@@ -1,10 +1,12 @@
 import asyncio
+import base64
 import html
 import json
 import os
 import re
 import sqlite3
 import time
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -12,10 +14,12 @@ from typing import Optional, List, Dict, Any
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright
+import requests
 from tabulate import tabulate
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 
 try:
     import psycopg
@@ -32,10 +36,15 @@ DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
 PORT = int(os.getenv("PORT", "10000"))
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 COINGLASS_MAX_PAIN_URL = os.getenv("COINGLASS_MAX_PAIN_URL", "https://www.coinglass.com/liquidation-maxpain")
+COINGLASS_API_URL = os.getenv("COINGLASS_API_URL", "https://fapi.coinglass.com/api/liqHeatMap/list")
 TOP_COINS_LIMIT = int(os.getenv("TOP_COINS_LIMIT", "50"))
 COLLECT_INTERVAL_MINUTES = int(os.getenv("COLLECT_INTERVAL_MINUTES", "60"))
 
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
+API_TIMEFRAME_MAP = {
+    "12h": "12h", "24h": "24h", "48h": "48h", "3d": "3d",
+    "1w": "7d", "2w": "14d", "1m": "30d",
+}
 TIMEFRAME_LABELS = {
     "12h": "12 hour",
     "24h": "24 hour",
@@ -47,7 +56,7 @@ TIMEFRAME_LABELS = {
 }
 NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
-COLLECTOR_VERSION = "v1-cloud-webservice"
+COLLECTOR_VERSION = "v2-api-direct"
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS max_pain_snapshots (
@@ -352,28 +361,59 @@ def extract_rows_from_json_payload(payload, timeframe, collected_at, scrape_dura
 
     return []
 
-async def scrape_timeframe(page, timeframe, collected_at, scrape_duration):
-    label = TIMEFRAME_LABELS.get(timeframe, timeframe)
+def aes_decrypt_raw(ciphertext_b64: str, key: str) -> bytes:
+    encrypted = base64.b64decode(ciphertext_b64)
+    cipher = AES.new(key.encode("utf-8"), AES.MODE_ECB)
+    return unpad(cipher.decrypt(encrypted), AES.block_size)
 
-    try:
-        await page.get_by_text(label, exact=True).click(timeout=5000)
-        await page.wait_for_timeout(4500)
-    except Exception as e:
-        print(f"[collector] could not click timeframe {timeframe}/{label}: {e}")
+def gzip_to_text(raw: bytes) -> str:
+    return zlib.decompress(raw, 16 + zlib.MAX_WBITS).decode("utf-8")
 
-    rows = await page.locator("table tbody tr").all()
+def decode_coinglass_payload(ciphertext_b64: str, key: str):
+    return json.loads(gzip_to_text(aes_decrypt_raw(ciphertext_b64, key)))
+
+def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
+    api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
+
+    headers = {
+        "accept": "application/json",
+        "origin": "https://www.coinglass.com",
+        "referer": "https://www.coinglass.com/",
+        "language": "en",
+        "encryption": "true",
+        "cache-ts-v2": str(int(time.time() * 1000)),
+        "user-agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/150.0.0.0 Safari/537.36"
+        ),
+    }
+
+    response = requests.get(
+        COINGLASS_API_URL,
+        params={"range": api_range},
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    if payload.get("code") != "0" or "data" not in payload:
+        raise RuntimeError(f"Unexpected CoinGlass API response for {timeframe}: {payload}")
+
+    if response.headers.get("encryption") != "true":
+        data = payload["data"]
+        return data if isinstance(data, list) else json.loads(data)
+
+    temp_key = base64.b64encode(b"d6537d845a964081").decode("utf-8")[:16]
+    real_key = gzip_to_text(aes_decrypt_raw(response.headers["user"], temp_key))[:16]
+    return decode_coinglass_payload(payload["data"], real_key)
+
+async def scrape_timeframe(timeframe: str, collected_at, scrape_duration: float) -> List[Dict[str, Any]]:
+    api_rows = await asyncio.to_thread(fetch_coinglass_timeframe, timeframe)
     output = []
 
-    for idx, row in enumerate(rows[:TOP_COINS_LIMIT], start=1):
-        cells = [await c.inner_text() for c in await row.locator("td").all()]
-        cells = [c.strip() for c in cells if c.strip()]
-        if len(cells) < 4:
-            continue
-
-        symbol = normalize_symbol(cells[0])
-        numbers = [parse_number(c) for c in cells]
-        numbers = [n for n in numbers if n is not None]
-
+    for idx, item in enumerate(api_rows[:TOP_COINS_LIMIT], start=1):
         output.append({
             "collected_at": collected_at,
             "source": SOURCE_NAME,
@@ -381,15 +421,14 @@ async def scrape_timeframe(page, timeframe, collected_at, scrape_duration):
             "scrape_duration_seconds": scrape_duration,
             "is_valid": True if use_postgres() else 1,
             "validation_errors": None,
-            "symbol": symbol,
+            "symbol": str(item.get("symbol", "")).upper(),
             "rank": idx,
             "timeframe": timeframe,
-            "current_price": numbers[0] if len(numbers) > 0 else None,
-            "short_max_pain": numbers[1] if len(numbers) > 1 else None,
-            "long_max_pain": numbers[2] if len(numbers) > 2 else None,
+            "current_price": item.get("price"),
+            "short_max_pain": item.get("maxShortLiquidationPrice"),
+            "long_max_pain": item.get("maxLongLiquidationPrice"),
         })
 
-    print(f"[collector] html table rows for {timeframe}: {len(output)}")
     return output
 
 def validate_snapshot(rows):
@@ -425,80 +464,16 @@ async def collect_once():
     if not use_postgres():
         collected_at = collected_at.isoformat()
 
-    print(f"[collector] starting collection at {collected_at}")
+    print(f"[collector] starting API collection at {collected_at}")
 
-    network_payloads = []
-    network_urls = []
-
-    async def capture_response(response):
+    all_rows = []
+    for timeframe in TIMEFRAMES:
         try:
-            url = response.url
-            content_type = response.headers.get("content-type", "")
-            if "json" not in content_type.lower():
-                return
-            if len(network_payloads) >= NETWORK_CAPTURE_LIMIT:
-                return
-            payload = await response.json()
-            text_url = url.lower()
-            payload_preview = json.dumps(payload, ensure_ascii=False)[:1500].lower()
-            if (
-                "liquidation" in text_url
-                or "max-pain" in text_url
-                or "maxpain" in text_url
-                or "max_pain" in payload_preview
-                or "max pain" in payload_preview
-                or ("short" in payload_preview and "long" in payload_preview and "symbol" in payload_preview)
-            ):
-                network_payloads.append(payload)
-                network_urls.append(url)
-                print(f"[collector] captured json: {url}")
-        except Exception as e:
-            print(f"[collector] response capture error: {e}")
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = await browser.new_page(viewport={"width": 1440, "height": 1200})
-        page.on("response", capture_response)
-
-        await page.goto(COINGLASS_MAX_PAIN_URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(8000)
-
-        try:
-            print(f"[collector] page title: {await page.title()}")
-            print(f"[collector] page url: {page.url}")
-        except Exception:
-            pass
-
-        all_rows = []
-
-        for timeframe in TIMEFRAMES:
-            rows = []
-
-            for payload in network_payloads:
-                rows = extract_rows_from_json_payload(payload, timeframe, collected_at, time.time() - start)
-                if rows:
-                    print(f"[collector] network rows for {timeframe}: {len(rows)}")
-                    break
-
-            if not rows:
-                rows = await scrape_timeframe(page, timeframe, collected_at, time.time() - start)
-
+            rows = await scrape_timeframe(timeframe, collected_at, time.time() - start)
             print(f"[collector] {timeframe}: {len(rows)} rows")
             all_rows.extend(rows)
-
-        if not all_rows:
-            try:
-                visible_text = await page.locator("body").inner_text(timeout=5000)
-                print("[collector] visible text preview:")
-                print(visible_text[:2000])
-            except Exception as e:
-                print(f"[collector] could not read body text: {e}")
-
-            print("[collector] captured json urls:")
-            for url in network_urls[:20]:
-                print(f"[collector] url: {url}")
-
-        await browser.close()
+        except Exception as e:
+            print(f"[collector] {timeframe} failed: {e}")
 
     all_rows = validate_snapshot(all_rows)
     all_rows = enrich_rows(all_rows)
