@@ -1,5 +1,6 @@
 import asyncio
 import html
+import json
 import os
 import re
 import sqlite3
@@ -34,6 +35,16 @@ TOP_COINS_LIMIT = int(os.getenv("TOP_COINS_LIMIT", "50"))
 COLLECT_INTERVAL_MINUTES = int(os.getenv("COLLECT_INTERVAL_MINUTES", "60"))
 
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
+TIMEFRAME_LABELS = {
+    "12h": "12 hour",
+    "24h": "24 hour",
+    "48h": "48 hour",
+    "3d": "3 day",
+    "1w": "1 week",
+    "2w": "2 week",
+    "1m": "1 month",
+}
+NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v1-cloud-webservice"
 
@@ -249,12 +260,105 @@ def enrich_rows(rows):
         output.append(row)
     return output
 
+
+def normalize_symbol(value: str) -> str:
+    if not value:
+        return ""
+    match = re.search(r"[A-Z0-9]{2,12}", str(value).upper())
+    return match.group(0) if match else str(value).split()[0].upper()
+
+def pick_number(obj: Dict[str, Any], keywords: List[str]) -> Optional[float]:
+    for key, value in obj.items():
+        key_l = str(key).lower()
+        if all(k in key_l for k in keywords):
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                return parse_number(value)
+    return None
+
+def extract_rows_from_json_payload(payload, timeframe, collected_at, scrape_duration):
+    candidates = []
+
+    def walk(node):
+        if isinstance(node, list):
+            if node and all(isinstance(x, dict) for x in node):
+                sample = " ".join(" ".join(map(str, x.keys())) for x in node[:3]).lower()
+                if "symbol" in sample and ("pain" in sample or "liq" in sample or "price" in sample):
+                    candidates.append(node)
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+
+    walk(payload)
+
+    output = []
+    for arr in candidates:
+        for idx, item in enumerate(arr[:TOP_COINS_LIMIT], start=1):
+            if not isinstance(item, dict):
+                continue
+
+            symbol = normalize_symbol(
+                item.get("symbol")
+                or item.get("baseAsset")
+                or item.get("coin")
+                or item.get("currency")
+                or item.get("name")
+            )
+            if not symbol:
+                continue
+
+            current_price = (
+                pick_number(item, ["price"])
+                or pick_number(item, ["current"])
+                or pick_number(item, ["last"])
+            )
+
+            short_max_pain = (
+                pick_number(item, ["short", "max", "pain", "price"])
+                or pick_number(item, ["short", "pain"])
+                or pick_number(item, ["short", "liq", "price"])
+            )
+
+            long_max_pain = (
+                pick_number(item, ["long", "max", "pain", "price"])
+                or pick_number(item, ["long", "pain"])
+                or pick_number(item, ["long", "liq", "price"])
+            )
+
+            if current_price is None or (short_max_pain is None and long_max_pain is None):
+                continue
+
+            output.append({
+                "collected_at": collected_at,
+                "source": SOURCE_NAME,
+                "collector_version": COLLECTOR_VERSION,
+                "scrape_duration_seconds": scrape_duration,
+                "is_valid": True if use_postgres() else 1,
+                "validation_errors": None,
+                "symbol": symbol,
+                "rank": idx,
+                "timeframe": timeframe,
+                "current_price": current_price,
+                "short_max_pain": short_max_pain,
+                "long_max_pain": long_max_pain,
+            })
+
+        if output:
+            return output
+
+    return []
+
 async def scrape_timeframe(page, timeframe, collected_at, scrape_duration):
+    label = TIMEFRAME_LABELS.get(timeframe, timeframe)
+
     try:
-        await page.get_by_text(timeframe, exact=True).click(timeout=5000)
-        await page.wait_for_timeout(2500)
-    except Exception:
-        pass
+        await page.get_by_text(label, exact=True).click(timeout=5000)
+        await page.wait_for_timeout(4500)
+    except Exception as e:
+        print(f"[collector] could not click timeframe {timeframe}/{label}: {e}")
 
     rows = await page.locator("table tbody tr").all()
     output = []
@@ -265,9 +369,7 @@ async def scrape_timeframe(page, timeframe, collected_at, scrape_duration):
         if len(cells) < 4:
             continue
 
-        symbol_match = re.search(r"[A-Z0-9]{2,12}", cells[0])
-        symbol = symbol_match.group(0) if symbol_match else cells[0].split()[0].upper()
-
+        symbol = normalize_symbol(cells[0])
         numbers = [parse_number(c) for c in cells]
         numbers = [n for n in numbers if n is not None]
 
@@ -286,6 +388,7 @@ async def scrape_timeframe(page, timeframe, collected_at, scrape_duration):
             "long_max_pain": numbers[2] if len(numbers) > 2 else None,
         })
 
+    print(f"[collector] html table rows for {timeframe}: {len(output)}")
     return output
 
 def validate_snapshot(rows):
@@ -314,6 +417,7 @@ def validate_snapshot(rows):
             row["validation_errors"] = "; ".join(global_errors + row_errors)[:1000]
     return rows
 
+
 async def collect_once():
     start = time.time()
     collected_at = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -322,16 +426,76 @@ async def collect_once():
 
     print(f"[collector] starting collection at {collected_at}")
 
+    network_payloads = []
+    network_urls = []
+
+    async def capture_response(response):
+        try:
+            url = response.url
+            content_type = response.headers.get("content-type", "")
+            if "json" not in content_type.lower():
+                return
+            if len(network_payloads) >= NETWORK_CAPTURE_LIMIT:
+                return
+            payload = await response.json()
+            text_url = url.lower()
+            payload_preview = json.dumps(payload, ensure_ascii=False)[:1500].lower()
+            if (
+                "liquidation" in text_url
+                or "max-pain" in text_url
+                or "maxpain" in text_url
+                or "max_pain" in payload_preview
+                or "max pain" in payload_preview
+                or ("short" in payload_preview and "long" in payload_preview and "symbol" in payload_preview)
+            ):
+                network_payloads.append(payload)
+                network_urls.append(url)
+                print(f"[collector] captured json: {url}")
+        except Exception as e:
+            print(f"[collector] response capture error: {e}")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
         page = await browser.new_page(viewport={"width": 1440, "height": 1200})
-        await page.goto(COINGLASS_MAX_PAIN_URL, wait_until="networkidle", timeout=60000)
+        page.on("response", capture_response)
+
+        await page.goto(COINGLASS_MAX_PAIN_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(8000)
+
+        try:
+            print(f"[collector] page title: {await page.title()}")
+            print(f"[collector] page url: {page.url}")
+        except Exception:
+            pass
 
         all_rows = []
+
         for timeframe in TIMEFRAMES:
-            rows = await scrape_timeframe(page, timeframe, collected_at, time.time() - start)
+            rows = []
+
+            for payload in network_payloads:
+                rows = extract_rows_from_json_payload(payload, timeframe, collected_at, time.time() - start)
+                if rows:
+                    print(f"[collector] network rows for {timeframe}: {len(rows)}")
+                    break
+
+            if not rows:
+                rows = await scrape_timeframe(page, timeframe, collected_at, time.time() - start)
+
             print(f"[collector] {timeframe}: {len(rows)} rows")
             all_rows.extend(rows)
+
+        if not all_rows:
+            try:
+                visible_text = await page.locator("body").inner_text(timeout=5000)
+                print("[collector] visible text preview:")
+                print(visible_text[:2000])
+            except Exception as e:
+                print(f"[collector] could not read body text: {e}")
+
+            print("[collector] captured json urls:")
+            for url in network_urls[:20]:
+                print(f"[collector] url: {url}")
 
         await browser.close()
 
