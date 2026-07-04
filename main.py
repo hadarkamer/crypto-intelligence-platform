@@ -124,22 +124,6 @@ CREATE INDEX IF NOT EXISTS idx_timeframe_time ON max_pain_snapshots(timeframe, c
 CREATE INDEX IF NOT EXISTS idx_alert_level ON max_pain_snapshots(alert_level);
 """
 
-def ensure_amount_columns():
-    """Add liquidation amount columns to existing DB tables created by older versions."""
-    if use_postgres():
-        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-            conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS short_liquidation_amount DOUBLE PRECISION")
-            conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS long_liquidation_amount DOUBLE PRECISION")
-            conn.commit()
-    else:
-        with sqlite3.connect(DB_PATH) as conn:
-            existing = {row[1] for row in conn.execute("PRAGMA table_info(max_pain_snapshots)").fetchall()}
-            if "short_liquidation_amount" not in existing:
-                conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN short_liquidation_amount REAL")
-            if "long_liquidation_amount" not in existing:
-                conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN long_liquidation_amount REAL")
-            conn.commit()
-
 def use_postgres() -> bool:
     return bool(DATABASE_URL and psycopg)
 
@@ -268,9 +252,8 @@ def previous_row(symbol, timeframe, before_collected_at):
     return rows[0] if rows else None
 
 def enrich_rows(rows):
-    # Fast trial-mode enrichment: calculate current distances only.
-    # Historical delta comparison is intentionally disabled here because it adds many DB lookups
-    # and delayed the Telegram completion message by several minutes.
+    # Fast trial-mode enrichment: current distances only.
+    # Historical deltas are disabled for now to avoid hundreds of DB lookups after collection.
     output = []
     for row in rows:
         price = row.get("current_price")
@@ -287,9 +270,71 @@ def enrich_rows(rows):
         row["delta_long_abs"] = None
         row["delta_long_pct"] = None
         row["alert_level"] = "none"
-
         output.append(row)
     return output
+
+def aes_decrypt_raw(ciphertext_b64: str, key: str) -> bytes:
+    encrypted = base64.b64decode(ciphertext_b64)
+    cipher = AES.new(key.encode("utf-8"), AES.MODE_ECB)
+    return unpad(cipher.decrypt(encrypted), AES.block_size)
+
+def gzip_to_text(raw: bytes) -> str:
+    return zlib.decompress(raw, 16 + zlib.MAX_WBITS).decode("utf-8")
+
+def decode_coinglass_payload(ciphertext_b64: str, key: str):
+    return json.loads(gzip_to_text(aes_decrypt_raw(ciphertext_b64, key)))
+
+def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
+    api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
+    last_error = None
+
+    for attempt in range(1, 4):
+        headers = {
+            "accept": "application/json",
+            "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
+            "origin": "https://www.coinglass.com",
+            "referer": "https://www.coinglass.com/",
+            "language": "en",
+            "encryption": "true",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "connection": "close",
+            "cache-ts-v2": str(int(time.time() * 1000)),
+            "user-agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/150.0.0.0 Safari/537.36"
+            ),
+        }
+
+        try:
+            with requests.Session() as session:
+                response = session.get(
+                    COINGLASS_API_URL,
+                    params={"range": api_range, "_": str(int(time.time() * 1000))},
+                    headers=headers,
+                    timeout=12,
+                )
+            response.raise_for_status()
+
+            payload = response.json()
+            if payload.get("code") != "0" or "data" not in payload:
+                raise RuntimeError(f"Unexpected CoinGlass API response for {timeframe}: {payload}")
+
+            if response.headers.get("encryption") != "true":
+                data = payload["data"]
+                return data if isinstance(data, list) else json.loads(data)
+
+            temp_key = base64.b64encode(b"d6537d845a964081").decode("utf-8")[:16]
+            real_key = gzip_to_text(aes_decrypt_raw(response.headers["user"], temp_key))[:16]
+            return decode_coinglass_payload(payload["data"], real_key)
+
+        except Exception as e:
+            last_error = e
+            print(f"[collector] {timeframe} attempt {attempt}/3 failed: {e}")
+            time.sleep(1.0 * attempt)
+
+    raise last_error
 
 async def scrape_timeframe(timeframe: str, collected_at, scrape_duration: float) -> List[Dict[str, Any]]:
     api_rows = await asyncio.to_thread(fetch_coinglass_timeframe, timeframe)
@@ -357,12 +402,12 @@ async def collect_once():
             await asyncio.sleep(2)
             rows = await asyncio.wait_for(
                 scrape_timeframe(timeframe, collected_at, time.time() - start),
-                timeout=65,
+                timeout=50,
             )
             print(f"[collector] {timeframe}: {len(rows)} rows")
             all_rows.extend(rows)
         except asyncio.TimeoutError:
-            print(f"[collector] {timeframe} skipped: timed out after 65 seconds")
+            print(f"[collector] {timeframe} skipped: timed out after 50 seconds")
         except Exception as e:
             print(f"[collector] {timeframe} skipped after retries: {e}")
 
