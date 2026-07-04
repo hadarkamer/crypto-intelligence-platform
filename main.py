@@ -38,6 +38,8 @@ COINGLASS_MAX_PAIN_URL = os.getenv("COINGLASS_MAX_PAIN_URL", "https://www.coingl
 COINGLASS_API_URL = os.getenv("COINGLASS_API_URL", "https://fapi.coinglass.com/api/liqHeatMap/list")
 TOP_COINS_LIMIT = int(os.getenv("TOP_COINS_LIMIT", "50"))
 COLLECT_INTERVAL_MINUTES = int(os.getenv("COLLECT_INTERVAL_MINUTES", "60"))
+MAX_SECONDS_PER_TIMEFRAME = int(os.getenv("MAX_SECONDS_PER_TIMEFRAME", "120"))
+RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 API_TIMEFRAME_MAP = {
@@ -303,10 +305,19 @@ def decode_coinglass_payload(ciphertext_b64: str, key: str):
     return json.loads(gzip_to_text(aes_decrypt_raw(ciphertext_b64, key)))
 
 def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
+    """
+    Keep retrying a timeframe until it succeeds or until MAX_SECONDS_PER_TIMEFRAME is reached.
+    This avoids losing data because of transient CoinGlass encryption/cache mismatches,
+    but still prevents the bot from hanging forever.
+    """
     api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
+    deadline = time.time() + MAX_SECONDS_PER_TIMEFRAME
+    attempt = 0
     last_error = None
 
-    for attempt in range(1, 9):
+    while time.time() < deadline:
+        attempt += 1
+
         headers = {
             "accept": "application/json",
             "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -336,9 +347,10 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
                     headers=headers,
                     timeout=12,
                 )
-            response.raise_for_status()
 
+            response.raise_for_status()
             payload = response.json()
+
             if payload.get("code") != "0" or "data" not in payload:
                 raise RuntimeError(f"Unexpected CoinGlass API response for {timeframe}: {payload}")
 
@@ -352,10 +364,11 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
 
         except Exception as e:
             last_error = e
-            print(f"[collector] {timeframe} attempt {attempt}/8 failed: {e}")
-            time.sleep(min(2.0 * attempt, 10))
+            remaining = max(0, int(deadline - time.time()))
+            print(f"[collector] {timeframe} attempt {attempt} failed: {e}; retrying in {RETRY_SLEEP_SECONDS}s; {remaining}s left")
+            time.sleep(RETRY_SLEEP_SECONDS)
 
-    raise last_error
+    raise TimeoutError(f"{timeframe} failed after {attempt} attempts over {MAX_SECONDS_PER_TIMEFRAME}s. Last error: {last_error}")
 
 async def scrape_timeframe(timeframe: str, collected_at, scrape_duration: float) -> List[Dict[str, Any]]:
     api_rows = await asyncio.to_thread(fetch_coinglass_timeframe, timeframe)
@@ -380,6 +393,30 @@ async def scrape_timeframe(timeframe: str, collected_at, scrape_duration: float)
         })
 
     return output
+
+def normalize_current_prices(rows):
+    """
+    Use one current price per symbol for the whole snapshot.
+
+    The API returns a price inside each timeframe response. Because we collect ranges
+    sequentially, the last successful response is the freshest price we fetched now.
+    Therefore, for each symbol, use the latest price from the current collection,
+    not a fixed timeframe such as 24h.
+    """
+    price_by_symbol = {}
+
+    for row in rows:
+        symbol = row.get("symbol")
+        price = row.get("current_price")
+        if symbol and price is not None:
+            price_by_symbol[symbol] = price
+
+    for row in rows:
+        symbol = row.get("symbol")
+        if symbol in price_by_symbol:
+            row["current_price"] = price_by_symbol[symbol]
+
+    return rows
 
 def validate_snapshot(rows):
     global_errors = []
@@ -417,26 +454,32 @@ async def collect_once():
     print(f"[collector] starting API collection at {collected_at}")
 
     all_rows = []
+    missing_timeframes = []
+
     for timeframe in TIMEFRAMES:
         try:
-            # Collect every range sequentially, but do not let one bad range block the whole bot.
+            # Collect every range sequentially. Retry inside fetch_coinglass_timeframe until success
+            # or until MAX_SECONDS_PER_TIMEFRAME is reached.
             await asyncio.sleep(2)
             rows = await asyncio.wait_for(
                 scrape_timeframe(timeframe, collected_at, time.time() - start),
-                timeout=120,
+                timeout=MAX_SECONDS_PER_TIMEFRAME + 20,
             )
             print(f"[collector] {timeframe}: {len(rows)} rows")
             all_rows.extend(rows)
         except asyncio.TimeoutError:
-            print(f"[collector] {timeframe} skipped: timed out after 120 seconds")
+            print(f"[collector] {timeframe} missing: timed out")
+            missing_timeframes.append(timeframe)
         except Exception as e:
-            print(f"[collector] {timeframe} skipped after retries: {e}")
+            print(f"[collector] {timeframe} missing: {e}")
+            missing_timeframes.append(timeframe)
 
+    all_rows = normalize_current_prices(all_rows)
     all_rows = validate_snapshot(all_rows)
     all_rows = enrich_rows(all_rows)
     inserted = insert_snapshots(all_rows)
-    print(f"[collector] inserted {inserted} rows")
-    return inserted
+    print(f"[collector] inserted {inserted} rows; missing={missing_timeframes}")
+    return inserted, missing_timeframes
 
 def fmt(value, digits=2):
     if value is None:
@@ -472,10 +515,14 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     async with COLLECT_LOCK:
-        await update.message.reply_text("מתחיל איסוף ידני. זה יכול לקחת דקה...")
+        await update.message.reply_text("מתחיל איסוף ידני. זה יכול לקחת כמה דקות...")
         try:
-            inserted = await collect_once()
-            await update.message.reply_text(f"האיסוף הסתיים. נשמרו {inserted} שורות.")
+            inserted, missing_timeframes = await collect_once()
+            if missing_timeframes:
+                missing = ", ".join(missing_timeframes)
+                await update.message.reply_text(f"האיסוף הסתיים. נשמרו {inserted} שורות. חסר טווח: {missing}")
+            else:
+                await update.message.reply_text(f"האיסוף הסתיים. נשמרו {inserted} שורות.")
         except Exception as e:
             await update.message.reply_text(f"שגיאה באיסוף: {e}")
 
