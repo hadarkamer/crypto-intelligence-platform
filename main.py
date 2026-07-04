@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS max_pain_snapshots (
     current_price REAL,
     short_max_pain REAL,
     long_max_pain REAL,
+    short_liquidation_amount REAL,
+    long_liquidation_amount REAL,
     distance_short_abs REAL,
     distance_short_pct REAL,
     distance_long_abs REAL,
@@ -104,6 +106,8 @@ CREATE TABLE IF NOT EXISTS max_pain_snapshots (
     current_price DOUBLE PRECISION,
     short_max_pain DOUBLE PRECISION,
     long_max_pain DOUBLE PRECISION,
+    short_liquidation_amount DOUBLE PRECISION,
+    long_liquidation_amount DOUBLE PRECISION,
     distance_short_abs DOUBLE PRECISION,
     distance_short_pct DOUBLE PRECISION,
     distance_long_abs DOUBLE PRECISION,
@@ -120,6 +124,22 @@ CREATE INDEX IF NOT EXISTS idx_timeframe_time ON max_pain_snapshots(timeframe, c
 CREATE INDEX IF NOT EXISTS idx_alert_level ON max_pain_snapshots(alert_level);
 """
 
+def ensure_amount_columns():
+    """Add liquidation amount columns to existing DB tables created by older versions."""
+    if use_postgres():
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS short_liquidation_amount DOUBLE PRECISION")
+            conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS long_liquidation_amount DOUBLE PRECISION")
+            conn.commit()
+    else:
+        with sqlite3.connect(DB_PATH) as conn:
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(max_pain_snapshots)").fetchall()}
+            if "short_liquidation_amount" not in existing:
+                conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN short_liquidation_amount REAL")
+            if "long_liquidation_amount" not in existing:
+                conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN long_liquidation_amount REAL")
+            conn.commit()
+
 def use_postgres() -> bool:
     return bool(DATABASE_URL and psycopg)
 
@@ -133,6 +153,7 @@ def init_db():
         with sqlite3.connect(DB_PATH) as conn:
             conn.executescript(SQLITE_SCHEMA)
             conn.commit()
+    ensure_amount_columns()
 
 def query(sql: str, params: tuple = ()):
     init_db()
@@ -156,6 +177,7 @@ def insert_snapshots(rows: List[Dict[str, Any]]) -> int:
         "collected_at", "source", "collector_version", "scrape_duration_seconds",
         "is_valid", "validation_errors", "symbol", "rank", "timeframe",
         "current_price", "short_max_pain", "long_max_pain",
+        "short_liquidation_amount", "long_liquidation_amount",
         "distance_short_abs", "distance_short_pct", "distance_long_abs", "distance_long_pct",
         "delta_short_abs", "delta_short_pct", "delta_long_abs", "delta_long_pct",
         "alert_level"
@@ -246,183 +268,28 @@ def previous_row(symbol, timeframe, before_collected_at):
     return rows[0] if rows else None
 
 def enrich_rows(rows):
+    # Fast trial-mode enrichment: calculate current distances only.
+    # Historical delta comparison is intentionally disabled here because it adds many DB lookups
+    # and delayed the Telegram completion message by several minutes.
     output = []
     for row in rows:
         price = row.get("current_price")
         short_mp = row.get("short_max_pain")
         long_mp = row.get("long_max_pain")
+
         row["distance_short_abs"] = distance_abs(price, short_mp)
         row["distance_short_pct"] = distance_pct(price, short_mp)
         row["distance_long_abs"] = distance_abs(price, long_mp)
         row["distance_long_pct"] = distance_pct(price, long_mp)
 
-        prev = previous_row(row["symbol"], row["timeframe"], row["collected_at"])
-        if prev:
-            row["delta_short_abs"] = None if short_mp is None or prev["short_max_pain"] is None else short_mp - prev["short_max_pain"]
-            row["delta_short_pct"] = pct_change(short_mp, prev["short_max_pain"])
-            row["delta_long_abs"] = None if long_mp is None or prev["long_max_pain"] is None else long_mp - prev["long_max_pain"]
-            row["delta_long_pct"] = pct_change(long_mp, prev["long_max_pain"])
-        else:
-            row["delta_short_abs"] = row["delta_short_pct"] = None
-            row["delta_long_abs"] = row["delta_long_pct"] = None
+        row["delta_short_abs"] = None
+        row["delta_short_pct"] = None
+        row["delta_long_abs"] = None
+        row["delta_long_pct"] = None
+        row["alert_level"] = "none"
 
-        row["alert_level"] = alert_level(row["delta_short_pct"], row["delta_long_pct"])
         output.append(row)
     return output
-
-
-def normalize_symbol(value: str) -> str:
-    if not value:
-        return ""
-    match = re.search(r"[A-Z0-9]{2,12}", str(value).upper())
-    return match.group(0) if match else str(value).split()[0].upper()
-
-def pick_number(obj: Dict[str, Any], keywords: List[str]) -> Optional[float]:
-    for key, value in obj.items():
-        key_l = str(key).lower()
-        if all(k in key_l for k in keywords):
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, str):
-                return parse_number(value)
-    return None
-
-def extract_rows_from_json_payload(payload, timeframe, collected_at, scrape_duration):
-    candidates = []
-
-    def walk(node):
-        if isinstance(node, list):
-            if node and all(isinstance(x, dict) for x in node):
-                sample = " ".join(" ".join(map(str, x.keys())) for x in node[:3]).lower()
-                if "symbol" in sample and ("pain" in sample or "liq" in sample or "price" in sample):
-                    candidates.append(node)
-            for item in node:
-                walk(item)
-        elif isinstance(node, dict):
-            for value in node.values():
-                walk(value)
-
-    walk(payload)
-
-    output = []
-    for arr in candidates:
-        for idx, item in enumerate(arr[:TOP_COINS_LIMIT], start=1):
-            if not isinstance(item, dict):
-                continue
-
-            symbol = normalize_symbol(
-                item.get("symbol")
-                or item.get("baseAsset")
-                or item.get("coin")
-                or item.get("currency")
-                or item.get("name")
-            )
-            if not symbol:
-                continue
-
-            current_price = (
-                pick_number(item, ["price"])
-                or pick_number(item, ["current"])
-                or pick_number(item, ["last"])
-            )
-
-            short_max_pain = (
-                pick_number(item, ["short", "max", "pain", "price"])
-                or pick_number(item, ["short", "pain"])
-                or pick_number(item, ["short", "liq", "price"])
-            )
-
-            long_max_pain = (
-                pick_number(item, ["long", "max", "pain", "price"])
-                or pick_number(item, ["long", "pain"])
-                or pick_number(item, ["long", "liq", "price"])
-            )
-
-            if current_price is None or (short_max_pain is None and long_max_pain is None):
-                continue
-
-            output.append({
-                "collected_at": collected_at,
-                "source": SOURCE_NAME,
-                "collector_version": COLLECTOR_VERSION,
-                "scrape_duration_seconds": scrape_duration,
-                "is_valid": True if use_postgres() else 1,
-                "validation_errors": None,
-                "symbol": symbol,
-                "rank": idx,
-                "timeframe": timeframe,
-                "current_price": current_price,
-                "short_max_pain": short_max_pain,
-                "long_max_pain": long_max_pain,
-            })
-
-        if output:
-            return output
-
-    return []
-
-def aes_decrypt_raw(ciphertext_b64: str, key: str) -> bytes:
-    encrypted = base64.b64decode(ciphertext_b64)
-    cipher = AES.new(key.encode("utf-8"), AES.MODE_ECB)
-    return unpad(cipher.decrypt(encrypted), AES.block_size)
-
-def gzip_to_text(raw: bytes) -> str:
-    return zlib.decompress(raw, 16 + zlib.MAX_WBITS).decode("utf-8")
-
-def decode_coinglass_payload(ciphertext_b64: str, key: str):
-    return json.loads(gzip_to_text(aes_decrypt_raw(ciphertext_b64, key)))
-
-def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
-    api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
-    last_error = None
-
-    for attempt in range(1, 4):
-        headers = {
-            "accept": "application/json",
-            "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
-            "origin": "https://www.coinglass.com",
-            "referer": "https://www.coinglass.com/",
-            "language": "en",
-            "encryption": "true",
-            "cache-control": "no-cache",
-            "pragma": "no-cache",
-            "connection": "close",
-            "cache-ts-v2": str(int(time.time() * 1000)),
-            "user-agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/150.0.0.0 Safari/537.36"
-            ),
-        }
-
-        try:
-            with requests.Session() as session:
-                response = session.get(
-                    COINGLASS_API_URL,
-                    params={"range": api_range, "_": str(int(time.time() * 1000))},
-                    headers=headers,
-                    timeout=12,
-                )
-            response.raise_for_status()
-
-            payload = response.json()
-            if payload.get("code") != "0" or "data" not in payload:
-                raise RuntimeError(f"Unexpected CoinGlass API response for {timeframe}: {payload}")
-
-            if response.headers.get("encryption") != "true":
-                data = payload["data"]
-                return data if isinstance(data, list) else json.loads(data)
-
-            temp_key = base64.b64encode(b"d6537d845a964081").decode("utf-8")[:16]
-            real_key = gzip_to_text(aes_decrypt_raw(response.headers["user"], temp_key))[:16]
-            return decode_coinglass_payload(payload["data"], real_key)
-
-        except Exception as e:
-            last_error = e
-            print(f"[collector] {timeframe} attempt {attempt}/3 failed: {e}")
-            time.sleep(1.0 * attempt)
-
-    raise last_error
 
 async def scrape_timeframe(timeframe: str, collected_at, scrape_duration: float) -> List[Dict[str, Any]]:
     api_rows = await asyncio.to_thread(fetch_coinglass_timeframe, timeframe)
@@ -442,6 +309,8 @@ async def scrape_timeframe(timeframe: str, collected_at, scrape_duration: float)
             "current_price": item.get("price"),
             "short_max_pain": item.get("maxShortLiquidationPrice"),
             "long_max_pain": item.get("maxLongLiquidationPrice"),
+            "short_liquidation_amount": item.get("maxShortLiquidationLevel"),
+            "long_liquidation_amount": item.get("maxLongLiquidationLevel"),
         })
 
     return output
@@ -488,12 +357,12 @@ async def collect_once():
             await asyncio.sleep(2)
             rows = await asyncio.wait_for(
                 scrape_timeframe(timeframe, collected_at, time.time() - start),
-                timeout=50,
+                timeout=65,
             )
             print(f"[collector] {timeframe}: {len(rows)} rows")
             all_rows.extend(rows)
         except asyncio.TimeoutError:
-            print(f"[collector] {timeframe} skipped: timed out after 50 seconds")
+            print(f"[collector] {timeframe} skipped: timed out after 65 seconds")
         except Exception as e:
             print(f"[collector] {timeframe} skipped after retries: {e}")
 
@@ -557,6 +426,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = query(
         """
         SELECT collected_at, timeframe, current_price, short_max_pain, long_max_pain,
+               short_liquidation_amount, long_liquidation_amount,
                delta_short_pct, delta_long_pct, distance_short_pct, distance_long_pct, alert_level
         FROM max_pain_snapshots
         WHERE symbol = ?
@@ -572,11 +442,12 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     table = [[
         short_time(r["collected_at"]), r["timeframe"], fmt(r["current_price"]),
         fmt(r["short_max_pain"]), fmt(r["long_max_pain"]),
+        fmt(r["short_liquidation_amount"], 0), fmt(r["long_liquidation_amount"], 0),
         fmt(r["delta_short_pct"]), fmt(r["delta_long_pct"]),
         fmt(r["distance_short_pct"]), fmt(r["distance_long_pct"]), r["alert_level"]
     ] for r in rows]
 
-    text = tabulate(table, headers=["Hour", "TF", "Price", "Short", "Long", "ΔS%", "ΔL%", "DistS%", "DistL%", "Alert"], tablefmt="plain")
+    text = tabulate(table, headers=["Hour", "TF", "Price", "ShortPx", "LongPx", "Short$", "Long$", "ΔS%", "ΔL%", "DistS%", "DistL%", "Alert"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
 
 async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -588,6 +459,7 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = query(
         """
         SELECT collected_at, current_price, short_max_pain, long_max_pain,
+               short_liquidation_amount, long_liquidation_amount,
                delta_short_pct, delta_long_pct, distance_short_pct, distance_long_pct, alert_level
         FROM max_pain_snapshots
         WHERE symbol = ? AND timeframe = ?
@@ -601,10 +473,11 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     table = [[
         short_time(r["collected_at"]), fmt(r["current_price"]), fmt(r["short_max_pain"]),
-        fmt(r["long_max_pain"]), fmt(r["delta_short_pct"]), fmt(r["delta_long_pct"]),
+        fmt(r["long_max_pain"]), fmt(r["short_liquidation_amount"], 0), fmt(r["long_liquidation_amount"], 0),
+        fmt(r["delta_short_pct"]), fmt(r["delta_long_pct"]),
         fmt(r["distance_short_pct"]), fmt(r["distance_long_pct"]), r["alert_level"]
     ] for r in rows]
-    text = tabulate(table, headers=["Hour", "Price", "Short", "Long", "ΔS%", "ΔL%", "DistS%", "DistL%", "Alert"], tablefmt="plain")
+    text = tabulate(table, headers=["Hour", "Price", "ShortPx", "LongPx", "Short$", "Long$", "ΔS%", "ΔL%", "DistS%", "DistL%", "Alert"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -613,6 +486,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
         SELECT symbol, timeframe, current_price, short_max_pain, long_max_pain,
+               short_liquidation_amount, long_liquidation_amount,
                """ + ("LEAST(distance_short_pct, distance_long_pct)" if use_postgres() else "MIN(distance_short_pct, distance_long_pct)") + """ AS closest_distance_pct,
                alert_level
         FROM max_pain_snapshots, latest
@@ -627,8 +501,13 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("עדיין אין נתונים. הריצו /collect קודם.")
         return
-    table = [[r["symbol"], r["timeframe"], fmt(r["current_price"]), fmt(r["short_max_pain"]), fmt(r["long_max_pain"]), fmt(r["closest_distance_pct"]), r["alert_level"]] for r in rows]
-    text = tabulate(table, headers=["Coin", "TF", "Price", "Short", "Long", "Closest%", "Alert"], tablefmt="plain")
+    table = [[
+        r["symbol"], r["timeframe"], fmt(r["current_price"]),
+        fmt(r["short_max_pain"]), fmt(r["long_max_pain"]),
+        fmt(r["short_liquidation_amount"], 0), fmt(r["long_liquidation_amount"], 0),
+        fmt(r["closest_distance_pct"]), r["alert_level"]
+    ] for r in rows]
+    text = tabulate(table, headers=["Coin", "TF", "Price", "ShortPx", "LongPx", "Short$", "Long$", "Closest%", "Alert"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
 
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
