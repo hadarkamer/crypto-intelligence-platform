@@ -127,6 +127,24 @@ CREATE INDEX IF NOT EXISTS idx_alert_level ON max_pain_snapshots(alert_level);
 def use_postgres() -> bool:
     return bool(DATABASE_URL and psycopg)
 
+def ensure_amount_columns():
+    """Add amount columns to existing tables created before this version."""
+    if use_postgres():
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS short_liquidation_amount DOUBLE PRECISION")
+            conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS long_liquidation_amount DOUBLE PRECISION")
+            conn.commit()
+    else:
+        Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.executescript(SQLITE_SCHEMA)
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(max_pain_snapshots)").fetchall()}
+            if "short_liquidation_amount" not in existing:
+                conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN short_liquidation_amount REAL")
+            if "long_liquidation_amount" not in existing:
+                conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN long_liquidation_amount REAL")
+            conn.commit()
+
 def init_db():
     if use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
