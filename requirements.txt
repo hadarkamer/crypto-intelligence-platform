@@ -1,0 +1,70 @@
+# CoinGlass Collector Bot - POC
+
+POC לבוט שאוסף Liquidation Max Pain מ-CoinGlass ללא API, שומר snapshots, ומחשב:
+- שינוי מהמדידה הקודמת
+- 3 רמות חריגה: 1%-3%, 3%-7%, מעל 7%
+- מרחק Long/Short מהמחיר הנוכחי
+- Top N מטבעות הכי קרובים ל-Max Pain
+- תצוגה לפי מטבע וכל הטווחים
+
+## מבנה
+- `src/collector.py` - איסוף נתונים מ-CoinGlass בעזרת Playwright
+- `src/storage.py` - שמירה ושליפה מ-SQLite
+- `src/analytics.py` - חישובי שינוי, חריגות ומרחקים
+- `src/bot.py` - Telegram Bot להצגת נתונים לפי דרישה
+- `src/scheduler.py` - הרצה מתוזמנת כל שעה
+- `src/config.py` - הגדרות
+- `requirements.txt` - תלויות
+
+## התקנה מקומית
+
+```bash
+cd coinglass_collector_bot
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium
+```
+
+צרו קובץ `.env` לפי `.env.example`:
+
+```bash
+TELEGRAM_BOT_TOKEN=your_token_here
+DB_PATH=data/coinglass.db
+COLLECT_INTERVAL_MINUTES=60
+```
+
+## הרצה
+
+איסוף חד פעמי:
+
+```bash
+python -m src.collector
+```
+
+הרצת האיסוף ברקע כל שעה:
+
+```bash
+python -m src.scheduler
+```
+
+הרצת בוט טלגרם:
+
+```bash
+python -m src.bot
+```
+
+## פקודות בטלגרם
+
+```text
+/start
+/help
+/coin BTC
+/range BTC 24h
+/top 10
+/alerts
+/latest
+```
+
+## הערה חשובה
+זהו POC ללא API. אם CoinGlass משנה מבנה HTML, ייתכן שצריך לעדכן selectors בתוך `collector.py`.
