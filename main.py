@@ -30,6 +30,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
 PORT = int(os.getenv("PORT", "10000"))
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 COINGLASS_MAX_PAIN_URL = os.getenv("COINGLASS_MAX_PAIN_URL", "https://www.coinglass.com/liquidation-maxpain")
 TOP_COINS_LIMIT = int(os.getenv("TOP_COINS_LIMIT", "50"))
 COLLECT_INTERVAL_MINUTES = int(os.getenv("COLLECT_INTERVAL_MINUTES", "60"))
@@ -518,13 +519,13 @@ def short_time(value):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Crypto Intelligence Bot פעיל.\\n"
-        "פקודות:\\n"
-        "/collect - איסוף ידני עכשיו\\n"
-        "/latest - snapshot אחרון\\n"
-        "/coin BTC - מטבע בכל הטווחים\\n"
-        "/range BTC 24h - מטבע וטווח\\n"
-        "/top 10 - הכי קרובים ל-Max Pain\\n"
+        "Crypto Intelligence Bot פעיל.\n"
+        "פקודות:\n"
+        "/collect - איסוף ידני עכשיו\n"
+        "/latest - snapshot אחרון\n"
+        "/coin BTC - מטבע בכל הטווחים\n"
+        "/range BTC 24h - מטבע וטווח\n"
+        "/top 10 - הכי קרובים ל-Max Pain\n"
         "/alerts - חריגות"
     )
 
@@ -643,10 +644,24 @@ async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def health(request):
     return web.json_response({"status": "ok", "service": "crypto-intelligence-v1"})
 
-async def start_health_server():
+async def telegram_webhook(request):
+    bot_app = request.app["bot_app"]
+    try:
+        payload = await request.json()
+        update = Update.de_json(payload, bot_app.bot)
+        await bot_app.process_update(update)
+        return web.json_response({"ok": True})
+    except Exception as e:
+        print(f"[webhook] error: {e}")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+async def start_web_server(bot_app):
     app = web.Application()
+    app["bot_app"] = bot_app
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
+    app.router.add_post("/telegram", telegram_webhook)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
@@ -662,9 +677,10 @@ async def scheduled_collection():
 async def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
+    if not PUBLIC_URL:
+        raise RuntimeError("Missing PUBLIC_URL environment variable. Example: https://crypto-intelligence-platform-1.onrender.com")
 
     init_db()
-    await start_health_server()
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(scheduled_collection, "interval", minutes=COLLECT_INTERVAL_MINUTES)
@@ -680,16 +696,21 @@ async def main():
     bot_app.add_handler(CommandHandler("top", top))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
-    print("[bot] starting polling")
     await bot_app.initialize()
     await bot_app.start()
-    await bot_app.updater.start_polling()
+
+    webhook_url = f"{PUBLIC_URL}/telegram"
+    await bot_app.bot.delete_webhook(drop_pending_updates=True)
+    await bot_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    print(f"[bot] webhook set to {webhook_url}")
+
+    await start_web_server(bot_app)
 
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
-        await bot_app.updater.stop()
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
         await bot_app.stop()
         await bot_app.shutdown()
 
