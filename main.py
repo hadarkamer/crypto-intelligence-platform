@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from aiohttp import web
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 import requests
 from tabulate import tabulate
