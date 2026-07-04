@@ -1,5 +1,4 @@
 aiohttp
-apscheduler
 python-dotenv
 python-telegram-bot
 tabulate

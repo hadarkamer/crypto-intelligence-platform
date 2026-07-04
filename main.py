@@ -57,6 +57,7 @@ TIMEFRAME_LABELS = {
 NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v2-api-direct"
+COLLECT_LOCK = None
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS max_pain_snapshots (
@@ -376,7 +377,7 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
     api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
     last_error = None
 
-    for attempt in range(1, 4):
+    for attempt in range(1, 6):
         headers = {
             "accept": "application/json",
             "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -386,6 +387,7 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
             "encryption": "true",
             "cache-control": "no-cache",
             "pragma": "no-cache",
+            "connection": "close",
             "cache-ts-v2": str(int(time.time() * 1000)),
             "user-agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -418,8 +420,8 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
 
         except Exception as e:
             last_error = e
-            print(f"[collector] {timeframe} attempt {attempt}/3 failed: {e}")
-            time.sleep(0.8 * attempt)
+            print(f"[collector] {timeframe} attempt {attempt}/5 failed: {e}")
+            time.sleep(1.5 * attempt)
 
     raise last_error
 
@@ -483,11 +485,14 @@ async def collect_once():
     all_rows = []
     for timeframe in TIMEFRAMES:
         try:
+            # Collect all ranges, but strictly one after another with a short pause.
+            # This avoids CoinGlass encryption/cache collisions between consecutive requests.
+            await asyncio.sleep(2)
             rows = await scrape_timeframe(timeframe, collected_at, time.time() - start)
             print(f"[collector] {timeframe}: {len(rows)} rows")
             all_rows.extend(rows)
         except Exception as e:
-            print(f"[collector] {timeframe} failed: {e}")
+            print(f"[collector] {timeframe} failed after all retries: {e}")
 
     all_rows = validate_snapshot(all_rows)
     all_rows = enrich_rows(all_rows)
@@ -519,12 +524,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("מתחיל איסוף ידני. זה יכול לקחת דקה...")
-    try:
-        inserted = await collect_once()
-        await update.message.reply_text(f"האיסוף הסתיים. נשמרו {inserted} שורות.")
-    except Exception as e:
-        await update.message.reply_text(f"שגיאה באיסוף: {e}")
+    global COLLECT_LOCK
+
+    if COLLECT_LOCK is None:
+        COLLECT_LOCK = asyncio.Lock()
+
+    if COLLECT_LOCK.locked():
+        await update.message.reply_text("איסוף כבר רץ כרגע. חכי שהוא יסתיים ואז הריצי /latest או /top 10.")
+        return
+
+    async with COLLECT_LOCK:
+        await update.message.reply_text("מתחיל איסוף ידני. זה יכול לקחת דקה...")
+        try:
+            inserted = await collect_once()
+            await update.message.reply_text(f"האיסוף הסתיים. נשמרו {inserted} שורות.")
+        except Exception as e:
+            await update.message.reply_text(f"שגיאה באיסוף: {e}")
 
 async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = query("SELECT MAX(collected_at) AS latest_time, COUNT(*) AS rows_count FROM max_pain_snapshots")
@@ -671,9 +686,8 @@ async def main():
 
     init_db()
 
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(scheduled_collection, "interval", minutes=COLLECT_INTERVAL_MINUTES)
-    scheduler.start()
+    # Automatic scheduled collection is disabled for the trial phase.
+    # Data collection now runs only when you send /collect in Telegram.
 
     bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
