@@ -306,7 +306,7 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
     api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
     last_error = None
 
-    for attempt in range(1, 4):
+    for attempt in range(1, 9):
         headers = {
             "accept": "application/json",
             "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -329,7 +329,10 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
             with requests.Session() as session:
                 response = session.get(
                     COINGLASS_API_URL,
-                    params={"range": api_range, "_": str(int(time.time() * 1000))},
+                    params={
+                        "range": api_range,
+                        "_": f"{int(time.time() * 1000)}-{attempt}",
+                    },
                     headers=headers,
                     timeout=12,
                 )
@@ -349,8 +352,8 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
 
         except Exception as e:
             last_error = e
-            print(f"[collector] {timeframe} attempt {attempt}/3 failed: {e}")
-            time.sleep(1.0 * attempt)
+            print(f"[collector] {timeframe} attempt {attempt}/8 failed: {e}")
+            time.sleep(min(2.0 * attempt, 10))
 
     raise last_error
 
@@ -420,12 +423,12 @@ async def collect_once():
             await asyncio.sleep(2)
             rows = await asyncio.wait_for(
                 scrape_timeframe(timeframe, collected_at, time.time() - start),
-                timeout=50,
+                timeout=120,
             )
             print(f"[collector] {timeframe}: {len(rows)} rows")
             all_rows.extend(rows)
         except asyncio.TimeoutError:
-            print(f"[collector] {timeframe} skipped: timed out after 50 seconds")
+            print(f"[collector] {timeframe} skipped: timed out after 120 seconds")
         except Exception as e:
             print(f"[collector] {timeframe} skipped after retries: {e}")
 
