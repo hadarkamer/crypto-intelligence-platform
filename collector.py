@@ -1,69 +1,72 @@
-import sqlite3
-from pathlib import Path
-from typing import Iterable, Dict, Any, List
-from .config import DB_PATH
+from typing import Dict, Any, List, Optional
+from .storage import query
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS max_pain_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    collected_at TEXT NOT NULL,
-    source TEXT NOT NULL,
-    collector_version TEXT NOT NULL,
-    scrape_duration_seconds REAL,
-    is_valid INTEGER NOT NULL DEFAULT 1,
-    validation_errors TEXT,
-    symbol TEXT NOT NULL,
-    rank INTEGER,
-    timeframe TEXT NOT NULL,
-    current_price REAL,
-    short_max_pain REAL,
-    long_max_pain REAL,
-    distance_short_abs REAL,
-    distance_short_pct REAL,
-    distance_long_abs REAL,
-    distance_long_pct REAL,
-    delta_short_abs REAL,
-    delta_short_pct REAL,
-    delta_long_abs REAL,
-    delta_long_pct REAL,
-    alert_level TEXT,
-    UNIQUE(collected_at, symbol, timeframe)
-);
+def pct_change(new: Optional[float], old: Optional[float]) -> Optional[float]:
+    if new is None or old is None or old == 0:
+        return None
+    return ((new - old) / old) * 100
 
-CREATE INDEX IF NOT EXISTS idx_symbol_time ON max_pain_snapshots(symbol, collected_at);
-CREATE INDEX IF NOT EXISTS idx_timeframe_time ON max_pain_snapshots(timeframe, collected_at);
-CREATE INDEX IF NOT EXISTS idx_alert_level ON max_pain_snapshots(alert_level);
-"""
+def abs_diff(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    if a is None or b is None:
+        return None
+    return a - b
 
-def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    return conn
+def distance_abs(price: Optional[float], target: Optional[float]) -> Optional[float]:
+    if price is None or target is None:
+        return None
+    return abs(target - price)
 
-def insert_snapshots(rows: Iterable[Dict[str, Any]], db_path: str = DB_PATH) -> int:
-    rows = list(rows)
-    if not rows:
-        return 0
+def distance_pct(price: Optional[float], target: Optional[float]) -> Optional[float]:
+    if price is None or target is None or price == 0:
+        return None
+    return abs((target - price) / price) * 100
 
-    columns = [
-        "collected_at", "source", "collector_version", "scrape_duration_seconds",
-        "is_valid", "validation_errors", "symbol", "rank", "timeframe",
-        "current_price", "short_max_pain", "long_max_pain",
-        "distance_short_abs", "distance_short_pct", "distance_long_abs", "distance_long_pct",
-        "delta_short_abs", "delta_short_pct", "delta_long_abs", "delta_long_pct",
-        "alert_level"
-    ]
-    placeholders = ",".join(["?"] * len(columns))
-    sql = f"INSERT OR REPLACE INTO max_pain_snapshots ({','.join(columns)}) VALUES ({placeholders})"
-    values = [[row.get(col) for col in columns] for row in rows]
+def alert_level(delta_short_pct: Optional[float], delta_long_pct: Optional[float]) -> str:
+    values = [abs(v) for v in [delta_short_pct, delta_long_pct] if v is not None]
+    if not values:
+        return "none"
+    max_delta = max(values)
+    if max_delta >= 7:
+        return "high"
+    if max_delta >= 3:
+        return "medium"
+    if max_delta >= 1:
+        return "low"
+    return "none"
 
-    with connect(db_path) as conn:
-        conn.executemany(sql, values)
-        conn.commit()
-    return len(rows)
+def previous_row(symbol: str, timeframe: str, before_collected_at):
+    rows = query(
+        '''
+        SELECT * FROM max_pain_snapshots
+        WHERE symbol = %s AND timeframe = %s AND collected_at < %s
+        ORDER BY collected_at DESC
+        LIMIT 1
+        ''',
+        (symbol, timeframe, before_collected_at)
+    )
+    return rows[0] if rows else None
 
-def query(sql: str, params: tuple = (), db_path: str = DB_PATH) -> List[sqlite3.Row]:
-    with connect(db_path) as conn:
-        return conn.execute(sql, params).fetchall()
+def enrich_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    enriched = []
+    for row in rows:
+        price = row.get("current_price")
+        short_mp = row.get("short_max_pain")
+        long_mp = row.get("long_max_pain")
+        row["distance_short_abs"] = distance_abs(price, short_mp)
+        row["distance_short_pct"] = distance_pct(price, short_mp)
+        row["distance_long_abs"] = distance_abs(price, long_mp)
+        row["distance_long_pct"] = distance_pct(price, long_mp)
+        prev = previous_row(row["symbol"], row["timeframe"], row["collected_at"])
+        if prev:
+            row["delta_short_abs"] = abs_diff(short_mp, prev["short_max_pain"])
+            row["delta_short_pct"] = pct_change(short_mp, prev["short_max_pain"])
+            row["delta_long_abs"] = abs_diff(long_mp, prev["long_max_pain"])
+            row["delta_long_pct"] = pct_change(long_mp, prev["long_max_pain"])
+        else:
+            row["delta_short_abs"] = None
+            row["delta_short_pct"] = None
+            row["delta_long_abs"] = None
+            row["delta_long_pct"] = None
+        row["alert_level"] = alert_level(row["delta_short_pct"], row["delta_long_pct"])
+        enriched.append(row)
+    return enriched
