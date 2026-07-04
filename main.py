@@ -376,7 +376,7 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
     api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
     last_error = None
 
-    for attempt in range(1, 6):
+    for attempt in range(1, 4):
         headers = {
             "accept": "application/json",
             "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -401,7 +401,7 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
                     COINGLASS_API_URL,
                     params={"range": api_range, "_": str(int(time.time() * 1000))},
                     headers=headers,
-                    timeout=30,
+                    timeout=12,
                 )
             response.raise_for_status()
 
@@ -419,8 +419,8 @@ def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
 
         except Exception as e:
             last_error = e
-            print(f"[collector] {timeframe} attempt {attempt}/5 failed: {e}")
-            time.sleep(1.5 * attempt)
+            print(f"[collector] {timeframe} attempt {attempt}/3 failed: {e}")
+            time.sleep(1.0 * attempt)
 
     raise last_error
 
@@ -484,14 +484,18 @@ async def collect_once():
     all_rows = []
     for timeframe in TIMEFRAMES:
         try:
-            # Collect all ranges, but strictly one after another with a short pause.
-            # This avoids CoinGlass encryption/cache collisions between consecutive requests.
+            # Collect every range sequentially, but do not let one bad range block the whole bot.
             await asyncio.sleep(2)
-            rows = await scrape_timeframe(timeframe, collected_at, time.time() - start)
+            rows = await asyncio.wait_for(
+                scrape_timeframe(timeframe, collected_at, time.time() - start),
+                timeout=50,
+            )
             print(f"[collector] {timeframe}: {len(rows)} rows")
             all_rows.extend(rows)
+        except asyncio.TimeoutError:
+            print(f"[collector] {timeframe} skipped: timed out after 50 seconds")
         except Exception as e:
-            print(f"[collector] {timeframe} failed after all retries: {e}")
+            print(f"[collector] {timeframe} skipped after retries: {e}")
 
     all_rows = validate_snapshot(all_rows)
     all_rows = enrich_rows(all_rows)
@@ -529,7 +533,7 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         COLLECT_LOCK = asyncio.Lock()
 
     if COLLECT_LOCK.locked():
-        await update.message.reply_text("איסוף כבר רץ כרגע. חכי שהוא יסתיים ואז הריצי /latest או /top 10.")
+        await update.message.reply_text("איסוף כבר רץ כרגע. חכי שהוא יסתיים, או בצעי Restart service ב-Render אם הוא נתקע.")
         return
 
     async with COLLECT_LOCK:
