@@ -374,40 +374,54 @@ def decode_coinglass_payload(ciphertext_b64: str, key: str):
 
 def fetch_coinglass_timeframe(timeframe: str) -> List[Dict[str, Any]]:
     api_range = API_TIMEFRAME_MAP.get(timeframe, timeframe)
+    last_error = None
 
-    headers = {
-        "accept": "application/json",
-        "origin": "https://www.coinglass.com",
-        "referer": "https://www.coinglass.com/",
-        "language": "en",
-        "encryption": "true",
-        "cache-ts-v2": str(int(time.time() * 1000)),
-        "user-agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/150.0.0.0 Safari/537.36"
-        ),
-    }
+    for attempt in range(1, 4):
+        headers = {
+            "accept": "application/json",
+            "accept-language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
+            "origin": "https://www.coinglass.com",
+            "referer": "https://www.coinglass.com/",
+            "language": "en",
+            "encryption": "true",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "cache-ts-v2": str(int(time.time() * 1000)),
+            "user-agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/150.0.0.0 Safari/537.36"
+            ),
+        }
 
-    response = requests.get(
-        COINGLASS_API_URL,
-        params={"range": api_range},
-        headers=headers,
-        timeout=30,
-    )
-    response.raise_for_status()
+        try:
+            with requests.Session() as session:
+                response = session.get(
+                    COINGLASS_API_URL,
+                    params={"range": api_range, "_": str(int(time.time() * 1000))},
+                    headers=headers,
+                    timeout=30,
+                )
+            response.raise_for_status()
 
-    payload = response.json()
-    if payload.get("code") != "0" or "data" not in payload:
-        raise RuntimeError(f"Unexpected CoinGlass API response for {timeframe}: {payload}")
+            payload = response.json()
+            if payload.get("code") != "0" or "data" not in payload:
+                raise RuntimeError(f"Unexpected CoinGlass API response for {timeframe}: {payload}")
 
-    if response.headers.get("encryption") != "true":
-        data = payload["data"]
-        return data if isinstance(data, list) else json.loads(data)
+            if response.headers.get("encryption") != "true":
+                data = payload["data"]
+                return data if isinstance(data, list) else json.loads(data)
 
-    temp_key = base64.b64encode(b"d6537d845a964081").decode("utf-8")[:16]
-    real_key = gzip_to_text(aes_decrypt_raw(response.headers["user"], temp_key))[:16]
-    return decode_coinglass_payload(payload["data"], real_key)
+            temp_key = base64.b64encode(b"d6537d845a964081").decode("utf-8")[:16]
+            real_key = gzip_to_text(aes_decrypt_raw(response.headers["user"], temp_key))[:16]
+            return decode_coinglass_payload(payload["data"], real_key)
+
+        except Exception as e:
+            last_error = e
+            print(f"[collector] {timeframe} attempt {attempt}/3 failed: {e}")
+            time.sleep(0.8 * attempt)
+
+    raise last_error
 
 async def scrape_timeframe(timeframe: str, collected_at, scrape_duration: float) -> List[Dict[str, Any]]:
     api_rows = await asyncio.to_thread(fetch_coinglass_timeframe, timeframe)
