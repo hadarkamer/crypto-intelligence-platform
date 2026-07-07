@@ -43,6 +43,9 @@ MAX_SECONDS_PER_TIMEFRAME = int(os.getenv("MAX_SECONDS_PER_TIMEFRAME", "120"))
 RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
+TIMEFRAME_ORDER_SQL = "CASE timeframe WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3 WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6 WHEN '1m' THEN 7 ELSE 99 END"
+# CoinGlass may mix non-crypto assets into the Max Pain table. Exclude known non-crypto symbols.
+NON_CRYPTO_SYMBOLS = {"XAU", "MU", "MSFT", "AAPL", "NVDA", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
 API_TIMEFRAME_MAP = {
     "12h": "12h", "24h": "24h", "48h": "48h", "3d": "3d",
     "1w": "7d", "2w": "14d", "1m": "30d",
@@ -273,19 +276,28 @@ def previous_row(symbol, timeframe, before_collected_at):
     return rows[0] if rows else None
 
 def enrich_rows(rows):
-    # Fast trial-mode enrichment: current distances only.
-    # Historical deltas are disabled for now to avoid hundreds of DB lookups after collection.
+    """Enrich rows without overwriting CoinGlass distance percentages.
+
+    The DOM reader extracts Short/Long Distance directly from the site.
+    We keep those values because they match what CoinGlass displays at collection time.
+    Only fill missing distance values as fallback.
+    """
     output = []
     for row in rows:
         price = row.get("current_price")
         short_mp = row.get("short_max_pain")
         long_mp = row.get("long_max_pain")
 
-        row["distance_short_abs"] = distance_abs(price, short_mp)
-        row["distance_short_pct"] = distance_pct(price, short_mp)
-        row["distance_long_abs"] = distance_abs(price, long_mp)
-        row["distance_long_pct"] = distance_pct(price, long_mp)
+        if row.get("distance_short_abs") is None:
+            row["distance_short_abs"] = distance_abs(price, short_mp)
+        if row.get("distance_short_pct") is None:
+            row["distance_short_pct"] = distance_pct(price, short_mp)
+        if row.get("distance_long_abs") is None:
+            row["distance_long_abs"] = distance_abs(price, long_mp)
+        if row.get("distance_long_pct") is None:
+            row["distance_long_pct"] = distance_pct(price, long_mp)
 
+        # Deltas are intentionally hidden in the UI until historical comparison is defined.
         row["delta_short_abs"] = None
         row["delta_short_pct"] = None
         row["delta_long_abs"] = None
@@ -293,6 +305,7 @@ def enrich_rows(rows):
         row["alert_level"] = "none"
         output.append(row)
     return output
+
 
 def aes_decrypt_raw(ciphertext_b64: str, key: str) -> bytes:
     encrypted = base64.b64decode(ciphertext_b64)
@@ -478,6 +491,10 @@ async def collect_once():
             market_only_count += 1
             continue
 
+        symbol = str(item.get("symbol", "")).upper()
+        if symbol in NON_CRYPTO_SYMBOLS:
+            continue
+
         rows.append({
             "collected_at": collected_at,
             "source": SOURCE_NAME + "_dom",
@@ -485,15 +502,18 @@ async def collect_once():
             "scrape_duration_seconds": time.time() - start,
             "is_valid": True if use_postgres() else 1,
             "validation_errors": None,
-            "symbol": str(item.get("symbol", "")).upper(),
-            "rank": None,
+            "symbol": symbol,
+            "rank": item.get("rank"),
             "timeframe": item.get("timeframe"),
             "current_price": item.get("price"),
-            # Note: these names are DOM reader names. Later we can swap labels if needed.
             "short_max_pain": short_mp,
             "long_max_pain": long_mp,
             "short_liquidation_amount": item.get("short_amount_usd"),
             "long_liquidation_amount": item.get("long_amount_usd"),
+            "distance_short_abs": item.get("short_distance_usd"),
+            "distance_short_pct": item.get("short_distance_pct"),
+            "distance_long_abs": item.get("long_distance_usd"),
+            "distance_long_pct": item.get("long_distance_pct"),
         })
 
     missing_timeframes = list(snapshot.get("missing_timeframes", []))
@@ -502,7 +522,7 @@ async def collect_once():
         if tf not in seen_timeframes and tf not in missing_timeframes:
             missing_timeframes.append(tf)
 
-    rows = normalize_current_prices(rows)
+    # Do not normalize prices across timeframes; keep CoinGlass values and distances as rendered.
     rows = validate_snapshot(rows)
     rows = enrich_rows(rows)
     inserted = insert_snapshots(rows)
@@ -575,31 +595,35 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     symbol = context.args[0].upper()
     rows = query(
-        """
-        SELECT collected_at, timeframe, current_price, short_max_pain, long_max_pain,
+        f"""
+        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
+        SELECT timeframe, current_price, short_max_pain, long_max_pain,
                short_liquidation_amount, long_liquidation_amount,
-               delta_short_pct, delta_long_pct, distance_short_pct, distance_long_pct, alert_level
-        FROM max_pain_snapshots
-        WHERE symbol = ?
-        ORDER BY collected_at DESC, timeframe ASC
-        LIMIT 70
+               distance_short_pct, distance_long_pct, alert_level
+        FROM max_pain_snapshots, latest
+        WHERE symbol = ? AND collected_at = latest.max_time
+        ORDER BY {TIMEFRAME_ORDER_SQL}
         """,
         (symbol,)
     )
     if not rows:
-        await update.message.reply_text(f"לא נמצאו נתונים עבור {symbol}. הריצו /collect קודם.")
+        await update.message.reply_text(f"לא נמצאו נתונים עדכניים עבור {symbol}. הריצו /collect קודם.")
         return
 
     table = [[
-        short_time(r["collected_at"]), r["timeframe"], fmt(r["current_price"]),
+        r["timeframe"], fmt(r["current_price"]),
         fmt(r["short_max_pain"]), fmt(r["long_max_pain"]),
         fmt(r["short_liquidation_amount"], 0), fmt(r["long_liquidation_amount"], 0),
-        fmt(r["delta_short_pct"]), fmt(r["delta_long_pct"]),
         fmt(r["distance_short_pct"]), fmt(r["distance_long_pct"]), r["alert_level"]
     ] for r in rows]
 
-    text = tabulate(table, headers=["Hour", "TF", "Price", "ShortPx", "LongPx", "Short$", "Long$", "ΔS%", "ΔL%", "DistS%", "DistL%", "Alert"], tablefmt="plain")
+    text = tabulate(
+        table,
+        headers=["TF", "Price", "ShortPx", "LongPx", "Short$", "Long$", "DistS%", "DistL%", "Alert"],
+        tablefmt="plain",
+    )
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+
 
 async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
@@ -609,36 +633,51 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     timeframe = context.args[1].lower()
     rows = query(
         """
-        SELECT collected_at, current_price, short_max_pain, long_max_pain,
+        SELECT current_price, short_max_pain, long_max_pain,
                short_liquidation_amount, long_liquidation_amount,
-               delta_short_pct, delta_long_pct, distance_short_pct, distance_long_pct, alert_level
+               distance_short_pct, distance_long_pct, alert_level
         FROM max_pain_snapshots
         WHERE symbol = ? AND timeframe = ?
         ORDER BY collected_at DESC
-        LIMIT 24
+        LIMIT 1
         """,
         (symbol, timeframe)
     )
     if not rows:
-        await update.message.reply_text(f"לא נמצאו נתונים עבור {symbol}/{timeframe}.")
+        await update.message.reply_text(f"לא נמצאו נתונים עדכניים עבור {symbol}/{timeframe}.")
         return
+
     table = [[
-        short_time(r["collected_at"]), fmt(r["current_price"]), fmt(r["short_max_pain"]),
+        fmt(r["current_price"]), fmt(r["short_max_pain"]),
         fmt(r["long_max_pain"]), fmt(r["short_liquidation_amount"], 0), fmt(r["long_liquidation_amount"], 0),
-        fmt(r["delta_short_pct"]), fmt(r["delta_long_pct"]),
         fmt(r["distance_short_pct"]), fmt(r["distance_long_pct"]), r["alert_level"]
     ] for r in rows]
-    text = tabulate(table, headers=["Hour", "Price", "ShortPx", "LongPx", "Short$", "Long$", "ΔS%", "ΔL%", "DistS%", "DistL%", "Alert"], tablefmt="plain")
+    text = tabulate(
+        table,
+        headers=["Price", "ShortPx", "LongPx", "Short$", "Long$", "DistS%", "DistL%", "Alert"],
+        tablefmt="plain",
+    )
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     limit = int(context.args[0]) if context.args else 10
+    closest_expr = (
+        "LEAST(ABS(distance_short_pct), ABS(distance_long_pct))"
+        if use_postgres()
+        else "MIN(ABS(distance_short_pct), ABS(distance_long_pct))"
+    )
     rows = query(
-        """
+        f"""
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
         SELECT symbol, timeframe, current_price, short_max_pain, long_max_pain,
                short_liquidation_amount, long_liquidation_amount,
-               """ + ("LEAST(distance_short_pct, distance_long_pct)" if use_postgres() else "MIN(distance_short_pct, distance_long_pct)") + """ AS closest_distance_pct,
+               distance_short_pct, distance_long_pct,
+               {closest_expr} AS closest_distance_pct,
+               CASE
+                 WHEN ABS(distance_short_pct) <= ABS(distance_long_pct) THEN 'SHORT'
+                 ELSE 'LONG'
+               END AS closest_side,
                alert_level
         FROM max_pain_snapshots, latest
         WHERE collected_at = latest.max_time
@@ -653,30 +692,22 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("עדיין אין נתונים. הריצו /collect קודם.")
         return
     table = [[
-        r["symbol"], r["timeframe"], fmt(r["current_price"]),
+        r["symbol"], r["timeframe"], r["closest_side"], fmt(r["current_price"]),
         fmt(r["short_max_pain"]), fmt(r["long_max_pain"]),
-        fmt(r["short_liquidation_amount"], 0), fmt(r["long_liquidation_amount"], 0),
-        fmt(r["closest_distance_pct"]), r["alert_level"]
+        fmt(r["distance_short_pct"]), fmt(r["distance_long_pct"]), r["alert_level"]
     ] for r in rows]
-    text = tabulate(table, headers=["Coin", "TF", "Price", "ShortPx", "LongPx", "Short$", "Long$", "Closest%", "Alert"], tablefmt="plain")
+    text = tabulate(
+        table,
+        headers=["Coin", "TF", "Side", "Price", "ShortPx", "LongPx", "DistS%", "DistL%", "Alert"],
+        tablefmt="plain",
+    )
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
 
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = query(
-        """
-        SELECT collected_at, symbol, timeframe, delta_short_pct, delta_long_pct, alert_level
-        FROM max_pain_snapshots
-        WHERE alert_level IN ('low', 'medium', 'high')
-        ORDER BY collected_at DESC
-        LIMIT 50
-        """
-    )
-    if not rows:
-        await update.message.reply_text("אין חריגות כרגע או שעדיין אין מספיק מדידות להשוואה.")
-        return
-    table = [[short_time(r["collected_at"]), r["symbol"], r["timeframe"], fmt(r["delta_short_pct"]), fmt(r["delta_long_pct"]), r["alert_level"]] for r in rows]
-    text = tabulate(table, headers=["Hour", "Coin", "TF", "ΔS%", "ΔL%", "Alert"], tablefmt="plain")
-    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+    # Alerts are disabled until we define a meaningful historical comparison.
+    await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
+
 
 async def health(request):
     return web.json_response({"status": "ok", "service": "crypto-intelligence-v1"})

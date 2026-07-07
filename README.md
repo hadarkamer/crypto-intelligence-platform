@@ -1,11 +1,9 @@
-Crypto DOM Max Pain Parser Fix
+Crypto DOM Display Fix Patch
 
 Fixes:
-- Adds missing _parse_number helper.
-- Parses CoinGlass Max Pain body rows into numeric fields.
-- Expected result: inserted rows > 0.
-
-Deploy:
-1. Replace the 7 files.
-2. Clear build cache & deploy.
-3. Run /collect.
+- Removes Hour column from Telegram displays.
+- /coin shows only the latest snapshot across all timeframes.
+- /range shows only the latest row for the requested coin/timeframe.
+- Removes empty delta columns.
+- Keeps CoinGlass-provided distance percentages instead of recomputing/overwriting them.
+- Filters known non-crypto symbols such as XAU and MU.
