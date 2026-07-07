@@ -1,9 +1,10 @@
-Crypto Intelligence DOM URL Patch
+Crypto Intelligence Max Pain Parser Patch
 
-Fixes CoinGlass page URL to:
-https://www.coinglass.com/liquidation-maxpain
+Fix:
+- Parses real CoinGlass Max Pain rows from DOM body text.
+- Maps fields:
+  symbol, price, short max pain price, short amount, short distance $, short distance %,
+  long max pain price, long amount, long distance $, long distance %.
+- Drops fake rows like NEW/API/APP.
 
-After /collect, Render logs should show:
-[dom] page opened; current_url=https://www.coinglass.com/liquidation-maxpain
-and should NOT show:
-Oops! We couldn't find the page you're looking for.
+After /collect logs should show parsed_count around 50 per timeframe and inserted rows > 0.

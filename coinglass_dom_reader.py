@@ -95,6 +95,89 @@ def _normalize_timeframe(tf: str) -> str:
     return aliases.get(tf.strip().lower(), tf.strip())
 
 
+
+def _is_symbol_token(x: str) -> bool:
+    if not x:
+        return False
+    x = x.strip().upper()
+    if len(x) < 2 or len(x) > 12:
+        return False
+    if x in {"NEW", "API", "APP", "USD", "USDT", "BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "LINK", "AVAX", "TRX", "HYPE"}:
+        # Known valid symbols plus some common symbols; still allow by regex below.
+        pass
+    return bool(re.fullmatch(r"[A-Z0-9]{2,12}", x))
+
+
+def _parse_body_maxpain_rows(lines: list[str], timeframe: str) -> list[dict]:
+    """Parse CoinGlass Liquidation Max Pain body text.
+
+    Expected repeating pattern after headers:
+    rank, symbol, price,
+    short_max_pain_px, short_amount, short_distance_usd, short_distance_pct, emoji,
+    long_max_pain_px, long_amount, long_distance_usd, long_distance_pct, emoji
+    """
+    rows = []
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Start after the Max Pain table header if possible.
+    start = 0
+    for i in range(len(lines) - 7):
+        window = lines[i:i+8]
+        if (
+            "Ranking" in window
+            and "Symbol" in window
+            and "Price" in window
+            and "Short Max Pain" in window
+            and "Long Max Pain" in window
+        ):
+            start = i + 8
+            break
+
+    i = start
+    while i < len(lines) - 11:
+        rank = lines[i].strip()
+        symbol = lines[i + 1].strip().upper()
+
+        if not rank.isdigit() or not _is_symbol_token(symbol):
+            i += 1
+            continue
+
+        price = _parse_number(lines[i + 2])
+        short_px = _parse_number(lines[i + 3])
+        short_amount = _parse_number(lines[i + 4])
+        short_dist_abs = _parse_number(lines[i + 5])
+        short_dist_pct = _parse_number(lines[i + 6])
+        long_px = _parse_number(lines[i + 8])
+        long_amount = _parse_number(lines[i + 9])
+        long_dist_abs = _parse_number(lines[i + 10])
+        long_dist_pct = _parse_number(lines[i + 11])
+
+        if price is not None and short_px is not None and long_px is not None:
+            rows.append({
+                "collected_at_utc": now,
+                "timeframe": timeframe,
+                "source": "dom_body_maxpain",
+                "rank": int(rank),
+                "symbol": symbol,
+                "price": price,
+                "max_short_price": short_px,
+                "short_amount_usd": short_amount,
+                "short_distance_usd": short_dist_abs,
+                "short_distance_pct": short_dist_pct,
+                "max_long_price": long_px,
+                "long_amount_usd": long_amount,
+                "long_distance_usd": long_dist_abs,
+                "long_distance_pct": long_dist_pct,
+                "raw_cells": lines[i:i+13],
+                "extra": None,
+            })
+            i += 13
+        else:
+            i += 1
+
+    return rows
+
+
 async def _click_timeframe(page, timeframe: str) -> bool:
     """Try to select a timeframe in the CoinGlass UI."""
     labels = {
@@ -225,31 +308,44 @@ def _parse_body_lines_for_symbols(timeframe: str, lines: List[str], collected_at
     return rows
 
 
-async def read_timeframe(page, timeframe: str) -> Dict[str, Any]:
-    collected_at = datetime.now(timezone.utc).isoformat()
-    tf = _normalize_timeframe(timeframe)
+async def read_timeframe(page: Page, timeframe: str) -> Dict[str, Any]:
+    """Click/select one timeframe and parse Max Pain rows from page body text."""
+    clicked = False
 
-    clicked = await _click_timeframe(page, tf)
-    await page.wait_for_timeout(2500)
+    # Try visible labels exactly as they appear on the site.
+    label_map = {
+        "12h": "12 hour",
+        "24h": "24 hour",
+        "48h": "48 hour",
+        "3d": "3 day",
+        "1w": "1 week",
+        "2w": "2 week",
+        "1m": "1 month",
+    }
+    label = label_map.get(timeframe, timeframe)
+
+    try:
+        await page.get_by_text(label, exact=True).first.click(timeout=5000)
+        clicked = True
+        await page.wait_for_timeout(7000)
+    except Exception:
+        # 12h is often the default; keep going.
+        await page.wait_for_timeout(5000)
 
     tables = await _extract_tables(page)
-    body_lines = await _extract_body_lines(page)
+    lines = await _extract_body_lines(page, limit=1200)
 
-    rows = _parse_market_table_rows(tf, tables, collected_at)
-
-    # If no parseable HTML table exists, fallback to text grouping.
-    if not rows:
-        rows = _parse_body_lines_for_symbols(tf, body_lines, collected_at)
+    rows = _parse_body_maxpain_rows(lines, timeframe)
 
     return {
-        "timeframe": tf,
+        "timeframe": timeframe,
         "clicked": clicked,
-        "row_count": len(rows),
-        "rows": [asdict(r) for r in rows],
+        "rows": rows,
         "debug": {
             "table_count": len(tables),
             "table_headers": [t.get("headers", []) for t in tables],
-            "body_preview": body_lines[:120],
+            "body_preview": lines[:120],
+            "parsed_count": len(rows),
         },
     }
 
