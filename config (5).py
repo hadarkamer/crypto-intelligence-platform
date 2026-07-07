@@ -34,14 +34,14 @@ def alert_level(delta_short_pct: Optional[float], delta_long_pct: Optional[float
         return "low"
     return "none"
 
-def previous_row(symbol: str, timeframe: str, before_collected_at: str):
+def previous_row(symbol: str, timeframe: str, before_collected_at):
     rows = query(
-        """
+        '''
         SELECT * FROM max_pain_snapshots
-        WHERE symbol = ? AND timeframe = ? AND collected_at < ?
+        WHERE symbol = %s AND timeframe = %s AND collected_at < %s
         ORDER BY collected_at DESC
         LIMIT 1
-        """,
+        ''',
         (symbol, timeframe, before_collected_at)
     )
     return rows[0] if rows else None
@@ -52,12 +52,10 @@ def enrich_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         price = row.get("current_price")
         short_mp = row.get("short_max_pain")
         long_mp = row.get("long_max_pain")
-
         row["distance_short_abs"] = distance_abs(price, short_mp)
         row["distance_short_pct"] = distance_pct(price, short_mp)
         row["distance_long_abs"] = distance_abs(price, long_mp)
         row["distance_long_pct"] = distance_pct(price, long_mp)
-
         prev = previous_row(row["symbol"], row["timeframe"], row["collected_at"])
         if prev:
             row["delta_short_abs"] = abs_diff(short_mp, prev["short_max_pain"])
@@ -69,7 +67,6 @@ def enrich_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             row["delta_short_pct"] = None
             row["delta_long_abs"] = None
             row["delta_long_pct"] = None
-
         row["alert_level"] = alert_level(row["delta_short_pct"], row["delta_long_pct"])
         enriched.append(row)
     return enriched

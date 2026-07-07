@@ -1,12 +1,15 @@
-import os
-from dotenv import load_dotenv
-load_dotenv()
+import asyncio
+from apscheduler.schedulers.blocking import BlockingScheduler
+from .collector import collect_once
+from .config import COLLECT_INTERVAL_MINUTES
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-COINGLASS_MAX_PAIN_URL = os.getenv("COINGLASS_MAX_PAIN_URL", "https://www.coinglass.com/liquidation-maxpain")
-TOP_COINS_LIMIT = int(os.getenv("TOP_COINS_LIMIT", "50"))
+def run_collection():
+    inserted = asyncio.run(collect_once())
+    print(f"Collection finished. Inserted rows: {inserted}")
 
-TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
-SOURCE_NAME = "coinglass_liquidation_max_pain"
-COLLECTOR_VERSION = "0.2.0-render-postgres"
+if __name__ == "__main__":
+    scheduler = BlockingScheduler()
+    scheduler.add_job(run_collection, "interval", minutes=COLLECT_INTERVAL_MINUTES)
+    print(f"Scheduler started. Collection every {COLLECT_INTERVAL_MINUTES} minutes.")
+    run_collection()
+    scheduler.start()

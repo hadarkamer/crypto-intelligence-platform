@@ -1,72 +1,168 @@
-from typing import Dict, Any, List, Optional
+import html
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from tabulate import tabulate
+from .config import TELEGRAM_BOT_TOKEN
 from .storage import query
 
-def pct_change(new: Optional[float], old: Optional[float]) -> Optional[float]:
-    if new is None or old is None or old == 0:
-        return None
-    return ((new - old) / old) * 100
+def fmt(value, digits=2):
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:,.{digits}f}"
+    return str(value)
 
-def abs_diff(a: Optional[float], b: Optional[float]) -> Optional[float]:
-    if a is None or b is None:
-        return None
-    return a - b
-
-def distance_abs(price: Optional[float], target: Optional[float]) -> Optional[float]:
-    if price is None or target is None:
-        return None
-    return abs(target - price)
-
-def distance_pct(price: Optional[float], target: Optional[float]) -> Optional[float]:
-    if price is None or target is None or price == 0:
-        return None
-    return abs((target - price) / price) * 100
-
-def alert_level(delta_short_pct: Optional[float], delta_long_pct: Optional[float]) -> str:
-    values = [abs(v) for v in [delta_short_pct, delta_long_pct] if v is not None]
-    if not values:
-        return "none"
-    max_delta = max(values)
-    if max_delta >= 7:
-        return "high"
-    if max_delta >= 3:
-        return "medium"
-    if max_delta >= 1:
-        return "low"
-    return "none"
-
-def previous_row(symbol: str, timeframe: str, before_collected_at):
-    rows = query(
-        '''
-        SELECT * FROM max_pain_snapshots
-        WHERE symbol = %s AND timeframe = %s AND collected_at < %s
-        ORDER BY collected_at DESC
-        LIMIT 1
-        ''',
-        (symbol, timeframe, before_collected_at)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "CoinGlass Collector Bot פעיל.\n"
+        "פקודות:\n"
+        "/coin BTC - הצגת מטבע לפי כל הטווחים\n"
+        "/range BTC 24h - מטבע וטווח מסוים\n"
+        "/top 10 - המטבעות הכי קרובים ל-Max Pain\n"
+        "/alerts - חריגות אחרונות\n"
+        "/latest - Snapshot אחרון"
     )
-    return rows[0] if rows else None
 
-def enrich_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    enriched = []
-    for row in rows:
-        price = row.get("current_price")
-        short_mp = row.get("short_max_pain")
-        long_mp = row.get("long_max_pain")
-        row["distance_short_abs"] = distance_abs(price, short_mp)
-        row["distance_short_pct"] = distance_pct(price, short_mp)
-        row["distance_long_abs"] = distance_abs(price, long_mp)
-        row["distance_long_pct"] = distance_pct(price, long_mp)
-        prev = previous_row(row["symbol"], row["timeframe"], row["collected_at"])
-        if prev:
-            row["delta_short_abs"] = abs_diff(short_mp, prev["short_max_pain"])
-            row["delta_short_pct"] = pct_change(short_mp, prev["short_max_pain"])
-            row["delta_long_abs"] = abs_diff(long_mp, prev["long_max_pain"])
-            row["delta_long_pct"] = pct_change(long_mp, prev["long_max_pain"])
-        else:
-            row["delta_short_abs"] = None
-            row["delta_short_pct"] = None
-            row["delta_long_abs"] = None
-            row["delta_long_pct"] = None
-        row["alert_level"] = alert_level(row["delta_short_pct"], row["delta_long_pct"])
-        enriched.append(row)
-    return enriched
+async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("שימוש: /coin BTC")
+        return
+
+    symbol = context.args[0].upper()
+    rows = query(
+        """
+        SELECT collected_at, timeframe, current_price, short_max_pain, long_max_pain,
+               delta_short_pct, delta_long_pct, distance_short_pct, distance_long_pct, alert_level
+        FROM max_pain_snapshots
+        WHERE symbol = ?
+        ORDER BY collected_at DESC, timeframe ASC
+        LIMIT 70
+        """,
+        (symbol,)
+    )
+
+    if not rows:
+        await update.message.reply_text(f"לא נמצאו נתונים עבור {symbol}.")
+        return
+
+    table = [[
+        r["collected_at"][11:16],
+        r["timeframe"],
+        fmt(r["current_price"]),
+        fmt(r["short_max_pain"]),
+        fmt(r["long_max_pain"]),
+        fmt(r["delta_short_pct"]),
+        fmt(r["delta_long_pct"]),
+        fmt(r["distance_short_pct"]),
+        fmt(r["distance_long_pct"]),
+        r["alert_level"]
+    ] for r in rows]
+
+    text = tabulate(table, headers=["Hour", "TF", "Price", "Short", "Long", "ΔS%", "ΔL%", "DistS%", "DistL%", "Alert"], tablefmt="plain")
+    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+
+async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("שימוש: /range BTC 24h")
+        return
+
+    symbol = context.args[0].upper()
+    timeframe = context.args[1].lower()
+    rows = query(
+        """
+        SELECT collected_at, current_price, short_max_pain, long_max_pain,
+               delta_short_pct, delta_long_pct, distance_short_pct, distance_long_pct, alert_level
+        FROM max_pain_snapshots
+        WHERE symbol = ? AND timeframe = ?
+        ORDER BY collected_at DESC
+        LIMIT 24
+        """,
+        (symbol, timeframe)
+    )
+
+    table = [[
+        r["collected_at"][11:16],
+        fmt(r["current_price"]),
+        fmt(r["short_max_pain"]),
+        fmt(r["long_max_pain"]),
+        fmt(r["delta_short_pct"]),
+        fmt(r["delta_long_pct"]),
+        fmt(r["distance_short_pct"]),
+        fmt(r["distance_long_pct"]),
+        r["alert_level"]
+    ] for r in rows]
+
+    text = tabulate(table, headers=["Hour", "Price", "Short", "Long", "ΔS%", "ΔL%", "DistS%", "DistL%", "Alert"], tablefmt="plain")
+    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    limit = int(context.args[0]) if context.args else 10
+    rows = query(
+        """
+        WITH latest AS (
+            SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots
+        )
+        SELECT symbol, timeframe, current_price, short_max_pain, long_max_pain,
+               MIN(distance_short_pct, distance_long_pct) AS closest_distance_pct,
+               alert_level
+        FROM max_pain_snapshots, latest
+        WHERE collected_at = latest.max_time
+        ORDER BY closest_distance_pct ASC
+        LIMIT ?
+        """,
+        (limit,)
+    )
+
+    table = [[
+        r["symbol"], r["timeframe"], fmt(r["current_price"]),
+        fmt(r["short_max_pain"]), fmt(r["long_max_pain"]),
+        fmt(r["closest_distance_pct"]), r["alert_level"]
+    ] for r in rows]
+
+    text = tabulate(table, headers=["Coin", "TF", "Price", "Short", "Long", "Closest%", "Alert"], tablefmt="plain")
+    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+
+async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = query(
+        """
+        SELECT collected_at, symbol, timeframe, delta_short_pct, delta_long_pct, alert_level
+        FROM max_pain_snapshots
+        WHERE alert_level IN ('low', 'medium', 'high')
+        ORDER BY collected_at DESC,
+                 CASE alert_level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END
+        LIMIT 50
+        """
+    )
+
+    table = [[
+        r["collected_at"][11:16],
+        r["symbol"],
+        r["timeframe"],
+        fmt(r["delta_short_pct"]),
+        fmt(r["delta_long_pct"]),
+        r["alert_level"]
+    ] for r in rows]
+
+    text = tabulate(table, headers=["Hour", "Coin", "TF", "ΔS%", "ΔL%", "Alert"], tablefmt="plain")
+    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+
+async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = query("SELECT MAX(collected_at) AS latest_time, COUNT(*) AS rows_count FROM max_pain_snapshots")
+    r = rows[0]
+    await update.message.reply_text(f"Snapshot אחרון: {r['latest_time']}\nמספר שורות: {r['rows_count']}")
+
+def main():
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN in .env")
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("coin", coin))
+    app.add_handler(CommandHandler("range", range_cmd))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("alerts", alerts))
+    app.add_handler(CommandHandler("latest", latest))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
