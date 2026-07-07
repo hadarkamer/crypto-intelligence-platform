@@ -96,6 +96,43 @@ def _normalize_timeframe(tf: str) -> str:
 
 
 
+
+def _parse_number(value):
+    """Convert CoinGlass strings like '$63,650', '49.57M', '+2.29%', '-$1,096.9' to float."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s in {"-", "—", "N/A", "nan", "None", "💥"}:
+        return None
+
+    # Remove common formatting while preserving sign and multiplier.
+    s = s.replace(",", "")
+    s = s.replace("$", "")
+    s = s.replace("%", "")
+    s = s.replace("≈", "")
+    s = s.replace("+", "")
+    s = s.strip()
+
+    multiplier = 1.0
+    if s[-1:].upper() == "K":
+        multiplier = 1_000.0
+        s = s[:-1]
+    elif s[-1:].upper() == "M":
+        multiplier = 1_000_000.0
+        s = s[:-1]
+    elif s[-1:].upper() == "B":
+        multiplier = 1_000_000_000.0
+        s = s[:-1]
+    elif s[-1:].upper() == "T":
+        multiplier = 1_000_000_000_000.0
+        s = s[:-1]
+
+    try:
+        return float(s) * multiplier
+    except Exception:
+        return None
+
+
 def _is_symbol_token(x: str) -> bool:
     if not x:
         return False
