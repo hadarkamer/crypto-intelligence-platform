@@ -1,13 +1,9 @@
-Crypto Intelligence DOM Debug Patch
+Crypto Intelligence DOM URL Patch
 
-This version adds detailed Render logs to coinglass_dom_reader.py.
+Fixes CoinGlass page URL to:
+https://www.coinglass.com/liquidation-maxpain
 
-After /collect, Render logs should include:
-[dom] launch browser
-[dom] page opened
-[dom] initial table_count=...
-[dom] body_preview_first_80=...
-[dom] tf=12h ...
-[collector] DOM inserted ...
-
-If 0 rows are saved, send the [dom] log section back for diagnosis.
+After /collect, Render logs should show:
+[dom] page opened; current_url=https://www.coinglass.com/liquidation-maxpain
+and should NOT show:
+Oops! We couldn't find the page you're looking for.
