@@ -262,19 +262,18 @@ async def collect_coinglass_dom_snapshot(
     """
     Main entry point for /collect.
 
-    Returns:
-        {
-          'ok': bool,
-          'rows': [...],
-          'missing_timeframes': [...],
-          'by_timeframe': {...},
-          'debug': {...}
-        }
+    DEBUG version:
+    - prints every browser/DOM step to Render logs
+    - prints table headers + body preview when it cannot parse Max Pain rows
+    - does not fake rows if Max Pain fields are not found
     """
     timeframes = timeframes or DEFAULT_TIMEFRAMES
     all_rows: List[Dict[str, Any]] = []
     by_timeframe: Dict[str, Any] = {}
     missing: List[str] = []
+    debug_summary: Dict[str, Any] = {}
+
+    print(f"[dom] launch browser; url={url}; headless={headless}; timeframes={timeframes}", flush=True)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -283,10 +282,14 @@ async def collect_coinglass_dom_snapshot(
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-gpu",
+                "--disable-extensions",
             ],
         )
+        print("[dom] browser launched", flush=True)
+
         context = await browser.new_context(
-            viewport={"width": 1440, "height": 1400},
+            viewport={"width": 1440, "height": 1800},
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -297,40 +300,94 @@ async def collect_coinglass_dom_snapshot(
         page = await context.new_page()
 
         try:
+            print("[dom] opening page", flush=True)
             await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            await page.wait_for_timeout(5000)
+            print(f"[dom] page opened; title={await page.title()!r}; current_url={page.url}", flush=True)
 
-            # Try to dismiss common popups if present.
+            # Let React/network render dynamic content.
+            await page.wait_for_timeout(8000)
+            print("[dom] waited 8s after domcontentloaded", flush=True)
+
+            # Dismiss popups if present.
             for label in ["Accept", "I Agree", "Got it", "Close", "×"]:
                 try:
                     await page.get_by_text(label, exact=True).first.click(timeout=1000)
+                    print(f"[dom] dismissed popup/button: {label}", flush=True)
                     await page.wait_for_timeout(500)
                 except Exception:
                     pass
 
+            initial_tables = await _extract_tables(page)
+            initial_lines = await _extract_body_lines(page, limit=250)
+            print(f"[dom] initial table_count={len(initial_tables)}", flush=True)
+            for t in initial_tables[:6]:
+                print(
+                    f"[dom] table[{t.get('index')}] headers={t.get('headers')} rows={len(t.get('rows') or [])}",
+                    flush=True,
+                )
+            print("[dom] body_preview_first_80=" + json.dumps(initial_lines[:80], ensure_ascii=False), flush=True)
+
             for tf in timeframes:
+                print(f"[dom] ===== timeframe {tf} =====", flush=True)
                 try:
                     result = await read_timeframe(page, tf)
                     by_timeframe[tf] = result
                     rows = result.get("rows", [])
+                    debug = result.get("debug", {})
+                    print(
+                        f"[dom] tf={tf} clicked={result.get('clicked')} row_count={len(rows)} "
+                        f"table_count={debug.get('table_count')}",
+                        flush=True,
+                    )
+                    for i, headers in enumerate((debug.get("table_headers") or [])[:6]):
+                        print(f"[dom] tf={tf} headers[{i}]={headers}", flush=True)
+                    print(
+                        f"[dom] tf={tf} body_preview_first_60="
+                        + json.dumps((debug.get("body_preview") or [])[:60], ensure_ascii=False),
+                        flush=True,
+                    )
                     if rows:
+                        print(
+                            f"[dom] tf={tf} first_rows="
+                            + json.dumps(rows[:3], ensure_ascii=False)[:4000],
+                            flush=True,
+                        )
                         all_rows.extend(rows)
                     else:
                         missing.append(tf)
                 except Exception as exc:
                     missing.append(tf)
                     by_timeframe[tf] = {"timeframe": tf, "error": repr(exc), "rows": []}
+                    print(f"[dom] tf={tf} ERROR: {repr(exc)}", flush=True)
+
+            # Capture a final screenshot path for Render logs. It is mostly diagnostic;
+            # the file is not expected to be downloaded, but confirms page rendering.
+            try:
+                screenshot_path = "/tmp/coinglass_dom_debug.png"
+                await page.screenshot(path=screenshot_path, full_page=True)
+                print(f"[dom] screenshot saved to {screenshot_path}", flush=True)
+            except Exception as exc:
+                print(f"[dom] screenshot failed: {repr(exc)}", flush=True)
+
+            debug_summary = {
+                "initial_table_count": len(initial_tables),
+                "initial_table_headers": [t.get("headers") for t in initial_tables[:6]],
+                "initial_body_preview": initial_lines[:120],
+            }
 
         finally:
             await context.close()
             await browser.close()
+            print("[dom] browser closed", flush=True)
 
+    print(f"[dom] done; raw_rows={len(all_rows)}; missing={missing}", flush=True)
     return {
         "ok": len(all_rows) > 0,
         "rows": all_rows,
         "row_count": len(all_rows),
         "missing_timeframes": missing,
         "by_timeframe": by_timeframe,
+        "debug": debug_summary,
         "collected_at_utc": datetime.now(timezone.utc).isoformat(),
     }
 

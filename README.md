@@ -1,23 +1,13 @@
-# Crypto Intelligence Platform V1
+Crypto Intelligence DOM Debug Patch
 
-גרסה נקייה שמיועדת להרצה בענן כ-Web Service:
-- פותחת פורט health check כדי שהענן לא יפיל את השירות
-- מריצה Telegram Bot
-- מריצה Collector אוטומטי כל שעה
-- שומרת ב-PostgreSQL אם קיים DATABASE_URL
-- אם אין DATABASE_URL, נופלת ל-SQLite מקומי לצורכי בדיקה בלבד
+This version adds detailed Render logs to coinglass_dom_reader.py.
 
-## Render Settings
+After /collect, Render logs should include:
+[dom] launch browser
+[dom] page opened
+[dom] initial table_count=...
+[dom] body_preview_first_80=...
+[dom] tf=12h ...
+[collector] DOM inserted ...
 
-Build Command:
-pip install -r requirements.txt && playwright install chromium
-
-Start Command:
-python main.py
-
-Environment Variables:
-PYTHON_VERSION=3.11.9
-TELEGRAM_BOT_TOKEN=your_token
-DATABASE_URL=your_render_internal_database_url
-COLLECT_INTERVAL_MINUTES=60
-TOP_COINS_LIMIT=50
+If 0 rows are saved, send the [dom] log section back for diagnosis.
