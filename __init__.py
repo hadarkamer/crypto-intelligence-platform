@@ -1,5 +1,0 @@
-TELEGRAM_BOT_TOKEN=put_your_telegram_bot_token_here
-DB_PATH=data/coinglass.db
-COLLECT_INTERVAL_MINUTES=60
-COINGLASS_MAX_PAIN_URL=https://www.coinglass.com/liquidation-maxpain
-TOP_COINS_LIMIT=50
