@@ -550,6 +550,25 @@ def short_time(value):
     s = str(value)
     return s[11:16] if len(s) >= 16 else s
 
+def side_from_row(row):
+    """Return which Max Pain side is closer for one row."""
+    ds = row["distance_short_pct"]
+    dl = row["distance_long_pct"]
+    if ds is None or dl is None:
+        return None
+    return "SHORT" if abs(ds) <= abs(dl) else "LONG"
+
+def safe_avg(values):
+    vals = [v for v in values if v is not None]
+    return sum(vals) / len(vals) if vals else None
+
+def tf_order_value(tf: str) -> int:
+    try:
+        return TIMEFRAMES.index(tf) + 1
+    except ValueError:
+        return 99
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Crypto Intelligence Bot פעיל.\n"
@@ -559,6 +578,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/coin BTC - מטבע בכל הטווחים\n"
         "/range BTC 24h - מטבע וטווח\n"
         "/top 10 - הכי קרובים ל-Max Pain\n"
+        "/consensus - מטבעות עם קרבה עקבית לאותו צד בכל הטווחים\n"
         "/alerts - חריגות"
     )
 
@@ -704,6 +724,114 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
 
 
+async def consensus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Coins that point to the same Max Pain side across most/all timeframes."""
+    min_hits = 7
+    limit = 20
+
+    if context.args:
+        try:
+            min_hits = max(1, min(7, int(context.args[0])))
+        except Exception:
+            min_hits = 7
+    if len(context.args) >= 2:
+        try:
+            limit = max(1, min(50, int(context.args[1])))
+        except Exception:
+            limit = 20
+
+    rows = query(
+        f"""
+        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
+        SELECT symbol, timeframe, current_price,
+               distance_short_pct, distance_long_pct,
+               short_liquidation_amount, long_liquidation_amount
+        FROM max_pain_snapshots, latest
+        WHERE collected_at = latest.max_time
+          AND distance_short_pct IS NOT NULL
+          AND distance_long_pct IS NOT NULL
+        ORDER BY symbol, {TIMEFRAME_ORDER_SQL}
+        """
+    )
+
+    if not rows:
+        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
+        return
+
+    grouped = {}
+    for r in rows:
+        symbol = r["symbol"]
+        grouped.setdefault(symbol, []).append(r)
+
+    results = []
+    for symbol, items in grouped.items():
+        sides = []
+        short_dists = []
+        long_dists = []
+        active_tfs = []
+
+        for r in items:
+            side = side_from_row(r)
+            if not side:
+                continue
+            sides.append(side)
+            short_dists.append(abs(r["distance_short_pct"]))
+            long_dists.append(abs(r["distance_long_pct"]))
+            active_tfs.append(r["timeframe"])
+
+        if not sides:
+            continue
+
+        short_count = sides.count("SHORT")
+        long_count = sides.count("LONG")
+
+        if short_count >= long_count:
+            dominant_side = "SHORT"
+            hits = short_count
+            avg_dist = safe_avg(short_dists)
+        else:
+            dominant_side = "LONG"
+            hits = long_count
+            avg_dist = safe_avg(long_dists)
+
+        total = len(sides)
+        if hits < min_hits:
+            continue
+
+        results.append({
+            "symbol": symbol,
+            "side": dominant_side,
+            "hits": hits,
+            "total": total,
+            "avg_dist": avg_dist,
+            "tfs": ",".join(active_tfs),
+        })
+
+    if not results:
+        await update.message.reply_text(
+            f"לא נמצאו מטבעות עם קונצנזוס של {min_hits}/7. נסו /consensus 6"
+        )
+        return
+
+    results.sort(key=lambda x: (-x["hits"], x["avg_dist"] if x["avg_dist"] is not None else 999, x["symbol"]))
+    results = results[:limit]
+
+    table = [[
+        r["symbol"],
+        r["side"],
+        f'{r["hits"]}/{r["total"]}',
+        fmt(r["avg_dist"]),
+        r["tfs"],
+    ] for r in results]
+
+    output = tabulate(
+        table,
+        headers=["Coin", "Side", "Score", "AvgDist%", "TFs"],
+        tablefmt="plain",
+    )
+    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -761,6 +889,7 @@ async def main():
     bot_app.add_handler(CommandHandler("coin", coin))
     bot_app.add_handler(CommandHandler("range", range_cmd))
     bot_app.add_handler(CommandHandler("top", top))
+    bot_app.add_handler(CommandHandler("consensus", consensus))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()
