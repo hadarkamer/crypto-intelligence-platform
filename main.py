@@ -45,7 +45,7 @@ RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 TIMEFRAME_ORDER_SQL = "CASE timeframe WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3 WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6 WHEN '1m' THEN 7 ELSE 99 END"
 # CoinGlass may mix non-crypto assets into the Max Pain table. Exclude known non-crypto symbols.
-NON_CRYPTO_SYMBOLS = {"XAU", "MU", "MSFT", "AAPL", "NVDA", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
+NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
 API_TIMEFRAME_MAP = {
     "12h": "12h", "24h": "24h", "48h": "48h", "3d": "3d",
     "1w": "7d", "2w": "14d", "1m": "30d",
