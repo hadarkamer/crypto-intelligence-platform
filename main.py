@@ -20,6 +20,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from coinglass_dom_reader import collect_coinglass_dom_snapshot
+import analysis
 
 try:
     import psycopg
@@ -550,6 +551,23 @@ def short_time(value):
     s = str(value)
     return s[11:16] if len(s) >= 16 else s
 
+
+def latest_snapshot_rows():
+    """Fetch all rows from the latest snapshot for analysis.py."""
+    return query(
+        f"""
+        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
+        SELECT symbol, timeframe, current_price,
+               short_max_pain, long_max_pain,
+               short_liquidation_amount, long_liquidation_amount,
+               distance_short_pct, distance_long_pct
+        FROM max_pain_snapshots, latest
+        WHERE collected_at = latest.max_time
+        ORDER BY symbol, {TIMEFRAME_ORDER_SQL}
+        """
+    )
+
+
 def side_from_row(row):
     """Return which Max Pain side is closer for one row."""
     ds = row["distance_short_pct"]
@@ -727,7 +745,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def consensus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Coins that point to the same Max Pain side across most/all timeframes."""
+    """Display coins whose closest Max Pain side is consistent across timeframes."""
     min_hits = 7
     limit = 20
 
@@ -742,81 +760,15 @@ async def consensus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             limit = 20
 
-    rows = query(
-        f"""
-        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
-        SELECT symbol, timeframe, current_price,
-               distance_short_pct, distance_long_pct,
-               short_liquidation_amount, long_liquidation_amount
-        FROM max_pain_snapshots, latest
-        WHERE collected_at = latest.max_time
-          AND distance_short_pct IS NOT NULL
-          AND distance_long_pct IS NOT NULL
-        ORDER BY symbol, {TIMEFRAME_ORDER_SQL}
-        """
-    )
-
+    rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
         return
 
-    grouped = {}
-    for r in rows:
-        symbol = r["symbol"]
-        grouped.setdefault(symbol, []).append(r)
-
-    results = []
-    for symbol, items in grouped.items():
-        sides = []
-        short_dists = []
-        long_dists = []
-        active_tfs = []
-
-        for r in items:
-            side = side_from_row(r)
-            if not side:
-                continue
-            sides.append(side)
-            short_dists.append(abs(r["distance_short_pct"]))
-            long_dists.append(abs(r["distance_long_pct"]))
-            active_tfs.append(r["timeframe"])
-
-        if not sides:
-            continue
-
-        short_count = sides.count("SHORT")
-        long_count = sides.count("LONG")
-
-        if short_count >= long_count:
-            dominant_side = "SHORT"
-            hits = short_count
-            avg_dist = safe_avg(short_dists)
-        else:
-            dominant_side = "LONG"
-            hits = long_count
-            avg_dist = safe_avg(long_dists)
-
-        total = len(sides)
-        if hits < min_hits:
-            continue
-
-        results.append({
-            "symbol": symbol,
-            "side": dominant_side,
-            "hits": hits,
-            "total": total,
-            "avg_dist": avg_dist,
-            "tfs": ",".join(active_tfs),
-        })
-
+    results = analysis.calculate_consensus(rows, min_hits=min_hits, limit=limit)
     if not results:
-        await update.message.reply_text(
-            f"לא נמצאו מטבעות עם קונצנזוס של {min_hits}/7. נסו /consensus 6"
-        )
+        await update.message.reply_text(f"לא נמצאו מטבעות עם קונצנזוס של {min_hits}/7. נסו /consensus 6")
         return
-
-    results.sort(key=lambda x: (-x["hits"], x["avg_dist"] if x["avg_dist"] is not None else 999, x["symbol"]))
-    results = results[:limit]
 
     table = [[
         r["symbol"],
@@ -826,19 +778,11 @@ async def consensus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r["tfs"],
     ] for r in results]
 
-    output = tabulate(
-        table,
-        headers=["Coin", "Side", "Score", "AvgDist%", "TFs"],
-        tablefmt="plain",
-    )
+    output = tabulate(table, headers=["Coin", "Side", "Score", "AvgDist%", "TFs"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
-
 async def gap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Average percentage gap between Short Max Pain and Long Max Pain across all timeframes.
-
-    gap_pct = abs(short_max_pain - long_max_pain) / current_price * 100
-    """
+    """Display average percentage gap between Short/Long Max Pain."""
     limit = 20
     if context.args:
         try:
@@ -846,66 +790,15 @@ async def gap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             limit = 20
 
-    rows = query(
-        f"""
-        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
-        SELECT symbol, timeframe, current_price, short_max_pain, long_max_pain
-        FROM max_pain_snapshots, latest
-        WHERE collected_at = latest.max_time
-          AND current_price IS NOT NULL
-          AND short_max_pain IS NOT NULL
-          AND long_max_pain IS NOT NULL
-        ORDER BY symbol, {TIMEFRAME_ORDER_SQL}
-        """
-    )
+    rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין נתונים לחישוב. הריצו /collect קודם.")
         return
 
-    grouped = {}
-    for r in rows:
-        grouped.setdefault(r["symbol"], []).append(r)
-
-    results = []
-    for symbol, items in grouped.items():
-        gaps = []
-        max_gap = None
-        max_gap_tf = None
-        min_gap = None
-        min_gap_tf = None
-
-        for r in items:
-            price = r["current_price"]
-            short_mp = r["short_max_pain"]
-            long_mp = r["long_max_pain"]
-            if not price or price == 0 or short_mp is None or long_mp is None:
-                continue
-            gap_pct = abs(short_mp - long_mp) / price * 100
-            gaps.append(gap_pct)
-
-            if max_gap is None or gap_pct > max_gap:
-                max_gap = gap_pct
-                max_gap_tf = r["timeframe"]
-            if min_gap is None or gap_pct < min_gap:
-                min_gap = gap_pct
-                min_gap_tf = r["timeframe"]
-
-        if not gaps:
-            continue
-
-        avg_gap = sum(gaps) / len(gaps)
-        results.append({
-            "symbol": symbol,
-            "avg_gap": avg_gap,
-            "max_gap": max_gap,
-            "max_gap_tf": max_gap_tf,
-            "min_gap": min_gap,
-            "min_gap_tf": min_gap_tf,
-            "count": len(gaps),
-        })
-
-    results.sort(key=lambda x: (-x["avg_gap"], x["symbol"]))
-    results = results[:limit]
+    results = analysis.calculate_gap(rows, limit=limit)
+    if not results:
+        await update.message.reply_text("אין מספיק נתונים לחישוב Gap.")
+        return
 
     table = [[
         r["symbol"],
@@ -915,84 +808,32 @@ async def gap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'{r["min_gap_tf"]}:{fmt(r["min_gap"])}',
     ] for r in results]
 
-    output = tabulate(
-        table,
-        headers=["Coin", "TFs", "AvgGap%", "MaxGap", "MinGap"],
-        tablefmt="plain",
-    )
+    output = tabulate(table, headers=["Coin", "TFs", "AvgGap%", "MaxGap", "MinGap"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
-
 async def liqsum(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sum short/long liquidation amounts by timeframe and total balance."""
-    rows = query(
-        f"""
-        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
-        SELECT timeframe,
-               SUM(short_liquidation_amount) AS short_total,
-               SUM(long_liquidation_amount) AS long_total
-        FROM max_pain_snapshots, latest
-        WHERE collected_at = latest.max_time
-          AND short_liquidation_amount IS NOT NULL
-          AND long_liquidation_amount IS NOT NULL
-        GROUP BY timeframe
-        ORDER BY {TIMEFRAME_ORDER_SQL}
-        """
-    )
-
+    """Display liquidation amount balance by timeframe and total."""
+    rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין נתוני נזילות. הריצו /collect קודם.")
         return
 
+    result = analysis.calculate_liquidity_balance(rows)
+    tf_rows = result["timeframes"]
+    if not tf_rows:
+        await update.message.reply_text("אין נתוני נזילות להצגה.")
+        return
+
     table = []
-    total_short = 0.0
-    total_long = 0.0
-
-    for r in rows:
-        short_total = r["short_total"] or 0.0
-        long_total = r["long_total"] or 0.0
-        total_short += short_total
-        total_long += long_total
-
-        diff = long_total - short_total
-        if long_total > short_total:
-            dominant = "LONG"
-            ratio = long_total / short_total if short_total else None
-        elif short_total > long_total:
-            dominant = "SHORT"
-            ratio = short_total / long_total if long_total else None
-        else:
-            dominant = "BALANCED"
-            ratio = 1.0
-
+    for r in tf_rows + [result["total"]]:
         table.append([
             r["timeframe"],
-            fmt(short_total, 0),
-            fmt(long_total, 0),
-            dominant,
-            fmt(diff, 0),
-            fmt(ratio),
+            fmt(r["short_total"], 0),
+            fmt(r["long_total"], 0),
+            r["dominant"],
+            fmt(r["diff"], 0),
+            fmt(r["ratio"]),
         ])
-
-    total_diff = total_long - total_short
-    if total_long > total_short:
-        total_dom = "LONG"
-        total_ratio = total_long / total_short if total_short else None
-    elif total_short > total_long:
-        total_dom = "SHORT"
-        total_ratio = total_short / total_long if total_long else None
-    else:
-        total_dom = "BALANCED"
-        total_ratio = 1.0
-
-    table.append([
-        "TOTAL",
-        fmt(total_short, 0),
-        fmt(total_long, 0),
-        total_dom,
-        fmt(total_diff, 0),
-        fmt(total_ratio),
-    ])
 
     output = tabulate(
         table,
@@ -1000,7 +841,6 @@ async def liqsum(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tablefmt="plain",
     )
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
-
 
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
