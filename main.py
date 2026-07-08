@@ -599,6 +599,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/consensus - מטבעות עם קרבה עקבית לאותו צד בכל הטווחים\n"
         "/gap - פער ממוצע בין Short/Long Max Pain\n"
         "/liqsum - מאזן סכומי הנזילות לפי טווח וסך הכול\n"
+        "/market - נטיית שוק לפי קרבה ל-Max Pain בכל טווח\n"
         "/alerts - חריגות"
     )
 
@@ -842,6 +843,53 @@ async def liqsum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
+async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display overall market bias by timeframe and total.
+
+    LONG means more coins are closer to their Long Max Pain side.
+    SHORT means more coins are closer to their Short Max Pain side.
+    """
+    rows = latest_snapshot_rows()
+    if not rows:
+        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
+        return
+
+    result = analysis.calculate_market_bias(rows)
+    tf_rows = result.get("timeframes", [])
+    overall = result.get("overall", {})
+
+    if not tf_rows:
+        await update.message.reply_text("אין מספיק נתונים לחישוב Market Bias.")
+        return
+
+    table = []
+    for r in tf_rows:
+        table.append([
+            r["timeframe"],
+            r["bias"],
+            r["long_count"],
+            r["short_count"],
+            fmt(r["long_pct"]),
+            fmt(r["short_pct"]),
+        ])
+
+    table.append([
+        "TOTAL",
+        overall.get("bias"),
+        overall.get("long_count"),
+        overall.get("short_count"),
+        fmt(overall.get("long_pct")),
+        fmt(overall.get("short_pct")),
+    ])
+
+    output = tabulate(
+        table,
+        headers=["TF", "Bias", "LONG", "SHORT", "Long%", "Short%"],
+        tablefmt="plain",
+    )
+    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -902,6 +950,7 @@ async def main():
     bot_app.add_handler(CommandHandler("consensus", consensus))
     bot_app.add_handler(CommandHandler("gap", gap))
     bot_app.add_handler(CommandHandler("liqsum", liqsum))
+    bot_app.add_handler(CommandHandler("market", market))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()

@@ -1,19 +1,14 @@
-Stage 3 Analysis Refactor
+Stage 4 Market Bias Patch
 
-Adds analysis.py as the central calculation engine.
+Adds:
+/market
 
-No intended user-facing output changes.
-Existing commands now use analysis.py:
-- /consensus
-- /gap
-- /liqsum
+Meaning:
+For each timeframe, count how many coins are closer to Long Max Pain vs Short Max Pain.
+Then show the overall total across all timeframes.
 
-Purpose:
-- reduce duplicated calculations inside main.py
-- prepare for /market, /btc_like, and later probability/scoring engine
-
-Test after deploy:
+Test:
 /collect
-/consensus
-/gap
-/liqsum
+/market
+
+This stage does not change collection or existing commands.
