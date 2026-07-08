@@ -600,6 +600,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/gap - פער ממוצע בין Short/Long Max Pain\n"
         "/liqsum - מאזן סכומי הנזילות לפי טווח וסך הכול\n"
         "/market - נטיית שוק לפי קרבה ל-Max Pain בכל טווח\n"
+        "/btc_like - מטבעות שהכיוון שלהם דומה ל-BTC\n"
         "/alerts - חריגות"
     )
 
@@ -805,22 +806,71 @@ async def gap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r["symbol"],
         f'{r["count"]}/7',
         fmt(r["avg_gap"]),
+        fmt(r.get("avg_gap_abs")),
         f'{r["max_gap_tf"]}:{fmt(r["max_gap"])}',
         f'{r["min_gap_tf"]}:{fmt(r["min_gap"])}',
     ] for r in results]
 
-    output = tabulate(table, headers=["Coin", "TFs", "AvgGap%", "MaxGap", "MinGap"], tablefmt="plain")
+    output = tabulate(table, headers=["Coin", "TFs", "AvgGap%", "AvgGap$", "MaxGap", "MinGap"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
 async def liqsum(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Display liquidation amount balance by timeframe and total."""
+    """Display liquidation amount balance.
+
+    Usage:
+    - /liqsum            market totals by timeframe + TOTAL
+    - /liqsum top [n]    top coins by total liquidity across all timeframes
+    - /liqsum BTC        liquidity balance for a specific coin by timeframe + TOTAL
+    """
     rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין נתוני נזילות. הריצו /collect קודם.")
         return
 
-    result = analysis.calculate_liquidity_balance(rows)
-    tf_rows = result["timeframes"]
+    # /liqsum top [limit]
+    if context.args and context.args[0].lower() == "top":
+        limit = 20
+        if len(context.args) >= 2:
+            try:
+                limit = max(1, min(50, int(context.args[1])))
+            except Exception:
+                limit = 20
+
+        results = analysis.calculate_liquidity_by_coin(rows, limit=limit)
+        if not results:
+            await update.message.reply_text("אין נתוני נזילות להצגה.")
+            return
+
+        table = [[
+            r["symbol"],
+            f'{r["count"]}/7',
+            fmt(r["total"], 0),
+            fmt(r["short_total"], 0),
+            fmt(r["long_total"], 0),
+            r["dominant"],
+            fmt(r["ratio"]),
+        ] for r in results]
+
+        output = tabulate(
+            table,
+            headers=["Coin", "TFs", "Total$", "Short$", "Long$", "Dominant", "Ratio"],
+            tablefmt="plain",
+        )
+        await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+        return
+
+    # /liqsum BTC
+    if context.args:
+        symbol = context.args[0].upper()
+        result = analysis.calculate_liquidity_for_symbol_by_timeframe(rows, symbol)
+        tf_rows = result["timeframes"]
+        if not tf_rows:
+            await update.message.reply_text(f"לא נמצאו נתוני נזילות עבור {symbol}.")
+            return
+    else:
+        result = analysis.calculate_liquidity_balance(rows)
+        tf_rows = result["timeframes"]
+
     if not tf_rows:
         await update.message.reply_text("אין נתוני נזילות להצגה.")
         return
@@ -890,6 +940,46 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
 
+async def btc_like(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display coins whose closest Max Pain side is similar to BTC."""
+    min_hits = 5
+    limit = 20
+
+    if context.args:
+        try:
+            min_hits = max(1, min(7, int(context.args[0])))
+        except Exception:
+            min_hits = 5
+    if len(context.args) >= 2:
+        try:
+            limit = max(1, min(50, int(context.args[1])))
+        except Exception:
+            limit = 20
+
+    rows = latest_snapshot_rows()
+    if not rows:
+        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
+        return
+
+    results = analysis.calculate_btc_similarity(rows, min_hits=min_hits, limit=limit)
+    if not results:
+        await update.message.reply_text(f"לא נמצאו מטבעות עם התאמה ל-BTC של {min_hits}/7. נסו /btc_like 4")
+        return
+
+    table = [[
+        r["symbol"],
+        f'{r["hits"]}/{r["total"]}',
+        r["same_tfs"],
+        r["different_tfs"],
+    ] for r in results]
+
+    output = tabulate(
+        table,
+        headers=["Coin", "Match", "SameTFs", "DiffTFs"],
+        tablefmt="plain",
+    )
+    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -951,6 +1041,7 @@ async def main():
     bot_app.add_handler(CommandHandler("gap", gap))
     bot_app.add_handler(CommandHandler("liqsum", liqsum))
     bot_app.add_handler(CommandHandler("market", market))
+    bot_app.add_handler(CommandHandler("btc_like", btc_like))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()

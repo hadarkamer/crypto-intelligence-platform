@@ -1,14 +1,20 @@
-Stage 4 Market Bias Patch
+Stage 5 Fixes + BTC-like Patch
 
-Adds:
-/market
+Changes:
+1. /gap
+   - Keeps Yoni's approved formula:
+     abs(Short Max Pain - Long Max Pain) / Current Price * 100
+   - Adds AvgGap$ column to help sanity-check extreme AvgGap% values.
+   - Very high AvgGap% can be real for low-priced/high-volatility assets.
 
-Meaning:
-For each timeframe, count how many coins are closer to Long Max Pain vs Short Max Pain.
-Then show the overall total across all timeframes.
+2. /consensus
+   - Sorts AvgDist% from high to low inside the same score level, as requested.
 
-Test:
-/collect
-/market
+3. /liqsum
+   - Existing /liqsum still shows market balance by timeframe + TOTAL.
+   - New /liqsum top [limit] shows coins with the highest total liquidity across all timeframes.
+   - New /liqsum BTC shows liquidity balance for BTC by timeframe + TOTAL.
 
-This stage does not change collection or existing commands.
+4. /btc_like [min_hits] [limit]
+   - Shows coins whose closest Max Pain side matches BTC across timeframes.
+   - Example: /btc_like or /btc_like 6
