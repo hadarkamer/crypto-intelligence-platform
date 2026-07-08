@@ -21,6 +21,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from coinglass_dom_reader import collect_coinglass_dom_snapshot
 import analysis
+import decision_engine
 
 try:
     import psycopg
@@ -601,6 +602,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/liqsum - מאזן סכומי הנזילות לפי טווח וסך הכול\n"
         "/market - נטיית שוק לפי קרבה ל-Max Pain בכל טווח\n"
         "/btc_like - מטבעות שהכיוון שלהם דומה ל-BTC\n"
+        "/score BTC - פירוק Setup Strength למטבע\n"
+        "/score_top - דירוג Setup Strength\n"
         "/alerts - חריגות"
     )
 
@@ -980,6 +983,77 @@ async def btc_like(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
+async def score(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show transparent setup strength breakdown for one coin."""
+    if not context.args:
+        await update.message.reply_text("שימוש: /score BTC")
+        return
+
+    symbol = context.args[0].upper()
+    rows = latest_snapshot_rows()
+    if not rows:
+        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
+        return
+
+    result = decision_engine.calculate_score_for_symbol(rows, symbol)
+    if not result.get("ok"):
+        await update.message.reply_text(f"לא נמצאו נתונים עבור {symbol}.")
+        return
+
+    header = [
+        ["Coin", result["symbol"]],
+        ["Direction", result["direction"]],
+        ["SetupStrength", result["setup_strength"]],
+        ["Confidence", result["confidence"]],
+        ["Consensus", f'{result["consensus_hits"]}/{result["consensus_total"]}'],
+        ["AvgDist%", fmt(result.get("avg_distance"))],
+        ["AvgGap%", fmt(result.get("gap_avg_pct"))],
+    ]
+
+    comp_table = [[
+        c["name"],
+        f'{fmt(c["score"])}/{c["max"]}',
+        c["direction"],
+        c["reason"],
+    ] for c in result["components"]]
+
+    text1 = tabulate(header, tablefmt="plain")
+    text2 = tabulate(comp_table, headers=["Component", "Score", "Dir", "Reason"], tablefmt="plain")
+    await update.message.reply_text(f"<pre>{html.escape(text1 + chr(10) + chr(10) + text2)}</pre>", parse_mode="HTML")
+
+
+async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show top coins by setup strength."""
+    limit = 15
+    if context.args:
+        try:
+            limit = max(1, min(50, int(context.args[0])))
+        except Exception:
+            limit = 15
+
+    rows = latest_snapshot_rows()
+    if not rows:
+        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
+        return
+
+    results = decision_engine.calculate_scores(rows, limit=limit)
+    if not results:
+        await update.message.reply_text("אין מספיק נתונים לחישוב Setup Strength.")
+        return
+
+    table = [[
+        r["symbol"],
+        r["direction"],
+        r["setup_strength"],
+        r["confidence"],
+        f'{r["consensus_hits"]}/{r["consensus_total"]}',
+        fmt(r.get("avg_distance")),
+        fmt(r.get("gap_avg_pct")),
+    ] for r in results]
+
+    output = tabulate(table, headers=["Coin", "Dir", "Strength", "Conf", "Cons", "AvgDist%", "AvgGap%"], tablefmt="plain")
+    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -1042,6 +1116,8 @@ async def main():
     bot_app.add_handler(CommandHandler("liqsum", liqsum))
     bot_app.add_handler(CommandHandler("market", market))
     bot_app.add_handler(CommandHandler("btc_like", btc_like))
+    bot_app.add_handler(CommandHandler("score", score))
+    bot_app.add_handler(CommandHandler("score_top", score_top))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()
