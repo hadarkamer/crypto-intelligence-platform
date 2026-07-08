@@ -1,13 +1,18 @@
-Stage 1 Consensus Patch
+Stage 2 Gap + Liquidity Sum Patch
 
-Adds one new command:
-/consensus [min_hits] [limit]
+Adds:
+/gap [limit]
+- Calculates average percentage gap between Short Max Pain and Long Max Pain:
+  abs(short_max_pain - long_max_pain) / current_price * 100
+- Shows AvgGap%, MaxGap timeframe, MinGap timeframe.
 
-Examples:
-/consensus
-/consensus 6
-/consensus 6 20
+/liqsum
+- Sums liquidation amounts by timeframe:
+  Short$, Long$, Dominant side, Long-Short$, Ratio.
+- Adds TOTAL row across all timeframes.
 
-Purpose:
-Find coins whose closest Max Pain side is the same across most/all 7 timeframes.
-This uses the latest snapshot only and does not change the collector.
+Test after deploy:
+/collect
+/gap
+/gap 30
+/liqsum

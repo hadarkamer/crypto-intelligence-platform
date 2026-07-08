@@ -579,6 +579,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/range BTC 24h - מטבע וטווח\n"
         "/top 10 - הכי קרובים ל-Max Pain\n"
         "/consensus - מטבעות עם קרבה עקבית לאותו צד בכל הטווחים\n"
+        "/gap - פער ממוצע בין Short/Long Max Pain\n"
+        "/liqsum - מאזן סכומי הנזילות לפי טווח וסך הכול\n"
         "/alerts - חריגות"
     )
 
@@ -832,6 +834,174 @@ async def consensus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
 
+async def gap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Average percentage gap between Short Max Pain and Long Max Pain across all timeframes.
+
+    gap_pct = abs(short_max_pain - long_max_pain) / current_price * 100
+    """
+    limit = 20
+    if context.args:
+        try:
+            limit = max(1, min(50, int(context.args[0])))
+        except Exception:
+            limit = 20
+
+    rows = query(
+        f"""
+        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
+        SELECT symbol, timeframe, current_price, short_max_pain, long_max_pain
+        FROM max_pain_snapshots, latest
+        WHERE collected_at = latest.max_time
+          AND current_price IS NOT NULL
+          AND short_max_pain IS NOT NULL
+          AND long_max_pain IS NOT NULL
+        ORDER BY symbol, {TIMEFRAME_ORDER_SQL}
+        """
+    )
+    if not rows:
+        await update.message.reply_text("אין נתונים לחישוב. הריצו /collect קודם.")
+        return
+
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(r["symbol"], []).append(r)
+
+    results = []
+    for symbol, items in grouped.items():
+        gaps = []
+        max_gap = None
+        max_gap_tf = None
+        min_gap = None
+        min_gap_tf = None
+
+        for r in items:
+            price = r["current_price"]
+            short_mp = r["short_max_pain"]
+            long_mp = r["long_max_pain"]
+            if not price or price == 0 or short_mp is None or long_mp is None:
+                continue
+            gap_pct = abs(short_mp - long_mp) / price * 100
+            gaps.append(gap_pct)
+
+            if max_gap is None or gap_pct > max_gap:
+                max_gap = gap_pct
+                max_gap_tf = r["timeframe"]
+            if min_gap is None or gap_pct < min_gap:
+                min_gap = gap_pct
+                min_gap_tf = r["timeframe"]
+
+        if not gaps:
+            continue
+
+        avg_gap = sum(gaps) / len(gaps)
+        results.append({
+            "symbol": symbol,
+            "avg_gap": avg_gap,
+            "max_gap": max_gap,
+            "max_gap_tf": max_gap_tf,
+            "min_gap": min_gap,
+            "min_gap_tf": min_gap_tf,
+            "count": len(gaps),
+        })
+
+    results.sort(key=lambda x: (-x["avg_gap"], x["symbol"]))
+    results = results[:limit]
+
+    table = [[
+        r["symbol"],
+        f'{r["count"]}/7',
+        fmt(r["avg_gap"]),
+        f'{r["max_gap_tf"]}:{fmt(r["max_gap"])}',
+        f'{r["min_gap_tf"]}:{fmt(r["min_gap"])}',
+    ] for r in results]
+
+    output = tabulate(
+        table,
+        headers=["Coin", "TFs", "AvgGap%", "MaxGap", "MinGap"],
+        tablefmt="plain",
+    )
+    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+
+
+async def liqsum(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sum short/long liquidation amounts by timeframe and total balance."""
+    rows = query(
+        f"""
+        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
+        SELECT timeframe,
+               SUM(short_liquidation_amount) AS short_total,
+               SUM(long_liquidation_amount) AS long_total
+        FROM max_pain_snapshots, latest
+        WHERE collected_at = latest.max_time
+          AND short_liquidation_amount IS NOT NULL
+          AND long_liquidation_amount IS NOT NULL
+        GROUP BY timeframe
+        ORDER BY {TIMEFRAME_ORDER_SQL}
+        """
+    )
+
+    if not rows:
+        await update.message.reply_text("אין נתוני נזילות. הריצו /collect קודם.")
+        return
+
+    table = []
+    total_short = 0.0
+    total_long = 0.0
+
+    for r in rows:
+        short_total = r["short_total"] or 0.0
+        long_total = r["long_total"] or 0.0
+        total_short += short_total
+        total_long += long_total
+
+        diff = long_total - short_total
+        if long_total > short_total:
+            dominant = "LONG"
+            ratio = long_total / short_total if short_total else None
+        elif short_total > long_total:
+            dominant = "SHORT"
+            ratio = short_total / long_total if long_total else None
+        else:
+            dominant = "BALANCED"
+            ratio = 1.0
+
+        table.append([
+            r["timeframe"],
+            fmt(short_total, 0),
+            fmt(long_total, 0),
+            dominant,
+            fmt(diff, 0),
+            fmt(ratio),
+        ])
+
+    total_diff = total_long - total_short
+    if total_long > total_short:
+        total_dom = "LONG"
+        total_ratio = total_long / total_short if total_short else None
+    elif total_short > total_long:
+        total_dom = "SHORT"
+        total_ratio = total_short / total_long if total_long else None
+    else:
+        total_dom = "BALANCED"
+        total_ratio = 1.0
+
+    table.append([
+        "TOTAL",
+        fmt(total_short, 0),
+        fmt(total_long, 0),
+        total_dom,
+        fmt(total_diff, 0),
+        fmt(total_ratio),
+    ])
+
+    output = tabulate(
+        table,
+        headers=["TF", "Short$", "Long$", "Dominant", "Long-Short$", "Ratio"],
+        tablefmt="plain",
+    )
+    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -890,6 +1060,8 @@ async def main():
     bot_app.add_handler(CommandHandler("range", range_cmd))
     bot_app.add_handler(CommandHandler("top", top))
     bot_app.add_handler(CommandHandler("consensus", consensus))
+    bot_app.add_handler(CommandHandler("gap", gap))
+    bot_app.add_handler(CommandHandler("liqsum", liqsum))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()
