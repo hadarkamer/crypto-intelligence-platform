@@ -1,20 +1,22 @@
-Stable No-Hyperliquid Patch
+Stage 9 Manual Alert Engine Patch
 
-This version disables/removes the Hyperliquid experiment and returns to the stable bot state.
+Adds:
+- alert_engine.py
+- /alert_check [limit]
 
-Included:
-- Max Pain DOM collection
-- analysis.py
-- decision_engine.py
-- /collect
-- /symbols is NOT included here
-- /hyper_debug is NOT included here
-- /score
-- /score_top
-- /consensus
-- /gap
-- /liqsum
-- /market
-- /btc_like
+This is manual only:
+- no automatic 15-minute watch yet
+- no DB writes for alerts yet
+- no Hyperliquid dependency
 
-Hyperliquid is intentionally set aside for later.
+Alert types:
+1. NEAR_MAX_PAIN
+2. LIQUIDITY_IMBALANCE_NEAR_SIDE
+3. EXTREME_GAP
+4. HIGH_LIQUIDITY_CLOSE_DISTANCE
+5. HIGH_SETUP_STRENGTH
+
+Test:
+/collect
+/alert_check
+/alert_check 30

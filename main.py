@@ -22,6 +22,7 @@ from Crypto.Util.Padding import unpad
 from coinglass_dom_reader import collect_coinglass_dom_snapshot
 import analysis
 import decision_engine
+import alert_engine
 
 try:
     import psycopg
@@ -604,6 +605,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/btc_like - מטבעות שהכיוון שלהם דומה ל-BTC\n"
         "/score BTC - פירוק Setup Strength למטבע\n"
         "/score_top - דירוג Setup Strength\n"
+        "/alert_check - בדיקת חריגות ידנית\n"
         "/alerts - חריגות"
     )
 
@@ -1054,6 +1056,48 @@ async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     output = tabulate(table, headers=["Coin", "Dir", "Strength", "Conf", "Cons", "AvgDist%", "AvgGap%"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
+async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual alert scan using the latest saved snapshot."""
+    limit = 20
+    if context.args:
+        try:
+            limit = max(1, min(50, int(context.args[0])))
+        except Exception:
+            limit = 20
+
+    rows = latest_snapshot_rows()
+    if not rows:
+        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
+        return
+
+    alerts_found = alert_engine.find_alerts(rows, limit=limit)
+    if not alerts_found:
+        await update.message.reply_text("לא נמצאו חריגות לפי הספים הנוכחיים.")
+        return
+
+    table = [[
+        a["type"],
+        a["symbol"],
+        a["timeframe"],
+        a["side"],
+        a["severity"],
+        fmt(a.get("distance_pct")),
+        fmt(a.get("ratio")),
+        fmt(a.get("gap_pct")),
+    ] for a in alerts_found]
+
+    output = tabulate(
+        table,
+        headers=["Type", "Coin", "TF", "Side", "Sev", "Dist%", "Ratio", "Gap%"],
+        tablefmt="plain",
+    )
+
+    await update.message.reply_text(
+        f"<pre>{html.escape(output)}</pre>",
+        parse_mode="HTML"
+    )
+
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -1118,6 +1162,7 @@ async def main():
     bot_app.add_handler(CommandHandler("btc_like", btc_like))
     bot_app.add_handler(CommandHandler("score", score))
     bot_app.add_handler(CommandHandler("score_top", score_top))
+    bot_app.add_handler(CommandHandler("alert_check", alert_check))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()
