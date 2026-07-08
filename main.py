@@ -1069,9 +1069,9 @@ async def symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def hyper_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Diagnostic probe for Hyperliquid liquidation map page."""
+    """Diagnostic control probe for Hyperliquid liquidation map page."""
     symbol = context.args[0].upper() if context.args else "BTC"
-    await update.message.reply_text(f"בודק Hyperliquid עבור {symbol}. זה עשוי לקחת עד דקה...")
+    await update.message.reply_text(f"בודק שליטה בעמוד Hyperliquid עבור {symbol}: פתיחה, בחירת מטבע ורענון. עד דקה...")
 
     try:
         result = await hyperliquid_reader.probe_hyperliquid_symbol(symbol)
@@ -1079,24 +1079,34 @@ async def hyper_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"שגיאה בבדיקת Hyperliquid: {exc!r}")
         return
 
+    if not result.get("ok"):
+        preview = "\n".join(result.get("body_preview", [])[:20])
+        await update.message.reply_text(
+            f"<pre>{html.escape('Hyper debug failed\\n' + str(result.get('error')) + '\\n\\n' + preview[:1800])}</pre>",
+            parse_mode="HTML"
+        )
+        return
+
     structure = result.get("structure", {})
-    lines = result.get("body_preview", [])
+    selected = result.get("selected", {})
+    refreshed = result.get("refreshed", {})
 
     summary = [
         ["Symbol", result.get("symbol")],
         ["OK", result.get("ok")],
-        ["URL", result.get("url")],
+        ["Selected", selected.get("ok")],
+        ["SelectMethod", selected.get("method")],
+        ["Refresh", refreshed.get("ok")],
         ["Canvas", structure.get("canvasCount")],
         ["SVG", structure.get("svgCount")],
         ["Inputs", structure.get("inputCount")],
         ["Buttons", structure.get("buttonCount")],
-        ["Lines", result.get("line_count")],
     ]
     text1 = tabulate(summary, tablefmt="plain")
+    preview = "\n".join(result.get("body_preview", [])[:28])
 
-    preview = "\n".join(lines[:25])
     await update.message.reply_text(
-        f"<pre>{html.escape(text1 + chr(10) + chr(10) + preview[:2500])}</pre>",
+        f"<pre>{html.escape(text1 + chr(10) + chr(10) + preview[:2300])}</pre>",
         parse_mode="HTML"
     )
 

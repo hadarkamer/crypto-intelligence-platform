@@ -1,13 +1,17 @@
-"""Hyperliquid liquidation map probe reader.
+"""Hyperliquid liquidation map control probe.
 
-Stage 7 is diagnostic only:
-- Opens CoinGlass Hyperliquid Liquidation Map.
-- Tries to select the requested symbol.
-- Extracts page text + structural hints from DOM.
-- Does NOT save Hyperliquid data to DB yet.
-- Purpose: learn the page structure safely before building real extraction.
+Stage 8:
+- Fixes the previous hanging /hyper_debug command.
+- Opens the Hyperliquid map page.
+- Waits for the dropdown/graph area.
+- Attempts to select a symbol.
+- Attempts to click refresh.
+- Returns a Telegram summary even if selection fails.
+- Uses strict timeouts so the bot will not keep hanging.
 
-After testing /hyper_debug BTC, send the Render logs if parsing is incomplete.
+This is still diagnostic only:
+No DB writes.
+No Hyperliquid scoring yet.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 
 
 HYPERLIQUID_URL = os.getenv(
@@ -25,123 +29,152 @@ HYPERLIQUID_URL = os.getenv(
 )
 
 
-def _clean_lines(text: str, limit: int = 180) -> List[str]:
+def _clean_lines(text: str, limit: int = 160) -> List[str]:
     return [x.strip() for x in text.splitlines() if x.strip()][:limit]
 
 
-async def _extract_body_lines(page: Page, limit: int = 220) -> List[str]:
-    text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-    return _clean_lines(text, limit=limit)
+async def _body_lines(page: Page, limit: int = 160) -> List[str]:
+    try:
+        text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+        return _clean_lines(text, limit)
+    except Exception:
+        return []
 
 
-async def _structural_probe(page: Page) -> Dict[str, Any]:
+async def _click_refresh(page: Page) -> Dict[str, Any]:
+    """Try several ways to click the refresh button without hanging."""
+    attempts = []
+
+    selectors = [
+        "button:has(svg)",
+        "button",
+        "[role='button']",
+    ]
+
+    # Prefer buttons near the symbol selector area. We click candidates and watch for no fatal error.
+    for selector in selectors:
+        try:
+            count = await page.locator(selector).count()
+            attempts.append({"selector": selector, "count": count})
+            # The refresh button is often one of the first few buttons near the chart.
+            for i in range(min(count, 8)):
+                try:
+                    loc = page.locator(selector).nth(i)
+                    text = ""
+                    try:
+                        text = (await loc.inner_text(timeout=500)).strip()
+                    except Exception:
+                        pass
+                    await loc.click(timeout=1200)
+                    await page.wait_for_timeout(1500)
+                    attempts.append({"clicked": selector, "index": i, "text": text[:80], "ok": True})
+                    return {"ok": True, "attempts": attempts}
+                except Exception as exc:
+                    attempts.append({"clicked": selector, "index": i, "ok": False, "error": repr(exc)[:200]})
+        except Exception as exc:
+            attempts.append({"selector": selector, "ok": False, "error": repr(exc)[:200]})
+
+    return {"ok": False, "attempts": attempts}
+
+
+async def _try_select_symbol(page: Page, symbol: str) -> Dict[str, Any]:
+    """Best effort symbol selection, capped with short timeouts."""
+    symbol = symbol.upper()
+    attempts = []
+
+    async def add(name: str, ok: bool, err: Optional[Exception] = None):
+        attempts.append({"attempt": name, "ok": ok, "error": repr(err)[:220] if err else None})
+
+    # 1) If current dropdown already shows symbol, accept it.
+    lines = await _body_lines(page, 80)
+    if symbol in lines:
+        await add("symbol already visible in body", True)
+        return {"ok": True, "method": "already_visible", "attempts": attempts}
+
+    # 2) Try clicking exact symbol if visible.
+    try:
+        await page.get_by_text(symbol, exact=True).first.click(timeout=1800)
+        await page.wait_for_timeout(1500)
+        await add(f"click exact text {symbol}", True)
+        return {"ok": True, "method": "click_exact_text", "attempts": attempts}
+    except Exception as exc:
+        await add(f"click exact text {symbol}", False, exc)
+
+    # 3) Try opening dropdown by clicking text BTC/current dropdown, then click symbol.
+    for opener_text in ["BTC", "ETH", "SOL"]:
+        try:
+            await page.get_by_text(opener_text, exact=True).first.click(timeout=1800)
+            await page.wait_for_timeout(1200)
+            await page.get_by_text(symbol, exact=True).first.click(timeout=1800)
+            await page.wait_for_timeout(2500)
+            await add(f"open dropdown via {opener_text}, click {symbol}", True)
+            return {"ok": True, "method": "dropdown_text", "attempts": attempts}
+        except Exception as exc:
+            await add(f"open dropdown via {opener_text}", False, exc)
+
+    # 4) Try combobox/button typing.
+    for selector in ["input", "[role='combobox']", "button"]:
+        try:
+            loc = page.locator(selector).first
+            await loc.click(timeout=1800)
+            await page.keyboard.press("Control+A")
+            await page.keyboard.type(symbol)
+            await page.wait_for_timeout(700)
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(2500)
+            await add(f"type into {selector}", True)
+            return {"ok": True, "method": f"type_{selector}", "attempts": attempts}
+        except Exception as exc:
+            await add(f"type into {selector}", False, exc)
+
+    return {"ok": False, "method": None, "attempts": attempts}
+
+
+async def _structure(page: Page) -> Dict[str, Any]:
     return await page.evaluate(
         """() => {
-            const pick = (arr) => arr.slice(0, 60).map(x => ({
-                tag: x.tagName,
-                text: (x.innerText || x.textContent || '').trim().slice(0, 120),
-                aria: x.getAttribute('aria-label'),
-                title: x.getAttribute('title'),
-                role: x.getAttribute('role'),
-                cls: x.className ? String(x.className).slice(0, 120) : '',
-                id: x.id || ''
+            const short = (s) => (s || '').toString().trim().slice(0, 100);
+            const buttons = [...document.querySelectorAll('button')].slice(0, 20).map((b, i) => ({
+                i,
+                text: short(b.innerText || b.textContent),
+                aria: short(b.getAttribute('aria-label')),
+                title: short(b.getAttribute('title')),
+                cls: short(b.className)
             }));
-
-            const buttons = pick([...document.querySelectorAll('button')]);
-            const inputs = pick([...document.querySelectorAll('input')]);
-            const selects = pick([...document.querySelectorAll('select')]);
-            const canvases = [...document.querySelectorAll('canvas')].map(c => ({
-                width: c.width,
-                height: c.height,
-                clientWidth: c.clientWidth,
-                clientHeight: c.clientHeight,
-                cls: c.className ? String(c.className).slice(0,120) : ''
+            const inputs = [...document.querySelectorAll('input')].slice(0, 20).map((b, i) => ({
+                i,
+                value: short(b.value),
+                placeholder: short(b.getAttribute('placeholder')),
+                aria: short(b.getAttribute('aria-label')),
+                cls: short(b.className)
             }));
-            const svgs = [...document.querySelectorAll('svg')].map(s => ({
-                width: s.getAttribute('width'),
-                height: s.getAttribute('height'),
-                viewBox: s.getAttribute('viewBox'),
-                text: (s.textContent || '').trim().slice(0, 200),
-                cls: s.className ? String(s.className.baseVal || s.className).slice(0,120) : ''
-            })).slice(0, 20);
-
-            const possibleTexts = [...document.querySelectorAll('*')]
-                .map(e => (e.innerText || e.textContent || '').trim())
-                .filter(t => t && t.length <= 80)
-                .filter(t => /BTC|ETH|SOL|Long|Short|Liquidation|Cumulative|Price|USDC|HYPE/i.test(t))
-                .slice(0, 120);
-
+            const canvases = [...document.querySelectorAll('canvas')].map((c, i) => ({
+                i, width: c.width, height: c.height, clientWidth: c.clientWidth, clientHeight: c.clientHeight
+            }));
+            const svgs = [...document.querySelectorAll('svg')].slice(0, 20).map((s, i) => ({
+                i,
+                text: short(s.textContent),
+                cls: short(s.className && (s.className.baseVal || s.className))
+            }));
             return {
                 url: location.href,
                 title: document.title,
                 buttonCount: document.querySelectorAll('button').length,
                 inputCount: document.querySelectorAll('input').length,
-                selectCount: document.querySelectorAll('select').length,
                 canvasCount: document.querySelectorAll('canvas').length,
                 svgCount: document.querySelectorAll('svg').length,
                 buttons,
                 inputs,
-                selects,
                 canvases,
-                svgs,
-                possibleTexts
+                svgs
             };
         }"""
     )
 
 
-async def _try_select_symbol(page: Page, symbol: str) -> Dict[str, Any]:
-    """Best-effort symbol selection. This is intentionally broad for diagnostics."""
+async def probe_hyperliquid_symbol(symbol: str = "BTC", headless: bool = True, max_seconds: int = 55) -> Dict[str, Any]:
     symbol = symbol.upper()
-    attempts = []
-
-    async def record(name: str, ok: bool, err: Optional[Exception] = None):
-        attempts.append({"attempt": name, "ok": ok, "error": repr(err) if err else None})
-
-    # Try exact text first.
-    try:
-        await page.get_by_text(symbol, exact=True).first.click(timeout=3000)
-        await page.wait_for_timeout(2500)
-        await record(f"text exact {symbol}", True)
-        return {"selected": True, "attempts": attempts}
-    except Exception as exc:
-        await record(f"text exact {symbol}", False, exc)
-
-    # Try clicking known search/input/dropdown-ish elements and typing.
-    for selector in [
-        "input",
-        "[role='combobox']",
-        "button",
-    ]:
-        try:
-            loc = page.locator(selector).first
-            await loc.click(timeout=2500)
-            await page.keyboard.press("Control+A")
-            await page.keyboard.type(symbol)
-            await page.wait_for_timeout(1000)
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(3000)
-            await record(f"type into {selector}", True)
-            return {"selected": True, "attempts": attempts}
-        except Exception as exc:
-            await record(f"type into {selector}", False, exc)
-
-    # Try URL query fallback; may or may not be supported.
-    try:
-        sep = "&" if "?" in HYPERLIQUID_URL else "?"
-        await page.goto(f"{HYPERLIQUID_URL}{sep}symbol={symbol}", wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(8000)
-        await record("url query symbol", True)
-        return {"selected": True, "attempts": attempts}
-    except Exception as exc:
-        await record("url query symbol", False, exc)
-
-    return {"selected": False, "attempts": attempts}
-
-
-async def probe_hyperliquid_symbol(symbol: str = "BTC", headless: bool = True) -> Dict[str, Any]:
-    symbol = symbol.upper()
-    print(f"[hyper] probe start symbol={symbol}; url={HYPERLIQUID_URL}", flush=True)
+    print(f"[hyper] control probe start symbol={symbol}; url={HYPERLIQUID_URL}", flush=True)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -165,34 +198,33 @@ async def probe_hyperliquid_symbol(symbol: str = "BTC", headless: bool = True) -
             locale="en-US",
         )
         page = await context.new_page()
+        page.set_default_timeout(3500)
+        page.set_default_navigation_timeout(60000)
 
         try:
             await page.goto(HYPERLIQUID_URL, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(9000)
-            print(f"[hyper] opened title={await page.title()!r}; url={page.url}", flush=True)
+            title = await page.title()
+            print(f"[hyper] opened title={title!r}; url={page.url}", flush=True)
+
+            before_lines = await _body_lines(page, 120)
+            print("[hyper] before_lines=" + json.dumps(before_lines[:60], ensure_ascii=False)[:3000], flush=True)
 
             select_result = await _try_select_symbol(page, symbol)
-            await page.wait_for_timeout(5000)
-
-            lines = await _extract_body_lines(page, limit=220)
-            structure = await _structural_probe(page)
-
             print("[hyper] select_result=" + json.dumps(select_result, ensure_ascii=False)[:4000], flush=True)
-            print("[hyper] structure_summary=" + json.dumps({
-                "url": structure.get("url"),
-                "title": structure.get("title"),
-                "buttonCount": structure.get("buttonCount"),
-                "inputCount": structure.get("inputCount"),
-                "selectCount": structure.get("selectCount"),
-                "canvasCount": structure.get("canvasCount"),
-                "svgCount": structure.get("svgCount"),
-                "canvases": structure.get("canvases"),
-                "possibleTexts": structure.get("possibleTexts", [])[:80],
-            }, ensure_ascii=False)[:6000], flush=True)
-            print("[hyper] body_preview=" + json.dumps(lines[:120], ensure_ascii=False)[:6000], flush=True)
 
+            refresh_result = await _click_refresh(page)
+            print("[hyper] refresh_result=" + json.dumps(refresh_result, ensure_ascii=False)[:4000], flush=True)
+
+            await page.wait_for_timeout(4000)
+            after_lines = await _body_lines(page, 160)
+            struct = await _structure(page)
+
+            print("[hyper] structure=" + json.dumps(struct, ensure_ascii=False)[:5000], flush=True)
+            print("[hyper] after_lines=" + json.dumps(after_lines[:90], ensure_ascii=False)[:5000], flush=True)
+
+            screenshot_path = f"/tmp/hyperliquid_{symbol}_control.png"
             try:
-                screenshot_path = f"/tmp/hyperliquid_{symbol}_debug.png"
                 await page.screenshot(path=screenshot_path, full_page=True)
                 print(f"[hyper] screenshot saved to {screenshot_path}", flush=True)
             except Exception as exc:
@@ -202,21 +234,29 @@ async def probe_hyperliquid_symbol(symbol: str = "BTC", headless: bool = True) -
                 "ok": True,
                 "symbol": symbol,
                 "url": page.url,
-                "title": await page.title(),
+                "title": title,
                 "selected": select_result,
-                "line_count": len(lines),
-                "body_preview": lines[:80],
+                "refreshed": refresh_result,
                 "structure": {
-                    "buttonCount": structure.get("buttonCount"),
-                    "inputCount": structure.get("inputCount"),
-                    "selectCount": structure.get("selectCount"),
-                    "canvasCount": structure.get("canvasCount"),
-                    "svgCount": structure.get("svgCount"),
-                    "canvases": structure.get("canvases"),
-                    "possibleTexts": structure.get("possibleTexts", [])[:40],
+                    "buttonCount": struct.get("buttonCount"),
+                    "inputCount": struct.get("inputCount"),
+                    "canvasCount": struct.get("canvasCount"),
+                    "svgCount": struct.get("svgCount"),
+                    "buttons": struct.get("buttons", [])[:8],
+                    "inputs": struct.get("inputs", [])[:8],
+                    "canvases": struct.get("canvases", [])[:6],
                 },
+                "body_preview": after_lines[:50],
+            }
+        except Exception as exc:
+            print(f"[hyper] ERROR: {repr(exc)}", flush=True)
+            return {
+                "ok": False,
+                "symbol": symbol,
+                "error": repr(exc),
+                "body_preview": await _body_lines(page, 50),
             }
         finally:
             await context.close()
             await browser.close()
-            print("[hyper] probe done", flush=True)
+            print("[hyper] control probe done", flush=True)

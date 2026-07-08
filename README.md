@@ -1,18 +1,21 @@
-Stage 7 Hyperliquid Probe Patch
+Stage 8 Hyperliquid Control Probe Patch
 
-Adds diagnostic Hyperliquid probe only:
-- hyperliquid_reader.py
-- /hyper_debug BTC
-- /symbols
+Goal:
+Fix the hanging /hyper_debug command and verify that the bot can control the Hyperliquid page.
 
-Purpose:
-Find how CoinGlass renders Hyperliquid liquidation-map data before building real extraction.
-This stage does not save Hyperliquid data and does not change Max Pain collection.
+What it does:
+/hyper_debug BTC
+- opens https://www.coinglass.com/hyperliquid-liquidation-map
+- waits for page load
+- tries to select BTC
+- tries to click refresh
+- returns Telegram summary even if selection/refresh fails
+- logs detailed [hyper] diagnostics
+- does not save data to DB
 
-Test after deploy:
-/symbols
+Test:
 /hyper_debug BTC
 
-Then send:
-- Telegram summary
-- Render logs starting with [hyper]
+Send back:
+- Telegram output
+- Render lines starting with [hyper]
