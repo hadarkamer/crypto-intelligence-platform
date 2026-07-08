@@ -1,19 +1,20 @@
-Stage 8 v2 Hyperliquid Control Probe Patch
+Stable No-Hyperliquid Patch
 
-Fixes:
-- Python SyntaxError in /hyper_debug failure branch.
-- Validated all Python files with py_compile.
+This version disables/removes the Hyperliquid experiment and returns to the stable bot state.
 
-Purpose remains diagnostic only:
-- open Hyperliquid page
-- try selecting symbol
-- try refresh
-- return Telegram summary instead of hanging
-- no DB writes
+Included:
+- Max Pain DOM collection
+- analysis.py
+- decision_engine.py
+- /collect
+- /symbols is NOT included here
+- /hyper_debug is NOT included here
+- /score
+- /score_top
+- /consensus
+- /gap
+- /liqsum
+- /market
+- /btc_like
 
-Test:
-/hyper_debug BTC
-
-Then send:
-- Telegram output
-- Render [hyper] lines
+Hyperliquid is intentionally set aside for later.
