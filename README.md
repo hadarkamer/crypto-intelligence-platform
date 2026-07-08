@@ -1,25 +1,18 @@
-Stage 6 Decision Engine Patch
+Stage 7 Hyperliquid Probe Patch
 
-Adds:
-- decision_engine.py
-- /score SYMBOL
-- /score_top [limit]
+Adds diagnostic Hyperliquid probe only:
+- hyperliquid_reader.py
+- /hyper_debug BTC
+- /symbols
 
 Purpose:
-First transparent setup-strength engine using existing Max Pain data only.
+Find how CoinGlass renders Hyperliquid liquidation-map data before building real extraction.
+This stage does not save Hyperliquid data and does not change Max Pain collection.
 
-Components:
-1. CONSENSUS: up to 35 points
-2. NEAR_MAX_PAIN: up to 25 points
-3. LIQUIDITY_BALANCE: up to 20 points
-4. MARKET_BIAS: up to 10 points
-5. BTC_LIKE: up to 10 points
+Test after deploy:
+/symbols
+/hyper_debug BTC
 
-No Hyperliquid yet.
-No automatic alerts yet.
-No changes to collection.
-
-Test:
-/collect
-/score BTC
-/score_top
+Then send:
+- Telegram summary
+- Render logs starting with [hyper]

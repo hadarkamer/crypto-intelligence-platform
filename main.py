@@ -22,6 +22,7 @@ from Crypto.Util.Padding import unpad
 from coinglass_dom_reader import collect_coinglass_dom_snapshot
 import analysis
 import decision_engine
+import hyperliquid_reader
 
 try:
     import psycopg
@@ -604,6 +605,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/btc_like - מטבעות שהכיוון שלהם דומה ל-BTC\n"
         "/score BTC - פירוק Setup Strength למטבע\n"
         "/score_top - דירוג Setup Strength\n"
+        "/hyper_debug BTC - בדיקת מבנה עמוד Hyperliquid\n"
+        "/symbols - רשימת מטבעות מה-snapshot האחרון\n"
         "/alerts - חריגות"
     )
 
@@ -1054,6 +1057,50 @@ async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     output = tabulate(table, headers=["Coin", "Dir", "Strength", "Conf", "Cons", "AvgDist%", "AvgGap%"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
+async def symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show symbols available in latest snapshot."""
+    rows = latest_snapshot_rows()
+    if not rows:
+        await update.message.reply_text("אין נתונים. הריצו /collect קודם.")
+        return
+    symbols = sorted({r["symbol"] for r in rows if r["symbol"]})
+    text = ", ".join(symbols)
+    await update.message.reply_text(f"{len(symbols)} symbols:\n{text}")
+
+
+async def hyper_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostic probe for Hyperliquid liquidation map page."""
+    symbol = context.args[0].upper() if context.args else "BTC"
+    await update.message.reply_text(f"בודק Hyperliquid עבור {symbol}. זה עשוי לקחת עד דקה...")
+
+    try:
+        result = await hyperliquid_reader.probe_hyperliquid_symbol(symbol)
+    except Exception as exc:
+        await update.message.reply_text(f"שגיאה בבדיקת Hyperliquid: {exc!r}")
+        return
+
+    structure = result.get("structure", {})
+    lines = result.get("body_preview", [])
+
+    summary = [
+        ["Symbol", result.get("symbol")],
+        ["OK", result.get("ok")],
+        ["URL", result.get("url")],
+        ["Canvas", structure.get("canvasCount")],
+        ["SVG", structure.get("svgCount")],
+        ["Inputs", structure.get("inputCount")],
+        ["Buttons", structure.get("buttonCount")],
+        ["Lines", result.get("line_count")],
+    ]
+    text1 = tabulate(summary, tablefmt="plain")
+
+    preview = "\n".join(lines[:25])
+    await update.message.reply_text(
+        f"<pre>{html.escape(text1 + chr(10) + chr(10) + preview[:2500])}</pre>",
+        parse_mode="HTML"
+    )
+
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -1118,6 +1165,8 @@ async def main():
     bot_app.add_handler(CommandHandler("btc_like", btc_like))
     bot_app.add_handler(CommandHandler("score", score))
     bot_app.add_handler(CommandHandler("score_top", score_top))
+    bot_app.add_handler(CommandHandler("symbols", symbols))
+    bot_app.add_handler(CommandHandler("hyper_debug", hyper_debug))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()
