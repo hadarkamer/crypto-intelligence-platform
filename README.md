@@ -1,21 +1,19 @@
-Stage 8 Hyperliquid Control Probe Patch
+Stage 8 v2 Hyperliquid Control Probe Patch
 
-Goal:
-Fix the hanging /hyper_debug command and verify that the bot can control the Hyperliquid page.
+Fixes:
+- Python SyntaxError in /hyper_debug failure branch.
+- Validated all Python files with py_compile.
 
-What it does:
-/hyper_debug BTC
-- opens https://www.coinglass.com/hyperliquid-liquidation-map
-- waits for page load
-- tries to select BTC
-- tries to click refresh
-- returns Telegram summary even if selection/refresh fails
-- logs detailed [hyper] diagnostics
-- does not save data to DB
+Purpose remains diagnostic only:
+- open Hyperliquid page
+- try selecting symbol
+- try refresh
+- return Telegram summary instead of hanging
+- no DB writes
 
 Test:
 /hyper_debug BTC
 
-Send back:
+Then send:
 - Telegram output
-- Render lines starting with [hyper]
+- Render [hyper] lines
