@@ -23,6 +23,7 @@ from coinglass_dom_reader import collect_coinglass_dom_snapshot
 import analysis
 import decision_engine
 import alert_engine
+import live_price_provider
 
 try:
     import psycopg
@@ -606,6 +607,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/score BTC - פירוק Setup Strength למטבע\n"
         "/score_top - דירוג Setup Strength\n"
         "/alert_check - בדיקת חריגות ידנית\n"
+        "/price_check - בדיקת כיסוי מחירים חיים\n"
+        "/price_check BTC - השוואת מחיר ויעדי Max Pain\n"
         "/alerts - חריגות"
     )
 
@@ -1098,6 +1101,70 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostic live-price coverage check. Does not alter DB data."""
+    rows = latest_snapshot_rows()
+    if not rows:
+        await update.message.reply_text("אין snapshot קיים. הריצו /collect קודם.")
+        return
+
+    symbols = sorted({str(r["symbol"]).upper() for r in rows if r["symbol"]})
+
+    try:
+        result = live_price_provider.fetch_binance_usdt_prices(symbols)
+    except Exception as exc:
+        await update.message.reply_text(f"שגיאה במשיכת מחירים חיים: {exc!r}")
+        return
+
+    if context.args:
+        symbol = context.args[0].upper()
+        live = result["prices"].get(symbol)
+        if not live:
+            await update.message.reply_text(
+                f"לא נמצא מחיר Binance עבור {symbol}.\n"
+                f"סימבולים חסרים כרגע: {', '.join(result['missing_symbols']) or '-'}"
+            )
+            return
+
+        symbol_rows = [r for r in rows if str(r["symbol"]).upper() == symbol]
+        table = []
+        for r in symbol_rows:
+            calc = live_price_provider.recalculate_distances(
+                live["price"], r["short_max_pain"], r["long_max_pain"]
+            )
+            table.append([
+                r["timeframe"], fmt(live["price"]), fmt(r["short_max_pain"]),
+                fmt(r["long_max_pain"]), fmt(calc["short_signed_pct"]),
+                fmt(calc["long_signed_pct"]), calc["closest_side"],
+            ])
+
+        output = tabulate(
+            table,
+            headers=["TF", "LivePrice", "ShortPx", "LongPx", "ShortΔ%", "LongΔ%", "Closest"],
+            tablefmt="plain",
+        )
+        await update.message.reply_text(
+            f"Source: Binance\nFetched: {result['fetched_at_utc']}\n"
+            f"<pre>{html.escape(output)}</pre>",
+            parse_mode="HTML",
+        )
+        return
+
+    summary = [
+        ["Source", result["source"]],
+        ["Requested", result["requested_count"]],
+        ["Found", result["found_count"]],
+        ["Missing", result["missing_count"]],
+        ["Fetched UTC", result["fetched_at_utc"]],
+    ]
+    text1 = tabulate(summary, tablefmt="plain")
+    missing_text = ", ".join(result["missing_symbols"]) or "none"
+    await update.message.reply_text(
+        f"<pre>{html.escape(text1 + chr(10) + chr(10) + 'Missing symbols: ' + missing_text)}</pre>",
+        parse_mode="HTML",
+    )
+
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -1163,6 +1230,7 @@ async def main():
     bot_app.add_handler(CommandHandler("score", score))
     bot_app.add_handler(CommandHandler("score_top", score_top))
     bot_app.add_handler(CommandHandler("alert_check", alert_check))
+    bot_app.add_handler(CommandHandler("price_check", price_check))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()

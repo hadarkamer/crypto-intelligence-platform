@@ -1,22 +1,19 @@
-Stage 9 Manual Alert Engine Patch
+Stage 10 — Live Price Diagnostic
 
 Adds:
-- alert_engine.py
-- /alert_check [limit]
+- live_price_provider.py
+- /price_check
+- /price_check BTC
 
-This is manual only:
-- no automatic 15-minute watch yet
-- no DB writes for alerts yet
-- no Hyperliquid dependency
+Purpose:
+Verify live-price coverage before changing alert calculations.
 
-Alert types:
-1. NEAR_MAX_PAIN
-2. LIQUIDITY_IMBALANCE_NEAR_SIDE
-3. EXTREME_GAP
-4. HIGH_LIQUIDITY_CLOSE_DISTANCE
-5. HIGH_SETUP_STRENGTH
+This stage does NOT:
+- modify DB rows
+- change /alert_check
+- run automatic alerts
 
 Test:
-/collect
-/alert_check
-/alert_check 30
+1. /collect
+2. /price_check
+3. /price_check BTC
