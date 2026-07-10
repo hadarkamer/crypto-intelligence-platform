@@ -1,28 +1,10 @@
-"""Manual alert engine for the crypto Max Pain bot.
-
-Stage 9:
-- Manual alert scan only: /alert_check
-- Uses latest saved Max Pain snapshot.
-- Does not run automatically yet.
-- Does not write alert history yet.
-- No Hyperliquid dependency.
-
-Alert types:
-1. NEAR_MAX_PAIN
-2. LIQUIDITY_IMBALANCE_NEAR_SIDE
-3. EXTREME_GAP
-4. HIGH_LIQUIDITY_CLOSE_DISTANCE
-5. HIGH_SETUP_STRENGTH
-"""
-
 from __future__ import annotations
-
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional
-
+from typing import Any, Dict, List, Optional, Tuple
 import analysis
 import decision_engine
 
+TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 
 def _get(row: Any, key: str, default=None):
     try:
@@ -30,228 +12,139 @@ def _get(row: Any, key: str, default=None):
     except Exception:
         return default
 
-
-def _group_by_symbol(rows: Iterable[Any]) -> Dict[str, List[Any]]:
-    grouped: Dict[str, List[Any]] = defaultdict(list)
-    for row in rows:
-        symbol = _get(row, "symbol")
-        if symbol:
-            grouped[str(symbol).upper()].append(row)
-    return dict(grouped)
-
-
-def _closest_side(row: Any) -> Optional[str]:
+def _closest_side(row):
     return analysis.side_from_distances(
         _get(row, "distance_short_pct"),
         _get(row, "distance_long_pct"),
     )
 
-
-def _closest_distance(row: Any) -> Optional[float]:
+def _closest_distance(row):
     side = _closest_side(row)
     if side == "SHORT":
-        val = _get(row, "distance_short_pct")
+        v = _get(row, "distance_short_pct")
     elif side == "LONG":
-        val = _get(row, "distance_long_pct")
+        v = _get(row, "distance_long_pct")
     else:
         return None
-    return abs(val) if val is not None else None
+    return abs(v) if v is not None else None
 
+def _amount(row, side):
+    return _get(row, "short_liquidation_amount") if side == "SHORT" else _get(row, "long_liquidation_amount")
 
-def _amount_for_side(row: Any, side: str) -> Optional[float]:
-    if side == "SHORT":
-        return _get(row, "short_liquidation_amount")
-    if side == "LONG":
-        return _get(row, "long_liquidation_amount")
-    return None
+def _other_amount(row, side):
+    return _get(row, "long_liquidation_amount") if side == "SHORT" else _get(row, "short_liquidation_amount")
 
-
-def _other_amount(row: Any, side: str) -> Optional[float]:
-    if side == "SHORT":
-        return _get(row, "long_liquidation_amount")
-    if side == "LONG":
-        return _get(row, "short_liquidation_amount")
-    return None
-
-
-def _gap_pct(row: Any) -> Optional[float]:
+def _gap_pct(row):
     price = _get(row, "current_price")
-    short_mp = _get(row, "short_max_pain")
-    long_mp = _get(row, "long_max_pain")
-    if not price or short_mp is None or long_mp is None:
+    s = _get(row, "short_max_pain")
+    l = _get(row, "long_max_pain")
+    if not price or s is None or l is None:
         return None
-    return abs(short_mp - long_mp) / price * 100
+    return abs(s - l) / price * 100
 
-
-def _money_rank_threshold(rows: List[Any], percentile: float = 0.80) -> float:
-    """Return approximate high-liquidity threshold based on closest-side amount."""
-    values = []
-    for row in rows:
-        side = _closest_side(row)
-        if not side:
-            continue
-        amount = _amount_for_side(row, side)
-        if amount is not None:
-            values.append(amount)
+def _percentile(value: float, values: List[float]) -> float:
     if not values:
         return 0.0
-    values.sort()
-    idx = int((len(values) - 1) * percentile)
-    return values[idx]
+    return sum(1 for x in values if x <= value) / len(values)
 
+def _tf_liquidity(rows):
+    out = defaultdict(list)
+    for r in rows:
+        tf = str(_get(r, "timeframe", ""))
+        side = _closest_side(r)
+        amount = _amount(r, side) if side else None
+        if tf and amount is not None:
+            out[tf].append(float(amount))
+    return dict(out)
 
-def find_alerts(
-    rows: List[Any],
-    *,
-    near_threshold_pct: float = 0.75,
-    imbalance_ratio_threshold: float = 2.0,
-    gap_threshold_pct: float = 20.0,
-    high_setup_threshold: float = 75.0,
-    high_liq_distance_pct: float = 1.0,
-    limit: int = 30,
-) -> List[Dict[str, Any]]:
-    alerts: List[Dict[str, Any]] = []
-    high_liq_threshold = _money_rank_threshold(rows, percentile=0.80)
+def _distance_points(d):
+    if d is None:
+        return 0.0
+    if d <= 0.25:
+        return 35.0
+    if d >= 1.5:
+        return 0.0
+    return round((1.5 - d) / 1.25 * 35.0, 2)
 
-    # Row-level alerts by coin/timeframe.
-    for row in rows:
-        symbol = str(_get(row, "symbol", "")).upper()
-        timeframe = _get(row, "timeframe")
-        side = _closest_side(row)
-        distance = _closest_distance(row)
-        if not symbol or not timeframe or not side or distance is None:
+def _balance_points(near: float, far: float) -> Tuple[float, Optional[float], str]:
+    if far <= 0:
+        return (10.0, None, "near side has liquidity; opposite side is zero") if near > 0 else (0.0, None, "no balance data")
+    ratio = near / far
+    if ratio >= 2.0:
+        return 10.0, ratio, "near side at least 2x larger"
+    if ratio >= 1.5:
+        return 7.0, ratio, "near side clearly larger"
+    if ratio >= 1.0:
+        return 3.0, ratio, "near side slightly larger or equal"
+    if ratio >= 0.67:
+        return 0.0, ratio, "near side mildly smaller; no penalty"
+    if ratio >= 0.5:
+        return -5.0, ratio, "near side significantly smaller"
+    return -10.0, ratio, "near side less than half the opposite side"
+
+def build_opportunities(rows, limit=30):
+    tf_values = _tf_liquidity(rows)
+    consensus_map = {x["symbol"]: x for x in analysis.calculate_consensus(rows, min_hits=1, limit=500)}
+    setup_map = {x["symbol"]: x for x in decision_engine.calculate_scores(rows, limit=500)}
+    out = []
+
+    for r in rows:
+        symbol = str(_get(r, "symbol", "")).upper()
+        tf = str(_get(r, "timeframe", ""))
+        side = _closest_side(r)
+        dist = _closest_distance(r)
+        if not symbol or not tf or not side or dist is None:
             continue
 
-        near_amount = _amount_for_side(row, side) or 0.0
-        far_amount = _other_amount(row, side) or 0.0
-        ratio = (near_amount / far_amount) if far_amount else None
-        gap = _gap_pct(row)
+        near = float(_amount(r, side) or 0.0)
+        far = float(_other_amount(r, side) or 0.0)
+        gap = _gap_pct(r)
+        liq_pct = _percentile(near, tf_values.get(tf, []))
+        bal_points, ratio, bal_reason = _balance_points(near, far)
 
-        # 1. Very close to Max Pain.
-        if distance <= near_threshold_pct:
-            alerts.append({
-                "type": "NEAR_MAX_PAIN",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "side": side,
-                "severity": _severity_from_distance(distance),
-                "distance_pct": distance,
-                "gap_pct": gap,
-                "amount": near_amount,
-                "ratio": ratio,
-                "reason": f"{symbol}/{timeframe} is {distance:.2f}% from {side} Max Pain",
-            })
+        cons = consensus_map.get(symbol, {})
+        hits = int(cons.get("hits", 0) or 0)
+        total = int(cons.get("total", 0) or 0)
+        setup = setup_map.get(symbol, {}).get("setup_strength")
 
-        # 2. Liquidity imbalance only if the bigger side is also the closer Max Pain side.
-        if ratio is not None and ratio >= imbalance_ratio_threshold:
-            alerts.append({
-                "type": "LIQUIDITY_IMBALANCE_NEAR_SIDE",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "side": side,
-                "severity": _severity_from_ratio(ratio),
-                "distance_pct": distance,
-                "gap_pct": gap,
-                "amount": near_amount,
-                "ratio": ratio,
-                "reason": f"{side} side is {ratio:.2f}x larger and is the closer Max Pain side",
-            })
+        types = []
+        if dist <= 0.75:
+            types.append("NEAR_MAX_PAIN")
+        if ratio is not None and ratio >= 2:
+            types.append("LIQUIDITY_IMBALANCE_NEAR_SIDE")
+        if gap is not None and gap >= 20:
+            types.append("EXTREME_GAP")
+        if dist <= 1.0 and liq_pct >= 0.80:
+            types.append("HIGH_LIQUIDITY_CLOSE_DISTANCE")
+        if setup is not None and setup >= 75:
+            types.append("HIGH_SETUP_STRENGTH")
+        if not types:
+            continue
 
-        # 3. Extreme gap between two Max Pain edges.
-        if gap is not None and gap >= gap_threshold_pct:
-            alerts.append({
-                "type": "EXTREME_GAP",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "side": side,
-                "severity": _severity_from_gap(gap),
-                "distance_pct": distance,
-                "gap_pct": gap,
-                "amount": near_amount,
-                "ratio": ratio,
-                "reason": f"Gap between Short/Long Max Pain is {gap:.2f}%",
-            })
+        components = {
+            "distance": _distance_points(dist),
+            "liquidity_rank": round(liq_pct * 25, 2),
+            "consensus": round((hits / total) * 20, 2) if total else 0.0,
+            "setup_strength": round((min(max(setup or 0, 0), 100) / 100) * 15, 2),
+            "liquidity_balance": bal_points,
+        }
+        priority = max(0.0, min(100.0, round(sum(components.values()), 2)))
 
-        # 4. Close + high liquidity on the close side.
-        if distance <= high_liq_distance_pct and near_amount >= high_liq_threshold and high_liq_threshold > 0:
-            alerts.append({
-                "type": "HIGH_LIQUIDITY_CLOSE_DISTANCE",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "side": side,
-                "severity": "HIGH",
-                "distance_pct": distance,
-                "gap_pct": gap,
-                "amount": near_amount,
-                "ratio": ratio,
-                "reason": f"Close to {side} Max Pain and liquidity is in top 20% of current snapshot",
-            })
+        out.append({
+            "symbol": symbol,
+            "timeframe": tf,
+            "side": side,
+            "types": types,
+            "priority": priority,
+            "distance_pct": dist,
+            "near_far_ratio": ratio,
+            "consensus_hits": hits,
+            "consensus_total": total,
+            "setup_strength": setup,
+            "liquidity_percentile": liq_pct,
+            "components": components,
+            "balance_reason": bal_reason,
+        })
 
-    # Symbol-level high setup strength alerts.
-    scores = decision_engine.calculate_scores(rows, limit=500)
-    for score in scores:
-        if score.get("setup_strength", 0) >= high_setup_threshold:
-            alerts.append({
-                "type": "HIGH_SETUP_STRENGTH",
-                "symbol": score["symbol"],
-                "timeframe": "ALL",
-                "side": score["direction"],
-                "severity": "HIGH",
-                "distance_pct": score.get("avg_distance"),
-                "gap_pct": score.get("gap_avg_pct"),
-                "amount": score.get("liquidity", {}).get("total"),
-                "ratio": score.get("liquidity", {}).get("ratio"),
-                "reason": f"Setup Strength {score['setup_strength']} ({score['confidence']})",
-            })
-
-    # Deduplicate similar alerts and sort strongest first.
-    deduped = {}
-    for a in alerts:
-        key = (a["type"], a["symbol"], a["timeframe"], a["side"])
-        existing = deduped.get(key)
-        if not existing or _alert_sort_key(a) < _alert_sort_key(existing):
-            deduped[key] = a
-
-    result = list(deduped.values())
-    result.sort(key=_alert_sort_key)
-    return result[:limit]
-
-
-def _severity_from_distance(distance: float) -> str:
-    if distance <= 0.35:
-        return "HIGH"
-    if distance <= 0.75:
-        return "MEDIUM"
-    return "LOW"
-
-
-def _severity_from_ratio(ratio: float) -> str:
-    if ratio >= 3:
-        return "HIGH"
-    if ratio >= 2:
-        return "MEDIUM"
-    return "LOW"
-
-
-def _severity_from_gap(gap: float) -> str:
-    if gap >= 40:
-        return "HIGH"
-    if gap >= 20:
-        return "MEDIUM"
-    return "LOW"
-
-
-def _severity_weight(severity: str) -> int:
-    return {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(severity, 9)
-
-
-def _alert_sort_key(alert: Dict[str, Any]):
-    distance = alert.get("distance_pct")
-    distance_sort = distance if distance is not None else 999
-    return (
-        _severity_weight(alert.get("severity")),
-        distance_sort,
-        -float(alert.get("ratio") or 0),
-        alert.get("symbol", ""),
-        alert.get("timeframe", ""),
-    )
+    out.sort(key=lambda x: (-x["priority"], x["distance_pct"], x["symbol"]))
+    return out[:limit]

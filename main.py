@@ -464,16 +464,22 @@ def validate_snapshot(rows):
 
 
 async def collect_once():
-    """Collect through CoinGlass rendered page/DOM instead of direct encrypted API.
+    """Collect CoinGlass Max Pain targets, attach Binance live prices, and save one coherent snapshot.
 
-    Safety rule: insert only rows that contain parsed Max Pain fields.
-    If the DOM reader only sees generic market-table rows, do not pollute the DB;
-    return 0 rows and mark the timeframes as missing so we can inspect logs/debug.
+    CoinGlass supplies:
+    - Short/Long Max Pain targets
+    - Short/Long liquidation amounts
+
+    Binance supplies:
+    - current_price
+    - all distance calculations
+
+    Rows without a Binance price are not saved, so later commands never mix
+    stale CoinGlass prices with Binance-based calculations.
     """
     start = time.time()
-    collected_at = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    if not use_postgres():
-        collected_at = collected_at.isoformat()
+    collected_dt = datetime.now(timezone.utc)
+    collected_at = collected_dt if use_postgres() else collected_dt.isoformat()
 
     print(f"[collector] starting DOM collection at {collected_at}")
 
@@ -483,12 +489,10 @@ async def collect_once():
         url=COINGLASS_MAX_PAIN_URL,
     )
 
-    rows = []
+    raw_rows = []
     market_only_count = 0
 
     for item in snapshot.get("rows", []):
-        # The DOM reader can currently see generic market rows too.
-        # Only save rows when Max Pain-specific fields are present.
         short_mp = item.get("max_short_price")
         long_mp = item.get("max_long_price")
         if short_mp is None or long_mp is None:
@@ -496,12 +500,12 @@ async def collect_once():
             continue
 
         symbol = str(item.get("symbol", "")).upper()
-        if symbol in NON_CRYPTO_SYMBOLS:
+        if not symbol or symbol in NON_CRYPTO_SYMBOLS:
             continue
 
-        rows.append({
+        raw_rows.append({
             "collected_at": collected_at,
-            "source": SOURCE_NAME + "_dom",
+            "source": SOURCE_NAME + "_dom_binance",
             "collector_version": COLLECTOR_VERSION,
             "scrape_duration_seconds": time.time() - start,
             "is_valid": True if use_postgres() else 1,
@@ -509,16 +513,37 @@ async def collect_once():
             "symbol": symbol,
             "rank": item.get("rank"),
             "timeframe": item.get("timeframe"),
+            # Temporary CoinGlass price; replaced by Binance before DB insertion.
             "current_price": item.get("price"),
             "short_max_pain": short_mp,
             "long_max_pain": long_mp,
             "short_liquidation_amount": item.get("short_amount_usd"),
             "long_liquidation_amount": item.get("long_amount_usd"),
-            "distance_short_abs": item.get("short_distance_usd"),
-            "distance_short_pct": item.get("short_distance_pct"),
-            "distance_long_abs": item.get("long_distance_usd"),
-            "distance_long_pct": item.get("long_distance_pct"),
+            "distance_short_abs": None,
+            "distance_short_pct": None,
+            "distance_long_abs": None,
+            "distance_long_pct": None,
         })
+
+    # Fetch Binance once for all symbols, then overlay one consistent price
+    # on all seven timeframes of each symbol.
+    live_result = live_price_provider.enrich_snapshot_rows(
+        raw_rows,
+        excluded_symbols=NON_CRYPTO_SYMBOLS,
+    )
+    rows = live_result.get("rows", [])
+    skipped_symbols = live_result.get("skipped_symbols", [])
+    price_result = live_result.get("price_result", {})
+
+    # Restore DB metadata fields after the provider copied/enriched rows.
+    elapsed = time.time() - start
+    for row in rows:
+        row["collected_at"] = collected_at
+        row["source"] = SOURCE_NAME + "_dom_binance"
+        row["collector_version"] = COLLECTOR_VERSION
+        row["scrape_duration_seconds"] = elapsed
+        row["is_valid"] = True if use_postgres() else 1
+        row["validation_errors"] = None
 
     missing_timeframes = list(snapshot.get("missing_timeframes", []))
     seen_timeframes = {r.get("timeframe") for r in rows}
@@ -526,20 +551,25 @@ async def collect_once():
         if tf not in seen_timeframes and tf not in missing_timeframes:
             missing_timeframes.append(tf)
 
-    # Do not normalize prices across timeframes; keep CoinGlass values and distances as rendered.
     rows = validate_snapshot(rows)
     rows = enrich_rows(rows)
     inserted = insert_snapshots(rows)
 
     print(
-        f"[collector] DOM inserted {inserted} rows; "
-        f"missing={missing_timeframes}; "
+        f"[collector] DOM+Binance inserted {inserted} rows; "
+        f"binance_found={price_result.get('found_count', 0)}; "
+        f"binance_missing={price_result.get('missing_count', 0)}; "
+        f"skipped_symbols={skipped_symbols}; "
+        f"missing_timeframes={missing_timeframes}; "
         f"market_only_rows_seen={market_only_count}; "
         f"raw_rows_seen={snapshot.get('row_count', 0)}"
     )
 
     if inserted == 0:
-        print("[collector] DOM reader did not find parseable Max Pain rows yet. It did find raw DOM rows/text; no fake DB rows inserted.")
+        print(
+            "[collector] no rows inserted. Check DOM parsing and Binance coverage; "
+            "CoinGlass prices were not used as fallback."
+        )
 
     return inserted, missing_timeframes
 
@@ -573,7 +603,11 @@ def short_time(value):
 
 
 def raw_latest_snapshot_rows():
-    """Raw latest CoinGlass snapshot, before Binance live-price overlay."""
+    """Latest saved snapshot.
+
+    From Stage 13 onward, current_price and distances stored here were already
+    calculated from Binance during /collect.
+    """
     return query(
         f"""
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
@@ -591,19 +625,27 @@ def raw_latest_snapshot_rows():
 
 
 def latest_snapshot_live_result():
-    """Latest snapshot with Binance price and recalculated distances."""
-    raw_rows = raw_latest_snapshot_rows()
-    if not raw_rows:
-        return {"rows": [], "price_result": {}, "skipped_symbols": []}
-    return live_price_provider.enrich_snapshot_rows(
-        raw_rows,
-        excluded_symbols=NON_CRYPTO_SYMBOLS,
-    )
+    """Compatibility wrapper for commands that expect a live-result object."""
+    rows = raw_latest_snapshot_rows()
+    return {
+        "rows": rows,
+        "price_result": {
+            "source": "binance_saved_at_collect",
+            "found_count": len({r["symbol"] for r in rows}) if rows else 0,
+            "missing_count": 0,
+            "fetched_at_utc": "-",
+        },
+        "skipped_symbols": [],
+    }
 
 
 def latest_snapshot_rows():
-    """Rows used by every analysis, score and alert command."""
-    return latest_snapshot_live_result()["rows"]
+    """Rows used by all analysis, score and alert commands.
+
+    No new price request occurs here; all commands use the exact Binance price
+    saved by the most recent /collect, keeping the snapshot internally consistent.
+    """
+    return raw_latest_snapshot_rows()
 
 
 def side_from_row(row):
@@ -641,7 +683,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/btc_like - מטבעות שהכיוון שלהם דומה ל-BTC\n"
         "/score BTC - פירוק Setup Strength למטבע\n"
         "/score_top - דירוג Setup Strength\n"
-        "/alert_check - בדיקת חריגות ידנית\n"
+        "/alert_check - דירוג הזדמנויות ידני\n"
+        "/alert_explain BTC 24h - פירוט ניקוד\n"
         "/price_check - בדיקת כיסוי מחירים חיים\n"
         "/price_check BTC - השוואת מחיר ויעדי Max Pain\n"
         "/live_status - כיסוי מטבעות בחישובים החיים\n"
@@ -655,20 +698,46 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         COLLECT_LOCK = asyncio.Lock()
 
     if COLLECT_LOCK.locked():
-        await update.message.reply_text("איסוף כבר רץ כרגע. חכי שהוא יסתיים, או בצעי Restart service ב-Render אם הוא נתקע.")
+        await update.message.reply_text(
+            "איסוף כבר רץ כרגע. חכי שהוא יסתיים, או בצעי Restart service ב-Render אם הוא נתקע."
+        )
         return
 
     async with COLLECT_LOCK:
-        await update.message.reply_text("מתחיל איסוף ידני. זה יכול לקחת כמה דקות...")
+        await update.message.reply_text(
+            "מתחיל איסוף: יעדי Max Pain מ-CoinGlass ומחירים חיים מ-Binance. "
+            "זה יכול לקחת כמה דקות..."
+        )
         try:
             inserted, missing_timeframes = await collect_once()
-            if missing_timeframes:
-                missing = ", ".join(missing_timeframes)
-                await update.message.reply_text(f"האיסוף הסתיים. נשמרו {inserted} שורות. חסר טווח: {missing}")
-            else:
-                await update.message.reply_text(f"האיסוף הסתיים. נשמרו {inserted} שורות.")
+            missing_note = (
+                f"\nטווחים חסרים: {', '.join(missing_timeframes)}"
+                if missing_timeframes else ""
+            )
+            commands = (
+                "\n\nפקודות זמינות:\n"
+                "/live_status\n"
+                "/coin BTC\n"
+                "/range BTC 24h\n"
+                "/top\n"
+                "/consensus\n"
+                "/gap\n"
+                "/liqsum\n"
+                "/market\n"
+                "/btc_like\n"
+                "/score BTC\n"
+                "/score_top\n"
+                "/alert_check\n"
+                "/alert_explain BTC 24h"
+            )
+            await update.message.reply_text(
+                f"האיסוף הסתיים. נשמרו {inserted} שורות עם מחיר Binance "
+                f"ומרחקים שחושבו מחדש.{missing_note}{commands}"
+            )
         except Exception as e:
             await update.message.reply_text(f"שגיאה באיסוף: {e}")
+
+
 
 async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = query("SELECT MAX(collected_at) AS latest_time, COUNT(*) AS rows_count FROM max_pain_snapshots")
@@ -1120,8 +1189,8 @@ async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     output = tabulate(table, headers=["Coin", "Dir", "Strength", "Conf", "Cons", "AvgDist%", "AvgGap%"], tablefmt="plain")
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
+
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual alert scan using the latest saved snapshot."""
     limit = 20
     if context.args:
         try:
@@ -1131,35 +1200,71 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     rows = latest_snapshot_rows()
     if not rows:
-        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
+        await update.message.reply_text("אין נתונים חיים. הריצו /collect ובדקו /live_status.")
         return
 
-    alerts_found = alert_engine.find_alerts(rows, limit=limit)
-    if not alerts_found:
-        await update.message.reply_text("לא נמצאו חריגות לפי הספים הנוכחיים.")
+    items = alert_engine.build_opportunities(rows, limit=limit)
+    if not items:
+        await update.message.reply_text("לא נמצאו הזדמנויות לפי הספים הנוכחיים.")
         return
 
     table = [[
-        a["type"],
-        a["symbol"],
-        a["timeframe"],
-        a["side"],
-        a["severity"],
-        fmt(a.get("distance_pct")),
-        fmt(a.get("ratio")),
-        fmt(a.get("gap_pct")),
-    ] for a in alerts_found]
+        x["priority"], x["symbol"], x["timeframe"], x["side"],
+        "+".join(x["types"]), fmt(x["distance_pct"]),
+        fmt(x["near_far_ratio"]), f'{x["consensus_hits"]}/{x["consensus_total"]}',
+        fmt(x["setup_strength"])
+    ] for x in items]
 
     output = tabulate(
         table,
-        headers=["Type", "Coin", "TF", "Side", "Sev", "Dist%", "Ratio", "Gap%"],
+        headers=["Priority", "Coin", "TF", "Side", "Types", "Dist%", "Near/Far", "Cons", "Setup"],
         tablefmt="plain",
     )
-
-    await update.message.reply_text(
-        f"<pre>{html.escape(output)}</pre>",
-        parse_mode="HTML"
+    note = (
+        "Priority = Distance(35) + Liquidity rank in same TF(25) + "
+        "Consensus(20) + Setup(15) + Liquidity balance(-10..+10).\n"
+        "No 2x gap is required for HIGH_LIQUIDITY_CLOSE_DISTANCE. "
+        "Positive balance adds points; significantly negative balance subtracts.\n"
     )
+    await update.message.reply_text(note + f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+
+
+
+async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("שימוש: /alert_explain BTC או /alert_explain BTC 24h")
+        return
+
+    symbol = context.args[0].upper()
+    tf = context.args[1].lower() if len(context.args) > 1 else None
+    items = alert_engine.build_opportunities(latest_snapshot_rows(), limit=500)
+    matches = [x for x in items if x["symbol"] == symbol and (tf is None or x["timeframe"] == tf)]
+
+    if not matches:
+        await update.message.reply_text("לא נמצאה כרגע התראה מתאימה.")
+        return
+
+    x = sorted(matches, key=lambda y: -y["priority"])[0]
+    c = x["components"]
+    rows_out = [
+        ["Coin", x["symbol"]],
+        ["TF", x["timeframe"]],
+        ["Side", x["side"]],
+        ["Types", "+".join(x["types"])],
+        ["Priority", x["priority"]],
+        ["Distance%", fmt(x["distance_pct"])],
+        ["Near/Far", fmt(x["near_far_ratio"])],
+        ["Consensus", f'{x["consensus_hits"]}/{x["consensus_total"]}'],
+        ["Setup", fmt(x["setup_strength"])],
+        ["Distance points", c["distance"]],
+        ["Liquidity-rank points", c["liquidity_rank"]],
+        ["Consensus points", c["consensus"]],
+        ["Setup points", c["setup_strength"]],
+        ["Balance adjustment", c["liquidity_balance"]],
+        ["Balance meaning", x["balance_reason"]],
+    ]
+    output = tabulate(rows_out, tablefmt="plain")
+    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1279,19 +1384,24 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show which symbols are included/excluded from live calculations."""
-    result = latest_snapshot_live_result()
-    rows = result.get("rows", [])
-    price_result = result.get("price_result", {})
-    skipped = result.get("skipped_symbols", [])
+    """Describe Binance-backed data saved by the latest collection."""
+    rows = latest_snapshot_rows()
+    if not rows:
+        await update.message.reply_text("אין snapshot שמור. הריצו /collect קודם.")
+        return
 
-    symbols_used = sorted({r["symbol"] for r in rows})
+    symbols_used = sorted({str(r["symbol"]).upper() for r in rows if r["symbol"]})
+    collected = query(
+        "SELECT MAX(collected_at) AS latest_time FROM max_pain_snapshots"
+    )[0]["latest_time"]
+
     text = (
-        "Binance live calculation status\n"
-        f"Symbols used: {len(symbols_used)}\n"
-        f"Symbols skipped: {len(skipped)}\n"
-        f"Fetched UTC: {price_result.get('fetched_at_utc', '-')}\n"
-        f"Skipped: {', '.join(skipped) or 'none'}"
+        "Binance collection status\n"
+        f"Latest snapshot: {collected}\n"
+        f"Symbols saved with Binance price: {len(symbols_used)}\n"
+        f"Rows saved: {len(rows)}\n"
+        "Current price and all Max Pain distances were calculated during /collect.\n"
+        "CoinGlass current price is not used as fallback."
     )
     await update.message.reply_text(text)
 
@@ -1362,6 +1472,7 @@ async def main():
     bot_app.add_handler(CommandHandler("score", score))
     bot_app.add_handler(CommandHandler("score_top", score_top))
     bot_app.add_handler(CommandHandler("alert_check", alert_check))
+    bot_app.add_handler(CommandHandler("alert_explain", alert_explain))
     bot_app.add_handler(CommandHandler("price_check", price_check))
     bot_app.add_handler(CommandHandler("live_status", live_status))
     bot_app.add_handler(CommandHandler("alerts", alerts))

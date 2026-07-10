@@ -1,21 +1,29 @@
-Stage 11 v2 — Binance Live Calculations + Full Price Precision
+Stage 13 — Save Binance Price During /collect
 
-Changes:
-- Keeps all Stage 11 live-price calculations.
-- Adds fmt_price() for every displayed market price and Max Pain target.
-- No meaningful decimal digit is rounded away.
-- Scientific notation is avoided.
-- Only meaningless trailing zeros are removed.
+Core correction:
+- /collect reads Max Pain targets and liquidation amounts from CoinGlass.
+- /collect fetches Binance prices once for all symbols.
+- It recalculates and stores current_price, distances and closest-side inputs
+  from Binance before inserting the snapshot into the database.
+- CoinGlass current price is never saved as a fallback.
+- Symbols without Binance coverage are skipped.
 
-Examples:
-0.0000123456789 -> 0.0000123456789
-123.4500000000 -> 123.45
+Consistency change:
+- Analysis commands no longer fetch a newer Binance price independently.
+- /coin, /range, /top, /consensus, /gap, /market, /btc_like, /score and alerts
+  all use the exact Binance price saved in the latest /collect snapshot.
+- This keeps every command internally consistent with one collection moment.
 
-Affected displays:
-/price_check
-/price_check BTC
-/coin BTC
-/range BTC 24h
-/top
+Also:
+- collection timestamp is the exact collection time, not a rounded hour.
+- /collect completion message includes the available command list.
+- /live_status explains the saved Binance-backed snapshot.
 
-Calculation logic is unchanged.
+Test:
+1. /collect
+2. /live_status
+3. /coin BTC
+4. /range BTC 24h
+5. /top
+6. /consensus
+7. /alert_check
