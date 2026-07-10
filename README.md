@@ -1,29 +1,26 @@
-Stage 13 — Save Binance Price During /collect
+Stage 14 — Alert Formula Correction
 
-Core correction:
-- /collect reads Max Pain targets and liquidation amounts from CoinGlass.
-- /collect fetches Binance prices once for all symbols.
-- It recalculates and stores current_price, distances and closest-side inputs
-  from Binance before inserting the snapshot into the database.
-- CoinGlass current price is never saved as a fallback.
-- Symbols without Binance coverage are skipped.
+Fixes:
+- Removes Setup Strength from alert priority.
+- Removes asset-to-asset absolute liquidity ranking.
+- Uses normalized liquidity inside each coin/timeframe.
+- Shows liquidity balance explicitly in /alert_check and /alert_explain.
 
-Consistency change:
-- Analysis commands no longer fetch a newer Binance price independently.
-- /coin, /range, /top, /consensus, /gap, /market, /btc_like, /score and alerts
-  all use the exact Binance price saved in the latest /collect snapshot.
-- This keeps every command internally consistent with one collection moment.
+New priority formula:
+- Distance: 0..45
+- Consensus: 0..30
+- Liquidity balance/concentration: 0..25
+Total: 0..100
 
-Also:
-- collection timestamp is the exact collection time, not a rounded hour.
-- /collect completion message includes the available command list.
-- /live_status explains the saved Binance-backed snapshot.
+Liquidity formula:
+NearShare% = Near-side liquidity / (Near + Opposite liquidity) * 100
+
+Output includes:
+- NearShare%
+- Near/Far ratio
+- LiqPts
 
 Test:
 1. /collect
-2. /live_status
-3. /coin BTC
-4. /range BTC 24h
-5. /top
-6. /consensus
-7. /alert_check
+2. /alert_check
+3. /alert_explain XRP 12h

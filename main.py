@@ -1191,6 +1191,7 @@ async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual alert scan with corrected raw-feature priority."""
     limit = 20
     if context.args:
         try:
@@ -1200,7 +1201,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     rows = latest_snapshot_rows()
     if not rows:
-        await update.message.reply_text("אין נתונים חיים. הריצו /collect ובדקו /live_status.")
+        await update.message.reply_text("אין נתונים שמורים. הריצו /collect קודם.")
         return
 
     items = alert_engine.build_opportunities(rows, limit=limit)
@@ -1209,36 +1210,55 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     table = [[
-        x["priority"], x["symbol"], x["timeframe"], x["side"],
-        "+".join(x["types"]), fmt(x["distance_pct"]),
-        fmt(x["near_far_ratio"]), f'{x["consensus_hits"]}/{x["consensus_total"]}',
-        fmt(x["setup_strength"])
+        x["priority"],
+        x["symbol"],
+        x["timeframe"],
+        x["side"],
+        "+".join(x["types"]),
+        fmt(x["distance_pct"]),
+        fmt(x["near_share_pct"]),
+        fmt(x["near_far_ratio"]),
+        f'{x["consensus_hits"]}/{x["consensus_total"]}',
+        fmt(x["components"]["liquidity_balance"]),
     ] for x in items]
 
     output = tabulate(
         table,
-        headers=["Priority", "Coin", "TF", "Side", "Types", "Dist%", "Near/Far", "Cons", "Setup"],
+        headers=[
+            "Priority", "Coin", "TF", "Side", "Types",
+            "Dist%", "NearShare%", "Near/Far", "Cons", "LiqPts"
+        ],
         tablefmt="plain",
     )
-    note = (
-        "Priority = Distance(35) + Liquidity rank in same TF(25) + "
-        "Consensus(20) + Setup(15) + Liquidity balance(-10..+10).\n"
-        "No 2x gap is required for HIGH_LIQUIDITY_CLOSE_DISTANCE. "
-        "Positive balance adds points; significantly negative balance subtracts.\n"
-    )
-    await update.message.reply_text(note + f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
+    explanation = (
+        "Priority = Distance (0-45) + Consensus (0-30) "
+        "+ Liquidity Balance/Concentration (0-25).\n"
+        "Setup Strength אינו חלק מהניקוד.\n"
+        "NearShare% = אחוז הנזילות של הצד הקרוב מתוך סך שני הצדדים.\n"
+    )
+
+    await update.message.reply_text(
+        explanation + f"<pre>{html.escape(output)}</pre>",
+        parse_mode="HTML",
+    )
 
 
 async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Explain corrected alert priority for one coin/timeframe."""
     if not context.args:
         await update.message.reply_text("שימוש: /alert_explain BTC או /alert_explain BTC 24h")
         return
 
     symbol = context.args[0].upper()
-    tf = context.args[1].lower() if len(context.args) > 1 else None
+    timeframe = context.args[1].lower() if len(context.args) > 1 else None
+
     items = alert_engine.build_opportunities(latest_snapshot_rows(), limit=500)
-    matches = [x for x in items if x["symbol"] == symbol and (tf is None or x["timeframe"] == tf)]
+    matches = [
+        x for x in items
+        if x["symbol"] == symbol
+        and (timeframe is None or x["timeframe"] == timeframe)
+    ]
 
     if not matches:
         await update.message.reply_text("לא נמצאה כרגע התראה מתאימה.")
@@ -1246,6 +1266,7 @@ async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     x = sorted(matches, key=lambda y: -y["priority"])[0]
     c = x["components"]
+
     rows_out = [
         ["Coin", x["symbol"]],
         ["TF", x["timeframe"]],
@@ -1253,18 +1274,22 @@ async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["Types", "+".join(x["types"])],
         ["Priority", x["priority"]],
         ["Distance%", fmt(x["distance_pct"])],
-        ["Near/Far", fmt(x["near_far_ratio"])],
+        ["Near-side liquidity", fmt(x["near_amount"], 0)],
+        ["Opposite liquidity", fmt(x["far_amount"], 0)],
+        ["NearShare%", fmt(x["near_share_pct"])],
+        ["Near/Far ratio", fmt(x["near_far_ratio"])],
         ["Consensus", f'{x["consensus_hits"]}/{x["consensus_total"]}'],
-        ["Setup", fmt(x["setup_strength"])],
         ["Distance points", c["distance"]],
-        ["Liquidity-rank points", c["liquidity_rank"]],
         ["Consensus points", c["consensus"]],
-        ["Setup points", c["setup_strength"]],
-        ["Balance adjustment", c["liquidity_balance"]],
-        ["Balance meaning", x["balance_reason"]],
+        ["Liquidity points", c["liquidity_balance"]],
+        ["Liquidity meaning", x["liquidity_meaning"]],
     ]
+
     output = tabulate(rows_out, tablefmt="plain")
-    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
+    await update.message.reply_text(
+        f"<pre>{html.escape(output)}</pre>",
+        parse_mode="HTML",
+    )
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
