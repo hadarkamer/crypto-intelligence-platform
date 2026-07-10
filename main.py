@@ -543,6 +543,23 @@ async def collect_once():
 
     return inserted, missing_timeframes
 
+
+def fmt_price(value):
+    """Display full available price precision without scientific notation."""
+    if value is None:
+        return "-"
+    try:
+        from decimal import Decimal, InvalidOperation
+        d = Decimal(str(value))
+    except Exception:
+        return str(value)
+
+    text = format(d, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def fmt(value, digits=2):
     if value is None:
         return "-"
@@ -555,20 +572,38 @@ def short_time(value):
     return s[11:16] if len(s) >= 16 else s
 
 
-def latest_snapshot_rows():
-    """Fetch all rows from the latest snapshot for analysis.py."""
+def raw_latest_snapshot_rows():
+    """Raw latest CoinGlass snapshot, before Binance live-price overlay."""
     return query(
         f"""
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
         SELECT symbol, timeframe, current_price,
                short_max_pain, long_max_pain,
                short_liquidation_amount, long_liquidation_amount,
-               distance_short_pct, distance_long_pct
+               distance_short_abs, distance_short_pct,
+               distance_long_abs, distance_long_pct,
+               alert_level
         FROM max_pain_snapshots, latest
         WHERE collected_at = latest.max_time
         ORDER BY symbol, {TIMEFRAME_ORDER_SQL}
         """
     )
+
+
+def latest_snapshot_live_result():
+    """Latest snapshot with Binance price and recalculated distances."""
+    raw_rows = raw_latest_snapshot_rows()
+    if not raw_rows:
+        return {"rows": [], "price_result": {}, "skipped_symbols": []}
+    return live_price_provider.enrich_snapshot_rows(
+        raw_rows,
+        excluded_symbols=NON_CRYPTO_SYMBOLS,
+    )
+
+
+def latest_snapshot_rows():
+    """Rows used by every analysis, score and alert command."""
+    return latest_snapshot_live_result()["rows"]
 
 
 def side_from_row(row):
@@ -609,6 +644,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/alert_check - בדיקת חריגות ידנית\n"
         "/price_check - בדיקת כיסוי מחירים חיים\n"
         "/price_check BTC - השוואת מחיר ויעדי Max Pain\n"
+        "/live_status - כיסוי מטבעות בחישובים החיים\n"
         "/alerts - חריגות"
     )
 
@@ -643,115 +679,140 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("שימוש: /coin BTC")
         return
+
     symbol = context.args[0].upper()
-    rows = query(
-        f"""
-        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
-        SELECT timeframe, current_price, short_max_pain, long_max_pain,
-               short_liquidation_amount, long_liquidation_amount,
-               distance_short_pct, distance_long_pct, alert_level
-        FROM max_pain_snapshots, latest
-        WHERE symbol = ? AND collected_at = latest.max_time
-        ORDER BY {TIMEFRAME_ORDER_SQL}
-        """,
-        (symbol,)
-    )
+    rows = [
+        r for r in latest_snapshot_rows()
+        if str(r["symbol"]).upper() == symbol
+    ]
+
     if not rows:
-        await update.message.reply_text(f"לא נמצאו נתונים עדכניים עבור {symbol}. הריצו /collect קודם.")
+        await update.message.reply_text(
+            f"לא נמצאו נתוני Binance חיים עבור {symbol}, או שהמטבע אינו קיים ב-snapshot האחרון."
+        )
         return
 
+    rows.sort(key=lambda r: tf_order_value(r["timeframe"]))
+
     table = [[
-        r["timeframe"], fmt(r["current_price"]),
-        fmt(r["short_max_pain"]), fmt(r["long_max_pain"]),
-        fmt(r["short_liquidation_amount"], 0), fmt(r["long_liquidation_amount"], 0),
-        fmt(r["distance_short_pct"]), fmt(r["distance_long_pct"]), r["alert_level"]
+        r["timeframe"],
+        fmt_price(r["current_price"]),
+        fmt_price(r["short_max_pain"]),
+        fmt_price(r["long_max_pain"]),
+        fmt(r["short_liquidation_amount"], 0),
+        fmt(r["long_liquidation_amount"], 0),
+        fmt(r["distance_short_pct"]),
+        fmt(r["distance_long_pct"]),
+        r.get("closest_side"),
     ] for r in rows]
 
     text = tabulate(
         table,
-        headers=["TF", "Price", "ShortPx", "LongPx", "Short$", "Long$", "DistS%", "DistL%", "Alert"],
+        headers=["TF", "BinancePx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
         tablefmt="plain",
     )
-    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+
+    source = rows[0].get("price_source", "binance")
+    fetched = rows[0].get("price_fetched_at_utc", "-")
+    await update.message.reply_text(
+        f"Price source: {source}\nFetched UTC: {fetched}\n"
+        f"<pre>{html.escape(text)}</pre>",
+        parse_mode="HTML",
+    )
 
 
 async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text("שימוש: /range BTC 24h")
         return
+
     symbol = context.args[0].upper()
     timeframe = context.args[1].lower()
-    rows = query(
-        """
-        SELECT current_price, short_max_pain, long_max_pain,
-               short_liquidation_amount, long_liquidation_amount,
-               distance_short_pct, distance_long_pct, alert_level
-        FROM max_pain_snapshots
-        WHERE symbol = ? AND timeframe = ?
-        ORDER BY collected_at DESC
-        LIMIT 1
-        """,
-        (symbol, timeframe)
-    )
+
+    rows = [
+        r for r in latest_snapshot_rows()
+        if str(r["symbol"]).upper() == symbol
+        and str(r["timeframe"]).lower() == timeframe
+    ]
+
     if not rows:
-        await update.message.reply_text(f"לא נמצאו נתונים עדכניים עבור {symbol}/{timeframe}.")
+        await update.message.reply_text(
+            f"לא נמצאו נתוני Binance חיים עבור {symbol}/{timeframe}."
+        )
         return
 
+    r = rows[0]
     table = [[
-        fmt(r["current_price"]), fmt(r["short_max_pain"]),
-        fmt(r["long_max_pain"]), fmt(r["short_liquidation_amount"], 0), fmt(r["long_liquidation_amount"], 0),
-        fmt(r["distance_short_pct"]), fmt(r["distance_long_pct"]), r["alert_level"]
-    ] for r in rows]
+        fmt_price(r["current_price"]),
+        fmt_price(r["short_max_pain"]),
+        fmt_price(r["long_max_pain"]),
+        fmt(r["short_liquidation_amount"], 0),
+        fmt(r["long_liquidation_amount"], 0),
+        fmt(r["distance_short_pct"]),
+        fmt(r["distance_long_pct"]),
+        r.get("closest_side"),
+    ]]
+
     text = tabulate(
         table,
-        headers=["Price", "ShortPx", "LongPx", "Short$", "Long$", "DistS%", "DistL%", "Alert"],
+        headers=["BinancePx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
         tablefmt="plain",
     )
-    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+
+    await update.message.reply_text(
+        f"Price source: {r.get('price_source', 'binance')}\n"
+        f"Fetched UTC: {r.get('price_fetched_at_utc', '-')}\n"
+        f"<pre>{html.escape(text)}</pre>",
+        parse_mode="HTML",
+    )
 
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    limit = int(context.args[0]) if context.args else 10
-    closest_expr = (
-        "LEAST(ABS(distance_short_pct), ABS(distance_long_pct))"
-        if use_postgres()
-        else "MIN(ABS(distance_short_pct), ABS(distance_long_pct))"
-    )
-    rows = query(
-        f"""
-        WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
-        SELECT symbol, timeframe, current_price, short_max_pain, long_max_pain,
-               short_liquidation_amount, long_liquidation_amount,
-               distance_short_pct, distance_long_pct,
-               {closest_expr} AS closest_distance_pct,
-               CASE
-                 WHEN ABS(distance_short_pct) <= ABS(distance_long_pct) THEN 'SHORT'
-                 ELSE 'LONG'
-               END AS closest_side,
-               alert_level
-        FROM max_pain_snapshots, latest
-        WHERE collected_at = latest.max_time
-          AND distance_short_pct IS NOT NULL
-          AND distance_long_pct IS NOT NULL
-        ORDER BY closest_distance_pct ASC
-        LIMIT ?
-        """,
-        (limit,)
-    )
+    try:
+        limit = int(context.args[0]) if context.args else 10
+    except Exception:
+        limit = 10
+    limit = max(1, min(50, limit))
+
+    rows = latest_snapshot_rows()
     if not rows:
-        await update.message.reply_text("עדיין אין נתונים. הריצו /collect קודם.")
+        await update.message.reply_text("אין נתונים חיים זמינים. הריצו /collect ואז נסו שוב.")
         return
+
+    candidates = []
+    for r in rows:
+        ds = r.get("distance_short_pct")
+        dl = r.get("distance_long_pct")
+        if ds is None or dl is None:
+            continue
+        closest_side = "SHORT" if abs(ds) <= abs(dl) else "LONG"
+        closest_distance = min(abs(ds), abs(dl))
+        candidates.append((closest_distance, closest_side, r))
+
+    candidates.sort(key=lambda item: item[0])
+    selected = candidates[:limit]
+
     table = [[
-        r["symbol"], r["timeframe"], r["closest_side"], fmt(r["current_price"]),
-        fmt(r["short_max_pain"]), fmt(r["long_max_pain"]),
-        fmt(r["distance_short_pct"]), fmt(r["distance_long_pct"]), r["alert_level"]
-    ] for r in rows]
+        r["symbol"],
+        r["timeframe"],
+        side,
+        fmt_price(r["current_price"]),
+        fmt_price(r["short_max_pain"]),
+        fmt_price(r["long_max_pain"]),
+        fmt(r["distance_short_pct"]),
+        fmt(r["distance_long_pct"]),
+    ] for distance, side, r in selected]
+
     text = tabulate(
         table,
-        headers=["Coin", "TF", "Side", "Price", "ShortPx", "LongPx", "DistS%", "DistL%", "Alert"],
+        headers=["Coin", "TF", "Side", "BinancePx", "ShortMP", "LongMP", "ToShort%", "ToLong%"],
         tablefmt="plain",
     )
-    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+    await update.message.reply_text(
+        "כל המרחקים חושבו מחדש לפי מחיר Binance חי.\n"
+        f"<pre>{html.escape(text)}</pre>",
+        parse_mode="HTML",
+    )
 
 
 async def consensus(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1103,7 +1164,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check Binance live-price coverage. This command does not modify DB data."""
-    rows = latest_snapshot_rows()
+    rows = raw_latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין snapshot קיים. הריצו /collect קודם.")
         return
@@ -1153,9 +1214,9 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             table.append([
                 r["timeframe"],
-                fmt(live["price"]),
-                fmt(r["short_max_pain"]),
-                fmt(r["long_max_pain"]),
+                fmt_price(live["price"]),
+                fmt_price(r["short_max_pain"]),
+                fmt_price(r["long_max_pain"]),
                 fmt(calc["short_signed_pct"]),
                 fmt(calc["long_signed_pct"]),
                 calc["closest_side"],
@@ -1186,7 +1247,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             symbol,
             result["prices"][symbol]["pair"],
-            fmt(result["prices"][symbol]["price"]),
+            fmt_price(result["prices"][symbol]["price"]),
         ]
         for symbol in sample
     ]
@@ -1215,6 +1276,25 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + f"<pre>{html.escape(sample_output)}</pre>",
         parse_mode="HTML",
     )
+
+
+async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show which symbols are included/excluded from live calculations."""
+    result = latest_snapshot_live_result()
+    rows = result.get("rows", [])
+    price_result = result.get("price_result", {})
+    skipped = result.get("skipped_symbols", [])
+
+    symbols_used = sorted({r["symbol"] for r in rows})
+    text = (
+        "Binance live calculation status\n"
+        f"Symbols used: {len(symbols_used)}\n"
+        f"Symbols skipped: {len(skipped)}\n"
+        f"Fetched UTC: {price_result.get('fetched_at_utc', '-')}\n"
+        f"Skipped: {', '.join(skipped) or 'none'}"
+    )
+    await update.message.reply_text(text)
+
 
 
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1283,6 +1363,7 @@ async def main():
     bot_app.add_handler(CommandHandler("score_top", score_top))
     bot_app.add_handler(CommandHandler("alert_check", alert_check))
     bot_app.add_handler(CommandHandler("price_check", price_check))
+    bot_app.add_handler(CommandHandler("live_status", live_status))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()

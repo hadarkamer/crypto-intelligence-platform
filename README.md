@@ -1,18 +1,21 @@
-Stage 10 v2 — Clear Binance Live Price Check
+Stage 11 v2 — Binance Live Calculations + Full Price Precision
 
 Changes:
-- SNDK is now filtered as a non-crypto asset.
-- Binance market-data URL is configurable through environment variables.
-- No Binance API key is required.
-- /price_check now explains clearly that it is a connection/coverage test.
-- /price_check shows a sample of actual live prices.
-- /price_check BTC compares the Binance live price to all seven Max Pain targets.
-- Old excluded symbols are ignored even if they still exist in the latest DB snapshot.
+- Keeps all Stage 11 live-price calculations.
+- Adds fmt_price() for every displayed market price and Max Pain target.
+- No meaningful decimal digit is rounded away.
+- Scientific notation is avoided.
+- Only meaningless trailing zeros are removed.
 
-This stage still does NOT change alert calculations.
+Examples:
+0.0000123456789 -> 0.0000123456789
+123.4500000000 -> 123.45
 
-Test:
-1. Deploy
-2. /collect
-3. /price_check
-4. /price_check BTC
+Affected displays:
+/price_check
+/price_check BTC
+/coin BTC
+/range BTC 24h
+/top
+
+Calculation logic is unchanged.
