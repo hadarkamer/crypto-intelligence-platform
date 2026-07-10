@@ -49,7 +49,7 @@ RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 TIMEFRAME_ORDER_SQL = "CASE timeframe WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3 WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6 WHEN '1m' THEN 7 ELSE 99 END"
 # CoinGlass may mix non-crypto assets into the Max Pain table. Exclude known non-crypto symbols.
-NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "SNDK", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
+NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "SKHY", "SNDK", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
 API_TIMEFRAME_MAP = {
     "12h": "12h", "24h": "24h", "48h": "48h", "3d": "3d",
     "1w": "7d", "2w": "14d", "1m": "30d",
@@ -67,6 +67,10 @@ NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v3-dom-reader"
 COLLECT_LOCK = None
+WATCH_TASK = None
+WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
+WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "75"))
+WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS max_pain_snapshots (
@@ -99,6 +103,24 @@ CREATE TABLE IF NOT EXISTS max_pain_snapshots (
 CREATE INDEX IF NOT EXISTS idx_symbol_time ON max_pain_snapshots(symbol, collected_at);
 CREATE INDEX IF NOT EXISTS idx_timeframe_time ON max_pain_snapshots(timeframe, collected_at);
 CREATE INDEX IF NOT EXISTS idx_alert_level ON max_pain_snapshots(alert_level);
+
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alert_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    side TEXT NOT NULL,
+    alert_types TEXT NOT NULL,
+    priority REAL NOT NULL,
+    UNIQUE(fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_created_at ON alert_history(created_at);
 """
 
 POSTGRES_SCHEMA = """
@@ -132,6 +154,24 @@ CREATE TABLE IF NOT EXISTS max_pain_snapshots (
 CREATE INDEX IF NOT EXISTS idx_symbol_time ON max_pain_snapshots(symbol, collected_at);
 CREATE INDEX IF NOT EXISTS idx_timeframe_time ON max_pain_snapshots(timeframe, collected_at);
 CREATE INDEX IF NOT EXISTS idx_alert_level ON max_pain_snapshots(alert_level);
+
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alert_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    side TEXT NOT NULL,
+    alert_types TEXT NOT NULL,
+    priority REAL NOT NULL,
+    UNIQUE(fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_created_at ON alert_history(created_at);
 """
 
 def use_postgres() -> bool:
@@ -179,6 +219,44 @@ def query(sql: str, params: tuple = ()):
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             return conn.execute(sql, params).fetchall()
+
+
+def execute_write(sql: str, params: tuple = ()) -> None:
+    init_db()
+    if use_postgres():
+        sql = sql.replace("?", "%s")
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute(sql, params)
+            conn.commit()
+    else:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(sql, params)
+            conn.commit()
+
+
+def set_setting(key: str, value: str) -> None:
+    if use_postgres():
+        execute_write(
+            "INSERT INTO bot_settings(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
+            (key, value),
+        )
+    else:
+        execute_write(
+            "INSERT OR REPLACE INTO bot_settings(key, value) VALUES (?, ?)",
+            (key, value),
+        )
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    rows = query("SELECT value FROM bot_settings WHERE key = ?", (key,))
+    return rows[0]["value"] if rows else default
+
+
+def watch_enabled() -> bool:
+    return get_setting("watch_enabled", "0") == "1"
+
+
 
 def insert_snapshots(rows: List[Dict[str, Any]]) -> int:
     if not rows:
@@ -574,6 +652,59 @@ async def collect_once():
     return inserted, missing_timeframes
 
 
+
+async def collect_live_rows_for_watch():
+    """Read fresh CoinGlass + Binance data in memory without saving a snapshot."""
+    print("[watch] opening fresh CoinGlass snapshot", flush=True)
+
+    snapshot = await collect_coinglass_dom_snapshot(
+        timeframes=TIMEFRAMES,
+        headless=True,
+        url=COINGLASS_MAX_PAIN_URL,
+    )
+
+    raw_rows = []
+    for item in snapshot.get("rows", []):
+        short_mp = item.get("max_short_price")
+        long_mp = item.get("max_long_price")
+        if short_mp is None or long_mp is None:
+            continue
+
+        symbol = str(item.get("symbol", "")).upper()
+        if not symbol or symbol in NON_CRYPTO_SYMBOLS:
+            continue
+
+        raw_rows.append({
+            "symbol": symbol,
+            "rank": item.get("rank"),
+            "timeframe": item.get("timeframe"),
+            "current_price": item.get("price"),
+            "short_max_pain": short_mp,
+            "long_max_pain": long_mp,
+            "short_liquidation_amount": item.get("short_amount_usd"),
+            "long_liquidation_amount": item.get("long_amount_usd"),
+            "distance_short_abs": None,
+            "distance_short_pct": None,
+            "distance_long_abs": None,
+            "distance_long_pct": None,
+            "alert_level": None,
+        })
+
+    live_result = live_price_provider.enrich_snapshot_rows(
+        raw_rows,
+        excluded_symbols=NON_CRYPTO_SYMBOLS,
+    )
+
+    rows = live_result.get("rows", [])
+    print(
+        f"[watch] fresh rows={len(rows)}; "
+        f"skipped={live_result.get('skipped_symbols', [])}",
+        flush=True,
+    )
+    return rows, live_result
+
+
+
 def fmt_price(value):
     """Display full available price precision without scientific notation."""
     if value is None:
@@ -685,6 +816,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/score_top - דירוג Setup Strength\n"
         "/alert_check - דירוג הזדמנויות ידני\n"
         "/alert_explain BTC 24h - פירוט ניקוד\n"
+        "/watch_on - הפעלת התראות אוטומטיות\n"
+        "/watch_off - עצירת התראות\n"
+        "/watch_status - מצב ההתראות\n"
+        "/watch_now - בדיקה מיידית ללא שמירה\n"
         "/price_check - בדיקת כיסוי מחירים חיים\n"
         "/price_check BTC - השוואת מחיר ויעדי Max Pain\n"
         "/live_status - כיסוי מטבעות בחישובים החיים\n"
@@ -1191,13 +1326,13 @@ async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual alert scan with corrected raw-feature priority."""
-    limit = 20
+    """Manual alert scan displayed as readable Telegram cards."""
+    limit = 10
     if context.args:
         try:
-            limit = max(1, min(50, int(context.args[0])))
+            limit = max(1, min(25, int(context.args[0])))
         except Exception:
-            limit = 20
+            limit = 10
 
     rows = latest_snapshot_rows()
     if not rows:
@@ -1209,39 +1344,55 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("לא נמצאו הזדמנויות לפי הספים הנוכחיים.")
         return
 
-    table = [[
-        x["priority"],
-        x["symbol"],
-        x["timeframe"],
-        x["side"],
-        "+".join(x["types"]),
-        fmt(x["distance_pct"]),
-        fmt(x["near_share_pct"]),
-        fmt(x["near_far_ratio"]),
-        f'{x["consensus_hits"]}/{x["consensus_total"]}',
-        fmt(x["components"]["liquidity_balance"]),
-    ] for x in items]
-
-    output = tabulate(
-        table,
-        headers=[
-            "Priority", "Coin", "TF", "Side", "Types",
-            "Dist%", "NearShare%", "Near/Far", "Cons", "LiqPts"
-        ],
-        tablefmt="plain",
-    )
-
-    explanation = (
+    header = (
+        "📊 דירוג הזדמנויות\n"
         "Priority = Distance (0-45) + Consensus (0-30) "
-        "+ Liquidity Balance/Concentration (0-25).\n"
-        "Setup Strength אינו חלק מהניקוד.\n"
-        "NearShare% = אחוז הנזילות של הצד הקרוב מתוך סך שני הצדדים.\n"
+        "+ Liquidity Balance/Concentration (0-25)\n"
+        "Setup Strength אינו חלק מהניקוד.\n\n"
     )
 
-    await update.message.reply_text(
-        explanation + f"<pre>{html.escape(output)}</pre>",
-        parse_mode="HTML",
-    )
+    cards = []
+    for index, x in enumerate(items, start=1):
+        components = x.get("components", {})
+        types_text = "\n".join(f"• {t}" for t in x.get("types", [])) or "• ללא סוג חריגה"
+
+        near_share = fmt(x.get("near_share_pct"))
+        ratio = fmt(x.get("near_far_ratio"))
+        distance = fmt(x.get("distance_pct"))
+        consensus = f'{x.get("consensus_hits", 0)}/{x.get("consensus_total", 0)}'
+
+        card = (
+            f"🚨 #{index} — {x['symbol']} / {x['timeframe']}\n"
+            f"צד קרוב: {x['side']}\n"
+            f"Priority: {fmt(x['priority'])}\n"
+            f"מרחק: {distance}%\n"
+            f"קונצנזוס: {consensus}\n"
+            f"ריכוז נזילות בצד הקרוב: {near_share}%\n"
+            f"יחס צד קרוב/צד שני: {ratio}\n\n"
+            f"פירוט הניקוד:\n"
+            f"• Distance: {fmt(components.get('distance'))}/45\n"
+            f"• Consensus: {fmt(components.get('consensus'))}/30\n"
+            f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
+            f"סוגי חריגה:\n{types_text}"
+        )
+        cards.append(card)
+
+    # Telegram messages have length limits. Split cards into safe chunks.
+    chunks = []
+    current = header
+    for card in cards:
+        separator = "\n\n────────────────────\n\n"
+        candidate = current + (separator if current != header else "") + card
+        if len(candidate) > 3500:
+            chunks.append(current)
+            current = card
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        await update.message.reply_text(chunk)
 
 
 async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1432,6 +1583,194 @@ async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+def _alert_fingerprint(item: Dict[str, Any]) -> str:
+    # Fingerprint ignores exact priority so small score changes do not spam.
+    payload = "|".join([
+        item["symbol"],
+        item["timeframe"],
+        item["side"],
+        ",".join(sorted(item["types"])),
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _alert_recently_sent(fingerprint: str) -> bool:
+    if use_postgres():
+        rows = query(
+            "SELECT 1 FROM alert_history "
+            "WHERE fingerprint = ? AND created_at >= NOW() - (? * INTERVAL '1 minute') "
+            "LIMIT 1",
+            (fingerprint, WATCH_COOLDOWN_MINUTES),
+        )
+    else:
+        rows = query(
+            "SELECT 1 FROM alert_history "
+            "WHERE fingerprint = ? AND datetime(created_at) >= datetime('now', ?) "
+            "LIMIT 1",
+            (fingerprint, f"-{WATCH_COOLDOWN_MINUTES} minutes"),
+        )
+    return bool(rows)
+
+
+def _remember_alert(item: Dict[str, Any], fingerprint: str) -> None:
+    now_value = datetime.now(timezone.utc)
+    if not use_postgres():
+        now_value = now_value.isoformat()
+
+    try:
+        execute_write(
+            "INSERT INTO alert_history "
+            "(created_at, fingerprint, symbol, timeframe, side, alert_types, priority) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                now_value,
+                fingerprint,
+                item["symbol"],
+                item["timeframe"],
+                item["side"],
+                ",".join(item["types"]),
+                item["priority"],
+            ),
+        )
+    except Exception:
+        # Existing fingerprint is acceptable; cooldown prevents normal duplicates.
+        pass
+
+
+def _watch_message(item: Dict[str, Any]) -> str:
+    types = "\n".join(f"• {t}" for t in item["types"])
+    ratio = fmt(item.get("near_far_ratio"))
+    near_share = fmt(item.get("near_share_pct"))
+    consensus = f'{item["consensus_hits"]}/{item["consensus_total"]}'
+    components = item.get("components", {})
+
+    return (
+        "🚨 הזדמנות חדשה\n\n"
+        f"מטבע: {item['symbol']}\n"
+        f"טווח: {item['timeframe']}\n"
+        f"צד קרוב: {item['side']}\n"
+        f"Priority: {fmt(item['priority'])}\n"
+        f"מרחק: {fmt(item['distance_pct'])}%\n"
+        f"קונצנזוס: {consensus}\n"
+        f"ריכוז נזילות בצד הקרוב: {near_share}%\n"
+        f"יחס צד קרוב/צד שני: {ratio}\n\n"
+        "פירוט הניקוד:\n"
+        f"• Distance: {fmt(components.get('distance'))}/45\n"
+        f"• Consensus: {fmt(components.get('consensus'))}/30\n"
+        f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
+        f"סוגי חריגה:\n{types}\n\n"
+        "זו התראת נתונים לבדיקה, לא הוראת מסחר."
+    )
+
+
+async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
+    """Run one in-memory watch cycle and send only new high-priority alerts."""
+    chat_id = get_setting("watch_chat_id")
+    if not chat_id:
+        return {"ok": False, "reason": "no_chat_id", "sent": 0, "found": 0}
+
+    rows, live_result = await collect_live_rows_for_watch()
+    items = alert_engine.build_opportunities(rows, limit=500)
+    candidates = [
+        item for item in items
+        if item["priority"] >= WATCH_PRIORITY_THRESHOLD
+    ]
+
+    sent = 0
+    for item in candidates:
+        fingerprint = _alert_fingerprint(item)
+        if not force_send and _alert_recently_sent(fingerprint):
+            continue
+
+        await bot_app.bot.send_message(
+            chat_id=int(chat_id),
+            text=_watch_message(item),
+        )
+        _remember_alert(item, fingerprint)
+        sent += 1
+
+    print(
+        f"[watch] cycle done; opportunities={len(items)}; "
+        f"candidates={len(candidates)}; sent={sent}",
+        flush=True,
+    )
+
+    return {
+        "ok": True,
+        "found": len(items),
+        "candidates": len(candidates),
+        "sent": sent,
+        "skipped_symbols": live_result.get("skipped_symbols", []),
+    }
+
+
+async def watch_loop(bot_app):
+    """Automatic loop. Reads data every 15 minutes without saving snapshots."""
+    print(
+        f"[watch] loop started; interval={WATCH_INTERVAL_MINUTES}m; "
+        f"threshold={WATCH_PRIORITY_THRESHOLD}; cooldown={WATCH_COOLDOWN_MINUTES}m",
+        flush=True,
+    )
+
+    while True:
+        try:
+            if watch_enabled():
+                await run_watch_cycle(bot_app)
+        except Exception as exc:
+            print(f"[watch] cycle error: {exc!r}", flush=True)
+
+        await asyncio.sleep(max(1, WATCH_INTERVAL_MINUTES) * 60)
+
+
+async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    set_setting("watch_chat_id", str(chat_id))
+    set_setting("watch_enabled", "1")
+    await update.message.reply_text(
+        "ההתראות האוטומטיות הופעלו.\n"
+        f"בדיקה כל {WATCH_INTERVAL_MINUTES} דקות.\n"
+        f"סף Priority: {WATCH_PRIORITY_THRESHOLD}.\n"
+        f"אותה התראה לא תישלח שוב במשך {WATCH_COOLDOWN_MINUTES} דקות.\n"
+        "הבדיקה אינה שומרת Snapshot מלא."
+    )
+
+
+async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    set_setting("watch_enabled", "0")
+    await update.message.reply_text("ההתראות האוטומטיות הופסקו.")
+
+
+async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = "פעיל" if watch_enabled() else "כבוי"
+    chat_id = get_setting("watch_chat_id", "-")
+    await update.message.reply_text(
+        f"Watch: {state}\n"
+        f"בדיקה: כל {WATCH_INTERVAL_MINUTES} דקות\n"
+        f"Priority מינימלי: {WATCH_PRIORITY_THRESHOLD}\n"
+        f"Cooldown: {WATCH_COOLDOWN_MINUTES} דקות\n"
+        f"Chat ID מוגדר: {'כן' if chat_id != '-' else 'לא'}"
+    )
+
+
+async def watch_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    set_setting("watch_chat_id", str(update.effective_chat.id))
+    await update.message.reply_text(
+        "מריץ בדיקת Watch עכשיו, ללא שמירת Snapshot..."
+    )
+    try:
+        result = await run_watch_cycle(context.application)
+        await update.message.reply_text(
+            "בדיקת Watch הסתיימה.\n"
+            f"הזדמנויות שנמצאו: {result.get('found', 0)}\n"
+            f"מעל הסף: {result.get('candidates', 0)}\n"
+            f"התראות חדשות שנשלחו: {result.get('sent', 0)}"
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"שגיאה בבדיקת Watch: {exc!r}")
+
+
+
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Alerts are disabled until we define a meaningful historical comparison.
     await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
@@ -1498,12 +1837,19 @@ async def main():
     bot_app.add_handler(CommandHandler("score_top", score_top))
     bot_app.add_handler(CommandHandler("alert_check", alert_check))
     bot_app.add_handler(CommandHandler("alert_explain", alert_explain))
+    bot_app.add_handler(CommandHandler("watch_on", watch_on))
+    bot_app.add_handler(CommandHandler("watch_off", watch_off))
+    bot_app.add_handler(CommandHandler("watch_status", watch_status))
+    bot_app.add_handler(CommandHandler("watch_now", watch_now))
     bot_app.add_handler(CommandHandler("price_check", price_check))
     bot_app.add_handler(CommandHandler("live_status", live_status))
     bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()
     await bot_app.start()
+
+    global WATCH_TASK
+    WATCH_TASK = asyncio.create_task(watch_loop(bot_app))
 
     webhook_url = f"{PUBLIC_URL}/telegram"
     await bot_app.bot.delete_webhook(drop_pending_updates=True)
@@ -1516,6 +1862,12 @@ async def main():
         while True:
             await asyncio.sleep(3600)
     finally:
+        if WATCH_TASK:
+            WATCH_TASK.cancel()
+            try:
+                await WATCH_TASK
+            except asyncio.CancelledError:
+                pass
         await bot_app.bot.delete_webhook(drop_pending_updates=True)
         await bot_app.stop()
         await bot_app.shutdown()
