@@ -49,7 +49,7 @@ RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 TIMEFRAME_ORDER_SQL = "CASE timeframe WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3 WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6 WHEN '1m' THEN 7 ELSE 99 END"
 # CoinGlass may mix non-crypto assets into the Max Pain table. Exclude known non-crypto symbols.
-NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
+NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "SNDK", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
 API_TIMEFRAME_MAP = {
     "12h": "12h", "24h": "24h", "48h": "48h", "3d": "3d",
     "1w": "7d", "2w": "14d", "1m": "30d",
@@ -1102,65 +1102,117 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Diagnostic live-price coverage check. Does not alter DB data."""
+    """Check Binance live-price coverage. This command does not modify DB data."""
     rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין snapshot קיים. הריצו /collect קודם.")
         return
 
-    symbols = sorted({str(r["symbol"]).upper() for r in rows if r["symbol"]})
+    symbols = sorted({
+        str(r["symbol"]).upper()
+        for r in rows
+        if r["symbol"] and str(r["symbol"]).upper() not in NON_CRYPTO_SYMBOLS
+    })
 
     try:
         result = live_price_provider.fetch_binance_usdt_prices(symbols)
     except Exception as exc:
-        await update.message.reply_text(f"שגיאה במשיכת מחירים חיים: {exc!r}")
+        await update.message.reply_text(
+            "בדיקת החיבור ל-Binance נכשלה.\n"
+            f"שגיאה: {exc!r}"
+        )
         return
 
+    # Specific coin: compare one live Binance price with all seven Max Pain targets.
     if context.args:
         symbol = context.args[0].upper()
+
+        if symbol in NON_CRYPTO_SYMBOLS:
+            await update.message.reply_text(f"{symbol} מסונן ואינו נחשב מטבע קריפטו במערכת.")
+            return
+
         live = result["prices"].get(symbol)
         if not live:
             await update.message.reply_text(
-                f"לא נמצא מחיר Binance עבור {symbol}.\n"
-                f"סימבולים חסרים כרגע: {', '.join(result['missing_symbols']) or '-'}"
+                f"לא נמצא זוג {symbol}USDT ב-Binance.\n"
+                "בשלב הבא נוסיף מקור גיבוי למטבעות שאינם נסחרים שם."
             )
             return
 
-        symbol_rows = [r for r in rows if str(r["symbol"]).upper() == symbol]
+        symbol_rows = [
+            r for r in rows
+            if str(r["symbol"]).upper() == symbol
+        ]
+
         table = []
         for r in symbol_rows:
             calc = live_price_provider.recalculate_distances(
-                live["price"], r["short_max_pain"], r["long_max_pain"]
+                live["price"],
+                r["short_max_pain"],
+                r["long_max_pain"],
             )
             table.append([
-                r["timeframe"], fmt(live["price"]), fmt(r["short_max_pain"]),
-                fmt(r["long_max_pain"]), fmt(calc["short_signed_pct"]),
-                fmt(calc["long_signed_pct"]), calc["closest_side"],
+                r["timeframe"],
+                fmt(live["price"]),
+                fmt(r["short_max_pain"]),
+                fmt(r["long_max_pain"]),
+                fmt(calc["short_signed_pct"]),
+                fmt(calc["long_signed_pct"]),
+                calc["closest_side"],
             ])
 
         output = tabulate(
             table,
-            headers=["TF", "LivePrice", "ShortPx", "LongPx", "ShortΔ%", "LongΔ%", "Closest"],
+            headers=["TF", "LivePrice", "ShortMP", "LongMP", "ToShort%", "ToLong%", "Closest"],
             tablefmt="plain",
         )
+
+        intro = (
+            f"בדיקת מחיר חי עבור {symbol}\n"
+            f"מקור: Binance ({live['pair']})\n"
+            f"זמן משיכה UTC: {result['fetched_at_utc']}\n"
+            "המחיר עדיין לא נשמר ולא משנה את ההתראות בשלב זה.\n\n"
+        )
+
         await update.message.reply_text(
-            f"Source: Binance\nFetched: {result['fetched_at_utc']}\n"
-            f"<pre>{html.escape(output)}</pre>",
+            intro + f"<pre>{html.escape(output)}</pre>",
             parse_mode="HTML",
         )
         return
 
-    summary = [
-        ["Source", result["source"]],
-        ["Requested", result["requested_count"]],
-        ["Found", result["found_count"]],
-        ["Missing", result["missing_count"]],
-        ["Fetched UTC", result["fetched_at_utc"]],
+    found_symbols = sorted(result["prices"].keys())
+    sample = found_symbols[:12]
+    sample_table = [
+        [
+            symbol,
+            result["prices"][symbol]["pair"],
+            fmt(result["prices"][symbol]["price"]),
+        ]
+        for symbol in sample
     ]
-    text1 = tabulate(summary, tablefmt="plain")
-    missing_text = ", ".join(result["missing_symbols"]) or "none"
+
+    summary = (
+        "בדיקת חיבור למחירי Binance\n"
+        "--------------------------------\n"
+        f"מטבעות קריפטו שנבדקו: {result['requested_count']}\n"
+        f"נמצא מחיר חי: {result['found_count']}\n"
+        f"חסרים ב-Binance: {result['missing_count']}\n"
+        f"זמן משיכה UTC: {result['fetched_at_utc']}\n\n"
+        "זו בדיקת כיסוי בלבד — המחירים עדיין לא משנים את החישובים או ההתראות.\n"
+    )
+
+    missing_text = ", ".join(result["missing_symbols"]) or "אין"
+    sample_output = tabulate(
+        sample_table,
+        headers=["Coin", "Binance Pair", "Live Price"],
+        tablefmt="plain",
+    )
+
     await update.message.reply_text(
-        f"<pre>{html.escape(text1 + chr(10) + chr(10) + 'Missing symbols: ' + missing_text)}</pre>",
+        summary
+        + f"\nמטבעות חסרים: {missing_text}\n\n"
+        + "דוגמת מחירים שנמצאו:\n"
+        + f"<pre>{html.escape(sample_output)}</pre>",
         parse_mode="HTML",
     )
 

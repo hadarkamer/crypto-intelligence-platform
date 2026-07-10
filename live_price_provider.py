@@ -1,10 +1,19 @@
 from __future__ import annotations
 from datetime import datetime, timezone
+import os
 from typing import Any, Dict, Iterable, List, Optional
 import requests
 
-BINANCE_ALL_PRICES_URL = "https://data-api.binance.vision/api/v3/ticker/price"
-REQUEST_TIMEOUT_SECONDS = 15
+BINANCE_MARKET_DATA_BASE_URL = os.getenv(
+    "BINANCE_MARKET_DATA_BASE_URL",
+    "https://data-api.binance.vision",
+).rstrip("/")
+BINANCE_PRICE_ENDPOINT = os.getenv(
+    "BINANCE_PRICE_ENDPOINT",
+    "/api/v3/ticker/price",
+)
+BINANCE_ALL_PRICES_URL = BINANCE_MARKET_DATA_BASE_URL + BINANCE_PRICE_ENDPOINT
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("BINANCE_PRICE_TIMEOUT_SECONDS", "15"))
 SYMBOL_ALIASES: Dict[str, str] = {}
 
 def _normalize_symbol(symbol: str) -> str:
