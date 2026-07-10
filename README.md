@@ -1,24 +1,20 @@
-Stage 16 — Alert Cards + SKHY Filter
+Stage 16 v2 — PostgreSQL Schema Fix
 
-Changes:
-1. SKHY is added to the non-crypto blacklist.
-2. /alert_check no longer uses a wide table.
-3. Each opportunity is shown as a readable Telegram card.
-4. Each card includes:
-   - Coin and timeframe
-   - Closest side
-   - Priority
-   - Distance
-   - Consensus
-   - Near-side liquidity concentration
-   - Near/Far ratio
-   - Score component breakdown
-   - Alert types
-5. Automatic watch messages include the same score breakdown.
-6. Long outputs are split safely into multiple Telegram messages.
+Fixes the failed deploy:
+- PostgreSQL no longer receives SQLite syntax.
+- alert_history.id uses BIGSERIAL PRIMARY KEY.
+- alert_history.created_at uses TIMESTAMPTZ.
+- priority uses DOUBLE PRECISION.
+- fingerprint remains UNIQUE.
 
-Test:
-1. /collect
-2. /alert_check
-3. /alert_check 15
+All Stage 16 functionality remains:
+- SKHY filtering
+- readable /alert_check cards
+- score component breakdown
+- automatic Watch commands
+
+Test after deploy:
+1. /watch_status
+2. /collect
+3. /alert_check
 4. /watch_now

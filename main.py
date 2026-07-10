@@ -161,15 +161,14 @@ CREATE TABLE IF NOT EXISTS bot_settings (
 );
 
 CREATE TABLE IF NOT EXISTS alert_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at TEXT NOT NULL,
-    fingerprint TEXT NOT NULL,
+    id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL,
+    fingerprint TEXT NOT NULL UNIQUE,
     symbol TEXT NOT NULL,
     timeframe TEXT NOT NULL,
     side TEXT NOT NULL,
     alert_types TEXT NOT NULL,
-    priority REAL NOT NULL,
-    UNIQUE(fingerprint)
+    priority DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_alert_created_at ON alert_history(created_at);
 """
