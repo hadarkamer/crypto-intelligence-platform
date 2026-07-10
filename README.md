@@ -1,20 +1,28 @@
-Stage 16 v2 — PostgreSQL Schema Fix
+Stage 17 — Timeframe Verification Fix
 
-Fixes the failed deploy:
-- PostgreSQL no longer receives SQLite syntax.
-- alert_history.id uses BIGSERIAL PRIMARY KEY.
-- alert_history.created_at uses TIMESTAMPTZ.
-- priority uses DOUBLE PRECISION.
-- fingerprint remains UNIQUE.
+Recurring bug fixed:
+CoinGlass sometimes accepted the click but kept showing the previous timeframe.
+The old reader then saved the same table under a different timeframe label.
 
-All Stage 16 functionality remains:
-- SKHY filtering
-- readable /alert_check cards
-- score component breakdown
-- automatic Watch commands
+New safeguards:
+- clicks tabs with several selector strategies
+- polls until content changes
+- checks the active tab when detectable
+- creates a fingerprint from the first 10 rows
+- rejects a timeframe if its fingerprint duplicates an earlier timeframe
+- retries each timeframe up to 3 times
+- rejected timeframes are marked missing and are not saved
 
-Test after deploy:
-1. /watch_status
+Important:
+It is better to save fewer verified rows than to save duplicated/mislabeled data.
+
+Expected logs:
+[dom] tf=24h verified=True ...
+or
+[dom] tf=24h REJECTED ... duplicate_of=12h
+
+Test:
+1. Deploy
 2. /collect
-3. /alert_check
-4. /watch_now
+3. Check Render logs for verified/rejected lines
+4. /coin BTC

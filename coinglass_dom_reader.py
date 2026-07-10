@@ -345,11 +345,57 @@ def _parse_body_lines_for_symbols(timeframe: str, lines: List[str], collected_at
     return rows
 
 
-async def read_timeframe(page: Page, timeframe: str) -> Dict[str, Any]:
-    """Click/select one timeframe and parse Max Pain rows from page body text."""
-    clicked = False
 
-    # Try visible labels exactly as they appear on the site.
+def _rows_fingerprint(rows: List[Dict[str, Any]]) -> str:
+    """Stable signature used to detect stale/duplicated timeframe content."""
+    sample = []
+    for row in rows[:10]:
+        sample.append((
+            row.get("symbol"),
+            row.get("max_short_price"),
+            row.get("short_amount_usd"),
+            row.get("max_long_price"),
+            row.get("long_amount_usd"),
+        ))
+    return json.dumps(sample, sort_keys=True, ensure_ascii=False)
+
+
+async def _active_timeframe_label(page) -> Optional[str]:
+    """Best-effort detection of the currently selected timeframe tab."""
+    return await page.evaluate(
+        """
+        () => {
+            const labels = ['12 hour','24 hour','48 hour','3 day','1 week','2 week','1 month'];
+            const nodes = [...document.querySelectorAll('button, [role="tab"], div, span')];
+            for (const el of nodes) {
+                const text = (el.innerText || el.textContent || '').trim();
+                if (!labels.includes(text)) continue;
+
+                const cls = String(el.className || '').toLowerCase();
+                const ariaSelected = el.getAttribute('aria-selected');
+                const dataState = el.getAttribute('data-state');
+                const style = getComputedStyle(el);
+
+                if (
+                    ariaSelected === 'true' ||
+                    dataState === 'active' ||
+                    cls.includes('active') ||
+                    cls.includes('selected') ||
+                    cls.includes('current') ||
+                    style.borderColor === 'rgb(65, 132, 230)' ||
+                    style.color === 'rgb(65, 132, 230)'
+                ) {
+                    return text;
+                }
+            }
+            return null;
+        }
+        """
+    )
+
+
+async def _click_timeframe_verified(page, timeframe: str) -> bool:
+    """Click the requested tab using several selectors."""
     label_map = {
         "12h": "12 hour",
         "24h": "24 hour",
@@ -361,29 +407,115 @@ async def read_timeframe(page: Page, timeframe: str) -> Dict[str, Any]:
     }
     label = label_map.get(timeframe, timeframe)
 
-    try:
-        await page.get_by_text(label, exact=True).first.click(timeout=5000)
-        clicked = True
-        await page.wait_for_timeout(7000)
-    except Exception:
-        # 12h is often the default; keep going.
-        await page.wait_for_timeout(5000)
+    candidates = [
+        page.get_by_role("tab", name=label, exact=True),
+        page.get_by_role("button", name=label, exact=True),
+        page.get_by_text(label, exact=True),
+        page.locator("button").filter(has_text=label),
+        page.locator('[role="tab"]').filter(has_text=label),
+    ]
 
-    tables = await _extract_tables(page)
-    lines = await _extract_body_lines(page, limit=1200)
+    for locator in candidates:
+        try:
+            target = locator.first
+            await target.scroll_into_view_if_needed(timeout=2000)
+            await target.click(timeout=4000, force=True)
+            return True
+        except Exception:
+            continue
+    return False
 
-    rows = _parse_body_maxpain_rows(lines, timeframe)
+
+async def read_timeframe(
+    page,
+    timeframe: str,
+    previous_fingerprint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Select a timeframe and accept rows only after the page really changed.
+
+    The old bug:
+    CoinGlass sometimes reported click success while the visible table still
+    contained the previous timeframe. The parser then labelled stale rows as the
+    new timeframe.
+
+    This version:
+    - retries the click
+    - waits for active-tab/content confirmation
+    - compares row fingerprints
+    - refuses duplicate stale content
+    """
+    label_map = {
+        "12h": "12 hour",
+        "24h": "24 hour",
+        "48h": "48 hour",
+        "3d": "3 day",
+        "1w": "1 week",
+        "2w": "2 week",
+        "1m": "1 month",
+    }
+    expected_label = label_map.get(timeframe, timeframe)
+
+    last_debug = {}
+    for attempt in range(1, 4):
+        clicked = await _click_timeframe_verified(page, timeframe)
+
+        # CoinGlass updates asynchronously. Poll rather than trusting click().
+        for poll in range(1, 13):
+            await page.wait_for_timeout(1000)
+
+            tables = await _extract_tables(page)
+            lines = await _extract_body_lines(page, limit=1200)
+            rows = _parse_body_maxpain_rows(lines, timeframe)
+            fingerprint = _rows_fingerprint(rows) if rows else None
+            active_label = await _active_timeframe_label(page)
+
+            changed = (
+                bool(rows)
+                and (
+                    previous_fingerprint is None
+                    or fingerprint != previous_fingerprint
+                    or timeframe == "12h"
+                )
+            )
+            active_ok = active_label in {None, expected_label}
+
+            last_debug = {
+                "table_count": len(tables),
+                "table_headers": [t.get("headers", []) for t in tables],
+                "body_preview": lines[:120],
+                "parsed_count": len(rows),
+                "attempt": attempt,
+                "poll": poll,
+                "active_label": active_label,
+                "expected_label": expected_label,
+                "fingerprint": fingerprint,
+                "previous_fingerprint": previous_fingerprint,
+                "clicked": clicked,
+                "changed": changed,
+                "active_ok": active_ok,
+            }
+
+            if changed and active_ok:
+                return {
+                    "timeframe": timeframe,
+                    "clicked": clicked,
+                    "verified": True,
+                    "rows": rows,
+                    "fingerprint": fingerprint,
+                    "debug": last_debug,
+                }
+
+        # Retry after another click and slightly longer pause.
+        await page.wait_for_timeout(1500)
 
     return {
         "timeframe": timeframe,
-        "clicked": clicked,
-        "rows": rows,
-        "debug": {
-            "table_count": len(tables),
-            "table_headers": [t.get("headers", []) for t in tables],
-            "body_preview": lines[:120],
-            "parsed_count": len(rows),
-        },
+        "clicked": False,
+        "verified": False,
+        "rows": [],
+        "fingerprint": None,
+        "error": "timeframe content did not change or active tab could not be verified",
+        "debug": last_debug,
     }
 
 
@@ -460,10 +592,17 @@ async def collect_coinglass_dom_snapshot(
                 )
             print("[dom] body_preview_first_80=" + json.dumps(initial_lines[:80], ensure_ascii=False), flush=True)
 
+            previous_fingerprint = None
+            accepted_fingerprints: Dict[str, str] = {}
+
             for tf in timeframes:
                 print(f"[dom] ===== timeframe {tf} =====", flush=True)
                 try:
-                    result = await read_timeframe(page, tf)
+                    result = await read_timeframe(
+                        page,
+                        tf,
+                        previous_fingerprint=previous_fingerprint,
+                    )
                     by_timeframe[tf] = result
                     rows = result.get("rows", [])
                     debug = result.get("debug", {})
@@ -479,15 +618,38 @@ async def collect_coinglass_dom_snapshot(
                         + json.dumps((debug.get("body_preview") or [])[:60], ensure_ascii=False),
                         flush=True,
                     )
-                    if rows:
+                    fingerprint = result.get("fingerprint")
+                    duplicate_of = next(
+                        (
+                            prior_tf
+                            for prior_tf, prior_fp in accepted_fingerprints.items()
+                            if fingerprint and prior_fp == fingerprint
+                        ),
+                        None,
+                    )
+
+                    if rows and result.get("verified") and not duplicate_of:
+                        print(
+                            f"[dom] tf={tf} verified=True active_label="
+                            f"{debug.get('active_label')} fingerprint={fingerprint[:120] if fingerprint else None}",
+                            flush=True,
+                        )
                         print(
                             f"[dom] tf={tf} first_rows="
                             + json.dumps(rows[:3], ensure_ascii=False)[:4000],
                             flush=True,
                         )
                         all_rows.extend(rows)
+                        accepted_fingerprints[tf] = fingerprint
+                        previous_fingerprint = fingerprint
                     else:
                         missing.append(tf)
+                        print(
+                            f"[dom] tf={tf} REJECTED verified={result.get('verified')} "
+                            f"duplicate_of={duplicate_of} error={result.get('error')} "
+                            f"active_label={debug.get('active_label')}",
+                            flush=True,
+                        )
                 except Exception as exc:
                     missing.append(tf)
                     by_timeframe[tf] = {"timeframe": tf, "error": repr(exc), "rows": []}
