@@ -8,6 +8,7 @@ import sqlite3
 import time
 import zlib
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -69,7 +70,7 @@ COLLECTOR_VERSION = "v3-dom-reader"
 COLLECT_LOCK = None
 WATCH_TASK = None
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
-WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "75"))
+WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
 WATCH_RUNTIME = {
     "last_scan_utc": None,
@@ -1810,28 +1811,56 @@ async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
 
 
 async def watch_loop(bot_app):
-    """Silent automatic loop: no Telegram message unless a real alert is sent."""
-    print(
-        f"[watch] loop started; interval={WATCH_INTERVAL_MINUTES}m; "
-        f"threshold={WATCH_PRIORITY_THRESHOLD}; cooldown={WATCH_COOLDOWN_MINUTES}m",
-        flush=True,
-    )
-
+    """Manager loop. Never activates Watch without explicit /watch_on."""
+    global WATCH_SCAN_TASK
+    interval_seconds = max(1, WATCH_INTERVAL_MINUTES) * 60
+    next_run = None
+    print(f"[watch] manager ready; interval={WATCH_INTERVAL_MINUTES}m; threshold={WATCH_PRIORITY_THRESHOLD}; startup_state=OFF", flush=True)
     while True:
-        now = datetime.now(timezone.utc)
-        WATCH_RUNTIME["next_scan_utc"] = datetime.fromtimestamp(
-            now.timestamp() + max(1, WATCH_INTERVAL_MINUTES) * 60,
-            tz=timezone.utc,
-        ).isoformat()
-
         try:
-            if watch_enabled():
-                await run_watch_cycle(bot_app)
+            if not watch_enabled() or WATCH_RUNTIME.get("activation_source") != "manual":
+                WATCH_RUNTIME["next_scan_utc"] = None
+                next_run = None
+                await asyncio.sleep(2)
+                continue
+            now = datetime.now(timezone.utc)
+            if next_run is None:
+                next_run = now
+            if now < next_run:
+                WATCH_RUNTIME["next_scan_utc"] = next_run.isoformat()
+                await asyncio.sleep(min(2, max(0.1, (next_run-now).total_seconds())))
+                continue
+            if WATCH_SCAN_TASK and not WATCH_SCAN_TASK.done():
+                await asyncio.sleep(2)
+                continue
+            WATCH_RUNTIME["next_scan_utc"] = next_run.isoformat()
+            print("[watch] scan started", flush=True)
+            WATCH_SCAN_TASK = asyncio.create_task(run_watch_cycle(bot_app))
+            try:
+                await WATCH_SCAN_TASK
+            finally:
+                WATCH_SCAN_TASK = None
+            next_run = datetime.fromtimestamp(next_run.timestamp()+interval_seconds,tz=timezone.utc)
+            while next_run <= datetime.now(timezone.utc):
+                next_run = datetime.fromtimestamp(next_run.timestamp()+interval_seconds,tz=timezone.utc)
+            WATCH_RUNTIME["next_scan_utc"] = next_run.isoformat()
+            print(f"[watch] next scan {_format_watch_time(WATCH_RUNTIME['next_scan_utc'])} Israel time", flush=True)
+        except asyncio.CancelledError:
+            if WATCH_SCAN_TASK and not WATCH_SCAN_TASK.done():
+                WATCH_SCAN_TASK.cancel()
+                try:
+                    await WATCH_SCAN_TASK
+                except asyncio.CancelledError:
+                    pass
+            raise
         except Exception as exc:
             WATCH_RUNTIME["last_error"] = repr(exc)
-            print(f"[watch] cycle error: {exc!r}", flush=True)
+            WATCH_RUNTIME["last_cycle_status"] = "failed"
+            print(f"[watch] manager error: {exc!r}", flush=True)
+            await asyncio.sleep(2)
 
-        await asyncio.sleep(max(1, WATCH_INTERVAL_MINUTES) * 60)
+
+ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 
 
 def _format_watch_time(value) -> str:
@@ -1839,45 +1868,72 @@ def _format_watch_time(value) -> str:
         return "-"
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ISRAEL_TZ).strftime("%d/%m/%Y %H:%M:%S")
     except Exception:
         return str(value)
 
 
 async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    set_setting("watch_chat_id", str(chat_id))
+    if watch_enabled() and WATCH_RUNTIME.get("activation_source") == "manual":
+        await update.message.reply_text("👁 הצפייה כבר פעילה. לא נפתחה משימה נוספת.")
+        return
+    set_setting("watch_chat_id", str(update.effective_chat.id))
     set_setting("watch_enabled", "1")
+    WATCH_RUNTIME["activation_source"] = "manual"
+    WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
+    WATCH_RUNTIME["last_error"] = None
     await update.message.reply_text(
-        "✅ ההתראות האוטומטיות הופעלו\n\n"
-        f"בדיקה כל {WATCH_INTERVAL_MINUTES} דקות\n"
-        f"סף Priority: {WATCH_PRIORITY_THRESHOLD}\n"
-        f"Cooldown: {WATCH_COOLDOWN_MINUTES} דקות\n\n"
-        "המערכת תישאר שקטה לחלוטין ותשלח הודעה רק כאשר תימצא התראה חדשה שעוברת את הסף."
+        "✅ הצפייה הופעלה ידנית\n\n"
+        "הסריקה הראשונה תתחיל כעת.\n"
+        f"לאחר מכן תתבצע סריקה בכל {WATCH_INTERVAL_MINUTES} דקות.\n"
+        f"סף Priority: {WATCH_PRIORITY_THRESHOLD:.0f}\n"
+        "בסיום כל סריקה תישלח הודעת סיכום בטלגרם."
     )
 
 
 async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global WATCH_SCAN_TASK
     set_setting("watch_enabled", "0")
-    await update.message.reply_text("🛑 ההתראות האוטומטיות הופסקו.")
+    WATCH_RUNTIME["activation_source"] = None
+    WATCH_RUNTIME["next_scan_utc"] = None
+    cancelled=False
+    if WATCH_SCAN_TASK and not WATCH_SCAN_TASK.done():
+        WATCH_SCAN_TASK.cancel()
+        try:
+            await asyncio.wait_for(WATCH_SCAN_TASK, timeout=15)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        finally:
+            WATCH_SCAN_TASK=None
+        cancelled=True
+    WATCH_RUNTIME["scan_in_progress"] = False
+    WATCH_RUNTIME["last_cycle_status"] = "stopped"
+    await update.message.reply_text("🛑 הצפייה הופסקה והסריקה הפעילה בוטלה." if cancelled else "🛑 הצפייה הופסקה.")
 
 
 async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    state = "פעיל" if watch_enabled() else "כבוי"
+    state = "פעיל" if watch_enabled() and WATCH_RUNTIME.get("activation_source") == "manual" else "כבוי"
+    active_scan = "כן" if WATCH_RUNTIME.get("scan_in_progress") else "לא"
+    top_score=WATCH_RUNTIME.get("top_score")
+    top_line = "המועמד המוביל: -" if top_score is None else f"המועמד המוביל: {WATCH_RUNTIME.get('top_symbol')} / {WATCH_RUNTIME.get('top_timeframe')} ({fmt(top_score)}/100)"
+    missing=WATCH_RUNTIME.get("last_missing_timeframes") or []
+    missing_line = "טווחים חסרים במחזור האחרון: " + ", ".join(missing) if missing else "טווחים חסרים במחזור האחרון: אין"
     await update.message.reply_text(
         f"👁 Watch: {state}\n\n"
+        f"הופעל ידנית בסשן הנוכחי: {'כן' if WATCH_RUNTIME.get('activation_source') == 'manual' else 'לא'}\n"
+        f"סריקה פעילה כרגע: {active_scan}\n"
+        f"סטטוס המחזור האחרון: {WATCH_RUNTIME.get('last_cycle_status') or '-'}\n"
         f"בדיקה: כל {WATCH_INTERVAL_MINUTES} דקות\n"
-        f"Priority מינימלי: {WATCH_PRIORITY_THRESHOLD}\n"
-        f"Cooldown: {WATCH_COOLDOWN_MINUTES} דקות\n"
-        f"סריקה אחרונה: {_format_watch_time(WATCH_RUNTIME.get('last_scan_utc'))}\n"
-        f"סריקה הבאה: {_format_watch_time(WATCH_RUNTIME.get('next_scan_utc'))}\n"
-        f"הזדמנויות בסריקה האחרונה: {WATCH_RUNTIME.get('last_found', 0)}\n"
-        f"מעל הסף: {WATCH_RUNTIME.get('last_candidates', 0)}\n"
-        f"התראות שנשלחו: {WATCH_RUNTIME.get('last_sent', 0)}"
-        + (
-            f"\nשגיאה אחרונה: {WATCH_RUNTIME['last_error']}"
-            if WATCH_RUNTIME.get("last_error") else ""
-        )
+        f"Priority מינימלי: {WATCH_PRIORITY_THRESHOLD:.0f}\n"
+        f"סריקה אחרונה — שעון ישראל: {_format_watch_time(WATCH_RUNTIME.get('last_scan_utc'))}\n"
+        f"סריקה הבאה — שעון ישראל: {_format_watch_time(WATCH_RUNTIME.get('next_scan_utc'))}\n"
+        f"הזדמנויות בסריקה האחרונה: {WATCH_RUNTIME.get('last_found',0)}\n"
+        f"מעל הסף: {WATCH_RUNTIME.get('last_candidates',0)}\n"
+        f"התראות שנשלחו: {WATCH_RUNTIME.get('last_sent',0)}\n"
+        f"{top_line}\n{missing_line}"
+        + (f"\nשגיאה אחרונה: {WATCH_RUNTIME['last_error']}" if WATCH_RUNTIME.get('last_error') else "")
     )
 
 
@@ -1944,6 +2000,11 @@ async def main():
         raise RuntimeError("Missing PUBLIC_URL environment variable. Example: https://crypto-intelligence-platform-1.onrender.com")
 
     init_db()
+    set_setting("watch_enabled", "0")
+    WATCH_RUNTIME["activation_source"] = None
+    WATCH_RUNTIME["next_scan_utc"] = None
+    WATCH_RUNTIME["scan_in_progress"] = False
+    print("[watch] startup state forced OFF; waiting for /watch_on", flush=True)
 
     # Automatic scheduled collection is disabled for the trial phase.
     # Data collection now runs only when you send /collect in Telegram.
