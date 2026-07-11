@@ -68,6 +68,7 @@ NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v3-dom-reader"
 COLLECT_LOCK = None
+SCRAPE_LOCK = None
 WATCH_TASK = None
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
@@ -834,13 +835,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+def _get_scrape_lock():
+    """Shared lock for any CoinGlass/Binance scraping."""
+    global SCRAPE_LOCK
+    if SCRAPE_LOCK is None:
+        import asyncio
+        SCRAPE_LOCK = asyncio.Lock()
+    return SCRAPE_LOCK
+
 async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global COLLECT_LOCK
 
     if COLLECT_LOCK is None:
         COLLECT_LOCK = asyncio.Lock()
 
-    scrape_lock = _get_scrape_lock()
+    try:
+        scrape_lock = _get_scrape_lock()
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Failed to initialize scrape lock: {exc}")
+        return
 
     if COLLECT_LOCK.locked() or scrape_lock.locked():
         await update.message.reply_text(
