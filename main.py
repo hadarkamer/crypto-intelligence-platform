@@ -798,32 +798,16 @@ def tf_order_value(tf: str) -> int:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Crypto Intelligence Bot פעיל.\n"
-        "פקודות:\n"
-        "/collect - איסוף ידני עכשיו\n"
-        "/latest - snapshot אחרון\n"
-        "/coin BTC - מטבע בכל הטווחים\n"
-        "/range BTC 24h - מטבע וטווח\n"
-        "/top 10 - הכי קרובים ל-Max Pain\n"
-        "/consensus - מטבעות עם קרבה עקבית לאותו צד בכל הטווחים\n"
-        "/gap - פער ממוצע בין Short/Long Max Pain\n"
-        "/liqsum - מאזן סכומי הנזילות לפי טווח וסך הכול\n"
-        "/market - נטיית שוק לפי קרבה ל-Max Pain בכל טווח\n"
-        "/btc_like - מטבעות שהכיוון שלהם דומה ל-BTC\n"
-        "/score BTC - פירוק Setup Strength למטבע\n"
-        "/score_top - דירוג Setup Strength\n"
-        "/alert_check - דירוג Alert Score v2\n"
-        "/alert_explain BTC 24h - פירוט ניקוד\n"
+        "Crypto Intelligence Bot פעיל.\n\n"
+        "פקודות שימוש יומיומיות:\n"
+        "/collect - איסוף נתונים חדש\n"
+        "/alerts - הצגת הזדמנויות מדורגות\n"
+        "/coin BTC - פירוט מלא למטבע\n"
         "/watch_on - הפעלת התראות אוטומטיות\n"
-        "/watch_off - עצירת התראות\n"
-        "/watch_stop - עצירת התראות\n"
-        "/watch_status - מצב ההתראות\n"
-        "/watch_now - בדיקה מיידית ללא שמירה\n"
-        "/price_check - בדיקת כיסוי מחירים חיים\n"
-        "/price_check BTC - השוואת מחיר ויעדי Max Pain\n"
-        "/live_status - כיסוי מטבעות בחישובים החיים\n"
-        "/alerts - חריגות"
+        "/watch_status - מצב מערכת ההתראות\n"
+        "/watch_stop - עצירת התראות אוטומטיות"
     )
+
 
 async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global COLLECT_LOCK
@@ -1469,6 +1453,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"מרחק: {fmt(item.get('distance_pct'))}%\n"
         f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
         f"BTC Like: {item.get('btc_like_hits', 0)}/{item.get('btc_like_total', 0)}\n"
+        f"Market: {item.get('market_timeframe_bias', 'NEUTRAL')}\n"
         f"Target Cluster: {fmt(item.get('cluster_spread_pct'))}% "
         f"({item.get('cluster_count', 0)} טווחים)\n"
         f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
@@ -1477,14 +1462,15 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"Adjusted Near Liquidity Ratio: {fmt(item.get('adjusted_near_liquidity_ratio'))}x\n"
         "\n"
         "פירוט הניקוד:\n"
-        f"• קרבה ל-Max Pain: {fmt(c.get('proximity'))}/20\n"
+        f"• קרבה ל-Max Pain: {fmt(c.get('proximity'))}/25\n"
         f"• Directional Alignment: {fmt(c.get('directional_alignment'))}/20\n"
-        f"  - Consensus: {fmt(c.get('consensus'))}/15\n"
+        f"  - Consensus: {fmt(c.get('consensus'))}/12\n"
         f"  - BTC Like: {fmt(c.get('btc_like'))}/5\n"
-        f"• Target Clustering: {fmt(c.get('target_clustering'))}/15\n"
-        f"• High Liquidity Close Distance: {fmt(c.get('high_liquidity_close_distance'))}/10\n"
+        f"  - Market: {fmt(c.get('market'))}/3\n"
+        f"• Target Clustering: {fmt(c.get('target_clustering'))}/10\n"
+        f"• High Liquidity Close Distance: {fmt(c.get('high_liquidity_close_distance'))}/25\n"
         f"• Liquidity Balance: {fmt(c.get('liquidity_balance'))} "
-        "(טווח ‎-10 עד +10)\n\n"
+        "(טווח ‎-10 עד +20)\n\n"
         f"סוגי חריגה:\n{types_text}"
     )
     card += _other_alerts_block(item, all_items)
@@ -1513,7 +1499,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "📊 Alert Score v2\n"
+        "📊 הזדמנויות מדורגות\n"
         "איכות הנתונים וריבוי התראות אינם משפיעים על הציון.\n"
         "כל התראה נשארת נפרדת לפי מטבע וטווח זמן."
     )
@@ -1842,7 +1828,7 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"בדיקה כל {WATCH_INTERVAL_MINUTES} דקות\n"
         f"סף Priority: {WATCH_PRIORITY_THRESHOLD}\n"
         f"Cooldown: {WATCH_COOLDOWN_MINUTES} דקות\n\n"
-        "המערכת תישאר שקטה ותשלח הודעה רק כאשר תימצא התראה חדשה שעוברת את הסף."
+        "המערכת תישאר שקטה לחלוטין ותשלח הודעה רק כאשר תימצא התראה חדשה שעוברת את הסף."
     )
 
 
@@ -1941,27 +1927,11 @@ async def main():
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("help", start))
     bot_app.add_handler(CommandHandler("collect", collect_cmd))
-    bot_app.add_handler(CommandHandler("latest", latest))
     bot_app.add_handler(CommandHandler("coin", coin))
-    bot_app.add_handler(CommandHandler("range", range_cmd))
-    bot_app.add_handler(CommandHandler("top", top))
-    bot_app.add_handler(CommandHandler("consensus", consensus))
-    bot_app.add_handler(CommandHandler("gap", gap))
-    bot_app.add_handler(CommandHandler("liqsum", liqsum))
-    bot_app.add_handler(CommandHandler("market", market))
-    bot_app.add_handler(CommandHandler("btc_like", btc_like))
-    bot_app.add_handler(CommandHandler("score", score))
-    bot_app.add_handler(CommandHandler("score_top", score_top))
-    bot_app.add_handler(CommandHandler("alert_check", alert_check))
-    bot_app.add_handler(CommandHandler("alert_explain", alert_explain))
+    bot_app.add_handler(CommandHandler("alerts", alert_check))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
-    bot_app.add_handler(CommandHandler("watch_off", watch_off))
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
-    bot_app.add_handler(CommandHandler("watch_now", watch_now))
-    bot_app.add_handler(CommandHandler("price_check", price_check))
-    bot_app.add_handler(CommandHandler("live_status", live_status))
-    bot_app.add_handler(CommandHandler("alerts", alerts))
 
     await bot_app.initialize()
     await bot_app.start()

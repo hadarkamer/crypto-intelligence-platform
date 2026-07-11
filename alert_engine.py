@@ -32,7 +32,7 @@ TIMEFRAME_HOURS = {
     "2w": 336.0,
     "1m": 720.0,
 }
-RAW_MAX_SCORE = 75.0
+RAW_MAX_SCORE = 100.0
 
 
 def _get(row: Any, key: str, default=None):
@@ -86,14 +86,14 @@ def _gap_pct(row: Any) -> Optional[float]:
 
 
 def _proximity_points(distance_pct: Optional[float]) -> float:
-    """0..20. Full at <=0.25%, zero at >=2.00%."""
+    """0..25. Full at <=0.25%, zero at >=2.00%."""
     if distance_pct is None:
         return 0.0
     if distance_pct <= 0.25:
-        return 20.0
+        return 25.0
     if distance_pct >= 2.0:
         return 0.0
-    return round((2.0 - distance_pct) / 1.75 * 20.0, 2)
+    return round((2.0 - distance_pct) / 1.75 * 25.0, 2)
 
 
 def _consensus_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
@@ -126,26 +126,38 @@ def _directional_alignment(
     consensus_total: int,
     btc_hits: int,
     btc_total: int,
+    market_match: bool,
 ) -> Dict[str, float]:
-    """Total 0..20: Consensus 0..15 + BTC Like 0..5.
+    """Directional Alignment 0..20.
 
-    BTC Like can reinforce a coherent coin, but cannot rescue a split signal.
-    It receives points only when consensus is at least 5 timeframes.
+    - Consensus: 0..12
+    - BTC Like: 0..5
+    - Market alignment: 0..3
     """
     consensus_points = (
-        round(consensus_hits / consensus_total * 15.0, 2)
+        round(consensus_hits / consensus_total * 12.0, 2)
         if consensus_total else 0.0
     )
-
     btc_points = 0.0
-    if consensus_hits >= 5 and btc_total:
-        btc_points = round(btc_hits / btc_total * 5.0, 2)
-
+    market_points = 0.0
+    if consensus_hits >= 5:
+        if btc_total:
+            btc_points = round(btc_hits / btc_total * 5.0, 2)
+        market_points = 3.0 if market_match else 0.0
     return {
         "consensus_points": consensus_points,
         "btc_like_points": btc_points,
-        "total": round(consensus_points + btc_points, 2),
+        "market_points": market_points,
+        "total": round(consensus_points + btc_points + market_points, 2),
     }
+
+
+
+def _market_bias_map(rows: List[Any]) -> Dict[str, Any]:
+    market = analysis.calculate_market_bias(rows)
+    by_tf = {str(item.get("timeframe")): item.get("bias") for item in market.get("timeframes", [])}
+    return {"by_timeframe": by_tf, "overall": market.get("overall", {}).get("bias", "NEUTRAL")}
+
 
 
 def _cluster_map(rows: List[Any], consensus: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -204,13 +216,13 @@ def _cluster_map(rows: List[Any], consensus: Dict[str, Dict[str, Any]]) -> Dict[
         if spread is None:
             points = 0.0
         elif spread <= 0.50:
-            points = 15.0
+            points = 10.0
         elif spread <= 1.00:
-            points = 12.0
-        elif spread <= 2.00:
             points = 8.0
+        elif spread <= 2.00:
+            points = 5.0
         elif spread <= 3.00:
-            points = 4.0
+            points = 2.0
         else:
             points = 0.0
 
@@ -226,33 +238,19 @@ def _cluster_map(rows: List[Any], consensus: Dict[str, Dict[str, Any]]) -> Dict[
 
 
 def _liquidity_balance(near_amount: float, far_amount: float) -> Dict[str, Any]:
-    """Liquidity Balance bonus/penalty -10..+10.
-
-    balance = (near - far) / (near + far)
-    points = balance * 10
-
-    Equal sides give 0. A weaker near side subtracts points.
-    """
     total = near_amount + far_amount
     if total <= 0:
-        return {
-            "near_share_pct": None,
-            "near_far_ratio": None,
-            "balance": None,
-            "points": 0.0,
-        }
-
+        return {"near_share_pct": None, "near_far_ratio": None, "balance": None, "points": 0.0}
     balance = (near_amount - far_amount) / total
     near_share = near_amount / total * 100.0
     ratio = near_amount / far_amount if far_amount > 0 else None
-
+    points = max(-10.0, min(20.0, balance * 30.0))
     return {
         "near_share_pct": near_share,
         "near_far_ratio": ratio,
         "balance": balance,
-        "points": round(balance * 10.0, 2),
+        "points": round(points, 2),
     }
-
 
 
 def _adjusted_near_liquidity_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
@@ -307,25 +305,14 @@ def _high_liquidity_close_points(
     distance_pct: Optional[float],
     adjusted_ratio: Optional[float],
 ) -> float:
-    """0..10 points.
-
-    The distance threshold prevents double-counting proximity continuously:
-    - if distance > 1%, score is 0
-    - otherwise score depends only on adjusted liquidity ratio
-    """
+    """0..25 points, only when distance <= 1%."""
     if distance_pct is None or distance_pct > 1.0 or adjusted_ratio is None:
         return 0.0
-
-    if adjusted_ratio >= 2.50:
-        return 10.0
-    if adjusted_ratio >= 2.00:
-        return 8.0
-    if adjusted_ratio >= 1.60:
-        return 6.0
-    if adjusted_ratio >= 1.30:
-        return 4.0
-    if adjusted_ratio >= 1.10:
-        return 2.0
+    if adjusted_ratio >= 2.50: return 25.0
+    if adjusted_ratio >= 2.00: return 20.0
+    if adjusted_ratio >= 1.60: return 15.0
+    if adjusted_ratio >= 1.30: return 10.0
+    if adjusted_ratio >= 1.10: return 5.0
     return 0.0
 
 
@@ -333,6 +320,7 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
     """Build one independent alert per coin/timeframe."""
     consensus = _consensus_map(rows)
     btc_like = _btc_similarity_map(rows)
+    market = _market_bias_map(rows)
     clusters = _cluster_map(rows, consensus)
     adjusted_liquidity = _adjusted_near_liquidity_map(rows)
     out: List[Dict[str, Any]] = []
@@ -372,8 +360,11 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
         btc_hits = int(btc.get("hits", 0) or 0)
         btc_total = int(btc.get("total", 0) or 0)
 
+        market_tf_bias = market.get("by_timeframe", {}).get(timeframe, "NEUTRAL")
+        market_overall_bias = market.get("overall", "NEUTRAL")
+        market_match = market_tf_bias == side or (market_tf_bias == "NEUTRAL" and market_overall_bias == side)
         directional = _directional_alignment(
-            consensus_hits, consensus_total, btc_hits, btc_total
+            consensus_hits, consensus_total, btc_hits, btc_total, market_match
         )
         cluster = clusters.get(symbol, {
             "count": 0, "spread_pct": None, "points": 0.0, "side": None
@@ -394,7 +385,7 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
         # High liquidity close distance:
         # - distance <= 1%
         # - adjusted near liquidity ratio >= 1.60
-        if high_liquidity_close_points >= 6.0:
+        if high_liquidity_close_points >= 15.0:
             types.append("HIGH_LIQUIDITY_CLOSE_DISTANCE")
 
         if cluster["points"] >= 8.0 and cluster.get("side") == side:
@@ -410,6 +401,7 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "directional_alignment": directional["total"],
             "consensus": directional["consensus_points"],
             "btc_like": directional["btc_like_points"],
+            "market": directional["market_points"],
             "target_clustering": float(cluster["points"]),
             "high_liquidity_close_distance": float(high_liquidity_close_points),
             "liquidity_balance": float(balance["points"]),
@@ -446,6 +438,9 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "consensus_total": consensus_total,
             "btc_like_hits": btc_hits,
             "btc_like_total": btc_total,
+            "market_timeframe_bias": market_tf_bias,
+            "market_overall_bias": market_overall_bias,
+            "market_match": market_match,
             "cluster_count": cluster["count"],
             "cluster_spread_pct": cluster["spread_pct"],
             "cluster_side": cluster.get("side"),
