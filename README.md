@@ -1,12 +1,11 @@
-# Stage 35 — WATCH_SCAN_TASK Final Fix
+# Stage 36 — Complete Separation Between /collect and Watch
 
-Fixed:
-- Added exactly one top-level `WATCH_SCAN_TASK = None`.
-- Preserved runtime resets inside watch_loop/watch_off.
-- Confirmed both functions declare it global.
-- No scoring, collection, alert, database, or Telegram logic was changed.
-
-Expected:
-- /watch_on starts without NameError.
-- /watch_status shows the live scan state.
-- /watch_stop cancels an active scan safely.
+Implemented:
+- /collect never enables, schedules, or changes Watch.
+- A manual /collect has priority over the browser resource.
+- A scheduled Watch cycle is deferred silently while /collect is active.
+- No Telegram warning is sent merely because /collect is running.
+- /watch_on during /collect activates Watch but waits for collection to finish.
+- Watch and collect can no longer open two CoinGlass browsers simultaneously.
+- Completed Watch cycles still send a Telegram summary.
+- Pending Telegram commands are preserved during deploy/restart.
