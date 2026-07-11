@@ -5,7 +5,6 @@ import json
 import os
 import re
 import sqlite3
-import statistics
 import time
 import zlib
 from datetime import datetime, timezone
@@ -72,6 +71,14 @@ WATCH_TASK = None
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "75"))
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
+WATCH_RUNTIME = {
+    "last_scan_utc": None,
+    "next_scan_utc": None,
+    "last_found": 0,
+    "last_candidates": 0,
+    "last_sent": 0,
+    "last_error": None,
+}
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS max_pain_snapshots (
@@ -695,7 +702,7 @@ async def collect_live_rows_for_watch():
         excluded_symbols=NON_CRYPTO_SYMBOLS,
     )
 
-    rows = attach_liquidity_baselines(live_result.get("rows", []))
+    rows = live_result.get("rows", [])
     print(
         f"[watch] fresh rows={len(rows)}; "
         f"skipped={live_result.get('skipped_symbols', [])}",
@@ -733,74 +740,9 @@ def short_time(value):
     return s[11:16] if len(s) >= 16 else s
 
 
-def _as_dict(row):
-    return dict(row) if not isinstance(row, dict) else dict(row)
-
-
-def _liquidity_baseline_map(history_limit: int = 5000, min_samples: int = 3):
-    """Median liquidity for the same coin, timeframe and side."""
-    history = query(
-        """
-        SELECT symbol, timeframe,
-               short_liquidation_amount, long_liquidation_amount
-        FROM max_pain_snapshots
-        ORDER BY collected_at DESC
-        LIMIT ?
-        """,
-        (history_limit,),
-    )
-
-    values = {}
-    for row in history:
-        symbol = str(row["symbol"]).upper()
-        tf = str(row["timeframe"])
-        key = (symbol, tf)
-        bucket = values.setdefault(key, {"short": [], "long": []})
-
-        short_amount = row["short_liquidation_amount"]
-        long_amount = row["long_liquidation_amount"]
-        if short_amount is not None and float(short_amount) > 0:
-            bucket["short"].append(float(short_amount))
-        if long_amount is not None and float(long_amount) > 0:
-            bucket["long"].append(float(long_amount))
-
-    result = {}
-    for key, bucket in values.items():
-        result[key] = {
-            "baseline_short_liquidity": (
-                statistics.median(bucket["short"])
-                if len(bucket["short"]) >= min_samples else None
-            ),
-            "baseline_long_liquidity": (
-                statistics.median(bucket["long"])
-                if len(bucket["long"]) >= min_samples else None
-            ),
-            "baseline_short_samples": len(bucket["short"]),
-            "baseline_long_samples": len(bucket["long"]),
-        }
-    return result
-
-
-def attach_liquidity_baselines(rows):
-    baselines = _liquidity_baseline_map()
-    output = []
-    for source_row in rows:
-        row = _as_dict(source_row)
-        key = (str(row.get("symbol", "")).upper(), str(row.get("timeframe", "")))
-        baseline = baselines.get(key, {})
-        row.update({
-            "baseline_short_liquidity": baseline.get("baseline_short_liquidity"),
-            "baseline_long_liquidity": baseline.get("baseline_long_liquidity"),
-            "baseline_short_samples": baseline.get("baseline_short_samples", 0),
-            "baseline_long_samples": baseline.get("baseline_long_samples", 0),
-        })
-        output.append(row)
-    return output
-
-
 def raw_latest_snapshot_rows():
     """Latest saved Binance-backed snapshot with validation metadata."""
-    rows = query(
+    return query(
         f"""
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
         SELECT symbol, timeframe, collected_at, source, is_valid, validation_errors,
@@ -814,7 +756,6 @@ def raw_latest_snapshot_rows():
         ORDER BY symbol, {TIMEFRAME_ORDER_SQL}
         """
     )
-    return attach_liquidity_baselines(rows)
 
 
 def latest_snapshot_live_result():
@@ -1457,11 +1398,6 @@ def _quality_result(item: Dict[str, Any], rows: List[Any]) -> Dict[str, Any]:
         elif _row_get(row, "is_valid", True) in (False, 0):
             orange.append("שורת הנתונים סומנה כלא תקינה בבדיקת האיסוף.")
 
-    if item.get("baseline_liquidity") is None:
-        yellow.append(
-            "אין עדיין לפחות 3 דגימות היסטוריות לאותו מטבע, טווח וצד; "
-            "רכיב Liquidity Density קיבל 0 נקודות."
-        )
 
     if red:
         return {"level": "red", "title": "🔴 בעיית נתונים קריטית", "notes": red + orange + yellow}
@@ -1538,15 +1474,13 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
         f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}\n"
         f"Near Share: {fmt(item.get('near_share_pct'))}%\n"
-        f"Relative Liquidity: {fmt(item.get('relative_liquidity'))}\n"
-        f"Liquidity Density: {fmt(item.get('liquidity_density'))}\n\n"
+        "\n"
         "פירוט הניקוד:\n"
         f"• קרבה ל-Max Pain: {fmt(c.get('proximity'))}/20\n"
         f"• Directional Alignment: {fmt(c.get('directional_alignment'))}/20\n"
         f"  - Consensus: {fmt(c.get('consensus'))}/15\n"
         f"  - BTC Like: {fmt(c.get('btc_like'))}/5\n"
         f"• Target Clustering: {fmt(c.get('target_clustering'))}/15\n"
-        f"• Liquidity Density: {fmt(c.get('liquidity_density'))}/20\n"
         f"• Liquidity Balance: {fmt(c.get('liquidity_balance'))} "
         "(טווח ‎-10 עד +10)\n\n"
         f"סוגי חריגה:\n{types_text}"
@@ -1815,10 +1749,13 @@ def _watch_message(item, all_items, rows) -> str:
 
 
 async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
-    """Run one in-memory watch cycle and send only new high-priority alerts."""
+    """Run one in-memory scan and send only new alerts above the threshold."""
     chat_id = get_setting("watch_chat_id")
     if not chat_id:
         return {"ok": False, "reason": "no_chat_id", "sent": 0, "found": 0}
+
+    WATCH_RUNTIME["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
+    WATCH_RUNTIME["last_error"] = None
 
     rows, live_result = await collect_live_rows_for_watch()
     items = alert_engine.build_opportunities(rows, limit=500)
@@ -1840,6 +1777,10 @@ async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
         _remember_alert(item, fingerprint)
         sent += 1
 
+    WATCH_RUNTIME["last_found"] = len(items)
+    WATCH_RUNTIME["last_candidates"] = len(candidates)
+    WATCH_RUNTIME["last_sent"] = sent
+
     print(
         f"[watch] cycle done; opportunities={len(items)}; "
         f"candidates={len(candidates)}; sent={sent}",
@@ -1856,7 +1797,7 @@ async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
 
 
 async def watch_loop(bot_app):
-    """Automatic loop. Reads data every 15 minutes without saving snapshots."""
+    """Silent automatic loop: no Telegram message unless a real alert is sent."""
     print(
         f"[watch] loop started; interval={WATCH_INTERVAL_MINUTES}m; "
         f"threshold={WATCH_PRIORITY_THRESHOLD}; cooldown={WATCH_COOLDOWN_MINUTES}m",
@@ -1864,13 +1805,30 @@ async def watch_loop(bot_app):
     )
 
     while True:
+        now = datetime.now(timezone.utc)
+        WATCH_RUNTIME["next_scan_utc"] = datetime.fromtimestamp(
+            now.timestamp() + max(1, WATCH_INTERVAL_MINUTES) * 60,
+            tz=timezone.utc,
+        ).isoformat()
+
         try:
             if watch_enabled():
                 await run_watch_cycle(bot_app)
         except Exception as exc:
+            WATCH_RUNTIME["last_error"] = repr(exc)
             print(f"[watch] cycle error: {exc!r}", flush=True)
 
         await asyncio.sleep(max(1, WATCH_INTERVAL_MINUTES) * 60)
+
+
+def _format_watch_time(value) -> str:
+    if not value:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return str(value)
 
 
 async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1878,47 +1836,54 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_setting("watch_chat_id", str(chat_id))
     set_setting("watch_enabled", "1")
     await update.message.reply_text(
-        "ההתראות האוטומטיות הופעלו.\n"
-        f"בדיקה כל {WATCH_INTERVAL_MINUTES} דקות.\n"
-        f"סף Priority: {WATCH_PRIORITY_THRESHOLD}.\n"
-        f"אותה התראה לא תישלח שוב במשך {WATCH_COOLDOWN_MINUTES} דקות.\n"
-        "הבדיקה אינה שומרת Snapshot מלא."
+        "✅ ההתראות האוטומטיות הופעלו\n\n"
+        f"בדיקה כל {WATCH_INTERVAL_MINUTES} דקות\n"
+        f"סף Priority: {WATCH_PRIORITY_THRESHOLD}\n"
+        f"Cooldown: {WATCH_COOLDOWN_MINUTES} דקות\n\n"
+        "המערכת תישאר שקטה ותשלח הודעה רק כאשר תימצא התראה חדשה שעוברת את הסף."
     )
 
 
 async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_setting("watch_enabled", "0")
-    await update.message.reply_text("ההתראות האוטומטיות הופסקו.")
+    await update.message.reply_text("🛑 ההתראות האוטומטיות הופסקו.")
 
 
 async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = "פעיל" if watch_enabled() else "כבוי"
-    chat_id = get_setting("watch_chat_id", "-")
     await update.message.reply_text(
-        f"Watch: {state}\n"
+        f"👁 Watch: {state}\n\n"
         f"בדיקה: כל {WATCH_INTERVAL_MINUTES} דקות\n"
         f"Priority מינימלי: {WATCH_PRIORITY_THRESHOLD}\n"
         f"Cooldown: {WATCH_COOLDOWN_MINUTES} דקות\n"
-        f"Chat ID מוגדר: {'כן' if chat_id != '-' else 'לא'}"
+        f"סריקה אחרונה: {_format_watch_time(WATCH_RUNTIME.get('last_scan_utc'))}\n"
+        f"סריקה הבאה: {_format_watch_time(WATCH_RUNTIME.get('next_scan_utc'))}\n"
+        f"הזדמנויות בסריקה האחרונה: {WATCH_RUNTIME.get('last_found', 0)}\n"
+        f"מעל הסף: {WATCH_RUNTIME.get('last_candidates', 0)}\n"
+        f"התראות שנשלחו: {WATCH_RUNTIME.get('last_sent', 0)}"
+        + (
+            f"\nשגיאה אחרונה: {WATCH_RUNTIME['last_error']}"
+            if WATCH_RUNTIME.get("last_error") else ""
+        )
     )
 
 
 async def watch_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_setting("watch_chat_id", str(update.effective_chat.id))
     await update.message.reply_text(
-        "מריץ בדיקת Watch עכשיו, ללא שמירת Snapshot..."
+        "🔎 מריץ בדיקת Watch חד-פעמית ללא שמירת Snapshot..."
     )
     try:
         result = await run_watch_cycle(context.application)
         await update.message.reply_text(
-            "בדיקת Watch הסתיימה.\n"
+            "✅ בדיקת Watch הסתיימה\n"
             f"הזדמנויות שנמצאו: {result.get('found', 0)}\n"
             f"מעל הסף: {result.get('candidates', 0)}\n"
             f"התראות חדשות שנשלחו: {result.get('sent', 0)}"
         )
     except Exception as exc:
-        await update.message.reply_text(f"שגיאה בבדיקת Watch: {exc!r}")
-
+        WATCH_RUNTIME["last_error"] = repr(exc)
+        await update.message.reply_text(f"❌ שגיאה בבדיקת Watch: {exc!r}")
 
 
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):

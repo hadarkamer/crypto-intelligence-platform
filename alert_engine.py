@@ -6,9 +6,8 @@ Final agreed principles:
 - Multiple alerts for one coin do not add score.
 - Consensus and BTC similarity share one Directional Alignment component.
 - Target clustering is scored.
-- Liquidity is split into:
-  1. Liquidity Density — positive 0..20
-  2. Liquidity Balance — bonus/penalty -10..+10
+- Liquidity Density is intentionally excluded because it depends on repeated historical samples and is not reliable enough yet.
+- Liquidity Balance is a bonus/penalty from -10 to +10.
 - Historical direction persistence is not scored.
 """
 
@@ -21,7 +20,7 @@ import analysis
 
 
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
-RAW_MAX_SCORE = 85.0
+RAW_MAX_SCORE = 65.0
 
 
 def _get(row: Any, key: str, default=None):
@@ -63,15 +62,6 @@ def _amount_for_side(row: Any, side: str) -> float:
 def _opposite_amount(row: Any, side: str) -> float:
     key = "long_liquidation_amount" if side == "SHORT" else "short_liquidation_amount"
     return float(_get(row, key) or 0.0)
-
-
-def _baseline_for_side(row: Any, side: str) -> Optional[float]:
-    key = "baseline_short_liquidity" if side == "SHORT" else "baseline_long_liquidity"
-    value = _get(row, key)
-    if value is None:
-        return None
-    value = float(value)
-    return value if value > 0 else None
 
 
 def _gap_pct(row: Any) -> Optional[float]:
@@ -223,52 +213,6 @@ def _cluster_map(rows: List[Any], consensus: Dict[str, Dict[str, Any]]) -> Dict[
     return result
 
 
-def _liquidity_density(
-    near_amount: float,
-    baseline_amount: Optional[float],
-    distance_pct: Optional[float],
-) -> Dict[str, Any]:
-    """Liquidity Density 0..20.
-
-    relative_liquidity = current near-side liquidity /
-                         historical median for same coin, timeframe and side
-
-    density = relative_liquidity / max(distance_pct, 0.10)
-
-    This avoids ranking BTC above smaller coins merely because BTC has more dollars.
-    """
-    if near_amount <= 0 or not baseline_amount or distance_pct is None:
-        return {
-            "relative_liquidity": None,
-            "density": None,
-            "points": 0.0,
-            "baseline": baseline_amount,
-        }
-
-    relative = near_amount / baseline_amount
-    density = relative / max(distance_pct, 0.10)
-
-    if density >= 4.0:
-        points = 20.0
-    elif density >= 2.5:
-        points = 16.0
-    elif density >= 1.5:
-        points = 12.0
-    elif density >= 1.0:
-        points = 8.0
-    elif density >= 0.5:
-        points = 4.0
-    else:
-        points = 0.0
-
-    return {
-        "relative_liquidity": relative,
-        "density": density,
-        "points": points,
-        "baseline": baseline_amount,
-    }
-
-
 def _liquidity_balance(near_amount: float, far_amount: float) -> Dict[str, Any]:
     """Liquidity Balance bonus/penalty -10..+10.
 
@@ -316,7 +260,6 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
 
         near_amount = _amount_for_side(row, side)
         far_amount = _opposite_amount(row, side)
-        baseline = _baseline_for_side(row, side)
 
         cons = consensus.get(symbol, {})
         consensus_hits = int(cons.get("hits", 0) or 0)
@@ -332,7 +275,6 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
         cluster = clusters.get(symbol, {
             "count": 0, "spread_pct": None, "points": 0.0, "side": None
         })
-        density = _liquidity_density(near_amount, baseline, distance)
         balance = _liquidity_balance(near_amount, far_amount)
         gap = _gap_pct(row)
 
@@ -341,8 +283,6 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             types.append("NEAR_MAX_PAIN")
         if balance["near_far_ratio"] is not None and balance["near_far_ratio"] >= 2.0:
             types.append("LIQUIDITY_IMBALANCE_NEAR_SIDE")
-        if distance <= 1.0 and density["points"] >= 12.0:
-            types.append("HIGH_LIQUIDITY_CLOSE_DISTANCE")
         if cluster["points"] >= 8.0 and cluster.get("side") == side:
             types.append("TARGET_CLUSTER")
         if gap is not None and gap >= 20.0:
@@ -357,7 +297,6 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "consensus": directional["consensus_points"],
             "btc_like": directional["btc_like_points"],
             "target_clustering": float(cluster["points"]),
-            "liquidity_density": float(density["points"]),
             "liquidity_balance": float(balance["points"]),
         }
 
@@ -365,7 +304,6 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             components["proximity"]
             + components["directional_alignment"]
             + components["target_clustering"]
-            + components["liquidity_density"]
             + components["liquidity_balance"],
             2,
         )
@@ -385,9 +323,6 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "near_share_pct": balance["near_share_pct"],
             "near_far_ratio": balance["near_far_ratio"],
             "liquidity_balance": balance["balance"],
-            "baseline_liquidity": baseline,
-            "relative_liquidity": density["relative_liquidity"],
-            "liquidity_density": density["density"],
             "consensus_hits": consensus_hits,
             "consensus_total": consensus_total,
             "btc_like_hits": btc_hits,
