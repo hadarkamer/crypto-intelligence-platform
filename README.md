@@ -1,15 +1,21 @@
-# Stage 32 — Alert scoring and display fixes
+# Stage 33 — Watch Webhook and Feedback Fix
 
-- Liquidity Balance removed from score and moved below anomaly types.
-- Near Share >=60% is green; <=40% is red; otherwise neutral.
-- Score redistribution:
-  - Proximity: 30
-  - Directional Alignment: 20
-  - Target Clustering: 20
-  - High Liquidity Close Distance: 30
-- BTC alerts exclude BTC Like:
-  - Consensus max 15
-  - Market Schema max 5
-- More than one anomaly type is marked green.
-- Same-direction additional timeframes are shown only when their Priority > 50.
-- The obsolete 350/231 warning is suppressed.
+Root cause:
+- /watch_on was sent during the deploy/restart window.
+- Startup used drop_pending_updates=True, so Telegram commands waiting during
+  the restart could be discarded before the new service handled them.
+
+Fixes:
+- Pending Telegram updates are preserved during webhook reset.
+- /watch_on immediately replies that the command was received.
+- Clear Render logs were added for every incoming Telegram update.
+- /watch_on activation and immediate scheduling are logged.
+- A Telegram application error handler now reports handler failures to both
+  Render logs and the user.
+- Watch still starts OFF after deploy and requires manual /watch_on.
+
+Expected log after /watch_on:
+[webhook] update received; ... text='/watch_on'
+[watch] /watch_on received
+[watch] manual activation saved
+[watch] scan started
