@@ -7,6 +7,8 @@ Final agreed principles:
 - Consensus and BTC similarity share one Directional Alignment component.
 - Target clustering is scored.
 - Liquidity Density is intentionally excluded because it depends on repeated historical samples and is not reliable enough yet.
+- HIGH_LIQUIDITY_CLOSE_DISTANCE is both an alert type and a 0..10 score component.
+- Its liquidity ratio is adjusted by sqrt(timeframe hours) before comparison, so long timeframes do not dominate automatically.
 - Liquidity Balance is a bonus/penalty from -10 to +10.
 - Historical direction persistence is not scored.
 """
@@ -14,13 +16,23 @@ Final agreed principles:
 from __future__ import annotations
 
 from collections import defaultdict
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 import analysis
 
 
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
-RAW_MAX_SCORE = 65.0
+TIMEFRAME_HOURS = {
+    "12h": 12.0,
+    "24h": 24.0,
+    "48h": 48.0,
+    "3d": 72.0,
+    "1w": 168.0,
+    "2w": 336.0,
+    "1m": 720.0,
+}
+RAW_MAX_SCORE = 75.0
 
 
 def _get(row: Any, key: str, default=None):
@@ -242,11 +254,87 @@ def _liquidity_balance(near_amount: float, far_amount: float) -> Dict[str, Any]:
     }
 
 
+
+def _adjusted_near_liquidity_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
+    """Timeframe-adjusted near-side liquidity for each coin.
+
+    adjusted_liquidity = near_liquidity / sqrt(timeframe_hours)
+
+    Then compare each timeframe with the average adjusted liquidity of the same
+    coin across all available timeframes in the current snapshot.
+    """
+    per_symbol: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+    for row in rows:
+        symbol = str(_get(row, "symbol", "")).upper()
+        timeframe = str(_get(row, "timeframe", ""))
+        side = _closest_side(row)
+
+        if not symbol or not timeframe or not side:
+            continue
+
+        hours = TIMEFRAME_HOURS.get(timeframe)
+        near_amount = _amount_for_side(row, side)
+
+        if not hours or near_amount <= 0:
+            continue
+
+        adjusted = near_amount / math.sqrt(hours)
+        per_symbol[symbol].append({
+            "timeframe": timeframe,
+            "adjusted_liquidity": adjusted,
+            "near_amount": near_amount,
+            "hours": hours,
+        })
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for symbol, items in per_symbol.items():
+        average_adjusted = (
+            sum(item["adjusted_liquidity"] for item in items) / len(items)
+            if items else None
+        )
+        result[symbol] = {
+            "average_adjusted_liquidity": average_adjusted,
+            "items": {
+                item["timeframe"]: item for item in items
+            },
+        }
+
+    return result
+
+
+def _high_liquidity_close_points(
+    distance_pct: Optional[float],
+    adjusted_ratio: Optional[float],
+) -> float:
+    """0..10 points.
+
+    The distance threshold prevents double-counting proximity continuously:
+    - if distance > 1%, score is 0
+    - otherwise score depends only on adjusted liquidity ratio
+    """
+    if distance_pct is None or distance_pct > 1.0 or adjusted_ratio is None:
+        return 0.0
+
+    if adjusted_ratio >= 2.50:
+        return 10.0
+    if adjusted_ratio >= 2.00:
+        return 8.0
+    if adjusted_ratio >= 1.60:
+        return 6.0
+    if adjusted_ratio >= 1.30:
+        return 4.0
+    if adjusted_ratio >= 1.10:
+        return 2.0
+    return 0.0
+
+
 def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]]:
     """Build one independent alert per coin/timeframe."""
     consensus = _consensus_map(rows)
     btc_like = _btc_similarity_map(rows)
     clusters = _cluster_map(rows, consensus)
+    adjusted_liquidity = _adjusted_near_liquidity_map(rows)
     out: List[Dict[str, Any]] = []
 
     for row in rows:
@@ -260,6 +348,21 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
 
         near_amount = _amount_for_side(row, side)
         far_amount = _opposite_amount(row, side)
+
+        symbol_adjusted = adjusted_liquidity.get(symbol, {})
+        average_adjusted_liquidity = symbol_adjusted.get("average_adjusted_liquidity")
+        timeframe_adjusted = (
+            symbol_adjusted.get("items", {})
+            .get(timeframe, {})
+            .get("adjusted_liquidity")
+        )
+        adjusted_near_liquidity_ratio = (
+            timeframe_adjusted / average_adjusted_liquidity
+            if timeframe_adjusted is not None
+            and average_adjusted_liquidity
+            and average_adjusted_liquidity > 0
+            else None
+        )
 
         cons = consensus.get(symbol, {})
         consensus_hits = int(cons.get("hits", 0) or 0)
@@ -276,6 +379,10 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "count": 0, "spread_pct": None, "points": 0.0, "side": None
         })
         balance = _liquidity_balance(near_amount, far_amount)
+        high_liquidity_close_points = _high_liquidity_close_points(
+            distance,
+            adjusted_near_liquidity_ratio,
+        )
         gap = _gap_pct(row)
 
         types: List[str] = []
@@ -283,6 +390,13 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             types.append("NEAR_MAX_PAIN")
         if balance["near_far_ratio"] is not None and balance["near_far_ratio"] >= 2.0:
             types.append("LIQUIDITY_IMBALANCE_NEAR_SIDE")
+
+        # High liquidity close distance:
+        # - distance <= 1%
+        # - adjusted near liquidity ratio >= 1.60
+        if high_liquidity_close_points >= 6.0:
+            types.append("HIGH_LIQUIDITY_CLOSE_DISTANCE")
+
         if cluster["points"] >= 8.0 and cluster.get("side") == side:
             types.append("TARGET_CLUSTER")
         if gap is not None and gap >= 20.0:
@@ -297,6 +411,7 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "consensus": directional["consensus_points"],
             "btc_like": directional["btc_like_points"],
             "target_clustering": float(cluster["points"]),
+            "high_liquidity_close_distance": float(high_liquidity_close_points),
             "liquidity_balance": float(balance["points"]),
         }
 
@@ -304,6 +419,7 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             components["proximity"]
             + components["directional_alignment"]
             + components["target_clustering"]
+            + components["high_liquidity_close_distance"]
             + components["liquidity_balance"],
             2,
         )
@@ -320,6 +436,9 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "distance_pct": distance,
             "near_amount": near_amount,
             "far_amount": far_amount,
+            "adjusted_near_liquidity": timeframe_adjusted,
+            "average_adjusted_near_liquidity": average_adjusted_liquidity,
+            "adjusted_near_liquidity_ratio": adjusted_near_liquidity_ratio,
             "near_share_pct": balance["near_share_pct"],
             "near_far_ratio": balance["near_far_ratio"],
             "liquidity_balance": balance["balance"],

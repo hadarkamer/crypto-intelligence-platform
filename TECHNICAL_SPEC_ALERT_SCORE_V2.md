@@ -49,3 +49,45 @@ HIGH_LIQUIDITY_CLOSE_DISTANCE was removed because it depended on Liquidity Densi
 - Uses cooldown to prevent duplicate alerts.
 - /watch_stop stops it.
 - /watch_status shows runtime state.
+
+
+## HIGH_LIQUIDITY_CLOSE_DISTANCE
+
+This is an alert type only and does not add a separate score component.
+
+Conditions:
+- distance_pct <= 1.0
+- near_liquidity_ratio >= 1.8
+
+near_liquidity_ratio =
+current near-side liquidity /
+average near-side liquidity for the same coin across current snapshot timeframes
+
+This uses no historical data and does not compare one coin's absolute dollars to another coin.
+
+
+## Stage 23 — Timeframe-adjusted High Liquidity Close Distance
+
+This component contributes 0..10 points.
+
+adjusted_liquidity =
+near_liquidity / sqrt(timeframe_hours)
+
+adjusted_near_liquidity_ratio =
+current adjusted liquidity /
+average adjusted liquidity of the same coin across current snapshot timeframes
+
+The component scores only when distance_pct <= 1.0.
+
+Points:
+- ratio < 1.10: 0
+- 1.10 <= ratio < 1.30: 2
+- 1.30 <= ratio < 1.60: 4
+- 1.60 <= ratio < 2.00: 6
+- 2.00 <= ratio < 2.50: 8
+- ratio >= 2.50: 10
+
+The alert type HIGH_LIQUIDITY_CLOSE_DISTANCE is emitted from 6 points upward.
+
+New raw maximum = 75.
+priority = clamp(raw_score / 75 * 100, 0, 100)
