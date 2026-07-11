@@ -126,24 +126,46 @@ def _directional_alignment(
     consensus_total: int,
     btc_hits: int,
     btc_total: int,
-    market_match: bool,
+    market_support_pct: Optional[float],
 ) -> Dict[str, float]:
     """Directional Alignment 0..20.
 
+    Components:
     - Consensus: 0..12
     - BTC Like: 0..5
-    - Market alignment: 0..3
+    - Aggregate Market support: 0..3
+
+    Market is calculated from the full current snapshot:
+    all valid assets × all available timeframes.
+
+    Market points:
+    - 50% support or less: 0
+    - 50%..100% support: linear 0..3
+
+    Formula:
+    market_points = max(0, (support_pct - 50) / 50 * 3)
+
+    BTC Like and Market can reinforce only when the coin itself has
+    consensus of at least 5 timeframes.
     """
     consensus_points = (
         round(consensus_hits / consensus_total * 12.0, 2)
         if consensus_total else 0.0
     )
+
     btc_points = 0.0
     market_points = 0.0
+
     if consensus_hits >= 5:
         if btc_total:
             btc_points = round(btc_hits / btc_total * 5.0, 2)
-        market_points = 3.0 if market_match else 0.0
+
+        if market_support_pct is not None:
+            market_points = round(
+                max(0.0, min(3.0, (market_support_pct - 50.0) / 50.0 * 3.0)),
+                2,
+            )
+
     return {
         "consensus_points": consensus_points,
         "btc_like_points": btc_points,
@@ -152,12 +174,22 @@ def _directional_alignment(
     }
 
 
-
 def _market_bias_map(rows: List[Any]) -> Dict[str, Any]:
+    """Aggregate market schema from all valid asset/timeframe rows."""
     market = analysis.calculate_market_bias(rows)
-    by_tf = {str(item.get("timeframe")): item.get("bias") for item in market.get("timeframes", [])}
-    return {"by_timeframe": by_tf, "overall": market.get("overall", {}).get("bias", "NEUTRAL")}
+    overall = market.get("overall", {})
 
+    return {
+        "long_count": int(overall.get("long_count", 0) or 0),
+        "short_count": int(overall.get("short_count", 0) or 0),
+        "total": int(
+            (overall.get("long_count", 0) or 0)
+            + (overall.get("short_count", 0) or 0)
+        ),
+        "long_pct": overall.get("long_pct"),
+        "short_pct": overall.get("short_pct"),
+        "bias": overall.get("bias", "NEUTRAL"),
+    }
 
 
 def _cluster_map(rows: List[Any], consensus: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -360,11 +392,23 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
         btc_hits = int(btc.get("hits", 0) or 0)
         btc_total = int(btc.get("total", 0) or 0)
 
-        market_tf_bias = market.get("by_timeframe", {}).get(timeframe, "NEUTRAL")
-        market_overall_bias = market.get("overall", "NEUTRAL")
-        market_match = market_tf_bias == side or (market_tf_bias == "NEUTRAL" and market_overall_bias == side)
+        market_support_pct = (
+            market.get("short_pct")
+            if side == "SHORT"
+            else market.get("long_pct")
+        )
+        market_support_count = (
+            market.get("short_count")
+            if side == "SHORT"
+            else market.get("long_count")
+        )
+
         directional = _directional_alignment(
-            consensus_hits, consensus_total, btc_hits, btc_total, market_match
+            consensus_hits,
+            consensus_total,
+            btc_hits,
+            btc_total,
+            market_support_pct,
         )
         cluster = clusters.get(symbol, {
             "count": 0, "spread_pct": None, "points": 0.0, "side": None
@@ -438,9 +482,12 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "consensus_total": consensus_total,
             "btc_like_hits": btc_hits,
             "btc_like_total": btc_total,
-            "market_timeframe_bias": market_tf_bias,
-            "market_overall_bias": market_overall_bias,
-            "market_match": market_match,
+            "market_bias": market.get("bias", "NEUTRAL"),
+            "market_support_pct": market_support_pct,
+            "market_support_count": market_support_count,
+            "market_total_count": market.get("total", 0),
+            "market_long_pct": market.get("long_pct"),
+            "market_short_pct": market.get("short_pct"),
             "cluster_count": cluster["count"],
             "cluster_spread_pct": cluster["spread_pct"],
             "cluster_side": cluster.get("side"),

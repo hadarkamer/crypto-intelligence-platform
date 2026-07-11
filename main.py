@@ -522,29 +522,53 @@ def normalize_current_prices(rows):
     return rows
 
 def validate_snapshot(rows):
-    global_errors = []
-    expected_min = TOP_COINS_LIMIT * len(TIMEFRAMES) * 0.8
-    if len(rows) < expected_min:
-        global_errors.append(f"Expected around {TOP_COINS_LIMIT * len(TIMEFRAMES)} rows, got {len(rows)}")
+    """Validate the filtered Binance-backed snapshot.
 
-    seen_timeframes = {r["timeframe"] for r in rows}
+    The raw DOM normally contains about 50 assets × 7 timeframes = 350 rows.
+    After non-crypto filtering and Binance coverage checks, fewer symbols are
+    intentionally saved. Therefore the expected saved-row count must be based
+    on the symbols that remain, not the raw CoinGlass row count.
+    """
+    global_errors = []
+
+    symbols = {
+        str(row.get("symbol", "")).upper()
+        for row in rows
+        if row.get("symbol")
+    }
+    expected_saved_rows = len(symbols) * len(TIMEFRAMES)
+
+    if rows and len(rows) != expected_saved_rows:
+        global_errors.append(
+            f"Filtered snapshot incomplete: expected {expected_saved_rows} rows "
+            f"for {len(symbols)} saved symbols across {len(TIMEFRAMES)} timeframes, "
+            f"got {len(rows)}"
+        )
+
+    seen_timeframes = {r["timeframe"] for r in rows if r.get("timeframe")}
     missing_timeframes = set(TIMEFRAMES) - seen_timeframes
     if missing_timeframes:
         global_errors.append(f"Missing timeframes: {sorted(missing_timeframes)}")
 
     for row in rows:
         row_errors = []
+
         if not row.get("symbol"):
             row_errors.append("missing symbol")
         if row.get("current_price") is None:
-            row_errors.append("missing current_price")
+            row_errors.append("missing Binance current_price")
         if row.get("short_max_pain") is None:
             row_errors.append("missing short_max_pain")
         if row.get("long_max_pain") is None:
             row_errors.append("missing long_max_pain")
+
         if global_errors or row_errors:
             row["is_valid"] = False if use_postgres() else 0
             row["validation_errors"] = "; ".join(global_errors + row_errors)[:1000]
+        else:
+            row["is_valid"] = True if use_postgres() else 1
+            row["validation_errors"] = None
+
     return rows
 
 
@@ -815,45 +839,44 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if COLLECT_LOCK is None:
         COLLECT_LOCK = asyncio.Lock()
 
-    if COLLECT_LOCK.locked():
+    scrape_lock = _get_scrape_lock()
+
+    if COLLECT_LOCK.locked() or scrape_lock.locked():
         await update.message.reply_text(
-            "איסוף כבר רץ כרגע. חכי שהוא יסתיים, או בצעי Restart service ב-Render אם הוא נתקע."
+            "איסוף או סריקת Watch כבר פועלים כרגע. יש להמתין לסיום."
         )
         return
 
     async with COLLECT_LOCK:
-        await update.message.reply_text(
-            "מתחיל איסוף: יעדי Max Pain מ-CoinGlass ומחירים חיים מ-Binance. "
-            "זה יכול לקחת כמה דקות..."
-        )
-        try:
-            inserted, missing_timeframes = await collect_once()
-            missing_note = (
-                f"\nטווחים חסרים: {', '.join(missing_timeframes)}"
-                if missing_timeframes else ""
-            )
-            commands = (
-                "\n\nפקודות זמינות:\n"
-                "/live_status\n"
-                "/coin BTC\n"
-                "/range BTC 24h\n"
-                "/top\n"
-                "/consensus\n"
-                "/gap\n"
-                "/liqsum\n"
-                "/market\n"
-                "/btc_like\n"
-                "/score BTC\n"
-                "/score_top\n"
-                "/alert_check\n"
-                "/alert_explain BTC 24h"
-            )
+        async with scrape_lock:
             await update.message.reply_text(
-                f"האיסוף הסתיים. נשמרו {inserted} שורות עם מחיר Binance "
-                f"ומרחקים שחושבו מחדש.{missing_note}{commands}"
+                "מתחיל איסוף: יעדי Max Pain מ-CoinGlass ומחירים חיים מ-Binance. "
+                "זה יכול לקחת כמה דקות..."
             )
-        except Exception as e:
-            await update.message.reply_text(f"שגיאה באיסוף: {e}")
+            try:
+                inserted, missing_timeframes = await collect_once()
+                missing_note = (
+                    f"\nטווחים חסרים: {', '.join(missing_timeframes)}"
+                    if missing_timeframes else ""
+                )
+
+                await update.message.reply_text(
+                    f"✅ האיסוף הסתיים\n\n"
+                    f"שורות שנשמרו: {inserted}\n"
+                    f"המרחקים חושבו מחדש לפי מחיר Binance."
+                    f"{missing_note}\n\n"
+                    "פקודות שימוש יומיומיות:\n"
+                    "/collect - איסוף נתונים חדש\n"
+                    "/alerts - הצגת הזדמנויות מדורגות\n"
+                    "/coin BTC - פירוט מלא למטבע\n"
+                    "/watch_on - הפעלת התראות אוטומטיות\n"
+                    "/watch_status - מצב מערכת ההתראות\n"
+                    "/watch_stop - עצירת התראות אוטומטיות"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                await update.message.reply_text(f"שגיאה באיסוף: {e}")
 
 
 
@@ -1453,7 +1476,9 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"מרחק: {fmt(item.get('distance_pct'))}%\n"
         f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
         f"BTC Like: {item.get('btc_like_hits', 0)}/{item.get('btc_like_total', 0)}\n"
-        f"Market: {item.get('market_timeframe_bias', 'NEUTRAL')}\n"
+        f"Market Schema: {fmt(item.get('market_support_pct'))}% "
+        f"תמיכה ב-{item['side']} "
+        f"({item.get('market_support_count', 0)}/{item.get('market_total_count', 0)})\n"
         f"Target Cluster: {fmt(item.get('cluster_spread_pct'))}% "
         f"({item.get('cluster_count', 0)} טווחים)\n"
         f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
@@ -1466,7 +1491,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"• Directional Alignment: {fmt(c.get('directional_alignment'))}/20\n"
         f"  - Consensus: {fmt(c.get('consensus'))}/12\n"
         f"  - BTC Like: {fmt(c.get('btc_like'))}/5\n"
-        f"  - Market: {fmt(c.get('market'))}/3\n"
+        f"  - Market Schema: {fmt(c.get('market'))}/3\n"
         f"• Target Clustering: {fmt(c.get('target_clustering'))}/10\n"
         f"• High Liquidity Close Distance: {fmt(c.get('high_liquidity_close_distance'))}/25\n"
         f"• Liquidity Balance: {fmt(c.get('liquidity_balance'))} "
