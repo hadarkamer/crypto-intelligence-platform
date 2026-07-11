@@ -1416,7 +1416,13 @@ def _quality_result(item: Dict[str, Any], rows: List[Any]) -> Dict[str, Any]:
 
         validation_errors = _row_get(row, "validation_errors")
         if validation_errors:
-            orange.append("בדיקת האיסוף דיווחה: " + str(validation_errors))
+            validation_text = str(validation_errors)
+            stale_row_warning = (
+                "expected around 350 rows" in validation_text.lower()
+                and "got 231" in validation_text.lower()
+            )
+            if not stale_row_warning:
+                orange.append("בדיקת האיסוף דיווחה: " + validation_text)
         elif _row_get(row, "is_valid", True) in (False, 0):
             orange.append("שורת הנתונים סומנה כלא תקינה בבדיקת האיסוף.")
 
@@ -1453,7 +1459,9 @@ def _other_alerts_block(item: Dict[str, Any], all_items: List[Dict[str, Any]]) -
         {
             str(other.get("timeframe"))
             for other in others
-            if other.get("side") == item.get("side") and other.get("timeframe")
+            if other.get("side") == item.get("side")
+            and other.get("timeframe")
+            and float(other.get("priority") or 0) > 50.0
         },
         key=tf_order_value,
     )
@@ -1481,7 +1489,44 @@ def _other_alerts_block(item: Dict[str, Any], all_items: List[Dict[str, Any]]) -
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     c = item.get("components", {})
-    types_text = "\n".join(f"• {t}" for t in item.get("types", [])) or "• ללא סוג חריגה"
+    types = item.get("types", [])
+    if types:
+        type_prefix = "🟢 " if len(types) > 1 else ""
+        types_text = "\n".join(f"{type_prefix}• {t}" for t in types)
+    else:
+        types_text = "• ללא סוג חריגה"
+
+    near_share = item.get("near_share_pct")
+    if near_share is None:
+        balance_text = "⚪ Liquidity Balance: אין נתון"
+    elif float(near_share) >= 60.0:
+        balance_text = (
+            "🟢 Liquidity Balance תומך בצד ה-Max Pain הקרוב: "
+            f"{fmt(near_share)}%"
+        )
+    elif float(near_share) <= 40.0:
+        balance_text = (
+            "🔴 Liquidity Balance מנוגד לצד ה-Max Pain הקרוב: "
+            f"{fmt(near_share)}%"
+        )
+    else:
+        balance_text = f"⚪ Liquidity Balance ניטרלי: {fmt(near_share)}%"
+
+    btc_like_line = (
+        "BTC Like: לא נכלל בניקוד של BTC\n"
+        if item.get("symbol") == "BTC"
+        else (
+            f"BTC Like: {item.get('btc_like_hits', 0)}/"
+            f"{item.get('btc_like_total', 0)}\n"
+        )
+    )
+
+    btc_like_score_line = ""
+    if float(c.get("btc_like_max", 5) or 0) > 0:
+        btc_like_score_line = (
+            f"  - BTC Like: {fmt(c.get('btc_like'))}/"
+            f"{fmt(c.get('btc_like_max', 5))}\n"
+        )
 
     card = (
         f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
@@ -1490,8 +1535,8 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"Raw Score: {fmt(item.get('raw_score'))}/{fmt(item.get('raw_max_score'))}\n"
         f"מרחק: {fmt(item.get('distance_pct'))}%\n"
         f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
-        f"BTC Like: {item.get('btc_like_hits', 0)}/{item.get('btc_like_total', 0)}\n"
-        f"Market Schema: {fmt(item.get('market_support_pct'))}% "
+        + btc_like_line
+        + f"Market Schema: {fmt(item.get('market_support_pct'))}% "
         f"תמיכה ב-{item['side']} "
         f"({item.get('market_support_count', 0)}/{item.get('market_total_count', 0)})\n"
         f"Target Cluster: {fmt(item.get('cluster_spread_pct'))}% "
@@ -1502,16 +1547,16 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"Adjusted Near Liquidity Ratio: {fmt(item.get('adjusted_near_liquidity_ratio'))}x\n"
         "\n"
         "פירוט הניקוד:\n"
-        f"• קרבה ל-Max Pain: {fmt(c.get('proximity'))}/25\n"
+        f"• קרבה ל-Max Pain: {fmt(c.get('proximity'))}/30\n"
         f"• Directional Alignment: {fmt(c.get('directional_alignment'))}/20\n"
-        f"  - Consensus: {fmt(c.get('consensus'))}/12\n"
-        f"  - BTC Like: {fmt(c.get('btc_like'))}/5\n"
-        f"  - Market Schema: {fmt(c.get('market'))}/3\n"
-        f"• Target Clustering: {fmt(c.get('target_clustering'))}/10\n"
-        f"• High Liquidity Close Distance: {fmt(c.get('high_liquidity_close_distance'))}/25\n"
-        f"• Liquidity Balance: {fmt(c.get('liquidity_balance'))} "
-        "(טווח ‎-10 עד +20)\n\n"
-        f"סוגי חריגה:\n{types_text}"
+        f"  - Consensus: {fmt(c.get('consensus'))}/{fmt(c.get('consensus_max', 12))}\n"
+        + btc_like_score_line
+        + f"  - Market Schema: {fmt(c.get('market'))}/{fmt(c.get('market_max', 3))}\n"
+        f"• Target Clustering: {fmt(c.get('target_clustering'))}/20\n"
+        f"• High Liquidity Close Distance: "
+        f"{fmt(c.get('high_liquidity_close_distance'))}/30\n\n"
+        f"סוגי חריגה:\n{types_text}\n\n"
+        f"{balance_text}"
     )
     card += _other_alerts_block(item, all_items)
     card += _quality_block(item, rows)

@@ -86,14 +86,14 @@ def _gap_pct(row: Any) -> Optional[float]:
 
 
 def _proximity_points(distance_pct: Optional[float]) -> float:
-    """0..25. Full at <=0.25%, zero at >=2.00%."""
+    """0..30. Full at <=0.25%, zero at >=2.00%."""
     if distance_pct is None:
         return 0.0
     if distance_pct <= 0.25:
-        return 25.0
+        return 30.0
     if distance_pct >= 2.0:
         return 0.0
-    return round((2.0 - distance_pct) / 1.75 * 25.0, 2)
+    return round((2.0 - distance_pct) / 1.75 * 30.0, 2)
 
 
 def _consensus_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
@@ -122,6 +122,7 @@ def _btc_similarity_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
 
 
 def _directional_alignment(
+    symbol: str,
     consensus_hits: int,
     consensus_total: int,
     btc_hits: int,
@@ -130,26 +131,24 @@ def _directional_alignment(
 ) -> Dict[str, float]:
     """Directional Alignment 0..20.
 
-    Components:
+    Normal coins:
     - Consensus: 0..12
     - BTC Like: 0..5
-    - Aggregate Market support: 0..3
+    - Market Schema: 0..3
 
-    Market is calculated from the full current snapshot:
-    all valid assets × all available timeframes.
-
-    Market points:
-    - 50% support or less: 0
-    - 50%..100% support: linear 0..3
-
-    Formula:
-    market_points = max(0, (support_pct - 50) / 50 * 3)
-
-    BTC Like and Market can reinforce only when the coin itself has
-    consensus of at least 5 timeframes.
+    BTC:
+    - BTC Like is excluded from scoring.
+    - Consensus: 0..15
+    - Market Schema: 0..5
     """
+    is_btc = symbol.upper() == "BTC"
+
+    consensus_max = 15.0 if is_btc else 12.0
+    btc_like_max = 0.0 if is_btc else 5.0
+    market_max = 5.0 if is_btc else 3.0
+
     consensus_points = (
-        round(consensus_hits / consensus_total * 12.0, 2)
+        round(consensus_hits / consensus_total * consensus_max, 2)
         if consensus_total else 0.0
     )
 
@@ -157,12 +156,18 @@ def _directional_alignment(
     market_points = 0.0
 
     if consensus_hits >= 5:
-        if btc_total:
-            btc_points = round(btc_hits / btc_total * 5.0, 2)
+        if not is_btc and btc_total:
+            btc_points = round(btc_hits / btc_total * btc_like_max, 2)
 
         if market_support_pct is not None:
             market_points = round(
-                max(0.0, min(3.0, (market_support_pct - 50.0) / 50.0 * 3.0)),
+                max(
+                    0.0,
+                    min(
+                        market_max,
+                        (market_support_pct - 50.0) / 50.0 * market_max,
+                    ),
+                ),
                 2,
             )
 
@@ -170,6 +175,9 @@ def _directional_alignment(
         "consensus_points": consensus_points,
         "btc_like_points": btc_points,
         "market_points": market_points,
+        "consensus_max": consensus_max,
+        "btc_like_max": btc_like_max,
+        "market_max": market_max,
         "total": round(consensus_points + btc_points + market_points, 2),
     }
 
@@ -337,14 +345,19 @@ def _high_liquidity_close_points(
     distance_pct: Optional[float],
     adjusted_ratio: Optional[float],
 ) -> float:
-    """0..25 points, only when distance <= 1%."""
+    """0..30 points, only when distance <= 1%."""
     if distance_pct is None or distance_pct > 1.0 or adjusted_ratio is None:
         return 0.0
-    if adjusted_ratio >= 2.50: return 25.0
-    if adjusted_ratio >= 2.00: return 20.0
-    if adjusted_ratio >= 1.60: return 15.0
-    if adjusted_ratio >= 1.30: return 10.0
-    if adjusted_ratio >= 1.10: return 5.0
+    if adjusted_ratio >= 2.50:
+        return 30.0
+    if adjusted_ratio >= 2.00:
+        return 24.0
+    if adjusted_ratio >= 1.60:
+        return 18.0
+    if adjusted_ratio >= 1.30:
+        return 12.0
+    if adjusted_ratio >= 1.10:
+        return 6.0
     return 0.0
 
 
@@ -404,6 +417,7 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
         )
 
         directional = _directional_alignment(
+            symbol,
             consensus_hits,
             consensus_total,
             btc_hits,
@@ -429,7 +443,7 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
         # High liquidity close distance:
         # - distance <= 1%
         # - adjusted near liquidity ratio >= 1.60
-        if high_liquidity_close_points >= 15.0:
+        if high_liquidity_close_points >= 18.0:
             types.append("HIGH_LIQUIDITY_CLOSE_DISTANCE")
 
         if cluster["points"] >= 8.0 and cluster.get("side") == side:
@@ -446,17 +460,18 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "consensus": directional["consensus_points"],
             "btc_like": directional["btc_like_points"],
             "market": directional["market_points"],
+            "consensus_max": directional["consensus_max"],
+            "btc_like_max": directional["btc_like_max"],
+            "market_max": directional["market_max"],
             "target_clustering": float(cluster["points"]),
             "high_liquidity_close_distance": float(high_liquidity_close_points),
-            "liquidity_balance": float(balance["points"]),
         }
 
         raw_score = round(
             components["proximity"]
             + components["directional_alignment"]
             + components["target_clustering"]
-            + components["high_liquidity_close_distance"]
-            + components["liquidity_balance"],
+            + components["high_liquidity_close_distance"],
             2,
         )
         priority = round(max(0.0, min(100.0, raw_score / RAW_MAX_SCORE * 100.0)), 2)
