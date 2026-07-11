@@ -1,262 +1,254 @@
-"""Hyperliquid liquidation map control probe.
-
-Stage 8:
-- Fixes the previous hanging /hyper_debug command.
-- Opens the Hyperliquid map page.
-- Waits for the dropdown/graph area.
-- Attempts to select a symbol.
-- Attempts to click refresh.
-- Returns a Telegram summary even if selection fails.
-- Uses strict timeouts so the bot will not keep hanging.
-
-This is still diagnostic only:
-No DB writes.
-No Hyperliquid scoring yet.
-"""
-
 from __future__ import annotations
 
-import json
+from datetime import datetime, timezone
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
+import requests
 
 
-HYPERLIQUID_URL = os.getenv(
-    "COINGLASS_HYPERLIQUID_URL",
-    "https://www.coinglass.com/hyperliquid-liquidation-map",
+BINANCE_FUTURES_BASE_URL = os.getenv(
+    "BINANCE_FUTURES_BASE_URL",
+    "https://fapi.binance.com",
+).rstrip("/")
+BINANCE_FUTURES_MARK_ENDPOINT = os.getenv(
+    "BINANCE_FUTURES_MARK_ENDPOINT",
+    "/fapi/v1/premiumIndex",
 )
 
+BINANCE_SPOT_BASE_URL = os.getenv(
+    "BINANCE_MARKET_DATA_BASE_URL",
+    "https://data-api.binance.vision",
+).rstrip("/")
+BINANCE_SPOT_PRICE_ENDPOINT = os.getenv(
+    "BINANCE_PRICE_ENDPOINT",
+    "/api/v3/ticker/price",
+)
 
-def _clean_lines(text: str, limit: int = 160) -> List[str]:
-    return [x.strip() for x in text.splitlines() if x.strip()][:limit]
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("BINANCE_PRICE_TIMEOUT_SECONDS", "15"))
+
+# symbol -> (Binance base symbol, multiplier)
+# 1000PEPE on CoinGlass represents 1000 PEPE units.
+SYMBOL_ALIASES: Dict[str, Tuple[str, float]] = {
+    "1000PEPE": ("PEPE", 1000.0),
+}
 
 
-async def _body_lines(page: Page, limit: int = 160) -> List[str]:
-    try:
-        text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-        return _clean_lines(text, limit)
-    except Exception:
-        return []
+def _normalize_symbol(symbol: str) -> str:
+    return str(symbol or "").strip().upper()
 
 
-async def _click_refresh(page: Page) -> Dict[str, Any]:
-    """Try several ways to click the refresh button without hanging."""
-    attempts = []
+def _fetch_futures_mark_prices() -> Dict[str, float]:
+    url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_MARK_ENDPOINT
+    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    payload = response.json()
 
-    selectors = [
-        "button:has(svg)",
-        "button",
-        "[role='button']",
-    ]
-
-    # Prefer buttons near the symbol selector area. We click candidates and watch for no fatal error.
-    for selector in selectors:
+    result: Dict[str, float] = {}
+    for item in payload:
+        pair = str(item.get("symbol", "")).upper()
+        raw_price = item.get("markPrice")
+        if not pair or raw_price is None:
+            continue
         try:
-            count = await page.locator(selector).count()
-            attempts.append({"selector": selector, "count": count})
-            # The refresh button is often one of the first few buttons near the chart.
-            for i in range(min(count, 8)):
-                try:
-                    loc = page.locator(selector).nth(i)
-                    text = ""
-                    try:
-                        text = (await loc.inner_text(timeout=500)).strip()
-                    except Exception:
-                        pass
-                    await loc.click(timeout=1200)
-                    await page.wait_for_timeout(1500)
-                    attempts.append({"clicked": selector, "index": i, "text": text[:80], "ok": True})
-                    return {"ok": True, "attempts": attempts}
-                except Exception as exc:
-                    attempts.append({"clicked": selector, "index": i, "ok": False, "error": repr(exc)[:200]})
-        except Exception as exc:
-            attempts.append({"selector": selector, "ok": False, "error": repr(exc)[:200]})
-
-    return {"ok": False, "attempts": attempts}
+            result[pair] = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
-async def _try_select_symbol(page: Page, symbol: str) -> Dict[str, Any]:
-    """Best effort symbol selection, capped with short timeouts."""
-    symbol = symbol.upper()
-    attempts = []
+def _fetch_spot_prices() -> Dict[str, float]:
+    url = BINANCE_SPOT_BASE_URL + BINANCE_SPOT_PRICE_ENDPOINT
+    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    payload = response.json()
 
-    async def add(name: str, ok: bool, err: Optional[Exception] = None):
-        attempts.append({"attempt": name, "ok": ok, "error": repr(err)[:220] if err else None})
+    result: Dict[str, float] = {}
+    for item in payload:
+        pair = str(item.get("symbol", "")).upper()
+        raw_price = item.get("price")
+        if not pair or raw_price is None:
+            continue
+        try:
+            result[pair] = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+    return result
 
-    # 1) If current dropdown already shows symbol, accept it.
-    lines = await _body_lines(page, 80)
-    if symbol in lines:
-        await add("symbol already visible in body", True)
-        return {"ok": True, "method": "already_visible", "attempts": attempts}
 
-    # 2) Try clicking exact symbol if visible.
+def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
+    """Fetch Binance prices once.
+
+    Priority:
+    1. USD-M Futures mark price — better aligned with liquidation analysis.
+    2. Binance Spot last price as fallback.
+    """
+    requested = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
+    fetched_at = datetime.now(timezone.utc)
+
+    futures_error = None
+    spot_error = None
+
     try:
-        await page.get_by_text(symbol, exact=True).first.click(timeout=1800)
-        await page.wait_for_timeout(1500)
-        await add(f"click exact text {symbol}", True)
-        return {"ok": True, "method": "click_exact_text", "attempts": attempts}
+        futures_prices = _fetch_futures_mark_prices()
     except Exception as exc:
-        await add(f"click exact text {symbol}", False, exc)
+        futures_prices = {}
+        futures_error = repr(exc)
 
-    # 3) Try opening dropdown by clicking text BTC/current dropdown, then click symbol.
-    for opener_text in ["BTC", "ETH", "SOL"]:
-        try:
-            await page.get_by_text(opener_text, exact=True).first.click(timeout=1800)
-            await page.wait_for_timeout(1200)
-            await page.get_by_text(symbol, exact=True).first.click(timeout=1800)
-            await page.wait_for_timeout(2500)
-            await add(f"open dropdown via {opener_text}, click {symbol}", True)
-            return {"ok": True, "method": "dropdown_text", "attempts": attempts}
-        except Exception as exc:
-            await add(f"open dropdown via {opener_text}", False, exc)
+    try:
+        spot_prices = _fetch_spot_prices()
+    except Exception as exc:
+        spot_prices = {}
+        spot_error = repr(exc)
 
-    # 4) Try combobox/button typing.
-    for selector in ["input", "[role='combobox']", "button"]:
-        try:
-            loc = page.locator(selector).first
-            await loc.click(timeout=1800)
-            await page.keyboard.press("Control+A")
-            await page.keyboard.type(symbol)
-            await page.wait_for_timeout(700)
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(2500)
-            await add(f"type into {selector}", True)
-            return {"ok": True, "method": f"type_{selector}", "attempts": attempts}
-        except Exception as exc:
-            await add(f"type into {selector}", False, exc)
+    prices: Dict[str, Dict[str, Any]] = {}
+    missing: List[str] = []
 
-    return {"ok": False, "method": None, "attempts": attempts}
+    for symbol in requested:
+        base, multiplier = SYMBOL_ALIASES.get(symbol, (symbol, 1.0))
+        pair = f"{base}USDT"
+
+        if pair in futures_prices:
+            raw_price = futures_prices[pair]
+            source = "binance_futures_mark"
+        elif pair in spot_prices:
+            raw_price = spot_prices[pair]
+            source = "binance_spot"
+        else:
+            missing.append(symbol)
+            continue
+
+        prices[symbol] = {
+            "symbol": symbol,
+            "pair": pair,
+            "price": raw_price * multiplier,
+            "raw_price": raw_price,
+            "multiplier": multiplier,
+            "source": source,
+            "fetched_at_utc": fetched_at.isoformat(),
+        }
+
+    return {
+        "ok": bool(prices),
+        "source": "binance_futures_mark_then_spot",
+        "fetched_at_utc": fetched_at.isoformat(),
+        "requested_count": len(requested),
+        "found_count": len(prices),
+        "missing_count": len(missing),
+        "prices": prices,
+        "missing_symbols": missing,
+        "futures_error": futures_error,
+        "spot_error": spot_error,
+    }
 
 
-async def _structure(page: Page) -> Dict[str, Any]:
-    return await page.evaluate(
-        """() => {
-            const short = (s) => (s || '').toString().trim().slice(0, 100);
-            const buttons = [...document.querySelectorAll('button')].slice(0, 20).map((b, i) => ({
-                i,
-                text: short(b.innerText || b.textContent),
-                aria: short(b.getAttribute('aria-label')),
-                title: short(b.getAttribute('title')),
-                cls: short(b.className)
-            }));
-            const inputs = [...document.querySelectorAll('input')].slice(0, 20).map((b, i) => ({
-                i,
-                value: short(b.value),
-                placeholder: short(b.getAttribute('placeholder')),
-                aria: short(b.getAttribute('aria-label')),
-                cls: short(b.className)
-            }));
-            const canvases = [...document.querySelectorAll('canvas')].map((c, i) => ({
-                i, width: c.width, height: c.height, clientWidth: c.clientWidth, clientHeight: c.clientHeight
-            }));
-            const svgs = [...document.querySelectorAll('svg')].slice(0, 20).map((s, i) => ({
-                i,
-                text: short(s.textContent),
-                cls: short(s.className && (s.className.baseVal || s.className))
-            }));
-            return {
-                url: location.href,
-                title: document.title,
-                buttonCount: document.querySelectorAll('button').length,
-                inputCount: document.querySelectorAll('input').length,
-                canvasCount: document.querySelectorAll('canvas').length,
-                svgCount: document.querySelectorAll('svg').length,
-                buttons,
-                inputs,
-                canvases,
-                svgs
-            };
-        }"""
+def recalculate_distances(
+    live_price: float,
+    short_max_pain: Optional[float],
+    long_max_pain: Optional[float],
+) -> Dict[str, Optional[float]]:
+    """Recalculate all Max Pain distances from the Binance live price."""
+    if not live_price:
+        return {
+            "short_signed_pct": None,
+            "long_signed_pct": None,
+            "short_abs_pct": None,
+            "long_abs_pct": None,
+            "short_abs_usd": None,
+            "long_abs_usd": None,
+            "closest_side": None,
+        }
+
+    short_signed = (
+        (short_max_pain - live_price) / live_price * 100
+        if short_max_pain is not None else None
+    )
+    long_signed = (
+        (long_max_pain - live_price) / live_price * 100
+        if long_max_pain is not None else None
     )
 
+    short_abs = abs(short_signed) if short_signed is not None else None
+    long_abs = abs(long_signed) if long_signed is not None else None
+    short_abs_usd = abs(short_max_pain - live_price) if short_max_pain is not None else None
+    long_abs_usd = abs(long_max_pain - live_price) if long_max_pain is not None else None
 
-async def probe_hyperliquid_symbol(symbol: str = "BTC", headless: bool = True, max_seconds: int = 55) -> Dict[str, Any]:
-    symbol = symbol.upper()
-    print(f"[hyper] control probe start symbol={symbol}; url={HYPERLIQUID_URL}", flush=True)
+    if short_abs is None and long_abs is None:
+        closest = None
+    elif long_abs is None or (short_abs is not None and short_abs <= long_abs):
+        closest = "SHORT"
+    else:
+        closest = "LONG"
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=headless,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-gpu",
-                "--disable-extensions",
-            ],
+    return {
+        "short_signed_pct": short_signed,
+        "long_signed_pct": long_signed,
+        "short_abs_pct": short_abs,
+        "long_abs_pct": long_abs,
+        "short_abs_usd": short_abs_usd,
+        "long_abs_usd": long_abs_usd,
+        "closest_side": closest,
+    }
+
+
+def enrich_snapshot_rows(rows: Iterable[Any], excluded_symbols: Iterable[str] = ()) -> Dict[str, Any]:
+    """Overlay Binance live prices on raw CoinGlass rows.
+
+    CoinGlass remains the source for:
+    - Short/Long Max Pain targets
+    - Short/Long liquidation amounts
+
+    Binance becomes the source for:
+    - current_price
+    - distance_short_pct / distance_long_pct
+    - distance_short_abs / distance_long_abs
+
+    Symbols without a Binance price are excluded from live calculations.
+    """
+    excluded = {str(x).upper() for x in excluded_symbols}
+    raw_rows = [dict(row) for row in rows]
+    symbols = sorted({
+        str(row.get("symbol", "")).upper()
+        for row in raw_rows
+        if row.get("symbol") and str(row.get("symbol")).upper() not in excluded
+    })
+
+    price_result = fetch_binance_usdt_prices(symbols)
+    enriched = []
+    skipped = []
+
+    for row in raw_rows:
+        symbol = str(row.get("symbol", "")).upper()
+        if not symbol or symbol in excluded:
+            continue
+
+        live = price_result["prices"].get(symbol)
+        if not live:
+            skipped.append(symbol)
+            continue
+
+        calc = recalculate_distances(
+            live["price"],
+            row.get("short_max_pain"),
+            row.get("long_max_pain"),
         )
 
-        context = await browser.new_context(
-            viewport={"width": 1440, "height": 1800},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/150.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-        )
-        page = await context.new_page()
-        page.set_default_timeout(3500)
-        page.set_default_navigation_timeout(60000)
+        row["coinglass_price"] = row.get("current_price")
+        row["current_price"] = live["price"]
+        row["price_source"] = live["source"]
+        row["price_pair"] = live["pair"]
+        row["price_fetched_at_utc"] = live["fetched_at_utc"]
 
-        try:
-            await page.goto(HYPERLIQUID_URL, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(9000)
-            title = await page.title()
-            print(f"[hyper] opened title={title!r}; url={page.url}", flush=True)
+        row["distance_short_pct"] = calc["short_signed_pct"]
+        row["distance_long_pct"] = calc["long_signed_pct"]
+        row["distance_short_abs"] = calc["short_abs_usd"]
+        row["distance_long_abs"] = calc["long_abs_usd"]
+        row["closest_side"] = calc["closest_side"]
 
-            before_lines = await _body_lines(page, 120)
-            print("[hyper] before_lines=" + json.dumps(before_lines[:60], ensure_ascii=False)[:3000], flush=True)
+        enriched.append(row)
 
-            select_result = await _try_select_symbol(page, symbol)
-            print("[hyper] select_result=" + json.dumps(select_result, ensure_ascii=False)[:4000], flush=True)
-
-            refresh_result = await _click_refresh(page)
-            print("[hyper] refresh_result=" + json.dumps(refresh_result, ensure_ascii=False)[:4000], flush=True)
-
-            await page.wait_for_timeout(4000)
-            after_lines = await _body_lines(page, 160)
-            struct = await _structure(page)
-
-            print("[hyper] structure=" + json.dumps(struct, ensure_ascii=False)[:5000], flush=True)
-            print("[hyper] after_lines=" + json.dumps(after_lines[:90], ensure_ascii=False)[:5000], flush=True)
-
-            screenshot_path = f"/tmp/hyperliquid_{symbol}_control.png"
-            try:
-                await page.screenshot(path=screenshot_path, full_page=True)
-                print(f"[hyper] screenshot saved to {screenshot_path}", flush=True)
-            except Exception as exc:
-                print(f"[hyper] screenshot failed: {repr(exc)}", flush=True)
-
-            return {
-                "ok": True,
-                "symbol": symbol,
-                "url": page.url,
-                "title": title,
-                "selected": select_result,
-                "refreshed": refresh_result,
-                "structure": {
-                    "buttonCount": struct.get("buttonCount"),
-                    "inputCount": struct.get("inputCount"),
-                    "canvasCount": struct.get("canvasCount"),
-                    "svgCount": struct.get("svgCount"),
-                    "buttons": struct.get("buttons", [])[:8],
-                    "inputs": struct.get("inputs", [])[:8],
-                    "canvases": struct.get("canvases", [])[:6],
-                },
-                "body_preview": after_lines[:50],
-            }
-        except Exception as exc:
-            print(f"[hyper] ERROR: {repr(exc)}", flush=True)
-            return {
-                "ok": False,
-                "symbol": symbol,
-                "error": repr(exc),
-                "body_preview": await _body_lines(page, 50),
-            }
-        finally:
-            await context.close()
-            await browser.close()
-            print("[hyper] control probe done", flush=True)
+    return {
+        "rows": enriched,
+        "price_result": price_result,
+        "skipped_symbols": sorted(set(skipped)),
+    }
