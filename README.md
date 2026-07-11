@@ -1,16 +1,17 @@
-Stage 19 — Alert annotations and data-quality notes
+# Stage 20 — Alert Score v2
 
 Implemented:
-- Data quality is not part of Priority.
-- Each alert remains separate by coin and timeframe.
-- Each alert notes additional alerts for the same coin in other timeframes.
-- Opposite-direction alerts are explicitly marked.
-- Multiple alerts do not add score.
-- Data-quality problems are displayed in Hebrew at the end of the alert only.
-- Data-quality notes do not add or subtract score.
-- Same behavior in /alert_check, /alert_explain and automatic Watch alerts.
+- New 5-component score
+- Consensus and BTC Like combined
+- Target clustering
+- Historical liquidity density
+- Liquidity balance as bonus/penalty
+- Data-quality notes outside the score
+- Multiple-alert notes without score impact
+- Separate alert cards per timeframe
+- No .pyc files
 
-Tests:
+Test:
 1. /collect
 2. /alert_check 10
 3. /alert_explain BTC 24h

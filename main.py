@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import statistics
 import time
 import zlib
 from datetime import datetime, timezone
@@ -694,7 +695,7 @@ async def collect_live_rows_for_watch():
         excluded_symbols=NON_CRYPTO_SYMBOLS,
     )
 
-    rows = live_result.get("rows", [])
+    rows = attach_liquidity_baselines(live_result.get("rows", []))
     print(
         f"[watch] fresh rows={len(rows)}; "
         f"skipped={live_result.get('skipped_symbols', [])}",
@@ -732,17 +733,78 @@ def short_time(value):
     return s[11:16] if len(s) >= 16 else s
 
 
-def raw_latest_snapshot_rows():
-    """Latest saved snapshot.
+def _as_dict(row):
+    return dict(row) if not isinstance(row, dict) else dict(row)
 
-    From Stage 13 onward, current_price and distances stored here were already
-    calculated from Binance during /collect.
-    """
-    return query(
+
+def _liquidity_baseline_map(history_limit: int = 5000, min_samples: int = 3):
+    """Median liquidity for the same coin, timeframe and side."""
+    history = query(
+        """
+        SELECT symbol, timeframe,
+               short_liquidation_amount, long_liquidation_amount
+        FROM max_pain_snapshots
+        ORDER BY collected_at DESC
+        LIMIT ?
+        """,
+        (history_limit,),
+    )
+
+    values = {}
+    for row in history:
+        symbol = str(row["symbol"]).upper()
+        tf = str(row["timeframe"])
+        key = (symbol, tf)
+        bucket = values.setdefault(key, {"short": [], "long": []})
+
+        short_amount = row["short_liquidation_amount"]
+        long_amount = row["long_liquidation_amount"]
+        if short_amount is not None and float(short_amount) > 0:
+            bucket["short"].append(float(short_amount))
+        if long_amount is not None and float(long_amount) > 0:
+            bucket["long"].append(float(long_amount))
+
+    result = {}
+    for key, bucket in values.items():
+        result[key] = {
+            "baseline_short_liquidity": (
+                statistics.median(bucket["short"])
+                if len(bucket["short"]) >= min_samples else None
+            ),
+            "baseline_long_liquidity": (
+                statistics.median(bucket["long"])
+                if len(bucket["long"]) >= min_samples else None
+            ),
+            "baseline_short_samples": len(bucket["short"]),
+            "baseline_long_samples": len(bucket["long"]),
+        }
+    return result
+
+
+def attach_liquidity_baselines(rows):
+    baselines = _liquidity_baseline_map()
+    output = []
+    for source_row in rows:
+        row = _as_dict(source_row)
+        key = (str(row.get("symbol", "")).upper(), str(row.get("timeframe", "")))
+        baseline = baselines.get(key, {})
+        row.update({
+            "baseline_short_liquidity": baseline.get("baseline_short_liquidity"),
+            "baseline_long_liquidity": baseline.get("baseline_long_liquidity"),
+            "baseline_short_samples": baseline.get("baseline_short_samples", 0),
+            "baseline_long_samples": baseline.get("baseline_long_samples", 0),
+        })
+        output.append(row)
+    return output
+
+
+def raw_latest_snapshot_rows():
+    """Latest saved Binance-backed snapshot with validation metadata."""
+    rows = query(
         f"""
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
-        SELECT symbol, timeframe, current_price,
-               short_max_pain, long_max_pain,
+        SELECT symbol, timeframe, collected_at, source, is_valid, validation_errors,
+               current_price, short_max_pain, long_max_pain,
                short_liquidation_amount, long_liquidation_amount,
                distance_short_abs, distance_short_pct,
                distance_long_abs, distance_long_pct,
@@ -752,10 +814,10 @@ def raw_latest_snapshot_rows():
         ORDER BY symbol, {TIMEFRAME_ORDER_SQL}
         """
     )
+    return attach_liquidity_baselines(rows)
 
 
 def latest_snapshot_live_result():
-    """Compatibility wrapper for commands that expect a live-result object."""
     rows = raw_latest_snapshot_rows()
     return {
         "rows": rows,
@@ -770,12 +832,8 @@ def latest_snapshot_live_result():
 
 
 def latest_snapshot_rows():
-    """Rows used by all analysis, score and alert commands.
-
-    No new price request occurs here; all commands use the exact Binance price
-    saved by the most recent /collect, keeping the snapshot internally consistent.
-    """
     return raw_latest_snapshot_rows()
+
 
 
 def side_from_row(row):
@@ -813,10 +871,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/btc_like - מטבעות שהכיוון שלהם דומה ל-BTC\n"
         "/score BTC - פירוק Setup Strength למטבע\n"
         "/score_top - דירוג Setup Strength\n"
-        "/alert_check - דירוג הזדמנויות ידני\n"
+        "/alert_check - דירוג Alert Score v2\n"
         "/alert_explain BTC 24h - פירוט ניקוד\n"
         "/watch_on - הפעלת התראות אוטומטיות\n"
         "/watch_off - עצירת התראות\n"
+        "/watch_stop - עצירת התראות\n"
         "/watch_status - מצב ההתראות\n"
         "/watch_now - בדיקה מיידית ללא שמירה\n"
         "/price_check - בדיקת כיסוי מחירים חיים\n"
@@ -1332,152 +1391,224 @@ def _row_get(row, key, default=None):
         return default
 
 
-def _alert_quality_notes(item: Dict[str, Any], rows: List[Any]) -> List[str]:
-    """Return Hebrew quality notes only; never changes Priority."""
-    notes: List[str] = []
+def _quality_result(item: Dict[str, Any], rows: List[Any]) -> Dict[str, Any]:
+    """Quality is descriptive only and never changes Priority."""
     symbol = item.get("symbol")
     timeframe = item.get("timeframe")
     symbol_rows = [
         row for row in rows
         if str(_row_get(row, "symbol", "")).upper() == str(symbol).upper()
     ]
-    row = next((r for r in symbol_rows if str(_row_get(r, "timeframe", "")) == str(timeframe)), None)
-    available_tfs = {str(_row_get(r, "timeframe", "")) for r in symbol_rows if _row_get(r, "timeframe")}
-    missing_tfs = [tf for tf in TIMEFRAMES if tf not in available_tfs]
-    if missing_tfs:
-        notes.append("חסרים למטבע טווחי הזמן: " + ", ".join(missing_tfs) + ". הקונצנזוס מבוסס על מידע חלקי.")
+    row = next(
+        (r for r in symbol_rows if str(_row_get(r, "timeframe", "")) == str(timeframe)),
+        None,
+    )
+
+    yellow = []
+    orange = []
+    red = []
+
+    available_tfs = {
+        str(_row_get(r, "timeframe"))
+        for r in symbol_rows if _row_get(r, "timeframe")
+    }
+    missing = [tf for tf in TIMEFRAMES if tf not in available_tfs]
+    if len(missing) == 1:
+        yellow.append(
+            "חסר טווח הזמן " + missing[0]
+            + "; הקונצנזוס מבוסס על 6 מתוך 7 טווחים."
+        )
+    elif 2 <= len(missing) <= 3:
+        orange.append(
+            "חסרים טווחי הזמן " + ", ".join(missing)
+            + "; הקונצנזוס מבוסס על מידע חלקי."
+        )
+    elif len(missing) >= 4:
+        red.append(
+            "קיימים פחות מארבעה טווחים תקינים; אמינות ההתראה נמוכה מאוד."
+        )
+
     if row is None:
-        notes.append("לא נמצאה שורת מקור תואמת למטבע ולטווח הזמן.")
-        return notes
-    if _row_get(row, "current_price") in (None, 0):
-        notes.append("מחיר Binance חסר או אינו תקין.")
-    if _row_get(row, "short_max_pain") is None:
-        notes.append("יעד Short Max Pain חסר.")
-    if _row_get(row, "long_max_pain") is None:
-        notes.append("יעד Long Max Pain חסר.")
-    short_liq = _row_get(row, "short_liquidation_amount")
-    long_liq = _row_get(row, "long_liquidation_amount")
-    if short_liq in (None, 0) or long_liq in (None, 0):
-        notes.append("אחד מסכומי הנזילות חסר או שווה לאפס; נתוני מאזן וריכוז הנזילות פחות אמינים.")
-    if _row_get(row, "distance_short_pct") is None or _row_get(row, "distance_long_pct") is None:
-        notes.append("אחד מחישובי המרחק ל-Max Pain חסר.")
-    validation_errors = _row_get(row, "validation_errors")
-    is_valid = _row_get(row, "is_valid", True)
-    if validation_errors:
-        notes.append("בדיקת האיסוף דיווחה: " + str(validation_errors))
-    elif is_valid in (False, 0):
-        notes.append("שורת הנתונים סומנה כלא תקינה בבדיקת האיסוף.")
-    return notes
+        red.append("לא נמצאה שורת מקור תואמת למטבע ולטווח הזמן.")
+    else:
+        if _row_get(row, "current_price") in (None, 0):
+            red.append("מחיר Binance חסר או אינו תקין.")
+        if _row_get(row, "short_max_pain") is None:
+            red.append("יעד Short Max Pain חסר.")
+        if _row_get(row, "long_max_pain") is None:
+            red.append("יעד Long Max Pain חסר.")
+        if (
+            _row_get(row, "short_liquidation_amount") in (None, 0)
+            or _row_get(row, "long_liquidation_amount") in (None, 0)
+        ):
+            orange.append(
+                "אחד מסכומי הנזילות חסר או שווה לאפס; "
+                "מאזן וצפיפות הנזילות פחות אמינים."
+            )
+        if (
+            _row_get(row, "distance_short_pct") is None
+            or _row_get(row, "distance_long_pct") is None
+        ):
+            red.append("אחד מחישובי המרחק ל-Max Pain חסר.")
+
+        validation_errors = _row_get(row, "validation_errors")
+        if validation_errors:
+            orange.append("בדיקת האיסוף דיווחה: " + str(validation_errors))
+        elif _row_get(row, "is_valid", True) in (False, 0):
+            orange.append("שורת הנתונים סומנה כלא תקינה בבדיקת האיסוף.")
+
+    if item.get("baseline_liquidity") is None:
+        yellow.append(
+            "אין עדיין לפחות 3 דגימות היסטוריות לאותו מטבע, טווח וצד; "
+            "רכיב Liquidity Density קיבל 0 נקודות."
+        )
+
+    if red:
+        return {"level": "red", "title": "🔴 בעיית נתונים קריטית", "notes": red + orange + yellow}
+    if orange:
+        return {"level": "orange", "title": "🟠 אזהרת איכות נתונים", "notes": orange + yellow}
+    if yellow:
+        return {"level": "yellow", "title": "🟡 הערת איכות נתונים", "notes": yellow}
+    return {"level": None, "title": None, "notes": []}
 
 
-def _other_alerts_note(item: Dict[str, Any], all_items: List[Dict[str, Any]]) -> Optional[str]:
-    """Describe other alerts for the same coin without changing score."""
-    symbol = item.get("symbol")
-    timeframe = item.get("timeframe")
-    side = item.get("side")
-    others = [x for x in all_items if x.get("symbol") == symbol and x.get("timeframe") != timeframe]
-    if not others:
-        return None
-    same_side = sorted({str(x.get("timeframe")) for x in others if x.get("side") == side and x.get("timeframe")}, key=tf_order_value)
-    opposite = sorted({(str(x.get("timeframe")), str(x.get("side"))) for x in others if x.get("side") and x.get("side") != side and x.get("timeframe")}, key=lambda pair: tf_order_value(pair[0]))
-    parts = []
-    if same_side:
-        parts.append("🔁 למטבע קיימות התראות נוספות באותו כיוון בטווחים: " + ", ".join(same_side))
-    if opposite:
-        parts.append("⚠️ קיימות גם התראות בכיוון הפוך: " + ", ".join(f"{tf} {direction}" for tf, direction in opposite))
-    return "\n".join(parts) if parts else None
-
-
-def _format_quality_block(notes: List[str]) -> str:
-    if not notes:
+def _quality_block(item: Dict[str, Any], rows: List[Any]) -> str:
+    result = _quality_result(item, rows)
+    if not result["notes"]:
         return ""
-    return "\n\n🟠 אזהרת איכות נתונים:\n" + "\n".join(f"• {note}" for note in notes)
+    return (
+        "\n\n" + result["title"] + ":\n"
+        + "\n".join(f"• {note}" for note in result["notes"])
+    )
+
+
+def _other_alerts_block(item: Dict[str, Any], all_items: List[Dict[str, Any]]) -> str:
+    others = [
+        other for other in all_items
+        if other.get("symbol") == item.get("symbol")
+        and other.get("timeframe") != item.get("timeframe")
+    ]
+    if not others:
+        return ""
+
+    same_side = sorted(
+        {
+            str(other.get("timeframe"))
+            for other in others
+            if other.get("side") == item.get("side") and other.get("timeframe")
+        },
+        key=tf_order_value,
+    )
+    opposite = sorted(
+        {
+            (str(other.get("timeframe")), str(other.get("side")))
+            for other in others
+            if other.get("side")
+            and other.get("side") != item.get("side")
+            and other.get("timeframe")
+        },
+        key=lambda pair: tf_order_value(pair[0]),
+    )
+
+    lines = ["🔔 מטבע עם כמה התראות"]
+    if same_side:
+        lines.append("טווחים נוספים באותו כיוון: " + ", ".join(same_side))
+    if opposite:
+        lines.append(
+            "⚠️ התראות בכיוון הפוך: "
+            + ", ".join(f"{tf} {side}" for tf, side in opposite)
+        )
+    return "\n\n" + "\n".join(lines)
+
+
+def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
+    c = item.get("components", {})
+    types_text = "\n".join(f"• {t}" for t in item.get("types", [])) or "• ללא סוג חריגה"
+
+    card = (
+        f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
+        f"צד קרוב: {item['side']}\n"
+        f"Priority: {fmt(item.get('priority'))}/100\n"
+        f"Raw Score: {fmt(item.get('raw_score'))}/{fmt(item.get('raw_max_score'))}\n"
+        f"מרחק: {fmt(item.get('distance_pct'))}%\n"
+        f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
+        f"BTC Like: {item.get('btc_like_hits', 0)}/{item.get('btc_like_total', 0)}\n"
+        f"Target Cluster: {fmt(item.get('cluster_spread_pct'))}% "
+        f"({item.get('cluster_count', 0)} טווחים)\n"
+        f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
+        f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}\n"
+        f"Near Share: {fmt(item.get('near_share_pct'))}%\n"
+        f"Relative Liquidity: {fmt(item.get('relative_liquidity'))}\n"
+        f"Liquidity Density: {fmt(item.get('liquidity_density'))}\n\n"
+        "פירוט הניקוד:\n"
+        f"• קרבה ל-Max Pain: {fmt(c.get('proximity'))}/20\n"
+        f"• Directional Alignment: {fmt(c.get('directional_alignment'))}/20\n"
+        f"  - Consensus: {fmt(c.get('consensus'))}/15\n"
+        f"  - BTC Like: {fmt(c.get('btc_like'))}/5\n"
+        f"• Target Clustering: {fmt(c.get('target_clustering'))}/15\n"
+        f"• Liquidity Density: {fmt(c.get('liquidity_density'))}/20\n"
+        f"• Liquidity Balance: {fmt(c.get('liquidity_balance'))} "
+        "(טווח ‎-10 עד +10)\n\n"
+        f"סוגי חריגה:\n{types_text}"
+    )
+    card += _other_alerts_block(item, all_items)
+    card += _quality_block(item, rows)
+    return card
+
 
 
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual alert scan, one readable card per timeframe alert."""
     limit = 10
     if context.args:
         try:
             limit = max(1, min(25, int(context.args[0])))
         except Exception:
             limit = 10
+
     rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין נתונים שמורים. הריצו /collect קודם.")
         return
+
     all_items = alert_engine.build_opportunities(rows, limit=500)
     items = all_items[:limit]
     if not items:
         await update.message.reply_text("לא נמצאו הזדמנויות לפי הספים הנוכחיים.")
         return
+
     await update.message.reply_text(
-        "📊 Alert Check\n"
-        "כל התראה מוצגת בנפרד לפי מטבע וטווח זמן.\n"
-        "איכות הנתונים וריבוי התראות אינם משפיעים על הציון."
+        "📊 Alert Score v2\n"
+        "איכות הנתונים וריבוי התראות אינם משפיעים על הציון.\n"
+        "כל התראה נשארת נפרדת לפי מטבע וטווח זמן."
     )
+
     for index, item in enumerate(items, start=1):
-        components = item.get("components", {})
-        types_text = "\n".join(f"• {alert_type}" for alert_type in item.get("types", [])) or "• ללא סוג חריגה"
-        other_note = _other_alerts_note(item, all_items)
-        quality_block = _format_quality_block(_alert_quality_notes(item, rows))
-        card = (
-            f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
-            f"צד קרוב: {item['side']}\n"
-            f"Priority: {fmt(item.get('priority'))}\n"
-            f"מרחק: {fmt(item.get('distance_pct'))}%\n"
-            f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
-            f"ריכוז נזילות בצד הקרוב: {fmt(item.get('near_share_pct'))}%\n"
-            f"יחס צד קרוב/צד שני: {fmt(item.get('near_far_ratio'))}\n\n"
-            "פירוט הניקוד הנוכחי:\n"
-            f"• Distance: {fmt(components.get('distance'))}/45\n"
-            f"• Consensus: {fmt(components.get('consensus'))}/30\n"
-            f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
-            f"סוגי חריגה:\n{types_text}"
-        )
-        if other_note:
-            card += "\n\n" + other_note
-        card += quality_block
-        await update.message.reply_text(card)
+        await update.message.reply_text(_alert_card(index, item, all_items, rows))
 
 
 async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Explain one alert without score effects from quality or multiple alerts."""
     if not context.args:
-        await update.message.reply_text("שימוש: /alert_explain BTC או /alert_explain BTC 24h")
+        await update.message.reply_text(
+            "שימוש: /alert_explain BTC או /alert_explain BTC 24h"
+        )
         return
+
     symbol = context.args[0].upper()
     timeframe = context.args[1].lower() if len(context.args) > 1 else None
     rows = latest_snapshot_rows()
     all_items = alert_engine.build_opportunities(rows, limit=500)
-    matches = [item for item in all_items if item.get("symbol") == symbol and (timeframe is None or item.get("timeframe") == timeframe)]
+
+    matches = [
+        item for item in all_items
+        if item.get("symbol") == symbol
+        and (timeframe is None or item.get("timeframe") == timeframe)
+    ]
     if not matches:
         await update.message.reply_text("לא נמצאה כרגע התראה מתאימה.")
         return
+
     item = sorted(matches, key=lambda x: -x.get("priority", 0))[0]
-    components = item.get("components", {})
-    types_text = "\n".join(f"• {alert_type}" for alert_type in item.get("types", [])) or "• ללא סוג חריגה"
-    text = (
-        f"🚨 פירוט התראה — {item['symbol']} / {item['timeframe']}\n\n"
-        f"צד קרוב: {item['side']}\n"
-        f"Priority: {fmt(item.get('priority'))}\n"
-        f"מרחק: {fmt(item.get('distance_pct'))}%\n"
-        f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
-        f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
-        f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}\n"
-        f"Near Share: {fmt(item.get('near_share_pct'))}%\n"
-        f"Near/Far: {fmt(item.get('near_far_ratio'))}\n\n"
-        "פירוט הניקוד הנוכחי:\n"
-        f"• Distance: {fmt(components.get('distance'))}/45\n"
-        f"• Consensus: {fmt(components.get('consensus'))}/30\n"
-        f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
-        f"סוגי חריגה:\n{types_text}"
-    )
-    other_note = _other_alerts_note(item, all_items)
-    if other_note:
-        text += "\n\n" + other_note
-    text += _format_quality_block(_alert_quality_notes(item, rows))
-    await update.message.reply_text(text)
+    await update.message.reply_text(_alert_card(1, item, all_items, rows))
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1675,37 +1806,12 @@ def _remember_alert(item: Dict[str, Any], fingerprint: str) -> None:
         pass
 
 
-def _watch_message(
-    item: Dict[str, Any],
-    all_items: Optional[List[Dict[str, Any]]] = None,
-    source_rows: Optional[List[Any]] = None,
-) -> str:
-    types = "\n".join(f"• {t}" for t in item.get("types", []))
-    components = item.get("components", {})
-    text = (
+def _watch_message(item, all_items, rows) -> str:
+    return (
         "🚨 הזדמנות חדשה\n\n"
-        f"מטבע: {item['symbol']}\n"
-        f"טווח: {item['timeframe']}\n"
-        f"צד קרוב: {item['side']}\n"
-        f"Priority: {fmt(item.get('priority'))}\n"
-        f"מרחק: {fmt(item.get('distance_pct'))}%\n"
-        f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
-        f"ריכוז נזילות בצד הקרוב: {fmt(item.get('near_share_pct'))}%\n"
-        f"יחס צד קרוב/צד שני: {fmt(item.get('near_far_ratio'))}\n\n"
-        "פירוט הניקוד הנוכחי:\n"
-        f"• Distance: {fmt(components.get('distance'))}/45\n"
-        f"• Consensus: {fmt(components.get('consensus'))}/30\n"
-        f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
-        f"סוגי חריגה:\n{types}"
+        + _alert_card(1, item, all_items, rows)
+        + "\n\nזו התראת נתונים לבדיקה, לא הוראת מסחר."
     )
-    if all_items:
-        other_note = _other_alerts_note(item, all_items)
-        if other_note:
-            text += "\n\n" + other_note
-    if source_rows is not None:
-        text += _format_quality_block(_alert_quality_notes(item, source_rows))
-    text += "\n\nזו התראת נתונים לבדיקה, לא הוראת מסחר."
-    return text
 
 
 async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
@@ -1729,7 +1835,7 @@ async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
 
         await bot_app.bot.send_message(
             chat_id=int(chat_id),
-            text=_watch_message(item, all_items=items, source_rows=rows),
+            text=_watch_message(item, items, rows),
         )
         _remember_alert(item, fingerprint)
         sent += 1
@@ -1883,6 +1989,7 @@ async def main():
     bot_app.add_handler(CommandHandler("alert_explain", alert_explain))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_off", watch_off))
+    bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
     bot_app.add_handler(CommandHandler("watch_now", watch_now))
     bot_app.add_handler(CommandHandler("price_check", price_check))
