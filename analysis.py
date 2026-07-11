@@ -1,352 +1,269 @@
-"""Central analysis engine for the crypto Max Pain bot.
+"""Alert priority engine — corrected formula.
 
-This module is intentionally independent of Telegram and database code.
-It receives rows from the latest DB snapshot and returns plain Python
-structures that command handlers can display.
+Important:
+- Setup Strength is NOT used in alert priority.
+- Liquidity is normalized inside each coin/timeframe, not ranked against larger coins.
+- Liquidity balance is explicitly calculated and exposed in the output.
 """
 
 from __future__ import annotations
+from typing import Any, Dict, List, Optional
 
-from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional
-
-
-TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
+import analysis
 
 
 def _get(row: Any, key: str, default=None):
-    """Support sqlite Row, psycopg dict-like rows, and normal dicts."""
     try:
         return row[key]
     except Exception:
         return default
 
 
-def safe_avg(values: Iterable[Optional[float]]) -> Optional[float]:
-    vals = [v for v in values if v is not None]
-    return sum(vals) / len(vals) if vals else None
+def _closest_side(row: Any) -> Optional[str]:
+    return analysis.side_from_distances(
+        _get(row, "distance_short_pct"),
+        _get(row, "distance_long_pct"),
+    )
 
 
-def side_from_distances(distance_short_pct, distance_long_pct) -> Optional[str]:
-    """Return the closer Max Pain side for one row."""
-    if distance_short_pct is None or distance_long_pct is None:
-        return None
-    return "SHORT" if abs(distance_short_pct) <= abs(distance_long_pct) else "LONG"
-
-
-def group_by_symbol(rows: Iterable[Any]) -> Dict[str, List[Any]]:
-    grouped: Dict[str, List[Any]] = defaultdict(list)
-    for row in rows:
-        symbol = _get(row, "symbol")
-        if symbol:
-            grouped[str(symbol).upper()].append(row)
-    return dict(grouped)
-
-
-def calculate_consensus(rows: Iterable[Any], min_hits: int = 7, limit: int = 20) -> List[Dict[str, Any]]:
-    """Coins whose closest Max Pain side is consistent across most/all timeframes."""
-    results: List[Dict[str, Any]] = []
-
-    for symbol, items in group_by_symbol(rows).items():
-        sides = []
-        short_dists = []
-        long_dists = []
-        active_tfs = []
-
-        for row in items:
-            ds = _get(row, "distance_short_pct")
-            dl = _get(row, "distance_long_pct")
-            side = side_from_distances(ds, dl)
-            if not side:
-                continue
-            sides.append(side)
-            short_dists.append(abs(ds))
-            long_dists.append(abs(dl))
-            active_tfs.append(_get(row, "timeframe"))
-
-        if not sides:
-            continue
-
-        short_count = sides.count("SHORT")
-        long_count = sides.count("LONG")
-        if short_count >= long_count:
-            dominant_side = "SHORT"
-            hits = short_count
-            avg_dist = safe_avg(short_dists)
-        else:
-            dominant_side = "LONG"
-            hits = long_count
-            avg_dist = safe_avg(long_dists)
-
-        total = len(sides)
-        if hits < min_hits:
-            continue
-
-        results.append({
-            "symbol": symbol,
-            "side": dominant_side,
-            "hits": hits,
-            "total": total,
-            "avg_dist": avg_dist,
-            "tfs": ",".join([str(x) for x in active_tfs if x]),
-        })
-
-    results.sort(key=lambda x: (-x["hits"], -(x["avg_dist"] if x["avg_dist"] is not None else -1), x["symbol"]))
-    return results[:limit]
-
-
-def calculate_gap(rows: Iterable[Any], limit: int = 20) -> List[Dict[str, Any]]:
-    """Average % gap between Short Max Pain and Long Max Pain.
-
-    Formula approved by Yoni:
-        gap_pct = abs(short_max_pain - long_max_pain) / current_price * 100
-
-    Notes:
-    - This can be very high for low-priced/high-volatility assets.
-    - The function also returns avg_gap_abs for sanity-checking.
-    """
-    results: List[Dict[str, Any]] = []
-
-    for symbol, items in group_by_symbol(rows).items():
-        gaps_pct = []
-        gaps_abs = []
-        max_gap = None
-        max_gap_tf = None
-        min_gap = None
-        min_gap_tf = None
-
-        for row in items:
-            price = _get(row, "current_price")
-            short_mp = _get(row, "short_max_pain")
-            long_mp = _get(row, "long_max_pain")
-            if not price or price == 0 or short_mp is None or long_mp is None:
-                continue
-
-            gap_abs = abs(short_mp - long_mp)
-            gap_pct = gap_abs / price * 100
-            gaps_abs.append(gap_abs)
-            gaps_pct.append(gap_pct)
-
-            tf = _get(row, "timeframe")
-            if max_gap is None or gap_pct > max_gap:
-                max_gap = gap_pct
-                max_gap_tf = tf
-            if min_gap is None or gap_pct < min_gap:
-                min_gap = gap_pct
-                min_gap_tf = tf
-
-        if not gaps_pct:
-            continue
-
-        results.append({
-            "symbol": symbol,
-            "count": len(gaps_pct),
-            "avg_gap": sum(gaps_pct) / len(gaps_pct),
-            "avg_gap_abs": sum(gaps_abs) / len(gaps_abs),
-            "max_gap": max_gap,
-            "max_gap_tf": max_gap_tf,
-            "min_gap": min_gap,
-            "min_gap_tf": min_gap_tf,
-        })
-
-    results.sort(key=lambda x: (-x["avg_gap"], x["symbol"]))
-    return results[:limit]
-
-
-def calculate_liquidity_balance(rows: Iterable[Any]) -> Dict[str, Any]:
-    """Sum short/long liquidation amounts by timeframe + total."""
-    by_tf: Dict[str, Dict[str, float]] = defaultdict(lambda: {"short_total": 0.0, "long_total": 0.0})
-
-    for row in rows:
-        tf = _get(row, "timeframe")
-        if not tf:
-            continue
-        short_amount = _get(row, "short_liquidation_amount") or 0.0
-        long_amount = _get(row, "long_liquidation_amount") or 0.0
-        by_tf[str(tf)]["short_total"] += short_amount
-        by_tf[str(tf)]["long_total"] += long_amount
-
-    timeframe_rows = []
-    total_short = 0.0
-    total_long = 0.0
-
-    for tf in sorted(by_tf.keys(), key=lambda x: TIMEFRAMES.index(x) if x in TIMEFRAMES else 99):
-        short_total = by_tf[tf]["short_total"]
-        long_total = by_tf[tf]["long_total"]
-        total_short += short_total
-        total_long += long_total
-        timeframe_rows.append(_liquidity_row(tf, short_total, long_total))
-
-    return {
-        "timeframes": timeframe_rows,
-        "total": _liquidity_row("TOTAL", total_short, total_long),
-    }
-
-
-def _liquidity_row(tf: str, short_total: float, long_total: float) -> Dict[str, Any]:
-    diff = long_total - short_total
-
-    if long_total > short_total:
-        dominant = "LONG"
-        ratio = long_total / short_total if short_total else None
-    elif short_total > long_total:
-        dominant = "SHORT"
-        ratio = short_total / long_total if long_total else None
+def _closest_distance(row: Any) -> Optional[float]:
+    side = _closest_side(row)
+    if side == "SHORT":
+        value = _get(row, "distance_short_pct")
+    elif side == "LONG":
+        value = _get(row, "distance_long_pct")
     else:
-        dominant = "BALANCED"
-        ratio = 1.0
+        return None
+    return abs(value) if value is not None else None
+
+
+def _amount_for_side(row: Any, side: str) -> float:
+    if side == "SHORT":
+        return float(_get(row, "short_liquidation_amount") or 0.0)
+    if side == "LONG":
+        return float(_get(row, "long_liquidation_amount") or 0.0)
+    return 0.0
+
+
+def _opposite_amount(row: Any, side: str) -> float:
+    if side == "SHORT":
+        return float(_get(row, "long_liquidation_amount") or 0.0)
+    if side == "LONG":
+        return float(_get(row, "short_liquidation_amount") or 0.0)
+    return 0.0
+
+
+def _gap_pct(row: Any) -> Optional[float]:
+    price = _get(row, "current_price")
+    short_mp = _get(row, "short_max_pain")
+    long_mp = _get(row, "long_max_pain")
+    if not price or short_mp is None or long_mp is None:
+        return None
+    return abs(short_mp - long_mp) / price * 100
+
+
+def _distance_points(distance_pct: Optional[float]) -> float:
+    """0..35 points. Full score at <=0.25%; zero at >=1.50%."""
+    if distance_pct is None:
+        return 0.0
+    if distance_pct <= 0.25:
+        return 35.0
+    if distance_pct >= 1.50:
+        return 0.0
+    return round((1.50 - distance_pct) / 1.25 * 35.0, 2)
+
+
+def _consensus_points(hits: int, total: int) -> float:
+    """0..20 points."""
+    if not total:
+        return 0.0
+    return round((hits / total) * 20.0, 2)
+
+
+def _liquidity_metrics(near_amount: float, far_amount: float) -> Dict[str, Any]:
+    """Normalize liquidity inside the same coin/timeframe.
+
+    near_share_pct = near / (near + far) * 100
+
+    This avoids comparing BTC's absolute dollars with smaller assets.
+    The liquidity score is 0..25 and moves continuously:
+    - Near side larger -> more points
+    - Nearly equal -> neutral-middle score
+    - Near side significantly smaller -> fewer points
+    """
+    total = near_amount + far_amount
+    if total <= 0:
+        return {
+            "near_share_pct": None,
+            "near_far_ratio": None,
+            "points": 0.0,
+            "meaning": "no liquidity data",
+        }
+
+    share = near_amount / total
+    ratio = (near_amount / far_amount) if far_amount > 0 else None
+    points = round(share * 25.0, 2)
+
+    if share >= 0.67:
+        meaning = "near side clearly dominant"
+    elif share >= 0.50:
+        meaning = "near side equal or moderately larger"
+    elif share >= 0.40:
+        meaning = "near side mildly smaller"
+    else:
+        meaning = "near side significantly smaller"
 
     return {
-        "timeframe": tf,
-        "short_total": short_total,
-        "long_total": long_total,
-        "dominant": dominant,
-        "diff": diff,
-        "ratio": ratio,
+        "near_share_pct": share * 100.0,
+        "near_far_ratio": ratio,
+        "points": points,
+        "meaning": meaning,
     }
 
 
+def _consensus_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
+    results = analysis.calculate_consensus(rows, min_hits=1, limit=500)
+    return {item["symbol"]: item for item in results}
 
-def calculate_liquidity_by_coin(rows: Iterable[Any], symbol_filter: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
-    """Sum liquidity per coin across all timeframes, optionally only one symbol."""
-    results: List[Dict[str, Any]] = []
 
-    for symbol, items in group_by_symbol(rows).items():
-        if symbol_filter and symbol != symbol_filter.upper():
+
+def _btc_similarity_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
+    return {x["symbol"]: x for x in analysis.calculate_btc_similarity(rows, min_hits=1, limit=500)}
+
+
+def _btc_like_points(symbol: str, btc_map: Dict[str, Dict[str, Any]]) -> float:
+    if symbol == "BTC":
+        return 15.0
+    item = btc_map.get(symbol, {})
+    total = int(item.get("total", 0) or 0)
+    hits = int(item.get("hits", 0) or 0)
+    return round((hits / total) * 15.0, 2) if total else 0.0
+
+
+def _cluster_metrics(symbol_rows: List[Any], side: str, target: Optional[float]) -> Dict[str, Any]:
+    targets = []
+    for row in symbol_rows:
+        row_side = _closest_side(row)
+        if row_side != side:
             continue
-
-        short_total = sum((_get(row, "short_liquidation_amount") or 0.0) for row in items)
-        long_total = sum((_get(row, "long_liquidation_amount") or 0.0) for row in items)
-        total = short_total + long_total
-        diff = long_total - short_total
-
-        if total <= 0:
-            continue
-
-        if long_total > short_total:
-            dominant = "LONG"
-            ratio = long_total / short_total if short_total else None
-        elif short_total > long_total:
-            dominant = "SHORT"
-            ratio = short_total / long_total if long_total else None
-        else:
-            dominant = "BALANCED"
-            ratio = 1.0
-
-        results.append({
-            "symbol": symbol,
-            "short_total": short_total,
-            "long_total": long_total,
-            "total": total,
-            "dominant": dominant,
-            "diff": diff,
-            "ratio": ratio,
-            "count": len(items),
-        })
-
-    results.sort(key=lambda x: (-x["total"], x["symbol"]))
-    return results[:limit]
+        value = _get(row, "short_max_pain") if side == "SHORT" else _get(row, "long_max_pain")
+        if value is not None:
+            targets.append(float(value))
+    if target is None or len(targets) < 2:
+        return {"hits": len(targets), "spread_pct": None, "points": 0.0}
+    center = sum(targets) / len(targets)
+    if not center:
+        return {"hits": len(targets), "spread_pct": None, "points": 0.0}
+    spread = (max(targets) - min(targets)) / abs(center) * 100.0
+    density = min(len(targets) / 7.0, 1.0)
+    tightness = max(0.0, 1.0 - min(spread, 3.0) / 3.0)
+    return {"hits": len(targets), "spread_pct": spread, "points": round(10.0 * density * tightness, 2)}
 
 
-def calculate_liquidity_for_symbol_by_timeframe(rows: Iterable[Any], symbol: str) -> Dict[str, Any]:
-    """Liquidity balance for one coin, by timeframe + total."""
-    symbol = symbol.upper()
-    filtered = []
+def _data_quality(row: Any, symbol_rows: List[Any]) -> List[str]:
+    issues = []
+    present = {str(_get(x, "timeframe", "")) for x in symbol_rows}
+    missing = [tf for tf in analysis.TIMEFRAMES if tf not in present]
+    if missing:
+        issues.append("חסרים טווחי זמן: " + ", ".join(missing))
+    if _get(row, "current_price") is None:
+        issues.append("מחיר Binance חסר")
+    if _get(row, "short_max_pain") is None or _get(row, "long_max_pain") is None:
+        issues.append("Max Pain חסר או חלקי")
+    if _get(row, "short_liquidation_amount") is None or _get(row, "long_liquidation_amount") is None:
+        issues.append("נתוני נזילות חלקיים")
+    validation = _get(row, "validation_errors")
+    if validation:
+        issues.append(str(validation))
+    return issues
+
+def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]]:
+    """Build one alert opportunity per coin/timeframe."""
+    consensus = _consensus_map(rows)
+    btc_map = _btc_similarity_map(rows)
+    grouped = analysis.group_by_symbol(rows)
+    out: List[Dict[str, Any]] = []
+
     for row in rows:
-        if str(_get(row, "symbol", "")).upper() == symbol:
-            filtered.append(row)
-    return calculate_liquidity_balance(filtered)
+        symbol = str(_get(row, "symbol", "")).upper()
+        timeframe = str(_get(row, "timeframe", ""))
+        side = _closest_side(row)
+        distance = _closest_distance(row)
 
-
-def calculate_btc_similarity(rows: Iterable[Any], min_hits: int = 5, limit: int = 20) -> List[Dict[str, Any]]:
-    """Find coins whose closer Max Pain side matches BTC across timeframes."""
-    grouped = group_by_symbol(rows)
-    btc_rows = grouped.get("BTC", [])
-    btc_by_tf: Dict[str, str] = {}
-
-    for row in btc_rows:
-        tf = _get(row, "timeframe")
-        side = side_from_distances(_get(row, "distance_short_pct"), _get(row, "distance_long_pct"))
-        if tf and side:
-            btc_by_tf[str(tf)] = side
-
-    if not btc_by_tf:
-        return []
-
-    results: List[Dict[str, Any]] = []
-    for symbol, items in grouped.items():
-        if symbol == "BTC":
+        if not symbol or not timeframe or not side or distance is None:
             continue
 
-        same = []
-        different = []
-        compared = 0
+        near_amount = _amount_for_side(row, side)
+        far_amount = _opposite_amount(row, side)
+        liq = _liquidity_metrics(near_amount, far_amount)
+        gap = _gap_pct(row)
+        symbol_rows = grouped.get(symbol, [])
+        target = _get(row, "short_max_pain") if side == "SHORT" else _get(row, "long_max_pain")
+        cluster = _cluster_metrics(symbol_rows, side, target)
 
-        for row in items:
-            tf = _get(row, "timeframe")
-            if not tf or str(tf) not in btc_by_tf:
-                continue
-            side = side_from_distances(_get(row, "distance_short_pct"), _get(row, "distance_long_pct"))
-            if not side:
-                continue
+        cons = consensus.get(symbol, {})
+        hits = int(cons.get("hits", 0) or 0)
+        total = int(cons.get("total", 0) or 0)
 
-            compared += 1
-            if side == btc_by_tf[str(tf)]:
-                same.append(str(tf))
-            else:
-                different.append(str(tf))
+        types: List[str] = []
 
-        hits = len(same)
-        if hits < min_hits:
+        if distance <= 0.75:
+            types.append("NEAR_MAX_PAIN")
+
+        ratio = liq["near_far_ratio"]
+        if ratio is not None and ratio >= 2.0:
+            types.append("LIQUIDITY_IMBALANCE_NEAR_SIDE")
+
+        if distance <= 1.0 and liq["near_share_pct"] is not None and liq["near_share_pct"] >= 50.0:
+            types.append("HIGH_LIQUIDITY_CLOSE_DISTANCE")
+
+        if gap is not None and gap >= 20.0:
+            types.append("EXTREME_GAP")
+
+        if not types:
             continue
 
-        results.append({
+        balance_points = round((1.0 - abs((liq["near_share_pct"] or 50.0) - 50.0) / 50.0) * 10.0, 2) if liq["near_share_pct"] is not None else 0.0
+        concentration_points = round((liq["near_share_pct"] or 0.0) / 100.0 * 10.0, 2)
+        components = {
+            "distance": _distance_points(distance),
+            "consensus": _consensus_points(hits, total),
+            "btc_like": _btc_like_points(symbol, btc_map),
+            "liquidity_balance": balance_points,
+            "liquidity_concentration": concentration_points,
+            "cluster": cluster["points"],
+        }
+
+        priority = round(sum(components.values()), 2)
+        priority = max(0.0, min(100.0, priority))
+
+        out.append({
             "symbol": symbol,
-            "hits": hits,
-            "total": compared,
-            "same_tfs": ",".join(same),
-            "different_tfs": ",".join(different) if different else "-",
+            "timeframe": timeframe,
+            "side": side,
+            "types": types,
+            "priority": priority,
+            "distance_pct": distance,
+            "near_amount": near_amount,
+            "far_amount": far_amount,
+            "near_share_pct": liq["near_share_pct"],
+            "near_far_ratio": liq["near_far_ratio"],
+            "liquidity_meaning": liq["meaning"],
+            "consensus_hits": hits,
+            "consensus_total": total,
+            "gap_pct": gap,
+            "cluster_hits": cluster["hits"],
+            "cluster_spread_pct": cluster["spread_pct"],
+            "data_quality_issues": _data_quality(row, symbol_rows),
+            "components": components,
         })
 
-    results.sort(key=lambda x: (-x["hits"], x["symbol"]))
-    return results[:limit]
-
-
-def calculate_market_bias(rows: Iterable[Any]) -> Dict[str, Any]:
-    """Reserved for Stage 4. Counts LONG/SHORT closer side by timeframe."""
-    counts: Dict[str, Dict[str, int]] = defaultdict(lambda: {"LONG": 0, "SHORT": 0})
-    for row in rows:
-        tf = _get(row, "timeframe")
-        side = side_from_distances(_get(row, "distance_short_pct"), _get(row, "distance_long_pct"))
-        if tf and side:
-            counts[str(tf)][side] += 1
-
-    results = []
-    total_long = 0
-    total_short = 0
-    for tf in sorted(counts.keys(), key=lambda x: TIMEFRAMES.index(x) if x in TIMEFRAMES else 99):
-        long_count = counts[tf]["LONG"]
-        short_count = counts[tf]["SHORT"]
-        total = long_count + short_count
-        total_long += long_count
-        total_short += short_count
-        results.append({
-            "timeframe": tf,
-            "long_count": long_count,
-            "short_count": short_count,
-            "long_pct": (long_count / total * 100) if total else None,
-            "short_pct": (short_count / total * 100) if total else None,
-            "bias": "LONG" if long_count > short_count else "SHORT" if short_count > long_count else "NEUTRAL",
-        })
-
-    total = total_long + total_short
-    return {
-        "timeframes": results,
-        "overall": {
-            "long_count": total_long,
-            "short_count": total_short,
-            "long_pct": (total_long / total * 100) if total else None,
-            "short_pct": (total_short / total * 100) if total else None,
-            "bias": "LONG" if total_long > total_short else "SHORT" if total_short > total_long else "NEUTRAL",
-        },
-    }
+    out.sort(
+        key=lambda x: (
+            -x["priority"],
+            x["distance_pct"],
+            x["symbol"],
+            x["timeframe"],
+        )
+    )
+    return out[:limit]
