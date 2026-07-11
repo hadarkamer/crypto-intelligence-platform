@@ -31,13 +31,6 @@ COINGLASS_URL = "https://www.coinglass.com/liquidation-maxpain"
 DEFAULT_TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 
 
-def _log(*args, **kwargs):
-    text = " ".join(str(x) for x in args)
-    allowed = ("ERROR", "REJECTED", "verified=", "done;", "failed", "missing=")
-    if any(token in text for token in allowed):
-        print(text, flush=True)
-
-
 @dataclass
 class DomRow:
     collected_at_utc: str
@@ -353,7 +346,7 @@ def _parse_body_lines_for_symbols(timeframe: str, lines: List[str], collected_at
 
 
 
-def _rows_finger_log(rows: List[Dict[str, Any]]) -> str:
+def _rows_fingerprint(rows: List[Dict[str, Any]]) -> str:
     """Stable signature used to detect stale/duplicated timeframe content."""
     sample = []
     for row in rows[:10]:
@@ -473,7 +466,7 @@ async def read_timeframe(
             tables = await _extract_tables(page)
             lines = await _extract_body_lines(page, limit=1200)
             rows = _parse_body_maxpain_rows(lines, timeframe)
-            fingerprint = _rows_finger_log(rows) if rows else None
+            fingerprint = _rows_fingerprint(rows) if rows else None
             active_label = await _active_timeframe_label(page)
 
             changed = (
@@ -545,7 +538,7 @@ async def collect_coinglass_dom_snapshot(
     missing: List[str] = []
     debug_summary: Dict[str, Any] = {}
 
-    _log(f"[dom] launch browser; url={url}; headless={headless}; timeframes={timeframes}", flush=True)
+    print(f"[dom] launch browser; url={url}; headless={headless}; timeframes={timeframes}", flush=True)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -558,7 +551,7 @@ async def collect_coinglass_dom_snapshot(
                 "--disable-extensions",
             ],
         )
-        _log("[dom] browser launched", flush=True)
+        print("[dom] browser launched", flush=True)
 
         context = await browser.new_context(
             viewport={"width": 1440, "height": 1800},
@@ -572,38 +565,38 @@ async def collect_coinglass_dom_snapshot(
         page = await context.new_page()
 
         try:
-            _log("[dom] opening page", flush=True)
+            print("[dom] opening page", flush=True)
             await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            _log(f"[dom] page opened; title={await page.title()!r}; current_url={page.url}", flush=True)
+            print(f"[dom] page opened; title={await page.title()!r}; current_url={page.url}", flush=True)
 
             # Let React/network render dynamic content.
             await page.wait_for_timeout(8000)
-            _log("[dom] waited 8s after domcontentloaded", flush=True)
+            print("[dom] waited 8s after domcontentloaded", flush=True)
 
             # Dismiss popups if present.
             for label in ["Accept", "I Agree", "Got it", "Close", "×"]:
                 try:
                     await page.get_by_text(label, exact=True).first.click(timeout=1000)
-                    _log(f"[dom] dismissed popup/button: {label}", flush=True)
+                    print(f"[dom] dismissed popup/button: {label}", flush=True)
                     await page.wait_for_timeout(500)
                 except Exception:
                     pass
 
             initial_tables = await _extract_tables(page)
             initial_lines = await _extract_body_lines(page, limit=250)
-            _log(f"[dom] initial table_count={len(initial_tables)}", flush=True)
+            print(f"[dom] initial table_count={len(initial_tables)}", flush=True)
             for t in initial_tables[:6]:
-                _log(
+                print(
                     f"[dom] table[{t.get('index')}] headers={t.get('headers')} rows={len(t.get('rows') or [])}",
                     flush=True,
                 )
-            _log("[dom] body_preview_first_80=" + json.dumps(initial_lines[:80], ensure_ascii=False), flush=True)
+            print("[dom] body_preview_first_80=" + json.dumps(initial_lines[:80], ensure_ascii=False), flush=True)
 
             previous_fingerprint = None
             accepted_fingerprints: Dict[str, str] = {}
 
             for tf in timeframes:
-                _log(f"[dom] ===== timeframe {tf} =====", flush=True)
+                print(f"[dom] ===== timeframe {tf} =====", flush=True)
                 try:
                     result = await read_timeframe(
                         page,
@@ -613,14 +606,14 @@ async def collect_coinglass_dom_snapshot(
                     by_timeframe[tf] = result
                     rows = result.get("rows", [])
                     debug = result.get("debug", {})
-                    _log(
+                    print(
                         f"[dom] tf={tf} clicked={result.get('clicked')} row_count={len(rows)} "
                         f"table_count={debug.get('table_count')}",
                         flush=True,
                     )
                     for i, headers in enumerate((debug.get("table_headers") or [])[:6]):
-                        _log(f"[dom] tf={tf} headers[{i}]={headers}", flush=True)
-                    _log(
+                        print(f"[dom] tf={tf} headers[{i}]={headers}", flush=True)
+                    print(
                         f"[dom] tf={tf} body_preview_first_60="
                         + json.dumps((debug.get("body_preview") or [])[:60], ensure_ascii=False),
                         flush=True,
@@ -636,12 +629,12 @@ async def collect_coinglass_dom_snapshot(
                     )
 
                     if rows and result.get("verified") and not duplicate_of:
-                        _log(
+                        print(
                             f"[dom] tf={tf} verified=True active_label="
                             f"{debug.get('active_label')} fingerprint={fingerprint[:120] if fingerprint else None}",
                             flush=True,
                         )
-                        _log(
+                        print(
                             f"[dom] tf={tf} first_rows="
                             + json.dumps(rows[:3], ensure_ascii=False)[:4000],
                             flush=True,
@@ -651,7 +644,7 @@ async def collect_coinglass_dom_snapshot(
                         previous_fingerprint = fingerprint
                     else:
                         missing.append(tf)
-                        _log(
+                        print(
                             f"[dom] tf={tf} REJECTED verified={result.get('verified')} "
                             f"duplicate_of={duplicate_of} error={result.get('error')} "
                             f"active_label={debug.get('active_label')}",
@@ -660,16 +653,16 @@ async def collect_coinglass_dom_snapshot(
                 except Exception as exc:
                     missing.append(tf)
                     by_timeframe[tf] = {"timeframe": tf, "error": repr(exc), "rows": []}
-                    _log(f"[dom] tf={tf} ERROR: {repr(exc)}", flush=True)
+                    print(f"[dom] tf={tf} ERROR: {repr(exc)}", flush=True)
 
             # Capture a final screenshot path for Render logs. It is mostly diagnostic;
             # the file is not expected to be downloaded, but confirms page rendering.
             try:
                 screenshot_path = "/tmp/coinglass_dom_debug.png"
                 await page.screenshot(path=screenshot_path, full_page=True)
-                _log(f"[dom] screenshot saved to {screenshot_path}", flush=True)
+                print(f"[dom] screenshot saved to {screenshot_path}", flush=True)
             except Exception as exc:
-                _log(f"[dom] screenshot failed: {repr(exc)}", flush=True)
+                print(f"[dom] screenshot failed: {repr(exc)}", flush=True)
 
             debug_summary = {
                 "initial_table_count": len(initial_tables),
@@ -680,9 +673,9 @@ async def collect_coinglass_dom_snapshot(
         finally:
             await context.close()
             await browser.close()
-            _log("[dom] browser closed", flush=True)
+            print("[dom] browser closed", flush=True)
 
-    _log(f"[dom] done; raw_rows={len(all_rows)}; missing={missing}", flush=True)
+    print(f"[dom] done; raw_rows={len(all_rows)}; missing={missing}", flush=True)
     return {
         "ok": len(all_rows) > 0,
         "rows": all_rows,
@@ -707,4 +700,4 @@ def collect_coinglass_dom_snapshot_sync(
 
 if __name__ == "__main__":
     snapshot = collect_coinglass_dom_snapshot_sync(timeframes=["24h"], headless=True)
-    _log(json.dumps(snapshot, ensure_ascii=False, indent=2)[:12000])
+    print(json.dumps(snapshot, ensure_ascii=False, indent=2)[:12000])

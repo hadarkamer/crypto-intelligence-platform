@@ -1,37 +1,17 @@
-Stage 17 — Timeframe Verification Fix
+Stage 19 — Alert annotations and data-quality notes
 
-Recurring bug fixed:
-CoinGlass sometimes accepted the click but kept showing the previous timeframe.
-The old reader then saved the same table under a different timeframe label.
+Implemented:
+- Data quality is not part of Priority.
+- Each alert remains separate by coin and timeframe.
+- Each alert notes additional alerts for the same coin in other timeframes.
+- Opposite-direction alerts are explicitly marked.
+- Multiple alerts do not add score.
+- Data-quality problems are displayed in Hebrew at the end of the alert only.
+- Data-quality notes do not add or subtract score.
+- Same behavior in /alert_check, /alert_explain and automatic Watch alerts.
 
-New safeguards:
-- clicks tabs with several selector strategies
-- polls until content changes
-- checks the active tab when detectable
-- creates a fingerprint from the first 10 rows
-- rejects a timeframe if its fingerprint duplicates an earlier timeframe
-- retries each timeframe up to 3 times
-- rejected timeframes are marked missing and are not saved
-
-Important:
-It is better to save fewer verified rows than to save duplicated/mislabeled data.
-
-Expected logs:
-[dom] tf=24h verified=True ...
-or
-[dom] tf=24h REJECTED ... duplicate_of=12h
-
-Test:
-1. Deploy
-2. /collect
-3. Check Render logs for verified/rejected lines
-4. /coin BTC
-
-Stage 18 updates:
-- Binance-only live price and distance calculations
-- Six-part alert priority (Distance, Consensus, BTC Like, Liquidity Balance, Liquidity Concentration, Cluster)
-- Data-quality notes outside scoring
-- Separate multiple/opposite alert notices
-- Compact Telegram alert cards
-- /watch_start and /watch_stop lifecycle controls
-- Reduced collector logging and structured collect summary
+Tests:
+1. /collect
+2. /alert_check 10
+3. /alert_explain BTC 24h
+4. /watch_now

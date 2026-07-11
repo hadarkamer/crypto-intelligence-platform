@@ -1,8 +1,6 @@
 import asyncio
 import base64
 import html
-import hashlib
-import logging
 import json
 import os
 import re
@@ -51,7 +49,7 @@ RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 TIMEFRAME_ORDER_SQL = "CASE timeframe WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3 WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6 WHEN '1m' THEN 7 ELSE 99 END"
 # CoinGlass may mix non-crypto assets into the Max Pain table. Exclude known non-crypto symbols.
-NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "SKHY", "SNDK", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR", "CRCL", "DRAM", "FARTCOIN", "HYPE"}
+NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "SKHY", "SNDK", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
 API_TIMEFRAME_MAP = {
     "12h": "12h", "24h": "24h", "48h": "48h", "3d": "3d",
     "1w": "7d", "2w": "14d", "1m": "30d",
@@ -70,7 +68,6 @@ SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v3-dom-reader"
 COLLECT_LOCK = None
 WATCH_TASK = None
-LAST_COLLECT_SUMMARY: Dict[str, Any] = {}
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "75"))
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
@@ -544,7 +541,6 @@ def validate_snapshot(rows):
 
 
 async def collect_once():
-    global LAST_COLLECT_SUMMARY
     """Collect CoinGlass Max Pain targets, attach Binance live prices, and save one coherent snapshot.
 
     CoinGlass supplies:
@@ -646,18 +642,11 @@ async def collect_once():
         f"raw_rows_seen={snapshot.get('row_count', 0)}"
     )
 
-    LAST_COLLECT_SUMMARY = {
-        "source": price_result.get("source", "binance_futures_mark_then_spot"),
-        "requested": price_result.get("requested_count", 0),
-        "found": price_result.get("found_count", 0),
-        "missing": price_result.get("missing_count", 0),
-        "fetched_at_utc": price_result.get("fetched_at_utc", "-"),
-        "missing_symbols": price_result.get("missing_symbols", []),
-        "inserted_rows": inserted,
-        "missing_timeframes": missing_timeframes,
-    }
     if inserted == 0:
-        logging.warning("Collector inserted no rows; CoinGlass prices were not used as fallback")
+        print(
+            "[collector] no rows inserted. Check DOM parsing and Binance coverage; "
+            "CoinGlass prices were not used as fallback."
+        )
 
     return inserted, missing_timeframes
 
@@ -875,18 +864,9 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/alert_check\n"
                 "/alert_explain BTC 24h"
             )
-            summary = LAST_COLLECT_SUMMARY
-            missing_symbols = ", ".join(summary.get("missing_symbols", [])) or "-"
             await update.message.reply_text(
-                "האיסוף הסתיים.\n\n"
-                f"Source: {summary.get('source', '-')}\n"
-                f"Requested: {summary.get('requested', 0)}\n"
-                f"Found: {summary.get('found', 0)}\n"
-                f"Missing: {summary.get('missing', 0)}\n"
-                f"Fetched UTC: {summary.get('fetched_at_utc', '-')}\n"
-                f"Inserted rows: {inserted}\n"
-                f"Missing symbols: {missing_symbols}"
-                f"{missing_note}{commands}"
+                f"האיסוף הסתיים. נשמרו {inserted} שורות עם מחיר Binance "
+                f"ומרחקים שחושבו מחדש.{missing_note}{commands}"
             )
         except Exception as e:
             await update.message.reply_text(f"שגיאה באיסוף: {e}")
@@ -1344,122 +1324,160 @@ async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
 
+
+def _row_get(row, key, default=None):
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _alert_quality_notes(item: Dict[str, Any], rows: List[Any]) -> List[str]:
+    """Return Hebrew quality notes only; never changes Priority."""
+    notes: List[str] = []
+    symbol = item.get("symbol")
+    timeframe = item.get("timeframe")
+    symbol_rows = [
+        row for row in rows
+        if str(_row_get(row, "symbol", "")).upper() == str(symbol).upper()
+    ]
+    row = next((r for r in symbol_rows if str(_row_get(r, "timeframe", "")) == str(timeframe)), None)
+    available_tfs = {str(_row_get(r, "timeframe", "")) for r in symbol_rows if _row_get(r, "timeframe")}
+    missing_tfs = [tf for tf in TIMEFRAMES if tf not in available_tfs]
+    if missing_tfs:
+        notes.append("חסרים למטבע טווחי הזמן: " + ", ".join(missing_tfs) + ". הקונצנזוס מבוסס על מידע חלקי.")
+    if row is None:
+        notes.append("לא נמצאה שורת מקור תואמת למטבע ולטווח הזמן.")
+        return notes
+    if _row_get(row, "current_price") in (None, 0):
+        notes.append("מחיר Binance חסר או אינו תקין.")
+    if _row_get(row, "short_max_pain") is None:
+        notes.append("יעד Short Max Pain חסר.")
+    if _row_get(row, "long_max_pain") is None:
+        notes.append("יעד Long Max Pain חסר.")
+    short_liq = _row_get(row, "short_liquidation_amount")
+    long_liq = _row_get(row, "long_liquidation_amount")
+    if short_liq in (None, 0) or long_liq in (None, 0):
+        notes.append("אחד מסכומי הנזילות חסר או שווה לאפס; נתוני מאזן וריכוז הנזילות פחות אמינים.")
+    if _row_get(row, "distance_short_pct") is None or _row_get(row, "distance_long_pct") is None:
+        notes.append("אחד מחישובי המרחק ל-Max Pain חסר.")
+    validation_errors = _row_get(row, "validation_errors")
+    is_valid = _row_get(row, "is_valid", True)
+    if validation_errors:
+        notes.append("בדיקת האיסוף דיווחה: " + str(validation_errors))
+    elif is_valid in (False, 0):
+        notes.append("שורת הנתונים סומנה כלא תקינה בבדיקת האיסוף.")
+    return notes
+
+
+def _other_alerts_note(item: Dict[str, Any], all_items: List[Dict[str, Any]]) -> Optional[str]:
+    """Describe other alerts for the same coin without changing score."""
+    symbol = item.get("symbol")
+    timeframe = item.get("timeframe")
+    side = item.get("side")
+    others = [x for x in all_items if x.get("symbol") == symbol and x.get("timeframe") != timeframe]
+    if not others:
+        return None
+    same_side = sorted({str(x.get("timeframe")) for x in others if x.get("side") == side and x.get("timeframe")}, key=tf_order_value)
+    opposite = sorted({(str(x.get("timeframe")), str(x.get("side"))) for x in others if x.get("side") and x.get("side") != side and x.get("timeframe")}, key=lambda pair: tf_order_value(pair[0]))
+    parts = []
+    if same_side:
+        parts.append("🔁 למטבע קיימות התראות נוספות באותו כיוון בטווחים: " + ", ".join(same_side))
+    if opposite:
+        parts.append("⚠️ קיימות גם התראות בכיוון הפוך: " + ", ".join(f"{tf} {direction}" for tf, direction in opposite))
+    return "\n".join(parts) if parts else None
+
+
+def _format_quality_block(notes: List[str]) -> str:
+    if not notes:
+        return ""
+    return "\n\n🟠 אזהרת איכות נתונים:\n" + "\n".join(f"• {note}" for note in notes)
+
+
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual alert scan displayed as compact Telegram cards."""
+    """Manual alert scan, one readable card per timeframe alert."""
     limit = 10
     if context.args:
         try:
             limit = max(1, min(25, int(context.args[0])))
         except Exception:
-            pass
-
+            limit = 10
     rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין נתונים שמורים. הריצו /collect קודם.")
         return
-
     all_items = alert_engine.build_opportunities(rows, limit=500)
     items = all_items[:limit]
     if not items:
         await update.message.reply_text("לא נמצאו הזדמנויות לפי הספים הנוכחיים.")
         return
-
-    by_symbol = {}
-    for item in all_items:
-        by_symbol.setdefault(item["symbol"], []).append(item)
-
-    header = (
-        "📊 דירוג הזדמנויות\n"
-        "Priority: Distance 35 + Consensus 20 + BTC Like 15 + "
-        "Liquidity Balance 10 + Concentration 10 + Cluster 10\n\n"
+    await update.message.reply_text(
+        "📊 Alert Check\n"
+        "כל התראה מוצגת בנפרד לפי מטבע וטווח זמן.\n"
+        "איכות הנתונים וריבוי התראות אינם משפיעים על הציון."
     )
-    cards = []
-    for index, x in enumerate(items, start=1):
-        c = x.get("components", {})
-        siblings = by_symbol.get(x["symbol"], [])
-        other = [y for y in siblings if y["timeframe"] != x["timeframe"]]
-        same_tfs = [y["timeframe"] for y in other]
-        opposite = [f"{y['timeframe']} {y['side']}" for y in other if y["side"] != x["side"]]
-        notices = []
-        if same_tfs:
-            notices.append("🔔 קיימות עוד התראות עבור המטבע\nטווחים נוספים: " + ", ".join(same_tfs))
-        if opposite:
-            notices.append("⚠ קיימת גם התראה בכיוון ההפוך:\n" + "\n".join(opposite))
-        dq = x.get("data_quality_issues") or []
-        if dq:
-            notices.append("⚠ איכות נתונים\n" + "\n".join(f"• {q}" for q in dq))
-        notice_text = "\n\n" + "\n\n".join(notices) if notices else ""
-        cards.append(
-            f"🚨 #{index} — {x['symbol']} | {x['timeframe']} | {x['side']}\n"
-            f"Priority: {fmt(x['priority'])} | Distance: {fmt(x['distance_pct'])}%\n"
-            f"Consensus: {x['consensus_hits']}/{x['consensus_total']} | Liq share: {fmt(x.get('near_share_pct'))}%\n"
-            f"Score: D {fmt(c.get('distance'))}/35 · C {fmt(c.get('consensus'))}/20 · "
-            f"BTC {fmt(c.get('btc_like'))}/15\n"
-            f"LiqBal {fmt(c.get('liquidity_balance'))}/10 · LiqCon {fmt(c.get('liquidity_concentration'))}/10 · "
-            f"Cluster {fmt(c.get('cluster'))}/10{notice_text}"
+    for index, item in enumerate(items, start=1):
+        components = item.get("components", {})
+        types_text = "\n".join(f"• {alert_type}" for alert_type in item.get("types", [])) or "• ללא סוג חריגה"
+        other_note = _other_alerts_note(item, all_items)
+        quality_block = _format_quality_block(_alert_quality_notes(item, rows))
+        card = (
+            f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
+            f"צד קרוב: {item['side']}\n"
+            f"Priority: {fmt(item.get('priority'))}\n"
+            f"מרחק: {fmt(item.get('distance_pct'))}%\n"
+            f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
+            f"ריכוז נזילות בצד הקרוב: {fmt(item.get('near_share_pct'))}%\n"
+            f"יחס צד קרוב/צד שני: {fmt(item.get('near_far_ratio'))}\n\n"
+            "פירוט הניקוד הנוכחי:\n"
+            f"• Distance: {fmt(components.get('distance'))}/45\n"
+            f"• Consensus: {fmt(components.get('consensus'))}/30\n"
+            f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
+            f"סוגי חריגה:\n{types_text}"
         )
-
-    chunks, current = [], header
-    for card in cards:
-        sep = "\n\n────────────\n\n"
-        candidate = current + (sep if current != header else "") + card
-        if len(candidate) > 3500:
-            chunks.append(current)
-            current = card
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    for chunk in chunks:
-        await update.message.reply_text(chunk)
+        if other_note:
+            card += "\n\n" + other_note
+        card += quality_block
+        await update.message.reply_text(card)
 
 
 async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Explain corrected alert priority for one coin/timeframe."""
+    """Explain one alert without score effects from quality or multiple alerts."""
     if not context.args:
         await update.message.reply_text("שימוש: /alert_explain BTC או /alert_explain BTC 24h")
         return
-
     symbol = context.args[0].upper()
     timeframe = context.args[1].lower() if len(context.args) > 1 else None
-
-    items = alert_engine.build_opportunities(latest_snapshot_rows(), limit=500)
-    matches = [
-        x for x in items
-        if x["symbol"] == symbol
-        and (timeframe is None or x["timeframe"] == timeframe)
-    ]
-
+    rows = latest_snapshot_rows()
+    all_items = alert_engine.build_opportunities(rows, limit=500)
+    matches = [item for item in all_items if item.get("symbol") == symbol and (timeframe is None or item.get("timeframe") == timeframe)]
     if not matches:
         await update.message.reply_text("לא נמצאה כרגע התראה מתאימה.")
         return
-
-    x = sorted(matches, key=lambda y: -y["priority"])[0]
-    c = x["components"]
-
-    rows_out = [
-        ["Coin", x["symbol"]],
-        ["TF", x["timeframe"]],
-        ["Side", x["side"]],
-        ["Types", "+".join(x["types"])],
-        ["Priority", x["priority"]],
-        ["Distance%", fmt(x["distance_pct"])],
-        ["Near-side liquidity", fmt(x["near_amount"], 0)],
-        ["Opposite liquidity", fmt(x["far_amount"], 0)],
-        ["NearShare%", fmt(x["near_share_pct"])],
-        ["Near/Far ratio", fmt(x["near_far_ratio"])],
-        ["Consensus", f'{x["consensus_hits"]}/{x["consensus_total"]}'],
-        ["Distance points", c["distance"]],
-        ["Consensus points", c["consensus"]],
-        ["Liquidity points", c["liquidity_balance"]],
-        ["Liquidity meaning", x["liquidity_meaning"]],
-    ]
-
-    output = tabulate(rows_out, tablefmt="plain")
-    await update.message.reply_text(
-        f"<pre>{html.escape(output)}</pre>",
-        parse_mode="HTML",
+    item = sorted(matches, key=lambda x: -x.get("priority", 0))[0]
+    components = item.get("components", {})
+    types_text = "\n".join(f"• {alert_type}" for alert_type in item.get("types", [])) or "• ללא סוג חריגה"
+    text = (
+        f"🚨 פירוט התראה — {item['symbol']} / {item['timeframe']}\n\n"
+        f"צד קרוב: {item['side']}\n"
+        f"Priority: {fmt(item.get('priority'))}\n"
+        f"מרחק: {fmt(item.get('distance_pct'))}%\n"
+        f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
+        f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
+        f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}\n"
+        f"Near Share: {fmt(item.get('near_share_pct'))}%\n"
+        f"Near/Far: {fmt(item.get('near_far_ratio'))}\n\n"
+        "פירוט הניקוד הנוכחי:\n"
+        f"• Distance: {fmt(components.get('distance'))}/45\n"
+        f"• Consensus: {fmt(components.get('consensus'))}/30\n"
+        f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
+        f"סוגי חריגה:\n{types_text}"
     )
+    other_note = _other_alerts_note(item, all_items)
+    if other_note:
+        text += "\n\n" + other_note
+    text += _format_quality_block(_alert_quality_notes(item, rows))
+    await update.message.reply_text(text)
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1657,30 +1675,37 @@ def _remember_alert(item: Dict[str, Any], fingerprint: str) -> None:
         pass
 
 
-def _watch_message(item: Dict[str, Any]) -> str:
-    types = "\n".join(f"• {t}" for t in item["types"])
-    ratio = fmt(item.get("near_far_ratio"))
-    near_share = fmt(item.get("near_share_pct"))
-    consensus = f'{item["consensus_hits"]}/{item["consensus_total"]}'
+def _watch_message(
+    item: Dict[str, Any],
+    all_items: Optional[List[Dict[str, Any]]] = None,
+    source_rows: Optional[List[Any]] = None,
+) -> str:
+    types = "\n".join(f"• {t}" for t in item.get("types", []))
     components = item.get("components", {})
-
-    return (
+    text = (
         "🚨 הזדמנות חדשה\n\n"
         f"מטבע: {item['symbol']}\n"
         f"טווח: {item['timeframe']}\n"
         f"צד קרוב: {item['side']}\n"
-        f"Priority: {fmt(item['priority'])}\n"
-        f"מרחק: {fmt(item['distance_pct'])}%\n"
-        f"קונצנזוס: {consensus}\n"
-        f"ריכוז נזילות בצד הקרוב: {near_share}%\n"
-        f"יחס צד קרוב/צד שני: {ratio}\n\n"
-        "פירוט הניקוד:\n"
+        f"Priority: {fmt(item.get('priority'))}\n"
+        f"מרחק: {fmt(item.get('distance_pct'))}%\n"
+        f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
+        f"ריכוז נזילות בצד הקרוב: {fmt(item.get('near_share_pct'))}%\n"
+        f"יחס צד קרוב/צד שני: {fmt(item.get('near_far_ratio'))}\n\n"
+        "פירוט הניקוד הנוכחי:\n"
         f"• Distance: {fmt(components.get('distance'))}/45\n"
         f"• Consensus: {fmt(components.get('consensus'))}/30\n"
         f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
-        f"סוגי חריגה:\n{types}\n\n"
-        "זו התראת נתונים לבדיקה, לא הוראת מסחר."
+        f"סוגי חריגה:\n{types}"
     )
+    if all_items:
+        other_note = _other_alerts_note(item, all_items)
+        if other_note:
+            text += "\n\n" + other_note
+    if source_rows is not None:
+        text += _format_quality_block(_alert_quality_notes(item, source_rows))
+    text += "\n\nזו התראת נתונים לבדיקה, לא הוראת מסחר."
+    return text
 
 
 async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
@@ -1704,7 +1729,7 @@ async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
 
         await bot_app.bot.send_message(
             chat_id=int(chat_id),
-            text=_watch_message(item),
+            text=_watch_message(item, all_items=items, source_rows=rows),
         )
         _remember_alert(item, fingerprint)
         sent += 1
@@ -1742,35 +1767,22 @@ async def watch_loop(bot_app):
         await asyncio.sleep(max(1, WATCH_INTERVAL_MINUTES) * 60)
 
 
-async def watch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global WATCH_TASK
-    if WATCH_TASK is not None and not WATCH_TASK.done():
-        await update.message.reply_text("Watch כבר פעיל; לא נוצרה משימה נוספת.")
-        return
-    set_setting("watch_chat_id", str(update.effective_chat.id))
+async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    set_setting("watch_chat_id", str(chat_id))
     set_setting("watch_enabled", "1")
-    WATCH_TASK = asyncio.create_task(watch_loop(context.application))
     await update.message.reply_text(
-        "Watch הופעל.\n"
-        f"בדיקה כל {WATCH_INTERVAL_MINUTES} דקות | Priority מינימלי {WATCH_PRIORITY_THRESHOLD}."
+        "ההתראות האוטומטיות הופעלו.\n"
+        f"בדיקה כל {WATCH_INTERVAL_MINUTES} דקות.\n"
+        f"סף Priority: {WATCH_PRIORITY_THRESHOLD}.\n"
+        f"אותה התראה לא תישלח שוב במשך {WATCH_COOLDOWN_MINUTES} דקות.\n"
+        "הבדיקה אינה שומרת Snapshot מלא."
     )
 
 
-async def watch_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global WATCH_TASK
+async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_setting("watch_enabled", "0")
-    if WATCH_TASK is not None and not WATCH_TASK.done():
-        WATCH_TASK.cancel()
-        try:
-            await WATCH_TASK
-        except asyncio.CancelledError:
-            pass
-    WATCH_TASK = None
-    await update.message.reply_text("Watch הופסק בצורה נקייה.")
-
-
-watch_on = watch_start
-watch_off = watch_stop
+    await update.message.reply_text("ההתראות האוטומטיות הופסקו.")
 
 
 async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1869,10 +1881,8 @@ async def main():
     bot_app.add_handler(CommandHandler("score_top", score_top))
     bot_app.add_handler(CommandHandler("alert_check", alert_check))
     bot_app.add_handler(CommandHandler("alert_explain", alert_explain))
-    bot_app.add_handler(CommandHandler("watch_start", watch_start))
-    bot_app.add_handler(CommandHandler("watch_on", watch_start))
-    bot_app.add_handler(CommandHandler("watch_stop", watch_stop))
-    bot_app.add_handler(CommandHandler("watch_off", watch_stop))
+    bot_app.add_handler(CommandHandler("watch_on", watch_on))
+    bot_app.add_handler(CommandHandler("watch_off", watch_off))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
     bot_app.add_handler(CommandHandler("watch_now", watch_now))
     bot_app.add_handler(CommandHandler("price_check", price_check))
@@ -1883,7 +1893,7 @@ async def main():
     await bot_app.start()
 
     global WATCH_TASK
-    WATCH_TASK = None
+    WATCH_TASK = asyncio.create_task(watch_loop(bot_app))
 
     webhook_url = f"{PUBLIC_URL}/telegram"
     await bot_app.bot.delete_webhook(drop_pending_updates=True)
