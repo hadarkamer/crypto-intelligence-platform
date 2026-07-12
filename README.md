@@ -1,15 +1,13 @@
-# Stage 38 — Single Persistent Watch Loop
+# Stage 39 — Persistent Watch Across Restarts
 
-The Watch architecture was rebuilt around one task:
-
-- No Watch manager task is created during deploy/startup.
-- /watch_on creates exactly one `WATCH_TASK`.
-- Repeated /watch_on calls cannot create another loop.
-- The loop runs:
-  scan -> send results -> wait 15 minutes -> scan again.
-- It repeats indefinitely.
-- Only /watch_stop cancels the loop.
-- /watch_stop also cancels the active scan.
-- /watch_status reads the actual asyncio task, not only a database flag.
-- /alerts never cancels the Watch loop; it waits for the shared browser lock.
-- Telegram pending updates are preserved across deploys.
+Implemented:
+- Watch starts only after /watch_on on a fresh installation.
+- Once manually enabled, its state, chat ID and next scan time are stored.
+- Render/service restarts restore the same Watch loop automatically.
+- A restart does not count as /watch_stop.
+- Only /watch_stop permanently disables Watch.
+- Exactly one Watch task exists in each running process.
+- /watch_status responds immediately without waiting for scraping locks.
+- Status displays Israel time and a countdown to the next scan.
+- Last scan/result state is persisted for status after restart.
+- Telegram pending updates are preserved during webhook resets.
