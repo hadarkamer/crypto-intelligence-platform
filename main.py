@@ -7,7 +7,7 @@ import re
 import sqlite3
 import time
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -71,6 +71,7 @@ COLLECT_LOCK = None
 SCRAPE_LOCK = None
 WATCH_TASK = None
 WATCH_SCAN_TASK = None
+ALERT_ACTIVE = False
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
@@ -1447,117 +1448,92 @@ def _quality_block(item: Dict[str, Any], rows: List[Any]) -> str:
     )
 
 
-def _other_alerts_block(item: Dict[str, Any], all_items: List[Dict[str, Any]]) -> str:
-    others = [
+def _other_alerts_block(item: Dict[str, Any], all_items) -> str:
+    symbol_items = [
         other for other in all_items
         if other.get("symbol") == item.get("symbol")
-        and other.get("timeframe") != item.get("timeframe")
     ]
-    if not others:
+    if not symbol_items:
         return ""
 
-    same_side = sorted(
-        {
-            str(other.get("timeframe"))
-            for other in others
-            if other.get("side") == item.get("side")
-            and other.get("timeframe")
-            and float(other.get("priority") or 0) > 50.0
-        },
-        key=tf_order_value,
-    )
-    opposite = sorted(
-        {
-            (str(other.get("timeframe")), str(other.get("side")))
-            for other in others
-            if other.get("side")
-            and other.get("side") != item.get("side")
-            and other.get("timeframe")
-        },
-        key=lambda pair: tf_order_value(pair[0]),
-    )
+    average_score = sum(
+        float(other.get("score", other.get("priority", 0)) or 0)
+        for other in symbol_items
+    ) / len(symbol_items)
 
-    lines = ["🔔 מטבע עם כמה התראות"]
-    if same_side:
-        lines.append("טווחים נוספים באותו כיוון: " + ", ".join(same_side))
-    if opposite:
-        lines.append(
-            "⚠️ התראות בכיוון הפוך: "
-            + ", ".join(f"{tf} {side}" for tf, side in opposite)
-        )
+    alert_timeframes = [
+        other for other in symbol_items
+        if float(other.get("score", other.get("priority", 0)) or 0) > 50.0
+    ]
+
+    lines = [
+        f"🔔 {len(alert_timeframes)}/7 טווחי זמן עם התראות",
+        f"ממוצע Score בכל הטווחים: {average_score:.2f}/100",
+    ]
     return "\n\n" + "\n".join(lines)
 
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     c = item.get("components", {})
     types = item.get("types", [])
-    if types:
-        type_prefix = "🟢 " if len(types) > 1 else ""
-        types_text = "\n".join(f"{type_prefix}• {t}" for t in types)
-    else:
-        types_text = "• ללא סוג חריגה"
+    type_prefix = "🟢 " if len(types) > 1 else ""
+    types_text = (
+        "\n".join(f"{type_prefix}• {type_name}" for type_name in types)
+        if types else "• ללא סוג חריגה"
+    )
 
     near_share = item.get("near_share_pct")
     if near_share is None:
         balance_text = "⚪ Liquidity Balance: אין נתון"
     elif float(near_share) >= 60.0:
-        balance_text = (
-            "🟢 Liquidity Balance תומך בצד ה-Max Pain הקרוב: "
-            f"{fmt(near_share)}%"
-        )
+        balance_text = f"🟢 Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
     elif float(near_share) <= 40.0:
-        balance_text = (
-            "🔴 Liquidity Balance מנוגד לצד ה-Max Pain הקרוב: "
-            f"{fmt(near_share)}%"
-        )
+        balance_text = f"🔴 Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
     else:
-        balance_text = f"⚪ Liquidity Balance ניטרלי: {fmt(near_share)}%"
-
-    btc_like_line = (
-        "BTC Like: לא נכלל בניקוד של BTC\n"
-        if item.get("symbol") == "BTC"
-        else (
-            f"BTC Like: {item.get('btc_like_hits', 0)}/"
-            f"{item.get('btc_like_total', 0)}\n"
-        )
-    )
+        balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
 
     btc_like_score_line = ""
-    if float(c.get("btc_like_max", 5) or 0) > 0:
+    if float(c.get("btc_like_max", 0) or 0) > 0:
         btc_like_score_line = (
             f"  - BTC Like: {fmt(c.get('btc_like'))}/"
-            f"{fmt(c.get('btc_like_max', 5))}\n"
+            f"{fmt(c.get('btc_like_max'))}\n"
         )
 
     card = (
         f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
         f"צד קרוב: {item['side']}\n"
-        f"Priority: {fmt(item.get('priority'))}/100\n"
-        f"Raw Score: {fmt(item.get('raw_score'))}/{fmt(item.get('raw_max_score'))}\n"
-        f"מרחק: {fmt(item.get('distance_pct'))}%\n"
-        f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}\n"
-        + btc_like_line
-        + f"Market Schema: {fmt(item.get('market_support_pct'))}% "
-        f"תמיכה ב-{item['side']} "
-        f"({item.get('market_support_count', 0)}/{item.get('market_total_count', 0)})\n"
+        f"Score: {fmt(item.get('score', item.get('priority')))}/100\n"
+        f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
+        f"(סף: {fmt(item.get('allowed_distance_pct'))}%)\n"
+        f"קונצנזוס: {item.get('consensus_hits', 0)}/"
+        f"{item.get('consensus_total', 0)}\n"
+        f"Market: {fmt(item.get('market_support_pct'))}% תמיכה ב-{item['side']} "
+        f"({item.get('market_support_count', 0)}/"
+        f"{item.get('market_total_count', 0)})\n"
         f"Target Cluster: {fmt(item.get('cluster_spread_pct'))}% "
         f"({item.get('cluster_count', 0)} טווחים)\n"
-        f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
-        f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}\n"
-        f"Near Share: {fmt(item.get('near_share_pct'))}%\n"
-        f"Adjusted Near Liquidity Ratio: {fmt(item.get('adjusted_near_liquidity_ratio'))}x\n"
+        f"Relative Gap Advantage: "
+        f"{fmt((item.get('relative_gap_advantage') or 0) * 100)}%\n"
         "\n"
         "פירוט הניקוד:\n"
-        f"• קרבה ל-Max Pain: {fmt(c.get('proximity'))}/30\n"
-        f"• Directional Alignment: {fmt(c.get('directional_alignment'))}/20\n"
-        f"  - Consensus: {fmt(c.get('consensus'))}/{fmt(c.get('consensus_max', 12))}\n"
+        f"• Directional Alignment: "
+        f"{fmt(c.get('directional_alignment'))}/35\n"
+        f"  - Consensus: {fmt(c.get('consensus'))}/"
+        f"{fmt(c.get('consensus_max'))}\n"
         + btc_like_score_line
-        + f"  - Market Schema: {fmt(c.get('market'))}/{fmt(c.get('market_max', 3))}\n"
-        f"• Target Clustering: {fmt(c.get('target_clustering'))}/20\n"
-        f"• High Liquidity Close Distance: "
-        f"{fmt(c.get('high_liquidity_close_distance'))}/30\n\n"
+        + f"  - Market: {fmt(c.get('market'))}/"
+        f"{fmt(c.get('market_max'))}\n"
+        f"• Target Attraction: {fmt(c.get('target_attraction'))}/35\n"
+        f"  - קרבה בסיסית: {fmt(c.get('proximity_base'))}/35\n"
+        f"  - מכפיל נזילות מתוקנת: "
+        f"{fmt(item.get('adjusted_multiplier'))}x\n"
+        f"• Target Clustering: {fmt(c.get('target_clustering'))}/25\n"
+        f"• Relative Gap: {fmt(c.get('relative_gap'))}/5\n"
+        "\n"
         f"סוגי חריגה:\n{types_text}\n\n"
-        f"{balance_text}"
+        f"{balance_text}\n"
+        f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
+        f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}"
     )
     card += _other_alerts_block(item, all_items)
     card += _quality_block(item, rows)
@@ -1566,6 +1542,8 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 
 
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global WATCH_SCAN_TASK, ALERT_ACTIVE
+
     limit = 10
     if context.args:
         try:
@@ -1573,25 +1551,57 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             limit = 10
 
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים שמורים. הריצו /collect קודם.")
-        return
-
-    all_items = alert_engine.build_opportunities(rows, limit=500)
-    items = all_items[:limit]
-    if not items:
-        await update.message.reply_text("לא נמצאו הזדמנויות לפי הספים הנוכחיים.")
-        return
-
-    await update.message.reply_text(
-        "📊 הזדמנויות מדורגות\n"
-        "איכות הנתונים וריבוי התראות אינם משפיעים על הציון.\n"
-        "כל התראה נשארת נפרדת לפי מטבע וטווח זמן."
+    ALERT_ACTIVE = True
+    watch_was_active = (
+        watch_enabled()
+        and WATCH_RUNTIME.get("activation_source") == "manual"
     )
 
-    for index, item in enumerate(items, start=1):
-        await update.message.reply_text(_alert_card(index, item, all_items, rows))
+    # Manual /alerts has priority over an active Watch browser scan.
+    if WATCH_SCAN_TASK and not WATCH_SCAN_TASK.done():
+        WATCH_SCAN_TASK.cancel()
+        try:
+            await WATCH_SCAN_TASK
+        except asyncio.CancelledError:
+            pass
+        WATCH_SCAN_TASK = None
+
+    await update.message.reply_text(
+        "🔎 מבצע סריקת Alerts חיה. "
+        "אם Watch פעיל, הוא מושהה זמנית ויחזור לאחר הסריקה."
+    )
+
+    try:
+        scrape_lock = _get_scrape_lock()
+        async with scrape_lock:
+            rows, _live_result = await collect_live_rows_for_watch()
+
+        all_items = alert_engine.build_opportunities(rows, limit=500)
+        items = all_items[:limit]
+
+        if not items:
+            await update.message.reply_text("לא נמצאו נתונים תקינים בסריקה.")
+            return
+
+        await update.message.reply_text(
+            "📊 הזדמנויות מדורגות — נתונים חיים\n"
+            "ה-Score העליון בכל כרטיס שייך לטווח הזמן של הכרטיס בלבד."
+        )
+
+        for index, item in enumerate(items, start=1):
+            await update.message.reply_text(
+                _alert_card(index, item, all_items, rows)
+            )
+    except Exception as exc:
+        await update.message.reply_text(f"❌ שגיאה בסריקת Alerts: {exc!r}")
+    finally:
+        ALERT_ACTIVE = False
+        if watch_was_active:
+            WATCH_RUNTIME["last_cycle_status"] = "resumed_after_alert"
+            WATCH_RUNTIME["next_scan_utc"] = (
+                datetime.now(timezone.utc)
+                + timedelta(minutes=WATCH_INTERVAL_MINUTES)
+            ).isoformat()
 
 
 async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1822,89 +1832,173 @@ def _watch_message(item, all_items, rows) -> str:
     )
 
 
-async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
-    """Run one in-memory scan and send only new alerts above the threshold."""
+async def run_watch_cycle(bot_app) -> Dict[str, Any]:
+    """One complete Watch scan with mandatory Telegram results."""
+    global ALERT_ACTIVE
+
     chat_id = get_setting("watch_chat_id")
     if not chat_id:
-        return {"ok": False, "reason": "no_chat_id", "sent": 0, "found": 0}
+        return {"ok": False, "reason": "no_chat_id"}
+
+    if ALERT_ACTIVE:
+        return {"ok": False, "reason": "manual_alert_active", "deferred": True}
 
     WATCH_RUNTIME["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
+    WATCH_RUNTIME["scan_in_progress"] = True
+    WATCH_RUNTIME["last_cycle_status"] = "running"
     WATCH_RUNTIME["last_error"] = None
 
-    rows, live_result = await collect_live_rows_for_watch()
-    items = alert_engine.build_opportunities(rows, limit=500)
-    candidates = [
-        item for item in items
-        if item["priority"] >= WATCH_PRIORITY_THRESHOLD
-    ]
+    try:
+        scrape_lock = _get_scrape_lock()
+        async with scrape_lock:
+            rows, live_result = await collect_live_rows_for_watch()
 
-    sent = 0
-    for item in candidates:
-        fingerprint = _alert_fingerprint(item)
-        if not force_send and _alert_recently_sent(fingerprint):
-            continue
+        all_items = alert_engine.build_opportunities(rows, limit=500)
+        candidates = [
+            item for item in all_items
+            if float(item.get("score", item.get("priority", 0)) or 0)
+            >= WATCH_PRIORITY_THRESHOLD
+        ]
 
-        await bot_app.bot.send_message(
-            chat_id=int(chat_id),
-            text=_watch_message(item, items, rows),
+        # Mandatory result after every scan:
+        # all >=70 (up to 10); otherwise the single highest score.
+        if candidates:
+            result_items = candidates[:10]
+            header = (
+                f"✅ סריקת Watch הסתיימה\n"
+                f"נמצאו {len(candidates)} תוצאות בציון "
+                f"{WATCH_PRIORITY_THRESHOLD:.0f} ומעלה."
+            )
+        elif all_items:
+            result_items = [all_items[0]]
+            header = (
+                "✅ סריקת Watch הסתיימה\n"
+                f"לא נמצאה תוצאה בציון {WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
+                "מוצגת התוצאה בעלת הציון הגבוה ביותר:"
+            )
+        else:
+            result_items = []
+            header = "⚠️ סריקת Watch הסתיימה ללא נתונים תקינים."
+
+        await bot_app.bot.send_message(chat_id=int(chat_id), text=header)
+
+        for index, item in enumerate(result_items, start=1):
+            await bot_app.bot.send_message(
+                chat_id=int(chat_id),
+                text=_alert_card(index, item, all_items, rows),
+            )
+
+        top_item = all_items[0] if all_items else None
+        WATCH_RUNTIME["last_found"] = len(all_items)
+        WATCH_RUNTIME["last_candidates"] = len(candidates)
+        WATCH_RUNTIME["last_sent"] = len(result_items)
+        WATCH_RUNTIME["top_score"] = (
+            top_item.get("score", top_item.get("priority")) if top_item else None
         )
-        _remember_alert(item, fingerprint)
-        sent += 1
+        WATCH_RUNTIME["top_symbol"] = top_item.get("symbol") if top_item else None
+        WATCH_RUNTIME["top_timeframe"] = (
+            top_item.get("timeframe") if top_item else None
+        )
+        WATCH_RUNTIME["last_cycle_status"] = "completed"
 
-    WATCH_RUNTIME["last_found"] = len(items)
-    WATCH_RUNTIME["last_candidates"] = len(candidates)
-    WATCH_RUNTIME["last_sent"] = sent
-
-    print(
-        f"[watch] cycle done; opportunities={len(items)}; "
-        f"candidates={len(candidates)}; sent={sent}",
-        flush=True,
-    )
-
-    return {
-        "ok": True,
-        "found": len(items),
-        "candidates": len(candidates),
-        "sent": sent,
-        "skipped_symbols": live_result.get("skipped_symbols", []),
-    }
+        print(
+            f"[watch] cycle completed; items={len(all_items)}; "
+            f"candidates={len(candidates)}; delivered={len(result_items)}",
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "found": len(all_items),
+            "candidates": len(candidates),
+            "sent": len(result_items),
+            "skipped_symbols": live_result.get("skipped_symbols", []),
+        }
+    except asyncio.CancelledError:
+        WATCH_RUNTIME["last_cycle_status"] = "paused_for_manual_action"
+        raise
+    except Exception as exc:
+        WATCH_RUNTIME["last_cycle_status"] = "failed"
+        WATCH_RUNTIME["last_error"] = repr(exc)
+        try:
+            await bot_app.bot.send_message(
+                chat_id=int(chat_id),
+                text=(
+                    "❌ סריקת Watch נכשלה\n"
+                    f"{exc!r}\n"
+                    "המערכת תנסה שוב במחזור הבא."
+                ),
+            )
+        except Exception:
+            pass
+        return {"ok": False, "reason": repr(exc)}
+    finally:
+        WATCH_RUNTIME["scan_in_progress"] = False
 
 
 async def watch_loop(bot_app):
-    """Manager loop. Never activates Watch without explicit /watch_on."""
-    global WATCH_SCAN_TASK
-    interval_seconds = max(1, WATCH_INTERVAL_MINUTES) * 60
+    """Persistent 15-minute Watch until explicit /watch_stop."""
+    global WATCH_SCAN_TASK, ALERT_ACTIVE
+
+    interval = timedelta(minutes=WATCH_INTERVAL_MINUTES)
     next_run = None
-    print(f"[watch] manager ready; interval={WATCH_INTERVAL_MINUTES}m; threshold={WATCH_PRIORITY_THRESHOLD}; startup_state=OFF", flush=True)
+
+    print(
+        f"[watch] persistent manager ready; "
+        f"interval={WATCH_INTERVAL_MINUTES}m; "
+        f"threshold={WATCH_PRIORITY_THRESHOLD}; startup_state=OFF",
+        flush=True,
+    )
+
     while True:
         try:
-            if not watch_enabled() or WATCH_RUNTIME.get("activation_source") != "manual":
-                WATCH_RUNTIME["next_scan_utc"] = None
+            enabled = (
+                watch_enabled()
+                and WATCH_RUNTIME.get("activation_source") == "manual"
+            )
+            if not enabled:
                 next_run = None
+                WATCH_RUNTIME["next_scan_utc"] = None
                 await asyncio.sleep(2)
                 continue
+
+            if ALERT_ACTIVE:
+                WATCH_RUNTIME["last_cycle_status"] = "paused_for_alert"
+                await asyncio.sleep(2)
+                continue
+
             now = datetime.now(timezone.utc)
             if next_run is None:
                 next_run = now
+
             if now < next_run:
                 WATCH_RUNTIME["next_scan_utc"] = next_run.isoformat()
-                await asyncio.sleep(min(2, max(0.1, (next_run-now).total_seconds())))
+                await asyncio.sleep(
+                    min(2.0, max(0.1, (next_run - now).total_seconds()))
+                )
                 continue
+
             if WATCH_SCAN_TASK and not WATCH_SCAN_TASK.done():
                 await asyncio.sleep(2)
                 continue
-            WATCH_RUNTIME["next_scan_utc"] = next_run.isoformat()
-            print("[watch] scan started", flush=True)
+
+            cycle_started = datetime.now(timezone.utc)
             WATCH_SCAN_TASK = asyncio.create_task(run_watch_cycle(bot_app))
             try:
                 await WATCH_SCAN_TASK
+            except asyncio.CancelledError:
+                # Manual /alerts or /watch_stop interrupted the scan.
+                pass
             finally:
                 WATCH_SCAN_TASK = None
-            next_run = datetime.fromtimestamp(next_run.timestamp()+interval_seconds,tz=timezone.utc)
-            while next_run <= datetime.now(timezone.utc):
-                next_run = datetime.fromtimestamp(next_run.timestamp()+interval_seconds,tz=timezone.utc)
+
+            # Continue indefinitely. If /alerts paused the cycle, restart the
+            # 15-minute clock after the manual scan finishes.
+            next_run = max(
+                cycle_started + interval,
+                datetime.now(timezone.utc) + timedelta(seconds=2),
+            )
             WATCH_RUNTIME["next_scan_utc"] = next_run.isoformat()
-            print(f"[watch] next scan {_format_watch_time(WATCH_RUNTIME['next_scan_utc'])} Israel time", flush=True)
+
         except asyncio.CancelledError:
             if WATCH_SCAN_TASK and not WATCH_SCAN_TASK.done():
                 WATCH_SCAN_TASK.cancel()
@@ -1915,9 +2009,9 @@ async def watch_loop(bot_app):
             raise
         except Exception as exc:
             WATCH_RUNTIME["last_error"] = repr(exc)
-            WATCH_RUNTIME["last_cycle_status"] = "failed"
+            WATCH_RUNTIME["last_cycle_status"] = "manager_error"
             print(f"[watch] manager error: {exc!r}", flush=True)
-            await asyncio.sleep(2)
+            await asyncio.sleep(10)
 
 
 ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -1937,19 +2031,23 @@ def _format_watch_time(value) -> str:
 
 async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if watch_enabled() and WATCH_RUNTIME.get("activation_source") == "manual":
-        await update.message.reply_text("👁 הצפייה כבר פעילה. לא נפתחה משימה נוספת.")
+        await update.message.reply_text("👁 הצפייה כבר פעילה.")
         return
+
     set_setting("watch_chat_id", str(update.effective_chat.id))
     set_setting("watch_enabled", "1")
     WATCH_RUNTIME["activation_source"] = "manual"
     WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
     WATCH_RUNTIME["last_error"] = None
+    WATCH_RUNTIME["last_cycle_status"] = "scheduled"
+
     await update.message.reply_text(
-        "✅ הצפייה הופעלה ידנית\n\n"
-        "הסריקה הראשונה תתחיל כעת.\n"
-        f"לאחר מכן תתבצע סריקה בכל {WATCH_INTERVAL_MINUTES} דקות.\n"
-        f"סף Priority: {WATCH_PRIORITY_THRESHOLD:.0f}\n"
-        "בסיום כל סריקה תישלח הודעת סיכום בטלגרם."
+        "✅ הצפייה הופעלה\n\n"
+        "הסריקה הראשונה תתחיל כעת ותמשיך כל 15 דקות "
+        "עד להפעלת /watch_stop.\n"
+        f"בכל מחזור יוצגו כל התוצאות בציון "
+        f"{WATCH_PRIORITY_THRESHOLD:.0f} ומעלה; "
+        "אם אין כאלה, תוצג התוצאה הגבוהה ביותר."
     )
 
 
@@ -2016,8 +2114,7 @@ async def watch_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Alerts are disabled until we define a meaningful historical comparison.
-    await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
+    await alert_check(update, context)
 
 
 async def health(request):
