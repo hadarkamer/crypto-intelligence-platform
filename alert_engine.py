@@ -602,11 +602,22 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
         if balance["near_share_pct"] is not None and float(balance["near_share_pct"]) >= 60.0:
             types.append("LIQUIDITY_BALANCE_SUPPORT")
 
+        current_price = _get(row, "current_price")
+        target_price = _target_for_side(row, side)
+        target_direction = None
+        if current_price is not None and target_price is not None:
+            target_direction = (
+                "UP" if float(target_price) > float(current_price) else "DOWN"
+            )
+
         out.append({
             "symbol": symbol,
             "timeframe": timeframe,
             "rank": rank,
             "side": side,
+            "current_price": current_price,
+            "target_price": target_price,
+            "target_direction": target_direction,
             "types": types,
             "priority": score,
             "score": score,
@@ -642,12 +653,32 @@ def build_opportunities(rows: List[Any], limit: int = 30) -> List[Dict[str, Any]
             "components": components,
         })
 
+    # Average Score across all available timeframes is a secondary
+    # prioritization signal only. The current timeframe Score remains primary.
+    scores_by_symbol: Dict[str, List[float]] = defaultdict(list)
+    for item in out:
+        scores_by_symbol[item["symbol"]].append(float(item["score"]))
+
+    averages = {
+        symbol: sum(values) / len(values)
+        for symbol, values in scores_by_symbol.items()
+        if values
+    }
+    for item in out:
+        item["average_score_all_timeframes"] = round(
+            averages.get(item["symbol"], float(item["score"])),
+            2,
+        )
+
     out.sort(
         key=lambda x: (
-            -x["priority"],
-            x["distance_pct"],
+            -float(x["score"]),
+            -float(x.get("average_score_all_timeframes", 0)),
+            float(x["distance_pct"]),
             x["symbol"],
-            TIMEFRAMES.index(x["timeframe"]) if x["timeframe"] in TIMEFRAMES else 99,
+            TIMEFRAMES.index(x["timeframe"])
+            if x["timeframe"] in TIMEFRAMES
+            else 99,
         )
     )
     return out[:limit]

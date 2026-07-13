@@ -1,13 +1,36 @@
-# Stage 39 — Persistent Watch Across Restarts
+# Stage 40 — Manual-Only Alert and Watch Rebuild
 
-Implemented:
-- Watch starts only after /watch_on on a fresh installation.
-- Once manually enabled, its state, chat ID and next scan time are stored.
-- Render/service restarts restore the same Watch loop automatically.
-- A restart does not count as /watch_stop.
-- Only /watch_stop permanently disables Watch.
-- Exactly one Watch task exists in each running process.
-- /watch_status responds immediately without waiting for scraping locks.
-- Status displays Israel time and a countdown to the next scan.
-- Last scan/result state is persisted for status after restart.
-- Telegram pending updates are preserved during webhook resets.
+## Core rule
+No Alert or Watch action runs automatically after deploy/restart.
+
+## /alert and /alerts
+- Run only after a direct Telegram command.
+- Exactly one live scan is executed per command.
+- Duplicate manual scans are blocked.
+- They never start, stop, resume, or duplicate Watch.
+- If Watch currently uses the browser, Alert waits for the shared lock.
+
+## /watch_on
+- Creates exactly one Watch loop.
+- A second /watch_on does not create another loop.
+- First scan starts immediately.
+- After a scan completes, the loop waits 15 minutes and scans again.
+- No persisted loop is restored after deploy/restart.
+
+## /watch_stop
+- Cancels the active Watch scan and the one Watch loop.
+- It is the only command that stops a running loop.
+
+## /watch_status
+- Responds immediately.
+- Never triggers a scan.
+- Displays Israel time and countdown.
+
+## Alert display
+- Current Binance price.
+- Nearest Max Pain target price.
+- Target direction: up/down.
+- Liquidity at risk: longs/shorts.
+- Current timeframe Score remains primary.
+- Average Score across all timeframes is shown at the bottom and used only
+  as a secondary ordering signal.
