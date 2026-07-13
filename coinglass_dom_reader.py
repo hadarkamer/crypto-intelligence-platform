@@ -519,6 +519,87 @@ async def read_timeframe(
     }
 
 
+async def _new_ready_page(context, url: str):
+    """Open a clean CoinGlass page for a failed-timeframe retry."""
+    page = await context.new_page()
+    await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    await page.wait_for_timeout(8000)
+
+    for label in ["Accept", "I Agree", "Got it", "Close", "×"]:
+        try:
+            await page.get_by_text(label, exact=True).first.click(timeout=1000)
+            await page.wait_for_timeout(400)
+        except Exception:
+            pass
+
+    return page
+
+
+async def _retry_timeframe_on_fresh_page(
+    context,
+    url: str,
+    timeframe: str,
+    previous_fingerprint: Optional[str],
+    attempts: int,
+) -> Dict[str, Any]:
+    """Retry a rejected timeframe on clean pages."""
+    last_result: Dict[str, Any] = {
+        "timeframe": timeframe,
+        "clicked": False,
+        "verified": False,
+        "rows": [],
+        "fingerprint": None,
+        "error": "fresh-page retries exhausted",
+        "debug": {},
+    }
+
+    for attempt in range(1, attempts + 1):
+        retry_page = None
+        try:
+            print(
+                f"[dom] tf={timeframe} fresh-page retry {attempt}/{attempts}",
+                flush=True,
+            )
+            retry_page = await _new_ready_page(context, url)
+            last_result = await read_timeframe(
+                retry_page,
+                timeframe,
+                previous_fingerprint=previous_fingerprint,
+            )
+
+            if last_result.get("verified") and last_result.get("rows"):
+                print(
+                    f"[dom] tf={timeframe} retry succeeded on attempt {attempt}",
+                    flush=True,
+                )
+                return last_result
+
+        except Exception as exc:
+            last_result = {
+                "timeframe": timeframe,
+                "clicked": False,
+                "verified": False,
+                "rows": [],
+                "fingerprint": None,
+                "error": repr(exc),
+                "debug": {},
+            }
+            print(
+                f"[dom] tf={timeframe} retry error: {exc!r}",
+                flush=True,
+            )
+        finally:
+            if retry_page is not None:
+                try:
+                    await retry_page.close()
+                except Exception:
+                    pass
+
+        await asyncio.sleep(1.5)
+
+    return last_result
+
+
 async def collect_coinglass_dom_snapshot(
     timeframes: Optional[List[str]] = None,
     headless: bool = True,
@@ -603,6 +684,18 @@ async def collect_coinglass_dom_snapshot(
                         tf,
                         previous_fingerprint=previous_fingerprint,
                     )
+
+                    if not result.get("verified") or not result.get("rows"):
+                        retry_result = await _retry_timeframe_on_fresh_page(
+                            context,
+                            url,
+                            tf,
+                            previous_fingerprint=previous_fingerprint,
+                            attempts=4 if tf == "24h" else 2,
+                        )
+                        if retry_result.get("verified") and retry_result.get("rows"):
+                            result = retry_result
+
                     by_timeframe[tf] = result
                     rows = result.get("rows", [])
                     debug = result.get("debug", {})
@@ -643,7 +736,8 @@ async def collect_coinglass_dom_snapshot(
                         accepted_fingerprints[tf] = fingerprint
                         previous_fingerprint = fingerprint
                     else:
-                        missing.append(tf)
+                        if tf not in missing:
+                            missing.append(tf)
                         print(
                             f"[dom] tf={tf} REJECTED verified={result.get('verified')} "
                             f"duplicate_of={duplicate_of} error={result.get('error')} "
@@ -651,8 +745,13 @@ async def collect_coinglass_dom_snapshot(
                             flush=True,
                         )
                 except Exception as exc:
-                    missing.append(tf)
-                    by_timeframe[tf] = {"timeframe": tf, "error": repr(exc), "rows": []}
+                    if tf not in missing:
+                        missing.append(tf)
+                    by_timeframe[tf] = {
+                        "timeframe": tf,
+                        "error": repr(exc),
+                        "rows": [],
+                    }
                     print(f"[dom] tf={tf} ERROR: {repr(exc)}", flush=True)
 
             # Capture a final screenshot path for Render logs. It is mostly diagnostic;

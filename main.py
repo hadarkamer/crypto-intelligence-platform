@@ -72,6 +72,9 @@ SCRAPE_LOCK = None
 WATCH_TASK = None
 WATCH_SCAN_TASK = None
 ALERT_COMMAND_LOCK = None
+PROCESSED_UPDATE_IDS = set()
+PROCESSED_UPDATE_ORDER = []
+MAX_PROCESSED_UPDATE_IDS = 500
 ALERT_ACTIVE = False
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
@@ -2225,15 +2228,62 @@ async def health(request):
     return web.json_response({"status": "ok", "service": "crypto-intelligence-v1"})
 
 async def telegram_webhook(request):
+    """Acknowledge Telegram immediately and process each update once."""
     bot_app = request.app["bot_app"]
+
     try:
         payload = await request.json()
+        update_id = payload.get("update_id")
+
+        if update_id is not None and update_id in PROCESSED_UPDATE_IDS:
+            print(
+                f"[webhook] duplicate update ignored; update_id={update_id}",
+                flush=True,
+            )
+            return web.json_response({"ok": True, "duplicate": True})
+
+        if update_id is not None:
+            PROCESSED_UPDATE_IDS.add(update_id)
+            PROCESSED_UPDATE_ORDER.append(update_id)
+
+            while len(PROCESSED_UPDATE_ORDER) > MAX_PROCESSED_UPDATE_IDS:
+                old_update_id = PROCESSED_UPDATE_ORDER.pop(0)
+                PROCESSED_UPDATE_IDS.discard(old_update_id)
+
         update = Update.de_json(payload, bot_app.bot)
-        await bot_app.process_update(update)
+        text = (
+            update.effective_message.text
+            if update.effective_message is not None
+            else None
+        )
+        chat_id = (
+            update.effective_chat.id
+            if update.effective_chat is not None
+            else None
+        )
+
+        print(
+            f"[webhook] accepted update_id={update_id}; "
+            f"chat_id={chat_id}; text={text!r}",
+            flush=True,
+        )
+
+        # Return HTTP 200 immediately so Telegram does not retry long scans.
+        bot_app.create_task(
+            bot_app.process_update(update),
+            update=update,
+            name=f"telegram-update-{update_id}",
+        )
+
         return web.json_response({"ok": True})
-    except Exception as e:
-        print(f"[webhook] error: {e}")
-        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    except Exception as exc:
+        print(f"[webhook] error: {exc!r}", flush=True)
+        return web.json_response(
+            {"ok": False, "error": str(exc)},
+            status=500,
+        )
+
 
 async def start_web_server(bot_app):
     app = web.Application()
@@ -2247,12 +2297,6 @@ async def start_web_server(bot_app):
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"[health] server running on port {PORT}")
-
-async def scheduled_collection():
-    try:
-        await collect_once()
-    except Exception as e:
-        print(f"[collector] scheduled collection failed: {e}")
 
 async def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -2293,7 +2337,6 @@ async def main():
     bot_app.add_handler(CommandHandler("help", start))
     bot_app.add_handler(CommandHandler("collect", collect_cmd))
     bot_app.add_handler(CommandHandler("coin", coin))
-    bot_app.add_handler(CommandHandler("alert", alert_check))
     bot_app.add_handler(CommandHandler("alerts", alert_check))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
@@ -2306,10 +2349,10 @@ async def main():
     print("[watch] confirmed: no automatic task created", flush=True)
 
     webhook_url = f"{PUBLIC_URL}/telegram"
-    await bot_app.bot.delete_webhook(drop_pending_updates=False)
+    await bot_app.bot.delete_webhook(drop_pending_updates=True)
     await bot_app.bot.set_webhook(
         url=webhook_url,
-        drop_pending_updates=False,
+        drop_pending_updates=True,
     )
     print(f"[bot] webhook set to {webhook_url}", flush=True)
 
