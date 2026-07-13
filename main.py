@@ -91,6 +91,8 @@ WATCH_RUNTIME = {
     "top_symbol": None,
     "top_timeframe": None,
     "scan_in_progress": False,
+    "scan_owner": None,
+    "cycle_number": 0,
 }
 
 SQLITE_SCHEMA = """
@@ -751,15 +753,56 @@ async def collect_once():
 
 
 
+def _timeframe_integrity(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    counts = {tf: 0 for tf in TIMEFRAMES}
+    symbols_by_tf = {tf: set() for tf in TIMEFRAMES}
+
+    for row in rows:
+        tf = str(row.get("timeframe") or "")
+        symbol = str(row.get("symbol") or "").upper()
+        if tf in counts:
+            counts[tf] += 1
+            if symbol:
+                symbols_by_tf[tf].add(symbol)
+
+    missing = [tf for tf in TIMEFRAMES if counts[tf] == 0]
+    minimum_rows = min(counts.values()) if counts else 0
+
+    return {
+        "ok": not missing and minimum_rows > 0,
+        "counts": counts,
+        "missing_timeframes": missing,
+        "minimum_rows_per_timeframe": minimum_rows,
+        "symbols_by_timeframe": symbols_by_tf,
+    }
+
+
+def _assert_complete_live_scan(rows: List[Dict[str, Any]], source: str) -> Dict[str, Any]:
+    integrity = _timeframe_integrity(rows)
+    if not integrity["ok"]:
+        raise RuntimeError(
+            f"{source} incomplete: missing timeframes="
+            f"{integrity['missing_timeframes']}; counts={integrity['counts']}"
+        )
+    return integrity
+
+
 async def collect_live_rows_for_watch():
-    """Read fresh CoinGlass + Binance data in memory without saving a snapshot."""
-    print("[watch] opening fresh CoinGlass snapshot", flush=True)
+    """Collect one complete seven-timeframe live snapshot without DB writes."""
+    print("[scan] opening fresh CoinGlass snapshot", flush=True)
 
     snapshot = await collect_coinglass_dom_snapshot(
         timeframes=TIMEFRAMES,
         headless=True,
         url=COINGLASS_MAX_PAIN_URL,
     )
+
+    missing_from_reader = list(snapshot.get("missing_timeframes", []))
+    if missing_from_reader:
+        raise RuntimeError(
+            "CoinGlass scan incomplete after retries. Missing: "
+            + ", ".join(missing_from_reader)
+        )
 
     raw_rows = []
     for item in snapshot.get("rows", []):
@@ -792,10 +835,12 @@ async def collect_live_rows_for_watch():
         raw_rows,
         excluded_symbols=NON_CRYPTO_SYMBOLS,
     )
-
     rows = live_result.get("rows", [])
+    integrity = _assert_complete_live_scan(rows, "Live scan")
+
+    live_result["timeframe_integrity"] = integrity
     print(
-        f"[watch] fresh rows={len(rows)}; "
+        f"[scan] fresh rows={len(rows)}; counts={integrity['counts']}; "
         f"skipped={live_result.get('skipped_symbols', [])}",
         flush=True,
     )
@@ -890,13 +935,13 @@ def tf_order_value(tf: str) -> int:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Crypto Intelligence Bot פעיל.\n\n"
-        "פקודות שימוש יומיומיות:\n"
-        "/collect - איסוף נתונים חדש\n"
-        "/alerts - הצגת הזדמנויות מדורגות\n"
-        "/coin BTC - פירוט מלא למטבע\n"
-        "/watch_on - הפעלת התראות אוטומטיות\n"
-        "/watch_status - מצב מערכת ההתראות\n"
-        "/watch_stop - עצירת התראות אוטומטיות"
+        "פקודות:\n"
+        "/collect — איסוף מלא ושמירת Snapshot חדש\n"
+        "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
+        "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
+        "/watch_on — הפעלת לולאת Watch אחת\n"
+        "/watch_status — הצגת מצב בלבד\n"
+        "/watch_stop — עצירת Watch"
     )
 
 
@@ -917,53 +962,55 @@ def _get_scrape_lock():
     return SCRAPE_LOCK
 
 async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run one manual collection and save it. Never starts Watch."""
     global COLLECT_LOCK
 
     if COLLECT_LOCK is None:
         COLLECT_LOCK = asyncio.Lock()
 
-    try:
-        scrape_lock = _get_scrape_lock()
-    except Exception as exc:
-        await update.message.reply_text(f"❌ Failed to initialize scrape lock: {exc}")
+    if COLLECT_LOCK.locked():
+        await update.message.reply_text(
+            "⏳ פקודת /collect כבר פעילה. לא נפתח איסוף נוסף."
+        )
         return
 
-    if COLLECT_LOCK.locked() or scrape_lock.locked():
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
         await update.message.reply_text(
-            "איסוף או סריקת Watch כבר פועלים כרגע. יש להמתין לסיום."
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
+            "יש להמתין לסיום וללחוץ שוב על /collect."
         )
         return
 
     async with COLLECT_LOCK:
         async with scrape_lock:
+            WATCH_RUNTIME["scan_owner"] = "/collect"
             await update.message.reply_text(
-                "מתחיל איסוף: יעדי Max Pain מ-CoinGlass ומחירים חיים מ-Binance. "
-                "זה יכול לקחת כמה דקות..."
+                "🔄 מתחיל איסוף מלא של 7 טווחי הזמן. "
+                "הנתונים יישמרו רק אם כל הטווחים נקלטו."
             )
             try:
                 inserted, missing_timeframes = await collect_once()
-                missing_note = (
-                    f"\nטווחים חסרים: {', '.join(missing_timeframes)}"
-                    if missing_timeframes else ""
-                )
+                if missing_timeframes:
+                    raise RuntimeError(
+                        "לא נשמר Snapshot מלא. חסרים: "
+                        + ", ".join(missing_timeframes)
+                    )
 
                 await update.message.reply_text(
-                    f"✅ האיסוף הסתיים\n\n"
+                    "✅ /collect הסתיים בהצלחה\n"
                     f"שורות שנשמרו: {inserted}\n"
-                    f"המרחקים חושבו מחדש לפי מחיר Binance."
-                    f"{missing_note}\n\n"
-                    "פקודות שימוש יומיומיות:\n"
-                    "/collect - איסוף נתונים חדש\n"
-                    "/alerts - הצגת הזדמנויות מדורגות\n"
-                    "/coin BTC - פירוט מלא למטבע\n"
-                    "/watch_on - הפעלת התראות אוטומטיות\n"
-                    "/watch_status - מצב מערכת ההתראות\n"
-                    "/watch_stop - עצירת התראות אוטומטיות"
+                    "כל 7 טווחי הזמן נקלטו והמרחקים חושבו ממחיר Binance."
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                await update.message.reply_text(f"שגיאה באיסוף: {e}")
+            except Exception as exc:
+                await update.message.reply_text(
+                    f"❌ /collect נכשל ולא אושר כאיסוף מלא: {exc!r}"
+                )
+            finally:
+                WATCH_RUNTIME["scan_owner"] = None
 
 
 
@@ -1612,45 +1659,52 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 
 
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run exactly one live Alert scan after a direct Telegram command."""
+    """Run exactly one manual live scan for /alerts."""
     limit = 10
     if context.args:
         try:
             limit = max(1, min(15, int(context.args[0])))
-        except Exception:
+        except (TypeError, ValueError):
             limit = 10
 
     command_lock = _get_alert_command_lock()
     if command_lock.locked():
         await update.message.reply_text(
-            "⏳ סריקת Alert ידנית כבר פועלת. לא נפתחה סריקה נוספת."
+            "⏳ /alerts כבר מבצע סריקה. לא נפתחה סריקה נוספת."
         )
         return
 
-    async with command_lock:
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
         await update.message.reply_text(
-            "🔎 פקודת Alert התקבלה. מבצע סריקה חיה אחת בלבד."
+            f"⏳ /alerts ממתין לסיום הסריקה של {owner}. "
+            "הפקודה תמשיך אוטומטית לאחר שהסורק יתפנה."
         )
 
+    async with command_lock:
         try:
-            # Shared browser lock only serializes browser use.
-            # It does not change the Watch loop state.
-            scrape_lock = _get_scrape_lock()
             async with scrape_lock:
-                rows, _live_result = await collect_live_rows_for_watch()
+                WATCH_RUNTIME["scan_owner"] = "/alerts"
+                await update.message.reply_text(
+                    "🔎 /alerts התחיל סריקה חיה מלאה של 7 טווחי הזמן."
+                )
+                rows, live_result = await collect_live_rows_for_watch()
 
             all_items = alert_engine.build_opportunities(rows, limit=500)
             items = all_items[:limit]
 
             if not items:
                 await update.message.reply_text(
-                    "⚠️ סריקת Alert הסתיימה ללא נתונים תקינים."
+                    "⚠️ הסריקה הסתיימה ללא הזדמנויות תקינות."
                 )
                 return
 
+            counts = live_result.get("timeframe_integrity", {}).get("counts", {})
             await update.message.reply_text(
-                f"✅ סריקת Alert הסתיימה — מוצגות {len(items)} "
-                "התוצאות המובילות."
+                "✅ /alerts הסתיים\n"
+                f"מוצגות {len(items)} התוצאות המובילות.\n"
+                f"טווחים שנקלטו: {', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in TIMEFRAMES)}"
             )
 
             for index, item in enumerate(items, start=1):
@@ -1662,8 +1716,11 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise
         except Exception as exc:
             await update.message.reply_text(
-                f"❌ סריקת Alert נכשלה: {exc!r}"
+                f"❌ /alerts נכשל: {exc!r}"
             )
+        finally:
+            if WATCH_RUNTIME.get("scan_owner") == "/alerts":
+                WATCH_RUNTIME["scan_owner"] = None
 
 
 async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1895,11 +1952,14 @@ def _watch_message(item, all_items, rows) -> str:
 
 
 async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
-    """Run one Watch scan and send one controlled result batch."""
+    """Run one complete Watch cycle and always send a Telegram outcome."""
     WATCH_RUNTIME["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
     WATCH_RUNTIME["scan_in_progress"] = True
+    WATCH_RUNTIME["scan_owner"] = "Watch"
     WATCH_RUNTIME["last_cycle_status"] = "running"
     WATCH_RUNTIME["last_error"] = None
+    WATCH_RUNTIME["cycle_number"] = int(WATCH_RUNTIME.get("cycle_number", 0)) + 1
+    cycle_number = WATCH_RUNTIME["cycle_number"]
 
     try:
         scrape_lock = _get_scrape_lock()
@@ -1916,7 +1976,7 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
         if candidates:
             result_items = candidates[:10]
             header = (
-                "✅ סריקת Watch הסתיימה\n"
+                f"✅ סריקת Watch #{cycle_number} הסתיימה\n"
                 f"נמצאו {len(candidates)} תוצאות בציון "
                 f"{WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
                 f"מוצגות {len(result_items)} התוצאות המובילות."
@@ -1924,16 +1984,18 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
         elif all_items:
             result_items = [all_items[0]]
             header = (
-                "✅ סריקת Watch הסתיימה\n"
+                f"✅ סריקת Watch #{cycle_number} הסתיימה\n"
                 f"אין תוצאה בציון {WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
                 "מוצגת התוצאה בעלת הציון הגבוה ביותר."
             )
         else:
             result_items = []
-            header = "⚠️ סריקת Watch הסתיימה ללא נתונים תקינים."
+            header = (
+                f"⚠️ סריקת Watch #{cycle_number} הסתיימה "
+                "ללא הזדמנויות תקינות."
+            )
 
         await bot_app.bot.send_message(chat_id=chat_id, text=header)
-
         for index, item in enumerate(result_items, start=1):
             await bot_app.bot.send_message(
                 chat_id=chat_id,
@@ -1948,26 +2010,18 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
             top_item.get("score", top_item.get("priority"))
             if top_item else None
         )
-        WATCH_RUNTIME["top_symbol"] = (
-            top_item.get("symbol") if top_item else None
-        )
+        WATCH_RUNTIME["top_symbol"] = top_item.get("symbol") if top_item else None
         WATCH_RUNTIME["top_timeframe"] = (
             top_item.get("timeframe") if top_item else None
         )
         WATCH_RUNTIME["last_cycle_status"] = "completed"
-
-        print(
-            f"[watch] cycle completed; items={len(all_items)}; "
-            f"candidates={len(candidates)}; sent={len(result_items)}",
-            flush=True,
-        )
 
         return {
             "ok": True,
             "found": len(all_items),
             "candidates": len(candidates),
             "sent": len(result_items),
-            "skipped_symbols": live_result.get("skipped_symbols", []),
+            "timeframe_integrity": live_result.get("timeframe_integrity"),
         }
 
     except asyncio.CancelledError:
@@ -1979,21 +2033,26 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
         try:
             await bot_app.bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ סריקת Watch נכשלה: {exc!r}",
+                text=(
+                    f"❌ סריקת Watch #{cycle_number} נכשלה\n"
+                    f"{exc!r}\n"
+                    "הלולאה נשארת פעילה ותנסה שוב בעוד 15 דקות."
+                ),
             )
         except Exception:
             pass
         return {"ok": False, "reason": repr(exc)}
     finally:
         WATCH_RUNTIME["scan_in_progress"] = False
+        WATCH_RUNTIME["scan_owner"] = None
 
 
 async def watch_loop(bot_app, chat_id: int):
-    """One in-memory Watch loop created only by /watch_on."""
+    """Persistent single Watch loop; only /watch_stop cancels it."""
     global WATCH_SCAN_TASK
 
     print(
-        f"[watch] manual loop started; chat_id={chat_id}; "
+        f"[watch] loop started; chat_id={chat_id}; "
         f"interval={WATCH_INTERVAL_MINUTES}m",
         flush=True,
     )
@@ -2006,10 +2065,18 @@ async def watch_loop(bot_app, chat_id: int):
             ).isoformat()
 
             WATCH_SCAN_TASK = asyncio.create_task(
-                run_watch_cycle(bot_app, chat_id)
+                run_watch_cycle(bot_app, chat_id),
+                name="watch-scan-cycle",
             )
             try:
                 await WATCH_SCAN_TASK
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Defensive: a cycle error must never kill the persistent loop.
+                WATCH_RUNTIME["last_error"] = repr(exc)
+                WATCH_RUNTIME["last_cycle_status"] = "cycle_crashed"
+                print(f"[watch] uncaught cycle error: {exc!r}", flush=True)
             finally:
                 WATCH_SCAN_TASK = None
 
@@ -2018,12 +2085,6 @@ async def watch_loop(bot_app, chat_id: int):
             )
             WATCH_RUNTIME["next_scan_utc"] = next_scan.isoformat()
             WATCH_RUNTIME["last_cycle_status"] = "waiting"
-
-            print(
-                f"[watch] next cycle at "
-                f"{_format_watch_time(next_scan.isoformat())}",
-                flush=True,
-            )
 
             await asyncio.sleep(WATCH_INTERVAL_MINUTES * 60)
 
@@ -2039,9 +2100,10 @@ async def watch_loop(bot_app, chat_id: int):
     finally:
         WATCH_SCAN_TASK = None
         WATCH_RUNTIME["scan_in_progress"] = False
+        WATCH_RUNTIME["scan_owner"] = None
         WATCH_RUNTIME["next_scan_utc"] = None
         WATCH_RUNTIME["last_cycle_status"] = "stopped"
-        print("[watch] manual loop stopped", flush=True)
+        print("[watch] loop stopped", flush=True)
 
 
 ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -2060,42 +2122,55 @@ def _format_watch_time(value) -> str:
 
 
 async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create exactly one Watch loop after a direct command."""
+    """The only command allowed to create the Watch loop."""
     global WATCH_TASK
 
     if WATCH_TASK is not None and not WATCH_TASK.done():
         await update.message.reply_text(
-            "👁 הצפייה כבר פעילה. לא נפתחה לולאה נוספת."
+            "👁 Watch כבר פעיל. לא נפתחה לולאה נוספת."
         )
         return
 
     chat_id = int(update.effective_chat.id)
-
     WATCH_RUNTIME["last_error"] = None
     WATCH_RUNTIME["last_cycle_status"] = "starting"
     WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
 
     WATCH_TASK = asyncio.create_task(
-        watch_loop(context.application, chat_id)
+        watch_loop(context.application, chat_id),
+        name="persistent-watch-loop",
     )
 
+    # Give the task one event-loop turn and verify that it remained alive.
+    await asyncio.sleep(0)
+    if WATCH_TASK.done():
+        try:
+            error = WATCH_TASK.exception()
+        except Exception as exc:
+            error = exc
+        WATCH_TASK = None
+        WATCH_RUNTIME["last_cycle_status"] = "failed_to_start"
+        WATCH_RUNTIME["last_error"] = repr(error)
+        await update.message.reply_text(
+            f"❌ Watch לא הצליח להתחיל: {error!r}"
+        )
+        return
+
     await update.message.reply_text(
-        "✅ הצפייה הופעלה ידנית\n\n"
-        "נפתחה לולאת Watch אחת בלבד.\n"
-        "הסריקה הראשונה מתחילה כעת.\n"
-        f"לאחר כל סריקה המערכת תמתין "
-        f"{WATCH_INTERVAL_MINUTES} דקות ותסרוק שוב.\n"
-        "הצפייה תיעצר רק באמצעות /watch_stop."
+        "✅ Watch הופעל\n"
+        "לולאה אחת פעילה. הסריקה הראשונה מתחילה כעת.\n"
+        f"לאחר סיום כל סריקה תתחיל סריקה נוספת בעוד "
+        f"{WATCH_INTERVAL_MINUTES} דקות.\n"
+        "העצירה מתבצעת רק באמצעות /watch_stop."
     )
 
 
 async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop the only Watch loop and active scan."""
+    """Cancel the one Watch loop and any active Watch scan."""
     global WATCH_TASK, WATCH_SCAN_TASK
 
     loop_task = WATCH_TASK
     scan_task = WATCH_SCAN_TASK
-
     was_active = (
         loop_task is not None and not loop_task.done()
     ) or (
@@ -2112,43 +2187,35 @@ async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except asyncio.CancelledError:
             pass
         except asyncio.TimeoutError:
-            print("[watch] cancellation timeout", flush=True)
+            print("[watch] stop timed out", flush=True)
 
     WATCH_TASK = None
     WATCH_SCAN_TASK = None
     WATCH_RUNTIME["scan_in_progress"] = False
+    WATCH_RUNTIME["scan_owner"] = None
     WATCH_RUNTIME["next_scan_utc"] = None
     WATCH_RUNTIME["last_cycle_status"] = "stopped"
 
     await update.message.reply_text(
-        "🛑 הצפייה הופסקה."
+        "🛑 Watch הופסק."
         if was_active
-        else "🛑 הצפייה כבר הייתה כבויה."
+        else "🛑 Watch כבר היה כבוי."
     )
 
 
 async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return status only. Never starts or triggers a scan."""
+    """Read-only status. This function never starts a scan."""
     loop_active = WATCH_TASK is not None and not WATCH_TASK.done()
-    scan_active = (
-        WATCH_SCAN_TASK is not None and not WATCH_SCAN_TASK.done()
-    )
+    scan_active = WATCH_SCAN_TASK is not None and not WATCH_SCAN_TASK.done()
 
     next_dt = _parse_utc_setting(WATCH_RUNTIME.get("next_scan_utc"))
     countdown = "-"
     if next_dt is not None:
         seconds_left = max(
             0,
-            int(
-                (
-                    next_dt - datetime.now(timezone.utc)
-                ).total_seconds()
-            ),
+            int((next_dt - datetime.now(timezone.utc)).total_seconds()),
         )
-        countdown = (
-            f"{seconds_left // 60} דקות "
-            f"ו-{seconds_left % 60} שניות"
-        )
+        countdown = f"{seconds_left // 60} דקות ו-{seconds_left % 60} שניות"
 
     top_score = WATCH_RUNTIME.get("top_score")
     top_text = (
@@ -2165,8 +2232,9 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👁 Watch: {'פעיל' if loop_active else 'כבוי'}\n\n"
         f"לולאה פעילה: {'כן' if loop_active else 'לא'}\n"
         f"סריקה פעילה כרגע: {'כן' if scan_active else 'לא'}\n"
-        f"סטטוס מחזור: "
-        f"{WATCH_RUNTIME.get('last_cycle_status') or '-'}\n"
+        f"בעל הסורק: {WATCH_RUNTIME.get('scan_owner') or '-'}\n"
+        f"סטטוס מחזור: {WATCH_RUNTIME.get('last_cycle_status') or '-'}\n"
+        f"מספר מחזור: {WATCH_RUNTIME.get('cycle_number', 0)}\n"
         f"סריקה אחרונה — שעון ישראל: "
         f"{_format_watch_time(WATCH_RUNTIME.get('last_scan_utc'))}\n"
         f"סריקה הבאה — שעון ישראל: "
@@ -2182,28 +2250,6 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else ""
         )
     )
-
-
-async def watch_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_setting("watch_chat_id", str(update.effective_chat.id))
-    await update.message.reply_text(
-        "🔎 מריץ בדיקת Watch חד-פעמית ללא שמירת Snapshot..."
-    )
-    try:
-        result = await run_watch_cycle(context.application)
-        await update.message.reply_text(
-            "✅ בדיקת Watch הסתיימה\n"
-            f"הזדמנויות שנמצאו: {result.get('found', 0)}\n"
-            f"מעל הסף: {result.get('candidates', 0)}\n"
-            f"התראות חדשות שנשלחו: {result.get('sent', 0)}"
-        )
-    except Exception as exc:
-        WATCH_RUNTIME["last_error"] = repr(exc)
-        await update.message.reply_text(f"❌ שגיאה בבדיקת Watch: {exc!r}")
-
-
-async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await alert_check(update, context)
 
 
 async def telegram_error_handler(
@@ -2309,28 +2355,31 @@ async def main():
 
     init_db()
 
-    # Strict manual-only startup.
     global WATCH_TASK, WATCH_SCAN_TASK
     WATCH_TASK = None
     WATCH_SCAN_TASK = None
-    WATCH_RUNTIME["scan_in_progress"] = False
-    WATCH_RUNTIME["next_scan_utc"] = None
-    WATCH_RUNTIME["last_cycle_status"] = "off_after_startup"
-    WATCH_RUNTIME["last_error"] = None
+    WATCH_RUNTIME.update({
+        "last_scan_utc": None,
+        "next_scan_utc": None,
+        "last_found": 0,
+        "last_candidates": 0,
+        "last_sent": 0,
+        "last_error": None,
+        "last_cycle_status": "off_after_startup",
+        "top_score": None,
+        "top_symbol": None,
+        "top_timeframe": None,
+        "scan_in_progress": False,
+        "scan_owner": None,
+        "cycle_number": 0,
+    })
 
-    # Clear all legacy persisted Watch activation from older versions.
+    # Remove legacy activation flags. Startup never launches a scan.
     try:
         set_setting("watch_enabled", "0")
         set_setting("watch_next_scan_utc", "")
-        set_setting("watch_last_cycle_status", "off_after_startup")
     except Exception as exc:
-        print(f"[watch] legacy-state reset warning: {exc!r}", flush=True)
-
-    print(
-        "[watch] startup manual-only mode; no task created; "
-        "waiting for /watch_on",
-        flush=True,
-    )
+        print(f"[startup] legacy watch reset warning: {exc!r}", flush=True)
 
     bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
@@ -2339,14 +2388,17 @@ async def main():
     bot_app.add_handler(CommandHandler("coin", coin))
     bot_app.add_handler(CommandHandler("alerts", alert_check))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
-    bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
+    bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()
     await bot_app.start()
 
-    print("[watch] confirmed: no automatic task created", flush=True)
+    print(
+        "[startup] manual-only mode; no collection, alert, or Watch task created",
+        flush=True,
+    )
 
     webhook_url = f"{PUBLIC_URL}/telegram"
     await bot_app.bot.delete_webhook(drop_pending_updates=True)

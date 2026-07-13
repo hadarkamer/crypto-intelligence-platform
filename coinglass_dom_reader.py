@@ -460,7 +460,8 @@ async def read_timeframe(
         clicked = await _click_timeframe_verified(page, timeframe)
 
         # CoinGlass updates asynchronously. Poll rather than trusting click().
-        for poll in range(1, 13):
+        poll_limit = 20 if timeframe == "24h" else 12
+        for poll in range(1, poll_limit + 1):
             await page.wait_for_timeout(1000)
 
             tables = await _extract_tables(page)
@@ -477,7 +478,7 @@ async def read_timeframe(
                     or timeframe == "12h"
                 )
             )
-            active_ok = active_label in {None, expected_label}
+            active_ok = active_label == expected_label
 
             last_debug = {
                 "table_count": len(tables),
@@ -691,7 +692,7 @@ async def collect_coinglass_dom_snapshot(
                             url,
                             tf,
                             previous_fingerprint=previous_fingerprint,
-                            attempts=4 if tf == "24h" else 2,
+                            attempts=2 if tf == "24h" else 1,
                         )
                         if retry_result.get("verified") and retry_result.get("rows"):
                             result = retry_result
@@ -754,15 +755,6 @@ async def collect_coinglass_dom_snapshot(
                     }
                     print(f"[dom] tf={tf} ERROR: {repr(exc)}", flush=True)
 
-            # Capture a final screenshot path for Render logs. It is mostly diagnostic;
-            # the file is not expected to be downloaded, but confirms page rendering.
-            try:
-                screenshot_path = "/tmp/coinglass_dom_debug.png"
-                await page.screenshot(path=screenshot_path, full_page=True)
-                print(f"[dom] screenshot saved to {screenshot_path}", flush=True)
-            except Exception as exc:
-                print(f"[dom] screenshot failed: {repr(exc)}", flush=True)
-
             debug_summary = {
                 "initial_table_count": len(initial_tables),
                 "initial_table_headers": [t.get("headers") for t in initial_tables[:6]],
@@ -770,9 +762,19 @@ async def collect_coinglass_dom_snapshot(
             }
 
         finally:
-            await context.close()
-            await browser.close()
-            print("[dom] browser closed", flush=True)
+            try:
+                await page.close()
+            except Exception:
+                pass
+            try:
+                await context.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            print("[dom] page, context and browser closed", flush=True)
 
     print(f"[dom] done; raw_rows={len(all_rows)}; missing={missing}", flush=True)
     return {
