@@ -1,36 +1,30 @@
-# Stage 40 — Manual-Only Alert and Watch Rebuild
+# Stage 41 — Strict Manual Alert and Watch
 
-## Core rule
-No Alert or Watch action runs automatically after deploy/restart.
+This version removes all automatic Alert and Watch startup behavior.
+
+## Startup
+- Deploy/restart creates no Watch task.
+- Legacy persisted `watch_enabled` state is forcibly reset to 0.
+- No Watch runtime is restored.
+- No scan can start from startup code.
 
 ## /alert and /alerts
 - Run only after a direct Telegram command.
-- Exactly one live scan is executed per command.
-- Duplicate manual scans are blocked.
-- They never start, stop, resume, or duplicate Watch.
-- If Watch currently uses the browser, Alert waits for the shared lock.
+- Exactly one live scan per command.
+- Duplicate manual Alert scans are blocked.
+- Alert never starts, stops, cancels, resumes, or modifies Watch.
+- Alert and Watch only share the browser lock.
 
 ## /watch_on
-- Creates exactly one Watch loop.
-- A second /watch_on does not create another loop.
+- The only code path that creates WATCH_TASK.
+- Creates one loop only.
+- Repeated calls cannot create a second loop.
 - First scan starts immediately.
-- After a scan completes, the loop waits 15 minutes and scans again.
-- No persisted loop is restored after deploy/restart.
+- Next scan begins 15 minutes after the previous scan finishes.
 
 ## /watch_stop
-- Cancels the active Watch scan and the one Watch loop.
-- It is the only command that stops a running loop.
+- Cancels the active Watch scan and the single Watch loop.
 
 ## /watch_status
-- Responds immediately.
-- Never triggers a scan.
-- Displays Israel time and countdown.
-
-## Alert display
-- Current Binance price.
-- Nearest Max Pain target price.
-- Target direction: up/down.
-- Liquidity at risk: longs/shorts.
-- Current timeframe Score remains primary.
-- Average Score across all timeframes is shown at the bottom and used only
-  as a secondary ordering signal.
+- Returns status only.
+- Never starts or schedules a scan.
