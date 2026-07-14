@@ -460,7 +460,7 @@ async def read_timeframe(
         clicked = await _click_timeframe_verified(page, timeframe)
 
         # CoinGlass updates asynchronously. Poll rather than trusting click().
-        poll_limit = 20 if timeframe == "24h" else 12
+        poll_limit = 20 if timeframe in {"12h", "24h"} else 12
         for poll in range(1, poll_limit + 1):
             await page.wait_for_timeout(1000)
 
@@ -475,7 +475,6 @@ async def read_timeframe(
                 and (
                     previous_fingerprint is None
                     or fingerprint != previous_fingerprint
-                    or timeframe == "12h"
                 )
             )
             active_ok = active_label == expected_label
@@ -614,7 +613,17 @@ async def collect_coinglass_dom_snapshot(
     - prints table headers + body preview when it cannot parse Max Pain rows
     - does not fake rows if Max Pain fields are not found
     """
-    timeframes = timeframes or DEFAULT_TIMEFRAMES
+    requested_timeframes = list(timeframes or DEFAULT_TIMEFRAMES)
+
+    # CoinGlass normally opens with 24h already visible. Read it first as a
+    # baseline, then require 12h to produce a different table fingerprint.
+    preferred_order = ["24h", "12h", "48h", "3d", "1w", "2w", "1m"]
+    timeframes = [
+        tf for tf in preferred_order if tf in requested_timeframes
+    ] + [
+        tf for tf in requested_timeframes if tf not in preferred_order
+    ]
+
     all_rows: List[Dict[str, Any]] = []
     by_timeframe: Dict[str, Any] = {}
     missing: List[str] = []
@@ -692,7 +701,7 @@ async def collect_coinglass_dom_snapshot(
                             url,
                             tf,
                             previous_fingerprint=previous_fingerprint,
-                            attempts=2 if tf == "24h" else 1,
+                            attempts=2 if tf in {"12h", "24h"} else 1,
                         )
                         if retry_result.get("verified") and retry_result.get("rows"):
                             result = retry_result
@@ -755,7 +764,20 @@ async def collect_coinglass_dom_snapshot(
                     }
                     print(f"[dom] tf={tf} ERROR: {repr(exc)}", flush=True)
 
+            public_order = {
+                tf: index for index, tf in enumerate(requested_timeframes)
+            }
+            all_rows.sort(
+                key=lambda row: (
+                    public_order.get(str(row.get("timeframe")), 999),
+                    int(row.get("rank") or 9999),
+                    str(row.get("symbol") or ""),
+                )
+            )
+
             debug_summary = {
+                "requested_timeframes": requested_timeframes,
+                "collection_order": timeframes,
                 "initial_table_count": len(initial_tables),
                 "initial_table_headers": [t.get("headers") for t in initial_tables[:6]],
                 "initial_body_preview": initial_lines[:120],

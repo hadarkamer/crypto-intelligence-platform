@@ -641,20 +641,73 @@ def validate_snapshot(rows):
     return rows
 
 
+def _complete_symbol_audit(
+    rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Keep only symbols that have exactly one row in all seven timeframes."""
+    expected = set(TIMEFRAMES)
+    rows_by_symbol: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    present_by_symbol: Dict[str, set] = defaultdict(set)
+    duplicate_pairs: List[str] = []
+    seen_pairs = set()
+
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper()
+        timeframe = str(row.get("timeframe") or "")
+        if not symbol or timeframe not in expected:
+            continue
+
+        pair = (symbol, timeframe)
+        if pair in seen_pairs:
+            duplicate_pairs.append(f"{symbol}/{timeframe}")
+            continue
+
+        seen_pairs.add(pair)
+        present_by_symbol[symbol].add(timeframe)
+        rows_by_symbol[symbol].append(row)
+
+    complete_symbols = sorted(
+        symbol
+        for symbol, present in present_by_symbol.items()
+        if present == expected
+    )
+    incomplete_symbols = {
+        symbol: sorted(expected - present, key=TIMEFRAMES.index)
+        for symbol, present in sorted(present_by_symbol.items())
+        if present != expected
+    }
+
+    complete_rows = [
+        row
+        for symbol in complete_symbols
+        for row in sorted(
+            rows_by_symbol[symbol],
+            key=lambda item: TIMEFRAMES.index(str(item.get("timeframe"))),
+        )
+    ]
+
+    return {
+        "complete_rows": complete_rows,
+        "complete_symbols": complete_symbols,
+        "incomplete_symbols": incomplete_symbols,
+        "duplicate_pairs": sorted(set(duplicate_pairs)),
+        "input_rows": len(rows),
+        "expected_rows": len(complete_symbols) * len(TIMEFRAMES),
+        "complete_row_count": len(complete_rows),
+    }
+
+
+def _format_incomplete_symbols(incomplete: Dict[str, List[str]]) -> str:
+    if not incomplete:
+        return "אין"
+    return ", ".join(
+        f"{symbol}({','.join(missing)})"
+        for symbol, missing in incomplete.items()
+    )
+
+
 async def collect_once():
-    """Collect CoinGlass Max Pain targets, attach Binance live prices, and save one coherent snapshot.
-
-    CoinGlass supplies:
-    - Short/Long Max Pain targets
-    - Short/Long liquidation amounts
-
-    Binance supplies:
-    - current_price
-    - all distance calculations
-
-    Rows without a Binance price are not saved, so later commands never mix
-    stale CoinGlass prices with Binance-based calculations.
-    """
+    """Collect and save one coherent seven-timeframe Binance-backed snapshot."""
     start = time.time()
     collected_dt = datetime.now(timezone.utc)
     collected_at = collected_dt if use_postgres() else collected_dt.isoformat()
@@ -666,6 +719,13 @@ async def collect_once():
         headless=True,
         url=COINGLASS_MAX_PAIN_URL,
     )
+
+    reader_missing = list(snapshot.get("missing_timeframes", []))
+    if reader_missing:
+        raise RuntimeError(
+            "CoinGlass snapshot incomplete after retries: "
+            + ", ".join(reader_missing)
+        )
 
     raw_rows = []
     market_only_count = 0
@@ -691,7 +751,6 @@ async def collect_once():
             "symbol": symbol,
             "rank": item.get("rank"),
             "timeframe": item.get("timeframe"),
-            # Temporary CoinGlass price; replaced by Binance before DB insertion.
             "current_price": item.get("price"),
             "short_max_pain": short_mp,
             "long_max_pain": long_mp,
@@ -703,19 +762,16 @@ async def collect_once():
             "distance_long_pct": None,
         })
 
-    # Fetch Binance once for all symbols, then overlay one consistent price
-    # on all seven timeframes of each symbol.
     live_result = live_price_provider.enrich_snapshot_rows(
         raw_rows,
         excluded_symbols=NON_CRYPTO_SYMBOLS,
     )
-    rows = live_result.get("rows", [])
+    priced_rows = live_result.get("rows", [])
     skipped_symbols = live_result.get("skipped_symbols", [])
     price_result = live_result.get("price_result", {})
 
-    # Restore DB metadata fields after the provider copied/enriched rows.
     elapsed = time.time() - start
-    for row in rows:
+    for row in priced_rows:
         row["collected_at"] = collected_at
         row["source"] = SOURCE_NAME + "_dom_binance"
         row["collector_version"] = COLLECTOR_VERSION
@@ -723,33 +779,70 @@ async def collect_once():
         row["is_valid"] = True if use_postgres() else 1
         row["validation_errors"] = None
 
-    missing_timeframes = list(snapshot.get("missing_timeframes", []))
-    seen_timeframes = {r.get("timeframe") for r in rows}
-    for tf in TIMEFRAMES:
-        if tf not in seen_timeframes and tf not in missing_timeframes:
-            missing_timeframes.append(tf)
+    audit = _complete_symbol_audit(priced_rows)
+    rows = audit["complete_rows"]
+
+    if not rows:
+        raise RuntimeError(
+            "No complete seven-timeframe symbols remained after Binance pricing"
+        )
 
     rows = validate_snapshot(rows)
     rows = enrich_rows(rows)
-    inserted = insert_snapshots(rows)
 
-    print(
-        f"[collector] DOM+Binance inserted {inserted} rows; "
-        f"binance_found={price_result.get('found_count', 0)}; "
-        f"binance_missing={price_result.get('missing_count', 0)}; "
-        f"skipped_symbols={skipped_symbols}; "
-        f"missing_timeframes={missing_timeframes}; "
-        f"market_only_rows_seen={market_only_count}; "
-        f"raw_rows_seen={snapshot.get('row_count', 0)}"
-    )
-
-    if inserted == 0:
-        print(
-            "[collector] no rows inserted. Check DOM parsing and Binance coverage; "
-            "CoinGlass prices were not used as fallback."
+    invalid_pairs = [
+        f"{row.get('symbol')}/{row.get('timeframe')}"
+        for row in rows
+        if not bool(row.get("is_valid"))
+    ]
+    if invalid_pairs:
+        raise RuntimeError(
+            "Validation rejected complete snapshot rows: "
+            + ", ".join(invalid_pairs[:20])
         )
 
-    return inserted, missing_timeframes
+    inserted = insert_snapshots(rows)
+    expected_inserted = len(rows)
+
+    report = {
+        "raw_dom_rows": int(snapshot.get("row_count", 0) or 0),
+        "prepared_rows": len(raw_rows),
+        "priced_rows": len(priced_rows),
+        "complete_symbols": len(audit["complete_symbols"]),
+        "complete_symbol_names": audit["complete_symbols"],
+        "expected_inserted": expected_inserted,
+        "inserted": inserted,
+        "incomplete_symbols": audit["incomplete_symbols"],
+        "duplicate_pairs": audit["duplicate_pairs"],
+        "binance_found": int(price_result.get("found_count", 0) or 0),
+        "binance_missing": int(price_result.get("missing_count", 0) or 0),
+        "skipped_symbols": skipped_symbols,
+        "market_only_rows_seen": market_only_count,
+        "missing_timeframes": [],
+    }
+
+    print(
+        "[collector] audit "
+        f"raw_dom_rows={report['raw_dom_rows']}; "
+        f"prepared_rows={report['prepared_rows']}; "
+        f"priced_rows={report['priced_rows']}; "
+        f"complete_symbols={report['complete_symbols']}; "
+        f"expected_inserted={report['expected_inserted']}; "
+        f"inserted={report['inserted']}; "
+        f"incomplete_symbols={report['incomplete_symbols']}; "
+        f"duplicate_pairs={report['duplicate_pairs']}; "
+        f"binance_found={report['binance_found']}; "
+        f"binance_missing={report['binance_missing']}; "
+        f"skipped_symbols={report['skipped_symbols']}"
+    )
+
+    if inserted != expected_inserted:
+        raise RuntimeError(
+            f"Database write mismatch: expected {expected_inserted}, "
+            f"inserted {inserted}"
+        )
+
+    return report
 
 
 
@@ -837,10 +930,29 @@ async def collect_live_rows_for_watch():
     )
     rows = live_result.get("rows", [])
     integrity = _assert_complete_live_scan(rows, "Live scan")
+    symbol_audit = _complete_symbol_audit(rows)
 
+    if not symbol_audit["complete_symbols"]:
+        raise RuntimeError(
+            "Live scan has no symbol with all seven timeframes"
+        )
+
+    rows = symbol_audit["complete_rows"]
+    integrity = _assert_complete_live_scan(
+        rows,
+        "Complete-symbol live scan",
+    )
+
+    live_result["rows"] = rows
     live_result["timeframe_integrity"] = integrity
+    live_result["symbol_integrity"] = symbol_audit
+
     print(
-        f"[scan] fresh rows={len(rows)}; counts={integrity['counts']}; "
+        f"[scan] complete rows={len(rows)}; "
+        f"complete_symbols={len(symbol_audit['complete_symbols'])}; "
+        f"incomplete_symbols={symbol_audit['incomplete_symbols']}; "
+        f"duplicates={symbol_audit['duplicate_pairs']}; "
+        f"counts={integrity['counts']}; "
         f"skipped={live_result.get('skipped_symbols', [])}",
         flush=True,
     )
@@ -991,17 +1103,29 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "הנתונים יישמרו רק אם כל הטווחים נקלטו."
             )
             try:
-                inserted, missing_timeframes = await collect_once()
-                if missing_timeframes:
-                    raise RuntimeError(
-                        "לא נשמר Snapshot מלא. חסרים: "
-                        + ", ".join(missing_timeframes)
-                    )
+                report = await collect_once()
+
+                incomplete_text = _format_incomplete_symbols(
+                    report["incomplete_symbols"]
+                )
+                skipped_text = (
+                    ", ".join(report["skipped_symbols"])
+                    if report["skipped_symbols"]
+                    else "אין"
+                )
 
                 await update.message.reply_text(
-                    "✅ /collect הסתיים בהצלחה\n"
-                    f"שורות שנשמרו: {inserted}\n"
-                    "כל 7 טווחי הזמן נקלטו והמרחקים חושבו ממחיר Binance."
+                    "✅ /collect הסתיים בהצלחה מלאה\n"
+                    f"שורות DOM גולמיות: {report['raw_dom_rows']}\n"
+                    f"שורות לאחר מחיר Binance: {report['priced_rows']}\n"
+                    f"מטבעות מלאים ב-7/7 טווחים: "
+                    f"{report['complete_symbols']}\n"
+                    f"שורות צפויות לשמירה: "
+                    f"{report['expected_inserted']}\n"
+                    f"שורות שנשמרו בפועל: {report['inserted']}\n"
+                    f"מטבעות חלקיים שלא נשמרו: {incomplete_text}\n"
+                    f"סמלים ללא מחיר Binance/שדולגו: {skipped_text}\n"
+                    "המרחקים חושבו ממחיר Binance."
                 )
             except asyncio.CancelledError:
                 raise
@@ -1677,10 +1801,18 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scrape_lock = _get_scrape_lock()
     if scrape_lock.locked():
         owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
-        await update.message.reply_text(
-            f"⏳ /alerts ממתין לסיום הסריקה של {owner}. "
-            "הפקודה תמשיך אוטומטית לאחר שהסורק יתפנה."
-        )
+        if owner == "Watch":
+            wait_text = (
+                "⏳ סריקת Watch פעילה כרגע. פקודת Alerts ממתינה "
+                "לסיומה ותתחיל אוטומטית כשהסורק יתפנה."
+            )
+        else:
+            wait_text = (
+                f"⏳ הסורק תפוס כרגע על ידי {owner}. "
+                "פקודת Alerts ממתינה ותתחיל אוטומטית "
+                "כשהסורק יתפנה."
+            )
+        await update.message.reply_text(wait_text)
 
     async with command_lock:
         try:
