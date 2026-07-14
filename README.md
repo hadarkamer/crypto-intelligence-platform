@@ -32,3 +32,21 @@
 - Added transition-specific liquidity growth thresholds.
 - Increased Relative Gap to 10 points.
 - Directional Alignment is now 30 points: 15/8/7.
+
+
+## Stage 48 — Minimum tradable distance display filter
+- Internal scoring is unchanged.
+- `/alerts` and Watch omit opportunities whose remaining distance is below
+  `MIN_DISPLAY_DISTANCE_PCT`.
+- Default threshold: `0.15%`.
+- The threshold can be changed with the environment variable
+  `MIN_DISPLAY_DISTANCE_PCT`.
+- The Watch fallback result also respects this filter.
+- `/coin` and stored data are unchanged.
+
+
+## Stage 49 — Dynamic crypto price formatting
+- Price calculations are unchanged.
+- Binance current price and Max Pain targets use adaptive decimal precision.
+- Low-priced assets such as DOGE are no longer rounded to two decimals.
+- Trailing zeros are removed for readability.

@@ -79,6 +79,9 @@ MAX_PROCESSED_UPDATE_IDS = 500
 ALERT_ACTIVE = False
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
+MIN_DISPLAY_DISTANCE_PCT = float(
+    os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.15")
+)
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
 WATCH_RUNTIME = {
     "last_scan_utc": None,
@@ -1760,8 +1763,8 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"Score לטווח הנוכחי: "
         f"{fmt(item.get('score', item.get('priority')))}/100\n"
         f"ממוצע Score בכל 7 הטווחים: {fmt(average_score)}/100\n"
-        f"מחיר נוכחי — Binance: ${fmt(current_price)}\n"
-        f"יעד Max Pain הקרוב: ${fmt(target_price)}\n"
+        f"מחיר נוכחי — Binance: ${fmt_price(current_price)}\n"
+        f"יעד Max Pain הקרוב: ${fmt_price(target_price)}\n"
         f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
         f"(סף: {fmt(item.get('allowed_distance_pct'))}%)\n"
         f"קונצנזוס: {item.get('consensus_hits', 0)}/"
@@ -1809,6 +1812,21 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 
 
 
+def _is_displayable_opportunity(item: Dict[str, Any]) -> bool:
+    """Return whether an already-scored opportunity is still tradable.
+
+    This is a display filter only. It does not alter the internal Score.
+    Targets closer than MIN_DISPLAY_DISTANCE_PCT are considered effectively
+    reached and are omitted from /alerts and Watch output.
+    """
+    try:
+        distance = float(item.get("distance_pct"))
+    except (TypeError, ValueError):
+        return False
+
+    return distance >= MIN_DISPLAY_DISTANCE_PCT
+
+
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run exactly one manual live scan for /alerts."""
     limit = 10
@@ -1851,11 +1869,19 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows, live_result = await collect_live_rows_for_watch()
 
             all_items = alert_engine.build_opportunities(rows, limit=500)
-            items = all_items[:limit]
+            displayable_items = [
+                item
+                for item in all_items
+                if _is_displayable_opportunity(item)
+            ]
+            items = displayable_items[:limit]
 
             if not items:
                 await update.message.reply_text(
-                    "⚠️ הסריקה הסתיימה ללא הזדמנויות תקינות."
+                    "⚠️ הסריקה הסתיימה ללא הזדמנויות חדשות להצגה.\n"
+                    f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
+                    "נחשבים כמעט מושגים ואינם מוצגים, אך הציון שלהם "
+                    "עדיין מחושב פנימית."
                 )
                 return
 
@@ -2126,8 +2152,14 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
             rows, live_result = await collect_live_rows_for_watch()
 
         all_items = alert_engine.build_opportunities(rows, limit=500)
+        displayable_items = [
+            item
+            for item in all_items
+            if _is_displayable_opportunity(item)
+        ]
         candidates = [
-            item for item in all_items
+            item
+            for item in displayable_items
             if float(item.get("score", item.get("priority", 0)) or 0)
             >= WATCH_PRIORITY_THRESHOLD
         ]
@@ -2140,8 +2172,8 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
                 f"{WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
                 f"מוצגות {len(result_items)} התוצאות המובילות."
             )
-        elif all_items:
-            result_items = [all_items[0]]
+        elif displayable_items:
+            result_items = [displayable_items[0]]
             header = (
                 f"✅ סריקת Watch #{cycle_number} הסתיימה\n"
                 f"אין תוצאה בציון {WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
@@ -2150,8 +2182,10 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
         else:
             result_items = []
             header = (
-                f"⚠️ סריקת Watch #{cycle_number} הסתיימה "
-                "ללא הזדמנויות תקינות."
+                f"⚠️ סריקת Watch #{cycle_number} הסתיימה ללא "
+                "הזדמנויות חדשות להצגה.\n"
+                f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
+                "נחשבים כמעט מושגים ואינם מוצגים."
             )
 
         await bot_app.bot.send_message(chat_id=chat_id, text=header)
@@ -2161,8 +2195,12 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
                 text=_alert_card(index, item, all_items, rows),
             )
 
-        top_item = all_items[0] if all_items else None
-        WATCH_RUNTIME["last_found"] = len(all_items)
+        top_item = (
+            displayable_items[0]
+            if displayable_items
+            else None
+        )
+        WATCH_RUNTIME["last_found"] = len(displayable_items)
         WATCH_RUNTIME["last_candidates"] = len(candidates)
         WATCH_RUNTIME["last_sent"] = len(result_items)
         WATCH_RUNTIME["top_score"] = (
