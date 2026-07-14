@@ -10,3 +10,8 @@
 - /collect saves only complete seven-timeframe symbols.
 - /collect reports expected and actual database writes and incomplete symbols.
 - The Alerts waiting message now clearly states that Alerts waits for Watch.
+
+
+## Stage 45 — defaultdict hotfix
+- Added the missing `from collections import defaultdict` import to `main.py`.
+- Fixes the shared NameError affecting `/alerts`, `/collect`, and Watch cycles.

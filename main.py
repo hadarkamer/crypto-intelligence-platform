@@ -25,6 +25,7 @@ import analysis
 import decision_engine
 import alert_engine
 import live_price_provider
+from collections import defaultdict
 
 try:
     import psycopg
