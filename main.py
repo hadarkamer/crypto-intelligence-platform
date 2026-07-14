@@ -1698,21 +1698,15 @@ def _other_alerts_block(item: Dict[str, Any], all_items) -> str:
     if not symbol_items:
         return ""
 
-    average_score = sum(
-        float(other.get("score", other.get("priority", 0)) or 0)
-        for other in symbol_items
-    ) / len(symbol_items)
-
     alert_timeframes = [
         other for other in symbol_items
         if float(other.get("score", other.get("priority", 0)) or 0) > 50.0
     ]
 
-    lines = [
-        f"🔔 {len(alert_timeframes)}/7 טווחי זמן עם התראות",
-        f"ממוצע Score בכל הטווחים: {average_score:.2f}/100",
-    ]
-    return "\n\n" + "\n".join(lines)
+    return (
+        "\n\n"
+        f"🔔 {len(alert_timeframes)}/7 טווחי זמן עם התראות"
+    )
 
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
@@ -1741,10 +1735,33 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
             f"{fmt(c.get('btc_like_max'))}\n"
         )
 
+    average_score = item.get("average_score_all_timeframes")
+    if average_score is None:
+        symbol_items = [
+            other for other in all_items
+            if other.get("symbol") == item.get("symbol")
+        ]
+        average_score = (
+            sum(
+                float(other.get("score", other.get("priority", 0)) or 0)
+                for other in symbol_items
+            ) / len(symbol_items)
+            if symbol_items else float(
+                item.get("score", item.get("priority", 0)) or 0
+            )
+        )
+
+    current_price = item.get("current_price")
+    target_price = item.get("target_price")
+
     card = (
         f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
         f"צד קרוב: {item['side']}\n"
-        f"Score: {fmt(item.get('score', item.get('priority')))}/100\n"
+        f"Score לטווח הנוכחי: "
+        f"{fmt(item.get('score', item.get('priority')))}/100\n"
+        f"ממוצע Score בכל 7 הטווחים: {fmt(average_score)}/100\n"
+        f"מחיר נוכחי — Binance: ${fmt(current_price)}\n"
+        f"יעד Max Pain הקרוב: ${fmt(target_price)}\n"
         f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
         f"(סף: {fmt(item.get('allowed_distance_pct'))}%)\n"
         f"קונצנזוס: {item.get('consensus_hits', 0)}/"
@@ -1752,25 +1769,34 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"Market: {fmt(item.get('market_support_pct'))}% תמיכה ב-{item['side']} "
         f"({item.get('market_support_count', 0)}/"
         f"{item.get('market_total_count', 0)})\n"
-        f"Target Cluster: {fmt(item.get('cluster_spread_pct'))}% "
-        f"({item.get('cluster_count', 0)} טווחים)\n"
+        f"Cluster Confidence: "
+        f"{item.get('cluster_count', 0)} טווחים בקלאסטר "
+        f"(מתוך {item.get('cluster_same_direction_count', 0)} "
+        "באותו כיוון)\n"
+        f"סטייה ממוצעת מה-Median: "
+        f"{fmt(item.get('cluster_mean_deviation_pct'))}%\n"
         f"Relative Gap Advantage: "
         f"{fmt((item.get('relative_gap_advantage') or 0) * 100)}%\n"
         "\n"
         "פירוט הניקוד:\n"
         f"• Directional Alignment: "
-        f"{fmt(c.get('directional_alignment'))}/35\n"
+        f"{fmt(c.get('directional_alignment'))}/30\n"
         f"  - Consensus: {fmt(c.get('consensus'))}/"
         f"{fmt(c.get('consensus_max'))}\n"
         + btc_like_score_line
         + f"  - Market: {fmt(c.get('market'))}/"
         f"{fmt(c.get('market_max'))}\n"
-        f"• Target Attraction: {fmt(c.get('target_attraction'))}/35\n"
-        f"  - קרבה בסיסית: {fmt(c.get('proximity_base'))}/35\n"
-        f"  - מכפיל נזילות מתוקנת: "
-        f"{fmt(item.get('adjusted_multiplier'))}x\n"
-        f"• Target Clustering: {fmt(c.get('target_clustering'))}/25\n"
-        f"• Relative Gap: {fmt(c.get('relative_gap'))}/5\n"
+        f"• Target Proximity: "
+        f"{fmt(c.get('target_proximity'))}/30\n"
+        f"• Cluster Confidence: "
+        f"{fmt(c.get('cluster_confidence'))}/30\n"
+        f"  - צפיפות יעדים: "
+        f"{fmt(c.get('cluster_density'))}/12\n"
+        f"  - מספר טווחים: "
+        f"{fmt(c.get('cluster_coverage'))}/8\n"
+        f"  - הצטברות נזילות: "
+        f"{fmt(c.get('cluster_liquidity_growth'))}/10\n"
+        f"• Relative Gap: {fmt(c.get('relative_gap'))}/10\n"
         "\n"
         f"סוגי חריגה:\n{types_text}\n\n"
         f"{balance_text}\n"

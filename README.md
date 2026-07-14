@@ -15,3 +15,20 @@
 ## Stage 45 — defaultdict hotfix
 - Added the missing `from collections import defaultdict` import to `main.py`.
 - Fixes the shared NameError affecting `/alerts`, `/collect`, and Watch cycles.
+
+
+## Stage 46 — Alert display layout
+- Added current Binance price to every alert card.
+- Added the nearest Max Pain target price.
+- Moved the all-timeframe average score directly below the current timeframe score.
+- Kept the current timeframe score as the primary score.
+- Removed the duplicate average score line from the bottom of the card.
+
+
+## Stage 47 — Scoring rebuild
+- Applied Stage 46 alert display changes.
+- Replaced Target Attraction with Target Proximity.
+- Rebuilt Cluster Confidence with two minimum-three-timeframe gates.
+- Added transition-specific liquidity growth thresholds.
+- Increased Relative Gap to 10 points.
+- Directional Alignment is now 30 points: 15/8/7.
