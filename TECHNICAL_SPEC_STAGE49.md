@@ -1,21 +1,28 @@
-# Stage 49 — Dynamic Price Formatting
+# Stage 48 — Minimum Tradable Distance
 
-Display-only change.
+## Rule
+Every opportunity is still scored internally.
 
-Precision:
-- price >= 100: 2 decimals
-- 10 <= price < 100: 3 decimals
-- 1 <= price < 10: 4 decimals
-- 0.1 <= price < 1: 5 decimals
-- 0.01 <= price < 0.1: 6 decimals
-- 0.001 <= price < 0.01: 7 decimals
-- price < 0.001: 8 decimals
+Before Telegram output in `/alerts` or Watch:
 
-Trailing zeros are removed.
+`distance_pct >= MIN_DISPLAY_DISTANCE_PCT`
 
-Examples:
-- BTC 62577.50 -> 62577.5
-- DOGE 0.075432 -> 0.075432
-- PEPE 0.00001173 -> 0.00001173
+Default:
 
-Scoring, distance calculations, filtering, collection and Watch behavior remain unchanged.
+`MIN_DISPLAY_DISTANCE_PCT=0.15`
+
+An opportunity below the threshold is treated as a target that is already
+effectively reached and is not presented as a new trade opportunity.
+
+## Scope
+Changed:
+- `/alerts` display selection
+- Watch display selection
+- Watch best-result fallback
+
+Unchanged:
+- scoring formulas
+- sorting and all-timeframe averages
+- `/collect`
+- `/coin`
+- database rows
