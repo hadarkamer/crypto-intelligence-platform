@@ -1,19 +1,28 @@
-# Stage 44 Technical Specification
+# Stage 48 — Minimum Tradable Distance
 
-## Timeframe verification
-CoinGlass opens on 24h by default. The collector first accepts 24h as a
-baseline, then accepts 12h only after the table fingerprint changes.
+## Rule
+Every opportunity is still scored internally.
 
-## Symbol completeness
-A symbol enters the scoring engine or database only when it has one unique row
-for each of the seven timeframes.
+Before Telegram output in `/alerts` or Watch:
 
-## Collect audit
-Telegram and Render logs expose:
-- raw DOM rows
-- Binance-priced rows
-- complete symbols
-- expected database rows
-- actual database rows
-- incomplete symbols and missing timeframes
-- duplicate symbol/timeframe pairs
+`distance_pct >= MIN_DISPLAY_DISTANCE_PCT`
+
+Default:
+
+`MIN_DISPLAY_DISTANCE_PCT=0.15`
+
+An opportunity below the threshold is treated as a target that is already
+effectively reached and is not presented as a new trade opportunity.
+
+## Scope
+Changed:
+- `/alerts` display selection
+- Watch display selection
+- Watch best-result fallback
+
+Unchanged:
+- scoring formulas
+- sorting and all-timeframe averages
+- `/collect`
+- `/coin`
+- database rows

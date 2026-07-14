@@ -1,13 +1,19 @@
-# Command Specification V1
+# Stage 44 Technical Specification
 
-| Command | Scans? | Saves DB? | Starts Watch? |
-|---|---:|---:|---:|
-| `/collect` | Yes, once | Yes | No |
-| `/alerts` | Yes, once | No | No |
-| `/coin SYMBOL` | No | No | No |
-| `/watch_on` | Repeated | No | Yes |
-| `/watch_status` | No | No | No |
-| `/watch_stop` | No | No | Stops it |
+## Timeframe verification
+CoinGlass opens on 24h by default. The collector first accepts 24h as a
+baseline, then accepts 12h only after the table fingerprint changes.
 
-A score is never calculated from a partial timeframe set.
-The Watch task may only be created inside `watch_on()`.
+## Symbol completeness
+A symbol enters the scoring engine or database only when it has one unique row
+for each of the seven timeframes.
+
+## Collect audit
+Telegram and Render logs expose:
+- raw DOM rows
+- Binance-priced rows
+- complete symbols
+- expected database rows
+- actual database rows
+- incomplete symbols and missing timeframes
+- duplicate symbol/timeframe pairs
