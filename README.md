@@ -58,3 +58,12 @@
 - Added `GET /technical/status` and Telegram command `/technical_status`.
 - Technical signals are stored and displayed only; liquidity scoring is unchanged.
 - Configure `TRADINGVIEW_WEBHOOK_SECRET` before enabling the webhook.
+
+
+## Stage 51 — Tradable Max Pain filtering
+
+- Minimum displayed opportunity distance is now 0.5%.
+- 0.7%–1.3% is labeled as the preferred trading-distance band.
+- SHORT targets already crossed by the live Binance price are excluded.
+- LONG targets already crossed by the live Binance price are excluded.
+- Crossed targets do not participate in direction, consensus, clustering or scoring.

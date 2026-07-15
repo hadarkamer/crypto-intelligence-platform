@@ -87,10 +87,21 @@ def _relative_gap_advantage(row: Any) -> Dict[str, Optional[float]]:
     if not price or short_mp is None or long_mp is None:
         return {"near_distance": None, "far_distance": None, "advantage": None, "points": 0.0}
 
-    short_distance = abs(float(short_mp) - float(price)) / float(price) * 100.0
-    long_distance = abs(float(long_mp) - float(price)) / float(price) * 100.0
-    near_distance = min(short_distance, long_distance)
-    far_distance = max(short_distance, long_distance)
+    short_signed = (float(short_mp) - float(price)) / float(price) * 100.0
+    long_signed = (float(long_mp) - float(price)) / float(price) * 100.0
+    active_distances = []
+    if short_signed > 0:
+        active_distances.append(abs(short_signed))
+    if long_signed < 0:
+        active_distances.append(abs(long_signed))
+
+    # Relative-gap advantage requires two still-active opposing targets.
+    # A target already crossed by the live Binance price is excluded.
+    if len(active_distances) < 2:
+        return {"near_distance": None, "far_distance": None, "advantage": None, "points": 0.0}
+
+    near_distance = min(active_distances)
+    far_distance = max(active_distances)
 
     if far_distance <= 0:
         advantage = 0.0
@@ -797,6 +808,11 @@ def build_opportunities(
             "raw_score": score,
             "raw_max_score": 100.0,
             "distance_pct": distance,
+            "distance_trade_band": (
+                "BORDERLINE" if distance < 0.7
+                else "PREFERRED" if distance <= 1.3
+                else "FARTHER"
+            ),
             "allowed_distance_pct": allowed_distance,
             "near_amount": near_amount,
             "far_amount": far_amount,

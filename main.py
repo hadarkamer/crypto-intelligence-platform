@@ -82,7 +82,7 @@ ALERT_ACTIVE = False
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
 MIN_DISPLAY_DISTANCE_PCT = float(
-    os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.15")
+    os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.5")
 )
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
 WATCH_RUNTIME = {
@@ -1770,7 +1770,9 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"מחיר נוכחי — Binance: ${fmt_price(current_price)}\n"
         f"יעד Max Pain הקרוב: ${fmt_price(target_price)}\n"
         f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
-        f"(סף: {fmt(item.get('allowed_distance_pct'))}%)\n"
+        f"(סף ניקוד דינמי: {fmt(item.get('allowed_distance_pct'))}%)\n"
+        f"סיווג מרחק למסחר: "
+        f"{_distance_trade_label(item.get('distance_pct'))}\n"
         f"קונצנזוס: {item.get('consensus_hits', 0)}/"
         f"{item.get('consensus_total', 0)}\n"
         f"Market: {fmt(item.get('market_support_pct'))}% תמיכה ב-{item['side']} "
@@ -1819,9 +1821,10 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 def _is_displayable_opportunity(item: Dict[str, Any]) -> bool:
     """Return whether an already-scored opportunity is still tradable.
 
-    This is a display filter only. It does not alter the internal Score.
-    Targets closer than MIN_DISPLAY_DISTANCE_PCT are considered effectively
-    reached and are omitted from /alerts and Watch output.
+    Targets closer than MIN_DISPLAY_DISTANCE_PCT are not practical enough for
+    an alert after fees, slippage and execution risk, so they are omitted from
+    /alerts and Watch output. Crossed targets are already excluded by the
+    scoring engine before this display filter runs.
     """
     try:
         distance = float(item.get("distance_pct"))
@@ -1829,6 +1832,18 @@ def _is_displayable_opportunity(item: Dict[str, Any]) -> bool:
         return False
 
     return distance >= MIN_DISPLAY_DISTANCE_PCT
+
+
+def _distance_trade_label(distance_pct: Any) -> str:
+    try:
+        distance = float(distance_pct)
+    except (TypeError, ValueError):
+        return "לא ידוע"
+    if distance < 0.7:
+        return "גבולי"
+    if distance <= 1.3:
+        return "טווח מועדף"
+    return "רחוק יותר"
 
 
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1884,8 +1899,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "⚠️ הסריקה הסתיימה ללא הזדמנויות חדשות להצגה.\n"
                     f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
-                    "נחשבים כמעט מושגים ואינם מוצגים, אך הציון שלהם "
-                    "עדיין מחושב פנימית."
+                    "אינם מוצגים כהזדמנות מסחר רלוונטית."
                 )
                 return
 
@@ -2189,7 +2203,7 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
                 f"⚠️ סריקת Watch #{cycle_number} הסתיימה ללא "
                 "הזדמנויות חדשות להצגה.\n"
                 f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
-                "נחשבים כמעט מושגים ואינם מוצגים."
+                "אינם מוצגים כהזדמנות מסחר רלוונטית."
             )
 
         await bot_app.bot.send_message(chat_id=chat_id, text=header)
