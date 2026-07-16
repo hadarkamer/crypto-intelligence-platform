@@ -1,14 +1,21 @@
-Stage 52 Scoring Update
+# Stage 49 — Dynamic Price Formatting
 
-Scoring weights:
-- Direction Alignment: 30
-- Target Proximity: 25
-- Cluster Confidence: 30
-- Relative Gap: 15
+Display-only change.
 
-Target Proximity:
-<0.5% -> excluded
-0.5%-0.7% -> 17/25
-0.7%-1.3% -> 25/25
-1.3%-2.0% -> 20/25
->2.0% -> 15/25
+Precision:
+- price >= 100: 2 decimals
+- 10 <= price < 100: 3 decimals
+- 1 <= price < 10: 4 decimals
+- 0.1 <= price < 1: 5 decimals
+- 0.01 <= price < 0.1: 6 decimals
+- 0.001 <= price < 0.01: 7 decimals
+- price < 0.001: 8 decimals
+
+Trailing zeros are removed.
+
+Examples:
+- BTC 62577.50 -> 62577.5
+- DOGE 0.075432 -> 0.075432
+- PEPE 0.00001173 -> 0.00001173
+
+Scoring, distance calculations, filtering, collection and Watch behavior remain unchanged.

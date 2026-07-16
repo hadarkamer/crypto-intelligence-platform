@@ -1,10 +1,11 @@
-# Stage 55 — Seven-timeframe status in alert cards
+# Stage 54 — Per-symbol alerts and seven-timeframe score display
 
-At the bottom of every alert card, all seven timeframes are displayed with status:
+## Changes
 
-- 🟢 Active tradable target: show the timeframe score.
-- 🟡 Active target below the 0.5% display threshold: show its distance and threshold note.
-- 🔴 No active target: show that Max Pain was already taken.
-
-No aggregate count/status summary is added after the table.
-The existing average line remains at the bottom.
+- Every alert card now ends with a compact score list for all canonical timeframes:
+  `12h, 24h, 48h, 3d, 1w, 2w, 1m`.
+- The score list appears only at the bottom of the alert message.
+- Added `/alert SYMBOL`, for example `/alert BTC`.
+- `/alert SYMBOL` runs one fresh seven-timeframe scan and sends a separate message for each timeframe of the selected symbol.
+- A timeframe without an active scorable Max Pain target is reported explicitly instead of being silently omitted.
+- Existing `/alerts`, Watch, scoring, TradingView shadow mode, and Stage 53 cluster/scoring logic remain intact.

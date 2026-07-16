@@ -1,13 +1,10 @@
-# Stage 56 — Alert timeframe status UI
+# Stage 55 — Seven-timeframe status in alert cards
 
-## Changes
+At the bottom of every alert card, all seven timeframes are displayed with status:
 
-- Removed the line `X/7 טווחי זמן עם התראות` from alert cards.
-- The all-timeframe block remains only at the bottom of each alert card.
-- The block title is now `📊 מצב SYMBOL בכל טווחי הזמן`.
-- Timeframes are displayed in the fixed order: `12h`, `24h`, `48h`, `3d`, `1w`, `2w`, `1m`, according to the project TIMEFRAMES configuration.
-- Status meanings remain:
-  - 🟢 active tradable target with score
-  - 🟡 active target below the 0.5% minimum
-  - 🔴 no active target / Max Pain already taken
-- No summary-count line is added after the timeframe list.
+- 🟢 Active tradable target: show the timeframe score.
+- 🟡 Active target below the 0.5% display threshold: show its distance and threshold note.
+- 🔴 No active target: show that Max Pain was already taken.
+
+No aggregate count/status summary is added after the table.
+The existing average line remains at the bottom.

@@ -1,1 +1,8 @@
-python-3.11.9
+aiohttp
+python-dotenv
+python-telegram-bot
+tabulate
+requests
+pycryptodome
+psycopg[binary]
+playwright

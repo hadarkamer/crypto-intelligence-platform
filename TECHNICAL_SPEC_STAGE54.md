@@ -1,11 +1,33 @@
-# Stage 54 — Per-symbol alerts and seven-timeframe score display
+# Stage 53 — Scoring and Cluster Corrections
 
-## Changes
+## Score distribution
 
-- Every alert card now ends with a compact score list for all canonical timeframes:
-  `12h, 24h, 48h, 3d, 1w, 2w, 1m`.
-- The score list appears only at the bottom of the alert message.
-- Added `/alert SYMBOL`, for example `/alert BTC`.
-- `/alert SYMBOL` runs one fresh seven-timeframe scan and sends a separate message for each timeframe of the selected symbol.
-- A timeframe without an active scorable Max Pain target is reported explicitly instead of being silently omitted.
-- Existing `/alerts`, Watch, scoring, TradingView shadow mode, and Stage 53 cluster/scoring logic remain intact.
+- Directional Alignment: 30
+- Target Proximity: 25
+- Cluster Confidence: 30
+- Relative Gap: 15
+- Total: 100
+
+## Target Proximity
+
+- below 0.5%: 0 / excluded from alert display
+- 0.5% to below 0.7%: 17
+- 0.7% to 1.3%: 25
+- above 1.3% to 2.0%: 20
+- above 2.0% and within the coin dynamic threshold: 15
+- beyond the coin dynamic threshold: 0
+
+## Cluster Confidence
+
+Duplicate rows are deduplicated by timeframe, so the count cannot exceed the seven canonical timeframes.
+
+Cluster Confidence is calculated as:
+
+`(target density points + timeframe coverage points) * liquidity accumulation multiplier`
+
+Liquidity accumulation is not added as a separate point block.
+The multiplier ranges from 0.0 to 1.5, and the final Cluster Confidence is capped at 30.
+
+## Alert display
+
+Each liquidity side below $500,000 is marked with a red indicator.
