@@ -80,8 +80,8 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
     """Fetch Binance prices once.
 
     Priority:
-    1. USD-M Futures mark price — better aligned with liquidation analysis.
-    2. Binance Spot last price as fallback.
+    1. Binance Spot last price — matches the regular Binance market price.
+    2. USD-M Futures mark price as fallback when Spot is unavailable.
     """
     requested = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
     fetched_at = datetime.now(timezone.utc)
@@ -108,12 +108,12 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
         base, multiplier = SYMBOL_ALIASES.get(symbol, (symbol, 1.0))
         pair = f"{base}USDT"
 
-        if pair in futures_prices:
-            raw_price = futures_prices[pair]
-            source = "binance_futures_mark"
-        elif pair in spot_prices:
+        if pair in spot_prices:
             raw_price = spot_prices[pair]
             source = "binance_spot"
+        elif pair in futures_prices:
+            raw_price = futures_prices[pair]
+            source = "binance_futures_mark"
         else:
             missing.append(symbol)
             continue
@@ -130,7 +130,7 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
 
     return {
         "ok": bool(prices),
-        "source": "binance_futures_mark_then_spot",
+        "source": "binance_spot_then_futures_mark",
         "fetched_at_utc": fetched_at.isoformat(),
         "requested_count": len(requested),
         "found_count": len(prices),

@@ -1158,14 +1158,23 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = context.args[0].upper()
-    rows = [
-        r for r in latest_snapshot_rows()
+    snapshot_rows = [
+        r for r in raw_latest_snapshot_rows()
         if str(r["symbol"]).upper() == symbol
     ]
 
+    if not snapshot_rows:
+        await update.message.reply_text(
+            f"לא נמצא {symbol} ב-snapshot האחרון. הריצו /collect קודם."
+        )
+        return
+
+    live_result = live_price_provider.enrich_snapshot_rows(snapshot_rows)
+    rows = live_result.get("rows", [])
+    price_result = live_result.get("price_result", {})
     if not rows:
         await update.message.reply_text(
-            f"לא נמצאו נתוני Binance חיים עבור {symbol}, או שהמטבע אינו קיים ב-snapshot האחרון."
+            f"לא ניתן היה למשוך כעת מחיר Binance חי עבור {symbol}."
         )
         return
 
@@ -1190,7 +1199,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     source = rows[0].get("price_source", "binance")
-    fetched = rows[0].get("price_fetched_at_utc", "-")
+    fetched = price_result.get("fetched_at_utc") or rows[0].get("price_fetched_at_utc", "-")
     await update.message.reply_text(
         f"Price source: {source}\nFetched UTC: {fetched}\n"
         f"<pre>{html.escape(text)}</pre>",
