@@ -1712,7 +1712,7 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
         if str(_row_get(row, "symbol", "") or "").upper() == symbol
     }
 
-    lines = [f"📊 ציוני {symbol} בכל הטווחים:", ""]
+    lines = [f"📊 מצב {symbol} בכל טווחי הזמן", ""]
     values = []
 
     for timeframe in TIMEFRAMES:
@@ -1767,25 +1767,6 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
     lines.append("")
     lines.append(f"ממוצע: {average:.2f}/100")
     return "\n\n" + "\n".join(lines)
-
-
-def _other_alerts_block(item: Dict[str, Any], all_items) -> str:
-    symbol_items = [
-        other for other in all_items
-        if other.get("symbol") == item.get("symbol")
-    ]
-    if not symbol_items:
-        return ""
-
-    alert_timeframes = [
-        other for other in symbol_items
-        if float(other.get("score", other.get("priority", 0)) or 0) > 50.0
-    ]
-
-    return (
-        "\n\n"
-        f"🔔 {len(alert_timeframes)}/7 טווחי זמן עם התראות"
-    )
 
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
@@ -1893,7 +1874,6 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         + liquidity_line("נזילות בצד הקרוב", item.get("near_amount")) + "\n"
         + liquidity_line("נזילות בצד השני", item.get("far_amount"))
     )
-    card += _other_alerts_block(item, all_items)
     card += _quality_block(item, rows)
     card += _all_timeframe_scores_block(item, all_items, rows)
     return card
