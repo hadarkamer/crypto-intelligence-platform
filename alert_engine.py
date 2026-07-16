@@ -112,7 +112,7 @@ def _relative_gap_advantage(row: Any) -> Dict[str, Optional[float]]:
         "near_distance": near_distance,
         "far_distance": far_distance,
         "advantage": advantage,
-        "points": round(advantage * 10.0, 2),
+        "points": round(advantage * 15.0, 2),
     }
 
 
@@ -135,16 +135,24 @@ def _target_proximity_points(
     distance_pct: Optional[float],
     allowed_distance_pct: float,
 ) -> float:
-    """Continuous Target Proximity score, 0..30.
+    """Tradable target-distance score, 0..25.
 
-    0% distance receives 30 points.
-    The dynamic allowed-distance boundary receives 0 points.
+    The dynamic threshold remains available for display and eligibility, while
+    the score follows the agreed simple tradability bands.
     """
     if distance_pct is None or allowed_distance_pct <= 0:
         return 0.0
 
-    normalized = 1.0 - float(distance_pct) / float(allowed_distance_pct)
-    return round(max(0.0, min(1.0, normalized)) * 30.0, 2)
+    distance = float(distance_pct)
+    if distance < 0.5 or distance > float(allowed_distance_pct):
+        return 0.0
+    if distance < 0.7:
+        return 17.0
+    if distance <= 1.3:
+        return 25.0
+    if distance <= 2.0:
+        return 20.0
+    return 15.0
 
 
 def _proximity_points(distance_pct: Optional[float]) -> float:
@@ -376,7 +384,15 @@ def _cluster_map(
                     ),
                 })
 
-        directional_entries.sort(key=lambda item: item["hours"])
+        # Keep one current entry per canonical timeframe. Historical or
+        # duplicated rows must not make a seven-timeframe model report 8+.
+        directional_entries_by_tf = {
+            item["timeframe"]: item for item in directional_entries
+        }
+        directional_entries = sorted(
+            directional_entries_by_tf.values(),
+            key=lambda item: item["hours"],
+        )
         same_direction_count = len(directional_entries)
 
         empty_result = {
@@ -389,6 +405,7 @@ def _cluster_map(
             "density_points": 0.0,
             "coverage_points": 0.0,
             "growth_points": 0.0,
+            "liquidity_multiplier": 0.0,
             "growth_transition_scores": {},
             "points": 0.0,
         }
@@ -490,7 +507,7 @@ def _cluster_map(
                 threshold,
             )
 
-        growth_points = (
+        growth_score = (
             round(
                 sum(transition_scores.values())
                 / len(transition_scores)
@@ -498,6 +515,16 @@ def _cluster_map(
                 2,
             )
             if transition_scores else 0.0
+        )
+
+        # Liquidity accumulation is a multiplier on the structural cluster
+        # quality; it is not an additional block of points. The structural
+        # base is density (0..12) + timeframe coverage (0..8). A full
+        # accumulation score produces a 1.5x multiplier and a 30-point max.
+        liquidity_multiplier = round(growth_score / 10.0 * 1.5, 4)
+        cluster_points = round(
+            min(30.0, (density_points + coverage_points) * liquidity_multiplier),
+            2,
         )
 
         results[symbol] = {
@@ -509,14 +536,10 @@ def _cluster_map(
             "spread_pct": spread_pct,
             "density_points": density_points,
             "coverage_points": coverage_points,
-            "growth_points": growth_points,
+            "growth_points": growth_score,
+            "liquidity_multiplier": liquidity_multiplier,
             "growth_transition_scores": transition_scores,
-            "points": round(
-                density_points
-                + coverage_points
-                + growth_points,
-                2,
-            ),
+            "points": cluster_points,
         }
 
     return results
@@ -722,6 +745,7 @@ def build_opportunities(
             "density_points": 0.0,
             "coverage_points": 0.0,
             "growth_points": 0.0,
+            "liquidity_multiplier": 0.0,
             "growth_transition_scores": {},
             "points": 0.0,
             "side": None,
@@ -755,6 +779,9 @@ def build_opportunities(
             ),
             "cluster_liquidity_growth": float(
                 cluster.get("growth_points", 0.0)
+            ),
+            "cluster_liquidity_multiplier": float(
+                cluster.get("liquidity_multiplier", 0.0)
             ),
             "relative_gap": gap_points,
         }
@@ -841,6 +868,8 @@ def build_opportunities(
                 cluster.get("coverage_points", 0.0),
             "cluster_growth_points":
                 cluster.get("growth_points", 0.0),
+            "cluster_liquidity_multiplier":
+                cluster.get("liquidity_multiplier", 0.0),
             "cluster_growth_transition_scores":
                 cluster.get("growth_transition_scores", {}),
             "cluster_side": cluster.get("side"),
