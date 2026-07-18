@@ -2540,20 +2540,55 @@ def _insert_technical_signal(signal: technical_signal_store.NormalizedTechnicalS
 
 
 async def tradingview_webhook(request: web.Request):
-    """Receive and persist one TradingView technical signal in Shadow Mode."""
+    """Receive and persist one TradingView technical score snapshot.
+
+    TradingView/Pine alerts may send ordinary JSON, JSON encoded as a quoted
+    string, or an ``embeds`` member that is itself JSON text. Decode these
+    variants before authorization and normalization.
+    """
+    raw_body = await request.text()
+    print(
+        f"[tradingview] request received path={request.path_qs} "
+        f"content_type={request.content_type!r} bytes={len(raw_body.encode('utf-8'))}",
+        flush=True,
+    )
+
     try:
-        payload = await request.json()
-    except Exception:
+        payload = json.loads(raw_body)
+        # Pine alert() can emit an already-serialized JSON document wrapped in
+        # another JSON string. Decode up to two additional layers safely.
+        for _ in range(2):
+            if not isinstance(payload, str):
+                break
+            candidate = payload.strip()
+            if not candidate:
+                break
+            payload = json.loads(candidate)
+    except Exception as exc:
+        print(f"[tradingview] invalid JSON: {exc!r}; body={raw_body[:2000]!r}", flush=True)
         return web.json_response(
             {"ok": False, "error": "body must be valid JSON"}, status=400
         )
 
     if not isinstance(payload, dict):
+        print(f"[tradingview] decoded non-object: {type(payload).__name__}", flush=True)
         return web.json_response(
-            {"ok": False, "error": "body must be a JSON object"}, status=400
+            {"ok": False, "error": "body must decode to a JSON object"}, status=400
         )
 
+    # Some Discord-compatible templates encode embeds as a JSON string.
+    embeds_value = payload.get("embeds")
+    if isinstance(embeds_value, str):
+        try:
+            payload["embeds"] = json.loads(embeds_value)
+        except Exception as exc:
+            print(f"[tradingview] invalid embeds JSON: {exc!r}", flush=True)
+            return web.json_response(
+                {"ok": False, "error": "embeds must be valid JSON"}, status=422
+            )
+
     if not _tradingview_authorized(request, payload):
+        print("[tradingview] unauthorized request", flush=True)
         return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
 
     safe_payload = dict(payload)
@@ -2576,7 +2611,7 @@ async def tradingview_webhook(request: web.Request):
         f"score={signal.technical_score} confirmed={signal.is_confirmed}",
         flush=True,
     )
-    return web.json_response({
+    return web.json_response(_json_safe({
         "ok": True,
         "stored": inserted,
         "duplicate": not inserted,
@@ -2593,7 +2628,18 @@ async def tradingview_webhook(request: web.Request):
             "settings_profile": signal.settings_profile,
             "fingerprint": signal.fingerprint,
         },
-    })
+    }))
+
+
+def _json_safe(value):
+    """Recursively convert DB/API values into JSON-serializable types."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 async def technical_status_api(request: web.Request):
@@ -2611,7 +2657,7 @@ async def technical_status_api(request: web.Request):
     for item in items:
         if "is_confirmed" in item:
             item["is_confirmed"] = bool(item["is_confirmed"])
-    return web.json_response({"ok": True, "count": len(items), "latest": items})
+    return web.json_response(_json_safe({"ok": True, "count": len(items), "latest": items}))
 
 
 async def technical_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
