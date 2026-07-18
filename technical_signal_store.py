@@ -2991,7 +2991,8 @@ async def start_web_server(bot_app):
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"[health] server running on port {PORT}")
+    print(f"[health] server running on port {PORT}", flush=True)
+    return runner
 
 async def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -3044,27 +3045,35 @@ async def main():
     bot_app.add_handler(CommandHandler("technical_status", technical_status_cmd))
     bot_app.add_error_handler(telegram_error_handler)
 
-    await bot_app.initialize()
-    await bot_app.start()
-
-    print(
-        "[startup] manual-only mode; no collection, alert, or Watch task created",
-        flush=True,
-    )
-
-    webhook_url = f"{PUBLIC_URL}/telegram"
-    await bot_app.bot.delete_webhook(drop_pending_updates=True)
-    await bot_app.bot.set_webhook(
-        url=webhook_url,
-        drop_pending_updates=True,
-    )
-    print(f"[bot] webhook set to {webhook_url}", flush=True)
-
-    await start_web_server(bot_app)
+    # Bind Render's HTTP port before making outbound Telegram API calls.
+    # This prevents Render from terminating the service while startup waits on
+    # Telegram initialization or webhook configuration.
+    web_runner = await start_web_server(bot_app)
 
     try:
+        await bot_app.initialize()
+        await bot_app.start()
+
+        print(
+            "[startup] manual-only mode; no collection, alert, or Watch task created",
+            flush=True,
+        )
+
+        webhook_url = f"{PUBLIC_URL}/telegram"
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+        await bot_app.bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+        )
+        print(f"[bot] webhook set to {webhook_url}", flush=True)
+
         while True:
             await asyncio.sleep(3600)
+    except Exception as exc:
+        import traceback
+        print(f"[startup] fatal error: {exc!r}", flush=True)
+        traceback.print_exc()
+        raise
     finally:
         if WATCH_TASK is not None and not WATCH_TASK.done():
             WATCH_TASK.cancel()
@@ -3073,9 +3082,14 @@ async def main():
             except asyncio.CancelledError:
                 pass
 
-        await bot_app.bot.delete_webhook(drop_pending_updates=False)
-        await bot_app.stop()
+        try:
+            await bot_app.bot.delete_webhook(drop_pending_updates=False)
+        except Exception as exc:
+            print(f"[shutdown] delete_webhook warning: {exc!r}", flush=True)
+        if bot_app.running:
+            await bot_app.stop()
         await bot_app.shutdown()
+        await web_runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
