@@ -1,33 +1,13 @@
-# Stage 53 — Scoring and Cluster Corrections
+# Command Specification V1
 
-## Score distribution
+| Command | Scans? | Saves DB? | Starts Watch? |
+|---|---:|---:|---:|
+| `/collect` | Yes, once | Yes | No |
+| `/alerts` | Yes, once | No | No |
+| `/coin SYMBOL` | No | No | No |
+| `/watch_on` | Repeated | No | Yes |
+| `/watch_status` | No | No | No |
+| `/watch_stop` | No | No | Stops it |
 
-- Directional Alignment: 30
-- Target Proximity: 25
-- Cluster Confidence: 30
-- Relative Gap: 15
-- Total: 100
-
-## Target Proximity
-
-- below 0.5%: 0 / excluded from alert display
-- 0.5% to below 0.7%: 17
-- 0.7% to 1.3%: 25
-- above 1.3% to 2.0%: 20
-- above 2.0% and within the coin dynamic threshold: 15
-- beyond the coin dynamic threshold: 0
-
-## Cluster Confidence
-
-Duplicate rows are deduplicated by timeframe, so the count cannot exceed the seven canonical timeframes.
-
-Cluster Confidence is calculated as:
-
-`(target density points + timeframe coverage points) * liquidity accumulation multiplier`
-
-Liquidity accumulation is not added as a separate point block.
-The multiplier ranges from 0.0 to 1.5, and the final Cluster Confidence is capped at 30.
-
-## Alert display
-
-Each liquidity side below $500,000 is marked with a red indicator.
+A score is never calculated from a partial timeframe set.
+The Watch task may only be created inside `watch_on()`.

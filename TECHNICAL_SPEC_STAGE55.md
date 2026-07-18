@@ -1,10 +1,28 @@
-# Stage 55 — Seven-timeframe status in alert cards
+# Stage 48 — Minimum Tradable Distance
 
-At the bottom of every alert card, all seven timeframes are displayed with status:
+## Rule
+Every opportunity is still scored internally.
 
-- 🟢 Active tradable target: show the timeframe score.
-- 🟡 Active target below the 0.5% display threshold: show its distance and threshold note.
-- 🔴 No active target: show that Max Pain was already taken.
+Before Telegram output in `/alerts` or Watch:
 
-No aggregate count/status summary is added after the table.
-The existing average line remains at the bottom.
+`distance_pct >= MIN_DISPLAY_DISTANCE_PCT`
+
+Default:
+
+`MIN_DISPLAY_DISTANCE_PCT=0.15`
+
+An opportunity below the threshold is treated as a target that is already
+effectively reached and is not presented as a new trade opportunity.
+
+## Scope
+Changed:
+- `/alerts` display selection
+- Watch display selection
+- Watch best-result fallback
+
+Unchanged:
+- scoring formulas
+- sorting and all-timeframe averages
+- `/collect`
+- `/coin`
+- database rows

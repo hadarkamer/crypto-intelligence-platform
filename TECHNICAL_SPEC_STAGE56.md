@@ -1,13 +1,21 @@
-# Stage 56 — Alert timeframe status UI
+# Stage 49 — Dynamic Price Formatting
 
-## Changes
+Display-only change.
 
-- Removed the line `X/7 טווחי זמן עם התראות` from alert cards.
-- The all-timeframe block remains only at the bottom of each alert card.
-- The block title is now `📊 מצב SYMBOL בכל טווחי הזמן`.
-- Timeframes are displayed in the fixed order: `12h`, `24h`, `48h`, `3d`, `1w`, `2w`, `1m`, according to the project TIMEFRAMES configuration.
-- Status meanings remain:
-  - 🟢 active tradable target with score
-  - 🟡 active target below the 0.5% minimum
-  - 🔴 no active target / Max Pain already taken
-- No summary-count line is added after the timeframe list.
+Precision:
+- price >= 100: 2 decimals
+- 10 <= price < 100: 3 decimals
+- 1 <= price < 10: 4 decimals
+- 0.1 <= price < 1: 5 decimals
+- 0.01 <= price < 0.1: 6 decimals
+- 0.001 <= price < 0.01: 7 decimals
+- price < 0.001: 8 decimals
+
+Trailing zeros are removed.
+
+Examples:
+- BTC 62577.50 -> 62577.5
+- DOGE 0.075432 -> 0.075432
+- PEPE 0.00001173 -> 0.00001173
+
+Scoring, distance calculations, filtering, collection and Watch behavior remain unchanged.

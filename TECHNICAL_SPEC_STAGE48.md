@@ -1,28 +1,27 @@
-# Stage 48 — Minimum Tradable Distance
+# Technical Specification — Alert Quality Score V3
 
-## Rule
-Every opportunity is still scored internally.
+Directional Alignment = Consensus (0..12) + BTC Like (0..5) + Market (0..3).
+Specific Distance = 0..25.
+Adjusted High Liquidity Close Distance = 0..25.
+Liquidity Balance = clamp(balance*30, -10, +20).
+Target Clustering = 0..10.
+Final score range: 0..100.
 
-Before Telegram output in `/alerts` or Watch:
+Daily commands: /collect, /alerts, /coin BTC, /watch_on, /watch_status, /watch_stop.
 
-`distance_pct >= MIN_DISPLAY_DISTANCE_PCT`
 
-Default:
+## Stage 27 — Aggregate Market Schema
 
-`MIN_DISPLAY_DISTANCE_PCT=0.15`
+Market uses every valid asset/timeframe indication in the current snapshot.
 
-An opportunity below the threshold is treated as a target that is already
-effectively reached and is not presented as a new trade opportunity.
+For a SHORT alert:
+market_support_pct = total SHORT indications / total indications * 100
 
-## Scope
-Changed:
-- `/alerts` display selection
-- Watch display selection
-- Watch best-result fallback
+For a LONG alert:
+market_support_pct = total LONG indications / total indications * 100
 
-Unchanged:
-- scoring formulas
-- sorting and all-timeframe averages
-- `/collect`
-- `/coin`
-- database rows
+Market points:
+market_points = clamp((market_support_pct - 50) / 50 * 3, 0, 3)
+
+This is not a binary label and does not borrow direction from a different
+timeframe. It represents the strength of the full market schema.

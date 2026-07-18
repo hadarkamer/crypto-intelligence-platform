@@ -1,69 +1,28 @@
-import unittest
+# Stage 59 — Stable atomic CoinGlass collection
 
-import alert_engine
+## Scope
+All live CoinGlass consumers use the same collector:
+- `/collect`
+- `/alerts`
+- `/alert SYMBOL`
+- `/debug SYMBOL`
+- Watch
 
+## Reliability rules
+1. Every timeframe is opened in a fresh browser page.
+2. The requested tab must be visibly active.
+3. Non-default tabs must differ from the page baseline.
+4. A table is accepted only after the same fingerprint is read twice consecutively.
+5. Symbol rows within a timeframe must be unique and at least 30 rows must parse.
+6. A fingerprint already accepted for another timeframe is rejected and retried on a fresh page.
+7. Each timeframe receives up to three fresh-page attempts.
+8. The final snapshot is atomic: if one timeframe fails, no rows are returned or saved.
+9. Duplicate symbol/timeframe pairs reject the complete snapshot.
+10. The existing shared scrape lock prevents overlapping collection, alerts, debug and Watch scans.
 
-def btc_rows():
-    rows = []
-    price = 100.0
-    plan = [
-        ("12h", "LONG", 99.0),
-        ("24h", "LONG", 99.1),
-        ("48h", "LONG", 98.9),
-        ("3d", "SHORT", 103.0),
-        ("1w", "SHORT", 103.1),
-        ("2w", "SHORT", 102.3),
-        ("1m", "SHORT", 102.5),
-    ]
-    for timeframe, side, target in plan:
-        rows.append({
-            "symbol": "BTC",
-            "timeframe": timeframe,
-            "current_price": price,
-            "rank": 1,
-            "short_max_pain": target if side == "SHORT" else 105.0,
-            "long_max_pain": target if side == "LONG" else 95.0,
-            "distance_short_pct": (target - price) if side == "SHORT" else 5.0,
-            "distance_long_pct": (target - price) if side == "LONG" else -5.0,
-            "short_liquidation_amount": 1_000_000.0,
-            "long_liquidation_amount": 900_000.0,
-        })
-    return rows
+## Expected log ending
+A valid scan ends with:
 
+`[dom] atomic result ok=True; rows=...; counts=...; missing=[]; duplicates=[]`
 
-class Stage57CalculationTests(unittest.TestCase):
-    def test_consensus_is_side_specific(self):
-        items = alert_engine.build_opportunities(btc_rows(), limit=100)
-        for item in items:
-            if item["side"] == "LONG":
-                self.assertEqual(item["consensus_hits"], 3)
-                self.assertAlmostEqual(item["components"]["consensus"], 12.86, places=2)
-            else:
-                self.assertEqual(item["consensus_hits"], 4)
-                self.assertAlmostEqual(item["components"]["consensus"], 17.14, places=2)
-
-    def test_cluster_is_side_specific(self):
-        items = alert_engine.build_opportunities(btc_rows(), limit=100)
-        for item in items:
-            if item["side"] == "LONG":
-                self.assertEqual(item["cluster_same_direction_count"], 3)
-                self.assertEqual(set(item["cluster_members"]), {"12h", "24h", "48h"})
-            else:
-                self.assertEqual(item["cluster_same_direction_count"], 4)
-                self.assertEqual(set(item["cluster_members"]), {"3d", "1w", "2w", "1m"})
-
-    def test_duplicates_are_removed(self):
-        rows = btc_rows()
-        rows.append(dict(rows[0]))
-        report = alert_engine.debug_symbol(rows, "BTC")
-        self.assertEqual(report["duplicates_removed"], 1)
-        self.assertEqual(len(report["items"]), 7)
-
-    def test_component_sum_matches_score(self):
-        for item in alert_engine.build_opportunities(btc_rows(), limit=100):
-            self.assertEqual(item["calculation_validation_errors"], [])
-            self.assertAlmostEqual(item["component_sum_check"], item["score"], places=2)
-
-
-if __name__ == "__main__":
-    unittest.main()
+A failed validation ends with `ok=False` and the caller must not save or score the snapshot.

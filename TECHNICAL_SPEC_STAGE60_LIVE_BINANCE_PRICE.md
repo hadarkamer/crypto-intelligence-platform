@@ -1,7 +1,10 @@
-# Stage 60 — Live Binance Price Refresh
+# Stage 55 — Seven-timeframe status in alert cards
 
-- Binance Spot last price is the primary current-price source.
-- USD-M Futures mark price is used only as fallback.
-- `/coin SYMBOL` refreshes Binance price at command time and recalculates all distances against the latest saved Max Pain targets.
-- Live scans used by `/alerts`, `/alert`, `/debug`, and Watch already refresh Binance immediately after CoinGlass collection and continue to do so.
-- Output includes price source and UTC fetch time.
+At the bottom of every alert card, all seven timeframes are displayed with status:
+
+- 🟢 Active tradable target: show the timeframe score.
+- 🟡 Active target below the 0.5% display threshold: show its distance and threshold note.
+- 🔴 No active target: show that Max Pain was already taken.
+
+No aggregate count/status summary is added after the table.
+The existing average line remains at the bottom.
