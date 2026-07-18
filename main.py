@@ -597,10 +597,10 @@ def normalize_current_prices(rows):
     return rows
 
 def validate_snapshot(rows):
-    """Validate the filtered Binance-backed snapshot.
+    """Validate the filtered Bybit-backed snapshot.
 
     The raw DOM normally contains about 50 assets × 7 timeframes = 350 rows.
-    After non-crypto filtering and Binance coverage checks, fewer symbols are
+    After non-crypto filtering and Bybit coverage checks, fewer symbols are
     intentionally saved. Therefore the expected saved-row count must be based
     on the symbols that remain, not the raw CoinGlass row count.
     """
@@ -631,7 +631,7 @@ def validate_snapshot(rows):
         if not row.get("symbol"):
             row_errors.append("missing symbol")
         if row.get("current_price") is None:
-            row_errors.append("missing Binance current_price")
+            row_errors.append("missing Bybit current_price")
         if row.get("short_max_pain") is None:
             row_errors.append("missing short_max_pain")
         if row.get("long_max_pain") is None:
@@ -713,7 +713,7 @@ def _format_incomplete_symbols(incomplete: Dict[str, List[str]]) -> str:
 
 
 async def collect_once():
-    """Collect and save one coherent seven-timeframe Binance-backed snapshot."""
+    """Collect and save one coherent seven-timeframe Bybit-backed snapshot."""
     start = time.time()
     collected_dt = datetime.now(timezone.utc)
     collected_at = collected_dt if use_postgres() else collected_dt.isoformat()
@@ -749,7 +749,7 @@ async def collect_once():
 
         raw_rows.append({
             "collected_at": collected_at,
-            "source": SOURCE_NAME + "_dom_binance",
+            "source": SOURCE_NAME + "_dom_bybit",
             "collector_version": COLLECTOR_VERSION,
             "scrape_duration_seconds": time.time() - start,
             "is_valid": True if use_postgres() else 1,
@@ -779,7 +779,7 @@ async def collect_once():
     elapsed = time.time() - start
     for row in priced_rows:
         row["collected_at"] = collected_at
-        row["source"] = SOURCE_NAME + "_dom_binance"
+        row["source"] = SOURCE_NAME + "_dom_bybit"
         row["collector_version"] = COLLECTOR_VERSION
         row["scrape_duration_seconds"] = elapsed
         row["is_valid"] = True if use_postgres() else 1
@@ -790,7 +790,7 @@ async def collect_once():
 
     if not rows:
         raise RuntimeError(
-            "No complete seven-timeframe symbols remained after Binance pricing"
+            "No complete seven-timeframe symbols remained after Bybit pricing"
         )
 
     rows = validate_snapshot(rows)
@@ -820,8 +820,8 @@ async def collect_once():
         "inserted": inserted,
         "incomplete_symbols": audit["incomplete_symbols"],
         "duplicate_pairs": audit["duplicate_pairs"],
-        "binance_found": int(price_result.get("found_count", 0) or 0),
-        "binance_missing": int(price_result.get("missing_count", 0) or 0),
+        "bybit_found": int(price_result.get("found_count", 0) or 0),
+        "bybit_missing": int(price_result.get("missing_count", 0) or 0),
         "skipped_symbols": skipped_symbols,
         "market_only_rows_seen": market_only_count,
         "missing_timeframes": [],
@@ -837,8 +837,8 @@ async def collect_once():
         f"inserted={report['inserted']}; "
         f"incomplete_symbols={report['incomplete_symbols']}; "
         f"duplicate_pairs={report['duplicate_pairs']}; "
-        f"binance_found={report['binance_found']}; "
-        f"binance_missing={report['binance_missing']}; "
+        f"bybit_found={report['bybit_found']}; "
+        f"bybit_missing={report['bybit_missing']}; "
         f"skipped_symbols={report['skipped_symbols']}"
     )
 
@@ -995,7 +995,7 @@ def short_time(value):
 
 
 def raw_latest_snapshot_rows():
-    """Latest saved Binance-backed snapshot with validation metadata."""
+    """Latest saved Bybit-backed snapshot with validation metadata."""
     return query(
         f"""
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
@@ -1017,7 +1017,7 @@ def latest_snapshot_live_result():
     return {
         "rows": rows,
         "price_result": {
-            "source": "binance_saved_at_collect",
+            "source": "bybit_saved_at_collect",
             "found_count": len({r["symbol"] for r in rows}) if rows else 0,
             "missing_count": 0,
             "fetched_at_utc": "-",
@@ -1054,7 +1054,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Crypto Intelligence Bot פעיל.\n\n"
         "פקודות:\n"
-        "/coin BTC — סריקה חיה והצגת 7 טווחים במחיר Binance Futures\n"
+        "/coin BTC — סריקה חיה והצגת 7 טווחים במחיר Bybit Futures\n"
         "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
         "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
         "/watch_on — הפעלת לולאת Watch אחת\n"
@@ -1072,7 +1072,7 @@ def _get_alert_command_lock() -> asyncio.Lock:
 
 
 def _get_scrape_lock():
-    """Shared lock for any CoinGlass/Binance scraping."""
+    """Shared lock for any CoinGlass/Bybit scraping."""
     global SCRAPE_LOCK
     if SCRAPE_LOCK is None:
         import asyncio
@@ -1086,7 +1086,7 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run a fresh CoinGlass scan and show one coin using Binance Futures mark price."""
+    """Run a fresh CoinGlass scan and show one coin using Bybit Futures mark price."""
     if not context.args:
         await update.message.reply_text("שימוש: /coin BTC")
         return
@@ -1101,7 +1101,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        f"🔎 מבצע סריקה חיה עבור {symbol}: CoinGlass + מחיר Binance Futures..."
+        f"🔎 מבצע סריקה חיה עבור {symbol}: CoinGlass + מחיר Bybit Futures..."
     )
 
     try:
@@ -1121,7 +1121,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = [r for r in rows if str(r.get("symbol", "")).upper() == symbol]
     if not rows:
         skipped = live_result.get("skipped_symbols", [])
-        suffix = "" if symbol not in skipped else " לא נמצא עבורו מחיר Binance Futures."
+        suffix = "" if symbol not in skipped else " לא נמצא עבורו מחיר Bybit Futures."
         await update.message.reply_text(
             f"לא נמצאו 7 טווחים מלאים עבור {symbol} בסריקה הנוכחית.{suffix}"
         )
@@ -1148,7 +1148,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fetched = live_result.get("price_result", {}).get("fetched_at_utc", "-")
     await update.message.reply_text(
         f"{symbol} — סריקה חיה\n"
-        f"Price source: Binance USD-M Futures mark price\n"
+        f"Price source: Bybit USD-M Futures mark price\n"
         f"Fetched UTC: {fetched}\n\n"
         f"<pre>{html.escape(output)}</pre>",
         parse_mode="HTML",
@@ -1170,7 +1170,7 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not rows:
         await update.message.reply_text(
-            f"לא נמצאו נתוני Binance חיים עבור {symbol}/{timeframe}."
+            f"לא נמצאו נתוני Bybit חיים עבור {symbol}/{timeframe}."
         )
         return
 
@@ -1188,12 +1188,12 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = tabulate(
         table,
-        headers=["BinancePx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
+        headers=["BybitPx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
         tablefmt="plain",
     )
 
     await update.message.reply_text(
-        f"Price source: {r.get('price_source', 'binance')}\n"
+        f"Price source: {r.get('price_source', 'bybit')}\n"
         f"Fetched UTC: {r.get('price_fetched_at_utc', '-')}\n"
         f"<pre>{html.escape(text)}</pre>",
         parse_mode="HTML",
@@ -1238,11 +1238,11 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = tabulate(
         table,
-        headers=["Coin", "TF", "Side", "BinancePx", "ShortMP", "LongMP", "ToShort%", "ToLong%"],
+        headers=["Coin", "TF", "Side", "BybitPx", "ShortMP", "LongMP", "ToShort%", "ToLong%"],
         tablefmt="plain",
     )
     await update.message.reply_text(
-        "כל המרחקים חושבו מחדש לפי מחיר Binance חי.\n"
+        "כל המרחקים חושבו מחדש לפי מחיר Bybit חי.\n"
         f"<pre>{html.escape(text)}</pre>",
         parse_mode="HTML",
     )
@@ -1603,7 +1603,7 @@ def _quality_result(item: Dict[str, Any], rows: List[Any]) -> Dict[str, Any]:
         red.append("לא נמצאה שורת מקור תואמת למטבע ולטווח הזמן.")
     else:
         if _row_get(row, "current_price") in (None, 0):
-            red.append("מחיר Binance חסר או אינו תקין.")
+            red.append("מחיר Bybit חסר או אינו תקין.")
         if _row_get(row, "short_max_pain") is None:
             red.append("יעד Short Max Pain חסר.")
         if _row_get(row, "long_max_pain") is None:
@@ -1819,7 +1819,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"Score לטווח הנוכחי: "
         f"{fmt(item.get('score', item.get('priority')))}/100\n"
         f"ממוצע Score בכל 7 הטווחים: {fmt(average_score)}/100\n"
-        f"מחיר נוכחי — Binance: ${fmt_price(current_price)}\n"
+        f"מחיר נוכחי — Bybit: ${fmt_price(current_price)}\n"
         f"יעד Max Pain הקרוב: ${fmt_price(target_price)}\n"
         f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
         f"(סף ניקוד דינמי: {fmt(item.get('allowed_distance_pct'))}%)\n"
@@ -2025,7 +2025,7 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not symbol_items:
                 await update.message.reply_text(
                     f"⚠️ לא נמצאו טווחים ניתנים לחישוב עבור {symbol}. "
-                    "ייתכן שאין מחיר Binance, שחסרים נתוני Max Pain, "
+                    "ייתכן שאין מחיר Bybit, שחסרים נתוני Max Pain, "
                     "או שכל היעדים כבר נחצו."
                 )
                 return
@@ -2157,7 +2157,7 @@ async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check Binance live-price coverage. This command does not modify DB data."""
+    """Check Bybit live-price coverage. This command does not modify DB data."""
     rows = raw_latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין snapshot קיים. הריצו /collect קודם.")
@@ -2170,15 +2170,15 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     try:
-        result = live_price_provider.fetch_binance_usdt_prices(symbols)
+        result = live_price_provider.fetch_bybit_usdt_prices(symbols)
     except Exception as exc:
         await update.message.reply_text(
-            "בדיקת החיבור ל-Binance נכשלה.\n"
+            "בדיקת החיבור ל-Bybit נכשלה.\n"
             f"שגיאה: {exc!r}"
         )
         return
 
-    # Specific coin: compare one live Binance price with all seven Max Pain targets.
+    # Specific coin: compare one live Bybit price with all seven Max Pain targets.
     if context.args:
         symbol = context.args[0].upper()
 
@@ -2189,7 +2189,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         live = result["prices"].get(symbol)
         if not live:
             await update.message.reply_text(
-                f"לא נמצא זוג {symbol}USDT ב-Binance.\n"
+                f"לא נמצא זוג {symbol}USDT ב-Bybit.\n"
                 "בשלב הבא נוסיף מקור גיבוי למטבעות שאינם נסחרים שם."
             )
             return
@@ -2224,7 +2224,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         intro = (
             f"בדיקת מחיר חי עבור {symbol}\n"
-            f"מקור: Binance ({live['pair']})\n"
+            f"מקור: Bybit ({live['pair']})\n"
             f"זמן משיכה UTC: {result['fetched_at_utc']}\n"
             "המחיר עדיין לא נשמר ולא משנה את ההתראות בשלב זה.\n\n"
         )
@@ -2247,11 +2247,11 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     summary = (
-        "בדיקת חיבור למחירי Binance\n"
+        "בדיקת חיבור למחירי Bybit\n"
         "--------------------------------\n"
         f"מטבעות קריפטו שנבדקו: {result['requested_count']}\n"
         f"נמצא מחיר חי: {result['found_count']}\n"
-        f"חסרים ב-Binance: {result['missing_count']}\n"
+        f"חסרים ב-Bybit: {result['missing_count']}\n"
         f"זמן משיכה UTC: {result['fetched_at_utc']}\n\n"
         "זו בדיקת כיסוי בלבד — המחירים עדיין לא משנים את החישובים או ההתראות.\n"
     )
@@ -2259,7 +2259,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     missing_text = ", ".join(result["missing_symbols"]) or "אין"
     sample_output = tabulate(
         sample_table,
-        headers=["Coin", "Binance Pair", "Live Price"],
+        headers=["Coin", "Bybit Pair", "Live Price"],
         tablefmt="plain",
     )
 
@@ -2273,7 +2273,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Describe Binance-backed data saved by the latest collection."""
+    """Describe Bybit-backed data saved by the latest collection."""
     rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין snapshot שמור. הריצו /collect קודם.")
@@ -2285,9 +2285,9 @@ async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )[0]["latest_time"]
 
     text = (
-        "Binance collection status\n"
+        "Bybit collection status\n"
         f"Latest snapshot: {collected}\n"
-        f"Symbols saved with Binance price: {len(symbols_used)}\n"
+        f"Symbols saved with Bybit price: {len(symbols_used)}\n"
         f"Rows saved: {len(rows)}\n"
         "Current price and all Max Pain distances were calculated during /collect.\n"
         "CoinGlass current price is not used as fallback."
