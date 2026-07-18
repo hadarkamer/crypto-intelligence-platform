@@ -1,0 +1,3 @@
+# Superseded
+
+See TECHNICAL_SPEC_ALERT_SCORE_V3.md.
