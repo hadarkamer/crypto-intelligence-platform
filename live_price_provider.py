@@ -60,8 +60,17 @@ def _normalize_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
 
 
-def _get_json(url: str, params: Optional[Dict[str, str]] = None) -> Any:
-    response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+def _get_json(
+    url: str,
+    params: Optional[Dict[str, str]] = None,
+    timeout: Optional[float] = None,
+) -> Any:
+    response = requests.get(
+        url,
+        params=params,
+        timeout=timeout if timeout is not None else REQUEST_TIMEOUT_SECONDS,
+        headers={"User-Agent": "Mozilla/5.0 CryptoIntelligenceBot/1.0"},
+    )
     response.raise_for_status()
     return response.json()
 
@@ -221,6 +230,166 @@ def _candidate_pairs(symbol: str, exchange_map: Dict[str, List[str]]) -> List[Tu
             add(pair, multiplier)
 
     return candidates
+
+
+# Short, bounded timeouts for user-triggered single-symbol commands.
+SINGLE_SYMBOL_WS_TIMEOUT_SECONDS = float(os.getenv("BINANCE_SINGLE_WS_TIMEOUT_SECONDS", "8"))
+SINGLE_SYMBOL_REST_TIMEOUT_SECONDS = float(os.getenv("BINANCE_SINGLE_REST_TIMEOUT_SECONDS", "5"))
+SINGLE_SYMBOL_REST_HOST_LIMIT = max(1, int(os.getenv("BINANCE_SINGLE_REST_HOST_LIMIT", "2")))
+
+
+def _fetch_single_websocket_mark_price(pair: str) -> Tuple[Optional[float], Optional[str], List[str]]:
+    """Fetch one USD-M Futures Mark Price from its dedicated websocket stream."""
+    errors: List[str] = []
+    pair = str(pair or "").upper()
+    if not pair:
+        return None, None, ["empty pair"]
+
+    urls = [
+        f"wss://fstream.binance.com/ws/{pair.lower()}@markPrice@1s",
+    ]
+    for url in urls:
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                url,
+                timeout=SINGLE_SYMBOL_WS_TIMEOUT_SECONDS,
+                suppress_origin=True,
+            )
+            raw = ws.recv()
+            payload = json.loads(raw)
+            if isinstance(payload, dict) and "data" in payload:
+                payload = payload["data"]
+            if not isinstance(payload, dict):
+                raise ValueError("single mark-price websocket response is not an object")
+            returned_pair = str(payload.get("s") or payload.get("symbol") or "").upper()
+            raw_price = payload.get("p") if payload.get("p") is not None else payload.get("markPrice")
+            if returned_pair and returned_pair != pair:
+                raise ValueError(f"unexpected pair {returned_pair}")
+            price = float(raw_price)
+            if price <= 0:
+                raise ValueError("non-positive mark price")
+            return price, url, errors
+        except Exception as exc:
+            errors.append(f"{url}: {exc!r}")
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+    return None, None, errors
+
+
+def _fetch_single_rest_mark_price(pair: str) -> Tuple[Optional[float], Optional[str], List[str]]:
+    """Fetch one Mark Price over REST with a strict, short retry budget."""
+    errors: List[str] = []
+    for host in list(BINANCE_FUTURES_BASE_URLS)[:SINGLE_SYMBOL_REST_HOST_LIMIT]:
+        try:
+            payload = _get_json(
+                host + BINANCE_FUTURES_MARK_ENDPOINT,
+                params={"symbol": pair},
+                timeout=SINGLE_SYMBOL_REST_TIMEOUT_SECONDS,
+            )
+            raw_price = payload.get("markPrice") if isinstance(payload, dict) else None
+            price = float(raw_price)
+            if price <= 0:
+                raise ValueError("non-positive mark price")
+            return price, host, errors
+        except Exception as exc:
+            errors.append(f"{host}/{pair}: {exc!r}")
+    return None, None, errors
+
+
+def fetch_single_binance_futures_price(symbol: str) -> Dict[str, Any]:
+    """Fetch one live Binance USD-M Futures Mark Price without scanning all symbols.
+
+    This function is intended for /coin and /price_check. It has a bounded network
+    budget and never uses Spot or a saved Snapshot price.
+    """
+    normalized = _normalize_symbol(symbol)
+    fetched_at = datetime.now(timezone.utc)
+    candidates = _candidate_pairs(normalized, {})
+    websocket_errors: List[str] = []
+    rest_errors: List[str] = []
+
+    for pair, multiplier in candidates:
+        price, ws_url, errors = _fetch_single_websocket_mark_price(pair)
+        websocket_errors.extend(errors)
+        if price is not None:
+            return {
+                "ok": True,
+                "source": "binance_futures_mark",
+                "transport": "websocket_single",
+                "fetched_at_utc": fetched_at.isoformat(),
+                "requested_count": 1,
+                "found_count": 1,
+                "missing_count": 0,
+                "prices": {
+                    normalized: {
+                        "symbol": normalized,
+                        "pair": pair,
+                        "price": price * multiplier,
+                        "raw_price": price,
+                        "multiplier": multiplier,
+                        "source": "binance_futures_mark",
+                        "transport": "websocket_single",
+                        "fetched_at_utc": fetched_at.isoformat(),
+                    }
+                },
+                "missing_symbols": [],
+                "websocket_url": ws_url,
+                "websocket_errors": websocket_errors,
+                "mark_price_host": None,
+                "mark_price_errors": rest_errors,
+            }
+
+    for pair, multiplier in candidates:
+        price, host, errors = _fetch_single_rest_mark_price(pair)
+        rest_errors.extend(errors)
+        if price is not None:
+            return {
+                "ok": True,
+                "source": "binance_futures_mark",
+                "transport": "rest_single",
+                "fetched_at_utc": fetched_at.isoformat(),
+                "requested_count": 1,
+                "found_count": 1,
+                "missing_count": 0,
+                "prices": {
+                    normalized: {
+                        "symbol": normalized,
+                        "pair": pair,
+                        "price": price * multiplier,
+                        "raw_price": price,
+                        "multiplier": multiplier,
+                        "source": "binance_futures_mark",
+                        "transport": "rest_single",
+                        "fetched_at_utc": fetched_at.isoformat(),
+                    }
+                },
+                "missing_symbols": [],
+                "websocket_url": None,
+                "websocket_errors": websocket_errors,
+                "mark_price_host": host,
+                "mark_price_errors": rest_errors,
+            }
+
+    return {
+        "ok": False,
+        "source": "binance_futures_mark",
+        "transport": None,
+        "fetched_at_utc": fetched_at.isoformat(),
+        "requested_count": 1,
+        "found_count": 0,
+        "missing_count": 1,
+        "prices": {},
+        "missing_symbols": [normalized],
+        "websocket_url": None,
+        "websocket_errors": websocket_errors,
+        "mark_price_host": None,
+        "mark_price_errors": rest_errors,
+    }
 
 
 def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:

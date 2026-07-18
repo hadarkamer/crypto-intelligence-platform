@@ -1064,8 +1064,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/collect — איסוף מלא ושמירת Snapshot חדש\n"
         "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
         "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
-        "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון עם מחיר Futures חי\n"
-        "/price_check BTC — משיכת מחיר Binance Futures חי ללא איסוף חדש\n"
+        "/coin BTC — יעדי Snapshot עם מחיר Futures חי חדש\n"
+        "/price_check BTC — בדיקת מחיר Futures חי ללא שמירה\n"
         "/watch_on — הפעלת לולאת Watch אחת\n"
         "/watch_status — הצגת מצב בלבד\n"
         "/watch_stop — עצירת Watch"
@@ -1175,17 +1175,56 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    live_result = live_price_provider.enrich_snapshot_rows(snapshot_rows)
-    rows = live_result.get("rows", [])
-    price_result = live_result.get("price_result", {})
-    if not rows:
+    try:
+        price_result = await asyncio.wait_for(
+            asyncio.to_thread(
+                live_price_provider.fetch_single_binance_futures_price,
+                symbol,
+            ),
+            timeout=25,
+        )
+    except asyncio.TimeoutError:
         await update.message.reply_text(
-            f"לא ניתן היה למשוך כעת מחיר Binance חי עבור {symbol}."
+            f"משיכת מחיר Futures חי עבור {symbol} נעצרה לאחר 25 שניות."
+        )
+        return
+    except Exception as exc:
+        await update.message.reply_text(
+            f"משיכת מחיר Futures חי עבור {symbol} נכשלה: {exc!r}"
         )
         return
 
-    rows.sort(key=lambda r: tf_order_value(r["timeframe"]))
+    live = price_result.get("prices", {}).get(symbol)
+    if not live:
+        ws_errors = price_result.get("websocket_errors") or []
+        rest_errors = price_result.get("mark_price_errors") or []
+        details = "\n".join((ws_errors + rest_errors)[:4]) or "לא התקבל פירוט נוסף"
+        await update.message.reply_text(
+            f"לא ניתן היה למשוך כעת Binance Futures Mark Price עבור {symbol}.\n"
+            f"{details[:3000]}"
+        )
+        return
 
+    rows = []
+    for original in snapshot_rows:
+        r = dict(original)
+        calc = live_price_provider.recalculate_distances(
+            live["price"],
+            r.get("short_max_pain"),
+            r.get("long_max_pain"),
+        )
+        r["current_price"] = live["price"]
+        r["price_source"] = live["source"]
+        r["price_pair"] = live["pair"]
+        r["price_fetched_at_utc"] = live["fetched_at_utc"]
+        r["distance_short_pct"] = calc["short_signed_pct"]
+        r["distance_long_pct"] = calc["long_signed_pct"]
+        r["distance_short_abs"] = calc["short_abs_usd"]
+        r["distance_long_abs"] = calc["long_abs_usd"]
+        r["closest_side"] = calc["closest_side"]
+        rows.append(r)
+
+    rows.sort(key=lambda r: tf_order_value(r["timeframe"]))
     table = [[
         r["timeframe"],
         fmt_price(r["current_price"]),
@@ -1200,18 +1239,18 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = tabulate(
         table,
-        headers=["TF", "BinancePx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
+        headers=["TF", "FuturesPx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
         tablefmt="plain",
     )
 
-    source = rows[0].get("price_source", "binance")
-    fetched = price_result.get("fetched_at_utc") or rows[0].get("price_fetched_at_utc", "-")
     await update.message.reply_text(
-        f"Price source: {source}\nFetched UTC: {fetched}\n"
+        f"Price source: {live['source']}\n"
+        f"Transport: {live.get('transport', price_result.get('transport', '-'))}\n"
+        f"Pair: {live['pair']}\n"
+        f"Fetched UTC: {live['fetched_at_utc']}\n"
         f"<pre>{html.escape(text)}</pre>",
         parse_mode="HTML",
     )
-
 
 async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
@@ -2205,142 +2244,58 @@ async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetch a fresh Binance Futures Mark Price without running /collect.
+    """Check a live Binance Futures Mark Price without modifying DB data."""
+    if not context.args:
+        await update.message.reply_text("שימוש: /price_check BTC")
+        return
 
-    The latest saved Snapshot is used only for Max Pain targets. The price itself is
-    fetched live when this command runs.
-    """
-    rows = raw_latest_snapshot_rows()
-    if not rows:
+    symbol = context.args[0].upper()
+    if symbol in NON_CRYPTO_SYMBOLS:
         await update.message.reply_text(
-            "אין Snapshot שמור שממנו ניתן לקרוא יעדי Max Pain. הריצו /collect פעם אחת."
+            f"{symbol} מסונן ואינו נחשב מטבע קריפטו במערכת."
         )
         return
 
-    if context.args:
-        symbol = context.args[0].upper()
-        if symbol in NON_CRYPTO_SYMBOLS:
-            await update.message.reply_text(
-                f"{symbol} מסונן ואינו נחשב מטבע קריפטו במערכת."
-            )
-            return
-
-        symbol_rows = [
-            r for r in rows
-            if str(r["symbol"]).upper() == symbol
-        ]
-        if not symbol_rows:
-            await update.message.reply_text(
-                f"לא נמצא {symbol} ב-Snapshot האחרון."
-            )
-            return
-
-        # Fetch only the requested symbol. This is independent of /collect and avoids
-        # requesting prices for every symbol merely to inspect one coin.
-        try:
-            result = live_price_provider.fetch_binance_usdt_prices([symbol])
-        except Exception as exc:
-            await update.message.reply_text(
-                "משיכת מחיר Binance Futures נכשלה.\n"
-                f"שגיאה: {exc!r}"
-            )
-            return
-
-        live = result.get("prices", {}).get(symbol)
-        if not live:
-            websocket_errors = result.get("websocket_errors") or []
-            rest_errors = result.get("mark_price_errors") or []
-            error_lines = (websocket_errors + rest_errors)[:4]
-            details = "\n".join(error_lines) if error_lines else "לא התקבלה שגיאה מפורטת."
-            await update.message.reply_text(
-                f"לא התקבל מחיר Binance Futures חי עבור {symbol}.\n"
-                f"פרטים:\n{details}"
-            )
-            return
-
-        table = []
-        for r in sorted(symbol_rows, key=lambda row: tf_order_value(row["timeframe"])):
-            calc = live_price_provider.recalculate_distances(
-                live["price"],
-                r["short_max_pain"],
-                r["long_max_pain"],
-            )
-            table.append([
-                r["timeframe"],
-                fmt_price(live["price"]),
-                fmt_price(r["short_max_pain"]),
-                fmt_price(r["long_max_pain"]),
-                fmt(calc["short_signed_pct"]),
-                fmt(calc["long_signed_pct"]),
-                calc["closest_side"],
-            ])
-
-        output = tabulate(
-            table,
-            headers=["TF", "FuturesPx", "ShortMP", "LongMP", "ToShort%", "ToLong%", "Closest"],
-            tablefmt="plain",
-        )
-        transport = live.get("transport") or result.get("transport") or "-"
-        intro = (
-            f"מחיר Binance Futures חי עבור {symbol}\n"
-            f"זוג: {live['pair']}\n"
-            f"מקור: {live['source']} ({transport})\n"
-            f"זמן משיכה UTC: {result['fetched_at_utc']}\n"
-            "המחיר נמשך עכשיו ואינו המחיר שנשמר בזמן /collect.\n\n"
-        )
-        await update.message.reply_text(
-            intro + f"<pre>{html.escape(output)}</pre>",
-            parse_mode="HTML",
-        )
-        return
-
-    symbols = sorted({
-        str(r["symbol"]).upper()
-        for r in rows
-        if r["symbol"] and str(r["symbol"]).upper() not in NON_CRYPTO_SYMBOLS
-    })
     try:
-        result = live_price_provider.fetch_binance_usdt_prices(symbols)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                live_price_provider.fetch_single_binance_futures_price,
+                symbol,
+            ),
+            timeout=25,
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            f"בדיקת Futures עבור {symbol} נעצרה לאחר 25 שניות."
+        )
+        return
     except Exception as exc:
         await update.message.reply_text(
-            "בדיקת החיבור ל-Binance Futures נכשלה.\n"
-            f"שגיאה: {exc!r}"
+            f"בדיקת Futures עבור {symbol} נכשלה: {exc!r}"
         )
         return
 
-    found_symbols = sorted(result.get("prices", {}).keys())
-    sample = found_symbols[:12]
-    sample_table = [
-        [
-            symbol,
-            result["prices"][symbol]["pair"],
-            fmt_price(result["prices"][symbol]["price"]),
-            result["prices"][symbol].get("transport", "-"),
-        ]
-        for symbol in sample
-    ]
-    summary = (
-        "בדיקת כיסוי Binance Futures חי\n"
-        "--------------------------------\n"
-        f"מטבעות שנבדקו: {result['requested_count']}\n"
-        f"נמצא מחיר Futures: {result['found_count']}\n"
-        f"חסרים: {result['missing_count']}\n"
-        f"זמן משיכה UTC: {result['fetched_at_utc']}\n"
-    )
-    missing_text = ", ".join(result.get("missing_symbols", [])) or "אין"
-    sample_output = tabulate(
-        sample_table,
-        headers=["Coin", "Futures Pair", "Mark Price", "Transport"],
-        tablefmt="plain",
-    )
-    await update.message.reply_text(
-        summary
-        + f"\nמטבעות חסרים: {missing_text}\n\n"
-        + "דוגמת מחירים שנמצאו:\n"
-        + f"<pre>{html.escape(sample_output)}</pre>",
-        parse_mode="HTML",
-    )
+    live = result.get("prices", {}).get(symbol)
+    if not live:
+        ws_errors = result.get("websocket_errors") or []
+        rest_errors = result.get("mark_price_errors") or []
+        details = "\n".join((ws_errors + rest_errors)[:5]) or "לא התקבל פירוט נוסף"
+        await update.message.reply_text(
+            f"לא התקבל Binance Futures Mark Price עבור {symbol}.\n"
+            f"{details[:3200]}"
+        )
+        return
 
+    await update.message.reply_text(
+        f"✅ Binance Futures Mark Price חי\n"
+        f"מטבע: {symbol}\n"
+        f"זוג: {live['pair']}\n"
+        f"מחיר: {fmt_price(live['price'])}\n"
+        f"מקור: {live['source']}\n"
+        f"תעבורה: {live.get('transport', result.get('transport', '-'))}\n"
+        f"זמן UTC: {live['fetched_at_utc']}\n"
+        "הבדיקה אינה מפעילה /collect ואינה משנה את מסד הנתונים."
+    )
 
 async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Describe Binance-backed data saved by the latest collection."""
