@@ -11,6 +11,23 @@ BINANCE_FUTURES_BASE_URL = os.getenv(
     "BINANCE_FUTURES_BASE_URL",
     "https://fapi.binance.com",
 ).rstrip("/")
+
+# Binance exposes several public USD-M Futures API edge hosts. Render can
+# occasionally fail against one edge while another remains available. Keep the
+# configured host first, then try only equivalent Futures endpoints.
+BINANCE_FUTURES_BASE_URLS: List[str] = []
+for _base in [
+    BINANCE_FUTURES_BASE_URL,
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+    "https://fapi4.binance.com",
+    "https://www.binance.com",
+]:
+    _base = _base.rstrip("/")
+    if _base and _base not in BINANCE_FUTURES_BASE_URLS:
+        BINANCE_FUTURES_BASE_URLS.append(_base)
 BINANCE_FUTURES_MARK_ENDPOINT = os.getenv(
     "BINANCE_FUTURES_MARK_ENDPOINT",
     "/fapi/v1/premiumIndex",
@@ -35,9 +52,35 @@ def _normalize_symbol(symbol: str) -> str:
 
 
 def _request_json(url: str, *, params: Optional[Dict[str, str]] = None) -> Any:
-    response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+    response = requests.get(
+        url,
+        params=params,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; CoinGlassTracker/1.0)",
+            "Accept": "application/json",
+        },
+    )
     response.raise_for_status()
-    return response.json()
+    payload = response.json()
+    if isinstance(payload, dict) and payload.get("code") not in (None, 0, 200):
+        raise RuntimeError(f"Binance API error: {payload}")
+    return payload
+
+
+def _request_futures_path(
+    path: str,
+    *,
+    params: Optional[Dict[str, str]] = None,
+) -> Tuple[Any, str]:
+    errors: List[str] = []
+    for base in BINANCE_FUTURES_BASE_URLS:
+        try:
+            payload = _request_json(base + path, params=params)
+            return payload, base
+        except Exception as exc:
+            errors.append(f"{base}: {exc!r}")
+    raise RuntimeError("All Binance Futures API hosts failed: " + " | ".join(errors))
 
 
 def _fetch_futures_exchange_info() -> Dict[str, Any]:
@@ -47,8 +90,7 @@ def _fetch_futures_exchange_info() -> Dict[str, Any]:
     exactly SYMBOLUSDT. This is important for newly listed contracts and symbols
     whose exchange ticker differs from their display name.
     """
-    url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_EXCHANGE_INFO_ENDPOINT
-    payload = _request_json(url)
+    payload, _ = _request_futures_path(BINANCE_FUTURES_EXCHANGE_INFO_ENDPOINT)
 
     by_pair: Dict[str, Dict[str, Any]] = {}
     by_base: Dict[str, List[str]] = {}
@@ -79,8 +121,7 @@ def _fetch_futures_exchange_info() -> Dict[str, Any]:
 
 
 def _fetch_futures_mark_prices() -> Dict[str, float]:
-    url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_MARK_ENDPOINT
-    payload = _request_json(url)
+    payload, _ = _request_futures_path(BINANCE_FUTURES_MARK_ENDPOINT)
 
     result: Dict[str, float] = {}
     for item in payload:
@@ -97,9 +138,11 @@ def _fetch_futures_mark_prices() -> Dict[str, float]:
 
 def _fetch_single_futures_mark_price(pair: str) -> Optional[float]:
     """Direct fallback for a contract missing from the bulk premiumIndex reply."""
-    url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_MARK_ENDPOINT
     try:
-        payload = _request_json(url, params={"symbol": pair})
+        payload, _ = _request_futures_path(
+            BINANCE_FUTURES_MARK_ENDPOINT,
+            params={"symbol": pair},
+        )
         value = payload.get("markPrice") if isinstance(payload, dict) else None
         return float(value) if value is not None else None
     except Exception:
@@ -158,7 +201,12 @@ def _resolve_futures_pair(
     for pair in ordered:
         if pair in available_marks or pair in by_pair:
             return pair, multiplier, ordered
-    return None, multiplier, ordered
+
+    # If exchangeInfo or the bulk response is temporarily unavailable, still
+    # try the canonical Futures contract directly. The previous code returned
+    # None here, skipped every symbol and made an otherwise valid CoinGlass
+    # collection fail with zero complete symbols.
+    return (ordered[0] if ordered else exact), multiplier, ordered
 
 
 def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:

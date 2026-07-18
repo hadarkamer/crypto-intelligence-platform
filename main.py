@@ -792,7 +792,11 @@ async def collect_once():
 
     if not rows:
         raise RuntimeError(
-            "No complete seven-timeframe symbols remained after Binance pricing"
+            "No complete seven-timeframe symbols remained after Binance Futures pricing; "
+            f"found={price_result.get('found_count', 0)}/{price_result.get('requested_count', 0)}; "
+            f"missing={price_result.get('missing_symbols', [])[:15]}; "
+            f"exchange_info_error={price_result.get('exchange_info_error')}; "
+            f"futures_error={price_result.get('futures_error')}"
         )
 
     rows = validate_snapshot(rows)
