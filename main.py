@@ -1761,6 +1761,14 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     current_price = item.get("current_price")
     target_price = item.get("target_price")
 
+    def liquidity_line(label: str, amount: Any) -> str:
+        try:
+            value = float(amount or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        marker = "🔴 " if value < 500_000 else ""
+        return f"{marker}{label}: ${fmt(value, 0)}"
+
     card = (
         f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
         f"צד קרוב: {item['side']}\n"
@@ -1796,7 +1804,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         + f"  - Market: {fmt(c.get('market'))}/"
         f"{fmt(c.get('market_max'))}\n"
         f"• Target Proximity: "
-        f"{fmt(c.get('target_proximity'))}/30\n"
+        f"{fmt(c.get('target_proximity'))}/25\n"
         f"• Cluster Confidence: "
         f"{fmt(c.get('cluster_confidence'))}/30\n"
         f"  - צפיפות יעדים: "
@@ -1804,13 +1812,14 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"  - מספר טווחים: "
         f"{fmt(c.get('cluster_coverage'))}/8\n"
         f"  - הצטברות נזילות: "
-        f"{fmt(c.get('cluster_liquidity_growth'))}/10\n"
-        f"• Relative Gap: {fmt(c.get('relative_gap'))}/10\n"
+        f"{fmt(c.get('cluster_liquidity_growth'))}/10 "
+        f"(מכפיל x{fmt(c.get('cluster_liquidity_multiplier'))})\n"
+        f"• Relative Gap: {fmt(c.get('relative_gap'))}/15\n"
         "\n"
         f"סוגי חריגה:\n{types_text}\n\n"
         f"{balance_text}\n"
-        f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
-        f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}"
+        + liquidity_line("נזילות בצד הקרוב", item.get("near_amount")) + "\n"
+        + liquidity_line("נזילות בצד השני", item.get("far_amount"))
     )
     card += _other_alerts_block(item, all_items)
     card += _quality_block(item, rows)
