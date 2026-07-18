@@ -1,15 +1,14 @@
 import asyncio
 import base64
 import html
-import hashlib
-import logging
 import json
 import os
 import re
 import sqlite3
 import time
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -51,7 +50,7 @@ RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 TIMEFRAMES = ["12h", "24h", "48h", "3d", "1w", "2w", "1m"]
 TIMEFRAME_ORDER_SQL = "CASE timeframe WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3 WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6 WHEN '1m' THEN 7 ELSE 99 END"
 # CoinGlass may mix non-crypto assets into the Max Pain table. Exclude known non-crypto symbols.
-NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "SKHY", "SNDK", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR", "CRCL", "DRAM", "FARTCOIN", "HYPE"}
+NON_CRYPTO_SYMBOLS = {"CL", "SPCX", "XAG", "PAXG", "XAU", "MU", "XAUT", "NVDA", "SOXL", "MRVL", "SKHYNIX", "SKHY", "SNDK", "MSFT", "AAPL", "TSLA", "GOOGL", "AMZN", "META", "COIN", "MSTR"}
 API_TIMEFRAME_MAP = {
     "12h": "12h", "24h": "24h", "48h": "48h", "3d": "3d",
     "1w": "7d", "2w": "14d", "1m": "30d",
@@ -69,11 +68,32 @@ NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v3-dom-reader"
 COLLECT_LOCK = None
+SCRAPE_LOCK = None
 WATCH_TASK = None
-LAST_COLLECT_SUMMARY: Dict[str, Any] = {}
+WATCH_SCAN_TASK = None
+ALERT_COMMAND_LOCK = None
+PROCESSED_UPDATE_IDS = set()
+PROCESSED_UPDATE_ORDER = []
+MAX_PROCESSED_UPDATE_IDS = 500
+ALERT_ACTIVE = False
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
-WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "75"))
+WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
+WATCH_RUNTIME = {
+    "last_scan_utc": None,
+    "next_scan_utc": None,
+    "last_found": 0,
+    "last_candidates": 0,
+    "last_sent": 0,
+    "last_error": None,
+    "last_cycle_status": None,
+    "top_score": None,
+    "top_symbol": None,
+    "top_timeframe": None,
+    "scan_in_progress": False,
+    "scan_owner": None,
+    "cycle_number": 0,
+}
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS max_pain_snapshots (
@@ -257,6 +277,60 @@ def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
 
 def watch_enabled() -> bool:
     return get_setting("watch_enabled", "0") == "1"
+
+
+def _parse_utc_setting(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _persist_watch_runtime() -> None:
+    """Persist enough state for /watch_status and restart recovery."""
+    mapping = {
+        "watch_last_scan_utc": WATCH_RUNTIME.get("last_scan_utc"),
+        "watch_next_scan_utc": WATCH_RUNTIME.get("next_scan_utc"),
+        "watch_last_cycle_status": WATCH_RUNTIME.get("last_cycle_status"),
+        "watch_last_found": WATCH_RUNTIME.get("last_found", 0),
+        "watch_last_candidates": WATCH_RUNTIME.get("last_candidates", 0),
+        "watch_last_sent": WATCH_RUNTIME.get("last_sent", 0),
+        "watch_top_score": WATCH_RUNTIME.get("top_score"),
+        "watch_top_symbol": WATCH_RUNTIME.get("top_symbol"),
+        "watch_top_timeframe": WATCH_RUNTIME.get("top_timeframe"),
+        "watch_last_error": WATCH_RUNTIME.get("last_error"),
+    }
+    for key, value in mapping.items():
+        set_setting(key, "" if value is None else str(value))
+
+
+def _restore_watch_runtime() -> None:
+    WATCH_RUNTIME["last_scan_utc"] = get_setting("watch_last_scan_utc") or None
+    WATCH_RUNTIME["next_scan_utc"] = get_setting("watch_next_scan_utc") or None
+    WATCH_RUNTIME["last_cycle_status"] = (
+        get_setting("watch_last_cycle_status") or None
+    )
+    WATCH_RUNTIME["last_found"] = int(get_setting("watch_last_found", "0") or 0)
+    WATCH_RUNTIME["last_candidates"] = int(
+        get_setting("watch_last_candidates", "0") or 0
+    )
+    WATCH_RUNTIME["last_sent"] = int(get_setting("watch_last_sent", "0") or 0)
+
+    top_score = get_setting("watch_top_score")
+    WATCH_RUNTIME["top_score"] = float(top_score) if top_score else None
+    WATCH_RUNTIME["top_symbol"] = get_setting("watch_top_symbol") or None
+    WATCH_RUNTIME["top_timeframe"] = get_setting("watch_top_timeframe") or None
+    WATCH_RUNTIME["last_error"] = get_setting("watch_last_error") or None
+
+
+def _actual_watch_active() -> bool:
+    return WATCH_TASK is not None and not WATCH_TASK.done()
+
 
 
 
@@ -517,34 +591,57 @@ def normalize_current_prices(rows):
     return rows
 
 def validate_snapshot(rows):
-    global_errors = []
-    expected_min = TOP_COINS_LIMIT * len(TIMEFRAMES) * 0.8
-    if len(rows) < expected_min:
-        global_errors.append(f"Expected around {TOP_COINS_LIMIT * len(TIMEFRAMES)} rows, got {len(rows)}")
+    """Validate the filtered Binance-backed snapshot.
 
-    seen_timeframes = {r["timeframe"] for r in rows}
+    The raw DOM normally contains about 50 assets × 7 timeframes = 350 rows.
+    After non-crypto filtering and Binance coverage checks, fewer symbols are
+    intentionally saved. Therefore the expected saved-row count must be based
+    on the symbols that remain, not the raw CoinGlass row count.
+    """
+    global_errors = []
+
+    symbols = {
+        str(row.get("symbol", "")).upper()
+        for row in rows
+        if row.get("symbol")
+    }
+    expected_saved_rows = len(symbols) * len(TIMEFRAMES)
+
+    if rows and len(rows) != expected_saved_rows:
+        global_errors.append(
+            f"Filtered snapshot incomplete: expected {expected_saved_rows} rows "
+            f"for {len(symbols)} saved symbols across {len(TIMEFRAMES)} timeframes, "
+            f"got {len(rows)}"
+        )
+
+    seen_timeframes = {r["timeframe"] for r in rows if r.get("timeframe")}
     missing_timeframes = set(TIMEFRAMES) - seen_timeframes
     if missing_timeframes:
         global_errors.append(f"Missing timeframes: {sorted(missing_timeframes)}")
 
     for row in rows:
         row_errors = []
+
         if not row.get("symbol"):
             row_errors.append("missing symbol")
         if row.get("current_price") is None:
-            row_errors.append("missing current_price")
+            row_errors.append("missing Binance current_price")
         if row.get("short_max_pain") is None:
             row_errors.append("missing short_max_pain")
         if row.get("long_max_pain") is None:
             row_errors.append("missing long_max_pain")
+
         if global_errors or row_errors:
             row["is_valid"] = False if use_postgres() else 0
             row["validation_errors"] = "; ".join(global_errors + row_errors)[:1000]
+        else:
+            row["is_valid"] = True if use_postgres() else 1
+            row["validation_errors"] = None
+
     return rows
 
 
 async def collect_once():
-    global LAST_COLLECT_SUMMARY
     """Collect CoinGlass Max Pain targets, attach Binance live prices, and save one coherent snapshot.
 
     CoinGlass supplies:
@@ -646,32 +743,66 @@ async def collect_once():
         f"raw_rows_seen={snapshot.get('row_count', 0)}"
     )
 
-    LAST_COLLECT_SUMMARY = {
-        "source": price_result.get("source", "binance_futures_mark_then_spot"),
-        "requested": price_result.get("requested_count", 0),
-        "found": price_result.get("found_count", 0),
-        "missing": price_result.get("missing_count", 0),
-        "fetched_at_utc": price_result.get("fetched_at_utc", "-"),
-        "missing_symbols": price_result.get("missing_symbols", []),
-        "inserted_rows": inserted,
-        "missing_timeframes": missing_timeframes,
-    }
     if inserted == 0:
-        logging.warning("Collector inserted no rows; CoinGlass prices were not used as fallback")
+        print(
+            "[collector] no rows inserted. Check DOM parsing and Binance coverage; "
+            "CoinGlass prices were not used as fallback."
+        )
 
     return inserted, missing_timeframes
 
 
 
+def _timeframe_integrity(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    counts = {tf: 0 for tf in TIMEFRAMES}
+    symbols_by_tf = {tf: set() for tf in TIMEFRAMES}
+
+    for row in rows:
+        tf = str(row.get("timeframe") or "")
+        symbol = str(row.get("symbol") or "").upper()
+        if tf in counts:
+            counts[tf] += 1
+            if symbol:
+                symbols_by_tf[tf].add(symbol)
+
+    missing = [tf for tf in TIMEFRAMES if counts[tf] == 0]
+    minimum_rows = min(counts.values()) if counts else 0
+
+    return {
+        "ok": not missing and minimum_rows > 0,
+        "counts": counts,
+        "missing_timeframes": missing,
+        "minimum_rows_per_timeframe": minimum_rows,
+        "symbols_by_timeframe": symbols_by_tf,
+    }
+
+
+def _assert_complete_live_scan(rows: List[Dict[str, Any]], source: str) -> Dict[str, Any]:
+    integrity = _timeframe_integrity(rows)
+    if not integrity["ok"]:
+        raise RuntimeError(
+            f"{source} incomplete: missing timeframes="
+            f"{integrity['missing_timeframes']}; counts={integrity['counts']}"
+        )
+    return integrity
+
+
 async def collect_live_rows_for_watch():
-    """Read fresh CoinGlass + Binance data in memory without saving a snapshot."""
-    print("[watch] opening fresh CoinGlass snapshot", flush=True)
+    """Collect one complete seven-timeframe live snapshot without DB writes."""
+    print("[scan] opening fresh CoinGlass snapshot", flush=True)
 
     snapshot = await collect_coinglass_dom_snapshot(
         timeframes=TIMEFRAMES,
         headless=True,
         url=COINGLASS_MAX_PAIN_URL,
     )
+
+    missing_from_reader = list(snapshot.get("missing_timeframes", []))
+    if missing_from_reader:
+        raise RuntimeError(
+            "CoinGlass scan incomplete after retries. Missing: "
+            + ", ".join(missing_from_reader)
+        )
 
     raw_rows = []
     for item in snapshot.get("rows", []):
@@ -704,10 +835,12 @@ async def collect_live_rows_for_watch():
         raw_rows,
         excluded_symbols=NON_CRYPTO_SYMBOLS,
     )
-
     rows = live_result.get("rows", [])
+    integrity = _assert_complete_live_scan(rows, "Live scan")
+
+    live_result["timeframe_integrity"] = integrity
     print(
-        f"[watch] fresh rows={len(rows)}; "
+        f"[scan] fresh rows={len(rows)}; counts={integrity['counts']}; "
         f"skipped={live_result.get('skipped_symbols', [])}",
         flush=True,
     )
@@ -744,16 +877,12 @@ def short_time(value):
 
 
 def raw_latest_snapshot_rows():
-    """Latest saved snapshot.
-
-    From Stage 13 onward, current_price and distances stored here were already
-    calculated from Binance during /collect.
-    """
+    """Latest saved Binance-backed snapshot with validation metadata."""
     return query(
         f"""
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
-        SELECT symbol, timeframe, current_price,
-               short_max_pain, long_max_pain,
+        SELECT symbol, timeframe, collected_at, source, is_valid, validation_errors,
+               current_price, short_max_pain, long_max_pain,
                short_liquidation_amount, long_liquidation_amount,
                distance_short_abs, distance_short_pct,
                distance_long_abs, distance_long_pct,
@@ -766,7 +895,6 @@ def raw_latest_snapshot_rows():
 
 
 def latest_snapshot_live_result():
-    """Compatibility wrapper for commands that expect a live-result object."""
     rows = raw_latest_snapshot_rows()
     return {
         "rows": rows,
@@ -781,12 +909,8 @@ def latest_snapshot_live_result():
 
 
 def latest_snapshot_rows():
-    """Rows used by all analysis, score and alert commands.
-
-    No new price request occurs here; all commands use the exact Binance price
-    saved by the most recent /collect, keeping the snapshot internally consistent.
-    """
     return raw_latest_snapshot_rows()
+
 
 
 def side_from_row(row):
@@ -810,33 +934,35 @@ def tf_order_value(tf: str) -> int:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Crypto Intelligence Bot פעיל.\n"
+        "Crypto Intelligence Bot פעיל.\n\n"
         "פקודות:\n"
-        "/collect - איסוף ידני עכשיו\n"
-        "/latest - snapshot אחרון\n"
-        "/coin BTC - מטבע בכל הטווחים\n"
-        "/range BTC 24h - מטבע וטווח\n"
-        "/top 10 - הכי קרובים ל-Max Pain\n"
-        "/consensus - מטבעות עם קרבה עקבית לאותו צד בכל הטווחים\n"
-        "/gap - פער ממוצע בין Short/Long Max Pain\n"
-        "/liqsum - מאזן סכומי הנזילות לפי טווח וסך הכול\n"
-        "/market - נטיית שוק לפי קרבה ל-Max Pain בכל טווח\n"
-        "/btc_like - מטבעות שהכיוון שלהם דומה ל-BTC\n"
-        "/score BTC - פירוק Setup Strength למטבע\n"
-        "/score_top - דירוג Setup Strength\n"
-        "/alert_check - דירוג הזדמנויות ידני\n"
-        "/alert_explain BTC 24h - פירוט ניקוד\n"
-        "/watch_on - הפעלת התראות אוטומטיות\n"
-        "/watch_off - עצירת התראות\n"
-        "/watch_status - מצב ההתראות\n"
-        "/watch_now - בדיקה מיידית ללא שמירה\n"
-        "/price_check - בדיקת כיסוי מחירים חיים\n"
-        "/price_check BTC - השוואת מחיר ויעדי Max Pain\n"
-        "/live_status - כיסוי מטבעות בחישובים החיים\n"
-        "/alerts - חריגות"
+        "/collect — איסוף מלא ושמירת Snapshot חדש\n"
+        "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
+        "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
+        "/watch_on — הפעלת לולאת Watch אחת\n"
+        "/watch_status — הצגת מצב בלבד\n"
+        "/watch_stop — עצירת Watch"
     )
 
+
+
+def _get_alert_command_lock() -> asyncio.Lock:
+    global ALERT_COMMAND_LOCK
+    if ALERT_COMMAND_LOCK is None:
+        ALERT_COMMAND_LOCK = asyncio.Lock()
+    return ALERT_COMMAND_LOCK
+
+
+def _get_scrape_lock():
+    """Shared lock for any CoinGlass/Binance scraping."""
+    global SCRAPE_LOCK
+    if SCRAPE_LOCK is None:
+        import asyncio
+        SCRAPE_LOCK = asyncio.Lock()
+    return SCRAPE_LOCK
+
 async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run one manual collection and save it. Never starts Watch."""
     global COLLECT_LOCK
 
     if COLLECT_LOCK is None:
@@ -844,52 +970,47 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if COLLECT_LOCK.locked():
         await update.message.reply_text(
-            "איסוף כבר רץ כרגע. חכי שהוא יסתיים, או בצעי Restart service ב-Render אם הוא נתקע."
+            "⏳ פקודת /collect כבר פעילה. לא נפתח איסוף נוסף."
+        )
+        return
+
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
+        await update.message.reply_text(
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
+            "יש להמתין לסיום וללחוץ שוב על /collect."
         )
         return
 
     async with COLLECT_LOCK:
-        await update.message.reply_text(
-            "מתחיל איסוף: יעדי Max Pain מ-CoinGlass ומחירים חיים מ-Binance. "
-            "זה יכול לקחת כמה דקות..."
-        )
-        try:
-            inserted, missing_timeframes = await collect_once()
-            missing_note = (
-                f"\nטווחים חסרים: {', '.join(missing_timeframes)}"
-                if missing_timeframes else ""
-            )
-            commands = (
-                "\n\nפקודות זמינות:\n"
-                "/live_status\n"
-                "/coin BTC\n"
-                "/range BTC 24h\n"
-                "/top\n"
-                "/consensus\n"
-                "/gap\n"
-                "/liqsum\n"
-                "/market\n"
-                "/btc_like\n"
-                "/score BTC\n"
-                "/score_top\n"
-                "/alert_check\n"
-                "/alert_explain BTC 24h"
-            )
-            summary = LAST_COLLECT_SUMMARY
-            missing_symbols = ", ".join(summary.get("missing_symbols", [])) or "-"
+        async with scrape_lock:
+            WATCH_RUNTIME["scan_owner"] = "/collect"
             await update.message.reply_text(
-                "האיסוף הסתיים.\n\n"
-                f"Source: {summary.get('source', '-')}\n"
-                f"Requested: {summary.get('requested', 0)}\n"
-                f"Found: {summary.get('found', 0)}\n"
-                f"Missing: {summary.get('missing', 0)}\n"
-                f"Fetched UTC: {summary.get('fetched_at_utc', '-')}\n"
-                f"Inserted rows: {inserted}\n"
-                f"Missing symbols: {missing_symbols}"
-                f"{missing_note}{commands}"
+                "🔄 מתחיל איסוף מלא של 7 טווחי הזמן. "
+                "הנתונים יישמרו רק אם כל הטווחים נקלטו."
             )
-        except Exception as e:
-            await update.message.reply_text(f"שגיאה באיסוף: {e}")
+            try:
+                inserted, missing_timeframes = await collect_once()
+                if missing_timeframes:
+                    raise RuntimeError(
+                        "לא נשמר Snapshot מלא. חסרים: "
+                        + ", ".join(missing_timeframes)
+                    )
+
+                await update.message.reply_text(
+                    "✅ /collect הסתיים בהצלחה\n"
+                    f"שורות שנשמרו: {inserted}\n"
+                    "כל 7 טווחי הזמן נקלטו והמרחקים חושבו ממחיר Binance."
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await update.message.reply_text(
+                    f"❌ /collect נכשל ולא אושר כאיסוף מלא: {exc!r}"
+                )
+            finally:
+                WATCH_RUNTIME["scan_owner"] = None
 
 
 
@@ -1344,122 +1465,287 @@ async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
 
 
+
+def _row_get(row, key, default=None):
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _quality_result(item: Dict[str, Any], rows: List[Any]) -> Dict[str, Any]:
+    """Quality is descriptive only and never changes Priority."""
+    symbol = item.get("symbol")
+    timeframe = item.get("timeframe")
+    symbol_rows = [
+        row for row in rows
+        if str(_row_get(row, "symbol", "")).upper() == str(symbol).upper()
+    ]
+    row = next(
+        (r for r in symbol_rows if str(_row_get(r, "timeframe", "")) == str(timeframe)),
+        None,
+    )
+
+    yellow = []
+    orange = []
+    red = []
+
+    available_tfs = {
+        str(_row_get(r, "timeframe"))
+        for r in symbol_rows if _row_get(r, "timeframe")
+    }
+    missing = [tf for tf in TIMEFRAMES if tf not in available_tfs]
+    if len(missing) == 1:
+        yellow.append(
+            "חסר טווח הזמן " + missing[0]
+            + "; הקונצנזוס מבוסס על 6 מתוך 7 טווחים."
+        )
+    elif 2 <= len(missing) <= 3:
+        orange.append(
+            "חסרים טווחי הזמן " + ", ".join(missing)
+            + "; הקונצנזוס מבוסס על מידע חלקי."
+        )
+    elif len(missing) >= 4:
+        red.append(
+            "קיימים פחות מארבעה טווחים תקינים; אמינות ההתראה נמוכה מאוד."
+        )
+
+    if row is None:
+        red.append("לא נמצאה שורת מקור תואמת למטבע ולטווח הזמן.")
+    else:
+        if _row_get(row, "current_price") in (None, 0):
+            red.append("מחיר Binance חסר או אינו תקין.")
+        if _row_get(row, "short_max_pain") is None:
+            red.append("יעד Short Max Pain חסר.")
+        if _row_get(row, "long_max_pain") is None:
+            red.append("יעד Long Max Pain חסר.")
+        if (
+            _row_get(row, "short_liquidation_amount") in (None, 0)
+            or _row_get(row, "long_liquidation_amount") in (None, 0)
+        ):
+            orange.append(
+                "אחד מסכומי הנזילות חסר או שווה לאפס; "
+                "מאזן וצפיפות הנזילות פחות אמינים."
+            )
+        if (
+            _row_get(row, "distance_short_pct") is None
+            or _row_get(row, "distance_long_pct") is None
+        ):
+            red.append("אחד מחישובי המרחק ל-Max Pain חסר.")
+
+        validation_errors = _row_get(row, "validation_errors")
+        if validation_errors:
+            validation_text = str(validation_errors)
+            stale_row_warning = (
+                "expected around 350 rows" in validation_text.lower()
+                and "got 231" in validation_text.lower()
+            )
+            if not stale_row_warning:
+                orange.append("בדיקת האיסוף דיווחה: " + validation_text)
+        elif _row_get(row, "is_valid", True) in (False, 0):
+            orange.append("שורת הנתונים סומנה כלא תקינה בבדיקת האיסוף.")
+
+
+    if red:
+        return {"level": "red", "title": "🔴 בעיית נתונים קריטית", "notes": red + orange + yellow}
+    if orange:
+        return {"level": "orange", "title": "🟠 אזהרת איכות נתונים", "notes": orange + yellow}
+    if yellow:
+        return {"level": "yellow", "title": "🟡 הערת איכות נתונים", "notes": yellow}
+    return {"level": None, "title": None, "notes": []}
+
+
+def _quality_block(item: Dict[str, Any], rows: List[Any]) -> str:
+    result = _quality_result(item, rows)
+    if not result["notes"]:
+        return ""
+    return (
+        "\n\n" + result["title"] + ":\n"
+        + "\n".join(f"• {note}" for note in result["notes"])
+    )
+
+
+def _other_alerts_block(item: Dict[str, Any], all_items) -> str:
+    symbol_items = [
+        other for other in all_items
+        if other.get("symbol") == item.get("symbol")
+    ]
+    if not symbol_items:
+        return ""
+
+    average_score = sum(
+        float(other.get("score", other.get("priority", 0)) or 0)
+        for other in symbol_items
+    ) / len(symbol_items)
+
+    alert_timeframes = [
+        other for other in symbol_items
+        if float(other.get("score", other.get("priority", 0)) or 0) > 50.0
+    ]
+
+    lines = [
+        f"🔔 {len(alert_timeframes)}/7 טווחי זמן עם התראות",
+        f"ממוצע Score בכל הטווחים: {average_score:.2f}/100",
+    ]
+    return "\n\n" + "\n".join(lines)
+
+
+def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
+    c = item.get("components", {})
+    types = item.get("types", [])
+    type_prefix = "🟢 " if len(types) > 1 else ""
+    types_text = (
+        "\n".join(f"{type_prefix}• {type_name}" for type_name in types)
+        if types else "• ללא סוג חריגה"
+    )
+
+    near_share = item.get("near_share_pct")
+    if near_share is None:
+        balance_text = "⚪ Liquidity Balance: אין נתון"
+    elif float(near_share) >= 60.0:
+        balance_text = f"🟢 Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
+    elif float(near_share) <= 40.0:
+        balance_text = f"🔴 Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
+    else:
+        balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
+
+    btc_like_score_line = ""
+    if float(c.get("btc_like_max", 0) or 0) > 0:
+        btc_like_score_line = (
+            f"  - BTC Like: {fmt(c.get('btc_like'))}/"
+            f"{fmt(c.get('btc_like_max'))}\n"
+        )
+
+    card = (
+        f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
+        f"צד קרוב: {item['side']}\n"
+        f"Score: {fmt(item.get('score', item.get('priority')))}/100\n"
+        f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
+        f"(סף: {fmt(item.get('allowed_distance_pct'))}%)\n"
+        f"קונצנזוס: {item.get('consensus_hits', 0)}/"
+        f"{item.get('consensus_total', 0)}\n"
+        f"Market: {fmt(item.get('market_support_pct'))}% תמיכה ב-{item['side']} "
+        f"({item.get('market_support_count', 0)}/"
+        f"{item.get('market_total_count', 0)})\n"
+        f"Target Cluster: {fmt(item.get('cluster_spread_pct'))}% "
+        f"({item.get('cluster_count', 0)} טווחים)\n"
+        f"Relative Gap Advantage: "
+        f"{fmt((item.get('relative_gap_advantage') or 0) * 100)}%\n"
+        "\n"
+        "פירוט הניקוד:\n"
+        f"• Directional Alignment: "
+        f"{fmt(c.get('directional_alignment'))}/35\n"
+        f"  - Consensus: {fmt(c.get('consensus'))}/"
+        f"{fmt(c.get('consensus_max'))}\n"
+        + btc_like_score_line
+        + f"  - Market: {fmt(c.get('market'))}/"
+        f"{fmt(c.get('market_max'))}\n"
+        f"• Target Attraction: {fmt(c.get('target_attraction'))}/35\n"
+        f"  - קרבה בסיסית: {fmt(c.get('proximity_base'))}/35\n"
+        f"  - מכפיל נזילות מתוקנת: "
+        f"{fmt(item.get('adjusted_multiplier'))}x\n"
+        f"• Target Clustering: {fmt(c.get('target_clustering'))}/25\n"
+        f"• Relative Gap: {fmt(c.get('relative_gap'))}/5\n"
+        "\n"
+        f"סוגי חריגה:\n{types_text}\n\n"
+        f"{balance_text}\n"
+        f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
+        f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}"
+    )
+    card += _other_alerts_block(item, all_items)
+    card += _quality_block(item, rows)
+    return card
+
+
+
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual alert scan displayed as compact Telegram cards."""
+    """Run exactly one manual live scan for /alerts."""
     limit = 10
     if context.args:
         try:
-            limit = max(1, min(25, int(context.args[0])))
-        except Exception:
-            pass
+            limit = max(1, min(15, int(context.args[0])))
+        except (TypeError, ValueError):
+            limit = 10
 
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים שמורים. הריצו /collect קודם.")
+    command_lock = _get_alert_command_lock()
+    if command_lock.locked():
+        await update.message.reply_text(
+            "⏳ /alerts כבר מבצע סריקה. לא נפתחה סריקה נוספת."
+        )
         return
 
-    all_items = alert_engine.build_opportunities(rows, limit=500)
-    items = all_items[:limit]
-    if not items:
-        await update.message.reply_text("לא נמצאו הזדמנויות לפי הספים הנוכחיים.")
-        return
-
-    by_symbol = {}
-    for item in all_items:
-        by_symbol.setdefault(item["symbol"], []).append(item)
-
-    header = (
-        "📊 דירוג הזדמנויות\n"
-        "Priority: Distance 35 + Consensus 20 + BTC Like 15 + "
-        "Liquidity Balance 10 + Concentration 10 + Cluster 10\n\n"
-    )
-    cards = []
-    for index, x in enumerate(items, start=1):
-        c = x.get("components", {})
-        siblings = by_symbol.get(x["symbol"], [])
-        other = [y for y in siblings if y["timeframe"] != x["timeframe"]]
-        same_tfs = [y["timeframe"] for y in other]
-        opposite = [f"{y['timeframe']} {y['side']}" for y in other if y["side"] != x["side"]]
-        notices = []
-        if same_tfs:
-            notices.append("🔔 קיימות עוד התראות עבור המטבע\nטווחים נוספים: " + ", ".join(same_tfs))
-        if opposite:
-            notices.append("⚠ קיימת גם התראה בכיוון ההפוך:\n" + "\n".join(opposite))
-        dq = x.get("data_quality_issues") or []
-        if dq:
-            notices.append("⚠ איכות נתונים\n" + "\n".join(f"• {q}" for q in dq))
-        notice_text = "\n\n" + "\n\n".join(notices) if notices else ""
-        cards.append(
-            f"🚨 #{index} — {x['symbol']} | {x['timeframe']} | {x['side']}\n"
-            f"Priority: {fmt(x['priority'])} | Distance: {fmt(x['distance_pct'])}%\n"
-            f"Consensus: {x['consensus_hits']}/{x['consensus_total']} | Liq share: {fmt(x.get('near_share_pct'))}%\n"
-            f"Score: D {fmt(c.get('distance'))}/35 · C {fmt(c.get('consensus'))}/20 · "
-            f"BTC {fmt(c.get('btc_like'))}/15\n"
-            f"LiqBal {fmt(c.get('liquidity_balance'))}/10 · LiqCon {fmt(c.get('liquidity_concentration'))}/10 · "
-            f"Cluster {fmt(c.get('cluster'))}/10{notice_text}"
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
+        await update.message.reply_text(
+            f"⏳ /alerts ממתין לסיום הסריקה של {owner}. "
+            "הפקודה תמשיך אוטומטית לאחר שהסורק יתפנה."
         )
 
-    chunks, current = [], header
-    for card in cards:
-        sep = "\n\n────────────\n\n"
-        candidate = current + (sep if current != header else "") + card
-        if len(candidate) > 3500:
-            chunks.append(current)
-            current = card
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    for chunk in chunks:
-        await update.message.reply_text(chunk)
+    async with command_lock:
+        try:
+            async with scrape_lock:
+                WATCH_RUNTIME["scan_owner"] = "/alerts"
+                await update.message.reply_text(
+                    "🔎 /alerts התחיל סריקה חיה מלאה של 7 טווחי הזמן."
+                )
+                rows, live_result = await collect_live_rows_for_watch()
+
+            all_items = alert_engine.build_opportunities(rows, limit=500)
+            items = all_items[:limit]
+
+            if not items:
+                await update.message.reply_text(
+                    "⚠️ הסריקה הסתיימה ללא הזדמנויות תקינות."
+                )
+                return
+
+            counts = live_result.get("timeframe_integrity", {}).get("counts", {})
+            await update.message.reply_text(
+                "✅ /alerts הסתיים\n"
+                f"מוצגות {len(items)} התוצאות המובילות.\n"
+                f"טווחים שנקלטו: {', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in TIMEFRAMES)}"
+            )
+
+            for index, item in enumerate(items, start=1):
+                await update.message.reply_text(
+                    _alert_card(index, item, all_items, rows)
+                )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await update.message.reply_text(
+                f"❌ /alerts נכשל: {exc!r}"
+            )
+        finally:
+            if WATCH_RUNTIME.get("scan_owner") == "/alerts":
+                WATCH_RUNTIME["scan_owner"] = None
 
 
 async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Explain corrected alert priority for one coin/timeframe."""
     if not context.args:
-        await update.message.reply_text("שימוש: /alert_explain BTC או /alert_explain BTC 24h")
+        await update.message.reply_text(
+            "שימוש: /alert_explain BTC או /alert_explain BTC 24h"
+        )
         return
 
     symbol = context.args[0].upper()
     timeframe = context.args[1].lower() if len(context.args) > 1 else None
+    rows = latest_snapshot_rows()
+    all_items = alert_engine.build_opportunities(rows, limit=500)
 
-    items = alert_engine.build_opportunities(latest_snapshot_rows(), limit=500)
     matches = [
-        x for x in items
-        if x["symbol"] == symbol
-        and (timeframe is None or x["timeframe"] == timeframe)
+        item for item in all_items
+        if item.get("symbol") == symbol
+        and (timeframe is None or item.get("timeframe") == timeframe)
     ]
-
     if not matches:
         await update.message.reply_text("לא נמצאה כרגע התראה מתאימה.")
         return
 
-    x = sorted(matches, key=lambda y: -y["priority"])[0]
-    c = x["components"]
-
-    rows_out = [
-        ["Coin", x["symbol"]],
-        ["TF", x["timeframe"]],
-        ["Side", x["side"]],
-        ["Types", "+".join(x["types"])],
-        ["Priority", x["priority"]],
-        ["Distance%", fmt(x["distance_pct"])],
-        ["Near-side liquidity", fmt(x["near_amount"], 0)],
-        ["Opposite liquidity", fmt(x["far_amount"], 0)],
-        ["NearShare%", fmt(x["near_share_pct"])],
-        ["Near/Far ratio", fmt(x["near_far_ratio"])],
-        ["Consensus", f'{x["consensus_hits"]}/{x["consensus_total"]}'],
-        ["Distance points", c["distance"]],
-        ["Consensus points", c["consensus"]],
-        ["Liquidity points", c["liquidity_balance"]],
-        ["Liquidity meaning", x["liquidity_meaning"]],
-    ]
-
-    output = tabulate(rows_out, tablefmt="plain")
-    await update.message.reply_text(
-        f"<pre>{html.escape(output)}</pre>",
-        parse_mode="HTML",
-    )
+    item = sorted(matches, key=lambda x: -x.get("priority", 0))[0]
+    await update.message.reply_text(_alert_card(1, item, all_items, rows))
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1657,170 +1943,393 @@ def _remember_alert(item: Dict[str, Any], fingerprint: str) -> None:
         pass
 
 
-def _watch_message(item: Dict[str, Any]) -> str:
-    types = "\n".join(f"• {t}" for t in item["types"])
-    ratio = fmt(item.get("near_far_ratio"))
-    near_share = fmt(item.get("near_share_pct"))
-    consensus = f'{item["consensus_hits"]}/{item["consensus_total"]}'
-    components = item.get("components", {})
-
+def _watch_message(item, all_items, rows) -> str:
     return (
         "🚨 הזדמנות חדשה\n\n"
-        f"מטבע: {item['symbol']}\n"
-        f"טווח: {item['timeframe']}\n"
-        f"צד קרוב: {item['side']}\n"
-        f"Priority: {fmt(item['priority'])}\n"
-        f"מרחק: {fmt(item['distance_pct'])}%\n"
-        f"קונצנזוס: {consensus}\n"
-        f"ריכוז נזילות בצד הקרוב: {near_share}%\n"
-        f"יחס צד קרוב/צד שני: {ratio}\n\n"
-        "פירוט הניקוד:\n"
-        f"• Distance: {fmt(components.get('distance'))}/45\n"
-        f"• Consensus: {fmt(components.get('consensus'))}/30\n"
-        f"• Liquidity: {fmt(components.get('liquidity_balance'))}/25\n\n"
-        f"סוגי חריגה:\n{types}\n\n"
-        "זו התראת נתונים לבדיקה, לא הוראת מסחר."
+        + _alert_card(1, item, all_items, rows)
+        + "\n\nזו התראת נתונים לבדיקה, לא הוראת מסחר."
     )
 
 
-async def run_watch_cycle(bot_app, force_send: bool = False) -> Dict[str, Any]:
-    """Run one in-memory watch cycle and send only new high-priority alerts."""
-    chat_id = get_setting("watch_chat_id")
-    if not chat_id:
-        return {"ok": False, "reason": "no_chat_id", "sent": 0, "found": 0}
+async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
+    """Run one complete Watch cycle and always send a Telegram outcome."""
+    WATCH_RUNTIME["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
+    WATCH_RUNTIME["scan_in_progress"] = True
+    WATCH_RUNTIME["scan_owner"] = "Watch"
+    WATCH_RUNTIME["last_cycle_status"] = "running"
+    WATCH_RUNTIME["last_error"] = None
+    WATCH_RUNTIME["cycle_number"] = int(WATCH_RUNTIME.get("cycle_number", 0)) + 1
+    cycle_number = WATCH_RUNTIME["cycle_number"]
 
-    rows, live_result = await collect_live_rows_for_watch()
-    items = alert_engine.build_opportunities(rows, limit=500)
-    candidates = [
-        item for item in items
-        if item["priority"] >= WATCH_PRIORITY_THRESHOLD
-    ]
+    try:
+        scrape_lock = _get_scrape_lock()
+        async with scrape_lock:
+            rows, live_result = await collect_live_rows_for_watch()
 
-    sent = 0
-    for item in candidates:
-        fingerprint = _alert_fingerprint(item)
-        if not force_send and _alert_recently_sent(fingerprint):
-            continue
+        all_items = alert_engine.build_opportunities(rows, limit=500)
+        candidates = [
+            item for item in all_items
+            if float(item.get("score", item.get("priority", 0)) or 0)
+            >= WATCH_PRIORITY_THRESHOLD
+        ]
 
-        await bot_app.bot.send_message(
-            chat_id=int(chat_id),
-            text=_watch_message(item),
+        if candidates:
+            result_items = candidates[:10]
+            header = (
+                f"✅ סריקת Watch #{cycle_number} הסתיימה\n"
+                f"נמצאו {len(candidates)} תוצאות בציון "
+                f"{WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
+                f"מוצגות {len(result_items)} התוצאות המובילות."
+            )
+        elif all_items:
+            result_items = [all_items[0]]
+            header = (
+                f"✅ סריקת Watch #{cycle_number} הסתיימה\n"
+                f"אין תוצאה בציון {WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
+                "מוצגת התוצאה בעלת הציון הגבוה ביותר."
+            )
+        else:
+            result_items = []
+            header = (
+                f"⚠️ סריקת Watch #{cycle_number} הסתיימה "
+                "ללא הזדמנויות תקינות."
+            )
+
+        await bot_app.bot.send_message(chat_id=chat_id, text=header)
+        for index, item in enumerate(result_items, start=1):
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=_alert_card(index, item, all_items, rows),
+            )
+
+        top_item = all_items[0] if all_items else None
+        WATCH_RUNTIME["last_found"] = len(all_items)
+        WATCH_RUNTIME["last_candidates"] = len(candidates)
+        WATCH_RUNTIME["last_sent"] = len(result_items)
+        WATCH_RUNTIME["top_score"] = (
+            top_item.get("score", top_item.get("priority"))
+            if top_item else None
         )
-        _remember_alert(item, fingerprint)
-        sent += 1
+        WATCH_RUNTIME["top_symbol"] = top_item.get("symbol") if top_item else None
+        WATCH_RUNTIME["top_timeframe"] = (
+            top_item.get("timeframe") if top_item else None
+        )
+        WATCH_RUNTIME["last_cycle_status"] = "completed"
 
-    print(
-        f"[watch] cycle done; opportunities={len(items)}; "
-        f"candidates={len(candidates)}; sent={sent}",
-        flush=True,
-    )
+        return {
+            "ok": True,
+            "found": len(all_items),
+            "candidates": len(candidates),
+            "sent": len(result_items),
+            "timeframe_integrity": live_result.get("timeframe_integrity"),
+        }
 
-    return {
-        "ok": True,
-        "found": len(items),
-        "candidates": len(candidates),
-        "sent": sent,
-        "skipped_symbols": live_result.get("skipped_symbols", []),
-    }
-
-
-async def watch_loop(bot_app):
-    """Automatic loop. Reads data every 15 minutes without saving snapshots."""
-    print(
-        f"[watch] loop started; interval={WATCH_INTERVAL_MINUTES}m; "
-        f"threshold={WATCH_PRIORITY_THRESHOLD}; cooldown={WATCH_COOLDOWN_MINUTES}m",
-        flush=True,
-    )
-
-    while True:
+    except asyncio.CancelledError:
+        WATCH_RUNTIME["last_cycle_status"] = "cancelled"
+        raise
+    except Exception as exc:
+        WATCH_RUNTIME["last_cycle_status"] = "failed"
+        WATCH_RUNTIME["last_error"] = repr(exc)
         try:
-            if watch_enabled():
-                await run_watch_cycle(bot_app)
-        except Exception as exc:
-            print(f"[watch] cycle error: {exc!r}", flush=True)
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"❌ סריקת Watch #{cycle_number} נכשלה\n"
+                    f"{exc!r}\n"
+                    "הלולאה נשארת פעילה ותנסה שוב בעוד 15 דקות."
+                ),
+            )
+        except Exception:
+            pass
+        return {"ok": False, "reason": repr(exc)}
+    finally:
+        WATCH_RUNTIME["scan_in_progress"] = False
+        WATCH_RUNTIME["scan_owner"] = None
 
-        await asyncio.sleep(max(1, WATCH_INTERVAL_MINUTES) * 60)
+
+async def watch_loop(bot_app, chat_id: int):
+    """Persistent single Watch loop; only /watch_stop cancels it."""
+    global WATCH_SCAN_TASK
+
+    print(
+        f"[watch] loop started; chat_id={chat_id}; "
+        f"interval={WATCH_INTERVAL_MINUTES}m",
+        flush=True,
+    )
+
+    try:
+        while True:
+            WATCH_RUNTIME["last_cycle_status"] = "starting_cycle"
+            WATCH_RUNTIME["next_scan_utc"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            WATCH_SCAN_TASK = asyncio.create_task(
+                run_watch_cycle(bot_app, chat_id),
+                name="watch-scan-cycle",
+            )
+            try:
+                await WATCH_SCAN_TASK
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Defensive: a cycle error must never kill the persistent loop.
+                WATCH_RUNTIME["last_error"] = repr(exc)
+                WATCH_RUNTIME["last_cycle_status"] = "cycle_crashed"
+                print(f"[watch] uncaught cycle error: {exc!r}", flush=True)
+            finally:
+                WATCH_SCAN_TASK = None
+
+            next_scan = datetime.now(timezone.utc) + timedelta(
+                minutes=WATCH_INTERVAL_MINUTES
+            )
+            WATCH_RUNTIME["next_scan_utc"] = next_scan.isoformat()
+            WATCH_RUNTIME["last_cycle_status"] = "waiting"
+
+            await asyncio.sleep(WATCH_INTERVAL_MINUTES * 60)
+
+    except asyncio.CancelledError:
+        current_scan = WATCH_SCAN_TASK
+        if current_scan is not None and not current_scan.done():
+            current_scan.cancel()
+            try:
+                await current_scan
+            except asyncio.CancelledError:
+                pass
+        raise
+    finally:
+        WATCH_SCAN_TASK = None
+        WATCH_RUNTIME["scan_in_progress"] = False
+        WATCH_RUNTIME["scan_owner"] = None
+        WATCH_RUNTIME["next_scan_utc"] = None
+        WATCH_RUNTIME["last_cycle_status"] = "stopped"
+        print("[watch] loop stopped", flush=True)
 
 
-async def watch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+
+
+def _format_watch_time(value) -> str:
+    if not value:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ISRAEL_TZ).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return str(value)
+
+
+async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The only command allowed to create the Watch loop."""
     global WATCH_TASK
+
     if WATCH_TASK is not None and not WATCH_TASK.done():
-        await update.message.reply_text("Watch כבר פעיל; לא נוצרה משימה נוספת.")
+        await update.message.reply_text(
+            "👁 Watch כבר פעיל. לא נפתחה לולאה נוספת."
+        )
         return
-    set_setting("watch_chat_id", str(update.effective_chat.id))
-    set_setting("watch_enabled", "1")
-    WATCH_TASK = asyncio.create_task(watch_loop(context.application))
+
+    chat_id = int(update.effective_chat.id)
+    WATCH_RUNTIME["last_error"] = None
+    WATCH_RUNTIME["last_cycle_status"] = "starting"
+    WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
+
+    WATCH_TASK = asyncio.create_task(
+        watch_loop(context.application, chat_id),
+        name="persistent-watch-loop",
+    )
+
+    # Give the task one event-loop turn and verify that it remained alive.
+    await asyncio.sleep(0)
+    if WATCH_TASK.done():
+        try:
+            error = WATCH_TASK.exception()
+        except Exception as exc:
+            error = exc
+        WATCH_TASK = None
+        WATCH_RUNTIME["last_cycle_status"] = "failed_to_start"
+        WATCH_RUNTIME["last_error"] = repr(error)
+        await update.message.reply_text(
+            f"❌ Watch לא הצליח להתחיל: {error!r}"
+        )
+        return
+
     await update.message.reply_text(
-        "Watch הופעל.\n"
-        f"בדיקה כל {WATCH_INTERVAL_MINUTES} דקות | Priority מינימלי {WATCH_PRIORITY_THRESHOLD}."
+        "✅ Watch הופעל\n"
+        "לולאה אחת פעילה. הסריקה הראשונה מתחילה כעת.\n"
+        f"לאחר סיום כל סריקה תתחיל סריקה נוספת בעוד "
+        f"{WATCH_INTERVAL_MINUTES} דקות.\n"
+        "העצירה מתבצעת רק באמצעות /watch_stop."
     )
 
 
-async def watch_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global WATCH_TASK
-    set_setting("watch_enabled", "0")
-    if WATCH_TASK is not None and not WATCH_TASK.done():
-        WATCH_TASK.cancel()
+async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the one Watch loop and any active Watch scan."""
+    global WATCH_TASK, WATCH_SCAN_TASK
+
+    loop_task = WATCH_TASK
+    scan_task = WATCH_SCAN_TASK
+    was_active = (
+        loop_task is not None and not loop_task.done()
+    ) or (
+        scan_task is not None and not scan_task.done()
+    )
+
+    if scan_task is not None and not scan_task.done():
+        scan_task.cancel()
+
+    if loop_task is not None and not loop_task.done():
+        loop_task.cancel()
         try:
-            await WATCH_TASK
+            await asyncio.wait_for(loop_task, timeout=30)
         except asyncio.CancelledError:
             pass
+        except asyncio.TimeoutError:
+            print("[watch] stop timed out", flush=True)
+
     WATCH_TASK = None
-    await update.message.reply_text("Watch הופסק בצורה נקייה.")
+    WATCH_SCAN_TASK = None
+    WATCH_RUNTIME["scan_in_progress"] = False
+    WATCH_RUNTIME["scan_owner"] = None
+    WATCH_RUNTIME["next_scan_utc"] = None
+    WATCH_RUNTIME["last_cycle_status"] = "stopped"
 
-
-watch_on = watch_start
-watch_off = watch_stop
+    await update.message.reply_text(
+        "🛑 Watch הופסק."
+        if was_active
+        else "🛑 Watch כבר היה כבוי."
+    )
 
 
 async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    state = "פעיל" if watch_enabled() else "כבוי"
-    chat_id = get_setting("watch_chat_id", "-")
-    await update.message.reply_text(
-        f"Watch: {state}\n"
-        f"בדיקה: כל {WATCH_INTERVAL_MINUTES} דקות\n"
-        f"Priority מינימלי: {WATCH_PRIORITY_THRESHOLD}\n"
-        f"Cooldown: {WATCH_COOLDOWN_MINUTES} דקות\n"
-        f"Chat ID מוגדר: {'כן' if chat_id != '-' else 'לא'}"
-    )
+    """Read-only status. This function never starts a scan."""
+    loop_active = WATCH_TASK is not None and not WATCH_TASK.done()
+    scan_active = WATCH_SCAN_TASK is not None and not WATCH_SCAN_TASK.done()
 
-
-async def watch_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_setting("watch_chat_id", str(update.effective_chat.id))
-    await update.message.reply_text(
-        "מריץ בדיקת Watch עכשיו, ללא שמירת Snapshot..."
-    )
-    try:
-        result = await run_watch_cycle(context.application)
-        await update.message.reply_text(
-            "בדיקת Watch הסתיימה.\n"
-            f"הזדמנויות שנמצאו: {result.get('found', 0)}\n"
-            f"מעל הסף: {result.get('candidates', 0)}\n"
-            f"התראות חדשות שנשלחו: {result.get('sent', 0)}"
+    next_dt = _parse_utc_setting(WATCH_RUNTIME.get("next_scan_utc"))
+    countdown = "-"
+    if next_dt is not None:
+        seconds_left = max(
+            0,
+            int((next_dt - datetime.now(timezone.utc)).total_seconds()),
         )
-    except Exception as exc:
-        await update.message.reply_text(f"שגיאה בבדיקת Watch: {exc!r}")
+        countdown = f"{seconds_left // 60} דקות ו-{seconds_left % 60} שניות"
+
+    top_score = WATCH_RUNTIME.get("top_score")
+    top_text = (
+        "-"
+        if top_score is None
+        else (
+            f"{WATCH_RUNTIME.get('top_symbol')} / "
+            f"{WATCH_RUNTIME.get('top_timeframe')} "
+            f"({fmt(top_score)}/100)"
+        )
+    )
+
+    await update.message.reply_text(
+        f"👁 Watch: {'פעיל' if loop_active else 'כבוי'}\n\n"
+        f"לולאה פעילה: {'כן' if loop_active else 'לא'}\n"
+        f"סריקה פעילה כרגע: {'כן' if scan_active else 'לא'}\n"
+        f"בעל הסורק: {WATCH_RUNTIME.get('scan_owner') or '-'}\n"
+        f"סטטוס מחזור: {WATCH_RUNTIME.get('last_cycle_status') or '-'}\n"
+        f"מספר מחזור: {WATCH_RUNTIME.get('cycle_number', 0)}\n"
+        f"סריקה אחרונה — שעון ישראל: "
+        f"{_format_watch_time(WATCH_RUNTIME.get('last_scan_utc'))}\n"
+        f"סריקה הבאה — שעון ישראל: "
+        f"{_format_watch_time(WATCH_RUNTIME.get('next_scan_utc'))}\n"
+        f"זמן נותר: {countdown}\n"
+        f"מעל הסף במחזור האחרון: "
+        f"{WATCH_RUNTIME.get('last_candidates', 0)}\n"
+        f"תוצאות שנשלחו: {WATCH_RUNTIME.get('last_sent', 0)}\n"
+        f"מועמד מוביל: {top_text}"
+        + (
+            f"\nשגיאה אחרונה: {WATCH_RUNTIME['last_error']}"
+            if WATCH_RUNTIME.get("last_error")
+            else ""
+        )
+    )
 
 
-
-async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Alerts are disabled until we define a meaningful historical comparison.
-    await update.message.reply_text("אין חריגות כרגע. מנגנון חריגות היסטורי יוגדר רק אחרי שנייצב את תצוגת הנתונים.")
+async def telegram_error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    print(
+        f"[telegram] handler error: {context.error!r}; update={update!r}",
+        flush=True,
+    )
+    message = getattr(update, "effective_message", None)
+    if message:
+        try:
+            await message.reply_text(
+                "❌ אירעה תקלה בטיפול בפקודה. הפרטים נרשמו בלוג."
+            )
+        except Exception:
+            pass
 
 
 async def health(request):
     return web.json_response({"status": "ok", "service": "crypto-intelligence-v1"})
 
 async def telegram_webhook(request):
+    """Acknowledge Telegram immediately and process each update once."""
     bot_app = request.app["bot_app"]
+
     try:
         payload = await request.json()
+        update_id = payload.get("update_id")
+
+        if update_id is not None and update_id in PROCESSED_UPDATE_IDS:
+            print(
+                f"[webhook] duplicate update ignored; update_id={update_id}",
+                flush=True,
+            )
+            return web.json_response({"ok": True, "duplicate": True})
+
+        if update_id is not None:
+            PROCESSED_UPDATE_IDS.add(update_id)
+            PROCESSED_UPDATE_ORDER.append(update_id)
+
+            while len(PROCESSED_UPDATE_ORDER) > MAX_PROCESSED_UPDATE_IDS:
+                old_update_id = PROCESSED_UPDATE_ORDER.pop(0)
+                PROCESSED_UPDATE_IDS.discard(old_update_id)
+
         update = Update.de_json(payload, bot_app.bot)
-        await bot_app.process_update(update)
+        text = (
+            update.effective_message.text
+            if update.effective_message is not None
+            else None
+        )
+        chat_id = (
+            update.effective_chat.id
+            if update.effective_chat is not None
+            else None
+        )
+
+        print(
+            f"[webhook] accepted update_id={update_id}; "
+            f"chat_id={chat_id}; text={text!r}",
+            flush=True,
+        )
+
+        # Return HTTP 200 immediately so Telegram does not retry long scans.
+        bot_app.create_task(
+            bot_app.process_update(update),
+            update=update,
+            name=f"telegram-update-{update_id}",
+        )
+
         return web.json_response({"ok": True})
-    except Exception as e:
-        print(f"[webhook] error: {e}")
-        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    except Exception as exc:
+        print(f"[webhook] error: {exc!r}", flush=True)
+        return web.json_response(
+            {"ok": False, "error": str(exc)},
+            status=500,
+        )
+
 
 async def start_web_server(bot_app):
     app = web.Application()
@@ -1835,60 +2344,69 @@ async def start_web_server(bot_app):
     await site.start()
     print(f"[health] server running on port {PORT}")
 
-async def scheduled_collection():
-    try:
-        await collect_once()
-    except Exception as e:
-        print(f"[collector] scheduled collection failed: {e}")
-
 async def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
     if not PUBLIC_URL:
-        raise RuntimeError("Missing PUBLIC_URL environment variable. Example: https://crypto-intelligence-platform-1.onrender.com")
+        raise RuntimeError(
+            "Missing PUBLIC_URL environment variable. "
+            "Example: https://crypto-intelligence-platform-1.onrender.com"
+        )
 
     init_db()
 
-    # Automatic scheduled collection is disabled for the trial phase.
-    # Data collection now runs only when you send /collect in Telegram.
+    global WATCH_TASK, WATCH_SCAN_TASK
+    WATCH_TASK = None
+    WATCH_SCAN_TASK = None
+    WATCH_RUNTIME.update({
+        "last_scan_utc": None,
+        "next_scan_utc": None,
+        "last_found": 0,
+        "last_candidates": 0,
+        "last_sent": 0,
+        "last_error": None,
+        "last_cycle_status": "off_after_startup",
+        "top_score": None,
+        "top_symbol": None,
+        "top_timeframe": None,
+        "scan_in_progress": False,
+        "scan_owner": None,
+        "cycle_number": 0,
+    })
+
+    # Remove legacy activation flags. Startup never launches a scan.
+    try:
+        set_setting("watch_enabled", "0")
+        set_setting("watch_next_scan_utc", "")
+    except Exception as exc:
+        print(f"[startup] legacy watch reset warning: {exc!r}", flush=True)
 
     bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("help", start))
     bot_app.add_handler(CommandHandler("collect", collect_cmd))
-    bot_app.add_handler(CommandHandler("latest", latest))
     bot_app.add_handler(CommandHandler("coin", coin))
-    bot_app.add_handler(CommandHandler("range", range_cmd))
-    bot_app.add_handler(CommandHandler("top", top))
-    bot_app.add_handler(CommandHandler("consensus", consensus))
-    bot_app.add_handler(CommandHandler("gap", gap))
-    bot_app.add_handler(CommandHandler("liqsum", liqsum))
-    bot_app.add_handler(CommandHandler("market", market))
-    bot_app.add_handler(CommandHandler("btc_like", btc_like))
-    bot_app.add_handler(CommandHandler("score", score))
-    bot_app.add_handler(CommandHandler("score_top", score_top))
-    bot_app.add_handler(CommandHandler("alert_check", alert_check))
-    bot_app.add_handler(CommandHandler("alert_explain", alert_explain))
-    bot_app.add_handler(CommandHandler("watch_start", watch_start))
-    bot_app.add_handler(CommandHandler("watch_on", watch_start))
-    bot_app.add_handler(CommandHandler("watch_stop", watch_stop))
-    bot_app.add_handler(CommandHandler("watch_off", watch_stop))
+    bot_app.add_handler(CommandHandler("alerts", alert_check))
+    bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
-    bot_app.add_handler(CommandHandler("watch_now", watch_now))
-    bot_app.add_handler(CommandHandler("price_check", price_check))
-    bot_app.add_handler(CommandHandler("live_status", live_status))
-    bot_app.add_handler(CommandHandler("alerts", alerts))
+    bot_app.add_handler(CommandHandler("watch_stop", watch_off))
+    bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()
     await bot_app.start()
 
-    global WATCH_TASK
-    WATCH_TASK = None
+    print(
+        "[startup] manual-only mode; no collection, alert, or Watch task created",
+        flush=True,
+    )
 
     webhook_url = f"{PUBLIC_URL}/telegram"
     await bot_app.bot.delete_webhook(drop_pending_updates=True)
-    await bot_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    print(f"[bot] webhook set to {webhook_url}")
+    await bot_app.bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True,
+    )
+    print(f"[bot] webhook set to {webhook_url}", flush=True)
 
     await start_web_server(bot_app)
 
@@ -1896,13 +2414,14 @@ async def main():
         while True:
             await asyncio.sleep(3600)
     finally:
-        if WATCH_TASK:
+        if WATCH_TASK is not None and not WATCH_TASK.done():
             WATCH_TASK.cancel()
             try:
                 await WATCH_TASK
             except asyncio.CancelledError:
                 pass
-        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+
+        await bot_app.bot.delete_webhook(drop_pending_updates=False)
         await bot_app.stop()
         await bot_app.shutdown()
 

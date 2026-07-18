@@ -1,37 +1,30 @@
-Stage 17 — Timeframe Verification Fix
+# Stage 43 — Full Command Rebuild
 
-Recurring bug fixed:
-CoinGlass sometimes accepted the click but kept showing the previous timeframe.
-The old reader then saved the same table under a different timeframe label.
+## Command contract
 
-New safeguards:
-- clicks tabs with several selector strategies
-- polls until content changes
-- checks the active tab when detectable
-- creates a fingerprint from the first 10 rows
-- rejects a timeframe if its fingerprint duplicates an earlier timeframe
-- retries each timeframe up to 3 times
-- rejected timeframes are marked missing and are not saved
+- `/collect`: one manual full scan; saves a DB snapshot only when all seven
+  timeframes are present.
+- `/alerts`: one manual full live scan; does not save a snapshot.
+- `/coin SYMBOL`: reads the most recent saved snapshot; it does not scan.
+- `/watch_on`: the only code path that creates the persistent Watch loop.
+- `/watch_status`: read-only; never starts a scan.
+- `/watch_stop`: cancels the active Watch scan and the persistent loop.
 
-Important:
-It is better to save fewer verified rows than to save duplicated/mislabeled data.
+## Scanner behavior
 
-Expected logs:
-[dom] tf=24h verified=True ...
-or
-[dom] tf=24h REJECTED ... duplicate_of=12h
+- CoinGlass/Playwright is protected by one shared lock.
+- `/collect`, `/alerts`, and Watch cannot open browsers in parallel.
+- Every scoring scan requires all seven timeframes.
+- 24h receives longer verification polling and two clean-page retries.
+- Other timeframes receive one clean-page retry.
+- Partial scans are rejected instead of being scored.
+- Production screenshots were removed to reduce memory use.
+- Page, context, and browser are closed explicitly after every scan.
 
-Test:
-1. Deploy
-2. /collect
-3. Check Render logs for verified/rejected lines
-4. /coin BTC
+## Watch behavior
 
-Stage 18 updates:
-- Binance-only live price and distance calculations
-- Six-part alert priority (Distance, Consensus, BTC Like, Liquidity Balance, Liquidity Concentration, Cluster)
-- Data-quality notes outside scoring
-- Separate multiple/opposite alert notices
-- Compact Telegram alert cards
-- /watch_start and /watch_stop lifecycle controls
-- Reduced collector logging and structured collect summary
+- No scan starts on deploy or restart.
+- One `/watch_on` creates one task.
+- A failed cycle sends a Telegram error and the loop tries again after 15 minutes.
+- Every successful cycle sends all results above 70, or the single best result.
+- Only `/watch_stop` ends the loop.
