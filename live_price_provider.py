@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
+import websocket
 
+
+
+# Binance USD-M Futures Mark Price websocket. This is the primary live-price source.
+_DEFAULT_FUTURES_WS_URLS = (
+    "wss://fstream.binance.com/ws/!markPrice@arr@1s",
+)
+BINANCE_FUTURES_WS_URLS = tuple(
+    item.strip()
+    for item in os.getenv(
+        "BINANCE_FUTURES_WS_URLS",
+        ",".join(_DEFAULT_FUTURES_WS_URLS),
+    ).split(",")
+    if item.strip()
+)
 
 # Binance USD-M Futures market-data hosts. The first reachable host is used.
 # Multiple official hosts make collection more resilient to a temporary DNS/CDN issue.
@@ -48,6 +64,53 @@ def _get_json(url: str, params: Optional[Dict[str, str]] = None) -> Any:
     response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
+
+
+def _fetch_websocket_mark_prices() -> Tuple[Dict[str, float], Optional[str], List[str]]:
+    """Read one complete Binance USD-M Futures Mark Price array from websocket."""
+    errors: List[str] = []
+    for url in BINANCE_FUTURES_WS_URLS:
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                url,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                suppress_origin=True,
+            )
+            raw = ws.recv()
+            payload = json.loads(raw)
+            if isinstance(payload, dict) and "data" in payload:
+                payload = payload["data"]
+            if not isinstance(payload, list):
+                raise ValueError("mark-price websocket response is not a list")
+
+            prices: Dict[str, float] = {}
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                pair = str(item.get("s") or item.get("symbol") or "").upper()
+                raw_price = item.get("p") if item.get("p") is not None else item.get("markPrice")
+                if not pair or raw_price is None:
+                    continue
+                try:
+                    price = float(raw_price)
+                except (TypeError, ValueError):
+                    continue
+                if price > 0:
+                    prices[pair] = price
+
+            if not prices:
+                raise ValueError("mark-price websocket returned no valid prices")
+            return prices, url, errors
+        except Exception as exc:
+            errors.append(f"{url}: {exc!r}")
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+    return {}, None, errors
 
 
 def _fetch_exchange_info() -> Tuple[Dict[str, List[str]], Optional[str], List[str]]:
@@ -163,15 +226,37 @@ def _candidate_pairs(symbol: str, exchange_map: Dict[str, List[str]]) -> List[Tu
 def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
     """Fetch Binance USD-M Futures Mark Prices.
 
-    Futures Mark Price is the sole pricing source for calculations. A missing
-    contract excludes only that symbol; it never causes valid contracts to be
-    replaced by Spot prices.
+    Primary source: official Futures Mark Price websocket.
+    Fallback: official REST premiumIndex bulk endpoint.
+    Spot prices are never used.
     """
     requested = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
     fetched_at = datetime.now(timezone.utc)
 
-    exchange_map, exchange_host, exchange_errors = _fetch_exchange_info()
-    bulk_prices, bulk_host, bulk_errors = _fetch_bulk_mark_prices()
+    websocket_prices, websocket_url, websocket_errors = _fetch_websocket_mark_prices()
+
+    rest_prices: Dict[str, float] = {}
+    rest_host: Optional[str] = None
+    rest_errors: List[str] = []
+    if not websocket_prices:
+        rest_prices, rest_host, rest_errors = _fetch_bulk_mark_prices()
+
+    bulk_prices = websocket_prices or rest_prices
+    source_transport = "websocket" if websocket_prices else ("rest" if rest_prices else None)
+
+    # Exact SYMBOLUSDT and controlled aliases resolve nearly all CoinGlass symbols.
+    # exchangeInfo is queried only when at least one symbol remains unresolved, avoiding
+    # long REST delays when the websocket already contains the needed contracts.
+    exchange_map: Dict[str, List[str]] = {}
+    exchange_host: Optional[str] = None
+    exchange_errors: List[str] = []
+
+    prelim_unresolved = []
+    for symbol in requested:
+        if not any(pair in bulk_prices for pair, _ in _candidate_pairs(symbol, {})):
+            prelim_unresolved.append(symbol)
+    if prelim_unresolved and bulk_prices:
+        exchange_map, exchange_host, exchange_errors = _fetch_exchange_info()
 
     prices: Dict[str, Dict[str, Any]] = {}
     missing: List[str] = []
@@ -192,11 +277,11 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
                 raw_price = bulk_prices[pair]
                 break
 
-        # HYPE and newly listed contracts can occasionally lag in a bulk response.
-        # Query each candidate directly before declaring the symbol missing.
-        if raw_price is None:
+        # A successful bulk source can occasionally omit a newly listed contract.
+        # In that case only, try the exact candidates directly over REST.
+        if raw_price is None and bulk_prices:
             for pair, multiplier in candidates:
-                direct_price, host, errors = _fetch_direct_mark_price(pair, bulk_host)
+                direct_price, host, errors = _fetch_direct_mark_price(pair, rest_host)
                 direct_errors.extend(errors)
                 if direct_price is not None:
                     selected_pair = pair
@@ -225,22 +310,26 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
             "raw_price": raw_price,
             "multiplier": selected_multiplier,
             "source": "binance_futures_mark",
+            "transport": source_transport if selected_pair in bulk_prices else "rest_direct",
             "fetched_at_utc": fetched_at.isoformat(),
         }
 
     return {
         "ok": bool(prices),
         "source": "binance_futures_mark",
+        "transport": source_transport,
         "fetched_at_utc": fetched_at.isoformat(),
         "requested_count": len(requested),
         "found_count": len(prices),
         "missing_count": len(missing),
         "prices": prices,
         "missing_symbols": missing,
+        "websocket_url": websocket_url,
+        "websocket_errors": websocket_errors,
         "exchange_info_host": exchange_host,
-        "mark_price_host": bulk_host,
         "exchange_info_errors": exchange_errors,
-        "mark_price_errors": bulk_errors,
+        "mark_price_host": rest_host,
+        "mark_price_errors": rest_errors,
         "diagnostics": diagnostics,
     }
 

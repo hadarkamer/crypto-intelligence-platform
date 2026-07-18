@@ -795,7 +795,9 @@ async def collect_once():
             "No complete seven-timeframe symbols remained after Binance Futures pricing; "
             f"found={price_result.get('found_count', 0)}/{price_result.get('requested_count', 0)}; "
             f"missing={price_result.get('missing_symbols', [])[:20]}; "
-            f"error={price_result.get('futures_error')}"
+            f"transport={price_result.get('transport')}; "
+            f"websocket_errors={price_result.get('websocket_errors', [])[:2]}; "
+            f"rest_errors={price_result.get('mark_price_errors', [])[:2]}"
         )
 
     rows = validate_snapshot(rows)
