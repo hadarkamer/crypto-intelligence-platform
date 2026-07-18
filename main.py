@@ -1698,25 +1698,70 @@ def _quality_block(item: Dict[str, Any], rows: List[Any]) -> str:
     )
 
 
-def _all_timeframe_scores_block(item: Dict[str, Any], all_items) -> str:
-    """Compact seven-timeframe score table shown only at card bottom."""
+def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
+    """Show score/status for all seven timeframes only at card bottom."""
     symbol = str(item.get("symbol") or "").upper()
     by_timeframe = {
         str(other.get("timeframe")): other
         for other in all_items
         if str(other.get("symbol") or "").upper() == symbol
     }
+    source_rows = {
+        str(_row_get(row, "timeframe")): row
+        for row in rows
+        if str(_row_get(row, "symbol", "") or "").upper() == symbol
+    }
 
-    lines = [f"📊 ציוני {symbol} בכל הטווחים:"]
+    lines = [f"📊 ציוני {symbol} בכל הטווחים:", ""]
     values = []
+
     for timeframe in TIMEFRAMES:
         other = by_timeframe.get(timeframe)
-        if other is None:
-            lines.append(f"{timeframe:<3}  —")
+        row = source_rows.get(timeframe)
+
+        price = _row_get(row, "current_price") if row is not None else None
+        short_mp = _row_get(row, "short_max_pain") if row is not None else None
+        long_mp = _row_get(row, "long_max_pain") if row is not None else None
+
+        active_distances = []
+        try:
+            price_value = float(price)
+            if price_value > 0:
+                if short_mp is not None and float(short_mp) > price_value:
+                    active_distances.append(
+                        (float(short_mp) - price_value) / price_value * 100.0
+                    )
+                if long_mp is not None and float(long_mp) < price_value:
+                    active_distances.append(
+                        (price_value - float(long_mp)) / price_value * 100.0
+                    )
+        except (TypeError, ValueError):
+            active_distances = []
+
+        nearest_active_distance = min(active_distances) if active_distances else None
+
+        if not active_distances:
+            lines.append(
+                f"🔴 {timeframe:<3}  אין יעד פעיל (Max Pain נלקח)"
+            )
             continue
+
+        if nearest_active_distance is not None and nearest_active_distance < MIN_DISPLAY_DISTANCE_PCT:
+            lines.append(
+                f"🟡 {timeframe:<3}  {nearest_active_distance:.2f}% "
+                f"(מתחת לסף {MIN_DISPLAY_DISTANCE_PCT:.1f}%)"
+            )
+            if other is not None:
+                values.append(float(other.get("score", other.get("priority", 0)) or 0))
+            continue
+
+        if other is None:
+            lines.append(f"🔴 {timeframe:<3}  אין ציון זמין")
+            continue
+
         value = float(other.get("score", other.get("priority", 0)) or 0)
         values.append(value)
-        lines.append(f"{timeframe:<3}  {value:.2f}")
+        lines.append(f"🟢 {timeframe:<3}  {value:.2f}")
 
     average = sum(values) / len(values) if values else 0.0
     lines.append("")
@@ -1850,7 +1895,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     )
     card += _other_alerts_block(item, all_items)
     card += _quality_block(item, rows)
-    card += _all_timeframe_scores_block(item, all_items)
+    card += _all_timeframe_scores_block(item, all_items, rows)
     return card
 
 
