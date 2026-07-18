@@ -1,19 +1,11 @@
-# Stage 44 Technical Specification
+# Stage 54 — Per-symbol alerts and seven-timeframe score display
 
-## Timeframe verification
-CoinGlass opens on 24h by default. The collector first accepts 24h as a
-baseline, then accepts 12h only after the table fingerprint changes.
+## Changes
 
-## Symbol completeness
-A symbol enters the scoring engine or database only when it has one unique row
-for each of the seven timeframes.
-
-## Collect audit
-Telegram and Render logs expose:
-- raw DOM rows
-- Binance-priced rows
-- complete symbols
-- expected database rows
-- actual database rows
-- incomplete symbols and missing timeframes
-- duplicate symbol/timeframe pairs
+- Every alert card now ends with a compact score list for all canonical timeframes:
+  `12h, 24h, 48h, 3d, 1w, 2w, 1m`.
+- The score list appears only at the bottom of the alert message.
+- Added `/alert SYMBOL`, for example `/alert BTC`.
+- `/alert SYMBOL` runs one fresh seven-timeframe scan and sends a separate message for each timeframe of the selected symbol.
+- A timeframe without an active scorable Max Pain target is reported explicitly instead of being silently omitted.
+- Existing `/alerts`, Watch, scoring, TradingView shadow mode, and Stage 53 cluster/scoring logic remain intact.

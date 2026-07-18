@@ -1,13 +1,17 @@
-# Stage 56 — Alert timeframe status UI
+# Stage 62 — BTC Directional Alignment
 
-## Changes
+## Directional Alignment (30 points)
 
-- Removed the line `X/7 טווחי זמן עם התראות` from alert cards.
-- The all-timeframe block remains only at the bottom of each alert card.
-- The block title is now `📊 מצב SYMBOL בכל טווחי הזמן`.
-- Timeframes are displayed in the fixed order: `12h`, `24h`, `48h`, `3d`, `1w`, `2w`, `1m`, according to the project TIMEFRAMES configuration.
-- Status meanings remain:
-  - 🟢 active tradable target with score
-  - 🟡 active target below the 0.5% minimum
-  - 🔴 no active target / Max Pain already taken
-- No summary-count line is added after the timeframe list.
+### Altcoins
+- Own consensus: continuous 0–15.
+- BTC in the same direction and same timeframe: continuous confirmation 0–15, calculated as `BTC total score / 100 × 15`.
+- BTC in the opposite direction and same timeframe: continuous penalty 0–10, calculated as `BTC total score / 100 × 10`.
+- Final Directional Alignment is clamped to 0–30.
+
+### BTC
+- BTC does not confirm itself.
+- Its Directional Alignment is consensus only, continuously scaled to 0–30.
+
+### Market breadth
+- Remains visible as information.
+- Does not add or subtract points.

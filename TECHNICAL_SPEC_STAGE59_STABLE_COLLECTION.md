@@ -1,11 +1,28 @@
-# Stage 54 — Per-symbol alerts and seven-timeframe score display
+# Stage 59 — Stable atomic CoinGlass collection
 
-## Changes
+## Scope
+All live CoinGlass consumers use the same collector:
+- `/collect`
+- `/alerts`
+- `/alert SYMBOL`
+- `/debug SYMBOL`
+- Watch
 
-- Every alert card now ends with a compact score list for all canonical timeframes:
-  `12h, 24h, 48h, 3d, 1w, 2w, 1m`.
-- The score list appears only at the bottom of the alert message.
-- Added `/alert SYMBOL`, for example `/alert BTC`.
-- `/alert SYMBOL` runs one fresh seven-timeframe scan and sends a separate message for each timeframe of the selected symbol.
-- A timeframe without an active scorable Max Pain target is reported explicitly instead of being silently omitted.
-- Existing `/alerts`, Watch, scoring, TradingView shadow mode, and Stage 53 cluster/scoring logic remain intact.
+## Reliability rules
+1. Every timeframe is opened in a fresh browser page.
+2. The requested tab must be visibly active.
+3. Non-default tabs must differ from the page baseline.
+4. A table is accepted only after the same fingerprint is read twice consecutively.
+5. Symbol rows within a timeframe must be unique and at least 30 rows must parse.
+6. A fingerprint already accepted for another timeframe is rejected and retried on a fresh page.
+7. Each timeframe receives up to three fresh-page attempts.
+8. The final snapshot is atomic: if one timeframe fails, no rows are returned or saved.
+9. Duplicate symbol/timeframe pairs reject the complete snapshot.
+10. The existing shared scrape lock prevents overlapping collection, alerts, debug and Watch scans.
+
+## Expected log ending
+A valid scan ends with:
+
+`[dom] atomic result ok=True; rows=...; counts=...; missing=[]; duplicates=[]`
+
+A failed validation ends with `ok=False` and the caller must not save or score the snapshot.
