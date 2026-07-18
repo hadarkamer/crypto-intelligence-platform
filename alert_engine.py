@@ -407,6 +407,7 @@ def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
     empty = {
         "side": side,
         "same_direction_count": same_direction_count,
+        "universe_count": len(TIMEFRAMES),
         "count": 0,
         "members": [],
         "median_target": None,
@@ -850,6 +851,8 @@ def build_opportunities(
             "cluster_count": cluster.get("count", 0),
             "cluster_same_direction_count":
                 cluster.get("same_direction_count", 0),
+            "cluster_universe_count":
+                cluster.get("universe_count", len(TIMEFRAMES)),
             "cluster_median_target":
                 cluster.get("median_target"),
             "cluster_mean_deviation_pct":

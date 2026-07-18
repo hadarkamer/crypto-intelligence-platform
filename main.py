@@ -1850,8 +1850,8 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     same_direction_count = int(item.get("cluster_same_direction_count", 0) or 0)
     if cluster_count >= 3:
         cluster_summary = (
-            f"Cluster Confidence: {cluster_count} טווחים בקלאסטר "
-            f"(מתוך {same_direction_count} באותו כיוון)\n"
+            f"Cluster Confidence: {cluster_count} טווחים בקלאסטר\n"
+            f"טווחים פעילים באותו כיוון: {same_direction_count}/7\n"
             f"סטייה ממוצעת מה-Median: "
             f"{fmt(item.get('cluster_mean_deviation_pct'))}%\n"
         )
@@ -2162,7 +2162,8 @@ async def debug_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      if c.get('btc_relation') == 'OPPOSITE' else
                      "  BTC self: consensus only" if c.get('btc_relation') == 'SELF' else
                      "  BTC reference missing"),
-                    f"  Cluster {item.get('cluster_count',0)}/{item.get('cluster_same_direction_count',0)} [{members}] = {float(c.get('cluster_confidence',0)):.2f}/30",
+                    f"  Cluster members {item.get('cluster_count',0)} [{members}] = {float(c.get('cluster_confidence',0)):.2f}/30",
+                    f"  Active same-direction timeframes {item.get('cluster_same_direction_count',0)}/7",
                     f"  Sum check {float(item.get('component_sum_check',0)):.2f} = Score {float(item['score']):.2f}",
                 ])
             lines.append("")

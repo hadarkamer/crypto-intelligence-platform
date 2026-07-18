@@ -15,22 +15,18 @@ BINANCE_FUTURES_MARK_ENDPOINT = os.getenv(
     "BINANCE_FUTURES_MARK_ENDPOINT",
     "/fapi/v1/premiumIndex",
 )
-
-BINANCE_SPOT_BASE_URL = os.getenv(
-    "BINANCE_MARKET_DATA_BASE_URL",
-    "https://data-api.binance.vision",
-).rstrip("/")
-BINANCE_SPOT_PRICE_ENDPOINT = os.getenv(
-    "BINANCE_PRICE_ENDPOINT",
-    "/api/v3/ticker/price",
+BINANCE_FUTURES_EXCHANGE_INFO_ENDPOINT = os.getenv(
+    "BINANCE_FUTURES_EXCHANGE_INFO_ENDPOINT",
+    "/fapi/v1/exchangeInfo",
 )
-
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("BINANCE_PRICE_TIMEOUT_SECONDS", "15"))
 
-# symbol -> (Binance base symbol, multiplier)
-# 1000PEPE on CoinGlass represents 1000 PEPE units.
-SYMBOL_ALIASES: Dict[str, Tuple[str, float]] = {
-    "1000PEPE": ("PEPE", 1000.0),
+# Optional explicit overrides for CoinGlass names that do not match Binance's
+# futures base asset. The tuple is: (Binance futures pair, multiplier applied
+# to the returned mark price). Keep this table small; the exchange-info resolver
+# handles normal symbols such as BTC, ETH and HYPE automatically.
+FUTURES_PAIR_OVERRIDES: Dict[str, Tuple[str, float]] = {
+    # Example only: "LUNA2": ("LUNA2USDT", 1.0),
 }
 
 
@@ -38,15 +34,57 @@ def _normalize_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
 
 
+def _request_json(url: str, *, params: Optional[Dict[str, str]] = None) -> Any:
+    response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return response.json()
+
+
+def _fetch_futures_exchange_info() -> Dict[str, Any]:
+    """Return Binance USD-M perpetual symbol metadata.
+
+    The resolver uses exchangeInfo instead of assuming every CoinGlass symbol is
+    exactly SYMBOLUSDT. This is important for newly listed contracts and symbols
+    whose exchange ticker differs from their display name.
+    """
+    url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_EXCHANGE_INFO_ENDPOINT
+    payload = _request_json(url)
+
+    by_pair: Dict[str, Dict[str, Any]] = {}
+    by_base: Dict[str, List[str]] = {}
+
+    for item in payload.get("symbols", []):
+        pair = _normalize_symbol(item.get("symbol"))
+        base = _normalize_symbol(item.get("baseAsset"))
+        quote = _normalize_symbol(item.get("quoteAsset"))
+        contract_type = _normalize_symbol(item.get("contractType"))
+        status = _normalize_symbol(item.get("status"))
+
+        if not pair or not base:
+            continue
+        if quote != "USDT" or contract_type != "PERPETUAL":
+            continue
+        # Keep TRADING first, but retain non-trading metadata for diagnostics.
+        by_pair[pair] = dict(item)
+        by_base.setdefault(base, []).append(pair)
+
+    for base, pairs in by_base.items():
+        pairs.sort(key=lambda p: (
+            _normalize_symbol(by_pair[p].get("status")) != "TRADING",
+            p != f"{base}USDT",
+            p,
+        ))
+
+    return {"by_pair": by_pair, "by_base": by_base}
+
+
 def _fetch_futures_mark_prices() -> Dict[str, float]:
     url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_MARK_ENDPOINT
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    payload = response.json()
+    payload = _request_json(url)
 
     result: Dict[str, float] = {}
     for item in payload:
-        pair = str(item.get("symbol", "")).upper()
+        pair = _normalize_symbol(item.get("symbol"))
         raw_price = item.get("markPrice")
         if not pair or raw_price is None:
             continue
@@ -57,37 +95,91 @@ def _fetch_futures_mark_prices() -> Dict[str, float]:
     return result
 
 
-def _fetch_spot_prices() -> Dict[str, float]:
-    url = BINANCE_SPOT_BASE_URL + BINANCE_SPOT_PRICE_ENDPOINT
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    payload = response.json()
+def _fetch_single_futures_mark_price(pair: str) -> Optional[float]:
+    """Direct fallback for a contract missing from the bulk premiumIndex reply."""
+    url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_MARK_ENDPOINT
+    try:
+        payload = _request_json(url, params={"symbol": pair})
+        value = payload.get("markPrice") if isinstance(payload, dict) else None
+        return float(value) if value is not None else None
+    except Exception:
+        return None
 
-    result: Dict[str, float] = {}
-    for item in payload:
-        pair = str(item.get("symbol", "")).upper()
-        raw_price = item.get("price")
-        if not pair or raw_price is None:
-            continue
-        try:
-            result[pair] = float(raw_price)
-        except (TypeError, ValueError):
-            continue
-    return result
+
+def _resolve_futures_pair(
+    symbol: str,
+    exchange_info: Dict[str, Any],
+    available_marks: Dict[str, float],
+) -> Tuple[Optional[str], float, List[str]]:
+    """Resolve a CoinGlass symbol to the best Binance USD-M perpetual pair.
+
+    Resolution order:
+    1. Explicit override.
+    2. Exact SYMBOLUSDT contract.
+    3. exchangeInfo baseAsset match (handles HYPE and future listings).
+    4. Unique mark-price pair beginning with the symbol (defensive fallback).
+    """
+    normalized = _normalize_symbol(symbol)
+    candidates: List[str] = []
+
+    override = FUTURES_PAIR_OVERRIDES.get(normalized)
+    if override:
+        candidates.append(_normalize_symbol(override[0]))
+
+    exact = f"{normalized}USDT"
+    candidates.append(exact)
+    candidates.extend(exchange_info.get("by_base", {}).get(normalized, []))
+
+    # Defensive fallback. Only accept a unique match to avoid mapping e.g. ETH
+    # to an unrelated prefixed contract.
+    prefix_matches = sorted(
+        pair for pair in available_marks
+        if pair.startswith(normalized) and pair.endswith("USDT")
+    )
+    if len(prefix_matches) == 1:
+        candidates.extend(prefix_matches)
+
+    seen = set()
+    ordered = []
+    for pair in candidates:
+        if pair and pair not in seen:
+            seen.add(pair)
+            ordered.append(pair)
+
+    by_pair = exchange_info.get("by_pair", {})
+    ordered.sort(key=lambda pair: (
+        pair not in available_marks,
+        _normalize_symbol(by_pair.get(pair, {}).get("status")) != "TRADING",
+        pair != exact,
+        pair,
+    ))
+
+    multiplier = override[1] if override else 1.0
+    for pair in ordered:
+        if pair in available_marks or pair in by_pair:
+            return pair, multiplier, ordered
+    return None, multiplier, ordered
 
 
 def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
-    """Fetch Binance prices once.
+    """Fetch Binance USD-M Futures Mark Prices.
 
-    Priority:
-    1. Binance Spot last price — matches the regular Binance market price.
-    2. USD-M Futures mark price as fallback when Spot is unavailable.
+    Mark Price is the sole canonical price source for scoring and alerts. Symbol
+    resolution is based on Binance Futures exchangeInfo, rather than relying only
+    on a hard-coded SYMBOLUSDT guess. This allows contracts such as HYPEUSDT to
+    be discovered automatically when Binance lists them.
     """
     requested = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
     fetched_at = datetime.now(timezone.utc)
 
+    exchange_info_error = None
     futures_error = None
-    spot_error = None
+
+    try:
+        exchange_info = _fetch_futures_exchange_info()
+    except Exception as exc:
+        exchange_info = {"by_pair": {}, "by_base": {}}
+        exchange_info_error = repr(exc)
 
     try:
         futures_prices = _fetch_futures_mark_prices()
@@ -95,50 +187,57 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
         futures_prices = {}
         futures_error = repr(exc)
 
-    try:
-        spot_prices = _fetch_spot_prices()
-    except Exception as exc:
-        spot_prices = {}
-        spot_error = repr(exc)
-
     prices: Dict[str, Dict[str, Any]] = {}
     missing: List[str] = []
+    diagnostics: Dict[str, Dict[str, Any]] = {}
 
     for symbol in requested:
-        base, multiplier = SYMBOL_ALIASES.get(symbol, (symbol, 1.0))
-        pair = f"{base}USDT"
+        pair, multiplier, candidates = _resolve_futures_pair(
+            symbol, exchange_info, futures_prices
+        )
+        raw_price = futures_prices.get(pair) if pair else None
 
-        if pair in spot_prices:
-            raw_price = spot_prices[pair]
-            source = "binance_spot"
-        elif pair in futures_prices:
-            raw_price = futures_prices[pair]
-            source = "binance_futures_mark"
-        else:
+        # A newly listed contract can occasionally be absent from the bulk reply
+        # for a short period. Query it directly once before declaring it missing.
+        if pair and raw_price is None:
+            raw_price = _fetch_single_futures_mark_price(pair)
+
+        diagnostics[symbol] = {
+            "resolved_pair": pair,
+            "candidate_pairs": candidates,
+            "exchange_info_match": bool(pair and pair in exchange_info.get("by_pair", {})),
+            "bulk_mark_match": bool(pair and pair in futures_prices),
+        }
+
+        if not pair or raw_price is None:
             missing.append(symbol)
             continue
 
+        metadata = exchange_info.get("by_pair", {}).get(pair, {})
         prices[symbol] = {
             "symbol": symbol,
             "pair": pair,
             "price": raw_price * multiplier,
             "raw_price": raw_price,
             "multiplier": multiplier,
-            "source": source,
+            "source": "binance_futures_mark",
+            "contract_status": metadata.get("status"),
+            "contract_type": metadata.get("contractType"),
             "fetched_at_utc": fetched_at.isoformat(),
         }
 
     return {
         "ok": bool(prices),
-        "source": "binance_spot_then_futures_mark",
+        "source": "binance_futures_mark",
         "fetched_at_utc": fetched_at.isoformat(),
         "requested_count": len(requested),
         "found_count": len(prices),
         "missing_count": len(missing),
         "prices": prices,
         "missing_symbols": missing,
+        "symbol_diagnostics": diagnostics,
+        "exchange_info_error": exchange_info_error,
         "futures_error": futures_error,
-        "spot_error": spot_error,
     }
 
 
@@ -192,19 +291,7 @@ def recalculate_distances(
 
 
 def enrich_snapshot_rows(rows: Iterable[Any], excluded_symbols: Iterable[str] = ()) -> Dict[str, Any]:
-    """Overlay Binance live prices on raw CoinGlass rows.
-
-    CoinGlass remains the source for:
-    - Short/Long Max Pain targets
-    - Short/Long liquidation amounts
-
-    Binance becomes the source for:
-    - current_price
-    - distance_short_pct / distance_long_pct
-    - distance_short_abs / distance_long_abs
-
-    Symbols without a Binance price are excluded from live calculations.
-    """
+    """Overlay Binance Futures Mark Prices on raw CoinGlass rows."""
     excluded = {str(x).upper() for x in excluded_symbols}
     raw_rows = [dict(row) for row in rows]
     symbols = sorted({

@@ -145,6 +145,75 @@ def _is_symbol_token(x: str) -> bool:
     return bool(re.fullmatch(r"[A-Z0-9]{2,12}", x))
 
 
+
+
+def _validate_maxpain_row(raw_cells: list[str], parsed: dict) -> tuple[bool, list[str]]:
+    """Validate the fixed CoinGlass 13-cell row before accepting it.
+
+    This guards against silent DOM layout shifts where a distance/percentage
+    cell could otherwise be mistaken for a liquidation amount.
+    """
+    errors: list[str] = []
+    if len(raw_cells) != 13:
+        errors.append(f"expected 13 cells, got {len(raw_cells)}")
+        return False, errors
+
+    price = parsed.get("price")
+    short_px = parsed.get("max_short_price")
+    long_px = parsed.get("max_long_price")
+    short_amount = parsed.get("short_amount_usd")
+    long_amount = parsed.get("long_amount_usd")
+    short_abs = parsed.get("short_distance_usd")
+    long_abs = parsed.get("long_distance_usd")
+    short_pct = parsed.get("short_distance_pct")
+    long_pct = parsed.get("long_distance_pct")
+
+    required = {
+        "price": price, "short_px": short_px, "long_px": long_px,
+        "short_amount": short_amount, "long_amount": long_amount,
+        "short_abs": short_abs, "long_abs": long_abs,
+        "short_pct": short_pct, "long_pct": long_pct,
+    }
+    for name, value in required.items():
+        if value is None:
+            errors.append(f"missing {name}")
+
+    if errors:
+        return False, errors
+
+    if price <= 0 or short_px <= 0 or long_px <= 0:
+        errors.append("non-positive price/target")
+    if short_amount < 0 or long_amount < 0:
+        errors.append("negative liquidation amount")
+
+    # CoinGlass amount cells are money values, while percentage cells carry %.
+    if "%" in raw_cells[4] or "%" in raw_cells[9]:
+        errors.append("percentage found in liquidation amount cell")
+    if "%" not in raw_cells[6] or "%" not in raw_cells[11]:
+        errors.append("percentage marker missing from distance percentage cell")
+
+    # Cross-check displayed absolute/percentage distances against target and price.
+    exp_short_abs = abs(short_px - price)
+    exp_long_abs = abs(long_px - price)
+    exp_short_pct = exp_short_abs / price * 100.0
+    exp_long_pct = exp_long_abs / price * 100.0
+
+    def close(actual: float, expected: float) -> bool:
+        tolerance = max(0.03, abs(expected) * 0.08)
+        return abs(abs(actual) - abs(expected)) <= tolerance
+
+    if not close(short_abs, exp_short_abs):
+        errors.append("short absolute distance does not match price/target")
+    if not close(long_abs, exp_long_abs):
+        errors.append("long absolute distance does not match price/target")
+    if not close(short_pct, exp_short_pct):
+        errors.append("short percentage distance does not match price/target")
+    if not close(long_pct, exp_long_pct):
+        errors.append("long percentage distance does not match price/target")
+
+    return not errors, errors
+
+
 def _parse_body_maxpain_rows(lines: list[str], timeframe: str) -> list[dict]:
     """Parse CoinGlass Liquidation Max Pain body text.
 
@@ -189,27 +258,30 @@ def _parse_body_maxpain_rows(lines: list[str], timeframe: str) -> list[dict]:
         long_dist_abs = _parse_number(lines[i + 10])
         long_dist_pct = _parse_number(lines[i + 11])
 
-        if price is not None and short_px is not None and long_px is not None:
-            rows.append({
-                "collected_at_utc": now,
-                "timeframe": timeframe,
-                "source": "dom_body_maxpain",
-                "rank": int(rank),
-                "symbol": symbol,
-                "price": price,
-                "max_short_price": short_px,
-                "short_amount_usd": short_amount,
-                "short_distance_usd": short_dist_abs,
-                "short_distance_pct": short_dist_pct,
-                "max_long_price": long_px,
-                "long_amount_usd": long_amount,
-                "long_distance_usd": long_dist_abs,
-                "long_distance_pct": long_dist_pct,
-                "raw_cells": lines[i:i+13],
-                "extra": None,
-            })
+        parsed = {
+            "collected_at_utc": now,
+            "timeframe": timeframe,
+            "source": "dom_body_maxpain_validated",
+            "rank": int(rank),
+            "symbol": symbol,
+            "price": price,
+            "max_short_price": short_px,
+            "short_amount_usd": short_amount,
+            "short_distance_usd": short_dist_abs,
+            "short_distance_pct": short_dist_pct,
+            "max_long_price": long_px,
+            "long_amount_usd": long_amount,
+            "long_distance_usd": long_dist_abs,
+            "long_distance_pct": long_dist_pct,
+            "raw_cells": lines[i:i+13],
+            "extra": None,
+        }
+        valid, validation_errors = _validate_maxpain_row(lines[i:i+13], parsed)
+        if valid:
+            rows.append(parsed)
             i += 13
         else:
+            # Do not accept a structurally plausible but semantically shifted row.
             i += 1
 
     return rows
