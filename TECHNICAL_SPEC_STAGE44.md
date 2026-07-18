@@ -1,19 +1,27 @@
-# Stage 44 Technical Specification
+# Technical Specification — Alert Quality Score V3
 
-## Timeframe verification
-CoinGlass opens on 24h by default. The collector first accepts 24h as a
-baseline, then accepts 12h only after the table fingerprint changes.
+Directional Alignment = Consensus (0..12) + BTC Like (0..5) + Market (0..3).
+Specific Distance = 0..25.
+Adjusted High Liquidity Close Distance = 0..25.
+Liquidity Balance = clamp(balance*30, -10, +20).
+Target Clustering = 0..10.
+Final score range: 0..100.
 
-## Symbol completeness
-A symbol enters the scoring engine or database only when it has one unique row
-for each of the seven timeframes.
+Daily commands: /collect, /alerts, /coin BTC, /watch_on, /watch_status, /watch_stop.
 
-## Collect audit
-Telegram and Render logs expose:
-- raw DOM rows
-- Binance-priced rows
-- complete symbols
-- expected database rows
-- actual database rows
-- incomplete symbols and missing timeframes
-- duplicate symbol/timeframe pairs
+
+## Stage 27 — Aggregate Market Schema
+
+Market uses every valid asset/timeframe indication in the current snapshot.
+
+For a SHORT alert:
+market_support_pct = total SHORT indications / total indications * 100
+
+For a LONG alert:
+market_support_pct = total LONG indications / total indications * 100
+
+Market points:
+market_points = clamp((market_support_pct - 50) / 50 * 3, 0, 3)
+
+This is not a binary label and does not borrow direction from a different
+timeframe. It represents the strength of the full market schema.

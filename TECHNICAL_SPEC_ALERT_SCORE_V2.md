@@ -1,3 +1,8 @@
-# Superseded
-
-See TECHNICAL_SPEC_ALERT_SCORE_V3.md.
+aiohttp==3.11.11
+python-dotenv==1.0.1
+python-telegram-bot==21.9
+tabulate==0.9.0
+requests==2.32.3
+pycryptodome==3.21.0
+psycopg[binary]==3.2.3
+playwright==1.49.1
