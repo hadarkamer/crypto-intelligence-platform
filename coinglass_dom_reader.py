@@ -430,91 +430,84 @@ async def read_timeframe(
     page,
     timeframe: str,
     previous_fingerprint: Optional[str] = None,
+    forbidden_fingerprints: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Select a timeframe and accept rows only after the page really changed.
+    """Read one timeframe only after tab, content and stability are verified.
 
-    The old bug:
-    CoinGlass sometimes reported click success while the visible table still
-    contained the previous timeframe. The parser then labelled stale rows as the
-    new timeframe.
-
-    This version:
-    - retries the click
-    - waits for active-tab/content confirmation
-    - compares row fingerprints
-    - refuses duplicate stale content
+    Reliability rules:
+    - capture the page baseline before clicking;
+    - for non-default tabs, require content to change from that baseline;
+    - require the same parsed fingerprint on two consecutive polls;
+    - reject a fingerprint already accepted for another timeframe;
+    - validate row count and unique symbols before accepting.
     """
     label_map = {
-        "12h": "12 hour",
-        "24h": "24 hour",
-        "48h": "48 hour",
-        "3d": "3 day",
-        "1w": "1 week",
-        "2w": "2 week",
-        "1m": "1 month",
+        "12h": "12 hour", "24h": "24 hour", "48h": "48 hour",
+        "3d": "3 day", "1w": "1 week", "2w": "2 week", "1m": "1 month",
     }
     expected_label = label_map.get(timeframe, timeframe)
+    forbidden_fingerprints = forbidden_fingerprints or {}
 
-    last_debug = {}
+    baseline_lines = await _extract_body_lines(page, limit=1200)
+    baseline_rows = _parse_body_maxpain_rows(baseline_lines, "baseline")
+    baseline_fp = _rows_fingerprint(baseline_rows) if baseline_rows else None
+
+    last_debug: Dict[str, Any] = {}
     for attempt in range(1, 4):
         clicked = await _click_timeframe_verified(page, timeframe)
+        stable_fp = None
+        stable_count = 0
 
-        # CoinGlass updates asynchronously. Poll rather than trusting click().
-        poll_limit = 20 if timeframe in {"12h", "24h"} else 12
-        for poll in range(1, poll_limit + 1):
-            await page.wait_for_timeout(1000)
-
-            tables = await _extract_tables(page)
-            lines = await _extract_body_lines(page, limit=1200)
+        for poll in range(1, 25):
+            await page.wait_for_timeout(750)
+            lines = await _extract_body_lines(page, limit=1400)
             rows = _parse_body_maxpain_rows(lines, timeframe)
             fingerprint = _rows_fingerprint(rows) if rows else None
             active_label = await _active_timeframe_label(page)
 
-            changed = (
-                bool(rows)
-                and (
-                    previous_fingerprint is None
-                    or fingerprint != previous_fingerprint
-                )
-            )
+            symbols = [str(r.get("symbol") or "") for r in rows]
+            unique_symbols = len(symbols) == len(set(symbols))
+            row_count_ok = len(rows) >= 30
             active_ok = active_label == expected_label
+            baseline_changed = timeframe == "24h" or baseline_fp is None or fingerprint != baseline_fp
+            previous_changed = previous_fingerprint is None or fingerprint != previous_fingerprint
+            duplicate_of = next(
+                (tf for tf, fp in forbidden_fingerprints.items() if fingerprint and fp == fingerprint),
+                None,
+            )
+
+            if fingerprint and fingerprint == stable_fp:
+                stable_count += 1
+            else:
+                stable_fp = fingerprint
+                stable_count = 1 if fingerprint else 0
 
             last_debug = {
-                "table_count": len(tables),
-                "table_headers": [t.get("headers", []) for t in tables],
-                "body_preview": lines[:120],
-                "parsed_count": len(rows),
-                "attempt": attempt,
-                "poll": poll,
-                "active_label": active_label,
-                "expected_label": expected_label,
-                "fingerprint": fingerprint,
-                "previous_fingerprint": previous_fingerprint,
-                "clicked": clicked,
-                "changed": changed,
-                "active_ok": active_ok,
+                "parsed_count": len(rows), "attempt": attempt, "poll": poll,
+                "active_label": active_label, "expected_label": expected_label,
+                "fingerprint": fingerprint, "baseline_fingerprint": baseline_fp,
+                "previous_fingerprint": previous_fingerprint, "clicked": clicked,
+                "active_ok": active_ok, "baseline_changed": baseline_changed,
+                "previous_changed": previous_changed, "stable_count": stable_count,
+                "unique_symbols": unique_symbols, "row_count_ok": row_count_ok,
+                "duplicate_of": duplicate_of, "body_preview": lines[:120],
             }
 
-            if changed and active_ok:
+            if (
+                active_ok and baseline_changed and previous_changed and
+                stable_count >= 2 and unique_symbols and row_count_ok and not duplicate_of
+            ):
                 return {
-                    "timeframe": timeframe,
-                    "clicked": clicked,
-                    "verified": True,
-                    "rows": rows,
-                    "fingerprint": fingerprint,
-                    "debug": last_debug,
+                    "timeframe": timeframe, "clicked": clicked, "verified": True,
+                    "rows": rows, "fingerprint": fingerprint, "debug": last_debug,
                 }
 
-        # Retry after another click and slightly longer pause.
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(1000)
 
     return {
-        "timeframe": timeframe,
-        "clicked": False,
-        "verified": False,
-        "rows": [],
+        "timeframe": timeframe, "clicked": False, "verified": False, "rows": [],
         "fingerprint": None,
-        "error": "timeframe content did not change or active tab could not be verified",
+        "error": "timeframe failed active-tab/content/stability/uniqueness verification",
         "debug": last_debug,
     }
 
@@ -541,6 +534,7 @@ async def _retry_timeframe_on_fresh_page(
     timeframe: str,
     previous_fingerprint: Optional[str],
     attempts: int,
+    forbidden_fingerprints: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Retry a rejected timeframe on clean pages."""
     last_result: Dict[str, Any] = {
@@ -565,6 +559,7 @@ async def _retry_timeframe_on_fresh_page(
                 retry_page,
                 timeframe,
                 previous_fingerprint=previous_fingerprint,
+                forbidden_fingerprints=forbidden_fingerprints,
             )
 
             if last_result.get("verified") and last_result.get("rows"):
@@ -605,45 +600,38 @@ async def collect_coinglass_dom_snapshot(
     headless: bool = True,
     url: str = COINGLASS_URL,
 ) -> Dict[str, Any]:
-    """
-    Main entry point for /collect.
+    """Collect an atomic, fully verified seven-timeframe snapshot.
 
-    DEBUG version:
-    - prints every browser/DOM step to Render logs
-    - prints table headers + body preview when it cannot parse Max Pain rows
-    - does not fake rows if Max Pain fields are not found
+    Each timeframe is opened in its own fresh page. A timeframe is accepted only
+    after the requested tab is active, the table changed from the fresh-page
+    baseline when needed, and the parsed fingerprint is stable across two reads.
+    Exact cross-timeframe duplicates are retried and then rejected. No partial
+    snapshot is considered OK.
     """
-    requested_timeframes = list(timeframes or DEFAULT_TIMEFRAMES)
-
-    # CoinGlass normally opens with 24h already visible. Read it first as a
-    # baseline, then require 12h to produce a different table fingerprint.
+    requested_timeframes = list(dict.fromkeys(timeframes or DEFAULT_TIMEFRAMES))
     preferred_order = ["24h", "12h", "48h", "3d", "1w", "2w", "1m"]
-    timeframes = [
-        tf for tf in preferred_order if tf in requested_timeframes
-    ] + [
-        tf for tf in requested_timeframes if tf not in preferred_order
-    ]
+    collection_order = [tf for tf in preferred_order if tf in requested_timeframes]
+    collection_order += [tf for tf in requested_timeframes if tf not in collection_order]
 
     all_rows: List[Dict[str, Any]] = []
     by_timeframe: Dict[str, Any] = {}
     missing: List[str] = []
-    debug_summary: Dict[str, Any] = {}
+    accepted_fingerprints: Dict[str, str] = {}
 
-    print(f"[dom] launch browser; url={url}; headless={headless}; timeframes={timeframes}", flush=True)
+    print(
+        f"[dom] isolated collection; url={url}; headless={headless}; "
+        f"timeframes={collection_order}", flush=True,
+    )
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=headless,
             args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
+                "--no-sandbox", "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
-                "--disable-gpu",
-                "--disable-extensions",
+                "--disable-gpu", "--disable-extensions",
             ],
         )
-        print("[dom] browser launched", flush=True)
-
         context = await browser.new_context(
             viewport={"width": 1440, "height": 1800},
             user_agent=(
@@ -653,159 +641,87 @@ async def collect_coinglass_dom_snapshot(
             ),
             locale="en-US",
         )
-        page = await context.new_page()
 
         try:
-            print("[dom] opening page", flush=True)
-            await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            print(f"[dom] page opened; title={await page.title()!r}; current_url={page.url}", flush=True)
-
-            # Let React/network render dynamic content.
-            await page.wait_for_timeout(8000)
-            print("[dom] waited 8s after domcontentloaded", flush=True)
-
-            # Dismiss popups if present.
-            for label in ["Accept", "I Agree", "Got it", "Close", "×"]:
-                try:
-                    await page.get_by_text(label, exact=True).first.click(timeout=1000)
-                    print(f"[dom] dismissed popup/button: {label}", flush=True)
-                    await page.wait_for_timeout(500)
-                except Exception:
-                    pass
-
-            initial_tables = await _extract_tables(page)
-            initial_lines = await _extract_body_lines(page, limit=250)
-            print(f"[dom] initial table_count={len(initial_tables)}", flush=True)
-            for t in initial_tables[:6]:
-                print(
-                    f"[dom] table[{t.get('index')}] headers={t.get('headers')} rows={len(t.get('rows') or [])}",
-                    flush=True,
+            previous_fp: Optional[str] = None
+            for tf in collection_order:
+                print(f"[dom] ===== isolated timeframe {tf} =====", flush=True)
+                result = await _retry_timeframe_on_fresh_page(
+                    context,
+                    url,
+                    tf,
+                    previous_fingerprint=previous_fp,
+                    attempts=3,
+                    forbidden_fingerprints=accepted_fingerprints,
                 )
-            print("[dom] body_preview_first_80=" + json.dumps(initial_lines[:80], ensure_ascii=False), flush=True)
+                by_timeframe[tf] = result
+                debug = result.get("debug", {})
+                rows = result.get("rows", [])
+                fp = result.get("fingerprint")
 
-            previous_fingerprint = None
-            accepted_fingerprints: Dict[str, str] = {}
-
-            for tf in timeframes:
-                print(f"[dom] ===== timeframe {tf} =====", flush=True)
-                try:
-                    result = await read_timeframe(
-                        page,
-                        tf,
-                        previous_fingerprint=previous_fingerprint,
-                    )
-
-                    if not result.get("verified") or not result.get("rows"):
-                        retry_result = await _retry_timeframe_on_fresh_page(
-                            context,
-                            url,
-                            tf,
-                            previous_fingerprint=previous_fingerprint,
-                            attempts=2 if tf in {"12h", "24h"} else 1,
-                        )
-                        if retry_result.get("verified") and retry_result.get("rows"):
-                            result = retry_result
-
-                    by_timeframe[tf] = result
-                    rows = result.get("rows", [])
-                    debug = result.get("debug", {})
+                if result.get("verified") and rows and fp:
                     print(
-                        f"[dom] tf={tf} clicked={result.get('clicked')} row_count={len(rows)} "
-                        f"table_count={debug.get('table_count')}",
+                        f"[dom] tf={tf} ACCEPTED rows={len(rows)} "
+                        f"active={debug.get('active_label')} stable={debug.get('stable_count')} "
+                        f"unique={debug.get('unique_symbols')}", flush=True,
+                    )
+                    all_rows.extend(rows)
+                    accepted_fingerprints[tf] = fp
+                    previous_fp = fp
+                else:
+                    missing.append(tf)
+                    print(
+                        f"[dom] tf={tf} REJECTED error={result.get('error')} "
+                        f"debug={json.dumps(debug, ensure_ascii=False)[:1800]}",
                         flush=True,
                     )
-                    for i, headers in enumerate((debug.get("table_headers") or [])[:6]):
-                        print(f"[dom] tf={tf} headers[{i}]={headers}", flush=True)
-                    print(
-                        f"[dom] tf={tf} body_preview_first_60="
-                        + json.dumps((debug.get("body_preview") or [])[:60], ensure_ascii=False),
-                        flush=True,
-                    )
-                    fingerprint = result.get("fingerprint")
-                    duplicate_of = next(
-                        (
-                            prior_tf
-                            for prior_tf, prior_fp in accepted_fingerprints.items()
-                            if fingerprint and prior_fp == fingerprint
-                        ),
-                        None,
-                    )
-
-                    if rows and result.get("verified") and not duplicate_of:
-                        print(
-                            f"[dom] tf={tf} verified=True active_label="
-                            f"{debug.get('active_label')} fingerprint={fingerprint[:120] if fingerprint else None}",
-                            flush=True,
-                        )
-                        print(
-                            f"[dom] tf={tf} first_rows="
-                            + json.dumps(rows[:3], ensure_ascii=False)[:4000],
-                            flush=True,
-                        )
-                        all_rows.extend(rows)
-                        accepted_fingerprints[tf] = fingerprint
-                        previous_fingerprint = fingerprint
-                    else:
-                        if tf not in missing:
-                            missing.append(tf)
-                        print(
-                            f"[dom] tf={tf} REJECTED verified={result.get('verified')} "
-                            f"duplicate_of={duplicate_of} error={result.get('error')} "
-                            f"active_label={debug.get('active_label')}",
-                            flush=True,
-                        )
-                except Exception as exc:
-                    if tf not in missing:
-                        missing.append(tf)
-                    by_timeframe[tf] = {
-                        "timeframe": tf,
-                        "error": repr(exc),
-                        "rows": [],
-                    }
-                    print(f"[dom] tf={tf} ERROR: {repr(exc)}", flush=True)
-
-            public_order = {
-                tf: index for index, tf in enumerate(requested_timeframes)
-            }
-            all_rows.sort(
-                key=lambda row: (
-                    public_order.get(str(row.get("timeframe")), 999),
-                    int(row.get("rank") or 9999),
-                    str(row.get("symbol") or ""),
-                )
-            )
-
-            debug_summary = {
-                "requested_timeframes": requested_timeframes,
-                "collection_order": timeframes,
-                "initial_table_count": len(initial_tables),
-                "initial_table_headers": [t.get("headers") for t in initial_tables[:6]],
-                "initial_body_preview": initial_lines[:120],
-            }
-
         finally:
-            try:
-                await page.close()
-            except Exception:
-                pass
-            try:
-                await context.close()
-            except Exception:
-                pass
-            try:
-                await browser.close()
-            except Exception:
-                pass
-            print("[dom] page, context and browser closed", flush=True)
+            await context.close()
+            await browser.close()
+            print("[dom] isolated browser/context closed", flush=True)
 
-    print(f"[dom] done; raw_rows={len(all_rows)}; missing={missing}", flush=True)
+    # Final whole-snapshot integrity checks.
+    pair_counts: Dict[tuple, int] = {}
+    tf_counts = {tf: 0 for tf in requested_timeframes}
+    for row in all_rows:
+        key = (str(row.get("symbol") or "").upper(), str(row.get("timeframe") or ""))
+        pair_counts[key] = pair_counts.get(key, 0) + 1
+        if key[1] in tf_counts:
+            tf_counts[key[1]] += 1
+
+    duplicate_pairs = [f"{sym}/{tf}" for (sym, tf), count in pair_counts.items() if count > 1]
+    empty_or_short = [tf for tf, count in tf_counts.items() if count < 30]
+    for tf in empty_or_short:
+        if tf not in missing:
+            missing.append(tf)
+    if duplicate_pairs:
+        missing = list(dict.fromkeys(missing + requested_timeframes))
+
+    # A successful result is atomic: all requested timeframes verified, no duplicate pairs.
+    ok = not missing and not duplicate_pairs
+    public_order = {tf: i for i, tf in enumerate(requested_timeframes)}
+    all_rows.sort(key=lambda row: (
+        public_order.get(str(row.get("timeframe")), 999),
+        int(row.get("rank") or 9999), str(row.get("symbol") or ""),
+    ))
+
+    print(
+        f"[dom] atomic result ok={ok}; rows={len(all_rows)}; counts={tf_counts}; "
+        f"missing={missing}; duplicates={duplicate_pairs}", flush=True,
+    )
     return {
-        "ok": len(all_rows) > 0,
-        "rows": all_rows,
-        "row_count": len(all_rows),
-        "missing_timeframes": missing,
+        "ok": ok,
+        "rows": all_rows if ok else [],
+        "row_count": len(all_rows) if ok else 0,
+        "missing_timeframes": sorted(set(missing), key=requested_timeframes.index),
+        "duplicate_pairs": duplicate_pairs,
+        "timeframe_counts": tf_counts,
         "by_timeframe": by_timeframe,
-        "debug": debug_summary,
+        "debug": {
+            "requested_timeframes": requested_timeframes,
+            "collection_order": collection_order,
+            "accepted_fingerprints": accepted_fingerprints,
+        },
         "collected_at_utc": datetime.now(timezone.utc).isoformat(),
     }
 

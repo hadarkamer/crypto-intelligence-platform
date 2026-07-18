@@ -166,9 +166,62 @@ def _proximity_points(distance_pct: Optional[float]) -> float:
     return round((2.0 - distance_pct) / 1.75 * 30.0, 2)
 
 
+def _dedupe_rows(rows: List[Any]) -> tuple[List[Any], Dict[str, int]]:
+    """Keep one row per symbol/timeframe and count removed duplicates."""
+    unique: Dict[tuple[str, str], Any] = {}
+    duplicate_counts: Dict[str, int] = defaultdict(int)
+    for row in rows:
+        symbol = str(_get(row, "symbol", "") or "").upper()
+        timeframe = str(_get(row, "timeframe", "") or "")
+        if not symbol or timeframe not in TIMEFRAMES:
+            continue
+        key = (symbol, timeframe)
+        if key in unique:
+            duplicate_counts[symbol] += 1
+        unique[key] = row
+    ordered = sorted(
+        unique.values(),
+        key=lambda row: (
+            str(_get(row, "symbol", "") or "").upper(),
+            TIMEFRAMES.index(str(_get(row, "timeframe", ""))),
+        ),
+    )
+    return ordered, dict(duplicate_counts)
+
+
 def _consensus_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
-    results = analysis.calculate_consensus(rows, min_hits=1, limit=1000)
-    return {item["symbol"]: item for item in results}
+    """Return side-specific consensus counts for every symbol.
+
+    Each alert must be scored using the number of timeframes supporting that
+    alert's own direction, not the dominant direction's hit count.
+    """
+    grouped: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {"LONG": 0, "SHORT": 0, "total": 0, "by_timeframe": {}}
+    )
+    for row in rows:
+        symbol = str(_get(row, "symbol", "") or "").upper()
+        timeframe = str(_get(row, "timeframe", "") or "")
+        side = _closest_side(row)
+        if not symbol or timeframe not in TIMEFRAMES or side not in {"LONG", "SHORT"}:
+            continue
+        grouped[symbol][side] += 1
+        grouped[symbol]["total"] += 1
+        grouped[symbol]["by_timeframe"][timeframe] = side
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for symbol, data in grouped.items():
+        long_count = int(data["LONG"])
+        short_count = int(data["SHORT"])
+        dominant = "SHORT" if short_count >= long_count else "LONG"
+        result[symbol] = {
+            "side": dominant,
+            "hits": max(long_count, short_count),
+            "total": int(data["total"]),
+            "LONG": long_count,
+            "SHORT": short_count,
+            "by_timeframe": dict(data["by_timeframe"]),
+        }
+    return result
 
 
 def _btc_similarity_map(rows: List[Any]) -> Dict[str, Dict[str, Any]]:
@@ -195,68 +248,69 @@ def _directional_alignment(
     symbol: str,
     consensus_hits: int,
     consensus_total: int,
-    btc_hits: int,
-    btc_total: int,
-    market_support_pct: Optional[float],
+    btc_reference: Optional[Dict[str, Any]],
+    alert_side: str,
 ) -> Dict[str, float]:
-    """Continuous Directional Alignment, 0..30.
+    """Directional Alignment agreed with Yoni, continuous and capped 0..30.
 
-    Regular coins:
-    - Consensus: 0..15
-    - BTC Like: 0..8
-    - Market: 0..7
-
-    BTC:
-    - BTC Like is not meaningful.
-    - Its 8 points are reassigned to Consensus.
-    - Consensus: 0..23
-    - Market: 0..7
+    BTC: own consensus only, scaled to 30.
+    Altcoins: own consensus 0..15, plus continuous BTC confirmation 0..15
+    when BTC points the same way, or a continuous penalty up to 10 when BTC
+    points the opposite way. Market breadth is informational only.
     """
     is_btc = symbol.upper() == "BTC"
-    consensus_max = 23.0 if is_btc else 15.0
-    btc_like_max = 0.0 if is_btc else 8.0
-    market_max = 7.0
-
+    consensus_max = 30.0 if is_btc else 15.0
     consensus_points = (
         round(consensus_hits / consensus_total * consensus_max, 2)
         if consensus_total else 0.0
     )
-    btc_points = (
-        round(btc_hits / btc_total * btc_like_max, 2)
-        if (not is_btc and btc_total) else 0.0
-    )
-
-    # Continuous Market score:
-    # 50% support is neutral and receives 0.
-    # 100% support receives the full 7 points.
-    market_points = 0.0
-    if market_support_pct is not None:
-        market_points = round(
-            max(
-                0.0,
-                min(
-                    market_max,
-                    (float(market_support_pct) - 50.0)
-                    / 50.0
-                    * market_max,
-                ),
-            ),
-            2,
-        )
-
+    btc_score = float((btc_reference or {}).get("score", 0.0) or 0.0)
+    btc_side = (btc_reference or {}).get("side")
+    btc_confirmation = 0.0
+    btc_penalty = 0.0
+    if not is_btc and btc_side in {"LONG", "SHORT"}:
+        if btc_side == alert_side:
+            btc_confirmation = round(min(15.0, max(0.0, btc_score * 0.15)), 2)
+        else:
+            btc_penalty = round(min(10.0, max(0.0, btc_score * 0.10)), 2)
+    total = max(0.0, min(30.0, consensus_points + btc_confirmation - btc_penalty))
     return {
         "consensus_points": consensus_points,
-        "btc_like_points": btc_points,
-        "market_points": market_points,
+        "btc_confirmation_points": btc_confirmation,
+        "btc_conflict_penalty": btc_penalty,
+        "btc_reference_score": round(btc_score, 2),
         "consensus_max": consensus_max,
-        "btc_like_max": btc_like_max,
-        "market_max": market_max,
-        "total": round(
-            consensus_points + btc_points + market_points,
-            2,
-        ),
+        "btc_confirmation_max": 15.0 if not is_btc else 0.0,
+        "btc_penalty_max": 10.0 if not is_btc else 0.0,
+        "total": round(total, 2),
     }
 
+
+def _btc_reference_map(
+    rows: List[Any],
+    consensus: Dict[str, Dict[str, Any]],
+    clusters: Dict[str, Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    """Build BTC's non-circular score for each timeframe."""
+    result: Dict[str, Dict[str, Any]] = {}
+    cons = consensus.get("BTC", {})
+    total = int(cons.get("total", 0) or 0)
+    for row in rows:
+        if str(_get(row, "symbol", "")).upper() != "BTC":
+            continue
+        tf = str(_get(row, "timeframe", ""))
+        side = _closest_side(row)
+        distance = _closest_distance(row)
+        if tf not in TIMEFRAMES or side not in {"LONG", "SHORT"} or distance is None:
+            continue
+        hits = int(cons.get(side, 0) or 0)
+        directional = round(hits / total * 30.0, 2) if total else 0.0
+        proximity = _target_proximity_points(distance, _allowed_distance_pct("BTC", _get(row, "rank")))
+        cluster = clusters.get("BTC", {}).get(side, {})
+        gap = _relative_gap_advantage(row)
+        score = round(min(100.0, max(0.0, directional + proximity + float(cluster.get("points", 0) or 0) + float(gap.get("points", 0) or 0))), 2)
+        result[tf] = {"side": side, "score": score}
+    return result
 
 def _market_bias_map(rows: List[Any]) -> Dict[str, Any]:
     """Aggregate market schema from all valid asset/timeframe rows."""
@@ -333,216 +387,112 @@ def _transition_growth_score(
     )
 
 
-def _cluster_map(
-    rows: List[Any],
-    consensus: Dict[str, Dict[str, Any]],
-) -> Dict[str, Dict[str, Any]]:
-    """Cluster Confidence, 0..30.
+def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
+    """Calculate one independent cluster for one direction."""
+    directional_entries: List[Dict[str, Any]] = []
+    for row in symbol_rows:
+        if _closest_side(row) != side:
+            continue
+        target = _target_for_side(row, side)
+        timeframe = str(_get(row, "timeframe", ""))
+        if target is None or target <= 0 or timeframe not in TIMEFRAME_HOURS:
+            continue
+        directional_entries.append({
+            "timeframe": timeframe,
+            "hours": TIMEFRAME_HOURS[timeframe],
+            "target": float(target),
+            "amount": max(0.0, _amount_for_side(row, side)),
+        })
 
-    Eligibility gates:
-    1. At least three timeframes must point in the dominant direction.
-    2. At least three targets must remain within 1.5% of the median target.
+    directional_entries = list({
+        item["timeframe"]: item for item in directional_entries
+    }.values())
+    directional_entries.sort(key=lambda item: item["hours"])
+    same_direction_count = len(directional_entries)
+    empty = {
+        "side": side,
+        "same_direction_count": same_direction_count,
+        "count": 0,
+        "members": [],
+        "median_target": None,
+        "mean_deviation_pct": None,
+        "spread_pct": None,
+        "density_points": 0.0,
+        "coverage_points": 0.0,
+        "growth_points": 0.0,
+        "liquidity_multiplier": 0.0,
+        "growth_transition_scores": {},
+        "points": 0.0,
+    }
+    if same_direction_count < 3:
+        return empty
 
-    Components:
-    - target density: 0..12
-    - participating timeframe count: 0..8
-    - meaningful liquidity accumulation: 0..10
-    """
+    median_target = _median([item["target"] for item in directional_entries])
+    if median_target is None or median_target <= 0:
+        return empty
+
+    cluster_entries = []
+    for item in directional_entries:
+        deviation = abs(item["target"] - median_target) / median_target * 100.0
+        if deviation <= CLUSTER_MEMBER_MAX_DISTANCE_PCT:
+            cluster_entries.append({**item, "distance_from_median_pct": deviation})
+    cluster_count = len(cluster_entries)
+    if cluster_count < 3:
+        return {**empty, "median_target": median_target, "count": cluster_count,
+                "members": [x["timeframe"] for x in cluster_entries]}
+
+    deviations = [x["distance_from_median_pct"] for x in cluster_entries]
+    mean_deviation_pct = sum(deviations) / len(deviations)
+    targets = [x["target"] for x in cluster_entries]
+    average_target = sum(targets) / len(targets)
+    spread_pct = ((max(targets)-min(targets))/average_target*100.0) if average_target else None
+    density_points = round(max(0.0, 1.0 - mean_deviation_pct / CLUSTER_MEMBER_MAX_DISTANCE_PCT) * 12.0, 2)
+    coverage_points = CLUSTER_COVERAGE_POINTS.get(min(cluster_count, 7), 0.0)
+
+    entries_by_tf = {x["timeframe"]: x for x in cluster_entries}
+    transition_scores: Dict[str, float] = {}
+    for (previous_tf, current_tf), threshold in LIQUIDITY_GROWTH_THRESHOLDS.items():
+        previous = entries_by_tf.get(previous_tf)
+        current = entries_by_tf.get(current_tf)
+        if previous is None or current is None:
+            continue
+        transition_scores[f"{previous_tf}->{current_tf}"] = _transition_growth_score(
+            previous["amount"], current["amount"], threshold
+        )
+    growth_score = round(sum(transition_scores.values()) / len(transition_scores) * 10.0, 2) if transition_scores else 0.0
+    liquidity_multiplier = round(growth_score / 10.0 * 1.5, 4)
+    cluster_points = round(min(30.0, (density_points + coverage_points) * liquidity_multiplier), 2)
+    return {
+        "side": side,
+        "same_direction_count": same_direction_count,
+        "count": cluster_count,
+        "members": [x["timeframe"] for x in cluster_entries],
+        "median_target": median_target,
+        "mean_deviation_pct": mean_deviation_pct,
+        "spread_pct": spread_pct,
+        "density_points": density_points,
+        "coverage_points": coverage_points,
+        "growth_points": growth_score,
+        "liquidity_multiplier": liquidity_multiplier,
+        "growth_transition_scores": transition_scores,
+        "points": cluster_points,
+    }
+
+
+def _cluster_map(rows: List[Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Calculate separate LONG and SHORT clusters for each symbol."""
     grouped: Dict[str, List[Any]] = defaultdict(list)
     for row in rows:
-        symbol = str(_get(row, "symbol", "")).upper()
+        symbol = str(_get(row, "symbol", "") or "").upper()
         if symbol:
             grouped[symbol].append(row)
-
-    results: Dict[str, Dict[str, Any]] = {}
-
-    for symbol, symbol_rows in grouped.items():
-        dominant = consensus.get(symbol, {}).get("side")
-        directional_entries: List[Dict[str, Any]] = []
-
-        if dominant in {"LONG", "SHORT"}:
-            for row in symbol_rows:
-                if _closest_side(row) != dominant:
-                    continue
-
-                target = _target_for_side(row, dominant)
-                timeframe = str(_get(row, "timeframe", ""))
-                if (
-                    target is None
-                    or target <= 0
-                    or timeframe not in TIMEFRAME_HOURS
-                ):
-                    continue
-
-                directional_entries.append({
-                    "timeframe": timeframe,
-                    "hours": TIMEFRAME_HOURS[timeframe],
-                    "target": float(target),
-                    "amount": max(
-                        0.0,
-                        _amount_for_side(row, dominant),
-                    ),
-                })
-
-        # Keep one current entry per canonical timeframe. Historical or
-        # duplicated rows must not make a seven-timeframe model report 8+.
-        directional_entries_by_tf = {
-            item["timeframe"]: item for item in directional_entries
+    return {
+        symbol: {
+            "LONG": _cluster_for_side(symbol_rows, "LONG"),
+            "SHORT": _cluster_for_side(symbol_rows, "SHORT"),
         }
-        directional_entries = sorted(
-            directional_entries_by_tf.values(),
-            key=lambda item: item["hours"],
-        )
-        same_direction_count = len(directional_entries)
-
-        empty_result = {
-            "side": dominant,
-            "same_direction_count": same_direction_count,
-            "count": 0,
-            "median_target": None,
-            "mean_deviation_pct": None,
-            "spread_pct": None,
-            "density_points": 0.0,
-            "coverage_points": 0.0,
-            "growth_points": 0.0,
-            "liquidity_multiplier": 0.0,
-            "growth_transition_scores": {},
-            "points": 0.0,
-        }
-
-        # Gate 1: at least three timeframes in the same direction.
-        if same_direction_count < 3:
-            results[symbol] = empty_result
-            continue
-
-        median_target = _median([
-            item["target"] for item in directional_entries
-        ])
-        if median_target is None or median_target <= 0:
-            results[symbol] = empty_result
-            continue
-
-        # Keep only targets genuinely located in the same price area.
-        cluster_entries = []
-        for item in directional_entries:
-            distance_from_median_pct = (
-                abs(item["target"] - median_target)
-                / median_target
-                * 100.0
-            )
-            if (
-                distance_from_median_pct
-                <= CLUSTER_MEMBER_MAX_DISTANCE_PCT
-            ):
-                cluster_entries.append({
-                    **item,
-                    "distance_from_median_pct":
-                        distance_from_median_pct,
-                })
-
-        cluster_count = len(cluster_entries)
-
-        # Gate 2: at least three actual members inside the cluster.
-        if cluster_count < 3:
-            results[symbol] = {
-                **empty_result,
-                "median_target": median_target,
-                "count": cluster_count,
-            }
-            continue
-
-        deviations = [
-            item["distance_from_median_pct"]
-            for item in cluster_entries
-        ]
-        mean_deviation_pct = sum(deviations) / len(deviations)
-
-        targets = [item["target"] for item in cluster_entries]
-        average_target = sum(targets) / len(targets)
-        spread_pct = (
-            (max(targets) - min(targets))
-            / average_target
-            * 100.0
-            if average_target else None
-        )
-
-        # 0% mean deviation = 12; 1.5% or more = 0.
-        density_points = round(
-            max(
-                0.0,
-                1.0
-                - mean_deviation_pct
-                / CLUSTER_MEMBER_MAX_DISTANCE_PCT,
-            )
-            * 12.0,
-            2,
-        )
-
-        coverage_points = CLUSTER_COVERAGE_POINTS.get(
-            min(cluster_count, 7),
-            0.0,
-        )
-
-        entries_by_tf = {
-            item["timeframe"]: item
-            for item in cluster_entries
-        }
-        transition_scores: Dict[str, float] = {}
-
-        # Score only canonical adjacent timeframe transitions where
-        # both timeframes are actual members of this cluster.
-        for (previous_tf, current_tf), threshold in (
-            LIQUIDITY_GROWTH_THRESHOLDS.items()
-        ):
-            previous = entries_by_tf.get(previous_tf)
-            current = entries_by_tf.get(current_tf)
-            if previous is None or current is None:
-                continue
-
-            transition_scores[
-                f"{previous_tf}->{current_tf}"
-            ] = _transition_growth_score(
-                previous["amount"],
-                current["amount"],
-                threshold,
-            )
-
-        growth_score = (
-            round(
-                sum(transition_scores.values())
-                / len(transition_scores)
-                * 10.0,
-                2,
-            )
-            if transition_scores else 0.0
-        )
-
-        # Liquidity accumulation is a multiplier on the structural cluster
-        # quality; it is not an additional block of points. The structural
-        # base is density (0..12) + timeframe coverage (0..8). A full
-        # accumulation score produces a 1.5x multiplier and a 30-point max.
-        liquidity_multiplier = round(growth_score / 10.0 * 1.5, 4)
-        cluster_points = round(
-            min(30.0, (density_points + coverage_points) * liquidity_multiplier),
-            2,
-        )
-
-        results[symbol] = {
-            "side": dominant,
-            "same_direction_count": same_direction_count,
-            "count": cluster_count,
-            "median_target": median_target,
-            "mean_deviation_pct": mean_deviation_pct,
-            "spread_pct": spread_pct,
-            "density_points": density_points,
-            "coverage_points": coverage_points,
-            "growth_points": growth_score,
-            "liquidity_multiplier": liquidity_multiplier,
-            "growth_transition_scores": transition_scores,
-            "points": cluster_points,
-        }
-
-    return results
+        for symbol, symbol_rows in grouped.items()
+    }
 
 
 def _liquidity_balance(near_amount: float, far_amount: float) -> Dict[str, Any]:
@@ -677,10 +627,11 @@ def build_opportunities(
     limit: int = 30,
 ) -> List[Dict[str, Any]]:
     """Score every valid coin/timeframe with the agreed 100-point model."""
+    rows, duplicate_counts = _dedupe_rows(rows)
     consensus = _consensus_map(rows)
-    btc_like = _btc_similarity_map(rows)
-    market = _market_bias_map(rows)
-    clusters = _cluster_map(rows, consensus)
+    market = _market_bias_map(rows)  # informational only
+    clusters = _cluster_map(rows)
+    btc_references = _btc_reference_map(rows, consensus, clusters)
     out: List[Dict[str, Any]] = []
 
     for row in rows:
@@ -709,12 +660,10 @@ def build_opportunities(
         )
 
         cons = consensus.get(symbol, {})
-        consensus_hits = int(cons.get("hits", 0) or 0)
+        consensus_hits = int(cons.get(side, 0) or 0)
         consensus_total = int(cons.get("total", 0) or 0)
 
-        btc = btc_like.get(symbol, {})
-        btc_hits = int(btc.get("hits", 0) or 0)
-        btc_total = int(btc.get("total", 0) or 0)
+        btc_reference = btc_references.get(timeframe)
 
         market_support_pct = (
             market.get("short_pct")
@@ -731,30 +680,19 @@ def build_opportunities(
             symbol,
             consensus_hits,
             consensus_total,
-            btc_hits,
-            btc_total,
-            market_support_pct,
+            btc_reference,
+            side,
         )
 
-        cluster = clusters.get(symbol, {
-            "count": 0,
-            "same_direction_count": 0,
-            "spread_pct": None,
-            "mean_deviation_pct": None,
-            "median_target": None,
-            "density_points": 0.0,
-            "coverage_points": 0.0,
-            "growth_points": 0.0,
+        cluster = clusters.get(symbol, {}).get(side, {
+            "count": 0, "same_direction_count": 0, "members": [],
+            "spread_pct": None, "mean_deviation_pct": None,
+            "median_target": None, "density_points": 0.0,
+            "coverage_points": 0.0, "growth_points": 0.0,
             "liquidity_multiplier": 0.0,
-            "growth_transition_scores": {},
-            "points": 0.0,
-            "side": None,
+            "growth_transition_scores": {}, "points": 0.0, "side": side,
         })
-        cluster_points = (
-            float(cluster.get("points", 0.0))
-            if cluster.get("side") == side
-            else 0.0
-        )
+        cluster_points = float(cluster.get("points", 0.0) or 0.0)
 
         gap = _relative_gap_advantage(row)
         gap_points = float(gap.get("points", 0.0))
@@ -762,11 +700,12 @@ def build_opportunities(
         components = {
             "directional_alignment": directional["total"],
             "consensus": directional["consensus_points"],
-            "btc_like": directional["btc_like_points"],
-            "market": directional["market_points"],
+            "btc_confirmation": directional["btc_confirmation_points"],
+            "btc_conflict_penalty": directional["btc_conflict_penalty"],
+            "btc_reference_score": directional["btc_reference_score"],
             "consensus_max": directional["consensus_max"],
-            "btc_like_max": directional["btc_like_max"],
-            "market_max": directional["market_max"],
+            "btc_confirmation_max": directional["btc_confirmation_max"],
+            "btc_penalty_max": directional["btc_penalty_max"],
             "target_proximity": target_proximity,
             "cluster_confidence": cluster_points,
             # Compatibility key for older formatting code.
@@ -821,6 +760,27 @@ def build_opportunities(
                 else "DOWN"
             )
 
+        validation_errors: List[str] = []
+        component_sum = round(
+            components["directional_alignment"]
+            + components["target_proximity"]
+            + components["cluster_confidence"]
+            + components["relative_gap"], 2
+        )
+        if abs(component_sum - score) > 0.01:
+            validation_errors.append(
+                f"Score mismatch: components={component_sum:.2f}, score={score:.2f}"
+            )
+        if consensus_hits > consensus_total:
+            validation_errors.append(
+                f"Consensus invalid: {consensus_hits}/{consensus_total}"
+            )
+        if int(cluster.get("count", 0) or 0) > consensus_hits:
+            validation_errors.append(
+                "Cluster count exceeds timeframes supporting alert direction"
+            )
+        duplicate_rows_removed = int(duplicate_counts.get(symbol, 0) or 0)
+
         out.append({
             "symbol": symbol,
             "timeframe": timeframe,
@@ -848,8 +808,8 @@ def build_opportunities(
             "liquidity_balance": balance["balance"],
             "consensus_hits": consensus_hits,
             "consensus_total": consensus_total,
-            "btc_like_hits": btc_hits,
-            "btc_like_total": btc_total,
+            "btc_reference_side": (btc_reference or {}).get("side"),
+            "btc_reference_score": (btc_reference or {}).get("score"),
             "market_support_pct": market_support_pct,
             "market_support_count": market_support_count,
             "market_total_count": market.get("total", 0),
@@ -873,6 +833,10 @@ def build_opportunities(
             "cluster_growth_transition_scores":
                 cluster.get("growth_transition_scores", {}),
             "cluster_side": cluster.get("side"),
+            "cluster_members": cluster.get("members", []),
+            "duplicate_rows_removed": duplicate_rows_removed,
+            "calculation_validation_errors": validation_errors,
+            "component_sum_check": component_sum,
             "relative_gap_advantage": gap.get("advantage"),
             "near_distance_pct": gap.get("near_distance"),
             "far_distance_pct": gap.get("far_distance"),
@@ -921,3 +885,29 @@ def build_opportunities(
     )
 
     return out[:limit]
+
+
+def debug_symbol(rows: List[Any], symbol: str) -> Dict[str, Any]:
+    """Return transparent calculations and integrity checks for one symbol."""
+    symbol = str(symbol or "").upper()
+    deduped, duplicate_counts = _dedupe_rows(rows)
+    items = build_opportunities(deduped, limit=1000)
+    selected = [x for x in items if x.get("symbol") == symbol]
+    selected.sort(key=lambda x: TIMEFRAMES.index(x["timeframe"]) if x.get("timeframe") in TIMEFRAMES else 99)
+    consensus = _consensus_map(deduped).get(symbol, {})
+    errors: List[str] = []
+    if int(consensus.get("LONG", 0)) + int(consensus.get("SHORT", 0)) != int(consensus.get("total", 0)):
+        errors.append("LONG + SHORT does not equal consensus total")
+    if len({x.get("timeframe") for x in selected}) != len(selected):
+        errors.append("Duplicate timeframe remained after deduplication")
+    for item in selected:
+        errors.extend(item.get("calculation_validation_errors", []))
+    return {
+        "symbol": symbol,
+        "LONG": int(consensus.get("LONG", 0) or 0),
+        "SHORT": int(consensus.get("SHORT", 0) or 0),
+        "total": int(consensus.get("total", 0) or 0),
+        "duplicates_removed": int(duplicate_counts.get(symbol, 0) or 0),
+        "items": selected,
+        "errors": errors,
+    }

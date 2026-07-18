@@ -792,7 +792,12 @@ async def collect_once():
 
     if not rows:
         raise RuntimeError(
-            "No complete seven-timeframe symbols remained after Binance pricing"
+            "No complete seven-timeframe symbols remained after Binance Futures pricing; "
+            f"found={price_result.get('found_count', 0)}/{price_result.get('requested_count', 0)}; "
+            f"missing={price_result.get('missing_symbols', [])[:20]}; "
+            f"source={price_result.get('source')}; "
+            f"futures_error={price_result.get('futures_error')}; "
+            f"spot_error={price_result.get('spot_error')}"
         )
 
     rows = validate_snapshot(rows)
@@ -1059,7 +1064,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/collect — איסוף מלא ושמירת Snapshot חדש\n"
         "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
         "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
-        "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
+        "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון עם מחיר Binance חי\n"
+        "/price_check BTC — בדיקת מחיר Binance חי ללא שמירה וללא /collect חדש\n"
         "/watch_on — הפעלת לולאת Watch אחת\n"
         "/watch_status — הצגת מצב בלבד\n"
         "/watch_stop — עצירת Watch"
@@ -1158,14 +1164,23 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = context.args[0].upper()
-    rows = [
-        r for r in latest_snapshot_rows()
+    snapshot_rows = [
+        r for r in raw_latest_snapshot_rows()
         if str(r["symbol"]).upper() == symbol
     ]
 
+    if not snapshot_rows:
+        await update.message.reply_text(
+            f"לא נמצא {symbol} ב-snapshot האחרון. הריצו /collect קודם."
+        )
+        return
+
+    live_result = live_price_provider.enrich_snapshot_rows(snapshot_rows)
+    rows = live_result.get("rows", [])
+    price_result = live_result.get("price_result", {})
     if not rows:
         await update.message.reply_text(
-            f"לא נמצאו נתוני Binance חיים עבור {symbol}, או שהמטבע אינו קיים ב-snapshot האחרון."
+            f"לא ניתן היה למשוך כעת מחיר Binance חי עבור {symbol}."
         )
         return
 
@@ -1190,7 +1205,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     source = rows[0].get("price_source", "binance")
-    fetched = rows[0].get("price_fetched_at_utc", "-")
+    fetched = price_result.get("fetched_at_utc") or rows[0].get("price_fetched_at_utc", "-")
     await update.message.reply_text(
         f"Price source: {source}\nFetched UTC: {fetched}\n"
         f"<pre>{html.escape(text)}</pre>",
@@ -1679,6 +1694,15 @@ def _quality_result(item: Dict[str, Any], rows: List[Any]) -> Dict[str, Any]:
             orange.append("שורת הנתונים סומנה כלא תקינה בבדיקת האיסוף.")
 
 
+    calculation_errors = item.get("calculation_validation_errors") or []
+    for error in calculation_errors:
+        red.append("בדיקת חישוב נכשלה: " + str(error))
+    duplicates_removed = int(item.get("duplicate_rows_removed", 0) or 0)
+    if duplicates_removed:
+        orange.append(
+            f"הוסרו {duplicates_removed} שורות כפולות של מטבע/טווח לפני החישוב."
+        )
+
     if red:
         return {"level": "red", "title": "🔴 בעיית נתונים קריטית", "notes": red + orange + yellow}
     if orange:
@@ -1788,12 +1812,20 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     else:
         balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
 
-    btc_like_score_line = ""
-    if float(c.get("btc_like_max", 0) or 0) > 0:
-        btc_like_score_line = (
-            f"  - BTC Like: {fmt(c.get('btc_like'))}/"
-            f"{fmt(c.get('btc_like_max'))}\n"
-        )
+    btc_score_line = ""
+    if float(c.get("btc_confirmation_max", 0) or 0) > 0:
+        if float(c.get("btc_conflict_penalty", 0) or 0) > 0:
+            btc_score_line = (
+                f"  - BTC conflict: -{fmt(c.get('btc_conflict_penalty'))}/"
+                f"{fmt(c.get('btc_penalty_max'))} "
+                f"(BTC {item.get('btc_reference_side')} {fmt(c.get('btc_reference_score'))}/100)\n"
+            )
+        else:
+            btc_score_line = (
+                f"  - BTC confirmation: +{fmt(c.get('btc_confirmation'))}/"
+                f"{fmt(c.get('btc_confirmation_max'))} "
+                f"(BTC {item.get('btc_reference_side')} {fmt(c.get('btc_reference_score'))}/100)\n"
+            )
 
     average_score = item.get("average_score_all_timeframes")
     if average_score is None:
@@ -1813,6 +1845,18 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 
     current_price = item.get("current_price")
     target_price = item.get("target_price")
+
+    cluster_count = int(item.get("cluster_count", 0) or 0)
+    same_direction_count = int(item.get("cluster_same_direction_count", 0) or 0)
+    if cluster_count >= 3:
+        cluster_summary = (
+            f"Cluster Confidence: {cluster_count} טווחים בקלאסטר "
+            f"(מתוך {same_direction_count} באותו כיוון)\n"
+            f"סטייה ממוצעת מה-Median: "
+            f"{fmt(item.get('cluster_mean_deviation_pct'))}%\n"
+        )
+    else:
+        cluster_summary = f"אין קלאסטר בכיוון {item.get('side')}\n"
 
     def liquidity_line(label: str, amount: Any) -> str:
         try:
@@ -1839,13 +1883,8 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"Market: {fmt(item.get('market_support_pct'))}% תמיכה ב-{item['side']} "
         f"({item.get('market_support_count', 0)}/"
         f"{item.get('market_total_count', 0)})\n"
-        f"Cluster Confidence: "
-        f"{item.get('cluster_count', 0)} טווחים בקלאסטר "
-        f"(מתוך {item.get('cluster_same_direction_count', 0)} "
-        "באותו כיוון)\n"
-        f"סטייה ממוצעת מה-Median: "
-        f"{fmt(item.get('cluster_mean_deviation_pct'))}%\n"
-        f"Relative Gap Advantage: "
+        + cluster_summary
+        + f"Relative Gap Advantage: "
         f"{fmt((item.get('relative_gap_advantage') or 0) * 100)}%\n"
         "\n"
         "פירוט הניקוד:\n"
@@ -1853,9 +1892,8 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"{fmt(c.get('directional_alignment'))}/30\n"
         f"  - Consensus: {fmt(c.get('consensus'))}/"
         f"{fmt(c.get('consensus_max'))}\n"
-        + btc_like_score_line
-        + f"  - Market: {fmt(c.get('market'))}/"
-        f"{fmt(c.get('market_max'))}\n"
+        + btc_score_line
+        + "  - Market: מידע בלבד, ללא ניקוד\n"
         f"• Target Proximity: "
         f"{fmt(c.get('target_proximity'))}/25\n"
         f"• Cluster Confidence: "
@@ -2073,6 +2111,71 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         finally:
             if WATCH_RUNTIME.get("scan_owner") == f"/alert {symbol}":
+                WATCH_RUNTIME["scan_owner"] = None
+
+
+async def debug_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run a live transparent validation report for one symbol."""
+    if not context.args:
+        await update.message.reply_text("שימוש: /debug BTC")
+        return
+    symbol = str(context.args[0]).strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
+        await update.message.reply_text("סימול המטבע אינו תקין. לדוגמה: /debug BTC")
+        return
+
+    command_lock = _get_alert_command_lock()
+    if command_lock.locked():
+        await update.message.reply_text("⏳ סריקת Alerts אחרת פעילה כרגע. נסו שוב לאחר שתסתיים.")
+        return
+
+    async with command_lock:
+        try:
+            async with _get_scrape_lock():
+                WATCH_RUNTIME["scan_owner"] = f"/debug {symbol}"
+                await update.message.reply_text(
+                    f"🔬 מתחילה בדיקת חישובים חיה עבור {symbol}."
+                )
+                rows, _ = await collect_live_rows_for_watch()
+
+            report = alert_engine.debug_symbol(rows, symbol)
+            items = report.get("items", [])
+            if not items:
+                await update.message.reply_text(f"לא נמצאו נתונים ניתנים לחישוב עבור {symbol}.")
+                return
+
+            lines = [
+                f"🔬 DEBUG {symbol}",
+                f"Consensus: LONG {report['LONG']}/{report['total']} | SHORT {report['SHORT']}/{report['total']}",
+                f"כפילויות שהוסרו: {report['duplicates_removed']}",
+                "",
+            ]
+            for item in items:
+                c = item.get("components", {})
+                members = ",".join(item.get("cluster_members") or []) or "-"
+                status = "✅" if not item.get("calculation_validation_errors") else "❌"
+                lines.extend([
+                    f"{status} {item['timeframe']} {item['side']} | Score {float(item['score']):.2f}",
+                    f"  Consensus {item.get('consensus_hits',0)}/{item.get('consensus_total',0)} = {float(c.get('consensus',0)):.2f}/{float(c.get('consensus_max',0)):.0f}",
+                    f"  Cluster members={item.get('cluster_count',0)} [{members}] | same direction={item.get('cluster_same_direction_count',0)}/7 | {float(c.get('cluster_confidence',0)):.2f}/30",
+                    f"  Sum check {float(item.get('component_sum_check',0)):.2f} = Score {float(item['score']):.2f}",
+                ])
+            lines.append("")
+            if report.get("errors"):
+                lines.append("❌ שגיאות:")
+                lines.extend(f"• {err}" for err in report["errors"])
+            else:
+                lines.append("✅ כל בדיקות העקביות עברו.")
+
+            text = "\n".join(lines)
+            for start in range(0, len(text), 3800):
+                await update.message.reply_text(text[start:start+3800])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await update.message.reply_text(f"❌ /debug נכשל: {exc!r}")
+        finally:
+            if WATCH_RUNTIME.get("scan_owner") == f"/debug {symbol}":
                 WATCH_RUNTIME["scan_owner"] = None
 
 
@@ -2923,8 +3026,10 @@ async def main():
     bot_app.add_handler(CommandHandler("help", start))
     bot_app.add_handler(CommandHandler("collect", collect_cmd))
     bot_app.add_handler(CommandHandler("coin", coin))
+    bot_app.add_handler(CommandHandler("price_check", price_check))
     bot_app.add_handler(CommandHandler("alerts", alert_check))
     bot_app.add_handler(CommandHandler("alert", alert_coin))
+    bot_app.add_handler(CommandHandler("debug", debug_coin))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
