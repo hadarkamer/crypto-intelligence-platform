@@ -45,6 +45,7 @@ PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 COINGLASS_MAX_PAIN_URL = os.getenv("COINGLASS_MAX_PAIN_URL", "https://www.coinglass.com/liquidation-maxpain")
 COINGLASS_API_URL = os.getenv("COINGLASS_API_URL", "https://fapi.coinglass.com/api/liqHeatMap/list")
 TOP_COINS_LIMIT = int(os.getenv("TOP_COINS_LIMIT", "50"))
+COLLECT_INTERVAL_MINUTES = int(os.getenv("COLLECT_INTERVAL_MINUTES", "60"))
 MAX_SECONDS_PER_TIMEFRAME = int(os.getenv("MAX_SECONDS_PER_TIMEFRAME", "120"))
 RETRY_SLEEP_SECONDS = float(os.getenv("RETRY_SLEEP_SECONDS", "4"))
 TRADINGVIEW_WEBHOOK_SECRET = os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "")
@@ -69,6 +70,7 @@ TIMEFRAME_LABELS = {
 NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v3-dom-reader"
+COLLECT_LOCK = None
 SCRAPE_LOCK = None
 WATCH_TASK = None
 WATCH_SCAN_TASK = None
@@ -80,7 +82,7 @@ ALERT_ACTIVE = False
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
 MIN_DISPLAY_DISTANCE_PCT = float(
-    os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.5")
+    os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.15")
 )
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
 WATCH_RUNTIME = {
@@ -597,10 +599,10 @@ def normalize_current_prices(rows):
     return rows
 
 def validate_snapshot(rows):
-    """Validate the filtered Bybit-backed snapshot.
+    """Validate the filtered Binance-backed snapshot.
 
     The raw DOM normally contains about 50 assets × 7 timeframes = 350 rows.
-    After non-crypto filtering and Bybit coverage checks, fewer symbols are
+    After non-crypto filtering and Binance coverage checks, fewer symbols are
     intentionally saved. Therefore the expected saved-row count must be based
     on the symbols that remain, not the raw CoinGlass row count.
     """
@@ -631,7 +633,7 @@ def validate_snapshot(rows):
         if not row.get("symbol"):
             row_errors.append("missing symbol")
         if row.get("current_price") is None:
-            row_errors.append("missing Bybit current_price")
+            row_errors.append("missing Binance current_price")
         if row.get("short_max_pain") is None:
             row_errors.append("missing short_max_pain")
         if row.get("long_max_pain") is None:
@@ -713,7 +715,7 @@ def _format_incomplete_symbols(incomplete: Dict[str, List[str]]) -> str:
 
 
 async def collect_once():
-    """Collect and save one coherent seven-timeframe Bybit-backed snapshot."""
+    """Collect and save one coherent seven-timeframe Binance-backed snapshot."""
     start = time.time()
     collected_dt = datetime.now(timezone.utc)
     collected_at = collected_dt if use_postgres() else collected_dt.isoformat()
@@ -749,7 +751,7 @@ async def collect_once():
 
         raw_rows.append({
             "collected_at": collected_at,
-            "source": SOURCE_NAME + "_dom_bybit",
+            "source": SOURCE_NAME + "_dom_binance",
             "collector_version": COLLECTOR_VERSION,
             "scrape_duration_seconds": time.time() - start,
             "is_valid": True if use_postgres() else 1,
@@ -779,7 +781,7 @@ async def collect_once():
     elapsed = time.time() - start
     for row in priced_rows:
         row["collected_at"] = collected_at
-        row["source"] = SOURCE_NAME + "_dom_bybit"
+        row["source"] = SOURCE_NAME + "_dom_binance"
         row["collector_version"] = COLLECTOR_VERSION
         row["scrape_duration_seconds"] = elapsed
         row["is_valid"] = True if use_postgres() else 1
@@ -790,7 +792,7 @@ async def collect_once():
 
     if not rows:
         raise RuntimeError(
-            "No complete seven-timeframe symbols remained after Bybit pricing"
+            "No complete seven-timeframe symbols remained after Binance pricing"
         )
 
     rows = validate_snapshot(rows)
@@ -820,8 +822,8 @@ async def collect_once():
         "inserted": inserted,
         "incomplete_symbols": audit["incomplete_symbols"],
         "duplicate_pairs": audit["duplicate_pairs"],
-        "bybit_found": int(price_result.get("found_count", 0) or 0),
-        "bybit_missing": int(price_result.get("missing_count", 0) or 0),
+        "binance_found": int(price_result.get("found_count", 0) or 0),
+        "binance_missing": int(price_result.get("missing_count", 0) or 0),
         "skipped_symbols": skipped_symbols,
         "market_only_rows_seen": market_only_count,
         "missing_timeframes": [],
@@ -837,8 +839,8 @@ async def collect_once():
         f"inserted={report['inserted']}; "
         f"incomplete_symbols={report['incomplete_symbols']}; "
         f"duplicate_pairs={report['duplicate_pairs']}; "
-        f"bybit_found={report['bybit_found']}; "
-        f"bybit_missing={report['bybit_missing']}; "
+        f"binance_found={report['binance_found']}; "
+        f"binance_missing={report['binance_missing']}; "
         f"skipped_symbols={report['skipped_symbols']}"
     )
 
@@ -995,7 +997,7 @@ def short_time(value):
 
 
 def raw_latest_snapshot_rows():
-    """Latest saved Bybit-backed snapshot with validation metadata."""
+    """Latest saved Binance-backed snapshot with validation metadata."""
     return query(
         f"""
         WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots)
@@ -1017,7 +1019,7 @@ def latest_snapshot_live_result():
     return {
         "rows": rows,
         "price_result": {
-            "source": "bybit_saved_at_collect",
+            "source": "binance_saved_at_collect",
             "found_count": len({r["symbol"] for r in rows}) if rows else 0,
             "missing_count": 0,
             "fetched_at_utc": "-",
@@ -1054,9 +1056,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Crypto Intelligence Bot פעיל.\n\n"
         "פקודות:\n"
-        "/coin BTC — סריקה חיה והצגת 7 טווחים במחיר Bybit Futures\n"
+        "/collect — איסוף מלא ושמירת Snapshot חדש\n"
         "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
-        "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
+        "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — הפעלת לולאת Watch אחת\n"
         "/watch_status — הצגת מצב בלבד\n"
         "/watch_stop — עצירת Watch"
@@ -1072,62 +1074,102 @@ def _get_alert_command_lock() -> asyncio.Lock:
 
 
 def _get_scrape_lock():
-    """Shared lock for any CoinGlass/Bybit scraping."""
+    """Shared lock for any CoinGlass/Binance scraping."""
     global SCRAPE_LOCK
     if SCRAPE_LOCK is None:
         import asyncio
         SCRAPE_LOCK = asyncio.Lock()
     return SCRAPE_LOCK
 
+async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run one manual collection and save it. Never starts Watch."""
+    global COLLECT_LOCK
+
+    if COLLECT_LOCK is None:
+        COLLECT_LOCK = asyncio.Lock()
+
+    if COLLECT_LOCK.locked():
+        await update.message.reply_text(
+            "⏳ פקודת /collect כבר פעילה. לא נפתח איסוף נוסף."
+        )
+        return
+
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
+        await update.message.reply_text(
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
+            "יש להמתין לסיום וללחוץ שוב על /collect."
+        )
+        return
+
+    async with COLLECT_LOCK:
+        async with scrape_lock:
+            WATCH_RUNTIME["scan_owner"] = "/collect"
+            await update.message.reply_text(
+                "🔄 מתחיל איסוף מלא של 7 טווחי הזמן. "
+                "הנתונים יישמרו רק אם כל הטווחים נקלטו."
+            )
+            try:
+                report = await collect_once()
+
+                incomplete_text = _format_incomplete_symbols(
+                    report["incomplete_symbols"]
+                )
+                skipped_text = (
+                    ", ".join(report["skipped_symbols"])
+                    if report["skipped_symbols"]
+                    else "אין"
+                )
+
+                await update.message.reply_text(
+                    "✅ /collect הסתיים בהצלחה מלאה\n"
+                    f"שורות DOM גולמיות: {report['raw_dom_rows']}\n"
+                    f"שורות לאחר מחיר Binance: {report['priced_rows']}\n"
+                    f"מטבעות מלאים ב-7/7 טווחים: "
+                    f"{report['complete_symbols']}\n"
+                    f"שורות צפויות לשמירה: "
+                    f"{report['expected_inserted']}\n"
+                    f"שורות שנשמרו בפועל: {report['inserted']}\n"
+                    f"מטבעות חלקיים שלא נשמרו: {incomplete_text}\n"
+                    f"סמלים ללא מחיר Binance/שדולגו: {skipped_text}\n"
+                    "המרחקים חושבו ממחיר Binance."
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await update.message.reply_text(
+                    f"❌ /collect נכשל ולא אושר כאיסוף מלא: {exc!r}"
+                )
+            finally:
+                WATCH_RUNTIME["scan_owner"] = None
+
+
+
 async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = query("SELECT MAX(collected_at) AS latest_time, COUNT(*) AS rows_count FROM max_pain_snapshots")
     r = rows[0]
     await update.message.reply_text(f"Snapshot אחרון: {r['latest_time']}\\nמספר שורות: {r['rows_count']}")
 
-
 async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run a fresh CoinGlass scan and show one coin using Bybit Futures mark price."""
     if not context.args:
         await update.message.reply_text("שימוש: /coin BTC")
         return
 
     symbol = context.args[0].upper()
-    scrape_lock = _get_scrape_lock()
-    if scrape_lock.locked():
-        owner = WATCH_RUNTIME.get("scan_owner") or "סריקה אחרת"
-        await update.message.reply_text(
-            f"⏳ הסורק תפוס כרגע על ידי {owner}. נסו שוב כשהסריקה תסתיים."
-        )
-        return
+    rows = [
+        r for r in latest_snapshot_rows()
+        if str(r["symbol"]).upper() == symbol
+    ]
 
-    await update.message.reply_text(
-        f"🔎 מבצע סריקה חיה עבור {symbol}: CoinGlass + מחיר Bybit Futures..."
-    )
-
-    try:
-        async with scrape_lock:
-            WATCH_RUNTIME["scan_owner"] = f"/coin {symbol}"
-            rows, live_result = await collect_live_rows_for_watch()
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ הסריקה החיה נכשלה: {exc!r}"
-        )
-        return
-    finally:
-        WATCH_RUNTIME["scan_owner"] = None
-
-    rows = [r for r in rows if str(r.get("symbol", "")).upper() == symbol]
     if not rows:
-        skipped = live_result.get("skipped_symbols", [])
-        suffix = "" if symbol not in skipped else " לא נמצא עבורו מחיר Bybit Futures."
         await update.message.reply_text(
-            f"לא נמצאו 7 טווחים מלאים עבור {symbol} בסריקה הנוכחית.{suffix}"
+            f"לא נמצאו נתוני Binance חיים עבור {symbol}, או שהמטבע אינו קיים ב-snapshot האחרון."
         )
         return
 
     rows.sort(key=lambda r: tf_order_value(r["timeframe"]))
+
     table = [[
         r["timeframe"],
         fmt_price(r["current_price"]),
@@ -1137,22 +1179,23 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fmt(r["long_liquidation_amount"], 0),
         fmt(r["distance_short_pct"]),
         fmt(r["distance_long_pct"]),
-        side_from_row(r),
+        r.get("closest_side"),
     ] for r in rows]
 
-    output = tabulate(
+    text = tabulate(
         table,
-        headers=["TF", "FuturesPx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
+        headers=["TF", "BinancePx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
         tablefmt="plain",
     )
-    fetched = live_result.get("price_result", {}).get("fetched_at_utc", "-")
+
+    source = rows[0].get("price_source", "binance")
+    fetched = rows[0].get("price_fetched_at_utc", "-")
     await update.message.reply_text(
-        f"{symbol} — סריקה חיה\n"
-        f"Price source: Bybit USD-M Futures mark price\n"
-        f"Fetched UTC: {fetched}\n\n"
-        f"<pre>{html.escape(output)}</pre>",
+        f"Price source: {source}\nFetched UTC: {fetched}\n"
+        f"<pre>{html.escape(text)}</pre>",
         parse_mode="HTML",
     )
+
 
 async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
@@ -1170,7 +1213,7 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not rows:
         await update.message.reply_text(
-            f"לא נמצאו נתוני Bybit חיים עבור {symbol}/{timeframe}."
+            f"לא נמצאו נתוני Binance חיים עבור {symbol}/{timeframe}."
         )
         return
 
@@ -1188,12 +1231,12 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = tabulate(
         table,
-        headers=["BybitPx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
+        headers=["BinancePx", "ShortMP", "LongMP", "Short$", "Long$", "ToShort%", "ToLong%", "Closest"],
         tablefmt="plain",
     )
 
     await update.message.reply_text(
-        f"Price source: {r.get('price_source', 'bybit')}\n"
+        f"Price source: {r.get('price_source', 'binance')}\n"
         f"Fetched UTC: {r.get('price_fetched_at_utc', '-')}\n"
         f"<pre>{html.escape(text)}</pre>",
         parse_mode="HTML",
@@ -1238,11 +1281,11 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = tabulate(
         table,
-        headers=["Coin", "TF", "Side", "BybitPx", "ShortMP", "LongMP", "ToShort%", "ToLong%"],
+        headers=["Coin", "TF", "Side", "BinancePx", "ShortMP", "LongMP", "ToShort%", "ToLong%"],
         tablefmt="plain",
     )
     await update.message.reply_text(
-        "כל המרחקים חושבו מחדש לפי מחיר Bybit חי.\n"
+        "כל המרחקים חושבו מחדש לפי מחיר Binance חי.\n"
         f"<pre>{html.escape(text)}</pre>",
         parse_mode="HTML",
     )
@@ -1603,7 +1646,7 @@ def _quality_result(item: Dict[str, Any], rows: List[Any]) -> Dict[str, Any]:
         red.append("לא נמצאה שורת מקור תואמת למטבע ולטווח הזמן.")
     else:
         if _row_get(row, "current_price") in (None, 0):
-            red.append("מחיר Bybit חסר או אינו תקין.")
+            red.append("מחיר Binance חסר או אינו תקין.")
         if _row_get(row, "short_max_pain") is None:
             red.append("יעד Short Max Pain חסר.")
         if _row_get(row, "long_max_pain") is None:
@@ -1635,15 +1678,6 @@ def _quality_result(item: Dict[str, Any], rows: List[Any]) -> Dict[str, Any]:
             orange.append("שורת הנתונים סומנה כלא תקינה בבדיקת האיסוף.")
 
 
-    calculation_errors = item.get("calculation_validation_errors") or []
-    for error in calculation_errors:
-        red.append("בדיקת חישוב נכשלה: " + str(error))
-    duplicates_removed = int(item.get("duplicate_rows_removed", 0) or 0)
-    if duplicates_removed:
-        orange.append(
-            f"הוסרו {duplicates_removed} שורות כפולות של מטבע/טווח לפני החישוב."
-        )
-
     if red:
         return {"level": "red", "title": "🔴 בעיית נתונים קריטית", "notes": red + orange + yellow}
     if orange:
@@ -1663,75 +1697,23 @@ def _quality_block(item: Dict[str, Any], rows: List[Any]) -> str:
     )
 
 
-def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
-    """Show score/status for all seven timeframes only at card bottom."""
-    symbol = str(item.get("symbol") or "").upper()
-    by_timeframe = {
-        str(other.get("timeframe")): other
-        for other in all_items
-        if str(other.get("symbol") or "").upper() == symbol
-    }
-    source_rows = {
-        str(_row_get(row, "timeframe")): row
-        for row in rows
-        if str(_row_get(row, "symbol", "") or "").upper() == symbol
-    }
+def _other_alerts_block(item: Dict[str, Any], all_items) -> str:
+    symbol_items = [
+        other for other in all_items
+        if other.get("symbol") == item.get("symbol")
+    ]
+    if not symbol_items:
+        return ""
 
-    lines = [f"📊 מצב {symbol} בכל טווחי הזמן", ""]
-    values = []
+    alert_timeframes = [
+        other for other in symbol_items
+        if float(other.get("score", other.get("priority", 0)) or 0) > 50.0
+    ]
 
-    for timeframe in TIMEFRAMES:
-        other = by_timeframe.get(timeframe)
-        row = source_rows.get(timeframe)
-
-        price = _row_get(row, "current_price") if row is not None else None
-        short_mp = _row_get(row, "short_max_pain") if row is not None else None
-        long_mp = _row_get(row, "long_max_pain") if row is not None else None
-
-        active_distances = []
-        try:
-            price_value = float(price)
-            if price_value > 0:
-                if short_mp is not None and float(short_mp) > price_value:
-                    active_distances.append(
-                        (float(short_mp) - price_value) / price_value * 100.0
-                    )
-                if long_mp is not None and float(long_mp) < price_value:
-                    active_distances.append(
-                        (price_value - float(long_mp)) / price_value * 100.0
-                    )
-        except (TypeError, ValueError):
-            active_distances = []
-
-        nearest_active_distance = min(active_distances) if active_distances else None
-
-        if not active_distances:
-            lines.append(
-                f"🔴 {timeframe:<3}  אין יעד פעיל (Max Pain נלקח)"
-            )
-            continue
-
-        if nearest_active_distance is not None and nearest_active_distance < MIN_DISPLAY_DISTANCE_PCT:
-            lines.append(
-                f"🟡 {timeframe:<3}  {nearest_active_distance:.2f}% "
-                f"(מתחת לסף {MIN_DISPLAY_DISTANCE_PCT:.1f}%)"
-            )
-            if other is not None:
-                values.append(float(other.get("score", other.get("priority", 0)) or 0))
-            continue
-
-        if other is None:
-            lines.append(f"🔴 {timeframe:<3}  אין ציון זמין")
-            continue
-
-        value = float(other.get("score", other.get("priority", 0)) or 0)
-        values.append(value)
-        lines.append(f"🟢 {timeframe:<3}  {value:.2f}")
-
-    average = sum(values) / len(values) if values else 0.0
-    lines.append("")
-    lines.append(f"ממוצע: {average:.2f}/100")
-    return "\n\n" + "\n".join(lines)
+    return (
+        "\n\n"
+        f"🔔 {len(alert_timeframes)}/7 טווחי זמן עם התראות"
+    )
 
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
@@ -1753,26 +1735,12 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     else:
         balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
 
-    btc_direction_line = ""
-    btc_reference_score = c.get("btc_reference_score")
-    btc_reference_side = c.get("btc_reference_side")
-    btc_relation = c.get("btc_relation")
-    if btc_relation == "ALIGNED":
-        btc_direction_line = (
-            f"  - אישור BTC ({btc_reference_side}, "
-            f"Score {fmt(btc_reference_score)}): "
-            f"+{fmt(c.get('btc_approval'))}/"
-            f"{fmt(c.get('btc_approval_max'))}\n"
+    btc_like_score_line = ""
+    if float(c.get("btc_like_max", 0) or 0) > 0:
+        btc_like_score_line = (
+            f"  - BTC Like: {fmt(c.get('btc_like'))}/"
+            f"{fmt(c.get('btc_like_max'))}\n"
         )
-    elif btc_relation == "OPPOSITE":
-        btc_direction_line = (
-            f"  - התנגדות BTC ({btc_reference_side}, "
-            f"Score {fmt(btc_reference_score)}): "
-            f"-{fmt(c.get('btc_conflict_penalty'))}/"
-            f"{fmt(c.get('btc_conflict_penalty_max'))}\n"
-        )
-    elif btc_relation == "MISSING":
-        btc_direction_line = "  - BTC: אין נתון באותו טווח\n"
 
     average_score = item.get("average_score_all_timeframes")
     if average_score is None:
@@ -1793,45 +1761,28 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     current_price = item.get("current_price")
     target_price = item.get("target_price")
 
-    cluster_count = int(item.get("cluster_count", 0) or 0)
-    same_direction_count = int(item.get("cluster_same_direction_count", 0) or 0)
-    if cluster_count >= 3:
-        cluster_summary = (
-            f"Cluster Confidence: {cluster_count} טווחים בקלאסטר "
-            f"(מתוך {same_direction_count} באותו כיוון)\n"
-            f"סטייה ממוצעת מה-Median: "
-            f"{fmt(item.get('cluster_mean_deviation_pct'))}%\n"
-        )
-    else:
-        cluster_summary = f"אין קלאסטר בכיוון {item.get('side')}\n"
-
-    def liquidity_line(label: str, amount: Any) -> str:
-        try:
-            value = float(amount or 0)
-        except (TypeError, ValueError):
-            value = 0.0
-        marker = "🔴 " if value < 500_000 else ""
-        return f"{marker}{label}: ${fmt(value, 0)}"
-
     card = (
         f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
         f"צד קרוב: {item['side']}\n"
         f"Score לטווח הנוכחי: "
         f"{fmt(item.get('score', item.get('priority')))}/100\n"
         f"ממוצע Score בכל 7 הטווחים: {fmt(average_score)}/100\n"
-        f"מחיר נוכחי — Bybit: ${fmt_price(current_price)}\n"
+        f"מחיר נוכחי — Binance: ${fmt_price(current_price)}\n"
         f"יעד Max Pain הקרוב: ${fmt_price(target_price)}\n"
         f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
-        f"(סף ניקוד דינמי: {fmt(item.get('allowed_distance_pct'))}%)\n"
-        f"סיווג מרחק למסחר: "
-        f"{_distance_trade_label(item.get('distance_pct'))}\n"
+        f"(סף: {fmt(item.get('allowed_distance_pct'))}%)\n"
         f"קונצנזוס: {item.get('consensus_hits', 0)}/"
         f"{item.get('consensus_total', 0)}\n"
         f"Market: {fmt(item.get('market_support_pct'))}% תמיכה ב-{item['side']} "
         f"({item.get('market_support_count', 0)}/"
         f"{item.get('market_total_count', 0)})\n"
-        + cluster_summary
-        + f"Relative Gap Advantage: "
+        f"Cluster Confidence: "
+        f"{item.get('cluster_count', 0)} טווחים בקלאסטר "
+        f"(מתוך {item.get('cluster_same_direction_count', 0)} "
+        "באותו כיוון)\n"
+        f"סטייה ממוצעת מה-Median: "
+        f"{fmt(item.get('cluster_mean_deviation_pct'))}%\n"
+        f"Relative Gap Advantage: "
         f"{fmt((item.get('relative_gap_advantage') or 0) * 100)}%\n"
         "\n"
         "פירוט הניקוד:\n"
@@ -1839,9 +1790,11 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"{fmt(c.get('directional_alignment'))}/30\n"
         f"  - Consensus: {fmt(c.get('consensus'))}/"
         f"{fmt(c.get('consensus_max'))}\n"
-        + btc_direction_line
-        + f"• Target Proximity: "
-        f"{fmt(c.get('target_proximity'))}/25\n"
+        + btc_like_score_line
+        + f"  - Market: {fmt(c.get('market'))}/"
+        f"{fmt(c.get('market_max'))}\n"
+        f"• Target Proximity: "
+        f"{fmt(c.get('target_proximity'))}/30\n"
         f"• Cluster Confidence: "
         f"{fmt(c.get('cluster_confidence'))}/30\n"
         f"  - צפיפות יעדים: "
@@ -1849,17 +1802,16 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"  - מספר טווחים: "
         f"{fmt(c.get('cluster_coverage'))}/8\n"
         f"  - הצטברות נזילות: "
-        f"{fmt(c.get('cluster_liquidity_growth'))}/10 "
-        f"(מכפיל x{fmt(c.get('cluster_liquidity_multiplier'))})\n"
-        f"• Relative Gap: {fmt(c.get('relative_gap'))}/15\n"
+        f"{fmt(c.get('cluster_liquidity_growth'))}/10\n"
+        f"• Relative Gap: {fmt(c.get('relative_gap'))}/10\n"
         "\n"
         f"סוגי חריגה:\n{types_text}\n\n"
         f"{balance_text}\n"
-        + liquidity_line("נזילות בצד הקרוב", item.get("near_amount")) + "\n"
-        + liquidity_line("נזילות בצד השני", item.get("far_amount"))
+        f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
+        f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}"
     )
+    card += _other_alerts_block(item, all_items)
     card += _quality_block(item, rows)
-    card += _all_timeframe_scores_block(item, all_items, rows)
     return card
 
 
@@ -1867,10 +1819,9 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 def _is_displayable_opportunity(item: Dict[str, Any]) -> bool:
     """Return whether an already-scored opportunity is still tradable.
 
-    Targets closer than MIN_DISPLAY_DISTANCE_PCT are not practical enough for
-    an alert after fees, slippage and execution risk, so they are omitted from
-    /alerts and Watch output. Crossed targets are already excluded by the
-    scoring engine before this display filter runs.
+    This is a display filter only. It does not alter the internal Score.
+    Targets closer than MIN_DISPLAY_DISTANCE_PCT are considered effectively
+    reached and are omitted from /alerts and Watch output.
     """
     try:
         distance = float(item.get("distance_pct"))
@@ -1878,18 +1829,6 @@ def _is_displayable_opportunity(item: Dict[str, Any]) -> bool:
         return False
 
     return distance >= MIN_DISPLAY_DISTANCE_PCT
-
-
-def _distance_trade_label(distance_pct: Any) -> str:
-    try:
-        distance = float(distance_pct)
-    except (TypeError, ValueError):
-        return "לא ידוע"
-    if distance < 0.7:
-        return "גבולי"
-    if distance <= 1.3:
-        return "טווח מועדף"
-    return "רחוק יותר"
 
 
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1945,7 +1884,8 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "⚠️ הסריקה הסתיימה ללא הזדמנויות חדשות להצגה.\n"
                     f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
-                    "אינם מוצגים כהזדמנות מסחר רלוונטית."
+                    "נחשבים כמעט מושגים ואינם מוצגים, אך הציון שלהם "
+                    "עדיין מחושב פנימית."
                 )
                 return
 
@@ -1969,165 +1909,6 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         finally:
             if WATCH_RUNTIME.get("scan_owner") == "/alerts":
-                WATCH_RUNTIME["scan_owner"] = None
-
-
-async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run one live scan and send a separate alert card for each timeframe."""
-    if not context.args:
-        await update.message.reply_text(
-            "שימוש: /alert BTC\n"
-            "אפשר להחליף את BTC בכל סימול מטבע אחר."
-        )
-        return
-
-    symbol = str(context.args[0]).strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
-        await update.message.reply_text("סימול המטבע אינו תקין. לדוגמה: /alert BTC")
-        return
-
-    command_lock = _get_alert_command_lock()
-    if command_lock.locked():
-        await update.message.reply_text(
-            "⏳ סריקת Alerts אחרת פעילה כרגע. נסו שוב לאחר שתסתיים."
-        )
-        return
-
-    scrape_lock = _get_scrape_lock()
-    if scrape_lock.locked():
-        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
-        await update.message.reply_text(
-            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
-            "הפקודה תמתין ותתחיל כשהסורק יתפנה."
-        )
-
-    async with command_lock:
-        try:
-            async with scrape_lock:
-                WATCH_RUNTIME["scan_owner"] = f"/alert {symbol}"
-                await update.message.reply_text(
-                    f"🔎 מתחילה סריקה חיה של 7 הטווחים עבור {symbol}."
-                )
-                rows, _live_result = await collect_live_rows_for_watch()
-
-            all_items = alert_engine.build_opportunities(rows, limit=500)
-            symbol_items = [
-                item for item in all_items
-                if str(item.get("symbol") or "").upper() == symbol
-            ]
-            symbol_items.sort(
-                key=lambda item: (
-                    TIMEFRAMES.index(item.get("timeframe"))
-                    if item.get("timeframe") in TIMEFRAMES else 99
-                )
-            )
-
-            if not symbol_items:
-                await update.message.reply_text(
-                    f"⚠️ לא נמצאו טווחים ניתנים לחישוב עבור {symbol}. "
-                    "ייתכן שאין מחיר Bybit, שחסרים נתוני Max Pain, "
-                    "או שכל היעדים כבר נחצו."
-                )
-                return
-
-            await update.message.reply_text(
-                f"✅ נמצאו {len(symbol_items)}/7 טווחים מחושבים עבור {symbol}. "
-                "כל טווח יוצג בהודעה נפרדת."
-            )
-
-            item_by_tf = {item.get("timeframe"): item for item in symbol_items}
-            sent_index = 0
-            for timeframe in TIMEFRAMES:
-                item = item_by_tf.get(timeframe)
-                if item is None:
-                    await update.message.reply_text(
-                        f"⚪ {symbol} / {timeframe}: אין יעד פעיל שניתן לניקוד."
-                    )
-                    continue
-                sent_index += 1
-                await update.message.reply_text(
-                    _alert_card(sent_index, item, all_items, rows)
-                )
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await update.message.reply_text(
-                f"❌ /alert {symbol} נכשל: {exc!r}"
-            )
-        finally:
-            if WATCH_RUNTIME.get("scan_owner") == f"/alert {symbol}":
-                WATCH_RUNTIME["scan_owner"] = None
-
-
-async def debug_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run a live transparent validation report for one symbol."""
-    if not context.args:
-        await update.message.reply_text("שימוש: /debug BTC")
-        return
-    symbol = str(context.args[0]).strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
-        await update.message.reply_text("סימול המטבע אינו תקין. לדוגמה: /debug BTC")
-        return
-
-    command_lock = _get_alert_command_lock()
-    if command_lock.locked():
-        await update.message.reply_text("⏳ סריקת Alerts אחרת פעילה כרגע. נסו שוב לאחר שתסתיים.")
-        return
-
-    async with command_lock:
-        try:
-            async with _get_scrape_lock():
-                WATCH_RUNTIME["scan_owner"] = f"/debug {symbol}"
-                await update.message.reply_text(
-                    f"🔬 מתחילה בדיקת חישובים חיה עבור {symbol}."
-                )
-                rows, _ = await collect_live_rows_for_watch()
-
-            report = alert_engine.debug_symbol(rows, symbol)
-            items = report.get("items", [])
-            if not items:
-                await update.message.reply_text(f"לא נמצאו נתונים ניתנים לחישוב עבור {symbol}.")
-                return
-
-            lines = [
-                f"🔬 DEBUG {symbol}",
-                f"Consensus: LONG {report['LONG']}/{report['total']} | SHORT {report['SHORT']}/{report['total']}",
-                f"כפילויות שהוסרו: {report['duplicates_removed']}",
-                "",
-            ]
-            for item in items:
-                c = item.get("components", {})
-                members = ",".join(item.get("cluster_members") or []) or "-"
-                status = "✅" if not item.get("calculation_validation_errors") else "❌"
-                lines.extend([
-                    f"{status} {item['timeframe']} {item['side']} | Score {float(item['score']):.2f}",
-                    f"  Consensus {item.get('consensus_hits',0)}/{item.get('consensus_total',0)} = {float(c.get('consensus',0)):.2f}/{float(c.get('consensus_max',0)):.0f}",
-                    (f"  BTC aligned {c.get('btc_reference_side')} Score {float(c.get('btc_reference_score') or 0):.2f}: +{float(c.get('btc_approval') or 0):.2f}/15"
-                     if c.get('btc_relation') == 'ALIGNED' else
-                     f"  BTC opposite {c.get('btc_reference_side')} Score {float(c.get('btc_reference_score') or 0):.2f}: -{float(c.get('btc_conflict_penalty') or 0):.2f}/10"
-                     if c.get('btc_relation') == 'OPPOSITE' else
-                     "  BTC self: consensus only" if c.get('btc_relation') == 'SELF' else
-                     "  BTC reference missing"),
-                    f"  Cluster {item.get('cluster_count',0)}/{item.get('cluster_same_direction_count',0)} [{members}] = {float(c.get('cluster_confidence',0)):.2f}/30",
-                    f"  Sum check {float(item.get('component_sum_check',0)):.2f} = Score {float(item['score']):.2f}",
-                ])
-            lines.append("")
-            if report.get("errors"):
-                lines.append("❌ שגיאות:")
-                lines.extend(f"• {err}" for err in report["errors"])
-            else:
-                lines.append("✅ כל בדיקות העקביות עברו.")
-
-            text = "\n".join(lines)
-            for start in range(0, len(text), 3800):
-                await update.message.reply_text(text[start:start+3800])
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await update.message.reply_text(f"❌ /debug נכשל: {exc!r}")
-        finally:
-            if WATCH_RUNTIME.get("scan_owner") == f"/debug {symbol}":
                 WATCH_RUNTIME["scan_owner"] = None
 
 
@@ -2157,7 +1938,7 @@ async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check Bybit live-price coverage. This command does not modify DB data."""
+    """Check Binance live-price coverage. This command does not modify DB data."""
     rows = raw_latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין snapshot קיים. הריצו /collect קודם.")
@@ -2170,15 +1951,15 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     try:
-        result = live_price_provider.fetch_bybit_usdt_prices(symbols)
+        result = live_price_provider.fetch_binance_usdt_prices(symbols)
     except Exception as exc:
         await update.message.reply_text(
-            "בדיקת החיבור ל-Bybit נכשלה.\n"
+            "בדיקת החיבור ל-Binance נכשלה.\n"
             f"שגיאה: {exc!r}"
         )
         return
 
-    # Specific coin: compare one live Bybit price with all seven Max Pain targets.
+    # Specific coin: compare one live Binance price with all seven Max Pain targets.
     if context.args:
         symbol = context.args[0].upper()
 
@@ -2189,7 +1970,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         live = result["prices"].get(symbol)
         if not live:
             await update.message.reply_text(
-                f"לא נמצא זוג {symbol}USDT ב-Bybit.\n"
+                f"לא נמצא זוג {symbol}USDT ב-Binance.\n"
                 "בשלב הבא נוסיף מקור גיבוי למטבעות שאינם נסחרים שם."
             )
             return
@@ -2224,7 +2005,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         intro = (
             f"בדיקת מחיר חי עבור {symbol}\n"
-            f"מקור: Bybit ({live['pair']})\n"
+            f"מקור: Binance ({live['pair']})\n"
             f"זמן משיכה UTC: {result['fetched_at_utc']}\n"
             "המחיר עדיין לא נשמר ולא משנה את ההתראות בשלב זה.\n\n"
         )
@@ -2247,11 +2028,11 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     summary = (
-        "בדיקת חיבור למחירי Bybit\n"
+        "בדיקת חיבור למחירי Binance\n"
         "--------------------------------\n"
         f"מטבעות קריפטו שנבדקו: {result['requested_count']}\n"
         f"נמצא מחיר חי: {result['found_count']}\n"
-        f"חסרים ב-Bybit: {result['missing_count']}\n"
+        f"חסרים ב-Binance: {result['missing_count']}\n"
         f"זמן משיכה UTC: {result['fetched_at_utc']}\n\n"
         "זו בדיקת כיסוי בלבד — המחירים עדיין לא משנים את החישובים או ההתראות.\n"
     )
@@ -2259,7 +2040,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     missing_text = ", ".join(result["missing_symbols"]) or "אין"
     sample_output = tabulate(
         sample_table,
-        headers=["Coin", "Bybit Pair", "Live Price"],
+        headers=["Coin", "Binance Pair", "Live Price"],
         tablefmt="plain",
     )
 
@@ -2273,7 +2054,7 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Describe Bybit-backed data saved by the latest collection."""
+    """Describe Binance-backed data saved by the latest collection."""
     rows = latest_snapshot_rows()
     if not rows:
         await update.message.reply_text("אין snapshot שמור. הריצו /collect קודם.")
@@ -2285,9 +2066,9 @@ async def live_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )[0]["latest_time"]
 
     text = (
-        "Bybit collection status\n"
+        "Binance collection status\n"
         f"Latest snapshot: {collected}\n"
-        f"Symbols saved with Bybit price: {len(symbols_used)}\n"
+        f"Symbols saved with Binance price: {len(symbols_used)}\n"
         f"Rows saved: {len(rows)}\n"
         "Current price and all Max Pain distances were calculated during /collect.\n"
         "CoinGlass current price is not used as fallback."
@@ -2408,7 +2189,7 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
                 f"⚠️ סריקת Watch #{cycle_number} הסתיימה ללא "
                 "הזדמנויות חדשות להצגה.\n"
                 f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
-                "אינם מוצגים כהזדמנות מסחר רלוונטית."
+                "נחשבים כמעט מושגים ואינם מוצגים."
             )
 
         await bot_app.bot.send_message(chat_id=chat_id, text=header)
@@ -2697,9 +2478,7 @@ def _tradingview_authorized(request: web.Request, payload: Dict[str, Any]) -> bo
     arbitrary HTTP headers. The body secret is removed from stored raw data.
     """
     if not TRADINGVIEW_WEBHOOK_SECRET:
-        # Shadow Mode is read-only. When no secret is configured, accept only
-        # payloads that pass the strict TradingView schema validation below.
-        return True
+        return False
     provided = (
         request.headers.get("X-Webhook-Secret")
         or request.query.get("secret")
@@ -2781,8 +2560,7 @@ async def tradingview_webhook(request: web.Request):
     safe_payload.pop("secret", None)
 
     try:
-        adapted_payload = technical_signal_store.normalize_tradingview_webhook(safe_payload)
-        signal = technical_signal_store.normalize_payload(adapted_payload)
+        signal = technical_signal_store.normalize_payload(safe_payload)
         inserted = _insert_technical_signal(signal)
     except ValueError as exc:
         print(f"[tradingview] rejected payload: {exc}; payload={safe_payload!r}", flush=True)
@@ -2930,7 +2708,6 @@ async def start_web_server(bot_app):
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     app.router.add_post("/telegram", telegram_webhook)
-    app.router.add_post("/tradingview", tradingview_webhook)
     app.router.add_post("/webhooks/tradingview", tradingview_webhook)
     app.router.add_get("/technical/status", technical_status_api)
 
@@ -2938,8 +2715,7 @@ async def start_web_server(bot_app):
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"[health] server running on port {PORT}", flush=True)
-    return runner
+    print(f"[health] server running on port {PORT}")
 
 async def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -2981,45 +2757,36 @@ async def main():
     bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("help", start))
+    bot_app.add_handler(CommandHandler("collect", collect_cmd))
     bot_app.add_handler(CommandHandler("coin", coin))
     bot_app.add_handler(CommandHandler("alerts", alert_check))
-    bot_app.add_handler(CommandHandler("alert", alert_coin))
-    bot_app.add_handler(CommandHandler("debug", debug_coin))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_handler(CommandHandler("technical_status", technical_status_cmd))
     bot_app.add_error_handler(telegram_error_handler)
 
-    # Bind Render's HTTP port before making outbound Telegram API calls.
-    # This prevents Render from terminating the service while startup waits on
-    # Telegram initialization or webhook configuration.
-    web_runner = await start_web_server(bot_app)
+    await bot_app.initialize()
+    await bot_app.start()
+
+    print(
+        "[startup] manual-only mode; no collection, alert, or Watch task created",
+        flush=True,
+    )
+
+    webhook_url = f"{PUBLIC_URL}/telegram"
+    await bot_app.bot.delete_webhook(drop_pending_updates=True)
+    await bot_app.bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True,
+    )
+    print(f"[bot] webhook set to {webhook_url}", flush=True)
+
+    await start_web_server(bot_app)
 
     try:
-        await bot_app.initialize()
-        await bot_app.start()
-
-        print(
-            "[startup] live-scan mode; no automatic scan or Watch task created",
-            flush=True,
-        )
-
-        webhook_url = f"{PUBLIC_URL}/telegram"
-        await bot_app.bot.delete_webhook(drop_pending_updates=True)
-        await bot_app.bot.set_webhook(
-            url=webhook_url,
-            drop_pending_updates=True,
-        )
-        print(f"[bot] webhook set to {webhook_url}", flush=True)
-
         while True:
             await asyncio.sleep(3600)
-    except Exception as exc:
-        import traceback
-        print(f"[startup] fatal error: {exc!r}", flush=True)
-        traceback.print_exc()
-        raise
     finally:
         if WATCH_TASK is not None and not WATCH_TASK.done():
             WATCH_TASK.cancel()
@@ -3028,14 +2795,9 @@ async def main():
             except asyncio.CancelledError:
                 pass
 
-        try:
-            await bot_app.bot.delete_webhook(drop_pending_updates=False)
-        except Exception as exc:
-            print(f"[shutdown] delete_webhook warning: {exc!r}", flush=True)
-        if bot_app.running:
-            await bot_app.stop()
+        await bot_app.bot.delete_webhook(drop_pending_updates=False)
+        await bot_app.stop()
         await bot_app.shutdown()
-        await web_runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())

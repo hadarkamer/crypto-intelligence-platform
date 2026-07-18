@@ -7,19 +7,28 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 
 
-BYBIT_API_BASE_URL = os.getenv(
-    "BYBIT_API_BASE_URL",
-    "https://api.bybit.com",
+BINANCE_FUTURES_BASE_URL = os.getenv(
+    "BINANCE_FUTURES_BASE_URL",
+    "https://fapi.binance.com",
 ).rstrip("/")
-BYBIT_TICKERS_ENDPOINT = os.getenv(
-    "BYBIT_TICKERS_ENDPOINT",
-    "/v5/market/tickers",
+BINANCE_FUTURES_MARK_ENDPOINT = os.getenv(
+    "BINANCE_FUTURES_MARK_ENDPOINT",
+    "/fapi/v1/premiumIndex",
 )
 
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("BYBIT_PRICE_TIMEOUT_SECONDS", "15"))
+BINANCE_SPOT_BASE_URL = os.getenv(
+    "BINANCE_MARKET_DATA_BASE_URL",
+    "https://data-api.binance.vision",
+).rstrip("/")
+BINANCE_SPOT_PRICE_ENDPOINT = os.getenv(
+    "BINANCE_PRICE_ENDPOINT",
+    "/api/v3/ticker/price",
+)
 
-# Optional fallbacks for symbols whose CoinGlass notation differs from Bybit.
-# Direct SYMBOLUSDT lookup is always attempted first.
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("BINANCE_PRICE_TIMEOUT_SECONDS", "15"))
+
+# symbol -> (Binance base symbol, multiplier)
+# 1000PEPE on CoinGlass represents 1000 PEPE units.
 SYMBOL_ALIASES: Dict[str, Tuple[str, float]] = {
     "1000PEPE": ("PEPE", 1000.0),
 }
@@ -29,32 +38,17 @@ def _normalize_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
 
 
-def _fetch_linear_mark_prices() -> Dict[str, float]:
-    """Fetch all Bybit USDT-linear tickers and return pair -> mark price."""
-    url = BYBIT_API_BASE_URL + BYBIT_TICKERS_ENDPOINT
-    response = requests.get(
-        url,
-        params={"category": "linear"},
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
+def _fetch_futures_mark_prices() -> Dict[str, float]:
+    url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_MARK_ENDPOINT
+    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     payload = response.json()
 
-    if int(payload.get("retCode", -1)) != 0:
-        raise RuntimeError(
-            f"Bybit API error retCode={payload.get('retCode')}: "
-            f"{payload.get('retMsg', 'unknown error')}"
-        )
-
-    items = payload.get("result", {}).get("list", [])
-    if not isinstance(items, list):
-        raise RuntimeError("Bybit API returned an unexpected ticker payload")
-
     result: Dict[str, float] = {}
-    for item in items:
+    for item in payload:
         pair = str(item.get("symbol", "")).upper()
         raw_price = item.get("markPrice")
-        if not pair or raw_price in (None, ""):
+        if not pair or raw_price is None:
             continue
         try:
             result[pair] = float(raw_price)
@@ -63,67 +57,89 @@ def _fetch_linear_mark_prices() -> Dict[str, float]:
     return result
 
 
-def fetch_bybit_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
-    """Fetch Bybit USDT-linear mark prices only.
+def _fetch_spot_prices() -> Dict[str, float]:
+    url = BINANCE_SPOT_BASE_URL + BINANCE_SPOT_PRICE_ENDPOINT
+    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    payload = response.json()
 
-    No Spot fallback is used. A symbol without an active USDT-linear mark
-    price is excluded from calculations and alerts.
+    result: Dict[str, float] = {}
+    for item in payload:
+        pair = str(item.get("symbol", "")).upper()
+        raw_price = item.get("price")
+        if not pair or raw_price is None:
+            continue
+        try:
+            result[pair] = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
+    """Fetch Binance prices once.
+
+    Priority:
+    1. USD-M Futures mark price — better aligned with liquidation analysis.
+    2. Binance Spot last price as fallback.
     """
     requested = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
     fetched_at = datetime.now(timezone.utc)
 
-    provider_error = None
+    futures_error = None
+    spot_error = None
+
     try:
-        futures_prices = _fetch_linear_mark_prices()
+        futures_prices = _fetch_futures_mark_prices()
     except Exception as exc:
         futures_prices = {}
-        provider_error = repr(exc)
+        futures_error = repr(exc)
+
+    try:
+        spot_prices = _fetch_spot_prices()
+    except Exception as exc:
+        spot_prices = {}
+        spot_error = repr(exc)
 
     prices: Dict[str, Dict[str, Any]] = {}
     missing: List[str] = []
+
     for symbol in requested:
-        # Prefer Bybit's exact pair (for example 1000PEPEUSDT).
-        direct_pair = f"{symbol}USDT"
-        pair = direct_pair
-        multiplier = 1.0
+        base, multiplier = SYMBOL_ALIASES.get(symbol, (symbol, 1.0))
+        pair = f"{base}USDT"
 
-        if direct_pair not in futures_prices:
-            base, multiplier = SYMBOL_ALIASES.get(symbol, (symbol, 1.0))
-            pair = f"{base}USDT"
-
-        if pair not in futures_prices:
+        if pair in futures_prices:
+            raw_price = futures_prices[pair]
+            source = "binance_futures_mark"
+        elif pair in spot_prices:
+            raw_price = spot_prices[pair]
+            source = "binance_spot"
+        else:
             missing.append(symbol)
             continue
 
-        raw_price = futures_prices[pair]
         prices[symbol] = {
             "symbol": symbol,
             "pair": pair,
             "price": raw_price * multiplier,
             "raw_price": raw_price,
             "multiplier": multiplier,
-            "source": "bybit_linear_mark",
+            "source": source,
             "fetched_at_utc": fetched_at.isoformat(),
         }
 
     return {
         "ok": bool(prices),
-        "source": "bybit_linear_mark",
+        "source": "binance_futures_mark_then_spot",
         "fetched_at_utc": fetched_at.isoformat(),
         "requested_count": len(requested),
         "found_count": len(prices),
         "missing_count": len(missing),
         "prices": prices,
         "missing_symbols": missing,
-        "provider_error": provider_error,
-        # Kept for compatibility with any existing diagnostics.
-        "futures_error": provider_error,
+        "futures_error": futures_error,
+        "spot_error": spot_error,
     }
-
-
-# Backward-compatible name so older callers do not break during deployment.
-def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
-    return fetch_bybit_usdt_prices(symbols)
 
 
 def recalculate_distances(
@@ -131,7 +147,7 @@ def recalculate_distances(
     short_max_pain: Optional[float],
     long_max_pain: Optional[float],
 ) -> Dict[str, Optional[float]]:
-    """Recalculate all Max Pain distances from the Bybit live price."""
+    """Recalculate all Max Pain distances from the Binance live price."""
     if not live_price:
         return {
             "short_signed_pct": None,
@@ -176,7 +192,19 @@ def recalculate_distances(
 
 
 def enrich_snapshot_rows(rows: Iterable[Any], excluded_symbols: Iterable[str] = ()) -> Dict[str, Any]:
-    """Overlay Bybit USDT-linear mark prices on raw CoinGlass rows."""
+    """Overlay Binance live prices on raw CoinGlass rows.
+
+    CoinGlass remains the source for:
+    - Short/Long Max Pain targets
+    - Short/Long liquidation amounts
+
+    Binance becomes the source for:
+    - current_price
+    - distance_short_pct / distance_long_pct
+    - distance_short_abs / distance_long_abs
+
+    Symbols without a Binance price are excluded from live calculations.
+    """
     excluded = {str(x).upper() for x in excluded_symbols}
     raw_rows = [dict(row) for row in rows]
     symbols = sorted({
@@ -185,11 +213,7 @@ def enrich_snapshot_rows(rows: Iterable[Any], excluded_symbols: Iterable[str] = 
         if row.get("symbol") and str(row.get("symbol")).upper() not in excluded
     })
 
-    price_result = fetch_bybit_usdt_prices(symbols)
-    provider_error = price_result.get("provider_error")
-    if provider_error and not price_result.get("prices"):
-        raise RuntimeError(f"Bybit live-price request failed: {provider_error}")
-
+    price_result = fetch_binance_usdt_prices(symbols)
     enriched = []
     skipped = []
 
