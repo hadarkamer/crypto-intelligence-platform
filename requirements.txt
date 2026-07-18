@@ -1,8 +1,0 @@
-aiohttp
-python-dotenv
-python-telegram-bot
-tabulate
-requests
-pycryptodome
-psycopg[binary]
-playwright
