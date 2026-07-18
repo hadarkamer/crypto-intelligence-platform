@@ -792,10 +792,7 @@ async def collect_once():
 
     if not rows:
         raise RuntimeError(
-            "No complete seven-timeframe symbols remained after Binance Futures pricing; "
-            f"found={price_result.get('found_count', 0)}/{price_result.get('requested_count', 0)}; "
-            f"missing={price_result.get('missing_symbols', [])[:20]}; "
-            f"error={price_result.get('futures_error')}"
+            "No complete seven-timeframe symbols remained after Binance pricing"
         )
 
     rows = validate_snapshot(rows)
@@ -1809,20 +1806,12 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     else:
         balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
 
-    btc_score_line = ""
-    if float(c.get("btc_confirmation_max", 0) or 0) > 0:
-        if float(c.get("btc_conflict_penalty", 0) or 0) > 0:
-            btc_score_line = (
-                f"  - BTC conflict: -{fmt(c.get('btc_conflict_penalty'))}/"
-                f"{fmt(c.get('btc_penalty_max'))} "
-                f"(BTC {item.get('btc_reference_side')} {fmt(c.get('btc_reference_score'))}/100)\n"
-            )
-        else:
-            btc_score_line = (
-                f"  - BTC confirmation: +{fmt(c.get('btc_confirmation'))}/"
-                f"{fmt(c.get('btc_confirmation_max'))} "
-                f"(BTC {item.get('btc_reference_side')} {fmt(c.get('btc_reference_score'))}/100)\n"
-            )
+    btc_like_score_line = ""
+    if float(c.get("btc_like_max", 0) or 0) > 0:
+        btc_like_score_line = (
+            f"  - BTC Like: {fmt(c.get('btc_like'))}/"
+            f"{fmt(c.get('btc_like_max'))}\n"
+        )
 
     average_score = item.get("average_score_all_timeframes")
     if average_score is None:
@@ -1889,8 +1878,9 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"{fmt(c.get('directional_alignment'))}/30\n"
         f"  - Consensus: {fmt(c.get('consensus'))}/"
         f"{fmt(c.get('consensus_max'))}\n"
-        + btc_score_line
-        + "  - Market: מידע בלבד, ללא ניקוד\n"
+        + btc_like_score_line
+        + f"  - Market: {fmt(c.get('market'))}/"
+        f"{fmt(c.get('market_max'))}\n"
         f"• Target Proximity: "
         f"{fmt(c.get('target_proximity'))}/25\n"
         f"• Cluster Confidence: "
@@ -2154,7 +2144,7 @@ async def debug_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.extend([
                     f"{status} {item['timeframe']} {item['side']} | Score {float(item['score']):.2f}",
                     f"  Consensus {item.get('consensus_hits',0)}/{item.get('consensus_total',0)} = {float(c.get('consensus',0)):.2f}/{float(c.get('consensus_max',0)):.0f}",
-                    f"  Cluster members={item.get('cluster_count',0)} [{members}] | same direction={item.get('cluster_same_direction_count',0)}/7 | {float(c.get('cluster_confidence',0)):.2f}/30",
+                    f"  Cluster {item.get('cluster_count',0)}/{item.get('cluster_same_direction_count',0)} [{members}] = {float(c.get('cluster_confidence',0)):.2f}/30",
                     f"  Sum check {float(item.get('component_sum_check',0)):.2f} = Score {float(item['score']):.2f}",
                 ])
             lines.append("")

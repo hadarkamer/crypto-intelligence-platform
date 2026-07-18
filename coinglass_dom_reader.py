@@ -554,14 +554,13 @@ async def _retry_timeframe_on_fresh_page(
                 f"[dom] tf={timeframe} fresh-page retry {attempt}/{attempts}",
                 flush=True,
             )
-            async with asyncio.timeout(55):
-                retry_page = await _new_ready_page(context, url)
-                last_result = await read_timeframe(
-                    retry_page,
-                    timeframe,
-                    previous_fingerprint=previous_fingerprint,
-                    forbidden_fingerprints=forbidden_fingerprints,
-                )
+            retry_page = await _new_ready_page(context, url)
+            last_result = await read_timeframe(
+                retry_page,
+                timeframe,
+                previous_fingerprint=previous_fingerprint,
+                forbidden_fingerprints=forbidden_fingerprints,
+            )
 
             if last_result.get("verified") and last_result.get("rows"):
                 print(
@@ -570,20 +569,6 @@ async def _retry_timeframe_on_fresh_page(
                 )
                 return last_result
 
-        except asyncio.TimeoutError:
-            last_result = {
-                "timeframe": timeframe,
-                "clicked": False,
-                "verified": False,
-                "rows": [],
-                "fingerprint": None,
-                "error": "fresh-page attempt timed out after 55 seconds",
-                "debug": {},
-            }
-            print(
-                f"[dom] tf={timeframe} retry {attempt}/{attempts} timed out after 55s",
-                flush=True,
-            )
         except Exception as exc:
             last_result = {
                 "timeframe": timeframe,
