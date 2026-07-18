@@ -65,3 +65,14 @@
 - Rai webhook endpoints: `POST /tradingview` and `POST /webhooks/tradingview`.
 - Rai status remains available separately through `/technical_status` and `GET /technical/status`.
 - Indicator ingestion does not trigger, replace, or modify the bot's liquidity actions.
+
+## GOAT alert() parser update — 2026-07-18
+
+The TradingView webhook adapter now accepts protected G.O.A.T `Any alert() function call`
+payloads, including event labels such as `SOFT EXIT`, `LOSING GRIP`, and other
+non-bullish/non-bearish readings. These payloads are stored only as technical-score
+snapshots. They do not independently trigger or replace any MaxPain bot action.
+
+The adapter extracts the score and timeframe from either dedicated embed fields or
+the embed description (for example `5/100` and `1 Min`). Existing normalized JSON
+and the earlier Bullish/Bearish/Strong Zone embed templates remain supported.

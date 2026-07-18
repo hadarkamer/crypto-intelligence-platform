@@ -206,26 +206,64 @@ def _extract_number(value: Any, *, field_name: str) -> float:
     return float(match.group(0))
 
 
-def normalize_tradingview_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert the G.O.A.T Discord-embed webhook into the internal contract.
+def _slug_event_label(label: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+    return slug or "goat_update"
 
-    TradingView sends the alert message exactly as configured. The shared
-    indicator templates use Discord embed JSON, so this adapter extracts the
-    symbol, exchange, event type, direction and plotted values without
-    requiring the user to rewrite the alert messages.
+
+def _extract_timeframe_from_text(*values: Any) -> Optional[str]:
+    """Extract a TradingView timeframe from GOAT embed text."""
+    text = " ".join(_clean_embed_text(value) for value in values if value not in (None, ""))
+    if not text:
+        return None
+
+    # Prefer explicit units used by the indicator, e.g. "1 Min" or "4 Hours".
+    unit_match = re.search(
+        r"\b(\d+)\s*(MIN(?:UTE)?S?|H(?:OU)?RS?|DAYS?|WEEKS?|MONTHS?)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if unit_match:
+        amount = int(unit_match.group(1))
+        unit = unit_match.group(2).lower()
+        if unit.startswith("min"):
+            return f"{amount}m"
+        if unit.startswith("h"):
+            return f"{amount}h"
+        if unit.startswith("day"):
+            return f"{amount}d"
+        if unit.startswith("week"):
+            return f"{amount}w"
+        if unit.startswith("month"):
+            return f"{amount}M"
+
+    # Also accept compact values such as 5m, 1h, 1D.
+    compact_match = re.search(r"(?<![A-Za-z0-9])(\d+\s*[mMhHdDwW])(?![A-Za-z0-9])", text)
+    if compact_match:
+        return compact_match.group(1).replace(" ", "")
+    return None
+
+
+def normalize_tradingview_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert G.O.A.T Discord-embed webhooks into the internal score contract.
+
+    The protected GOAT indicator emits many event labels through ``alert()``
+    (for example SOFT EXIT, LOSING GRIP, BULLISH, or BEARISH). These events are
+    treated only as score snapshots. MaxPain remains the sole component that
+    decides whether to send a trading alert.
     """
     if not isinstance(payload, dict):
         raise ValueError("payload must be a JSON object")
 
     # Already-normalized payloads remain supported.
-    if not isinstance(payload.get("embeds"), list):
+    embeds_value = payload.get("embeds")
+    if not isinstance(embeds_value, list):
         return dict(payload)
 
-    embeds = payload.get("embeds") or []
-    if not embeds or not isinstance(embeds[0], dict):
+    if not embeds_value or not isinstance(embeds_value[0], dict):
         raise ValueError("missing TradingView embed")
 
-    embed = embeds[0]
+    embed = embeds_value[0]
     title = _clean_embed_text(embed.get("title"))
     match = re.match(r"^([^:|]+):([^|]+)\|\s*(.+)$", title)
     if not match:
@@ -233,46 +271,63 @@ def normalize_tradingview_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     ticker = match.group(1).strip().upper()
     exchange = match.group(2).strip().upper()
-    label = match.group(3).strip().upper()
+    label_original = match.group(3).strip()
+    label = label_original.upper()
+    event_type = _slug_event_label(label_original)
+    description = _clean_embed_text(embed.get("description"))
 
-    if "BULLISH" in label:
-        event_type = "bullish_signal"
-        direction = "LONG"
-    elif "BEARISH" in label:
-        event_type = "bearish_signal"
-        direction = "SHORT"
-    elif "STRONG ZONE" in label:
-        event_type = "strong_zone"
-        direction = "NEUTRAL"
-    else:
-        raise ValueError(f"unsupported TradingView alert type: {label}")
-
-    fields = {}
+    fields: Dict[str, str] = {}
+    all_field_text = []
     for item in embed.get("fields") or []:
         if not isinstance(item, dict):
             continue
-        name = _clean_embed_text(item.get("name")).lower()
+        name = _clean_embed_text(item.get("name"))
+        name_lower = name.lower()
         value = _clean_embed_text(item.get("value"))
-        if "score" in name and "avg" not in name:
+        all_field_text.extend((name, value))
+        if "score" in name_lower and "avg" not in name_lower:
             fields["score"] = value
-        elif "avg" in name and "score" in name:
+        elif "avg" in name_lower and "score" in name_lower:
             fields["avg_score"] = value
-        elif "price" in name:
+        elif "price" in name_lower:
             fields["price"] = value
-        elif name.endswith("tf") or " tf" in name or "timeframe" in name:
+        elif name_lower.endswith("tf") or " tf" in name_lower or "timeframe" in name_lower:
             fields["timeframe"] = value
-        elif "exit" in name:
+        elif "exit" in name_lower:
             fields["exit_pressure"] = value
-        elif "atr" in name and "stop" in name:
+        elif "atr" in name_lower and "stop" in name_lower:
             fields["atr_stop"] = value
+        elif "risk" in name_lower:
+            fields["risk"] = value
+        elif "quality" in name_lower:
+            fields["quality"] = value
 
-    score = _extract_number(fields.get("score"), field_name="Score")
+    # Some alert() messages put the live Score in the description rather than
+    # a dedicated field: e.g. "🔴 5/100 NO SETUP".
+    score_value = fields.get("score")
+    if not score_value:
+        score_match = re.search(r"(?<!\d)(\d+(?:\.\d+)?)\s*/\s*100", description)
+        if score_match:
+            score_value = score_match.group(1)
+    score = _extract_number(score_value, field_name="Score")
+
     timeframe = _clean_embed_text(fields.get("timeframe"))
     if not timeframe:
-        raise ValueError("missing timeframe")
+        timeframe = _extract_timeframe_from_text(description, *all_field_text) or ""
+    if not timeframe:
+        raise ValueError("missing timeframe in GOAT alert payload")
+
+    # Direction is metadata only. It does not trigger a bot action.
+    direction_text = " ".join((label, description, " ".join(all_field_text))).upper()
+    if any(word in direction_text for word in ("BULLISH", " LONG", "LONG ")):
+        direction = "LONG"
+    elif any(word in direction_text for word in ("BEARISH", " SHORT", "SHORT ")):
+        direction = "SHORT"
+    else:
+        direction = "LONG" if score > 50 else "SHORT" if score < 50 else "NEUTRAL"
 
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
-    normalized = {
+    normalized: Dict[str, Any] = {
         "source": "tradingview_goat",
         "symbol": ticker,
         "exchange": exchange,
@@ -294,6 +349,9 @@ def normalize_tradingview_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
                 normalized[key] = _extract_number(fields[key], field_name=key)
             except ValueError:
                 normalized[key] = None
+    for key in ("risk", "quality"):
+        if key in fields:
+            normalized[key] = fields[key]
 
     return normalized
 
