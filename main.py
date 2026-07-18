@@ -1158,14 +1158,23 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = context.args[0].upper()
-    rows = [
-        r for r in latest_snapshot_rows()
+    snapshot_rows = [
+        r for r in raw_latest_snapshot_rows()
         if str(r["symbol"]).upper() == symbol
     ]
 
+    if not snapshot_rows:
+        await update.message.reply_text(
+            f"לא נמצא {symbol} ב-snapshot האחרון. הריצו /collect קודם."
+        )
+        return
+
+    live_result = live_price_provider.enrich_snapshot_rows(snapshot_rows)
+    rows = live_result.get("rows", [])
+    price_result = live_result.get("price_result", {})
     if not rows:
         await update.message.reply_text(
-            f"לא נמצאו נתוני Binance חיים עבור {symbol}, או שהמטבע אינו קיים ב-snapshot האחרון."
+            f"לא ניתן היה למשוך כעת מחיר Binance חי עבור {symbol}."
         )
         return
 
@@ -1190,7 +1199,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     source = rows[0].get("price_source", "binance")
-    fetched = rows[0].get("price_fetched_at_utc", "-")
+    fetched = price_result.get("fetched_at_utc") or rows[0].get("price_fetched_at_utc", "-")
     await update.message.reply_text(
         f"Price source: {source}\nFetched UTC: {fetched}\n"
         f"<pre>{html.escape(text)}</pre>",
@@ -1797,12 +1806,26 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     else:
         balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
 
-    btc_like_score_line = ""
-    if float(c.get("btc_like_max", 0) or 0) > 0:
-        btc_like_score_line = (
-            f"  - BTC Like: {fmt(c.get('btc_like'))}/"
-            f"{fmt(c.get('btc_like_max'))}\n"
+    btc_direction_line = ""
+    btc_reference_score = c.get("btc_reference_score")
+    btc_reference_side = c.get("btc_reference_side")
+    btc_relation = c.get("btc_relation")
+    if btc_relation == "ALIGNED":
+        btc_direction_line = (
+            f"  - אישור BTC ({btc_reference_side}, "
+            f"Score {fmt(btc_reference_score)}): "
+            f"+{fmt(c.get('btc_approval'))}/"
+            f"{fmt(c.get('btc_approval_max'))}\n"
         )
+    elif btc_relation == "OPPOSITE":
+        btc_direction_line = (
+            f"  - התנגדות BTC ({btc_reference_side}, "
+            f"Score {fmt(btc_reference_score)}): "
+            f"-{fmt(c.get('btc_conflict_penalty'))}/"
+            f"{fmt(c.get('btc_conflict_penalty_max'))}\n"
+        )
+    elif btc_relation == "MISSING":
+        btc_direction_line = "  - BTC: אין נתון באותו טווח\n"
 
     average_score = item.get("average_score_all_timeframes")
     if average_score is None:
@@ -1869,10 +1892,8 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"{fmt(c.get('directional_alignment'))}/30\n"
         f"  - Consensus: {fmt(c.get('consensus'))}/"
         f"{fmt(c.get('consensus_max'))}\n"
-        + btc_like_score_line
-        + f"  - Market: {fmt(c.get('market'))}/"
-        f"{fmt(c.get('market_max'))}\n"
-        f"• Target Proximity: "
+        + btc_direction_line
+        + f"• Target Proximity: "
         f"{fmt(c.get('target_proximity'))}/25\n"
         f"• Cluster Confidence: "
         f"{fmt(c.get('cluster_confidence'))}/30\n"
@@ -2135,6 +2156,12 @@ async def debug_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.extend([
                     f"{status} {item['timeframe']} {item['side']} | Score {float(item['score']):.2f}",
                     f"  Consensus {item.get('consensus_hits',0)}/{item.get('consensus_total',0)} = {float(c.get('consensus',0)):.2f}/{float(c.get('consensus_max',0)):.0f}",
+                    (f"  BTC aligned {c.get('btc_reference_side')} Score {float(c.get('btc_reference_score') or 0):.2f}: +{float(c.get('btc_approval') or 0):.2f}/15"
+                     if c.get('btc_relation') == 'ALIGNED' else
+                     f"  BTC opposite {c.get('btc_reference_side')} Score {float(c.get('btc_reference_score') or 0):.2f}: -{float(c.get('btc_conflict_penalty') or 0):.2f}/10"
+                     if c.get('btc_relation') == 'OPPOSITE' else
+                     "  BTC self: consensus only" if c.get('btc_relation') == 'SELF' else
+                     "  BTC reference missing"),
                     f"  Cluster {item.get('cluster_count',0)}/{item.get('cluster_same_direction_count',0)} [{members}] = {float(c.get('cluster_confidence',0)):.2f}/30",
                     f"  Sum check {float(item.get('component_sum_check',0)):.2f} = Score {float(item['score']):.2f}",
                 ])

@@ -67,3 +67,10 @@
 - SHORT targets already crossed by the live Binance price are excluded.
 - LONG targets already crossed by the live Binance price are excluded.
 - Crossed targets do not participate in direction, consensus, clustering or scoring.
+
+## Stage 62 — BTC Directional Alignment
+- Altcoin consensus: 0–15 points.
+- Same-timeframe BTC confirmation: continuous 0–15 points from BTC total score.
+- Opposite-timeframe BTC direction: continuous penalty up to 10 points.
+- BTC itself: consensus only, scaled to 0–30.
+- Market breadth remains display-only and is excluded from scoring.

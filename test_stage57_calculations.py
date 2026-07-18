@@ -37,10 +37,10 @@ class Stage57CalculationTests(unittest.TestCase):
         for item in items:
             if item["side"] == "LONG":
                 self.assertEqual(item["consensus_hits"], 3)
-                self.assertAlmostEqual(item["components"]["consensus"], 9.86, places=2)
+                self.assertAlmostEqual(item["components"]["consensus"], 12.86, places=2)
             else:
                 self.assertEqual(item["consensus_hits"], 4)
-                self.assertAlmostEqual(item["components"]["consensus"], 13.14, places=2)
+                self.assertAlmostEqual(item["components"]["consensus"], 17.14, places=2)
 
     def test_cluster_is_side_specific(self):
         items = alert_engine.build_opportunities(btc_rows(), limit=100)
