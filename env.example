@@ -1,0 +1,25 @@
+playwright==1.49.1
+python-telegram-bot==21.9
+python-dotenv==1.0.1
+pandas==2.2.3
+tabulate==0.9.0
+apscheduler==3.10.4
+
+# Binance public market-data endpoint (no API key required)
+BINANCE_MARKET_DATA_BASE_URL=https://data-api.binance.vision
+BINANCE_PRICE_ENDPOINT=/api/v3/ticker/price
+BINANCE_PRICE_TIMEOUT_SECONDS=15
+
+# Binance USD-M Futures mark price (primary live price)
+BINANCE_FUTURES_BASE_URL=https://fapi.binance.com
+BINANCE_FUTURES_MARK_ENDPOINT=/fapi/v1/premiumIndex
+
+# Binance Spot fallback
+BINANCE_MARKET_DATA_BASE_URL=https://data-api.binance.vision
+BINANCE_PRICE_ENDPOINT=/api/v3/ticker/price
+BINANCE_PRICE_TIMEOUT_SECONDS=15
+
+# Automatic alert watch
+WATCH_INTERVAL_MINUTES=15
+WATCH_PRIORITY_THRESHOLD=75
+WATCH_COOLDOWN_MINUTES=60
