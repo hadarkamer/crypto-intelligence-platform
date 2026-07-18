@@ -1058,6 +1058,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "פקודות:\n"
         "/collect — איסוף מלא ושמירת Snapshot חדש\n"
         "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
+        "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — הפעלת לולאת Watch אחת\n"
         "/watch_status — הצגת מצב בלבד\n"
@@ -1697,6 +1698,32 @@ def _quality_block(item: Dict[str, Any], rows: List[Any]) -> str:
     )
 
 
+def _all_timeframe_scores_block(item: Dict[str, Any], all_items) -> str:
+    """Compact seven-timeframe score table shown only at card bottom."""
+    symbol = str(item.get("symbol") or "").upper()
+    by_timeframe = {
+        str(other.get("timeframe")): other
+        for other in all_items
+        if str(other.get("symbol") or "").upper() == symbol
+    }
+
+    lines = [f"📊 ציוני {symbol} בכל הטווחים:"]
+    values = []
+    for timeframe in TIMEFRAMES:
+        other = by_timeframe.get(timeframe)
+        if other is None:
+            lines.append(f"{timeframe:<3}  —")
+            continue
+        value = float(other.get("score", other.get("priority", 0)) or 0)
+        values.append(value)
+        lines.append(f"{timeframe:<3}  {value:.2f}")
+
+    average = sum(values) / len(values) if values else 0.0
+    lines.append("")
+    lines.append(f"ממוצע: {average:.2f}/100")
+    return "\n\n" + "\n".join(lines)
+
+
 def _other_alerts_block(item: Dict[str, Any], all_items) -> str:
     symbol_items = [
         other for other in all_items
@@ -1823,6 +1850,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     )
     card += _other_alerts_block(item, all_items)
     card += _quality_block(item, rows)
+    card += _all_timeframe_scores_block(item, all_items)
     return card
 
 
@@ -1932,6 +1960,94 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         finally:
             if WATCH_RUNTIME.get("scan_owner") == "/alerts":
+                WATCH_RUNTIME["scan_owner"] = None
+
+
+async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run one live scan and send a separate alert card for each timeframe."""
+    if not context.args:
+        await update.message.reply_text(
+            "שימוש: /alert BTC\n"
+            "אפשר להחליף את BTC בכל סימול מטבע אחר."
+        )
+        return
+
+    symbol = str(context.args[0]).strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
+        await update.message.reply_text("סימול המטבע אינו תקין. לדוגמה: /alert BTC")
+        return
+
+    command_lock = _get_alert_command_lock()
+    if command_lock.locked():
+        await update.message.reply_text(
+            "⏳ סריקת Alerts אחרת פעילה כרגע. נסו שוב לאחר שתסתיים."
+        )
+        return
+
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
+        await update.message.reply_text(
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
+            "הפקודה תמתין ותתחיל כשהסורק יתפנה."
+        )
+
+    async with command_lock:
+        try:
+            async with scrape_lock:
+                WATCH_RUNTIME["scan_owner"] = f"/alert {symbol}"
+                await update.message.reply_text(
+                    f"🔎 מתחילה סריקה חיה של 7 הטווחים עבור {symbol}."
+                )
+                rows, _live_result = await collect_live_rows_for_watch()
+
+            all_items = alert_engine.build_opportunities(rows, limit=500)
+            symbol_items = [
+                item for item in all_items
+                if str(item.get("symbol") or "").upper() == symbol
+            ]
+            symbol_items.sort(
+                key=lambda item: (
+                    TIMEFRAMES.index(item.get("timeframe"))
+                    if item.get("timeframe") in TIMEFRAMES else 99
+                )
+            )
+
+            if not symbol_items:
+                await update.message.reply_text(
+                    f"⚠️ לא נמצאו טווחים ניתנים לחישוב עבור {symbol}. "
+                    "ייתכן שאין מחיר Binance, שחסרים נתוני Max Pain, "
+                    "או שכל היעדים כבר נחצו."
+                )
+                return
+
+            await update.message.reply_text(
+                f"✅ נמצאו {len(symbol_items)}/7 טווחים מחושבים עבור {symbol}. "
+                "כל טווח יוצג בהודעה נפרדת."
+            )
+
+            item_by_tf = {item.get("timeframe"): item for item in symbol_items}
+            sent_index = 0
+            for timeframe in TIMEFRAMES:
+                item = item_by_tf.get(timeframe)
+                if item is None:
+                    await update.message.reply_text(
+                        f"⚪ {symbol} / {timeframe}: אין יעד פעיל שניתן לניקוד."
+                    )
+                    continue
+                sent_index += 1
+                await update.message.reply_text(
+                    _alert_card(sent_index, item, all_items, rows)
+                )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await update.message.reply_text(
+                f"❌ /alert {symbol} נכשל: {exc!r}"
+            )
+        finally:
+            if WATCH_RUNTIME.get("scan_owner") == f"/alert {symbol}":
                 WATCH_RUNTIME["scan_owner"] = None
 
 
@@ -2783,6 +2899,7 @@ async def main():
     bot_app.add_handler(CommandHandler("collect", collect_cmd))
     bot_app.add_handler(CommandHandler("coin", coin))
     bot_app.add_handler(CommandHandler("alerts", alert_check))
+    bot_app.add_handler(CommandHandler("alert", alert_coin))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
