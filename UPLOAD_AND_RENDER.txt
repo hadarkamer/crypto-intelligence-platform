@@ -1,0 +1,9 @@
+After uploading the files to the repository, set Render Build Command to:
+
+bash build.sh
+
+Start Command remains:
+
+python main.py
+
+The build script restores requirements.txt from requirements.canonical.txt before installation.

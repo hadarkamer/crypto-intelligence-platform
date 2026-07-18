@@ -67,3 +67,7 @@
 - SHORT targets already crossed by the live Binance price are excluded.
 - LONG targets already crossed by the live Binance price are excluded.
 - Crossed targets do not participate in direction, consensus, clustering or scoring.
+
+## Stage 61
+Binance USD-M Futures Mark Price is the canonical price source. Futures pairs
+are discovered dynamically from exchangeInfo, including HYPEUSDT when listed.
