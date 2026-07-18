@@ -67,6 +67,20 @@ TIMEFRAME_LABELS = {
     "2w": "2 week",
     "1m": "1 month",
 }
+
+
+# GOAT technical-score timeframes used for each MaxPain liquidity horizon.
+# The first two mappings were specified by the product requirements; the
+# longer horizons continue the same progressive multi-timeframe structure.
+TECHNICAL_TIMEFRAME_MAP = {
+    "12h": ["5m", "15m", "1h"],
+    "24h": ["15m", "1h", "4h"],
+    "48h": ["1h", "4h", "1d"],
+    "3d": ["4h", "1d", "1w"],
+    "1w": ["1d", "1w", "1M"],
+    "2w": ["1d", "1w", "1M"],
+    "1m": ["1d", "1w", "1M"],
+}
 NETWORK_CAPTURE_LIMIT = 80
 SOURCE_NAME = "coinglass_liquidation_max_pain"
 COLLECTOR_VERSION = "v3-dom-reader"
@@ -1716,6 +1730,76 @@ def _other_alerts_block(item: Dict[str, Any], all_items) -> str:
     )
 
 
+def _latest_technical_scores(symbol: str, maxpain_timeframe: str) -> Dict[str, Any]:
+    """Return the latest GOAT score for every timeframe relevant to an alert.
+
+    Missing scores never block MaxPain alerts. The average is calculated only
+    from available timeframes and the caller explicitly labels missing values.
+    """
+    requested = TECHNICAL_TIMEFRAME_MAP.get(str(maxpain_timeframe), [])
+    if not requested:
+        return {"requested": [], "scores": {}, "average": None, "missing": []}
+
+    placeholders = ",".join("?" for _ in requested)
+    rows = query(
+        "SELECT timeframe, technical_score, signal_timestamp, received_at "
+        "FROM technical_signals "
+        f"WHERE symbol = ? AND timeframe IN ({placeholders}) "
+        "ORDER BY signal_timestamp DESC, received_at DESC",
+        (str(symbol).upper(), *requested),
+    )
+
+    scores: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        timeframe = str(row["timeframe"])
+        if timeframe in scores:
+            continue
+        scores[timeframe] = {
+            "score": float(row["technical_score"]),
+            "signal_timestamp": row["signal_timestamp"],
+        }
+
+    available_values = [scores[tf]["score"] for tf in requested if tf in scores]
+    average = (sum(available_values) / len(available_values)) if available_values else None
+    return {
+        "requested": requested,
+        "scores": scores,
+        "average": average,
+        "missing": [tf for tf in requested if tf not in scores],
+    }
+
+
+def _technical_score_block(item: Dict[str, Any]) -> str:
+    technical = _latest_technical_scores(item.get("symbol", ""), item.get("timeframe", ""))
+    requested = technical["requested"]
+    if not requested:
+        return ""
+
+    score_parts = []
+    for timeframe in requested:
+        entry = technical["scores"].get(timeframe)
+        score_parts.append(
+            f"{timeframe}: {fmt(entry['score'])}/100" if entry else f"{timeframe}: ממתין"
+        )
+
+    if technical["average"] is None:
+        average_line = "ממוצע טכני: ממתין לנתונים"
+    elif technical["missing"]:
+        average_line = (
+            f"ממוצע טכני זמני: {fmt(technical['average'])}/100 "
+            f"({len(technical['scores'])}/{len(requested)} טווחים)"
+        )
+    else:
+        average_line = f"ממוצע טכני: {fmt(technical['average'])}/100"
+
+    return (
+        "\n\n📊 אינדיקטור GOAT\n"
+        + " | ".join(score_parts)
+        + "\n"
+        + average_line
+    )
+
+
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     c = item.get("components", {})
     types = item.get("types", [])
@@ -1810,6 +1894,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"נזילות בצד הקרוב: ${fmt(item.get('near_amount'), 0)}\n"
         f"נזילות בצד השני: ${fmt(item.get('far_amount'), 0)}"
     )
+    card += _technical_score_block(item)
     card += _other_alerts_block(item, all_items)
     card += _quality_block(item, rows)
     return card

@@ -76,3 +76,14 @@ snapshots. They do not independently trigger or replace any MaxPain bot action.
 The adapter extracts the score and timeframe from either dedicated embed fields or
 the embed description (for example `5/100` and `1 Min`). Existing normalized JSON
 and the earlier Bullish/Bearish/Strong Zone embed templates remain supported.
+
+## GOAT technical scores in MaxPain alerts
+
+Each MaxPain alert now includes the latest GOAT score for every mapped technical timeframe and their arithmetic average. Missing technical timeframes are shown as `ממתין`; they never block the MaxPain alert. When only some scores exist, the alert labels the result as a temporary average and states how many mapped timeframes were available.
+
+Mapping:
+- 12h liquidity: 5m, 15m, 1h
+- 24h liquidity: 15m, 1h, 4h
+- 48h liquidity: 1h, 4h, 1d
+- 3d liquidity: 4h, 1d, 1w
+- 1w / 2w / 1m liquidity: 1d, 1w, 1M
