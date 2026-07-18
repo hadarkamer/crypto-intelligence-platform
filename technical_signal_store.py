@@ -191,6 +191,113 @@ def normalize_payload(payload: Dict[str, Any]) -> NormalizedTechnicalSignal:
     )
 
 
+
+def _clean_embed_text(value: Any) -> str:
+    text = str(value or "").strip()
+    text = text.replace("**", "").replace("`", "")
+    return text.strip()
+
+
+def _extract_number(value: Any, *, field_name: str) -> float:
+    text = _clean_embed_text(value).replace(",", "")
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        raise ValueError(f"missing or invalid {field_name}")
+    return float(match.group(0))
+
+
+def normalize_tradingview_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert the G.O.A.T Discord-embed webhook into the internal contract.
+
+    TradingView sends the alert message exactly as configured. The shared
+    indicator templates use Discord embed JSON, so this adapter extracts the
+    symbol, exchange, event type, direction and plotted values without
+    requiring the user to rewrite the alert messages.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+
+    # Already-normalized payloads remain supported.
+    if not isinstance(payload.get("embeds"), list):
+        return dict(payload)
+
+    embeds = payload.get("embeds") or []
+    if not embeds or not isinstance(embeds[0], dict):
+        raise ValueError("missing TradingView embed")
+
+    embed = embeds[0]
+    title = _clean_embed_text(embed.get("title"))
+    match = re.match(r"^([^:|]+):([^|]+)\|\s*(.+)$", title)
+    if not match:
+        raise ValueError("invalid TradingView embed title")
+
+    ticker = match.group(1).strip().upper()
+    exchange = match.group(2).strip().upper()
+    label = match.group(3).strip().upper()
+
+    if "BULLISH" in label:
+        event_type = "bullish_signal"
+        direction = "LONG"
+    elif "BEARISH" in label:
+        event_type = "bearish_signal"
+        direction = "SHORT"
+    elif "STRONG ZONE" in label:
+        event_type = "strong_zone"
+        direction = "NEUTRAL"
+    else:
+        raise ValueError(f"unsupported TradingView alert type: {label}")
+
+    fields = {}
+    for item in embed.get("fields") or []:
+        if not isinstance(item, dict):
+            continue
+        name = _clean_embed_text(item.get("name")).lower()
+        value = _clean_embed_text(item.get("value"))
+        if "score" in name and "avg" not in name:
+            fields["score"] = value
+        elif "avg" in name and "score" in name:
+            fields["avg_score"] = value
+        elif "price" in name:
+            fields["price"] = value
+        elif name.endswith("tf") or " tf" in name or "timeframe" in name:
+            fields["timeframe"] = value
+        elif "exit" in name:
+            fields["exit_pressure"] = value
+        elif "atr" in name and "stop" in name:
+            fields["atr_stop"] = value
+
+    score = _extract_number(fields.get("score"), field_name="Score")
+    timeframe = _clean_embed_text(fields.get("timeframe"))
+    if not timeframe:
+        raise ValueError("missing timeframe")
+
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
+    normalized = {
+        "source": "tradingview_goat",
+        "symbol": ticker,
+        "exchange": exchange,
+        "timeframe": timeframe,
+        "direction": direction,
+        "technical_score": score,
+        "signal_timestamp": now,
+        "is_confirmed": True,
+        "indicator_version": "goat-toolkit",
+        "settings_profile": event_type,
+        "event_type": event_type,
+        "title": title,
+        "raw_tradingview_payload": payload,
+    }
+
+    for key in ("avg_score", "price", "exit_pressure", "atr_stop"):
+        if key in fields:
+            try:
+                normalized[key] = _extract_number(fields[key], field_name=key)
+            except ValueError:
+                normalized[key] = None
+
+    return normalized
+
+
 def sqlite_schema() -> str:
     return """
     CREATE TABLE IF NOT EXISTS technical_signals (

@@ -58,3 +58,10 @@
 - Added `GET /technical/status` and Telegram command `/technical_status`.
 - Technical signals are stored and displayed only; liquidity scoring is unchanged.
 - Configure `TRADINGVIEW_WEBHOOK_SECRET` before enabling the webhook.
+
+## Rai indicator integration — isolated from bot actions
+- All Stage 50 Telegram bot commands and behavior remain unchanged.
+- Rai/TradingView webhook payloads in Discord-embed format are adapted and stored separately in `technical_signals`.
+- Rai webhook endpoints: `POST /tradingview` and `POST /webhooks/tradingview`.
+- Rai status remains available separately through `/technical_status` and `GET /technical/status`.
+- Indicator ingestion does not trigger, replace, or modify the bot's liquidity actions.

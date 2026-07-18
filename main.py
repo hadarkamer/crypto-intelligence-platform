@@ -2560,7 +2560,8 @@ async def tradingview_webhook(request: web.Request):
     safe_payload.pop("secret", None)
 
     try:
-        signal = technical_signal_store.normalize_payload(safe_payload)
+        adapted_payload = technical_signal_store.normalize_tradingview_webhook(safe_payload)
+        signal = technical_signal_store.normalize_payload(adapted_payload)
         inserted = _insert_technical_signal(signal)
     except ValueError as exc:
         print(f"[tradingview] rejected payload: {exc}; payload={safe_payload!r}", flush=True)
@@ -2708,6 +2709,7 @@ async def start_web_server(bot_app):
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     app.router.add_post("/telegram", telegram_webhook)
+    app.router.add_post("/tradingview", tradingview_webhook)
     app.router.add_post("/webhooks/tradingview", tradingview_webhook)
     app.router.add_get("/technical/status", technical_status_api)
 
