@@ -59,31 +59,11 @@
 - Technical signals are stored and displayed only; liquidity scoring is unchanged.
 - Configure `TRADINGVIEW_WEBHOOK_SECRET` before enabling the webhook.
 
-## Rai indicator integration — isolated from bot actions
-- All Stage 50 Telegram bot commands and behavior remain unchanged.
-- Rai/TradingView webhook payloads in Discord-embed format are adapted and stored separately in `technical_signals`.
-- Rai webhook endpoints: `POST /tradingview` and `POST /webhooks/tradingview`.
-- Rai status remains available separately through `/technical_status` and `GET /technical/status`.
-- Indicator ingestion does not trigger, replace, or modify the bot's liquidity actions.
 
-## GOAT alert() parser update — 2026-07-18
+## Stage 51 — Tradable Max Pain filtering
 
-The TradingView webhook adapter now accepts protected G.O.A.T `Any alert() function call`
-payloads, including event labels such as `SOFT EXIT`, `LOSING GRIP`, and other
-non-bullish/non-bearish readings. These payloads are stored only as technical-score
-snapshots. They do not independently trigger or replace any MaxPain bot action.
-
-The adapter extracts the score and timeframe from either dedicated embed fields or
-the embed description (for example `5/100` and `1 Min`). Existing normalized JSON
-and the earlier Bullish/Bearish/Strong Zone embed templates remain supported.
-
-## GOAT technical scores in MaxPain alerts
-
-Each MaxPain alert now includes the latest GOAT score for every mapped technical timeframe and their arithmetic average. Missing technical timeframes are shown as `ממתין`; they never block the MaxPain alert. When only some scores exist, the alert labels the result as a temporary average and states how many mapped timeframes were available.
-
-Mapping:
-- 12h liquidity: 5m, 15m, 1h
-- 24h liquidity: 15m, 1h, 4h
-- 48h liquidity: 1h, 4h, 1d
-- 3d liquidity: 4h, 1d, 1w
-- 1w / 2w / 1m liquidity: 1d, 1w, 1M
+- Minimum displayed opportunity distance is now 0.5%.
+- 0.7%–1.3% is labeled as the preferred trading-distance band.
+- SHORT targets already crossed by the live Binance price are excluded.
+- LONG targets already crossed by the live Binance price are excluded.
+- Crossed targets do not participate in direction, consensus, clustering or scoring.

@@ -28,10 +28,23 @@ def safe_avg(values: Iterable[Optional[float]]) -> Optional[float]:
 
 
 def side_from_distances(distance_short_pct, distance_long_pct) -> Optional[str]:
-    """Return the closer Max Pain side for one row."""
-    if distance_short_pct is None or distance_long_pct is None:
+    """Return the closest still-active Max Pain side.
+
+    Distances are signed and recalculated from the live Binance price:
+    - SHORT Max Pain is active only while it is above price (positive distance).
+    - LONG Max Pain is active only while it is below price (negative distance).
+
+    A target that has already been crossed is excluded rather than being treated
+    as a nearby opportunity on the opposite side of the market.
+    """
+    valid = []
+    if distance_short_pct is not None and float(distance_short_pct) > 0:
+        valid.append(("SHORT", abs(float(distance_short_pct))))
+    if distance_long_pct is not None and float(distance_long_pct) < 0:
+        valid.append(("LONG", abs(float(distance_long_pct))))
+    if not valid:
         return None
-    return "SHORT" if abs(distance_short_pct) <= abs(distance_long_pct) else "LONG"
+    return min(valid, key=lambda item: item[1])[0]
 
 
 def group_by_symbol(rows: Iterable[Any]) -> Dict[str, List[Any]]:
