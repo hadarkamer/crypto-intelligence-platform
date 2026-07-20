@@ -35,6 +35,21 @@ BYBIT_TICKERS_ENDPOINT = os.getenv(
     "/v5/market/tickers",
 )
 BYBIT_TIMEOUT_SECONDS = int(os.getenv("BYBIT_PRICE_TIMEOUT_SECONDS", "10"))
+HYPERLIQUID_INFO_URL = os.getenv(
+    "HYPERLIQUID_INFO_URL",
+    "https://api.hyperliquid.xyz/info",
+).rstrip("/")
+HYPERLIQUID_TIMEOUT_SECONDS = int(os.getenv("HYPERLIQUID_PRICE_TIMEOUT_SECONDS", "10"))
+COINGECKO_SIMPLE_PRICE_URL = os.getenv(
+    "COINGECKO_SIMPLE_PRICE_URL",
+    "https://api.coingecko.com/api/v3/simple/price",
+)
+COINGECKO_TIMEOUT_SECONDS = int(os.getenv("COINGECKO_PRICE_TIMEOUT_SECONDS", "10"))
+COINPAPRIKA_BASE_URL = os.getenv(
+    "COINPAPRIKA_BASE_URL",
+    "https://api.coinpaprika.com/v1",
+).rstrip("/")
+COINPAPRIKA_TIMEOUT_SECONDS = int(os.getenv("COINPAPRIKA_PRICE_TIMEOUT_SECONDS", "10"))
 
 # symbol -> (Binance base symbol, multiplier)
 # 1000PEPE on CoinGlass represents 1000 PEPE units.
@@ -138,6 +153,93 @@ def _fetch_bybit_hype_price(category: str) -> float:
     )
 
 
+def _fetch_hyperliquid_hype_price() -> float:
+    response = requests.post(
+        HYPERLIQUID_INFO_URL,
+        json={"type": "allMids"},
+        timeout=HYPERLIQUID_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Hyperliquid allMids returned a non-object payload")
+    raw_price = payload.get("HYPE")
+    price = float(raw_price)
+    if price <= 0:
+        raise ValueError("Hyperliquid allMids returned an invalid HYPE price")
+    return price
+
+
+def _fetch_coingecko_hype_price() -> float:
+    response = requests.get(
+        COINGECKO_SIMPLE_PRICE_URL,
+        params={"ids": "hyperliquid", "vs_currencies": "usd"},
+        timeout=COINGECKO_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    raw_price = (payload.get("hyperliquid") or {}).get("usd") if isinstance(payload, dict) else None
+    price = float(raw_price)
+    if price <= 0:
+        raise ValueError("CoinGecko returned an invalid HYPE price")
+    return price
+
+
+def _fetch_coinpaprika_hype_price() -> float:
+    search_response = requests.get(
+        COINPAPRIKA_BASE_URL + "/search",
+        params={"q": "HYPE", "c": "currencies", "limit": 20},
+        timeout=COINPAPRIKA_TIMEOUT_SECONDS,
+    )
+    search_response.raise_for_status()
+    search_payload = search_response.json()
+    currencies = search_payload.get("currencies") or [] if isinstance(search_payload, dict) else []
+    coin_id = None
+    for item in currencies:
+        symbol = str(item.get("symbol", "")).upper()
+        name = str(item.get("name", "")).lower()
+        if symbol == "HYPE" and "hyperliquid" in name:
+            coin_id = item.get("id")
+            break
+    if not coin_id:
+        raise ValueError("CoinPaprika could not resolve the Hyperliquid HYPE coin id")
+
+    ticker_response = requests.get(
+        COINPAPRIKA_BASE_URL + f"/tickers/{coin_id}",
+        timeout=COINPAPRIKA_TIMEOUT_SECONDS,
+    )
+    ticker_response.raise_for_status()
+    ticker_payload = ticker_response.json()
+    raw_price = ((ticker_payload.get("quotes") or {}).get("USD") or {}).get("price") if isinstance(ticker_payload, dict) else None
+    price = float(raw_price)
+    if price <= 0:
+        raise ValueError("CoinPaprika returned an invalid HYPE price")
+    return price
+
+
+def _fetch_hype_fallback_price() -> Tuple[Optional[float], Optional[str], Dict[str, Optional[str]]]:
+    errors: Dict[str, Optional[str]] = {
+        "hyperliquid_error": None,
+        "coingecko_error": None,
+        "coinpaprika_error": None,
+    }
+    sources = (
+        ("hyperliquid", _fetch_hyperliquid_hype_price),
+        ("coingecko", _fetch_coingecko_hype_price),
+        ("coinpaprika", _fetch_coinpaprika_hype_price),
+    )
+    for source, fetcher in sources:
+        try:
+            price = fetcher()
+            print(f"[price] HYPE source={source} price={price}", flush=True)
+            return price, source, errors
+        except Exception as exc:
+            key = f"{source}_error"
+            errors[key] = repr(exc)
+            print(f"[price] HYPE {source} failed: {errors[key]}", flush=True)
+    return None, None, errors
+
+
 def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
     """Fetch Binance prices once.
 
@@ -152,6 +254,11 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
     spot_error = None
     bybit_futures_error = None
     bybit_spot_error = None
+    hype_fallback_errors: Dict[str, Optional[str]] = {
+        "hyperliquid_error": None,
+        "coingecko_error": None,
+        "coinpaprika_error": None,
+    }
 
     try:
         futures_prices = _fetch_futures_mark_prices()
@@ -194,6 +301,7 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
                     f"[price] HYPE Bybit Spot failed: {bybit_spot_error}",
                     flush=True,
                 )
+                bybit_hype_price, bybit_hype_source, hype_fallback_errors = _fetch_hype_fallback_price()
 
     prices: Dict[str, Dict[str, Any]] = {}
     missing: List[str] = []
@@ -239,6 +347,7 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
         "spot_error": spot_error,
         "bybit_futures_error": bybit_futures_error,
         "bybit_spot_error": bybit_spot_error,
+        **hype_fallback_errors,
     }
 
 
@@ -303,7 +412,7 @@ def enrich_snapshot_rows(rows: Iterable[Any], excluded_symbols: Iterable[str] = 
     - distance_short_pct / distance_long_pct
     - distance_short_abs / distance_long_abs
 
-    Symbols without a supported live price are excluded from live calculations. HYPE uses Bybit Futures first and Bybit Spot as fallback when Binance does not list it.
+    Symbols without a supported live price are excluded from live calculations. HYPE uses Bybit Futures, Bybit Spot, Hyperliquid, CoinGecko, CoinPaprika, and finally its CoinGlass row price.
     """
     excluded = {str(x).upper() for x in excluded_symbols}
     raw_rows = [dict(row) for row in rows]
@@ -323,6 +432,22 @@ def enrich_snapshot_rows(rows: Iterable[Any], excluded_symbols: Iterable[str] = 
             continue
 
         live = price_result["prices"].get(symbol)
+        if not live and symbol == "HYPE":
+            try:
+                coinglass_price = float(row.get("current_price"))
+            except (TypeError, ValueError):
+                coinglass_price = 0.0
+            if coinglass_price > 0:
+                live = {
+                    "symbol": "HYPE",
+                    "pair": "HYPEUSDT",
+                    "price": coinglass_price,
+                    "raw_price": coinglass_price,
+                    "multiplier": 1.0,
+                    "source": "coinglass_dom",
+                    "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+                }
+                print(f"[price] HYPE source=coinglass_dom price={coinglass_price}", flush=True)
         if not live:
             skipped.append(symbol)
             continue

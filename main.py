@@ -1957,6 +1957,10 @@ def _price_source_label(source: Any) -> str:
     labels = {
         "bybit_futures_mark": "Bybit Futures",
         "bybit_spot": "Bybit Spot",
+        "hyperliquid": "Hyperliquid",
+        "coingecko": "CoinGecko",
+        "coinpaprika": "CoinPaprika",
+        "coinglass_dom": "CoinGlass DOM",
         "binance_spot": "Binance Spot",
         "binance_futures_mark": "Binance Futures",
     }
