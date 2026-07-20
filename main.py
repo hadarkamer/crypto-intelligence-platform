@@ -1790,6 +1790,7 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
 
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
+    """Build a compact Telegram alert card without changing score logic."""
     c = item.get("components", {})
     types = item.get("types", [])
     type_prefix = "🟢 " if len(types) > 1 else ""
@@ -1807,27 +1808,6 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         balance_text = f"🔴 Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
     else:
         balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
-
-    btc_direction_line = ""
-    btc_reference_score = c.get("btc_reference_score")
-    btc_reference_side = c.get("btc_reference_side")
-    btc_relation = c.get("btc_relation")
-    if btc_relation == "ALIGNED":
-        btc_direction_line = (
-            f"  - אישור BTC ({btc_reference_side}, "
-            f"Score {fmt(btc_reference_score)}): "
-            f"+{fmt(c.get('btc_approval'))}/"
-            f"{fmt(c.get('btc_approval_max'))}\n"
-        )
-    elif btc_relation == "OPPOSITE":
-        btc_direction_line = (
-            f"  - התנגדות BTC ({btc_reference_side}, "
-            f"Score {fmt(btc_reference_score)}): "
-            f"-{fmt(c.get('btc_conflict_penalty'))}/"
-            f"{fmt(c.get('btc_conflict_penalty_max'))}\n"
-        )
-    elif btc_relation == "MISSING":
-        btc_direction_line = "  - BTC: אין נתון באותו טווח\n"
 
     average_score = item.get("average_score_all_timeframes")
     if average_score is None:
@@ -1848,17 +1828,25 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     current_price = item.get("current_price")
     target_price = item.get("target_price")
 
-    cluster_count = int(item.get("cluster_count", 0) or 0)
-    same_direction_count = int(item.get("cluster_same_direction_count", 0) or 0)
-    if cluster_count >= 3:
-        cluster_summary = (
-            f"Cluster Confidence: {cluster_count} טווחים בקלאסטר "
-            f"(מתוך {same_direction_count} באותו כיוון)\n"
-            f"סטייה ממוצעת מה-Median: "
-            f"{fmt(item.get('cluster_mean_deviation_pct'))}%\n"
+    def scored_line(points: Any, text: str) -> str:
+        """Score on the fixed left side; item description on the right."""
+        return f"{fmt(points):>5} נקודות │ {text}"
+
+    btc_reference_score = c.get("btc_reference_score")
+    btc_reference_side = c.get("btc_reference_side")
+    btc_relation = c.get("btc_relation")
+    if btc_relation == "ALIGNED":
+        btc_line = scored_line(
+            c.get("btc_approval"),
+            f"אישור BTC: {btc_reference_side}, Score {fmt(btc_reference_score)}",
+        )
+    elif btc_relation == "OPPOSITE":
+        btc_line = scored_line(
+            -float(c.get("btc_conflict_penalty", 0) or 0),
+            f"התנגדות BTC: {btc_reference_side}, Score {fmt(btc_reference_score)}",
         )
     else:
-        cluster_summary = f"אין קלאסטר בכיוון {item.get('side')}\n"
+        btc_line = "    — │ BTC: אין נתון באותו טווח"
 
     def liquidity_line(label: str, amount: Any) -> str:
         try:
@@ -1869,66 +1857,50 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         return f"{marker}{label}: ${fmt(value, 0)}"
 
     card = (
-        f"🚨 #{index} — {item['symbol']} / {item['timeframe']}\n"
-        f"צד קרוב: {item['side']}\n"
-        f"Score לטווח הנוכחי: "
-        f"{fmt(item.get('score', item.get('priority')))}/100\n"
-        f"ממוצע Score בכל 7 הטווחים: {fmt(average_score)}/100\n"
-        f"מחיר נוכחי — "
-        f"{_price_source_label(item.get('price_source'))}: "
-        f"${fmt_price(current_price)}\n"
-        f"יעד Max Pain הקרוב: ${fmt_price(target_price)}\n"
-        f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
-        f"(סף ניקוד דינמי: {fmt(item.get('allowed_distance_pct'))}%)\n"
-        f"סיווג מרחק למסחר: "
-        f"{_distance_trade_label(item.get('distance_pct'))}\n"
-        f"קונצנזוס: {item.get('consensus_hits', 0)}/"
-        f"{item.get('consensus_total', 0)}\n"
-        f"Market: {fmt(item.get('market_support_pct'))}% תמיכה ב-{item['side']} "
-        f"({item.get('market_support_count', 0)}/"
-        f"{item.get('market_total_count', 0)})\n"
-        + cluster_summary
-        + f"Relative Gap Advantage: "
-        f"{fmt((item.get('relative_gap_advantage') or 0) * 100)}%\n"
-        "\n"
-        "פירוט הניקוד:\n"
-        f"• Directional Alignment: "
-        f"{fmt(c.get('directional_alignment'))}/30\n"
-        f"  - Consensus: {fmt(c.get('consensus'))}/"
-        f"{fmt(c.get('consensus_max'))}\n"
-        + btc_direction_line
-        + f"• Target Proximity: "
-        f"{fmt(c.get('target_proximity'))}/25\n"
-        f"• Cluster Confidence: "
-        f"{fmt(c.get('cluster_confidence'))}/30\n"
-        f"  - צפיפות יעדים: "
-        f"{fmt(c.get('cluster_density'))}/12\n"
-        f"  - מספר טווחים: "
-        f"{fmt(c.get('cluster_coverage'))}/8\n"
-        f"  - הצטברות נזילות: "
+        f"#{index} {item['symbol']} / {item['timeframe']}\n"
+        f"{'🔴' if item.get('side') == 'SHORT' else '🟢'} {item['side']}\n"
+        f"Score: {fmt(item.get('score', item.get('priority')))}\n"
+        f"ממוצע: {fmt(average_score)}\n\n"
+        f"מחיר נוכחי: ${fmt_price(current_price)}\n"
+        + scored_line(
+            c.get("target_proximity"),
+            f"🎯 Max Pain: ${fmt_price(target_price)} "
+            f"({fmt(item.get('distance_pct'))}%)",
+        )
+        + "\n\n"
+        + scored_line(
+            c.get("consensus"),
+            f"קונצנזוס: {item.get('consensus_hits', 0)}/"
+            f"{item.get('consensus_total', 0)}",
+        )
+        + "\n"
+        + btc_line
+        + "\n\n"
+        f"Cluster: {fmt(c.get('cluster_confidence'))}/30\n"
+        f"- צפיפות יעדים: {fmt(c.get('cluster_density'))}/12\n"
+        f"- מספר טווחים: {fmt(c.get('cluster_coverage'))}/8\n"
+        f"- הצטברות נזילות: "
         f"{fmt(c.get('cluster_liquidity_growth'))}/10 "
-        f"(מכפיל x{fmt(c.get('cluster_liquidity_multiplier'))})\n"
-        f"• Relative Gap: {fmt(c.get('relative_gap'))}/15\n"
-        "\n"
+        f"(מכפיל {fmt(c.get('cluster_liquidity_multiplier'))}x)\n\n"
+        f"Gap: {fmt(c.get('relative_gap'))}/15\n\n"
         f"סוגי חריגה:\n{types_text}\n\n"
         f"{balance_text}\n"
         + liquidity_line("נזילות בצד הקרוב", item.get("near_amount")) + "\n"
         + liquidity_line("נזילות בצד השני", item.get("far_amount"))
     )
+
     counter = counter_score.calculate_counter_score(item, rows, all_items)
     if counter.get("available"):
-        primary_score = float(item.get("score", item.get("priority", 0)) or 0)
         counter_value = float(counter.get("score", 0) or 0)
-        edge = round(primary_score - counter_value, 2)
         card += (
             "\n\nניקוד לכיוון הנגדי:\n"
-            f"• {counter.get('side')}: {fmt(counter_value)}/100\n"
-            f"• פער כיווני לטובת {item.get('side')}: {fmt(edge)} נקודות"
+            f"{counter.get('side')}: {fmt(counter_value)}/100"
         )
     else:
         card += (
             "\n\nניקוד לכיוון הנגדי:\n"
-            f"• {counter.get('side', '-')}: לא פעיל — יעד הכיוון הנגדי כבר נחצה או חסר"
+            f"{counter.get('side', '-')}: לא פעיל — "
+            "יעד הכיוון הנגדי כבר נחצה או חסר"
         )
 
     card += _quality_block(item, rows)
@@ -1972,7 +1944,7 @@ def _distance_trade_label(distance_pct: Any) -> str:
         distance = float(distance_pct)
     except (TypeError, ValueError):
         return "לא ידוע"
-    if distance < 0.7:
+    if distance < 0.8:
         return "גבולי"
     if distance <= 1.3:
         return "טווח מועדף"

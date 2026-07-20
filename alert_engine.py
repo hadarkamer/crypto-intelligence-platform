@@ -146,7 +146,7 @@ def _target_proximity_points(
     distance = float(distance_pct)
     if distance < 0.5 or distance > float(allowed_distance_pct):
         return 0.0
-    if distance < 0.7:
+    if distance < 0.8:
         return 17.0
     if distance <= 1.3:
         return 25.0
