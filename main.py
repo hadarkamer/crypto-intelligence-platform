@@ -25,6 +25,8 @@ import analysis
 import decision_engine
 import alert_engine
 import live_price_provider
+import counter_score
+import alert_summary
 import technical_signal_store
 from collections import defaultdict
 
@@ -1872,7 +1874,9 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"Score לטווח הנוכחי: "
         f"{fmt(item.get('score', item.get('priority')))}/100\n"
         f"ממוצע Score בכל 7 הטווחים: {fmt(average_score)}/100\n"
-        f"מחיר נוכחי — Binance: ${fmt_price(current_price)}\n"
+        f"מחיר נוכחי — "
+        f"{'Hyperliquid' if item.get('price_source') == 'hyperliquid_all_mids' else 'Binance'}: "
+        f"${fmt_price(current_price)}\n"
         f"יעד Max Pain הקרוב: ${fmt_price(target_price)}\n"
         f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
         f"(סף ניקוד דינמי: {fmt(item.get('allowed_distance_pct'))}%)\n"
@@ -1911,6 +1915,22 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         + liquidity_line("נזילות בצד הקרוב", item.get("near_amount")) + "\n"
         + liquidity_line("נזילות בצד השני", item.get("far_amount"))
     )
+    counter = counter_score.calculate_counter_score(item, rows, all_items)
+    if counter.get("available"):
+        primary_score = float(item.get("score", item.get("priority", 0)) or 0)
+        counter_value = float(counter.get("score", 0) or 0)
+        edge = round(primary_score - counter_value, 2)
+        card += (
+            "\n\nניקוד לכיוון הנגדי:\n"
+            f"• {counter.get('side')}: {fmt(counter_value)}/100\n"
+            f"• פער כיווני לטובת {item.get('side')}: {fmt(edge)} נקודות"
+        )
+    else:
+        card += (
+            "\n\nניקוד לכיוון הנגדי:\n"
+            f"• {counter.get('side', '-')}: לא פעיל — יעד הכיוון הנגדי כבר נחצה או חסר"
+        )
+
     card += _quality_block(item, rows)
     card += _all_timeframe_scores_block(item, all_items, rows)
     return card
@@ -2013,6 +2033,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     _alert_card(index, item, all_items, rows)
                 )
+            await update.message.reply_text(alert_summary.format_alert_count_summary(items))
 
         except asyncio.CancelledError:
             raise
@@ -2469,6 +2490,11 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
             await bot_app.bot.send_message(
                 chat_id=chat_id,
                 text=_alert_card(index, item, all_items, rows),
+            )
+        if result_items:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=alert_summary.format_alert_count_summary(result_items),
             )
 
         top_item = (

@@ -820,6 +820,8 @@ def build_opportunities(
             "rank": rank,
             "side": side,
             "current_price": current_price,
+            "price_source": _get(row, "price_source"),
+            "price_pair": _get(row, "price_pair"),
             "target_price": target_price,
             "target_direction": target_direction,
             "types": types,
