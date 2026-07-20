@@ -248,15 +248,23 @@ def _directional_alignment(
     symbol: str,
     consensus_hits: int,
     consensus_total: int,
-    btc_reference: Optional[Dict[str, Any]],
-    alert_side: str,
-) -> Dict[str, float]:
-    """Directional Alignment agreed with Yoni, continuous and capped 0..30.
+    side: str,
+    btc_reference: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Directional Alignment, 0..30, with continuous BTC confirmation.
 
-    BTC: own consensus only, scaled to 30.
-    Altcoins: own consensus 0..15, plus continuous BTC confirmation 0..15
-    when BTC points the same way, or a continuous penalty up to 10 when BTC
-    points the opposite way. Market breadth is informational only.
+    Altcoins:
+    - Own consensus: 0..15.
+    - Same-direction BTC confirmation: 0..15, continuously based on the
+      total BTC opportunity score in the same timeframe.
+    - Opposite-direction BTC conflict: subtract 0..10, continuously based
+      on the total BTC opportunity score in the same timeframe.
+
+    BTC itself:
+    - Consensus only, scaled continuously to 0..30.
+
+    Market breadth is intentionally excluded from scoring and remains
+    display-only information.
     """
     is_btc = symbol.upper() == "BTC"
     consensus_max = 30.0 if is_btc else 15.0
@@ -264,53 +272,40 @@ def _directional_alignment(
         round(consensus_hits / consensus_total * consensus_max, 2)
         if consensus_total else 0.0
     )
-    btc_score = float((btc_reference or {}).get("score", 0.0) or 0.0)
-    btc_side = (btc_reference or {}).get("side")
-    btc_confirmation = 0.0
-    btc_penalty = 0.0
-    if not is_btc and btc_side in {"LONG", "SHORT"}:
-        if btc_side == alert_side:
-            btc_confirmation = round(min(15.0, max(0.0, btc_score * 0.15)), 2)
-        else:
-            btc_penalty = round(min(10.0, max(0.0, btc_score * 0.10)), 2)
-    total = max(0.0, min(30.0, consensus_points + btc_confirmation - btc_penalty))
+
+    btc_score = None
+    btc_side = None
+    btc_approval = 0.0
+    btc_conflict_penalty = 0.0
+    btc_relation = "SELF" if is_btc else "MISSING"
+
+    if not is_btc and btc_reference:
+        btc_score = float(btc_reference.get("score", 0.0) or 0.0)
+        btc_side = str(btc_reference.get("side", "") or "").upper() or None
+        confidence = max(0.0, min(1.0, btc_score / 100.0))
+        if btc_side == side:
+            btc_approval = round(confidence * 15.0, 2)
+            btc_relation = "ALIGNED"
+        elif btc_side in {"LONG", "SHORT"}:
+            btc_conflict_penalty = round(confidence * 10.0, 2)
+            btc_relation = "OPPOSITE"
+
+    total = round(
+        max(0.0, min(30.0, consensus_points + btc_approval - btc_conflict_penalty)),
+        2,
+    )
     return {
         "consensus_points": consensus_points,
-        "btc_confirmation_points": btc_confirmation,
-        "btc_conflict_penalty": btc_penalty,
-        "btc_reference_score": round(btc_score, 2),
         "consensus_max": consensus_max,
-        "btc_confirmation_max": 15.0 if not is_btc else 0.0,
-        "btc_penalty_max": 10.0 if not is_btc else 0.0,
-        "total": round(total, 2),
+        "btc_approval_points": btc_approval,
+        "btc_approval_max": 15.0 if not is_btc else 0.0,
+        "btc_conflict_penalty": btc_conflict_penalty,
+        "btc_conflict_penalty_max": 10.0 if not is_btc else 0.0,
+        "btc_reference_score": btc_score,
+        "btc_reference_side": btc_side,
+        "btc_relation": btc_relation,
+        "total": total,
     }
-
-
-def _btc_reference_map(
-    rows: List[Any],
-    consensus: Dict[str, Dict[str, Any]],
-    clusters: Dict[str, Dict[str, Dict[str, Any]]],
-) -> Dict[str, Dict[str, Any]]:
-    """Build BTC's non-circular score for each timeframe."""
-    result: Dict[str, Dict[str, Any]] = {}
-    cons = consensus.get("BTC", {})
-    total = int(cons.get("total", 0) or 0)
-    for row in rows:
-        if str(_get(row, "symbol", "")).upper() != "BTC":
-            continue
-        tf = str(_get(row, "timeframe", ""))
-        side = _closest_side(row)
-        distance = _closest_distance(row)
-        if tf not in TIMEFRAMES or side not in {"LONG", "SHORT"} or distance is None:
-            continue
-        hits = int(cons.get(side, 0) or 0)
-        directional = round(hits / total * 30.0, 2) if total else 0.0
-        proximity = _target_proximity_points(distance, _allowed_distance_pct("BTC", _get(row, "rank")))
-        cluster = clusters.get("BTC", {}).get(side, {})
-        gap = _relative_gap_advantage(row)
-        score = round(min(100.0, max(0.0, directional + proximity + float(cluster.get("points", 0) or 0) + float(gap.get("points", 0) or 0))), 2)
-        result[tf] = {"side": side, "score": score}
-    return result
 
 def _market_bias_map(rows: List[Any]) -> Dict[str, Any]:
     """Aggregate market schema from all valid asset/timeframe rows."""
@@ -629,9 +624,47 @@ def build_opportunities(
     """Score every valid coin/timeframe with the agreed 100-point model."""
     rows, duplicate_counts = _dedupe_rows(rows)
     consensus = _consensus_map(rows)
-    market = _market_bias_map(rows)  # informational only
+    market = _market_bias_map(rows)
     clusters = _cluster_map(rows)
-    btc_references = _btc_reference_map(rows, consensus, clusters)
+
+    # BTC is calculated first because every altcoin uses BTC's total score
+    # from the same timeframe as a continuous directional confirmation.
+    btc_reference_by_timeframe: Dict[str, Dict[str, Any]] = {}
+    for btc_row in rows:
+        if str(_get(btc_row, "symbol", "")).upper() != "BTC":
+            continue
+        btc_timeframe = str(_get(btc_row, "timeframe", ""))
+        btc_side = _closest_side(btc_row)
+        btc_distance = _closest_distance(btc_row)
+        if not btc_timeframe or not btc_side or btc_distance is None:
+            continue
+        btc_cons = consensus.get("BTC", {})
+        btc_hits = int(btc_cons.get(btc_side, 0) or 0)
+        btc_total = int(btc_cons.get("total", 0) or 0)
+        btc_directional = _directional_alignment(
+            "BTC", btc_hits, btc_total, btc_side, None
+        )
+        btc_allowed_distance = _allowed_distance_pct(
+            "BTC", _get(btc_row, "rank")
+        )
+        btc_target_points = _target_proximity_points(
+            btc_distance, btc_allowed_distance
+        )
+        btc_cluster = clusters.get("BTC", {}).get(
+            btc_side, {"points": 0.0}
+        )
+        btc_gap = _relative_gap_advantage(btc_row)
+        btc_score = round(max(0.0, min(100.0,
+            float(btc_directional["total"])
+            + float(btc_target_points)
+            + float(btc_cluster.get("points", 0.0) or 0.0)
+            + float(btc_gap.get("points", 0.0) or 0.0)
+        )), 2)
+        btc_reference_by_timeframe[btc_timeframe] = {
+            "side": btc_side,
+            "score": btc_score,
+        }
+
     out: List[Dict[str, Any]] = []
 
     for row in rows:
@@ -663,8 +696,6 @@ def build_opportunities(
         consensus_hits = int(cons.get(side, 0) or 0)
         consensus_total = int(cons.get("total", 0) or 0)
 
-        btc_reference = btc_references.get(timeframe)
-
         market_support_pct = (
             market.get("short_pct")
             if side == "SHORT"
@@ -680,8 +711,8 @@ def build_opportunities(
             symbol,
             consensus_hits,
             consensus_total,
-            btc_reference,
             side,
+            btc_reference_by_timeframe.get(timeframe),
         )
 
         cluster = clusters.get(symbol, {}).get(side, {
@@ -700,12 +731,14 @@ def build_opportunities(
         components = {
             "directional_alignment": directional["total"],
             "consensus": directional["consensus_points"],
-            "btc_confirmation": directional["btc_confirmation_points"],
-            "btc_conflict_penalty": directional["btc_conflict_penalty"],
-            "btc_reference_score": directional["btc_reference_score"],
             "consensus_max": directional["consensus_max"],
-            "btc_confirmation_max": directional["btc_confirmation_max"],
-            "btc_penalty_max": directional["btc_penalty_max"],
+            "btc_approval": directional["btc_approval_points"],
+            "btc_approval_max": directional["btc_approval_max"],
+            "btc_conflict_penalty": directional["btc_conflict_penalty"],
+            "btc_conflict_penalty_max": directional["btc_conflict_penalty_max"],
+            "btc_reference_score": directional["btc_reference_score"],
+            "btc_reference_side": directional["btc_reference_side"],
+            "btc_relation": directional["btc_relation"],
             "target_proximity": target_proximity,
             "cluster_confidence": cluster_points,
             # Compatibility key for older formatting code.
@@ -808,8 +841,9 @@ def build_opportunities(
             "liquidity_balance": balance["balance"],
             "consensus_hits": consensus_hits,
             "consensus_total": consensus_total,
-            "btc_reference_side": (btc_reference or {}).get("side"),
-            "btc_reference_score": (btc_reference or {}).get("score"),
+            "btc_reference_score": directional.get("btc_reference_score"),
+            "btc_reference_side": directional.get("btc_reference_side"),
+            "btc_relation": directional.get("btc_relation"),
             "market_support_pct": market_support_pct,
             "market_support_count": market_support_count,
             "market_total_count": market.get("total", 0),

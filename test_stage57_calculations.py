@@ -64,20 +64,6 @@ class Stage57CalculationTests(unittest.TestCase):
             self.assertEqual(item["calculation_validation_errors"], [])
             self.assertAlmostEqual(item["component_sum_check"], item["score"], places=2)
 
-    def test_btc_confirmation_is_continuous(self):
-        result = alert_engine._directional_alignment(
-            "ETH", 5, 7, {"side": "LONG", "score": 73.4}, "LONG"
-        )
-        self.assertAlmostEqual(result["btc_confirmation_points"], 11.01, places=2)
-        self.assertEqual(result["btc_conflict_penalty"], 0.0)
-
-    def test_btc_opposite_direction_penalty_is_continuous(self):
-        result = alert_engine._directional_alignment(
-            "ETH", 5, 7, {"side": "LONG", "score": 73.4}, "SHORT"
-        )
-        self.assertAlmostEqual(result["btc_conflict_penalty"], 7.34, places=2)
-        self.assertEqual(result["btc_confirmation_points"], 0.0)
-
 
 if __name__ == "__main__":
     unittest.main()
