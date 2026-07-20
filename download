@@ -5,3 +5,8 @@ __pycache__/
 .env
 .venv/
 venv/
+
+# Python/test/tool caches
+.mypy_cache/
+.ruff_cache/
+.DS_Store

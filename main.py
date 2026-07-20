@@ -1875,7 +1875,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         f"{fmt(item.get('score', item.get('priority')))}/100\n"
         f"ממוצע Score בכל 7 הטווחים: {fmt(average_score)}/100\n"
         f"מחיר נוכחי — "
-        f"{'Hyperliquid' if item.get('price_source') == 'hyperliquid_all_mids' else 'Binance'}: "
+        f"{_price_source_label(item.get('price_source'))}: "
         f"${fmt_price(current_price)}\n"
         f"יעד Max Pain הקרוב: ${fmt_price(target_price)}\n"
         f"מרחק ל-Max Pain: {fmt(item.get('distance_pct'))}% "
@@ -1951,6 +1951,16 @@ def _is_displayable_opportunity(item: Dict[str, Any]) -> bool:
         return False
 
     return distance >= MIN_DISPLAY_DISTANCE_PCT
+
+
+def _price_source_label(source: Any) -> str:
+    labels = {
+        "bybit_futures_mark": "Bybit Futures",
+        "bybit_spot": "Bybit Spot",
+        "binance_spot": "Binance Spot",
+        "binance_futures_mark": "Binance Futures",
+    }
+    return labels.get(str(source or ""), "Live market")
 
 
 def _distance_trade_label(distance_pct: Any) -> str:

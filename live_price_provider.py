@@ -26,13 +26,15 @@ BINANCE_SPOT_PRICE_ENDPOINT = os.getenv(
 )
 
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("BINANCE_PRICE_TIMEOUT_SECONDS", "15"))
-HYPERLIQUID_INFO_URL = os.getenv(
-    "HYPERLIQUID_INFO_URL",
-    "https://api.hyperliquid.xyz/info",
+BYBIT_BASE_URL = os.getenv(
+    "BYBIT_BASE_URL",
+    "https://api.bybit.com",
+).rstrip("/")
+BYBIT_TICKERS_ENDPOINT = os.getenv(
+    "BYBIT_TICKERS_ENDPOINT",
+    "/v5/market/tickers",
 )
-HYPERLIQUID_TIMEOUT_SECONDS = int(
-    os.getenv("HYPERLIQUID_PRICE_TIMEOUT_SECONDS", "10")
-)
+BYBIT_TIMEOUT_SECONDS = int(os.getenv("BYBIT_PRICE_TIMEOUT_SECONDS", "10"))
 
 # symbol -> (Binance base symbol, multiplier)
 # 1000PEPE on CoinGlass represents 1000 PEPE units.
@@ -84,28 +86,56 @@ def _fetch_spot_prices() -> Dict[str, float]:
 
 
 
-def _fetch_hyperliquid_mids() -> Dict[str, float]:
-    """Fetch public Hyperliquid mid prices via the official Info API."""
-    response = requests.post(
-        HYPERLIQUID_INFO_URL,
-        json={"type": "allMids", "dex": ""},
-        timeout=HYPERLIQUID_TIMEOUT_SECONDS,
+def _fetch_bybit_hype_price(category: str) -> float:
+    """Fetch HYPEUSDT from Bybit V5 tickers.
+
+    ``linear`` is the preferred USDT perpetual market. ``spot`` is used only
+    as a fallback. For linear contracts the mark price is preferred; when it
+    is unavailable the latest traded price is used.
+    """
+    normalized_category = str(category or "").strip().lower()
+    if normalized_category not in {"linear", "spot"}:
+        raise ValueError(f"unsupported Bybit category: {category!r}")
+
+    response = requests.get(
+        BYBIT_BASE_URL + BYBIT_TICKERS_ENDPOINT,
+        params={"category": normalized_category, "symbol": "HYPEUSDT"},
+        timeout=BYBIT_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     payload = response.json()
-    if not isinstance(payload, dict):
-        raise ValueError("Hyperliquid allMids returned a non-object payload")
 
-    result: Dict[str, float] = {}
-    for symbol, raw_price in payload.items():
-        normalized = _normalize_symbol(symbol)
-        if not normalized or normalized.startswith("@"):
-            continue
+    if not isinstance(payload, dict):
+        raise ValueError("Bybit tickers returned a non-object payload")
+    if int(payload.get("retCode", -1)) != 0:
+        raise ValueError(
+            f"Bybit API error retCode={payload.get('retCode')} "
+            f"retMsg={payload.get('retMsg')!r}"
+        )
+
+    result = payload.get("result") or {}
+    items = result.get("list") or []
+    if not isinstance(items, list) or not items:
+        raise ValueError(f"Bybit {normalized_category} returned no HYPEUSDT ticker")
+
+    ticker = items[0] or {}
+    candidate_fields = (
+        ("markPrice", "lastPrice")
+        if normalized_category == "linear"
+        else ("lastPrice",)
+    )
+    for field in candidate_fields:
+        raw_price = ticker.get(field)
         try:
-            result[normalized] = float(raw_price)
+            price = float(raw_price)
         except (TypeError, ValueError):
             continue
-    return result
+        if price > 0:
+            return price
+
+    raise ValueError(
+        f"Bybit {normalized_category} HYPEUSDT ticker has no valid price"
+    )
 
 
 def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
@@ -120,7 +150,8 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
 
     futures_error = None
     spot_error = None
-    hyperliquid_error = None
+    bybit_futures_error = None
+    bybit_spot_error = None
 
     try:
         futures_prices = _fetch_futures_mark_prices()
@@ -134,12 +165,35 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
         spot_prices = {}
         spot_error = repr(exc)
 
-    hyperliquid_prices: Dict[str, float] = {}
+    bybit_hype_price: Optional[float] = None
+    bybit_hype_source: Optional[str] = None
     if "HYPE" in requested:
         try:
-            hyperliquid_prices = _fetch_hyperliquid_mids()
+            bybit_hype_price = _fetch_bybit_hype_price("linear")
+            bybit_hype_source = "bybit_futures_mark"
+            print(
+                f"[price] HYPE fetched from Bybit Futures: {bybit_hype_price}",
+                flush=True,
+            )
         except Exception as exc:
-            hyperliquid_error = repr(exc)
+            bybit_futures_error = repr(exc)
+            print(
+                f"[price] HYPE Bybit Futures failed: {bybit_futures_error}",
+                flush=True,
+            )
+            try:
+                bybit_hype_price = _fetch_bybit_hype_price("spot")
+                bybit_hype_source = "bybit_spot"
+                print(
+                    f"[price] HYPE fetched from Bybit Spot: {bybit_hype_price}",
+                    flush=True,
+                )
+            except Exception as spot_exc:
+                bybit_spot_error = repr(spot_exc)
+                print(
+                    f"[price] HYPE Bybit Spot failed: {bybit_spot_error}",
+                    flush=True,
+                )
 
     prices: Dict[str, Dict[str, Any]] = {}
     missing: List[str] = []
@@ -154,10 +208,10 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
         elif pair in futures_prices:
             raw_price = futures_prices[pair]
             source = "binance_futures_mark"
-        elif symbol == "HYPE" and "HYPE" in hyperliquid_prices:
-            raw_price = hyperliquid_prices["HYPE"]
-            source = "hyperliquid_all_mids"
-            pair = "HYPE/USD"
+        elif symbol == "HYPE" and bybit_hype_price is not None:
+            raw_price = bybit_hype_price
+            source = bybit_hype_source or "bybit_futures_mark"
+            pair = "HYPEUSDT"
         else:
             missing.append(symbol)
             continue
@@ -183,7 +237,8 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
         "missing_symbols": missing,
         "futures_error": futures_error,
         "spot_error": spot_error,
-        "hyperliquid_error": hyperliquid_error,
+        "bybit_futures_error": bybit_futures_error,
+        "bybit_spot_error": bybit_spot_error,
     }
 
 
@@ -248,7 +303,7 @@ def enrich_snapshot_rows(rows: Iterable[Any], excluded_symbols: Iterable[str] = 
     - distance_short_pct / distance_long_pct
     - distance_short_abs / distance_long_abs
 
-    Symbols without a supported live price are excluded from live calculations. HYPE uses the Hyperliquid public Info API when Binance does not list it.
+    Symbols without a supported live price are excluded from live calculations. HYPE uses Bybit Futures first and Bybit Spot as fallback when Binance does not list it.
     """
     excluded = {str(x).upper() for x in excluded_symbols}
     raw_rows = [dict(row) for row in rows]

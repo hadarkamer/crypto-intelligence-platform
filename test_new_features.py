@@ -18,13 +18,29 @@ def test_alert_summary_by_coin_and_side():
     assert "סה\"כ" not in text
 
 
-def test_hype_uses_hyperliquid_fallback():
+def test_hype_uses_bybit_futures_first():
     with patch.object(live_price_provider, "_fetch_futures_mark_prices", return_value={}), \
          patch.object(live_price_provider, "_fetch_spot_prices", return_value={}), \
-         patch.object(live_price_provider, "_fetch_hyperliquid_mids", return_value={"HYPE": 42.5}):
+         patch.object(live_price_provider, "_fetch_bybit_hype_price", return_value=42.5) as bybit:
         result = live_price_provider.fetch_binance_usdt_prices(["HYPE"])
     assert result["prices"]["HYPE"]["price"] == 42.5
-    assert result["prices"]["HYPE"]["source"] == "hyperliquid_all_mids"
+    assert result["prices"]["HYPE"]["source"] == "bybit_futures_mark"
+    bybit.assert_called_once_with("linear")
+
+
+def test_hype_falls_back_to_bybit_spot():
+    def fetch(category):
+        if category == "linear":
+            raise RuntimeError("linear unavailable")
+        return 41.25
+
+    with patch.object(live_price_provider, "_fetch_futures_mark_prices", return_value={}), \
+         patch.object(live_price_provider, "_fetch_spot_prices", return_value={}), \
+         patch.object(live_price_provider, "_fetch_bybit_hype_price", side_effect=fetch):
+        result = live_price_provider.fetch_binance_usdt_prices(["HYPE"])
+    assert result["prices"]["HYPE"]["price"] == 41.25
+    assert result["prices"]["HYPE"]["source"] == "bybit_spot"
+    assert "linear unavailable" in result["bybit_futures_error"]
 
 
 def test_counter_score_only_for_requested_item():
