@@ -7,36 +7,21 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 
 
-# Binance USD-M Futures market-data hosts. The first reachable host is used.
-# Multiple official hosts make collection more resilient to a temporary DNS/CDN issue.
-_DEFAULT_FUTURES_HOSTS = (
+BINANCE_FUTURES_BASE_URL = os.getenv(
+    "BINANCE_FUTURES_BASE_URL",
     "https://fapi.binance.com",
-    "https://fapi1.binance.com",
-    "https://fapi2.binance.com",
-    "https://fapi3.binance.com",
-)
-BINANCE_FUTURES_BASE_URLS = tuple(
-    item.strip().rstrip("/")
-    for item in os.getenv(
-        "BINANCE_FUTURES_BASE_URLS",
-        ",".join(_DEFAULT_FUTURES_HOSTS),
-    ).split(",")
-    if item.strip()
-)
+).rstrip("/")
 BINANCE_FUTURES_MARK_ENDPOINT = os.getenv(
     "BINANCE_FUTURES_MARK_ENDPOINT",
     "/fapi/v1/premiumIndex",
 )
-BINANCE_FUTURES_EXCHANGE_INFO_ENDPOINT = os.getenv(
-    "BINANCE_FUTURES_EXCHANGE_INFO_ENDPOINT",
-    "/fapi/v1/exchangeInfo",
-)
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("BINANCE_PRICE_TIMEOUT_SECONDS", "15"))
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("BINANCE_PRICE_TIMEOUT_SECONDS", "12"))
 
-# CoinGlass symbol -> fallback Binance base symbol and multiplier.
-# Exact Futures pair (for example 1000PEPEUSDT) is always tried first.
+# CoinGlass symbol -> (Binance futures base symbol, price multiplier).
+# Binance quotes 1000PEPE per 1000 tokens, while CoinGlass uses PEPE.
 SYMBOL_ALIASES: Dict[str, Tuple[str, float]] = {
-    "1000PEPE": ("PEPE", 1000.0),
+    "PEPE": ("1000PEPE", 0.001),
+    "1000PEPE": ("1000PEPE", 1.0),
 }
 
 
@@ -44,186 +29,66 @@ def _normalize_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
 
 
-def _get_json(url: str, params: Optional[Dict[str, str]] = None) -> Any:
-    response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+def _fetch_futures_mark_prices() -> Dict[str, float]:
+    """Fetch one coherent Binance USD-M Futures mark-price snapshot."""
+    url = BINANCE_FUTURES_BASE_URL + BINANCE_FUTURES_MARK_ENDPOINT
+    response = requests.get(
+        url,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+    )
     response.raise_for_status()
-    return response.json()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise RuntimeError("Binance Futures premiumIndex returned a non-list payload")
 
-
-def _fetch_exchange_info() -> Tuple[Dict[str, List[str]], Optional[str], List[str]]:
-    """Return baseAsset -> tradable USDT perpetual symbols.
-
-    Exchange info is helpful but not mandatory: direct SYMBOLUSDT matching still works
-    if this endpoint is temporarily unavailable.
-    """
-    errors: List[str] = []
-    for host in BINANCE_FUTURES_BASE_URLS:
+    result: Dict[str, float] = {}
+    for item in payload:
+        pair = str(item.get("symbol", "")).upper()
+        raw_price = item.get("markPrice")
+        if not pair or raw_price is None:
+            continue
         try:
-            payload = _get_json(host + BINANCE_FUTURES_EXCHANGE_INFO_ENDPOINT)
-            mapping: Dict[str, List[str]] = {}
-            for item in payload.get("symbols", []):
-                pair = str(item.get("symbol", "")).upper()
-                base_asset = str(item.get("baseAsset", "")).upper()
-                quote_asset = str(item.get("quoteAsset", "")).upper()
-                status = str(item.get("status", "")).upper()
-                contract_type = str(item.get("contractType", "")).upper()
-                if (
-                    pair
-                    and base_asset
-                    and quote_asset == "USDT"
-                    and status == "TRADING"
-                    and contract_type == "PERPETUAL"
-                ):
-                    mapping.setdefault(base_asset, []).append(pair)
-            return mapping, host, errors
-        except Exception as exc:  # network/API fallback across official hosts
-            errors.append(f"{host}: {exc!r}")
-    return {}, None, errors
-
-
-def _fetch_bulk_mark_prices() -> Tuple[Dict[str, float], Optional[str], List[str]]:
-    errors: List[str] = []
-    for host in BINANCE_FUTURES_BASE_URLS:
-        try:
-            payload = _get_json(host + BINANCE_FUTURES_MARK_ENDPOINT)
-            if not isinstance(payload, list):
-                raise ValueError("premiumIndex bulk response is not a list")
-            prices: Dict[str, float] = {}
-            for item in payload:
-                pair = str(item.get("symbol", "")).upper()
-                raw_price = item.get("markPrice")
-                if not pair or raw_price is None:
-                    continue
-                try:
-                    price = float(raw_price)
-                except (TypeError, ValueError):
-                    continue
-                if price > 0:
-                    prices[pair] = price
-            if not prices:
-                raise ValueError("premiumIndex returned no valid prices")
-            return prices, host, errors
-        except Exception as exc:
-            errors.append(f"{host}: {exc!r}")
-    return {}, None, errors
-
-
-def _fetch_direct_mark_price(pair: str, preferred_host: Optional[str] = None) -> Tuple[Optional[float], Optional[str], List[str]]:
-    errors: List[str] = []
-    hosts = list(BINANCE_FUTURES_BASE_URLS)
-    if preferred_host and preferred_host in hosts:
-        hosts.remove(preferred_host)
-        hosts.insert(0, preferred_host)
-
-    for host in hosts:
-        try:
-            payload = _get_json(
-                host + BINANCE_FUTURES_MARK_ENDPOINT,
-                params={"symbol": pair},
-            )
-            raw_price = payload.get("markPrice") if isinstance(payload, dict) else None
             price = float(raw_price)
-            if price <= 0:
-                raise ValueError("non-positive mark price")
-            return price, host, errors
-        except Exception as exc:
-            errors.append(f"{host}/{pair}: {exc!r}")
-    return None, None, errors
-
-
-def _candidate_pairs(symbol: str, exchange_map: Dict[str, List[str]]) -> List[Tuple[str, float]]:
-    """Return ordered Futures-pair candidates for a CoinGlass symbol."""
-    symbol = _normalize_symbol(symbol)
-    candidates: List[Tuple[str, float]] = []
-
-    def add(pair: str, multiplier: float = 1.0) -> None:
-        pair = pair.upper()
-        entry = (pair, float(multiplier))
-        if pair and entry not in candidates:
-            candidates.append(entry)
-
-    # Exact contract first. This resolves HYPE -> HYPEUSDT and preserves 1000-token contracts.
-    add(f"{symbol}USDT", 1.0)
-
-    # Official exchangeInfo matches by baseAsset.
-    for pair in exchange_map.get(symbol, []):
-        add(pair, 1.0)
-
-    # Controlled fallback aliases only after exact matching.
-    alias = SYMBOL_ALIASES.get(symbol)
-    if alias:
-        base, multiplier = alias
-        add(f"{base}USDT", multiplier)
-        for pair in exchange_map.get(base, []):
-            add(pair, multiplier)
-
-    return candidates
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            result[pair] = price
+    if not result:
+        raise RuntimeError("Binance Futures returned no usable mark prices")
+    return result
 
 
 def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
-    """Fetch Binance USD-M Futures Mark Prices.
+    """Fetch Binance USD-M Futures mark prices only.
 
-    Futures Mark Price is the sole pricing source for calculations. A missing
-    contract excludes only that symbol; it never causes valid contracts to be
-    replaced by Spot prices.
+    One bulk request is used for the entire scan so every timeframe of a symbol
+    receives the same live price and timestamp. Spot is intentionally excluded.
     """
     requested = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
     fetched_at = datetime.now(timezone.utc)
-
-    exchange_map, exchange_host, exchange_errors = _fetch_exchange_info()
-    bulk_prices, bulk_host, bulk_errors = _fetch_bulk_mark_prices()
+    error = None
+    try:
+        futures_prices = _fetch_futures_mark_prices()
+    except Exception as exc:
+        futures_prices = {}
+        error = repr(exc)
 
     prices: Dict[str, Dict[str, Any]] = {}
     missing: List[str] = []
-    diagnostics: Dict[str, Any] = {}
-
     for symbol in requested:
-        candidates = _candidate_pairs(symbol, exchange_map)
-        selected_pair: Optional[str] = None
-        selected_multiplier = 1.0
-        raw_price: Optional[float] = None
-        direct_errors: List[str] = []
-        direct_host: Optional[str] = None
-
-        for pair, multiplier in candidates:
-            if pair in bulk_prices:
-                selected_pair = pair
-                selected_multiplier = multiplier
-                raw_price = bulk_prices[pair]
-                break
-
-        # HYPE and newly listed contracts can occasionally lag in a bulk response.
-        # Query each candidate directly before declaring the symbol missing.
+        base, multiplier = SYMBOL_ALIASES.get(symbol, (symbol, 1.0))
+        pair = f"{base}USDT"
+        raw_price = futures_prices.get(pair)
         if raw_price is None:
-            for pair, multiplier in candidates:
-                direct_price, host, errors = _fetch_direct_mark_price(pair, bulk_host)
-                direct_errors.extend(errors)
-                if direct_price is not None:
-                    selected_pair = pair
-                    selected_multiplier = multiplier
-                    raw_price = direct_price
-                    direct_host = host
-                    break
-
-        diagnostics[symbol] = {
-            "candidate_pairs": [pair for pair, _ in candidates],
-            "exchange_info_pairs": exchange_map.get(symbol, []),
-            "selected_pair": selected_pair,
-            "bulk_match": bool(selected_pair and selected_pair in bulk_prices),
-            "direct_host": direct_host,
-            "direct_errors": direct_errors,
-        }
-
-        if raw_price is None or selected_pair is None:
             missing.append(symbol)
             continue
-
         prices[symbol] = {
             "symbol": symbol,
-            "pair": selected_pair,
-            "price": raw_price * selected_multiplier,
+            "pair": pair,
+            "price": raw_price * multiplier,
             "raw_price": raw_price,
-            "multiplier": selected_multiplier,
+            "multiplier": multiplier,
             "source": "binance_futures_mark",
             "fetched_at_utc": fetched_at.isoformat(),
         }
@@ -237,11 +102,7 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
         "missing_count": len(missing),
         "prices": prices,
         "missing_symbols": missing,
-        "exchange_info_host": exchange_host,
-        "mark_price_host": bulk_host,
-        "exchange_info_errors": exchange_errors,
-        "mark_price_errors": bulk_errors,
-        "diagnostics": diagnostics,
+        "futures_error": error,
     }
 
 
@@ -250,96 +111,62 @@ def recalculate_distances(
     short_max_pain: Optional[float],
     long_max_pain: Optional[float],
 ) -> Dict[str, Optional[float]]:
-    """Recalculate all Max Pain distances from the Binance Futures Mark Price."""
+    """Recalculate all Max Pain distances from the Futures mark price."""
     if not live_price:
         return {
-            "short_signed_pct": None,
-            "long_signed_pct": None,
-            "short_abs_pct": None,
-            "long_abs_pct": None,
-            "short_abs_usd": None,
-            "long_abs_usd": None,
+            "short_signed_pct": None, "long_signed_pct": None,
+            "short_abs_pct": None, "long_abs_pct": None,
+            "short_abs_usd": None, "long_abs_usd": None,
             "closest_side": None,
         }
-
-    short_signed = (
-        (short_max_pain - live_price) / live_price * 100
-        if short_max_pain is not None else None
-    )
-    long_signed = (
-        (long_max_pain - live_price) / live_price * 100
-        if long_max_pain is not None else None
-    )
-
+    short_signed = ((short_max_pain-live_price)/live_price*100 if short_max_pain is not None else None)
+    long_signed = ((long_max_pain-live_price)/live_price*100 if long_max_pain is not None else None)
     short_abs = abs(short_signed) if short_signed is not None else None
     long_abs = abs(long_signed) if long_signed is not None else None
-    short_abs_usd = abs(short_max_pain - live_price) if short_max_pain is not None else None
-    long_abs_usd = abs(long_max_pain - live_price) if long_max_pain is not None else None
+    short_abs_usd = abs(short_max_pain-live_price) if short_max_pain is not None else None
+    long_abs_usd = abs(long_max_pain-live_price) if long_max_pain is not None else None
 
-    if short_abs is None and long_abs is None:
-        closest = None
-    elif long_abs is None or (short_abs is not None and short_abs <= long_abs):
-        closest = "SHORT"
-    else:
-        closest = "LONG"
-
+    # A crossed target is no longer active.
+    active = []
+    if short_signed is not None and short_signed > 0:
+        active.append(("SHORT", short_abs))
+    if long_signed is not None and long_signed < 0:
+        active.append(("LONG", long_abs))
+    closest = min(active, key=lambda item: item[1])[0] if active else None
     return {
-        "short_signed_pct": short_signed,
-        "long_signed_pct": long_signed,
-        "short_abs_pct": short_abs,
-        "long_abs_pct": long_abs,
-        "short_abs_usd": short_abs_usd,
-        "long_abs_usd": long_abs_usd,
+        "short_signed_pct": short_signed, "long_signed_pct": long_signed,
+        "short_abs_pct": short_abs, "long_abs_pct": long_abs,
+        "short_abs_usd": short_abs_usd, "long_abs_usd": long_abs_usd,
         "closest_side": closest,
     }
 
 
 def enrich_snapshot_rows(rows: Iterable[Any], excluded_symbols: Iterable[str] = ()) -> Dict[str, Any]:
-    """Overlay Binance Futures Mark Prices on CoinGlass Max Pain rows."""
+    """Overlay one Futures mark-price snapshot on all CoinGlass rows."""
     excluded = {str(x).upper() for x in excluded_symbols}
     raw_rows = [dict(row) for row in rows]
-    symbols = sorted({
-        str(row.get("symbol", "")).upper()
-        for row in raw_rows
-        if row.get("symbol") and str(row.get("symbol")).upper() not in excluded
-    })
-
+    symbols = sorted({str(r.get("symbol", "")).upper() for r in raw_rows
+                      if r.get("symbol") and str(r.get("symbol")).upper() not in excluded})
     price_result = fetch_binance_usdt_prices(symbols)
-    enriched = []
-    skipped = []
-
+    enriched, skipped = [], []
     for row in raw_rows:
         symbol = str(row.get("symbol", "")).upper()
         if not symbol or symbol in excluded:
             continue
-
         live = price_result["prices"].get(symbol)
         if not live:
             skipped.append(symbol)
             continue
-
-        calc = recalculate_distances(
-            live["price"],
-            row.get("short_max_pain"),
-            row.get("long_max_pain"),
-        )
-
+        calc = recalculate_distances(live["price"], row.get("short_max_pain"), row.get("long_max_pain"))
         row["coinglass_price"] = row.get("current_price")
         row["current_price"] = live["price"]
         row["price_source"] = live["source"]
         row["price_pair"] = live["pair"]
         row["price_fetched_at_utc"] = live["fetched_at_utc"]
-
         row["distance_short_pct"] = calc["short_signed_pct"]
         row["distance_long_pct"] = calc["long_signed_pct"]
         row["distance_short_abs"] = calc["short_abs_usd"]
         row["distance_long_abs"] = calc["long_abs_usd"]
         row["closest_side"] = calc["closest_side"]
-
         enriched.append(row)
-
-    return {
-        "rows": enriched,
-        "price_result": price_result,
-        "skipped_symbols": sorted(set(skipped)),
-    }
+    return {"rows": enriched, "price_result": price_result, "skipped_symbols": sorted(set(skipped))}
