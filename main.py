@@ -76,6 +76,9 @@ COLLECT_LOCK = None
 SCRAPE_LOCK = None
 WATCH_TASK = None
 WATCH_SCAN_TASK = None
+SPECIFIC_WATCH_TASK = None
+SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
+SPECIFIC_WATCH_INTERVAL_MINUTES = 5
 ALERT_COMMAND_LOCK = None
 PROCESSED_UPDATE_IDS = set()
 PROCESSED_UPDATE_ORDER = []
@@ -1062,9 +1065,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
         "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
-        "/watch_on — הפעלת לולאת Watch אחת\n"
-        "/watch_status — הצגת מצב בלבד\n"
-        "/watch_stop — עצירת Watch"
+        "/watch_on — הפעלת צפייה כללית\n"
+        "/watch_on SOL 160 — צפייה ב-SOL עד יעד 160, כל 5 דקות\n"
+        "/watch_status — הצגת מצב הצפיות\n"
+        "/watch_stop — עצירת הצפייה הכללית\n"
+        "/watch_stop SOL — עצירת הצפייה ב-SOL"
     )
 
 
@@ -2606,9 +2611,244 @@ def _format_watch_time(value) -> str:
         return str(value)
 
 
+
+def _find_symbol_current_price(rows, symbol: str) -> Optional[float]:
+    for row in rows:
+        if str(row.get("symbol") or "").upper() != symbol:
+            continue
+        try:
+            value = float(row.get("current_price"))
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _specific_watch_progress_text(watch: Dict[str, Any], current_price: float) -> str:
+    target = float(watch["target_price"])
+    previous = watch.get("last_price")
+    start = float(watch["start_price"])
+    current_distance = abs(target - current_price)
+    start_distance = abs(target - start)
+    remaining_pct = (current_distance / current_price * 100) if current_price else 0.0
+
+    if previous is None:
+        movement = "בדיקה ראשונה"
+    else:
+        previous_distance = abs(target - float(previous))
+        if current_distance < previous_distance:
+            movement = "מתקרב ליעד"
+        elif current_distance > previous_distance:
+            movement = "מתרחק מהיעד"
+        else:
+            movement = "ללא שינוי במרחק מהיעד"
+
+    progress = 0.0
+    if start_distance > 0:
+        progress = max(0.0, min(100.0, (1 - current_distance / start_distance) * 100))
+
+    return (
+        f"\n\n👁 מעקב יעד: ${fmt_price(target)}\n"
+        f"מצב: {movement}\n"
+        f"מרחק נותר: {fmt(remaining_pct)}%\n"
+        f"התקדמות מההפעלה: {fmt(progress)}%"
+    )
+
+
+def _specific_target_reached(watch: Dict[str, Any], current_price: float) -> bool:
+    start = float(watch["start_price"])
+    target = float(watch["target_price"])
+    if target >= start:
+        return current_price >= target
+    return current_price <= target
+
+
+def _specific_watch_summary(symbol: str, watch: Dict[str, Any], current_price: float) -> str:
+    start = float(watch["start_price"])
+    target = float(watch["target_price"])
+    change_pct = ((current_price - start) / start * 100) if start else 0.0
+    started_at = _parse_utc_setting(watch.get("started_at"))
+    elapsed = "-"
+    if started_at is not None:
+        seconds = max(0, int((datetime.now(timezone.utc) - started_at).total_seconds()))
+        elapsed = f"{seconds // 3600} שעות ו-{(seconds % 3600) // 60} דקות"
+    return (
+        f"🎯 {symbol} הגיע ליעד\n\n"
+        f"מחיר בהפעלת הצפייה: ${fmt_price(start)}\n"
+        f"מחיר יעד: ${fmt_price(target)}\n"
+        f"מחיר נוכחי: ${fmt_price(current_price)}\n"
+        f"שינוי מההפעלה: {fmt(change_pct)}%\n"
+        f"משך המעקב: {elapsed}\n\n"
+        "הצפייה במטבע הופסקה אוטומטית."
+    )
+
+
+async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
+    """Scan once for all active symbol watches, protected by the shared scrape lock."""
+    if not SPECIFIC_WATCHES:
+        return
+
+    scrape_lock = _get_scrape_lock()
+    async with scrape_lock:
+        WATCH_RUNTIME["scan_in_progress"] = True
+        WATCH_RUNTIME["scan_owner"] = "Specific Watch"
+        try:
+            rows, _live_result = await collect_live_rows_for_watch()
+        finally:
+            WATCH_RUNTIME["scan_in_progress"] = False
+            WATCH_RUNTIME["scan_owner"] = None
+
+    all_items = alert_engine.build_opportunities(rows, limit=500)
+    symbols = list(SPECIFIC_WATCHES.keys())
+    completed = []
+
+    for symbol in symbols:
+        watch = SPECIFIC_WATCHES.get(symbol)
+        if not watch:
+            continue
+        current_price = _find_symbol_current_price(rows, symbol)
+        if current_price is None:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ צפייה ב-{symbol}: לא נמצא מחיר חי בסריקה הנוכחית.",
+            )
+            continue
+
+        if _specific_target_reached(watch, current_price):
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=_specific_watch_summary(symbol, watch, current_price),
+            )
+            completed.append(symbol)
+            continue
+
+        symbol_items = [
+            item for item in all_items
+            if str(item.get("symbol") or "").upper() == symbol
+        ]
+        symbol_items.sort(
+            key=lambda item: float(item.get("score", item.get("priority", 0)) or 0),
+            reverse=True,
+        )
+        if symbol_items:
+            text = (
+                f"👁 תמונת מצב — {symbol}\n\n"
+                + _alert_card(1, symbol_items[0], all_items, rows)
+                + _specific_watch_progress_text(watch, current_price)
+            )
+        else:
+            text = (
+                f"👁 תמונת מצב — {symbol}\n\n"
+                f"מחיר נוכחי: ${fmt_price(current_price)}"
+                + _specific_watch_progress_text(watch, current_price)
+                + "\n\nלא נבנתה התראת Max Pain מלאה בסריקה הנוכחית."
+            )
+        await bot_app.bot.send_message(chat_id=chat_id, text=text)
+        watch["last_price"] = current_price
+        watch["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
+
+    for symbol in completed:
+        SPECIFIC_WATCHES.pop(symbol, None)
+
+
+async def specific_watch_loop(bot_app, chat_id: int):
+    """One manager loop serves all symbol watches with one shared scan every 5 minutes."""
+    global SPECIFIC_WATCH_TASK
+    try:
+        while SPECIFIC_WATCHES:
+            try:
+                await run_specific_watch_cycle(bot_app, chat_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[specific-watch] cycle error: {exc!r}", flush=True)
+                try:
+                    await bot_app.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            "❌ סריקת הצפייה הספציפית נכשלה. "
+                            "הצפיות נשארות פעילות וינוסו שוב בעוד 5 דקות.\n"
+                            f"{exc!r}"
+                        ),
+                    )
+                except Exception:
+                    pass
+            if SPECIFIC_WATCHES:
+                await asyncio.sleep(SPECIFIC_WATCH_INTERVAL_MINUTES * 60)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        SPECIFIC_WATCH_TASK = None
+
+
+async def _start_specific_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global SPECIFIC_WATCH_TASK
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "שימוש נכון: /watch_on SOL 160"
+        )
+        return
+
+    symbol = str(context.args[0]).upper().strip()
+    try:
+        target = float(str(context.args[1]).replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("מחיר היעד חייב להיות מספר.")
+        return
+    if not symbol or target <= 0:
+        await update.message.reply_text("יש להזין מטבע ומחיר יעד חיובי.")
+        return
+
+    scrape_lock = _get_scrape_lock()
+    async with scrape_lock:
+        WATCH_RUNTIME["scan_in_progress"] = True
+        WATCH_RUNTIME["scan_owner"] = f"Watch setup {symbol}"
+        try:
+            rows, _ = await collect_live_rows_for_watch()
+        finally:
+            WATCH_RUNTIME["scan_in_progress"] = False
+            WATCH_RUNTIME["scan_owner"] = None
+
+    start_price = _find_symbol_current_price(rows, symbol)
+    if start_price is None:
+        await update.message.reply_text(
+            f"לא נמצא מחיר חי עבור {symbol}; הצפייה לא הופעלה."
+        )
+        return
+
+    SPECIFIC_WATCHES[symbol] = {
+        "symbol": symbol,
+        "target_price": target,
+        "start_price": start_price,
+        "last_price": start_price,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "last_scan_utc": None,
+    }
+
+    chat_id = int(update.effective_chat.id)
+    if SPECIFIC_WATCH_TASK is None or SPECIFIC_WATCH_TASK.done():
+        SPECIFIC_WATCH_TASK = asyncio.create_task(
+            specific_watch_loop(context.application, chat_id),
+            name="specific-watch-manager",
+        )
+
+    direction = "מעלה" if target >= start_price else "מטה"
+    await update.message.reply_text(
+        f"✅ צפייה ב-{symbol} הופעלה\n"
+        f"מחיר התחלה: ${fmt_price(start_price)}\n"
+        f"מחיר יעד: ${fmt_price(target)} ({direction})\n"
+        "תישלח תמונת מצב כל 5 דקות. בהגעה ליעד תישלח הודעת סיכום."
+    )
+
+
 async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """The only command allowed to create the Watch loop."""
+    """Start general Watch, or /watch_on SYMBOL TARGET for an independent watch."""
     global WATCH_TASK
+
+    if context.args:
+        await _start_specific_watch(update, context)
+        return
 
     if WATCH_TASK is not None and not WATCH_TASK.done():
         await update.message.reply_text(
@@ -2651,8 +2891,24 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the one Watch loop and any active Watch scan."""
-    global WATCH_TASK, WATCH_SCAN_TASK
+    """Stop general Watch, or only one symbol when /watch_stop SYMBOL is used."""
+    global WATCH_TASK, WATCH_SCAN_TASK, SPECIFIC_WATCH_TASK
+
+    if context.args:
+        symbol = str(context.args[0]).upper().strip()
+        removed = SPECIFIC_WATCHES.pop(symbol, None)
+        if not SPECIFIC_WATCHES and SPECIFIC_WATCH_TASK is not None and not SPECIFIC_WATCH_TASK.done():
+            SPECIFIC_WATCH_TASK.cancel()
+            try:
+                await SPECIFIC_WATCH_TASK
+            except asyncio.CancelledError:
+                pass
+            SPECIFIC_WATCH_TASK = None
+        await update.message.reply_text(
+            f"🛑 הצפייה ב-{symbol} הופסקה."
+            if removed else f"לא קיימת צפייה פעילה ב-{symbol}."
+        )
+        return
 
     loop_task = WATCH_TASK
     scan_task = WATCH_SCAN_TASK
@@ -2728,7 +2984,8 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"מעל הסף במחזור האחרון: "
         f"{WATCH_RUNTIME.get('last_candidates', 0)}\n"
         f"תוצאות שנשלחו: {WATCH_RUNTIME.get('last_sent', 0)}\n"
-        f"מועמד מוביל: {top_text}"
+        f"מועמד מוביל: {top_text}\n"
+        f"צפיות מטבע פעילות: {specific_text}"
         + (
             f"\nשגיאה אחרונה: {WATCH_RUNTIME['last_error']}"
             if WATCH_RUNTIME.get("last_error")
