@@ -2685,7 +2685,7 @@ def _specific_watch_summary(symbol: str, watch: Dict[str, Any], current_price: f
 
 
 async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
-    """Scan once for all active symbol watches, protected by the shared scrape lock."""
+    """Send the normal alert card for every timeframe of each active symbol watch."""
     if not SPECIFIC_WATCHES:
         return
 
@@ -2700,13 +2700,16 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
             WATCH_RUNTIME["scan_owner"] = None
 
     all_items = alert_engine.build_opportunities(rows, limit=500)
-    symbols = list(SPECIFIC_WATCHES.keys())
+    timeframe_order = list(getattr(alert_engine, "TIMEFRAMES", [
+        "12h", "24h", "48h", "3d", "1w", "2w", "1m"
+    ]))
     completed = []
 
-    for symbol in symbols:
+    for symbol in list(SPECIFIC_WATCHES.keys()):
         watch = SPECIFIC_WATCHES.get(symbol)
         if not watch:
             continue
+
         current_price = _find_symbol_current_price(rows, symbol)
         if current_price is None:
             await bot_app.bot.send_message(
@@ -2715,38 +2718,74 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
             )
             continue
 
+        # Select one normal alert per timeframe. If both directions exist for the
+        # same timeframe, show the stronger one, exactly as an ordinary alert card.
+        symbol_items = [
+            item for item in all_items
+            if str(item.get("symbol") or "").upper() == symbol
+        ]
+        best_by_timeframe: Dict[str, Dict[str, Any]] = {}
+        for item in symbol_items:
+            timeframe = str(item.get("timeframe") or "")
+            if timeframe not in timeframe_order:
+                continue
+            previous = best_by_timeframe.get(timeframe)
+            item_score = float(item.get("score", item.get("priority", 0)) or 0)
+            previous_score = (
+                float(previous.get("score", previous.get("priority", 0)) or 0)
+                if previous else float("-inf")
+            )
+            if previous is None or item_score > previous_score:
+                best_by_timeframe[timeframe] = item
+
+        ordered_items = [
+            best_by_timeframe[timeframe]
+            for timeframe in timeframe_order
+            if timeframe in best_by_timeframe
+        ]
+
+        target = float(watch["target_price"])
+        await bot_app.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"✅ צפייה ממוקדת — {symbol}\n"
+                f"מחיר נוכחי: ${fmt_price(current_price)} | "
+                f"יעד: ${fmt_price(target)}\n"
+                f"התראות זמינות: {len(ordered_items)}/{len(timeframe_order)} טווחים"
+            ),
+        )
+
+        for index, item in enumerate(ordered_items, start=1):
+            card = _alert_card(index, item, all_items, rows)
+            # Add the compact target status only once, after the final normal card.
+            if index == len(ordered_items):
+                card += _specific_watch_progress_text(watch, current_price)
+            await bot_app.bot.send_message(chat_id=chat_id, text=card)
+
+        missing_timeframes = [
+            timeframe for timeframe in timeframe_order
+            if timeframe not in best_by_timeframe
+        ]
+        if missing_timeframes:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚠️ {symbol}: לא נבנתה התראת Max Pain מלאה עבור: "
+                    + ", ".join(missing_timeframes)
+                ),
+            )
+
+        watch["last_price"] = current_price
+        watch["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
+
+        # The final message is deliberately separate and is sent only after all
+        # ordinary timeframe alerts from the target-reaching cycle.
         if _specific_target_reached(watch, current_price):
             await bot_app.bot.send_message(
                 chat_id=chat_id,
                 text=_specific_watch_summary(symbol, watch, current_price),
             )
             completed.append(symbol)
-            continue
-
-        symbol_items = [
-            item for item in all_items
-            if str(item.get("symbol") or "").upper() == symbol
-        ]
-        symbol_items.sort(
-            key=lambda item: float(item.get("score", item.get("priority", 0)) or 0),
-            reverse=True,
-        )
-        if symbol_items:
-            text = (
-                f"👁 תמונת מצב — {symbol}\n\n"
-                + _alert_card(1, symbol_items[0], all_items, rows)
-                + _specific_watch_progress_text(watch, current_price)
-            )
-        else:
-            text = (
-                f"👁 תמונת מצב — {symbol}\n\n"
-                f"מחיר נוכחי: ${fmt_price(current_price)}"
-                + _specific_watch_progress_text(watch, current_price)
-                + "\n\nלא נבנתה התראת Max Pain מלאה בסריקה הנוכחית."
-            )
-        await bot_app.bot.send_message(chat_id=chat_id, text=text)
-        watch["last_price"] = current_price
-        watch["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
 
     for symbol in completed:
         SPECIFIC_WATCHES.pop(symbol, None)
