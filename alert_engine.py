@@ -131,24 +131,46 @@ def _allowed_distance_pct(symbol: str, rank: Optional[int]) -> float:
     return 4.0
 
 
+def _preferred_distance_ceiling(allowed_distance_pct: float) -> float:
+    """Upper edge of the 25-point Max Pain proximity band.
+
+    The lower edge stays fixed at 0.8%. The upper edge expands only upward
+    with the coin's dynamic Max Pain eligibility threshold.
+    """
+    allowed = float(allowed_distance_pct)
+    if allowed <= 2.5:
+        return 1.3
+    if allowed <= 2.7:
+        return 1.4
+    if allowed <= 3.0:
+        return 1.5
+    if allowed <= 3.5:
+        return 1.7
+    return 2.0
+
+
 def _target_proximity_points(
     distance_pct: Optional[float],
     allowed_distance_pct: float,
 ) -> float:
     """Tradable target-distance score, 0..25.
 
-    The dynamic threshold remains available for display and eligibility, while
-    the score follows the agreed simple tradability bands.
+    0.8% is always the beginning of the ideal band. Its upper edge expands
+    according to the coin's dynamic Max Pain threshold. The remaining score
+    bands retain their previous values.
     """
     if distance_pct is None or allowed_distance_pct <= 0:
         return 0.0
 
     distance = float(distance_pct)
-    if distance < 0.5 or distance > float(allowed_distance_pct):
+    allowed = float(allowed_distance_pct)
+    preferred_ceiling = _preferred_distance_ceiling(allowed)
+
+    if distance < 0.5 or distance > allowed:
         return 0.0
     if distance < 0.8:
         return 17.0
-    if distance <= 1.3:
+    if distance <= preferred_ceiling:
         return 25.0
     if distance <= 2.0:
         return 20.0
@@ -831,8 +853,9 @@ def build_opportunities(
             "raw_max_score": 100.0,
             "distance_pct": distance,
             "distance_trade_band": (
-                "BORDERLINE" if distance < 0.7
-                else "PREFERRED" if distance <= 1.3
+                "BORDERLINE" if distance < 0.8
+                else "PREFERRED"
+                if distance <= _preferred_distance_ceiling(allowed_distance)
                 else "FARTHER"
             ),
             "allowed_distance_pct": allowed_distance,
