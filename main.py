@@ -1063,6 +1063,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "פקודות:\n"
         "/collect — איסוף מלא ושמירת Snapshot חדש\n"
         "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
+        "/alerts_liq 1000000 — Alerts רק מעל סך נזילות מינימלי בדולרים\n"
         "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — הפעלת צפייה כללית\n"
@@ -1737,7 +1738,12 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
         if str(_row_get(row, "symbol", "") or "").upper() == symbol
     }
 
-    lines = [f"📊 מצב {symbol} בכל טווחי הזמן", ""]
+    alert_side = str(item.get("side") or "").upper()
+    directional_scores = (
+        item.get("directional_scores_all_timeframes", {}).get(alert_side, {})
+        or {}
+    )
+    lines = [f"📊 מצב {symbol} בכיוון {alert_side} בכל טווחי הזמן", ""]
     values = []
 
     for timeframe in TIMEFRAMES:
@@ -1776,17 +1782,20 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
                 f"🟡 {timeframe:<3}  {nearest_active_distance:.2f}% "
                 f"(מתחת לסף {MIN_DISPLAY_DISTANCE_PCT:.1f}%)"
             )
-            if other is not None:
-                values.append(float(other.get("score", other.get("priority", 0)) or 0))
+            value = directional_scores.get(timeframe)
+            if value is not None:
+                values.append(float(value))
             continue
 
-        if other is None:
-            lines.append(f"🔴 {timeframe:<3}  אין ציון זמין")
+        value = directional_scores.get(timeframe)
+        if value is None:
+            lines.append(f"🔴 {timeframe:<3}  אין ציון זמין לכיוון {alert_side}")
             continue
 
-        value = float(other.get("score", other.get("priority", 0)) or 0)
+        value = float(value)
         values.append(value)
-        lines.append(f"🟢 {timeframe:<3}  {value:.2f}")
+        marker = "🟢" if other is not None and str(other.get("side") or "").upper() == alert_side else "🟡"
+        lines.append(f"{marker} {timeframe:<3}  {value:.2f}")
 
     average = sum(values) / len(values) if values else 0.0
     lines.append("")
@@ -1819,6 +1828,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         symbol_items = [
             other for other in all_items
             if other.get("symbol") == item.get("symbol")
+            and other.get("side") == item.get("side")
         ]
         average_score = (
             sum(
@@ -2034,6 +2044,103 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         finally:
             if WATCH_RUNTIME.get("scan_owner") == "/alerts":
+                WATCH_RUNTIME["scan_owner"] = None
+
+
+async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run /alerts with a user-defined minimum total liquidity per result."""
+    if not context.args:
+        await update.message.reply_text(
+            "שימוש: /alerts_liq 1000000 [מספר תוצאות]\n"
+            "הסכום הוא מינימום סך הנזילות בדולרים: הצד הקרוב + הצד השני."
+        )
+        return
+
+    try:
+        minimum_liquidity = float(str(context.args[0]).replace(",", ""))
+        if minimum_liquidity < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        await update.message.reply_text(
+            "סף הנזילות אינו תקין. דוגמה: /alerts_liq 1000000"
+        )
+        return
+
+    limit = 10
+    if len(context.args) > 1:
+        try:
+            limit = max(1, min(15, int(context.args[1])))
+        except (TypeError, ValueError):
+            limit = 10
+
+    command_lock = _get_alert_command_lock()
+    if command_lock.locked():
+        await update.message.reply_text(
+            "⏳ פקודת Alerts כבר מבצעת סריקה. לא נפתחה סריקה נוספת."
+        )
+        return
+
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
+        await update.message.reply_text(
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. הפקודה ממתינה לסיומו."
+        )
+
+    async with command_lock:
+        try:
+            async with scrape_lock:
+                WATCH_RUNTIME["scan_owner"] = "/alerts_liq"
+                await update.message.reply_text(
+                    "🔎 התחילה סריקה חיה מלאה של 7 טווחי הזמן "
+                    f"עם סף נזילות מעל ${minimum_liquidity:,.0f}."
+                )
+                rows, live_result = await collect_live_rows_for_watch()
+
+            all_items = alert_engine.build_opportunities(rows, limit=500)
+            filtered_items = []
+            for item in all_items:
+                if not _is_displayable_opportunity(item):
+                    continue
+                total_liquidity = float(item.get("near_amount", 0) or 0) + float(
+                    item.get("far_amount", 0) or 0
+                )
+                if total_liquidity > minimum_liquidity:
+                    enriched = dict(item)
+                    enriched["total_liquidity"] = total_liquidity
+                    filtered_items.append(enriched)
+
+            items = filtered_items[:limit]
+            if not items:
+                await update.message.reply_text(
+                    "⚠️ לא נמצאו הזדמנויות שעוברות גם את תנאי ההתראה "
+                    f"וגם סך נזילות מעל ${minimum_liquidity:,.0f}."
+                )
+                return
+
+            counts = live_result.get("timeframe_integrity", {}).get("counts", {})
+            await update.message.reply_text(
+                "✅ /alerts_liq הסתיים\n"
+                f"מוצגות {len(items)} התוצאות המובילות מעל "
+                f"${minimum_liquidity:,.0f} נזילות.\n"
+                f"טווחים שנקלטו: {', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in TIMEFRAMES)}"
+            )
+            for index, item in enumerate(items, start=1):
+                await update.message.reply_text(
+                    _alert_card(index, item, all_items, rows)
+                )
+            await update.message.reply_text(
+                alert_summary.format_alert_count_summary(items)
+            )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await update.message.reply_text(
+                f"❌ /alerts_liq נכשל: {exc!r}"
+            )
+        finally:
+            if WATCH_RUNTIME.get("scan_owner") == "/alerts_liq":
                 WATCH_RUNTIME["scan_owner"] = None
 
 
@@ -3340,6 +3447,7 @@ async def main():
     bot_app.add_handler(CommandHandler("collect", collect_cmd))
     bot_app.add_handler(CommandHandler("coin", coin))
     bot_app.add_handler(CommandHandler("alerts", alert_check))
+    bot_app.add_handler(CommandHandler("alerts_liq", alert_check_min_liquidity))
     bot_app.add_handler(CommandHandler("alert", alert_coin))
     bot_app.add_handler(CommandHandler("debug", debug_coin))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))

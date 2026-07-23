@@ -116,6 +116,69 @@ def _relative_gap_advantage(row: Any) -> Dict[str, Optional[float]]:
     }
 
 
+
+
+def _active_distance_for_side(row: Any, side: str) -> Optional[float]:
+    """Return the still-active distance for one explicit direction."""
+    price = _get(row, "current_price")
+    target = _target_for_side(row, side)
+    if price is None or target is None or float(price) <= 0:
+        return None
+    signed = (float(target) - float(price)) / float(price) * 100.0
+    if side == "SHORT" and signed <= 0:
+        return None
+    if side == "LONG" and signed >= 0:
+        return None
+    return abs(signed)
+
+
+def _relative_gap_points_for_side(row: Any, side: str) -> float:
+    """Relative-gap points for an explicit side, using the existing formula."""
+    distance = _active_distance_for_side(row, side)
+    opposite = "SHORT" if side == "LONG" else "LONG"
+    opposite_distance = _active_distance_for_side(row, opposite)
+    if distance is None or opposite_distance is None or opposite_distance <= 0:
+        return 0.0
+    advantage = max(0.0, min(1.0, (opposite_distance - distance) / opposite_distance))
+    return round(advantage * 15.0, 2)
+
+
+def _score_explicit_side(
+    row: Any,
+    side: str,
+    consensus: Dict[str, Dict[str, Any]],
+    clusters: Dict[str, Dict[str, Dict[str, Any]]],
+    btc_reference_by_timeframe: Dict[str, Dict[str, Any]],
+) -> Optional[float]:
+    """Calculate one direction's score without selecting the leading side."""
+    symbol = str(_get(row, "symbol", "") or "").upper()
+    timeframe = str(_get(row, "timeframe", "") or "")
+    distance = _active_distance_for_side(row, side)
+    if not symbol or not timeframe or distance is None:
+        return None
+
+    cons = consensus.get(symbol, {})
+    directional = _directional_alignment(
+        symbol,
+        int(cons.get(side, 0) or 0),
+        int(cons.get("total", 0) or 0),
+        side,
+        btc_reference_by_timeframe.get(timeframe),
+    )
+    allowed = _allowed_distance_pct(symbol, _get(row, "rank"))
+    target_points = _target_proximity_points(distance, allowed)
+    cluster_points = float(
+        clusters.get(symbol, {}).get(side, {}).get("points", 0.0) or 0.0
+    )
+    gap_points = _relative_gap_points_for_side(row, side)
+    score = (
+        float(directional.get("total", 0.0) or 0.0)
+        + float(target_points or 0.0)
+        + cluster_points
+        + gap_points
+    )
+    return round(max(0.0, min(100.0, score)), 2)
+
 def _allowed_distance_pct(symbol: str, rank: Optional[int]) -> float:
     """Dynamic Max Pain distance threshold."""
     symbol = symbol.upper()
@@ -902,23 +965,53 @@ def build_opportunities(
             "components": components,
         })
 
-    # Current timeframe Score is primary. All-timeframe average is secondary.
-    scores_by_symbol: Dict[str, List[float]] = defaultdict(list)
-    for item in out:
-        scores_by_symbol[item["symbol"]].append(
-            float(item["score"])
-        )
-
-    averages = {
-        symbol: sum(values) / len(values)
-        for symbol, values in scores_by_symbol.items()
-        if values
+    # Directional averages: LONG and SHORT are calculated separately.
+    # A SHORT-leading timeframe never contributes its SHORT score to a LONG
+    # average (and vice versa). Instead, the score of the requested direction
+    # is calculated for every available timeframe.
+    rows_by_symbol_tf = {
+        (
+            str(_get(row, "symbol", "") or "").upper(),
+            str(_get(row, "timeframe", "") or ""),
+        ): row
+        for row in rows
     }
+    directional_scores: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(
+        lambda: {"LONG": {}, "SHORT": {}}
+    )
+    for (symbol, timeframe), row in rows_by_symbol_tf.items():
+        for direction in ("LONG", "SHORT"):
+            value = _score_explicit_side(
+                row,
+                direction,
+                consensus,
+                clusters,
+                btc_reference_by_timeframe,
+            )
+            if value is not None:
+                directional_scores[symbol][direction][timeframe] = value
+
+    directional_averages: Dict[str, Dict[str, float]] = defaultdict(dict)
+    for symbol, sides in directional_scores.items():
+        for direction, tf_values in sides.items():
+            values = list(tf_values.values())
+            if values:
+                directional_averages[symbol][direction] = round(
+                    sum(values) / len(values), 2
+                )
 
     for item in out:
+        symbol = item["symbol"]
+        side = item["side"]
+        item["average_score_long"] = directional_averages.get(symbol, {}).get("LONG")
+        item["average_score_short"] = directional_averages.get(symbol, {}).get("SHORT")
+        item["directional_scores_all_timeframes"] = {
+            "LONG": dict(directional_scores.get(symbol, {}).get("LONG", {})),
+            "SHORT": dict(directional_scores.get(symbol, {}).get("SHORT", {})),
+        }
         item["average_score_all_timeframes"] = round(
-            averages.get(
-                item["symbol"],
+            directional_averages.get(symbol, {}).get(
+                side,
                 float(item["score"]),
             ),
             2,
