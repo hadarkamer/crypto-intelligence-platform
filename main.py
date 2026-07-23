@@ -1804,7 +1804,7 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
 
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
-    """Build a compact Telegram alert card without changing score logic."""
+    """Build the Stage 76 HTML-formatted Telegram alert card."""
     c = item.get("components", {})
     types = item.get("types", [])
     type_prefix = "🟢 " if len(types) > 1 else ""
@@ -1817,51 +1817,36 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     if near_share is None:
         balance_text = "⚪ Liquidity Balance: אין נתון"
     elif float(near_share) >= 60.0:
-        balance_text = f"🟢 Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
+        balance_text = f"🟢 Liquidity Balance: {fmt(near_share)}% לצד הנבחר"
     elif float(near_share) <= 40.0:
-        balance_text = f"🔴 Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
+        balance_text = f"🔴 Liquidity Balance: {fmt(near_share)}% לצד הנבחר"
     else:
-        balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הקרוב"
+        balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הנבחר"
 
     average_score = item.get("average_score_all_timeframes")
     if average_score is None:
-        symbol_items = [
-            other for other in all_items
-            if other.get("symbol") == item.get("symbol")
-            and other.get("side") == item.get("side")
-        ]
-        average_score = (
-            sum(
-                float(other.get("score", other.get("priority", 0)) or 0)
-                for other in symbol_items
-            ) / len(symbol_items)
-            if symbol_items else float(
-                item.get("score", item.get("priority", 0)) or 0
-            )
-        )
+        average_score = float(item.get("score", item.get("priority", 0)) or 0)
 
     current_price = item.get("current_price")
     target_price = item.get("target_price")
-
-    def scored_line(points: Any, text: str) -> str:
-        """Score on the fixed left side; item description on the right."""
-        return f"{fmt(points):>5} נקודות │ {text}"
 
     btc_reference_score = c.get("btc_reference_score")
     btc_reference_side = c.get("btc_reference_side")
     btc_relation = c.get("btc_relation")
     if btc_relation == "ALIGNED":
-        btc_line = scored_line(
-            c.get("btc_approval"),
-            f"אישור BTC: {btc_reference_side}, Score {fmt(btc_reference_score)}",
-        )
+        btc_label = f"אישור BTC: {btc_reference_side}, Score {fmt(btc_reference_score)}"
+        btc_points = c.get("btc_approval")
     elif btc_relation == "OPPOSITE":
-        btc_line = scored_line(
-            -float(c.get("btc_conflict_penalty", 0) or 0),
-            f"התנגדות BTC: {btc_reference_side}, Score {fmt(btc_reference_score)}",
-        )
+        btc_label = f"התנגדות BTC: {btc_reference_side}, Score {fmt(btc_reference_score)}"
+        btc_points = -float(c.get("btc_conflict_penalty", 0) or 0)
     else:
-        btc_line = "    — │ BTC: אין נתון באותו טווח"
+        btc_label = "BTC: אין נתון באותו טווח"
+        btc_points = None
+
+    def score_block(label: str, points: Any, suffix: str = " נקודות") -> str:
+        if points is None:
+            return f"{label}\n<b>—</b>"
+        return f"{label}\n<b>{fmt(points)}{suffix}</b>"
 
     def liquidity_line(label: str, amount: Any) -> str:
         try:
@@ -1874,49 +1859,68 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     card = (
         f"#{index} {item['symbol']} / {item['timeframe']}\n"
         f"{'🔴' if item.get('side') == 'SHORT' else '🟢'} {item['side']}\n"
-        f"Score: {fmt(item.get('score', item.get('priority')))}\n"
-        f"ממוצע: {fmt(average_score)}\n\n"
-        f"מחיר נוכחי: ${fmt_price(current_price)}\n"
-        + scored_line(
+        f"Score\n<b>{fmt(item.get('score', item.get('priority')))}/100</b>\n"
+        f"ממוצע {item['side']} בכל הטווחים\n<b>{fmt(average_score)}/100</b>\n\n"
+        f"מחיר נוכחי: ${fmt_price(current_price)}\n\n"
+        + score_block(
+            f"🎯 Max Pain: ${fmt_price(target_price)} ({fmt(item.get('distance_pct'))}%)",
             c.get("target_proximity"),
-            f"🎯 Max Pain: ${fmt_price(target_price)} "
-            f"({fmt(item.get('distance_pct'))}%)",
         )
         + "\n\n"
-        + scored_line(
+        + score_block(
+            f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}",
             c.get("consensus"),
-            f"קונצנזוס: {item.get('consensus_hits', 0)}/"
-            f"{item.get('consensus_total', 0)}",
         )
-        + "\n"
-        + btc_line
         + "\n\n"
-        f"Cluster: {fmt(c.get('cluster_confidence'))}/30\n"
-        f"- צפיפות יעדים: {fmt(c.get('cluster_density'))}/12\n"
-        f"- מספר טווחים: {fmt(c.get('cluster_coverage'))}/8\n"
-        f"- הצטברות נזילות: "
-        f"{fmt(c.get('cluster_liquidity_growth'))}/10 "
-        f"(מכפיל {fmt(c.get('cluster_liquidity_multiplier'))}x)\n\n"
-        f"Gap: {fmt(c.get('relative_gap'))}/15\n\n"
+        + score_block(btc_label, btc_points)
+        + "\n\n"
+        + score_block("Cluster", c.get("cluster_confidence"), " / 30")
+        + "\n\n"
+        + score_block("צפיפות יעדים", c.get("cluster_density"), " / 12")
+        + "\n\n"
+        + score_block("מספר טווחים", c.get("cluster_coverage"), " / 8")
+        + "\n\n"
+        + score_block(
+            f"הצטברות נזילות (מכפיל {fmt(c.get('cluster_liquidity_multiplier'))}x)",
+            c.get("cluster_liquidity_growth"), " / 10",
+        )
+        + "\n\n"
+        + score_block("Gap", c.get("relative_gap"), " / 15")
+        + "\n\n"
         f"סוגי חריגה:\n{types_text}\n\n"
         f"{balance_text}\n"
-        + liquidity_line("נזילות בצד הקרוב", item.get("near_amount")) + "\n"
-        + liquidity_line("נזילות בצד השני", item.get("far_amount"))
+        + liquidity_line("נזילות בכיוון הנבחר", item.get("near_amount")) + "\n"
+        + liquidity_line("נזילות בכיוון ההפוך", item.get("far_amount"))
     )
 
-    counter = counter_score.calculate_counter_score(item, rows, all_items)
-    if counter.get("available"):
-        counter_value = float(counter.get("score", 0) or 0)
+    counter_side = item.get("opposite_side")
+    counter_value = item.get("opposite_score")
+    if counter_value is None:
+        counter = counter_score.calculate_counter_score(item, rows, all_items)
+        counter_side = counter.get("side", counter_side)
+        counter_value = counter.get("score") if counter.get("available") else None
+
+    opposite_average = item.get("opposite_average_score_all_timeframes")
+    if counter_value is not None:
         card += (
-            "\n\nניקוד לכיוון הנגדי:\n"
-            f"{counter.get('side')}: {fmt(counter_value)}/100"
+            "\n\nניקוד לכיוון הנגדי — " + str(counter_side) + "\n"
+            f"<b>{fmt(counter_value)}/100</b>"
         )
+        if opposite_average is not None:
+            card += (
+                f"\n\nממוצע {counter_side} בכל הטווחים\n"
+                f"<b>{fmt(opposite_average)}/100</b>"
+            )
     else:
         card += (
             "\n\nניקוד לכיוון הנגדי:\n"
-            f"{counter.get('side', '-')}: לא פעיל — "
-            "יעד הכיוון הנגדי כבר נחצה או חסר"
+            f"{counter_side or '-'}: לא פעיל — יעד הכיוון הנגדי כבר נחצה או חסר"
         )
+        if opposite_average is not None:
+            card += (
+                f"\n\nממוצע {counter_side} בכל הטווחים\n"
+                f"<b>{fmt(opposite_average)}/100</b>"
+            )
 
     card += _quality_block(item, rows)
     card += _all_timeframe_scores_block(item, all_items, rows)
@@ -1967,13 +1971,14 @@ def _distance_trade_label(distance_pct: Any) -> str:
 
 
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run exactly one manual live scan for /alerts."""
+    """Run /alerts, or route /alerts SYMBOL to the single-coin scan."""
     limit = 10
     if context.args:
-        try:
-            limit = max(1, min(15, int(context.args[0])))
-        except (TypeError, ValueError):
-            limit = 10
+        first_arg = str(context.args[0]).strip()
+        if not first_arg.isdigit():
+            await alert_coin(update, context)
+            return
+        limit = max(1, min(15, int(first_arg)))
 
     command_lock = _get_alert_command_lock()
     if command_lock.locked():
@@ -2032,7 +2037,8 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             for index, item in enumerate(items, start=1):
                 await update.message.reply_text(
-                    _alert_card(index, item, all_items, rows)
+                    _alert_card(index, item, all_items, rows),
+                    parse_mode="HTML",
                 )
             await update.message.reply_text(alert_summary.format_alert_count_summary(items))
 
@@ -2127,7 +2133,8 @@ async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAUL
             )
             for index, item in enumerate(items, start=1):
                 await update.message.reply_text(
-                    _alert_card(index, item, all_items, rows)
+                    _alert_card(index, item, all_items, rows),
+                    parse_mode="HTML",
                 )
             await update.message.reply_text(
                 alert_summary.format_alert_count_summary(items)
@@ -2218,7 +2225,8 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 sent_index += 1
                 await update.message.reply_text(
-                    _alert_card(sent_index, item, all_items, rows)
+                    _alert_card(sent_index, item, all_items, rows),
+                    parse_mode="HTML",
                 )
 
         except asyncio.CancelledError:
@@ -2325,7 +2333,7 @@ async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     item = sorted(matches, key=lambda x: -x.get("priority", 0))[0]
-    await update.message.reply_text(_alert_card(1, item, all_items, rows))
+    await update.message.reply_text(_alert_card(1, item, all_items, rows), parse_mode="HTML")
 
 
 async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2588,6 +2596,7 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
             await bot_app.bot.send_message(
                 chat_id=chat_id,
                 text=_alert_card(index, item, all_items, rows),
+                parse_mode="HTML",
             )
         if result_items:
             await bot_app.bot.send_message(
@@ -2867,7 +2876,7 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
             # Add the compact target status only once, after the final normal card.
             if index == len(ordered_items):
                 card += _specific_watch_progress_text(watch, current_price)
-            await bot_app.bot.send_message(chat_id=chat_id, text=card)
+            await bot_app.bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
 
         missing_timeframes = [
             timeframe for timeframe in timeframe_order
