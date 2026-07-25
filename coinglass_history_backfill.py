@@ -1,0 +1,460 @@
+"""Historical Price + Open Interest backfill for Stage 77.
+
+Purpose
+-------
+Collect a clean 30-minute historical series for Price and aggregated OI, then
+measure the *normal historical movement* of each symbol separately for the
+same analytical windows used by the live regime layer:
+
+    30m / 1h / 4h / 12h / 24h
+
+This module is intentionally isolated from alert_engine.py and from the live
+Price+OI regime table. It does NOT change Max-Pain scores, alert selection,
+Watch, or live OI conclusions. Its output is reference statistics only.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, timezone
+import math
+import os
+from pathlib import Path
+import sqlite3
+import time
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import requests
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:  # pragma: no cover
+    psycopg = None
+    dict_row = None
+
+API_BASE_URL = "https://open-api-v4.coinglass.com"
+OI_HISTORY_ENDPOINT = "/api/futures/open-interest/aggregated-history"
+PRICE_HISTORY_ENDPOINT = "/api/futures/price/history"
+API_TIMEOUT_SECONDS = 20
+BACKFILL_DAYS = 30
+HISTORY_INTERVAL = "30m"
+# 30 days = about 1,440 candles. Two 15-day chunks stay safely under the
+# documented maximum of 1,000 records per request.
+CHUNK_DAYS = 15
+REQUEST_LIMIT = 1000
+REQUEST_PAUSE_SECONDS = 0.15
+
+TARGET_SYMBOLS: Tuple[str, ...] = (
+    "BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP"
+)
+
+WINDOWS: Dict[str, int] = {
+    "30m": 1,
+    "1h": 2,
+    "4h": 8,
+    "12h": 24,
+    "24h": 48,
+}
+
+# Price history is exchange/pair based. For most assets Binance is the first
+# choice. HYPE starts with Hyperliquid. Fallbacks exist only for historical
+# collection and never touch the live price provider.
+PRICE_MARKET_CANDIDATES: Dict[str, Sequence[Tuple[str, str]]] = {
+    "HYPE": (
+        ("Hyperliquid", "HYPEUSDT"),
+        ("Hyperliquid", "HYPEUSD"),
+        ("Binance", "HYPEUSDT"),
+        ("Bybit", "HYPEUSDT"),
+        ("Gate", "HYPEUSDT"),
+    ),
+}
+DEFAULT_EXCHANGES: Tuple[str, ...] = ("Binance", "Bybit", "OKX", "Gate")
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
+
+SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS oi_price_history (
+    symbol TEXT NOT NULL,
+    candle_time TEXT NOT NULL,
+    price_close REAL NOT NULL,
+    oi_close_usd REAL NOT NULL,
+    price_exchange TEXT NOT NULL,
+    price_pair TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'coinglass_backfill',
+    imported_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, candle_time)
+);
+CREATE INDEX IF NOT EXISTS idx_oi_price_history_symbol_time
+ON oi_price_history(symbol, candle_time);
+"""
+
+POSTGRES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS oi_price_history (
+    symbol TEXT NOT NULL,
+    candle_time TIMESTAMPTZ NOT NULL,
+    price_close DOUBLE PRECISION NOT NULL,
+    oi_close_usd DOUBLE PRECISION NOT NULL,
+    price_exchange TEXT NOT NULL,
+    price_pair TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'coinglass_backfill',
+    imported_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (symbol, candle_time)
+);
+CREATE INDEX IF NOT EXISTS idx_oi_price_history_symbol_time
+ON oi_price_history(symbol, candle_time);
+"""
+
+
+@dataclass(frozen=True)
+class BackfillResult:
+    symbol: str
+    price_rows: int
+    oi_rows: int
+    matched_rows: int
+    inserted_rows: int
+    price_exchange: Optional[str]
+    price_pair: Optional[str]
+    start_time: Optional[str]
+    end_time: Optional[str]
+    ok: bool
+    message: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def _use_postgres() -> bool:
+    return bool(DATABASE_URL and psycopg)
+
+
+def _api_key() -> str:
+    return os.getenv("COINGLASS_API_KEY", "").strip()
+
+
+def init_db() -> None:
+    if _use_postgres():
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute(POSTGRES_SCHEMA)
+            conn.commit()
+    else:
+        Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.executescript(SQLITE_SCHEMA)
+            conn.commit()
+
+
+def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    key = _api_key()
+    if not key:
+        raise RuntimeError("COINGLASS_API_KEY is not configured")
+    response = requests.get(
+        API_BASE_URL + path,
+        params=params,
+        headers={"CG-API-KEY": key, "accept": "application/json"},
+        timeout=API_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or str(payload.get("code")) not in {"0", "200"}:
+        msg = payload.get("msg") if isinstance(payload, dict) else "invalid response"
+        raise RuntimeError(f"CoinGlass API error: {msg!r}")
+    return payload
+
+
+def _chunks(start: datetime, end: datetime) -> Iterable[Tuple[datetime, datetime]]:
+    cursor = start
+    while cursor < end:
+        chunk_end = min(end, cursor + timedelta(days=CHUNK_DAYS))
+        yield cursor, chunk_end
+        cursor = chunk_end
+
+
+def _normalize_candles(payload: Dict[str, Any]) -> Dict[int, float]:
+    out: Dict[int, float] = {}
+    for row in payload.get("data") or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            timestamp = int(row.get("time"))
+            close = float(row.get("close"))
+        except (TypeError, ValueError):
+            continue
+        if timestamp > 0 and math.isfinite(close) and close > 0:
+            out[timestamp] = close
+    return out
+
+
+def fetch_oi_history(symbol: str, start: datetime, end: datetime) -> Dict[int, float]:
+    symbol = str(symbol or "").upper()
+    rows: Dict[int, float] = {}
+    for chunk_start, chunk_end in _chunks(start, end):
+        payload = _request(
+            OI_HISTORY_ENDPOINT,
+            {
+                "symbol": symbol,
+                "interval": HISTORY_INTERVAL,
+                "unit": "usd",
+                "limit": REQUEST_LIMIT,
+                "start_time": int(chunk_start.timestamp() * 1000),
+                "end_time": int(chunk_end.timestamp() * 1000),
+            },
+        )
+        rows.update(_normalize_candles(payload))
+        time.sleep(REQUEST_PAUSE_SECONDS)
+    return rows
+
+
+def _price_candidates(symbol: str) -> Sequence[Tuple[str, str]]:
+    symbol = str(symbol or "").upper()
+    if symbol in PRICE_MARKET_CANDIDATES:
+        return PRICE_MARKET_CANDIDATES[symbol]
+    pair = f"{symbol}USDT"
+    return tuple((exchange, pair) for exchange in DEFAULT_EXCHANGES)
+
+
+def _fetch_price_for_market(
+    exchange: str,
+    pair: str,
+    start: datetime,
+    end: datetime,
+) -> Dict[int, float]:
+    rows: Dict[int, float] = {}
+    for chunk_start, chunk_end in _chunks(start, end):
+        payload = _request(
+            PRICE_HISTORY_ENDPOINT,
+            {
+                "exchange": exchange,
+                "symbol": pair,
+                "interval": HISTORY_INTERVAL,
+                "limit": REQUEST_LIMIT,
+                "start_time": int(chunk_start.timestamp() * 1000),
+                "end_time": int(chunk_end.timestamp() * 1000),
+            },
+        )
+        rows.update(_normalize_candles(payload))
+        time.sleep(REQUEST_PAUSE_SECONDS)
+    return rows
+
+
+def fetch_price_history(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+) -> Tuple[Dict[int, float], str, str]:
+    errors: List[str] = []
+    for exchange, pair in _price_candidates(symbol):
+        try:
+            rows = _fetch_price_for_market(exchange, pair, start, end)
+            # A 30-day sample should be large. Requiring 100 candles prevents
+            # accidentally selecting an unsupported/empty market response.
+            if len(rows) >= 100:
+                return rows, exchange, pair
+            errors.append(f"{exchange}:{pair} returned {len(rows)} rows")
+        except Exception as exc:
+            errors.append(f"{exchange}:{pair}: {exc!r}")
+    raise RuntimeError("No usable CoinGlass price history market. " + " | ".join(errors))
+
+
+def _iso_from_ms(timestamp_ms: int) -> str:
+    return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc).isoformat()
+
+
+def _store_rows(
+    symbol: str,
+    matched: Sequence[Tuple[int, float, float]],
+    exchange: str,
+    pair: str,
+) -> int:
+    init_db()
+    imported_at_dt = datetime.now(timezone.utc)
+    imported_at = imported_at_dt if _use_postgres() else imported_at_dt.isoformat()
+    values = [
+        (
+            str(symbol).upper(),
+            datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc) if _use_postgres() else _iso_from_ms(ts),
+            float(price),
+            float(oi),
+            exchange,
+            pair,
+            "coinglass_backfill",
+            imported_at,
+        )
+        for ts, price, oi in matched
+    ]
+    if not values:
+        return 0
+
+    if _use_postgres():
+        sql = """
+        INSERT INTO oi_price_history
+        (symbol,candle_time,price_close,oi_close_usd,price_exchange,price_pair,source,imported_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (symbol,candle_time) DO UPDATE SET
+          price_close=EXCLUDED.price_close,
+          oi_close_usd=EXCLUDED.oi_close_usd,
+          price_exchange=EXCLUDED.price_exchange,
+          price_pair=EXCLUDED.price_pair,
+          source=EXCLUDED.source,
+          imported_at=EXCLUDED.imported_at
+        """
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, values)
+            conn.commit()
+    else:
+        sql = """
+        INSERT INTO oi_price_history
+        (symbol,candle_time,price_close,oi_close_usd,price_exchange,price_pair,source,imported_at)
+        VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(symbol,candle_time) DO UPDATE SET
+          price_close=excluded.price_close,
+          oi_close_usd=excluded.oi_close_usd,
+          price_exchange=excluded.price_exchange,
+          price_pair=excluded.price_pair,
+          source=excluded.source,
+          imported_at=excluded.imported_at
+        """
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.executemany(sql, values)
+            conn.commit()
+    return len(values)
+
+
+def backfill_symbol(symbol: str, days: int = BACKFILL_DAYS) -> Dict[str, Any]:
+    symbol = str(symbol or "").strip().upper()
+    if symbol not in TARGET_SYMBOLS:
+        return BackfillResult(
+            symbol, 0, 0, 0, 0, None, None, None, None, False,
+            f"Symbol is not in Stage 77 historical set: {', '.join(TARGET_SYMBOLS)}",
+        ).to_dict()
+
+    end = datetime.now(timezone.utc)
+    # Round down to the latest completed 30-minute boundary, avoiding a
+    # partially formed current candle.
+    minute = 30 if end.minute >= 30 else 0
+    end = end.replace(minute=minute, second=0, microsecond=0)
+    start = end - timedelta(days=max(1, int(days)))
+
+    try:
+        oi_rows = fetch_oi_history(symbol, start, end)
+        price_rows, exchange, pair = fetch_price_history(symbol, start, end)
+        common = sorted(set(oi_rows).intersection(price_rows))
+        matched = [(ts, price_rows[ts], oi_rows[ts]) for ts in common]
+        inserted = _store_rows(symbol, matched, exchange, pair)
+        return BackfillResult(
+            symbol=symbol,
+            price_rows=len(price_rows),
+            oi_rows=len(oi_rows),
+            matched_rows=len(matched),
+            inserted_rows=inserted,
+            price_exchange=exchange,
+            price_pair=pair,
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+            ok=len(matched) >= 100,
+            message="OK" if len(matched) >= 100 else "Too few matched 30m candles",
+        ).to_dict()
+    except Exception as exc:
+        return BackfillResult(
+            symbol, 0, 0, 0, 0, None, None, start.isoformat(), end.isoformat(), False, repr(exc)
+        ).to_dict()
+
+
+def backfill_all(days: int = BACKFILL_DAYS) -> Dict[str, Dict[str, Any]]:
+    return {symbol: backfill_symbol(symbol, days=days) for symbol in TARGET_SYMBOLS}
+
+
+def _history_rows(symbol: str) -> List[Dict[str, Any]]:
+    init_db()
+    symbol = str(symbol or "").upper()
+    if _use_postgres():
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            rows = conn.execute(
+                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                "WHERE symbol=%s ORDER BY candle_time ASC",
+                (symbol,),
+            ).fetchall()
+    else:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                "WHERE symbol=? ORDER BY candle_time ASC",
+                (symbol,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _pct_change(new: float, old: float) -> Optional[float]:
+    if old is None or float(old) == 0.0:
+        return None
+    return (float(new) - float(old)) / float(old) * 100.0
+
+
+def _percentile(values: Sequence[float], percentile: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(float(v) for v in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * float(percentile)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _distribution(values: Sequence[float]) -> Dict[str, Optional[float]]:
+    values = [abs(float(v)) for v in values if v is not None and math.isfinite(float(v))]
+    return {
+        "count": len(values),
+        "p25": _percentile(values, 0.25),
+        "median": _percentile(values, 0.50),
+        "p75": _percentile(values, 0.75),
+        "p90": _percentile(values, 0.90),
+        "p95": _percentile(values, 0.95),
+    }
+
+
+def calculate_reference_ranges(symbol: str) -> Dict[str, Any]:
+    """Calculate historical absolute-change distributions per analytical window.
+
+    No result is fed into live Regime yet. P25/P75 describe the middle historical
+    range; median is the typical move; P90/P95 expose larger historical moves.
+    """
+    symbol = str(symbol or "").strip().upper()
+    rows = _history_rows(symbol)
+    if len(rows) < 2:
+        return {"symbol": symbol, "available": False, "reason": "No backfill data", "windows": {}}
+
+    windows: Dict[str, Any] = {}
+    for label, step in WINDOWS.items():
+        price_changes: List[float] = []
+        oi_changes: List[float] = []
+        for i in range(step, len(rows)):
+            p = _pct_change(rows[i]["price_close"], rows[i-step]["price_close"])
+            o = _pct_change(rows[i]["oi_close_usd"], rows[i-step]["oi_close_usd"])
+            if p is not None:
+                price_changes.append(abs(p))
+            if o is not None:
+                oi_changes.append(abs(o))
+        windows[label] = {
+            "samples": min(len(price_changes), len(oi_changes)),
+            "price_abs_change_pct": _distribution(price_changes),
+            "oi_abs_change_pct": _distribution(oi_changes),
+        }
+
+    return {
+        "symbol": symbol,
+        "available": True,
+        "rows": len(rows),
+        "windows": windows,
+        "note": "Reference statistics only; not applied to live Regime or Max-Pain scoring.",
+    }
+
+
+def calculate_all_reference_ranges() -> Dict[str, Dict[str, Any]]:
+    return {symbol: calculate_reference_ranges(symbol) for symbol in TARGET_SYMBOLS}

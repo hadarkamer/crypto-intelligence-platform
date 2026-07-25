@@ -29,6 +29,7 @@ import counter_score
 import alert_summary
 import technical_signal_store
 import coinglass_oi_regime_service
+import coinglass_history_backfill
 from collections import defaultdict
 
 try:
@@ -79,6 +80,7 @@ WATCH_TASK = None
 WATCH_SCAN_TASK = None
 SPECIFIC_WATCH_TASK = None
 OI_REGIME_TASK = None
+HISTORY_BACKFILL_LOCK = None
 SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
 SPECIFIC_WATCH_INTERVAL_MINUTES = 5
 ALERT_COMMAND_LOCK = None
@@ -1072,7 +1074,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch_on SOL 160 — צפייה ב-SOL עד יעד 160, כל 5 דקות\n"
         "/watch_status — הצגת מצב הצפיות\n"
         "/watch_stop — עצירת הצפייה הכללית\n"
-        "/watch_stop SOL — עצירת הצפייה ב-SOL"
+        "/watch_stop SOL — עצירת הצפייה ב-SOL\n"
+        "/oi_backfill — הורדת 30 יום Price+OI היסטוריים ל-8 מטבעות\n"
+        "/oi_stats BTC — סטטיסטיקת Price+OI היסטורית לפי 30m/1h/4h/12h/24h"
     )
 
 
@@ -3456,6 +3460,125 @@ def _latest_active_symbols() -> List[str]:
     ]
 
 
+
+
+def _fmt_hist_stat(value: Any) -> str:
+    try:
+        if value is None:
+            return "-"
+        return f"{float(value):.4f}%"
+    except (TypeError, ValueError):
+        return "-"
+
+
+async def oi_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual, isolated 30-day CoinGlass historical Price+OI backfill."""
+    global HISTORY_BACKFILL_LOCK
+    if HISTORY_BACKFILL_LOCK is None:
+        HISTORY_BACKFILL_LOCK = asyncio.Lock()
+
+    if HISTORY_BACKFILL_LOCK.locked():
+        await update.message.reply_text("⏳ /oi_backfill כבר פעיל. לא נפתחה הורדה נוספת.")
+        return
+
+    await update.message.reply_text(
+        "📚 מתחיל Backfill היסטורי של Price + OI ל-30 יום.\n"
+        "מטבעות: BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB, XRP.\n"
+        "הפעולה מבודדת ואינה משנה Alerts, Watch, Max Pain או Regime חי."
+    )
+
+    async with HISTORY_BACKFILL_LOCK:
+        try:
+            results = await asyncio.to_thread(coinglass_history_backfill.backfill_all)
+            lines = ["✅ OI + Price Historical Backfill הסתיים", ""]
+            ok_count = 0
+            for symbol in coinglass_history_backfill.TARGET_SYMBOLS:
+                result = results.get(symbol) or {}
+                if result.get("ok"):
+                    ok_count += 1
+                    status = "✅"
+                else:
+                    status = "⚠️"
+                lines.append(
+                    f"{status} {symbol}: Price {result.get('price_rows', 0)} | "
+                    f"OI {result.get('oi_rows', 0)} | Matched {result.get('matched_rows', 0)}"
+                )
+                if result.get("price_exchange"):
+                    lines.append(
+                        f"   מחיר: {result.get('price_exchange')} / {result.get('price_pair')}"
+                    )
+                if not result.get("ok"):
+                    lines.append(f"   {result.get('message', 'לא הושלם')}")
+            lines.extend([
+                "",
+                f"הושלמו בהצלחה: {ok_count}/{len(coinglass_history_backfill.TARGET_SYMBOLS)}",
+                "הנתונים נשמרו בטבלה נפרדת oi_price_history בלבד.",
+                "כעת אפשר לבדוק למשל: /oi_stats BTC",
+            ])
+            await update.message.reply_text("\n".join(lines))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await update.message.reply_text(f"❌ /oi_backfill נכשל: {exc!r}")
+
+
+async def oi_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show historical Price/OI reference ranges; does not affect live logic."""
+    if not context.args:
+        await update.message.reply_text(
+            "שימוש: /oi_stats BTC\n"
+            "מטבעות: BTC ETH SOL HYPE DOGE ZEC BNB XRP"
+        )
+        return
+    symbol = str(context.args[0]).strip().upper()
+    if symbol not in coinglass_history_backfill.TARGET_SYMBOLS:
+        await update.message.reply_text(
+            "המטבע אינו ברשימת ה-Backfill.\n"
+            "אפשרויות: " + " ".join(coinglass_history_backfill.TARGET_SYMBOLS)
+        )
+        return
+
+    stats = await asyncio.to_thread(coinglass_history_backfill.calculate_reference_ranges, symbol)
+    if not stats.get("available"):
+        await update.message.reply_text(
+            f"אין עדיין נתוני Backfill עבור {symbol}. הריצו קודם /oi_backfill."
+        )
+        return
+
+    lines = [
+        f"📊 {symbol} — Price + OI Historical Reference",
+        f"דגימות 30m שמורות: {stats.get('rows', 0)}",
+        "",
+        "P25–P75 = הטווח האמצעי/טיפוסי בהיסטוריה.",
+        "P90/P95 = תנועות גדולות יותר היסטורית.",
+    ]
+    for label in ("30m", "1h", "4h", "12h", "24h"):
+        window = (stats.get("windows") or {}).get(label) or {}
+        price = window.get("price_abs_change_pct") or {}
+        oi = window.get("oi_abs_change_pct") or {}
+        lines.extend([
+            "",
+            f"⏱ {label} — {window.get('samples', 0)} השוואות",
+            "Price | "
+            f"P25 {_fmt_hist_stat(price.get('p25'))} | "
+            f"Median {_fmt_hist_stat(price.get('median'))} | "
+            f"P75 {_fmt_hist_stat(price.get('p75'))} | "
+            f"P90 {_fmt_hist_stat(price.get('p90'))} | "
+            f"P95 {_fmt_hist_stat(price.get('p95'))}",
+            "OI    | "
+            f"P25 {_fmt_hist_stat(oi.get('p25'))} | "
+            f"Median {_fmt_hist_stat(oi.get('median'))} | "
+            f"P75 {_fmt_hist_stat(oi.get('p75'))} | "
+            f"P90 {_fmt_hist_stat(oi.get('p90'))} | "
+            f"P95 {_fmt_hist_stat(oi.get('p95'))}",
+        ])
+    lines.extend([
+        "",
+        "ℹ️ הנתונים האלה הם Reference בלבד. הם עדיין לא משנים את ה-Regime ולא את ציון ה-Max Pain."
+    ])
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _collect_oi_regime_once() -> Dict[str, Dict[str, Any]]:
     symbols = _latest_active_symbols()
     if not symbols:
@@ -3568,6 +3691,8 @@ async def main():
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_handler(CommandHandler("technical_status", technical_status_cmd))
+    bot_app.add_handler(CommandHandler("oi_backfill", oi_backfill_cmd))
+    bot_app.add_handler(CommandHandler("oi_stats", oi_stats_cmd))
     bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()
