@@ -28,6 +28,7 @@ import live_price_provider
 import counter_score
 import alert_summary
 import technical_signal_store
+import coinglass_oi_regime_service
 from collections import defaultdict
 
 try:
@@ -77,6 +78,7 @@ SCRAPE_LOCK = None
 WATCH_TASK = None
 WATCH_SCAN_TASK = None
 SPECIFIC_WATCH_TASK = None
+OI_REGIME_TASK = None
 SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
 SPECIFIC_WATCH_INTERVAL_MINUTES = 5
 ALERT_COMMAND_LOCK = None
@@ -1803,6 +1805,38 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
     return "\n\n" + "\n".join(lines)
 
 
+def _build_opportunities_with_regime(rows, limit=500):
+    """Build Stage 76 opportunities and attach independent Price+OI context."""
+    items = alert_engine.build_opportunities(rows, limit=limit)
+    return coinglass_oi_regime_service.attach_to_opportunities(items)
+
+
+def _regime_block(item: Dict[str, Any]) -> str:
+    regime = item.get("market_regime") or {}
+    if not regime.get("available"):
+        return (
+            "\n\n📊 Price + OI Regime\n"
+            "<b>אין מספיק נתונים</b>\n"
+            f"{html.escape(str(regime.get('reason') or 'טרם נאספו שתי דגימות.'))}\n\n"
+            "🧩 מסקנה משולבת\n"
+            f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"
+        )
+
+    price_delta = regime.get("price_change_pct")
+    oi_delta = regime.get("oi_change_pct")
+    price_text = "—" if price_delta is None else f"{float(price_delta):+.4f}%"
+    oi_text = "—" if oi_delta is None else f"{float(oi_delta):+.4f}%"
+    return (
+        "\n\n📊 Price + OI Regime\n"
+        f"<b>{html.escape(str(regime.get('label') or regime.get('state') or '—'))}</b>\n"
+        f"שינוי מחיר (30 דק׳): {price_text}\n"
+        f"שינוי OI (30 דק׳): {oi_text}\n"
+        f"הסבר: {html.escape(str(regime.get('reason') or '—'))}\n\n"
+        "🧩 מסקנה משולבת\n"
+        f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"
+    )
+
+
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     """Build the Stage 76 HTML-formatted Telegram alert card."""
     c = item.get("components", {})
@@ -1922,6 +1956,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
                 f"<b>{fmt(opposite_average)}/100</b>"
             )
 
+    card += _regime_block(item)
     card += _quality_block(item, rows)
     card += _all_timeframe_scores_block(item, all_items, rows)
     return card
@@ -2012,7 +2047,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 rows, live_result = await collect_live_rows_for_watch()
 
-            all_items = alert_engine.build_opportunities(rows, limit=500)
+            all_items = _build_opportunities_with_regime(rows, limit=500)
             displayable_items = [
                 item
                 for item in all_items
@@ -2103,7 +2138,7 @@ async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAUL
                 )
                 rows, live_result = await collect_live_rows_for_watch()
 
-            all_items = alert_engine.build_opportunities(rows, limit=500)
+            all_items = _build_opportunities_with_regime(rows, limit=500)
             filtered_items = []
             for item in all_items:
                 if not _is_displayable_opportunity(item):
@@ -2189,7 +2224,7 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 rows, _live_result = await collect_live_rows_for_watch()
 
-            all_items = alert_engine.build_opportunities(rows, limit=500)
+            all_items = _build_opportunities_with_regime(rows, limit=500)
             symbol_items = [
                 item for item in all_items
                 if str(item.get("symbol") or "").upper() == symbol
@@ -2321,7 +2356,7 @@ async def alert_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     timeframe = context.args[1].lower() if len(context.args) > 1 else None
     rows = latest_snapshot_rows()
-    all_items = alert_engine.build_opportunities(rows, limit=500)
+    all_items = _build_opportunities_with_regime(rows, limit=500)
 
     matches = [
         item for item in all_items
@@ -2554,7 +2589,7 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
         async with scrape_lock:
             rows, live_result = await collect_live_rows_for_watch()
 
-        all_items = alert_engine.build_opportunities(rows, limit=500)
+        all_items = _build_opportunities_with_regime(rows, limit=500)
         displayable_items = [
             item
             for item in all_items
@@ -2815,7 +2850,7 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
             WATCH_RUNTIME["scan_in_progress"] = False
             WATCH_RUNTIME["scan_owner"] = None
 
-    all_items = alert_engine.build_opportunities(rows, limit=500)
+    all_items = _build_opportunities_with_regime(rows, limit=500)
     timeframe_order = list(getattr(alert_engine, "TIMEFRAMES", [
         "12h", "24h", "48h", "3d", "1w", "2w", "1m"
     ]))
@@ -3398,6 +3433,67 @@ async def telegram_webhook(request):
         )
 
 
+def _latest_active_symbols() -> List[str]:
+    """Symbols from the latest saved Max Pain snapshot, excluding known non-crypto rows."""
+    rows = query(
+        "WITH latest AS (SELECT MAX(collected_at) AS max_time FROM max_pain_snapshots) "
+        "SELECT DISTINCT symbol FROM max_pain_snapshots, latest "
+        "WHERE collected_at = latest.max_time ORDER BY symbol"
+    )
+    return [
+        str(row["symbol"]).upper()
+        for row in rows
+        if str(row["symbol"]).upper() not in NON_CRYPTO_SYMBOLS
+    ]
+
+
+async def _collect_oi_regime_once() -> Dict[str, Dict[str, Any]]:
+    symbols = _latest_active_symbols()
+    if not symbols:
+        print("[oi-regime] skipped: no saved crypto symbols", flush=True)
+        return {}
+
+    price_result = await asyncio.to_thread(
+        live_price_provider.fetch_binance_usdt_prices,
+        symbols,
+    )
+    prices = price_result.get("prices") or {}
+    usable_prices = {
+        symbol: float(prices[symbol]["price"])
+        for symbol in symbols
+        if isinstance(prices.get(symbol), dict)
+        and prices[symbol].get("price") is not None
+    }
+    if not usable_prices:
+        print("[oi-regime] skipped: no live prices available", flush=True)
+        return {}
+
+    results = await asyncio.to_thread(
+        coinglass_oi_regime_service.collect_many,
+        usable_prices,
+    )
+    available = sum(1 for value in results.values() if value.get("available"))
+    print(
+        f"[oi-regime] collected={len(results)} classified={available} "
+        f"interval={coinglass_oi_regime_service.COLLECTION_INTERVAL_MINUTES}m",
+        flush=True,
+    )
+    return results
+
+
+async def _oi_regime_loop() -> None:
+    interval_seconds = coinglass_oi_regime_service.COLLECTION_INTERVAL_MINUTES * 60
+    while True:
+        try:
+            await _collect_oi_regime_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Fail-safe: CoinGlass/API/DB failure never stops Telegram alerts.
+            print(f"[oi-regime] collection failed: {exc!r}", flush=True)
+        await asyncio.sleep(interval_seconds)
+
+
 async def start_web_server(bot_app):
     app = web.Application()
     app["bot_app"] = bot_app
@@ -3424,7 +3520,7 @@ async def main():
 
     init_db()
 
-    global WATCH_TASK, WATCH_SCAN_TASK
+    global WATCH_TASK, WATCH_SCAN_TASK, OI_REGIME_TASK
     WATCH_TASK = None
     WATCH_SCAN_TASK = None
     WATCH_RUNTIME.update({
@@ -3473,6 +3569,16 @@ async def main():
         flush=True,
     )
 
+    # Stage 77 is data collection only; it does not start alerts or Watch.
+    # The API key is read from Render. No additional environment variables are required.
+    if os.getenv("COINGLASS_API_KEY", "").strip():
+        coinglass_oi_regime_service.init_db()
+        OI_REGIME_TASK = asyncio.create_task(_oi_regime_loop())
+        print("[startup] Price+OI collector enabled (30m)", flush=True)
+    else:
+        OI_REGIME_TASK = None
+        print("[startup] Price+OI collector disabled: COINGLASS_API_KEY missing", flush=True)
+
     webhook_url = f"{PUBLIC_URL}/telegram"
     await bot_app.bot.delete_webhook(drop_pending_updates=True)
     await bot_app.bot.set_webhook(
@@ -3491,6 +3597,13 @@ async def main():
             WATCH_TASK.cancel()
             try:
                 await WATCH_TASK
+            except asyncio.CancelledError:
+                pass
+
+        if OI_REGIME_TASK is not None and not OI_REGIME_TASK.done():
+            OI_REGIME_TASK.cancel()
+            try:
+                await OI_REGIME_TASK
             except asyncio.CancelledError:
                 pass
 

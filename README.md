@@ -74,3 +74,6 @@
 - Opposite-timeframe BTC direction: continuous penalty up to 10 points.
 - BTC itself: consensus only, scaled to 0–30.
 - Market breadth remains display-only and is excluded from scoring.
+
+## Stage 77 — Price + OI Regime
+Stage 77 adds an independent 30-minute Price + Open Interest context layer using CoinGlass V4. It does not change the existing alert score. Only `COINGLASS_API_KEY` is required in Render; the bot stores raw Price/OI changes and a five-state classification for later calibration.
