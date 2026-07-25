@@ -245,19 +245,45 @@ def _window_results(symbol, price, oi, now=None, history_rows=None):
     return out
 
 def _overall(windows):
-    directional=[w for w in windows.values() if w.get("available") and w.get("state") not in {"NEUTRAL_INCONCLUSIVE","UNAVAILABLE"}]
+    """Aggregate the five regime windows without treating neutral as disagreement.
+
+    Neutral/Inconclusive is a real classified outcome once a window is available.
+    A lone directional window against four neutral windows must therefore remain
+    Neutral/Inconclusive, not Mixed/Transition. Mixed is reserved for cases where
+    directional evidence is genuinely split and no state reaches 3/5.
+    """
+    available=[w for w in windows.values() if w.get("available") and w.get("state") != "UNAVAILABLE"]
+    total=len(available)
+    if not available:
+        return {"state":"NEUTRAL_INCONCLUSIVE","label":"Neutral / Inconclusive","strength":"Inconclusive","agreement":0,"valid_windows":0}
+
+    neutral_count=sum(1 for w in available if w.get("state") == "NEUTRAL_INCONCLUSIVE")
+    directional=[w for w in available if w.get("state") != "NEUTRAL_INCONCLUSIVE"]
     counts={}
-    for w in directional: counts[w["state"]]=counts.get(w["state"],0)+1
+    for w in directional:
+        counts[w["state"]]=counts.get(w["state"],0)+1
+
+    # Neutral majority is itself the dominant conclusion.
+    if neutral_count >= 3:
+        strength = "Strong / Confirmed" if neutral_count >= 4 else "Confirmed"
+        return {"state":"NEUTRAL_INCONCLUSIVE","label":"Neutral / Inconclusive","strength":strength,
+                "agreement":neutral_count,"valid_windows":total}
+
     if not counts:
-        return {"state":"NEUTRAL_INCONCLUSIVE","label":"Neutral / Inconclusive","strength":"Inconclusive","agreement":0,"valid_windows":len(directional)}
+        return {"state":"NEUTRAL_INCONCLUSIVE","label":"Neutral / Inconclusive","strength":"Inconclusive",
+                "agreement":neutral_count,"valid_windows":total}
+
     state,n=max(counts.items(),key=lambda kv:kv[1])
     if n>=5: strength="Strong"
     elif n==4: strength="Strong / Confirmed"
     elif n==3: strength="Confirmed"
     else: strength="Mixed / Transition"
-    if n<3: state="MIXED_TRANSITION"; label="Mixed / Transition"
-    else: label=_state_label(state)
-    return {"state":state,"label":label,"strength":strength,"agreement":n,"valid_windows":len(directional)}
+
+    if n < 3:
+        state="MIXED_TRANSITION"; label="Mixed / Transition"
+    else:
+        label=_state_label(state)
+    return {"state":state,"label":label,"strength":strength,"agreement":n,"valid_windows":total}
 
 def _significance_observations(windows):
     observations=[]
