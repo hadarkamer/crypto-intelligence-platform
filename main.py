@@ -1838,7 +1838,15 @@ def _regime_block(item: Dict[str, Any]) -> str:
         od = w.get("oi_change_pct")
         ptxt = "—" if pd is None else f"{float(pd):+.4f}%"
         otxt = "—" if od is None else f"{float(od):+.4f}%"
-        lines.append(f"{label}: <b>{html.escape(str(w.get('label') or '—'))}</b> | Price {ptxt} | OI {otxt}")
+        ps = (w.get("price_strength") or {}).get("label")
+        os_ = (w.get("oi_strength") or {}).get("label")
+        if w.get("historical_reference_available") and ps and os_:
+            lines.append(
+                f"{label}: <b>{html.escape(str(w.get('label') or '—'))}</b> | "
+                f"Price {ptxt} [{html.escape(str(ps))}] | OI {otxt} [{html.escape(str(os_))}]"
+            )
+        else:
+            lines.append(f"{label}: <b>{html.escape(str(w.get('label') or '—'))}</b> | Price {ptxt} | OI {otxt}")
 
     overall_label = html.escape(str(overall.get("label") or "אין מסקנה"))
     strength = html.escape(str(overall.get("strength") or "—"))
@@ -1846,6 +1854,12 @@ def _regime_block(item: Dict[str, Any]) -> str:
     lines.extend(["", f"Overall: <b>{overall_label} — {strength}</b> ({agreement}/5)"])
     if regime.get("early_transition"):
         lines.append("⚠️ <b>Early Transition:</b> 30m + 1h סוטים מהמבנה הרחב")
+    observations = regime.get("significance_observations") or []
+    if observations:
+        lines.append("")
+        lines.append("🔎 <b>Historical significance</b>")
+        for obs in observations[:3]:
+            lines.append(f"• {html.escape(str(obs.get('text') or ''))}")
     lines.extend(["", "🧩 מסקנה משולבת", f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"])
     return "\n".join(lines)
 
@@ -3484,7 +3498,7 @@ async def oi_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 מתחיל Backfill היסטורי של Price + OI ל-30 יום.\n"
         "מטבעות: BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB, XRP.\n"
-        "הפעולה מבודדת ואינה משנה Alerts, Watch, Max Pain או Regime חי."
+        "הפעולה מבודדת ואינה משנה Max Pain או ציונים קיימים. לאחר השלמתה, ה-Reference ההיסטורי משמש רק לסינון עוצמת Price+OI ב-Regime."
     )
 
     async with HISTORY_BACKFILL_LOCK:
@@ -3523,7 +3537,7 @@ async def oi_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def oi_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show historical Price/OI reference ranges; does not affect live logic."""
+    """Show the historical Price/OI reference ranges used by live Regime significance."""
     if not context.args:
         await update.message.reply_text(
             "שימוש: /oi_stats BTC\n"
@@ -3574,7 +3588,7 @@ async def oi_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     lines.extend([
         "",
-        "ℹ️ הנתונים האלה הם Reference בלבד. הם עדיין לא משנים את ה-Regime ולא את ציון ה-Max Pain."
+        "ℹ️ ה-Reference הזה משמש לקביעת מינימום/עוצמה ב-Price+OI Regime בלבד. הוא אינו משנה את ציון ה-Max Pain."
     ])
     await update.message.reply_text("\n".join(lines))
 

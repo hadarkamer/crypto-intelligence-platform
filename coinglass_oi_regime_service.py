@@ -2,8 +2,9 @@
 
 Snapshots are collected every 30 minutes. Regime conclusions are calculated
 independently for 30m, 1h, 4h, 12h and 24h. No Max-Pain score is modified.
-No hand-tuned percentage/intensity thresholds are used: each window reports
-raw percentage changes and the sign relationship between Price and OI.
+Historical Price/OI distributions are used as a symbol+timeframe-specific
+minimum and strength reference. P25 is the minimum valid movement. No fixed
+percentage threshold is shared between coins or timeframes.
 """
 from __future__ import annotations
 
@@ -16,6 +17,8 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 
 import requests
+
+import coinglass_history_backfill as history_reference
 
 try:
     import psycopg
@@ -121,6 +124,57 @@ def classify(symbol, price_change_pct, oi_change_pct):
     else: st,di,rs="LONG_UNWINDING","SHORT","המחיר ירד וה-OI ירד: Long Unwinding."
     return RegimeResult(symbol,st,_state_label(st),di,round(p,6),round(o,6),rs)
 
+def _classify_with_historical_reference(symbol, window_label, price_change_pct, oi_change_pct):
+    """Classify direction only when both movements clear their own historical P25.
+
+    If no historical reference exists for this symbol/window, preserve the
+    pre-reference Stage 77 classifier so non-backfilled symbols keep working.
+    """
+    base = classify(symbol, price_change_pct, oi_change_pct)
+    d = base.to_dict()
+    ref = history_reference.reference_for_window(symbol, window_label)
+    price_dist = ref.get("price_abs_change_pct") or {}
+    oi_dist = ref.get("oi_abs_change_pct") or {}
+    price_strength = history_reference.strength_from_distribution(price_change_pct, price_dist)
+    oi_strength = history_reference.strength_from_distribution(oi_change_pct, oi_dist)
+    d["historical_reference_available"] = bool(price_strength.get("available") and oi_strength.get("available"))
+    d["price_strength"] = price_strength
+    d["oi_strength"] = oi_strength
+    d["reference_samples"] = ref.get("samples")
+
+    # No backfill/reference: keep existing live behavior unchanged.
+    if not d["historical_reference_available"]:
+        return d
+
+    # P25 is not an invented percentage. It is the lower historical quartile
+    # for this exact symbol and exact window. Both Price and OI must clear it
+    # before the four directional Price+OI states are considered confirmed.
+    price_valid = int(price_strength.get("rank", -1)) >= 1
+    oi_valid = int(oi_strength.get("rank", -1)) >= 1
+    d["price_minimum_valid"] = price_valid
+    d["oi_minimum_valid"] = oi_valid
+
+    if price_change_pct is None or oi_change_pct is None:
+        return d
+
+    if not (price_valid and oi_valid):
+        ptxt = price_strength.get("label", "Unknown")
+        otxt = oi_strength.get("label", "Unknown")
+        reasons = []
+        if not price_valid:
+            reasons.append(f"Price מתחת ל-P25 ({ptxt})")
+        if not oi_valid:
+            reasons.append(f"OI מתחת ל-P25 ({otxt})")
+        d.update({
+            "state": "NEUTRAL_INCONCLUSIVE",
+            "label": "Neutral / Inconclusive",
+            "direction": "NEUTRAL",
+            "reason": "; ".join(reasons) + "; אין אישור Price+OI כיווני.",
+            "available": True,
+        })
+    return d
+
+
 def fetch_aggregated_oi(symbol):
     key=_api_key()
     if not key: raise RuntimeError("COINGLASS_API_KEY is not configured")
@@ -159,12 +213,19 @@ def _window_results(symbol, price, oi, now=None, history_rows=None):
     now=now or datetime.now(timezone.utc); rows=_history(symbol) if history_rows is None else history_rows
     out={}
     for minutes in REGIME_WINDOWS_MINUTES:
+        label=WINDOW_LABELS[minutes]
         ref=_reference_for_window(rows,now,minutes)
         if not ref:
-            res=classify(symbol,None,None)
+            d=classify(symbol,None,None).to_dict()
+            # Reference strength is meaningful only when a live delta exists.
+            d["historical_reference_available"]=bool(history_reference.reference_for_window(symbol,label))
+            d["price_strength"]={"available":False,"label":"Unknown","rank":None}
+            d["oi_strength"]={"available":False,"label":"Unknown","rank":None}
         else:
-            res=classify(symbol,_pct_change(price,ref["price"]),_pct_change(oi,ref["open_interest_usd"]))
-        d=res.to_dict(); d["window_minutes"]=minutes; d["window_label"]=WINDOW_LABELS[minutes]; out[WINDOW_LABELS[minutes]]=d
+            pchange=_pct_change(price,ref["price"])
+            ochange=_pct_change(oi,ref["open_interest_usd"])
+            d=_classify_with_historical_reference(symbol,label,pchange,ochange)
+        d["window_minutes"]=minutes; d["window_label"]=label; out[label]=d
     return out
 
 def _overall(windows):
@@ -181,6 +242,30 @@ def _overall(windows):
     if n<3: state="MIXED_TRANSITION"; label="Mixed / Transition"
     else: label=_state_label(state)
     return {"state":state,"label":label,"strength":strength,"agreement":n,"valid_windows":len(directional)}
+
+def _significance_observations(windows):
+    observations=[]
+    for label,w in windows.items():
+        if not w.get("historical_reference_available"):
+            continue
+        ps=w.get("price_strength") or {}; os_=w.get("oi_strength") or {}
+        pr=ps.get("rank"); orank=os_.get("rank")
+        if pr is None or orank is None:
+            continue
+        if pr == 0 and orank >= 2:
+            observations.append({
+                "window":label,
+                "type":"OI_WITHOUT_PRICE_CONFIRMATION",
+                "text":f"{label}: OI {os_.get('label')} אך Price חלש — בניית/סגירת OI ללא תנועת מחיר מאושרת.",
+            })
+        elif orank == 0 and pr >= 2:
+            observations.append({
+                "window":label,
+                "type":"PRICE_WITHOUT_OI_CONFIRMATION",
+                "text":f"{label}: Price {ps.get('label')} אך OI חלש — תנועת מחיר ללא אישור OI משמעותי.",
+            })
+    return observations
+
 
 def _early_transition(windows, overall):
     if overall.get("state") in {"MIXED_TRANSITION","NEUTRAL_INCONCLUSIVE"}: return False
@@ -203,11 +288,11 @@ def _insert_snapshot(symbol,price,oi,result):
 
 def collect_symbol(symbol,price):
     symbol=str(symbol or "").upper(); oi=fetch_aggregated_oi(symbol); now=datetime.now(timezone.utc); rows=_history(symbol)
-    windows=_window_results(symbol,float(price),float(oi),now,rows); overall=_overall(windows); early=_early_transition(windows,overall)
+    windows=_window_results(symbol,float(price),float(oi),now,rows); overall=_overall(windows); early=_early_transition(windows,overall); observations=_significance_observations(windows)
     # Persist current sample. Legacy columns retain the 30m result for DB compatibility only.
     r30=windows["30m"]; legacy=RegimeResult(symbol,r30["state"],r30["label"],r30["direction"],r30["price_change_pct"],r30["oi_change_pct"],r30["reason"],r30["available"])
     _insert_snapshot(symbol,float(price),float(oi),legacy)
-    return {"symbol":symbol,"price":float(price),"open_interest_usd":float(oi),"windows":windows,"overall":overall,"early_transition":early,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
+    return {"symbol":symbol,"price":float(price),"open_interest_usd":float(oi),"windows":windows,"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
 
 def collect_many(symbol_prices):
     out={}
@@ -222,8 +307,8 @@ def latest(symbol):
     current=rows[-1]; now=_as_utc(current["collected_at"])
     history_before=rows[:-1]
     windows=_window_results(symbol,float(current["price"]),float(current["open_interest_usd"]),now,history_before)
-    overall=_overall(windows); early=_early_transition(windows,overall)
-    return {"symbol":symbol,"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"overall":overall,"early_transition":early,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
+    overall=_overall(windows); early=_early_transition(windows,overall); observations=_significance_observations(windows)
+    return {"symbol":symbol,"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
 
 def composite_conclusion(regime,alert_side):
     # Backward-compatible with the original single-window Stage 77 payload,

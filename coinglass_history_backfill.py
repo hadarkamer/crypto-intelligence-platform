@@ -56,6 +56,9 @@ WINDOWS: Dict[str, int] = {
     "24h": 48,
 }
 
+_REFERENCE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
 # Price history is exchange/pair based. For most assets Binance is the first
 # choice. HYPE starts with Hyperliquid. Fallbacks exist only for historical
 # collection and never touch the live price provider.
@@ -318,6 +321,7 @@ def _store_rows(
         with sqlite3.connect(DB_PATH) as conn:
             conn.executemany(sql, values)
             conn.commit()
+    _REFERENCE_CACHE.pop(str(symbol).upper(), None)
     return len(values)
 
 
@@ -420,10 +424,12 @@ def _distribution(values: Sequence[float]) -> Dict[str, Optional[float]]:
 
 
 def calculate_reference_ranges(symbol: str) -> Dict[str, Any]:
-    """Calculate historical absolute-change distributions per analytical window.
+    """Calculate absolute-change distributions for each analytical window.
 
-    No result is fed into live Regime yet. P25/P75 describe the middle historical
-    range; median is the typical move; P90/P95 expose larger historical moves.
+    The historical table remains separate from the live snapshot table. These
+    statistics are now used only to judge whether each live Price/OI movement is
+    large enough to be meaningful for the same symbol and the same timeframe.
+    They never modify Max-Pain scoring.
     """
     symbol = str(symbol or "").strip().upper()
     rows = _history_rows(symbol)
@@ -452,9 +458,63 @@ def calculate_reference_ranges(symbol: str) -> Dict[str, Any]:
         "available": True,
         "rows": len(rows),
         "windows": windows,
-        "note": "Reference statistics only; not applied to live Regime or Max-Pain scoring.",
+        "note": "Historical reference for live Price+OI significance only; Max-Pain remains independent.",
     }
 
 
+def get_reference_ranges(symbol: str, refresh: bool = False) -> Dict[str, Any]:
+    """Cached historical reference for one symbol.
+
+    Backfill invalidates the cache automatically, so repeated Alerts/Watch calls
+    do not reread ~1,440 history rows for every opportunity.
+    """
+    symbol = str(symbol or "").strip().upper()
+    if not refresh and symbol in _REFERENCE_CACHE:
+        return _REFERENCE_CACHE[symbol]
+    result = calculate_reference_ranges(symbol)
+    _REFERENCE_CACHE[symbol] = result
+    return result
+
+
+def strength_from_distribution(change_pct: Optional[float], distribution: Dict[str, Any]) -> Dict[str, Any]:
+    """Map an absolute move to transparent historical percentile bands."""
+    if change_pct is None or not distribution:
+        return {"available": False, "label": "Unknown", "rank": None}
+    value = abs(float(change_pct))
+    p25 = distribution.get("p25")
+    p75 = distribution.get("p75")
+    p90 = distribution.get("p90")
+    p95 = distribution.get("p95")
+    if any(x is None for x in (p25, p75, p90, p95)):
+        return {"available": False, "label": "Unknown", "rank": None}
+    if value < float(p25):
+        label, rank = "Weak / Noise", 0
+    elif value < float(p75):
+        label, rank = "Normal", 1
+    elif value < float(p90):
+        label, rank = "Elevated", 2
+    elif value < float(p95):
+        label, rank = "Strong", 3
+    else:
+        label, rank = "Extreme", 4
+    return {
+        "available": True,
+        "label": label,
+        "rank": rank,
+        "absolute_change_pct": value,
+        "p25": float(p25),
+        "p75": float(p75),
+        "p90": float(p90),
+        "p95": float(p95),
+    }
+
+
+def reference_for_window(symbol: str, label: str) -> Dict[str, Any]:
+    stats = get_reference_ranges(symbol)
+    if not stats.get("available"):
+        return {}
+    return dict((stats.get("windows") or {}).get(label) or {})
+
+
 def calculate_all_reference_ranges() -> Dict[str, Dict[str, Any]]:
-    return {symbol: calculate_reference_ranges(symbol) for symbol in TARGET_SYMBOLS}
+    return {symbol: get_reference_ranges(symbol, refresh=True) for symbol in TARGET_SYMBOLS}
