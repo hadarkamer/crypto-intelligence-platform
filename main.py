@@ -1813,28 +1813,37 @@ def _build_opportunities_with_regime(rows, limit=500):
 
 def _regime_block(item: Dict[str, Any]) -> str:
     regime = item.get("market_regime") or {}
-    if not regime.get("available"):
+    windows = regime.get("windows") or {}
+    overall = regime.get("overall") or {}
+    if not windows:
         return (
             "\n\n📊 Price + OI Regime\n"
             "<b>אין מספיק נתונים</b>\n"
-            f"{html.escape(str(regime.get('reason') or 'טרם נאספו שתי דגימות.'))}\n\n"
+            f"{html.escape(str(regime.get('reason') or 'טרם נאספה דגימת Price + OI.'))}\n\n"
             "🧩 מסקנה משולבת\n"
             f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"
         )
 
-    price_delta = regime.get("price_change_pct")
-    oi_delta = regime.get("oi_change_pct")
-    price_text = "—" if price_delta is None else f"{float(price_delta):+.4f}%"
-    oi_text = "—" if oi_delta is None else f"{float(oi_delta):+.4f}%"
-    return (
-        "\n\n📊 Price + OI Regime\n"
-        f"<b>{html.escape(str(regime.get('label') or regime.get('state') or '—'))}</b>\n"
-        f"שינוי מחיר (30 דק׳): {price_text}\n"
-        f"שינוי OI (30 דק׳): {oi_text}\n"
-        f"הסבר: {html.escape(str(regime.get('reason') or '—'))}\n\n"
-        "🧩 מסקנה משולבת\n"
-        f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"
-    )
+    lines = ["\n\n📊 Price + OI Regime"]
+    for label in ("30m", "1h", "4h", "12h", "24h"):
+        w = windows.get(label) or {}
+        if not w.get("available"):
+            lines.append(f"{label}: אין עדיין היסטוריה מספקת")
+            continue
+        pd = w.get("price_change_pct")
+        od = w.get("oi_change_pct")
+        ptxt = "—" if pd is None else f"{float(pd):+.4f}%"
+        otxt = "—" if od is None else f"{float(od):+.4f}%"
+        lines.append(f"{label}: <b>{html.escape(str(w.get('label') or '—'))}</b> | Price {ptxt} | OI {otxt}")
+
+    overall_label = html.escape(str(overall.get("label") or "אין מסקנה"))
+    strength = html.escape(str(overall.get("strength") or "—"))
+    agreement = int(overall.get("agreement") or 0)
+    lines.extend(["", f"Overall: <b>{overall_label} — {strength}</b> ({agreement}/5)"])
+    if regime.get("early_transition"):
+        lines.append("⚠️ <b>Early Transition:</b> 30m + 1h סוטים מהמבנה הרחב")
+    lines.extend(["", "🧩 מסקנה משולבת", f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"])
+    return "\n".join(lines)
 
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:

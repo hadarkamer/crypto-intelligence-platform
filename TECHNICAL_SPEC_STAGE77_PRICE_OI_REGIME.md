@@ -35,3 +35,21 @@ The first observation (or missing data) is `UNAVAILABLE`, not a market state.
 
 ## Fail-safe
 A CoinGlass/API/DB failure must never stop normal alerts or Watch. Missing Regime data is displayed as unavailable while Stage 76 continues normally.
+
+## Stage 77 multi-window update
+
+Price + OI snapshots continue to be collected every 30 minutes. The 30-minute cadence is the sampling frequency, not the only analytical horizon.
+
+Independent regime windows: **30m, 1h, 4h, 12h, 24h**.
+
+For every available window:
+
+ΔPrice = ((Price_now - Price_then) / Price_then) × 100
+
+ΔOI = ((OI_now - OI_then) / OI_then) × 100
+
+Classification remains: Bullish Build-up, Bearish Build-up, Short Covering, Long Unwinding, or Neutral/Inconclusive.
+
+Overall conclusion uses simple agreement across the five windows: 5/5 Strong; 4/5 Strong/Confirmed; 3/5 Confirmed; below 3/5 Mixed/Transition. Missing windows are displayed as unavailable and are never fabricated. Early Transition is flagged when both 30m and 1h agree with each other but diverge from the broader majority.
+
+This layer remains independent and never changes the existing Max Pain score.
