@@ -1076,7 +1076,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch_stop — עצירת הצפייה הכללית\n"
         "/watch_stop SOL — עצירת הצפייה ב-SOL\n"
         "/oi_backfill — הורדת 30 יום Price+OI היסטוריים ל-8 מטבעות\n"
-        "/oi_stats BTC — סטטיסטיקת Price+OI היסטורית לפי 30m/1h/4h/12h/24h"
+        "/oi_stats BTC — סטטיסטיקת Price+OI היסטורית לפי 30m/1h/4h/12h/24h\n"
+        "/oi_state BTC — הצגת חישוב Price+OI Regime השמור האחרון"
+        "/oi_regime BTC — Alias להצגת אותו חישוב Price+OI Regime"
     )
 
 
@@ -3593,6 +3595,71 @@ async def oi_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+def _fmt_signed_pct(value):
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):+.4f}%"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display the latest already-computed Price+OI regime; never triggers collection."""
+    if not context.args:
+        await update.message.reply_text("שימוש: /oi_state BTC")
+        return
+
+    symbol = str(context.args[0]).strip().upper()
+    regime = await asyncio.to_thread(coinglass_oi_regime_service.latest, symbol)
+    windows = regime.get("windows") or {}
+    overall = regime.get("overall") or {}
+
+    if not regime.get("available"):
+        reason = regime.get("reason") or "אין עדיין מספיק דגימות חיות להשוואה."
+        await update.message.reply_text(
+            f"📊 {symbol} — Price + OI Regime\n\n"
+            f"אין עדיין חישוב זמין.\n{reason}\n\n"
+            "הפקודה מציגה נתונים שכבר נאספו ואינה מפעילה איסוף חדש."
+        )
+        return
+
+    lines = [
+        f"📊 {symbol} — Price + OI Regime",
+        "הפקודה מציגה את החישוב השמור האחרון; היא אינה אוספת נתונים מחדש.",
+    ]
+    for label in ("30m", "1h", "4h", "12h", "24h"):
+        w = windows.get(label) or {}
+        lines.append("")
+        if not w.get("available"):
+            lines.extend([f"⏱ {label}", "אין עדיין דגימת עבר מספקת לטווח הזה."])
+            continue
+        ps = w.get("price_strength") or {}
+        os_ = w.get("oi_strength") or {}
+        p_strength = ps.get("label") or "ללא Reference"
+        o_strength = os_.get("label") or "ללא Reference"
+        lines.extend([
+            f"⏱ {label}",
+            f"Price: {_fmt_signed_pct(w.get('price_change_pct'))} — {p_strength}",
+            f"OI: {_fmt_signed_pct(w.get('oi_change_pct'))} — {o_strength}",
+            f"State: {w.get('label') or w.get('state') or 'לא ידוע'}",
+        ])
+
+    lines.extend([
+        "",
+        f"מסקנה כוללת: {overall.get('label') or 'לא זמינה'}",
+        f"עוצמה: {overall.get('strength') or 'לא זמינה'}",
+        f"הסכמה: {overall.get('agreement', 0)}/5",
+        f"Early Transition: {'כן' if regime.get('early_transition') else 'לא'}",
+    ])
+
+    observations = regime.get("significance_observations") or []
+    if observations:
+        lines.extend(["", "הערות משמעותיות:"] + [f"• {x.get('text')}" for x in observations if x.get('text')])
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _collect_oi_regime_once() -> Dict[str, Dict[str, Any]]:
     symbols = _latest_active_symbols()
     if not symbols:
@@ -3707,6 +3774,8 @@ async def main():
     bot_app.add_handler(CommandHandler("technical_status", technical_status_cmd))
     bot_app.add_handler(CommandHandler("oi_backfill", oi_backfill_cmd))
     bot_app.add_handler(CommandHandler("oi_stats", oi_stats_cmd))
+    bot_app.add_handler(CommandHandler("oi_state", oi_state_cmd))
+    bot_app.add_handler(CommandHandler("oi_regime", oi_state_cmd))
     bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()
