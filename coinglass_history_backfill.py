@@ -423,6 +423,49 @@ def _distribution(values: Sequence[float]) -> Dict[str, Optional[float]]:
     }
 
 
+
+def historical_point_at_or_before(symbol: str, target_time: datetime) -> Optional[Dict[str, Any]]:
+    """Return the newest backfilled 30m candle at or before ``target_time``.
+
+    This is a read-only bridge for the live regime layer. It lets 4h/12h/24h
+    windows use the already downloaded CoinGlass history immediately after a
+    deploy, instead of waiting many hours for live snapshots to accumulate.
+    The historical table remains separate and is never written by this call.
+    """
+    init_db()
+    symbol = str(symbol or "").strip().upper()
+    if target_time.tzinfo is None:
+        target_time = target_time.replace(tzinfo=timezone.utc)
+    else:
+        target_time = target_time.astimezone(timezone.utc)
+
+    if _use_postgres():
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            row = conn.execute(
+                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                "WHERE symbol=%s AND candle_time<=%s ORDER BY candle_time DESC LIMIT 1",
+                (symbol, target_time),
+            ).fetchone()
+    else:
+        target_iso = target_time.isoformat()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                "WHERE symbol=? AND candle_time<=? ORDER BY candle_time DESC LIMIT 1",
+                (symbol, target_iso),
+            ).fetchone()
+
+    if not row:
+        return None
+    data = dict(row)
+    return {
+        "collected_at": data["candle_time"],
+        "price": float(data["price_close"]),
+        "open_interest_usd": float(data["oi_close_usd"]),
+        "source": "historical_backfill",
+    }
+
 def calculate_reference_ranges(symbol: str) -> Dict[str, Any]:
     """Calculate absolute-change distributions for each analytical window.
 

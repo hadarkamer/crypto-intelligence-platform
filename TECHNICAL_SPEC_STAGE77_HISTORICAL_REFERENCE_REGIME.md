@@ -61,3 +61,16 @@ No historical-reference value changes:
 - Directional averages
 - LONG/SHORT selection
 - alert priority
+
+## Live-window bootstrap from historical backfill
+
+For each 30m / 1h / 4h / 12h / 24h regime window, the engine first looks for a
+live `oi_regime_snapshots` sample at or before the requested lookback time.
+If no live sample is old enough, it reads the newest `oi_price_history` candle
+at or before that time. This is a read-only fallback. Historical backfill never
+writes into the live snapshot table and never changes Max-Pain scoring.
+
+Priority:
+1. live snapshot reference;
+2. historical backfill reference;
+3. unavailable only if neither exists.

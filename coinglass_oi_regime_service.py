@@ -203,28 +203,44 @@ def _as_utc(v):
         return v.astimezone(timezone.utc) if v.tzinfo else v.replace(tzinfo=timezone.utc)
     return datetime.fromisoformat(str(v).replace("Z","+00:00")).astimezone(timezone.utc)
 
-def _reference_for_window(rows, now, minutes):
-    """Use the newest stored sample at or before the requested lookback time."""
+def _reference_for_window(rows, now, minutes, symbol=None):
+    """Find the best reference point for a regime window.
+
+    Priority is always the live snapshot history. If the service has not yet
+    accumulated a live sample old enough for this window, fall back read-only
+    to the CoinGlass historical backfill table. This never writes into the live
+    table and never changes Max-Pain calculations.
+    """
     target=now-timedelta(minutes=minutes)
     eligible=[r for r in rows if _as_utc(r["collected_at"])<=target]
-    return eligible[-1] if eligible else None
+    if eligible:
+        ref=dict(eligible[-1])
+        ref.setdefault("source", "live_snapshot")
+        return ref
+    if symbol:
+        return history_reference.historical_point_at_or_before(symbol, target)
+    return None
 
 def _window_results(symbol, price, oi, now=None, history_rows=None):
     now=now or datetime.now(timezone.utc); rows=_history(symbol) if history_rows is None else history_rows
     out={}
     for minutes in REGIME_WINDOWS_MINUTES:
         label=WINDOW_LABELS[minutes]
-        ref=_reference_for_window(rows,now,minutes)
+        ref=_reference_for_window(rows,now,minutes,symbol)
         if not ref:
             d=classify(symbol,None,None).to_dict()
             # Reference strength is meaningful only when a live delta exists.
             d["historical_reference_available"]=bool(history_reference.reference_for_window(symbol,label))
             d["price_strength"]={"available":False,"label":"Unknown","rank":None}
             d["oi_strength"]={"available":False,"label":"Unknown","rank":None}
+            d["comparison_source"]="unavailable"
+            d["reference_time"]=None
         else:
             pchange=_pct_change(price,ref["price"])
             ochange=_pct_change(oi,ref["open_interest_usd"])
             d=_classify_with_historical_reference(symbol,label,pchange,ochange)
+            d["comparison_source"]=ref.get("source","live_snapshot")
+            d["reference_time"]=_as_utc(ref["collected_at"]).isoformat()
         d["window_minutes"]=minutes; d["window_label"]=label; out[label]=d
     return out
 
