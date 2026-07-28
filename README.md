@@ -1,3 +1,11 @@
+
+## Stage 79 — Compact alert layout and 0.8% display threshold
+- The minimum distance for a primary Max Pain opportunity is now 0.8%.
+- Below-threshold rows remain visible in the seven-timeframe summary with a yellow marker, actual proximity percentage, and directional score.
+- Alert/Watch headers and counter-direction values use a compact one-line layout.
+- Price+OI windows retain Price/OI strength detail in a compact three-line block per timeframe.
+- Max Pain scoring formulas are unchanged.
+
 # Stage 44 — Timeframe Integrity and Collect Audit
 
 - CoinGlass is collected internally in the order:

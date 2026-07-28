@@ -91,7 +91,7 @@ ALERT_ACTIVE = False
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
 MIN_DISPLAY_DISTANCE_PCT = float(
-    os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.5")
+    os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.8")
 )
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
 WATCH_RUNTIME = {
@@ -1733,7 +1733,7 @@ def _quality_block(item: Dict[str, Any], rows: List[Any]) -> str:
 
 
 def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
-    """Show score/status for all seven timeframes only at card bottom."""
+    """Show compact score/status for all seven Max Pain timeframes at card bottom."""
     symbol = str(item.get("symbol") or "").upper()
     by_timeframe = {
         str(other.get("timeframe")): other
@@ -1751,7 +1751,7 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
         item.get("directional_scores_all_timeframes", {}).get(alert_side, {})
         or {}
     )
-    lines = [f"📊 מצב {symbol} בכיוון {alert_side} בכל טווחי הזמן", ""]
+    lines = []
     values = []
 
     for timeframe in TIMEFRAMES:
@@ -1778,35 +1778,36 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
             active_distances = []
 
         nearest_active_distance = min(active_distances) if active_distances else None
+        value = directional_scores.get(timeframe)
 
         if not active_distances:
-            lines.append(
-                f"🔴 {timeframe:<3}  אין יעד פעיל (Max Pain נלקח)"
-            )
+            lines.append(f"🔴 {timeframe:<3}  אין יעד פעיל (Max Pain נלקח)")
             continue
 
-        if nearest_active_distance is not None and nearest_active_distance < MIN_DISPLAY_DISTANCE_PCT:
-            lines.append(
-                f"🟡 {timeframe:<3}  {nearest_active_distance:.2f}% "
-                f"(מתחת לסף {MIN_DISPLAY_DISTANCE_PCT:.1f}%)"
-            )
-            value = directional_scores.get(timeframe)
-            if value is not None:
-                values.append(float(value))
-            continue
-
-        value = directional_scores.get(timeframe)
         if value is None:
             lines.append(f"🔴 {timeframe:<3}  אין ציון זמין לכיוון {alert_side}")
             continue
 
         value = float(value)
         values.append(value)
-        marker = "🟢" if other is not None and str(other.get("side") or "").upper() == alert_side else "🟡"
+
+        if nearest_active_distance is not None and nearest_active_distance < MIN_DISPLAY_DISTANCE_PCT:
+            # Below-threshold rows remain visible: the yellow marker is the warning,
+            # while both actual proximity and the directional score stay transparent.
+            lines.append(
+                f"🟡 {timeframe:<3}  {nearest_active_distance:.2f}% | {value:.2f}"
+            )
+            continue
+
+        marker = (
+            "🟢"
+            if other is not None
+            and str(other.get("side") or "").upper() == alert_side
+            else "🟡"
+        )
         lines.append(f"{marker} {timeframe:<3}  {value:.2f}")
 
     average = sum(values) / len(values) if values else 0.0
-    lines.append("")
     lines.append(f"ממוצע: {average:.2f}/100")
     return "\n\n" + "\n".join(lines)
 
@@ -1818,37 +1819,47 @@ def _build_opportunities_with_regime(rows, limit=500):
 
 
 def _regime_block(item: Dict[str, Any]) -> str:
+    """Render Price+OI context compactly while preserving full strength detail."""
     regime = item.get("market_regime") or {}
     windows = regime.get("windows") or {}
     overall = regime.get("overall") or {}
     if not windows:
         return (
-            "\n\n📊 Price + OI Regime\n"
-            "<b>אין מספיק נתונים</b>\n"
+            "\n\n<b>אין מספיק נתוני Price + OI</b>\n"
             f"{html.escape(str(regime.get('reason') or 'טרם נאספה דגימת Price + OI.'))}\n\n"
             "🧩 מסקנה משולבת\n"
             f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"
         )
 
-    lines = ["\n\n📊 Price + OI Regime"]
+    clock = {"30m": "🕒", "1h": "🕐", "4h": "🕓", "12h": "🕛", "24h": "🕛"}
+    indent = "\u00a0\u00a0\u00a0\u00a0"
+    lines = [""]
     for label in ("30m", "1h", "4h", "12h", "24h"):
         w = windows.get(label) or {}
+        icon = clock.get(label, "🕒")
         if not w.get("available"):
-            lines.append(f"{label}: אין עדיין היסטוריה מספקת")
+            lines.append(f"{icon} {label} | אין עדיין היסטוריה מספקת")
             continue
+
         pd = w.get("price_change_pct")
         od = w.get("oi_change_pct")
         ptxt = "—" if pd is None else f"{float(pd):+.4f}%"
         otxt = "—" if od is None else f"{float(od):+.4f}%"
+        state = html.escape(str(w.get("label") or "—"))
         ps = (w.get("price_strength") or {}).get("label")
         os_ = (w.get("oi_strength") or {}).get("label")
+
+        lines.append(f"{icon} {label} | <b>{state}</b>")
         if w.get("historical_reference_available") and ps and os_:
             lines.append(
-                f"{label}: <b>{html.escape(str(w.get('label') or '—'))}</b> | "
-                f"Price {ptxt} [{html.escape(str(ps))}] | OI {otxt} [{html.escape(str(os_))}]"
+                f"{indent}Price: {ptxt} [{html.escape(str(ps))}]"
+            )
+            lines.append(
+                f"{indent}OI   : {otxt} [{html.escape(str(os_))}]"
             )
         else:
-            lines.append(f"{label}: <b>{html.escape(str(w.get('label') or '—'))}</b> | Price {ptxt} | OI {otxt}")
+            lines.append(f"{indent}Price: {ptxt}")
+            lines.append(f"{indent}OI   : {otxt}")
 
     overall_label = html.escape(str(overall.get("label") or "אין מסקנה"))
     strength = html.escape(str(overall.get("strength") or "—"))
@@ -1858,7 +1869,6 @@ def _regime_block(item: Dict[str, Any]) -> str:
         lines.append("⚠️ <b>Early Transition:</b> 30m + 1h סוטים מהמבנה הרחב")
     observations = regime.get("significance_observations") or []
     if observations:
-        lines.append("")
         lines.append("🔎 <b>Historical significance</b>")
         for obs in observations[:3]:
             lines.append(f"• {html.escape(str(obs.get('text') or ''))}")
@@ -1920,11 +1930,11 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         return f"{marker}{label}: ${fmt(value, 0)}"
 
     card = (
-        f"#{index} {item['symbol']} / {item['timeframe']}\n"
-        f"{'🔴' if item.get('side') == 'SHORT' else '🟢'} {item['side']}\n"
-        f"Score\n<b>{fmt(item.get('score', item.get('priority')))}/100</b>\n"
-        f"ממוצע {item['side']} בכל הטווחים\n<b>{fmt(average_score)}/100</b>\n\n"
-        f"מחיר נוכחי: ${fmt_price(current_price)}\n\n"
+        f"#{index} {item['symbol']} / {item['timeframe']} | "
+        f"{'🔴' if item.get('side') == 'SHORT' else '🟢'} {item['side']} | "
+        f"<b>{fmt(item.get('score', item.get('priority')))}</b>\n"
+        f"ממוצע {item['side']} בכל הטווחים: <b>{fmt(average_score)}</b>\n\n"
+        f"מחיר נוכחי: ${fmt_price(current_price)}\n"
         + score_block(
             f"🎯 Max Pain: ${fmt_price(target_price)} ({fmt(item.get('distance_pct'))}%)",
             c.get("target_proximity"),
@@ -1938,11 +1948,11 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         + score_block(btc_label, btc_points)
         + "\n\n"
         + score_block("Cluster", c.get("cluster_confidence"), " / 30")
-        + "\n\n"
+        + "\n"
         + score_block("צפיפות יעדים", c.get("cluster_density"), " / 12")
-        + "\n\n"
+        + "\n"
         + score_block("מספר טווחים", c.get("cluster_coverage"), " / 8")
-        + "\n\n"
+        + "\n"
         + score_block(
             f"הצטברות נזילות (מכפיל {fmt(c.get('cluster_liquidity_multiplier'))}x)",
             c.get("cluster_liquidity_growth"), " / 10",
@@ -1965,25 +1975,20 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 
     opposite_average = item.get("opposite_average_score_all_timeframes")
     if counter_value is not None:
-        card += (
-            "\n\nניקוד לכיוון הנגדי — " + str(counter_side) + "\n"
-            f"<b>{fmt(counter_value)}/100</b>"
+        counter_line = (
+            f"ניקוד לכיוון הנגדי — {counter_side}: <b>{fmt(counter_value)}</b>"
         )
-        if opposite_average is not None:
-            card += (
-                f"\n\nממוצע {counter_side} בכל הטווחים\n"
-                f"<b>{fmt(opposite_average)}/100</b>"
-            )
     else:
-        card += (
-            "\n\nניקוד לכיוון הנגדי:\n"
-            f"{counter_side or '-'}: לא פעיל — יעד הכיוון הנגדי כבר נחצה או חסר"
+        counter_line = (
+            f"ניקוד לכיוון הנגדי — {counter_side or '-'}: "
+            "לא פעיל — יעד הכיוון הנגדי כבר נחצה או חסר"
         )
-        if opposite_average is not None:
-            card += (
-                f"\n\nממוצע {counter_side} בכל הטווחים\n"
-                f"<b>{fmt(opposite_average)}/100</b>"
-            )
+    if opposite_average is not None:
+        counter_line += (
+            f" | ממוצע {counter_side} בכל הטווחים: "
+            f"<b>{fmt(opposite_average)}</b>"
+        )
+    card += "\n\n" + counter_line
 
     card += _regime_block(item)
     card += _quality_block(item, rows)
