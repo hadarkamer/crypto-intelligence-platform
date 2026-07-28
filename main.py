@@ -94,6 +94,7 @@ HISTORY_BACKFILL_INTERVAL_HOURS = max(1, int(os.getenv("HISTORY_BACKFILL_INTERVA
 HISTORY_BACKFILL_STARTUP_DELAY_SECONDS = max(0, int(os.getenv("HISTORY_BACKFILL_STARTUP_DELAY_SECONDS", "60")))
 HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES = max(5, int(os.getenv("HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES", "60")))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
+TOP8_SYMBOLS = {"BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP"}
 MIN_DISPLAY_DISTANCE_PCT = float(
     os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.8")
 )
@@ -112,6 +113,7 @@ WATCH_RUNTIME = {
     "scan_in_progress": False,
     "scan_owner": None,
     "cycle_number": 0,
+    "mode": "all",
 }
 
 SQLITE_SCHEMA = """
@@ -1071,10 +1073,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "פקודות:\n"
         "/collect — איסוף מלא ושמירת Snapshot חדש\n"
         "/alerts — סריקה חיה חד-פעמית והצגת הזדמנויות\n"
+        "/alerts_top8 — סריקה חיה רק עבור 8 מטבעות הליבה\n"
         "/alerts_liq 1000000 — Alerts רק מעל סך נזילות מינימלי בדולרים\n"
         "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — הפעלת צפייה כללית\n"
+        "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
         "/watch_on SOL 160 — צפייה ב-SOL עד יעד 160, כל 5 דקות\n"
         "/watch_status — הצגת מצב הצפיות\n"
         "/watch_stop — עצירת הצפייה הכללית\n"
@@ -2126,6 +2130,92 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 WATCH_RUNTIME["scan_owner"] = None
 
 
+def _filter_top8_items(items):
+    """Keep only opportunities whose symbol belongs to the fixed Top-8 core list."""
+    return [
+        item for item in items
+        if str(item.get("symbol") or "").upper() in TOP8_SYMBOLS
+    ]
+
+
+async def alert_check_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run one live alert scan and display only the fixed Top-8 symbols."""
+    limit = 10
+    if context.args:
+        first_arg = str(context.args[0]).strip()
+        if not first_arg.isdigit():
+            await update.message.reply_text("שימוש: /alerts_top8 [מספר תוצאות]")
+            return
+        limit = max(1, min(15, int(first_arg)))
+
+    command_lock = _get_alert_command_lock()
+    if command_lock.locked():
+        await update.message.reply_text(
+            "⏳ סריקת Alerts כבר פעילה. לא נפתחה סריקה נוספת."
+        )
+        return
+
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
+        await update.message.reply_text(
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
+            "/alerts_top8 יתחיל אוטומטית כשהסורק יתפנה."
+        )
+
+    async with command_lock:
+        try:
+            async with scrape_lock:
+                WATCH_RUNTIME["scan_owner"] = "/alerts_top8"
+                await update.message.reply_text(
+                    "🔎 /alerts_top8 התחיל סריקה חיה עבור "
+                    "BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB ו-XRP."
+                )
+                rows, live_result = await collect_live_rows_for_watch()
+
+            all_items = _build_opportunities_with_regime(rows, limit=500)
+            top8_all_items = _filter_top8_items(all_items)
+            displayable_items = [
+                item for item in top8_all_items
+                if _is_displayable_opportunity(item)
+            ]
+            items = displayable_items[:limit]
+
+            if not items:
+                await update.message.reply_text(
+                    "⚠️ הסריקה הסתיימה ללא הזדמנויות חדשות ב-Top 8.\n"
+                    f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
+                    "אינם מוצגים כהזדמנות מסחר רלוונטית."
+                )
+                return
+
+            counts = live_result.get("timeframe_integrity", {}).get("counts", {})
+            await update.message.reply_text(
+                "✅ /alerts_top8 הסתיים\n"
+                f"מוצגות {len(items)} התוצאות המובילות מתוך 8 מטבעות הליבה.\n"
+                f"טווחים שנקלטו: {', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in TIMEFRAMES)}"
+            )
+
+            for index, item in enumerate(items, start=1):
+                await update.message.reply_text(
+                    _alert_card(index, item, top8_all_items, rows),
+                    parse_mode="HTML",
+                )
+            await update.message.reply_text(
+                alert_summary.format_alert_count_summary(items)
+            )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await update.message.reply_text(
+                f"❌ /alerts_top8 נכשל: {exc!r}"
+            )
+        finally:
+            if WATCH_RUNTIME.get("scan_owner") == "/alerts_top8":
+                WATCH_RUNTIME["scan_owner"] = None
+
+
 async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run /alerts with a user-defined minimum total liquidity per result."""
     if not context.args:
@@ -2612,7 +2702,7 @@ def _watch_message(item, all_items, rows) -> str:
     )
 
 
-async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
+async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dict[str, Any]:
     """Run one complete Watch cycle and always send a Telegram outcome."""
     WATCH_RUNTIME["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
     WATCH_RUNTIME["scan_in_progress"] = True
@@ -2628,6 +2718,8 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
             rows, live_result = await collect_live_rows_for_watch()
 
         all_items = _build_opportunities_with_regime(rows, limit=500)
+        if top8_only:
+            all_items = _filter_top8_items(all_items)
         displayable_items = [
             item
             for item in all_items
@@ -2640,10 +2732,11 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
             >= WATCH_PRIORITY_THRESHOLD
         ]
 
+        watch_label = "Watch Top 8" if top8_only else "Watch"
         if candidates:
             result_items = candidates[:10]
             header = (
-                f"✅ סריקת Watch #{cycle_number} הסתיימה\n"
+                f"✅ סריקת {watch_label} #{cycle_number} הסתיימה\n"
                 f"נמצאו {len(candidates)} תוצאות בציון "
                 f"{WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
                 f"מוצגות {len(result_items)} התוצאות המובילות."
@@ -2651,14 +2744,14 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
         elif displayable_items:
             result_items = [displayable_items[0]]
             header = (
-                f"✅ סריקת Watch #{cycle_number} הסתיימה\n"
+                f"✅ סריקת {watch_label} #{cycle_number} הסתיימה\n"
                 f"אין תוצאה בציון {WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
                 "מוצגת התוצאה בעלת הציון הגבוה ביותר."
             )
         else:
             result_items = []
             header = (
-                f"⚠️ סריקת Watch #{cycle_number} הסתיימה ללא "
+                f"⚠️ סריקת {watch_label} #{cycle_number} הסתיימה ללא "
                 "הזדמנויות חדשות להצגה.\n"
                 f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
                 "אינם מוצגים כהזדמנות מסחר רלוונטית."
@@ -2713,7 +2806,7 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
             await bot_app.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"❌ סריקת Watch #{cycle_number} נכשלה\n"
+                    f"❌ סריקת {'Watch Top 8' if top8_only else 'Watch'} #{cycle_number} נכשלה\n"
                     f"{exc!r}\n"
                     "הלולאה נשארת פעילה ותנסה שוב בעוד 15 דקות."
                 ),
@@ -2726,13 +2819,13 @@ async def run_watch_cycle(bot_app, chat_id: int) -> Dict[str, Any]:
         WATCH_RUNTIME["scan_owner"] = None
 
 
-async def watch_loop(bot_app, chat_id: int):
+async def watch_loop(bot_app, chat_id: int, top8_only: bool = False):
     """Persistent single Watch loop; only /watch_stop cancels it."""
     global WATCH_SCAN_TASK
 
     print(
         f"[watch] loop started; chat_id={chat_id}; "
-        f"interval={WATCH_INTERVAL_MINUTES}m",
+        f"interval={WATCH_INTERVAL_MINUTES}m; mode={'top8' if top8_only else 'all'}",
         flush=True,
     )
 
@@ -2744,7 +2837,7 @@ async def watch_loop(bot_app, chat_id: int):
             ).isoformat()
 
             WATCH_SCAN_TASK = asyncio.create_task(
-                run_watch_cycle(bot_app, chat_id),
+                run_watch_cycle(bot_app, chat_id, top8_only=top8_only),
                 name="watch-scan-cycle",
             )
             try:
@@ -2782,6 +2875,7 @@ async def watch_loop(bot_app, chat_id: int):
         WATCH_RUNTIME["scan_owner"] = None
         WATCH_RUNTIME["next_scan_utc"] = None
         WATCH_RUNTIME["last_cycle_status"] = "stopped"
+        WATCH_RUNTIME["mode"] = "all"
         print("[watch] loop stopped", flush=True)
 
 
@@ -3088,9 +3182,10 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["last_error"] = None
     WATCH_RUNTIME["last_cycle_status"] = "starting"
     WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
+    WATCH_RUNTIME["mode"] = "all"
 
     WATCH_TASK = asyncio.create_task(
-        watch_loop(context.application, chat_id),
+        watch_loop(context.application, chat_id, top8_only=False),
         name="persistent-watch-loop",
     )
 
@@ -3115,6 +3210,57 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"לאחר סיום כל סריקה תתחיל סריקה נוספת בעוד "
         f"{WATCH_INTERVAL_MINUTES} דקות.\n"
         "העצירה מתבצעת רק באמצעות /watch_stop."
+    )
+
+
+async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the persistent Watch loop restricted to the fixed Top-8 list."""
+    global WATCH_TASK
+
+    if context.args:
+        await update.message.reply_text("שימוש: /watch_on_top8")
+        return
+
+    if WATCH_TASK is not None and not WATCH_TASK.done():
+        mode = WATCH_RUNTIME.get("mode", "all")
+        active_label = "Watch Top 8" if mode == "top8" else "Watch רגיל"
+        await update.message.reply_text(
+            f"👁 {active_label} כבר פעיל. יש לעצור אותו קודם באמצעות /watch_stop."
+        )
+        return
+
+    chat_id = int(update.effective_chat.id)
+    WATCH_RUNTIME["last_error"] = None
+    WATCH_RUNTIME["last_cycle_status"] = "starting"
+    WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
+    WATCH_RUNTIME["mode"] = "top8"
+
+    WATCH_TASK = asyncio.create_task(
+        watch_loop(context.application, chat_id, top8_only=True),
+        name="persistent-watch-top8-loop",
+    )
+
+    await asyncio.sleep(0)
+    if WATCH_TASK.done():
+        try:
+            error = WATCH_TASK.exception()
+        except Exception as exc:
+            error = exc
+        WATCH_TASK = None
+        WATCH_RUNTIME["last_cycle_status"] = "failed_to_start"
+        WATCH_RUNTIME["last_error"] = repr(error)
+        await update.message.reply_text(
+            f"❌ Watch Top 8 לא הצליח להתחיל: {error!r}"
+        )
+        return
+
+    await update.message.reply_text(
+        "✅ Watch Top 8 הופעל\n"
+        "המעקב מוגבל ל-BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB ו-XRP.\n"
+        "הסריקה הראשונה מתחילה כעת.\n"
+        f"לאחר סיום כל סריקה תתחיל סריקה נוספת בעוד "
+        f"{WATCH_INTERVAL_MINUTES} דקות.\n"
+        "העצירה מתבצעת באמצעות /watch_stop."
     )
 
 
@@ -3841,10 +3987,12 @@ async def main():
     bot_app.add_handler(CommandHandler("collect", collect_cmd))
     bot_app.add_handler(CommandHandler("coin", coin))
     bot_app.add_handler(CommandHandler("alerts", alert_check))
+    bot_app.add_handler(CommandHandler("alerts_top8", alert_check_top8))
     bot_app.add_handler(CommandHandler("alerts_liq", alert_check_min_liquidity))
     bot_app.add_handler(CommandHandler("alert", alert_coin))
     bot_app.add_handler(CommandHandler("debug", debug_coin))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
+    bot_app.add_handler(CommandHandler("watch_on_top8", watch_on_top8))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_handler(CommandHandler("technical_status", technical_status_cmd))
