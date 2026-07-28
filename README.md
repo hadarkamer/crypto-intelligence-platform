@@ -1,3 +1,4 @@
+- Combined Price+OI conclusions compare the Regime with the price direction implied by the Max-Pain pain-side label, while preserving the existing LONG/SHORT label and display wording.
 
 ## Stage 79 — Compact alert layout and 0.8% display threshold
 - The minimum distance for a primary Max Pain opportunity is now 0.8%.

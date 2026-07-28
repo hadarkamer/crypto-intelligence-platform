@@ -23,15 +23,17 @@ def test_first_snapshot_cannot_claim_a_regime():
     assert result.state == "UNAVAILABLE"
 
 
-def test_build_up_composite_can_confirm_or_conflict():
+def test_build_up_composite_uses_inverse_max_pain_price_direction():
     bullish = {"available": True, "state": "BULLISH_BUILDUP"}
-    assert "תומך" in regime.composite_conclusion(bullish, "LONG")
-    assert "מנוגד" in regime.composite_conclusion(bullish, "SHORT")
+    # Max-Pain SHORT means shorts are expected to be hurt, hence price up.
+    assert "תומך" in regime.composite_conclusion(bullish, "SHORT")
+    # Max-Pain LONG means longs are expected to be hurt, hence price down.
+    assert "מנוגד" in regime.composite_conclusion(bullish, "LONG")
 
 
 def test_covering_does_not_claim_new_long_build_up():
     covering = {"available": True, "state": "SHORT_COVERING"}
-    text = regime.composite_conclusion(covering, "LONG")
+    text = regime.composite_conclusion(covering, "SHORT")
     assert "ללא אישור" in text
 
 

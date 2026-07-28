@@ -176,17 +176,40 @@ def _classify_with_historical_reference(symbol, window_label, price_change_pct, 
 
 
 def fetch_aggregated_oi(symbol):
+    symbol=str(symbol or "").upper()
     key=_api_key()
     if not key: raise RuntimeError("COINGLASS_API_KEY is not configured")
-    r=requests.get(API_BASE_URL+OI_ENDPOINT,params={"symbol":str(symbol or "").upper()},headers={"CG-API-KEY":key,"accept":"application/json"},timeout=API_TIMEOUT_SECONDS)
+    r=requests.get(API_BASE_URL+OI_ENDPOINT,params={"symbol":symbol},headers={"CG-API-KEY":key,"accept":"application/json"},timeout=API_TIMEOUT_SECONDS)
     r.raise_for_status(); payload=r.json()
     if not isinstance(payload,dict) or str(payload.get("code")) not in {"0","200"}: raise RuntimeError(f"CoinGlass API error: {payload.get('msg') if isinstance(payload,dict) else 'invalid response'!r}")
-    for row in payload.get("data") or []:
-        if isinstance(row,dict) and str(row.get("exchange","")).strip().lower()=="all":
-            try: v=float(row.get("open_interest_usd"))
-            except (TypeError,ValueError): continue
-            if v>0: return v
-    raise ValueError(f"CoinGlass returned no aggregated OI for {symbol}")
+
+    rows=[row for row in (payload.get("data") or []) if isinstance(row,dict)]
+    exchange_values=[]
+    for row in rows:
+        exchange=str(row.get("exchange","")).strip()
+        try: value=float(row.get("open_interest_usd"))
+        except (TypeError,ValueError):
+            continue
+        if value<=0:
+            continue
+        exchange_values.append((exchange,value))
+        if exchange.lower()=="all":
+            print(f"[oi-regime] {symbol} OI source=coinglass_all exchanges={len(rows)} value={value}")
+            return value
+
+    # Some CoinGlass symbols (notably exchange-native assets such as HYPE)
+    # may omit the synthetic `All` row while still returning valid per-exchange
+    # OI. In that case, sum only the positive per-exchange rows. This preserves
+    # all-exchange coverage without mixing in a single-exchange fallback.
+    per_exchange=[(name,value) for name,value in exchange_values if name.lower()!="all"]
+    if per_exchange:
+        total=sum(value for _,value in per_exchange)
+        names=",".join(name or "unknown" for name,_ in per_exchange)
+        print(f"[oi-regime] {symbol} OI source=coinglass_exchange_sum exchanges={names} count={len(per_exchange)} value={total}")
+        return total
+
+    returned_names=",".join(str(row.get("exchange","")).strip() or "unknown" for row in rows) or "none"
+    raise ValueError(f"CoinGlass returned no usable OI for {symbol}; exchanges={returned_names}")
 
 def _history(symbol):
     init_db(); symbol=str(symbol or "").upper()
@@ -339,8 +362,11 @@ def collect_symbol(symbol,price):
 def collect_many(symbol_prices):
     out={}
     for symbol,price in sorted(symbol_prices.items()):
-        try: out[symbol]=collect_symbol(symbol,price)
-        except Exception as exc: out[symbol]={"symbol":symbol,"windows":{},"overall":{"state":"UNAVAILABLE","label":"נתוני Price + OI לא זמינים","strength":"Unavailable","agreement":0,"valid_windows":0},"early_transition":False,"available":False,"reason":str(exc),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
+        try:
+            out[symbol]=collect_symbol(symbol,price)
+        except Exception as exc:
+            print(f"[oi-regime] {symbol} failed: {type(exc).__name__}: {exc}")
+            out[symbol]={"symbol":symbol,"windows":{},"overall":{"state":"UNAVAILABLE","label":"נתוני Price + OI לא זמינים","strength":"Unavailable","agreement":0,"valid_windows":0},"early_transition":False,"available":False,"reason":str(exc),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
     return out
 
 def latest(symbol):
@@ -355,20 +381,31 @@ def latest(symbol):
 def composite_conclusion(regime,alert_side):
     # Backward-compatible with the original single-window Stage 77 payload,
     # while normal operation uses the multi-window overall conclusion.
+    #
+    # IMPORTANT: the Max-Pain LONG/SHORT label identifies the side expected
+    # to be hurt, not the forecast price direction. Therefore the implied
+    # price direction is the inverse of the alert label:
+    #   Max-Pain LONG  -> longs hurt  -> price direction SHORT/down
+    #   Max-Pain SHORT -> shorts hurt -> price direction LONG/up
     overall=regime.get("overall") or {}; side=str(alert_side or "").upper()
+    implied_price_direction = "SHORT" if side == "LONG" else "LONG" if side == "SHORT" else side
     state=str(overall.get("state") or regime.get("state") or "")
     label=overall.get("label") or regime.get("label") or _state_label(state)
     agreement=overall.get("agreement")
     if state in {"","UNAVAILABLE","NEUTRAL_INCONCLUSIVE"}: return "אין כרגע מסקנת Price+OI כוללת; הציון הקיים נשאר עצמאי."
     if state=="MIXED_TRANSITION": return "Price+OI מציג Mixed / Transition; אין אישור כיווני כולל."
-    if state=="SHORT_COVERING" and side=="LONG":
-        return "המחיר עולה, אך ה-OI יורד: התנועה בכיוון LONG ללא אישור של בניית OI חדש."
-    if state=="LONG_UNWINDING" and side=="SHORT":
-        return "המחיר יורד, אך ה-OI יורד: התנועה בכיוון SHORT ללא אישור של בניית OI חדש."
     direction="LONG" if state in {"BULLISH_BUILDUP","SHORT_COVERING"} else "SHORT"
-    relation="תומך" if side==direction else "מנוגד"
+    relation="תומך" if implied_price_direction==direction else "מנוגד"
     suffix=f" ({agreement}/5)" if agreement is not None else ""
-    return f"Price+OI {relation} בכיוון {side}: {label}{suffix}."
+    # Long Unwinding and Short Covering still participate in the same
+    # support/opposition comparison. Their falling OI describes the quality of
+    # the move; it must not bypass the directional conclusion.
+    detail=""
+    if state=="SHORT_COVERING":
+        detail=" המחיר עולה, אך ה-OI יורד — ללא אישור של בניית OI חדש."
+    elif state=="LONG_UNWINDING":
+        detail=" המחיר יורד וה-OI יורד — ללא אישור של בניית OI חדש בכיוון הירידה."
+    return f"Price+OI {relation} בכיוון {side}: {label}{suffix}.{detail}"
 
 def attach_to_opportunities(items):
     cache={}
