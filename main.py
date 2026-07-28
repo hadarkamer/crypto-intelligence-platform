@@ -80,6 +80,7 @@ WATCH_TASK = None
 WATCH_SCAN_TASK = None
 SPECIFIC_WATCH_TASK = None
 OI_REGIME_TASK = None
+HISTORY_BACKFILL_TASK = None
 HISTORY_BACKFILL_LOCK = None
 SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
 SPECIFIC_WATCH_INTERVAL_MINUTES = 5
@@ -89,6 +90,9 @@ PROCESSED_UPDATE_ORDER = []
 MAX_PROCESSED_UPDATE_IDS = 500
 ALERT_ACTIVE = False
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
+HISTORY_BACKFILL_INTERVAL_HOURS = max(1, int(os.getenv("HISTORY_BACKFILL_INTERVAL_HOURS", "24")))
+HISTORY_BACKFILL_STARTUP_DELAY_SECONDS = max(0, int(os.getenv("HISTORY_BACKFILL_STARTUP_DELAY_SECONDS", "60")))
+HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES = max(5, int(os.getenv("HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES", "60")))
 WATCH_PRIORITY_THRESHOLD = float(os.getenv("WATCH_PRIORITY_THRESHOLD", "70"))
 MIN_DISPLAY_DISTANCE_PCT = float(
     os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.8")
@@ -3492,6 +3496,71 @@ def _fmt_hist_stat(value: Any) -> str:
         return "-"
 
 
+async def _run_history_backfill_once(source: str = "automatic") -> Dict[str, Dict[str, Any]]:
+    """Run the isolated historical Price+OI refresh without overlapping runs."""
+    global HISTORY_BACKFILL_LOCK
+    if HISTORY_BACKFILL_LOCK is None:
+        HISTORY_BACKFILL_LOCK = asyncio.Lock()
+    if HISTORY_BACKFILL_LOCK.locked():
+        print(f"[oi-backfill] {source} skipped: another backfill is active", flush=True)
+        return {}
+
+    async with HISTORY_BACKFILL_LOCK:
+        started = datetime.now(timezone.utc)
+        print(f"[oi-backfill] {source} started at {started.isoformat()}", flush=True)
+        results = await asyncio.to_thread(coinglass_history_backfill.backfill_all)
+        ok_count = sum(1 for result in results.values() if result.get("ok"))
+        completed = datetime.now(timezone.utc)
+        await asyncio.to_thread(
+            coinglass_history_backfill.record_backfill_run,
+            source,
+            ok_count,
+            len(coinglass_history_backfill.TARGET_SYMBOLS),
+            completed,
+        )
+        print(
+            f"[oi-backfill] {source} completed: "
+            f"{ok_count}/{len(coinglass_history_backfill.TARGET_SYMBOLS)} symbols",
+            flush=True,
+        )
+        return results
+
+
+async def _history_backfill_loop() -> None:
+    """Run only when the persisted last completion is at least 24 hours old."""
+    if HISTORY_BACKFILL_STARTUP_DELAY_SECONDS:
+        await asyncio.sleep(HISTORY_BACKFILL_STARTUP_DELAY_SECONDS)
+
+    due_after = timedelta(hours=HISTORY_BACKFILL_INTERVAL_HOURS)
+    check_seconds = HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES * 60
+    while True:
+        try:
+            last = await asyncio.to_thread(coinglass_history_backfill.last_backfill_run)
+            now = datetime.now(timezone.utc)
+            last_at = None
+            if last and last.get("completed_at"):
+                value = last["completed_at"]
+                if isinstance(value, datetime):
+                    last_at = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+                else:
+                    last_at = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+
+            if last_at is None or now - last_at >= due_after:
+                await _run_history_backfill_once("automatic_due")
+            else:
+                remaining = due_after - (now - last_at)
+                print(
+                    f"[oi-backfill] automatic skipped: last run {last_at.isoformat()}, "
+                    f"next due in {remaining}",
+                    flush=True,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[oi-backfill] automatic check failed: {exc!r}", flush=True)
+        await asyncio.sleep(check_seconds)
+
+
 async def oi_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manual, isolated 30-day CoinGlass historical Price+OI backfill."""
     global HISTORY_BACKFILL_LOCK
@@ -3508,39 +3577,38 @@ async def oi_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "הפעולה מבודדת ואינה משנה Max Pain או ציונים קיימים. לאחר השלמתה, ה-Reference ההיסטורי משמש רק לסינון עוצמת Price+OI ב-Regime."
     )
 
-    async with HISTORY_BACKFILL_LOCK:
-        try:
-            results = await asyncio.to_thread(coinglass_history_backfill.backfill_all)
-            lines = ["✅ OI + Price Historical Backfill הסתיים", ""]
-            ok_count = 0
-            for symbol in coinglass_history_backfill.TARGET_SYMBOLS:
-                result = results.get(symbol) or {}
-                if result.get("ok"):
-                    ok_count += 1
-                    status = "✅"
-                else:
-                    status = "⚠️"
+    try:
+        results = await _run_history_backfill_once("manual")
+        lines = ["✅ OI + Price Historical Backfill הסתיים", ""]
+        ok_count = 0
+        for symbol in coinglass_history_backfill.TARGET_SYMBOLS:
+            result = results.get(symbol) or {}
+            if result.get("ok"):
+                ok_count += 1
+                status = "✅"
+            else:
+                status = "⚠️"
+            lines.append(
+                f"{status} {symbol}: Price {result.get('price_rows', 0)} | "
+                f"OI {result.get('oi_rows', 0)} | Matched {result.get('matched_rows', 0)}"
+            )
+            if result.get("price_exchange"):
                 lines.append(
-                    f"{status} {symbol}: Price {result.get('price_rows', 0)} | "
-                    f"OI {result.get('oi_rows', 0)} | Matched {result.get('matched_rows', 0)}"
+                    f"   מחיר: {result.get('price_exchange')} / {result.get('price_pair')}"
                 )
-                if result.get("price_exchange"):
-                    lines.append(
-                        f"   מחיר: {result.get('price_exchange')} / {result.get('price_pair')}"
-                    )
-                if not result.get("ok"):
-                    lines.append(f"   {result.get('message', 'לא הושלם')}")
-            lines.extend([
-                "",
-                f"הושלמו בהצלחה: {ok_count}/{len(coinglass_history_backfill.TARGET_SYMBOLS)}",
-                "הנתונים נשמרו בטבלה נפרדת oi_price_history בלבד.",
-                "כעת אפשר לבדוק למשל: /oi_stats BTC",
-            ])
-            await update.message.reply_text("\n".join(lines))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await update.message.reply_text(f"❌ /oi_backfill נכשל: {exc!r}")
+            if not result.get("ok"):
+                lines.append(f"   {result.get('message', 'לא הושלם')}")
+        lines.extend([
+            "",
+            f"הושלמו בהצלחה: {ok_count}/{len(coinglass_history_backfill.TARGET_SYMBOLS)}",
+            "הנתונים נשמרו בטבלה נפרדת oi_price_history בלבד.",
+            "כעת אפשר לבדוק למשל: /oi_stats BTC",
+        ])
+        await update.message.reply_text("\n".join(lines))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await update.message.reply_text(f"❌ /oi_backfill נכשל: {exc!r}")
 
 
 async def oi_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3738,7 +3806,7 @@ async def main():
 
     init_db()
 
-    global WATCH_TASK, WATCH_SCAN_TASK, OI_REGIME_TASK
+    global WATCH_TASK, WATCH_SCAN_TASK, OI_REGIME_TASK, HISTORY_BACKFILL_TASK
     WATCH_TASK = None
     WATCH_SCAN_TASK = None
     WATCH_RUNTIME.update({
@@ -3796,9 +3864,18 @@ async def main():
     if os.getenv("COINGLASS_API_KEY", "").strip():
         coinglass_oi_regime_service.init_db()
         OI_REGIME_TASK = asyncio.create_task(_oi_regime_loop())
+        HISTORY_BACKFILL_TASK = asyncio.create_task(_history_backfill_loop())
         print("[startup] Price+OI collector enabled (30m)", flush=True)
+        print(
+            f"[startup] Historical Price+OI backfill freshness check enabled "
+            f"(due after {HISTORY_BACKFILL_INTERVAL_HOURS}h; check every "
+            f"{HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES}m; startup check after "
+            f"{HISTORY_BACKFILL_STARTUP_DELAY_SECONDS}s)",
+            flush=True,
+        )
     else:
         OI_REGIME_TASK = None
+        HISTORY_BACKFILL_TASK = None
         print("[startup] Price+OI collector disabled: COINGLASS_API_KEY missing", flush=True)
 
     webhook_url = f"{PUBLIC_URL}/telegram"
@@ -3826,6 +3903,13 @@ async def main():
             OI_REGIME_TASK.cancel()
             try:
                 await OI_REGIME_TASK
+            except asyncio.CancelledError:
+                pass
+
+        if HISTORY_BACKFILL_TASK is not None and not HISTORY_BACKFILL_TASK.done():
+            HISTORY_BACKFILL_TASK.cancel()
+            try:
+                await HISTORY_BACKFILL_TASK
             except asyncio.CancelledError:
                 pass
 

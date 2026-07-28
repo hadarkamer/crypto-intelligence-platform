@@ -90,6 +90,15 @@ CREATE TABLE IF NOT EXISTS oi_price_history (
 );
 CREATE INDEX IF NOT EXISTS idx_oi_price_history_symbol_time
 ON oi_price_history(symbol, candle_time);
+CREATE TABLE IF NOT EXISTS oi_backfill_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    completed_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    ok_count INTEGER NOT NULL,
+    total_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oi_backfill_runs_completed
+ON oi_backfill_runs(completed_at);
 """
 
 POSTGRES_SCHEMA = """
@@ -106,6 +115,15 @@ CREATE TABLE IF NOT EXISTS oi_price_history (
 );
 CREATE INDEX IF NOT EXISTS idx_oi_price_history_symbol_time
 ON oi_price_history(symbol, candle_time);
+CREATE TABLE IF NOT EXISTS oi_backfill_runs (
+    id BIGSERIAL PRIMARY KEY,
+    completed_at TIMESTAMPTZ NOT NULL,
+    source TEXT NOT NULL,
+    ok_count INTEGER NOT NULL,
+    total_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oi_backfill_runs_completed
+ON oi_backfill_runs(completed_at);
 """
 
 
@@ -323,6 +341,43 @@ def _store_rows(
             conn.commit()
     _REFERENCE_CACHE.pop(str(symbol).upper(), None)
     return len(values)
+
+
+def record_backfill_run(source: str, ok_count: int, total_count: int, completed_at: Optional[datetime] = None) -> None:
+    """Persist the completion time so restarts do not trigger redundant downloads."""
+    init_db()
+    completed_at = completed_at or datetime.now(timezone.utc)
+    if _use_postgres():
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute(
+                "INSERT INTO oi_backfill_runs (completed_at,source,ok_count,total_count) VALUES (%s,%s,%s,%s)",
+                (completed_at, str(source), int(ok_count), int(total_count)),
+            )
+            conn.commit()
+    else:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO oi_backfill_runs (completed_at,source,ok_count,total_count) VALUES (?,?,?,?)",
+                (completed_at.isoformat(), str(source), int(ok_count), int(total_count)),
+            )
+            conn.commit()
+
+
+def last_backfill_run() -> Optional[Dict[str, Any]]:
+    """Return the latest completed automatic or manual backfill, if one exists."""
+    init_db()
+    if _use_postgres():
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            row = conn.execute(
+                "SELECT completed_at,source,ok_count,total_count FROM oi_backfill_runs ORDER BY completed_at DESC LIMIT 1"
+            ).fetchone()
+    else:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT completed_at,source,ok_count,total_count FROM oi_backfill_runs ORDER BY completed_at DESC LIMIT 1"
+            ).fetchone()
+    return dict(row) if row else None
 
 
 def backfill_symbol(symbol: str, days: int = BACKFILL_DAYS) -> Dict[str, Any]:

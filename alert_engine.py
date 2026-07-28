@@ -229,10 +229,8 @@ def _target_proximity_points(
     allowed = float(allowed_distance_pct)
     preferred_ceiling = _preferred_distance_ceiling(allowed)
 
-    if distance < 0.5 or distance > allowed:
+    if distance < 0.8 or distance > allowed:
         return 0.0
-    if distance < 0.8:
-        return 17.0
     if distance <= preferred_ceiling:
         return 25.0
     if distance <= 2.0:
@@ -873,6 +871,14 @@ def build_opportunities(
 
         selected = _choose_scored_side(row, candidates)
         if selected is None:
+            continue
+
+        # Stage 80: 0.8% is a hard minimum for the alert timeframe.
+        # A row below it receives zero proximity points and cannot become an alert,
+        # while the existing upper eligibility threshold by coin size remains intact.
+        selected_distance = float(selected["distance"])
+        selected_allowed = float(selected["allowed_distance"])
+        if selected_distance < 0.8 or selected_distance > selected_allowed:
             continue
 
         side = selected["side"]

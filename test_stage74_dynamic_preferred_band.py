@@ -20,7 +20,7 @@ class Stage74DynamicPreferredBandTests(unittest.TestCase):
         self.assertEqual(alert_engine._target_proximity_points(2.0, 4.0), 25.0)
 
     def test_existing_outer_bands_remain(self):
-        self.assertEqual(alert_engine._target_proximity_points(0.79, 4.0), 17.0)
+        self.assertEqual(alert_engine._target_proximity_points(0.79, 4.0), 0.0)
         self.assertEqual(alert_engine._target_proximity_points(1.8, 3.5), 20.0)
         self.assertEqual(alert_engine._target_proximity_points(2.1, 3.5), 15.0)
         self.assertEqual(alert_engine._target_proximity_points(3.6, 3.5), 0.0)
