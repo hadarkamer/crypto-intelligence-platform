@@ -3734,7 +3734,10 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _collect_oi_regime_once() -> Dict[str, Dict[str, Any]]:
-    symbols = _latest_active_symbols()
+    # HYPE can be absent from the latest Max Pain snapshot even though it is a
+    # supported Price+OI asset. Keep it in the collector explicitly so the
+    # dedicated live-price fallbacks and CoinGlass OI logic can run.
+    symbols = sorted(set(_latest_active_symbols()) | {"HYPE"})
     if not symbols:
         print("[oi-regime] skipped: no saved crypto symbols", flush=True)
         return {}
