@@ -57,7 +57,7 @@ class Stage57CalculationTests(unittest.TestCase):
         rows.append(dict(rows[0]))
         report = alert_engine.debug_symbol(rows, "BTC")
         self.assertEqual(report["duplicates_removed"], 1)
-        self.assertEqual(len(report["items"]), 5)
+        self.assertEqual(len(report["items"]), 7)
 
     def test_component_sum_matches_score(self):
         for item in alert_engine.build_opportunities(btc_rows(), limit=100):

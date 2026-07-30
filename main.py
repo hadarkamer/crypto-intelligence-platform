@@ -2006,19 +2006,17 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 
 
 def _is_displayable_opportunity(item: Dict[str, Any]) -> bool:
-    """Return whether an already-scored opportunity is still tradable.
+    """Keep every scored opportunity with a valid active target visible.
 
-    Targets closer than MIN_DISPLAY_DISTANCE_PCT are not practical enough for
-    an alert after fees, slippage and execution risk, so they are omitted from
-    /alerts and Watch output. Crossed targets are already excluded by the
-    scoring engine before this display filter runs.
+    Distance affects only the Max Pain proximity component. A target below
+    0.8% or above its symbol-specific allowed distance receives 0 proximity
+    points, but is not removed from /alerts, /alerts_top8 or Watch output.
     """
     try:
         distance = float(item.get("distance_pct"))
     except (TypeError, ValueError):
         return False
-
-    return distance >= MIN_DISPLAY_DISTANCE_PCT
+    return distance >= 0.0
 
 
 def _price_source_label(source: Any) -> str:
@@ -2099,9 +2097,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not items:
                 await update.message.reply_text(
-                    "⚠️ הסריקה הסתיימה ללא הזדמנויות חדשות להצגה.\n"
-                    f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
-                    "אינם מוצגים כהזדמנות מסחר רלוונטית."
+                    "⚠️ הסריקה הסתיימה ללא הזדמנויות פעילות להצגה."
                 )
                 return
 
@@ -2183,9 +2179,7 @@ async def alert_check_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not items:
                 await update.message.reply_text(
-                    "⚠️ הסריקה הסתיימה ללא הזדמנויות חדשות ב-Top 8.\n"
-                    f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
-                    "אינם מוצגים כהזדמנות מסחר רלוונטית."
+                    "⚠️ הסריקה הסתיימה ללא הזדמנויות פעילות ב-Top 8."
                 )
                 return
 
@@ -2752,9 +2746,7 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
             result_items = []
             header = (
                 f"⚠️ סריקת {watch_label} #{cycle_number} הסתיימה ללא "
-                "הזדמנויות חדשות להצגה.\n"
-                f"יעדים במרחק קטן מ-{MIN_DISPLAY_DISTANCE_PCT:.2f}% "
-                "אינם מוצגים כהזדמנות מסחר רלוונטית."
+                "הזדמנויות פעילות להצגה."
             )
 
         await bot_app.bot.send_message(chat_id=chat_id, text=header)

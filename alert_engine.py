@@ -873,13 +873,11 @@ def build_opportunities(
         if selected is None:
             continue
 
-        # Stage 80: 0.8% is a hard minimum for the alert timeframe.
-        # A row below it receives zero proximity points and cannot become an alert,
-        # while the existing upper eligibility threshold by coin size remains intact.
+        # Stage 86: distance no longer controls whether an active Max Pain target
+        # is displayed. Targets below 0.8% or above the symbol-specific allowed
+        # distance remain valid opportunities, but receive 0 proximity points.
         selected_distance = float(selected["distance"])
         selected_allowed = float(selected["allowed_distance"])
-        if selected_distance < 0.8 or selected_distance > selected_allowed:
-            continue
 
         side = selected["side"]
         score = float(selected["score"])
