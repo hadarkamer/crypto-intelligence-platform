@@ -46,9 +46,9 @@ WINDOWS: Tuple[Tuple[str, int], ...] = (
 )
 WINDOW_STEPS = dict(WINDOWS)
 GROUPS: Dict[str, Tuple[str, ...]] = {
-    "short": ("30m", "1h"),
-    "medium": ("4h", "12h", "24h"),
-    "broad": ("48h", "72h", "7d"),
+    "momentum": ("30m", "1h"),
+    "trend": ("4h", "12h", "24h"),
+    "structure": ("48h", "72h", "7d"),
 }
 MIN_BASELINE_SAMPLES = 100
 REFERENCE_TOLERANCE_MINUTES = 20
@@ -64,6 +64,27 @@ class Percentiles:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class DirectionalBaselines:
+    positive: Optional[Percentiles]
+    negative: Optional[Percentiles]
+    total_samples: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "positive": self.positive.to_dict() if self.positive else None,
+            "negative": self.negative.to_dict() if self.negative else None,
+            "total_samples": self.total_samples,
+        }
+
+    def for_change(self, change: float) -> Optional[Percentiles]:
+        if change > 0:
+            return self.positive
+        if change < 0:
+            return self.negative
+        return None
 
 
 def _use_postgres() -> bool:
@@ -168,9 +189,29 @@ def _nearest_index_by_time(
     return best, offset
 
 
-def _baseline(rows: Sequence[Dict[str, Any]], steps: int) -> Optional[Percentiles]:
-    """Historical |CVD change| distribution using actual timestamps, not row count."""
-    values: List[float] = []
+def _percentiles(values: Sequence[float]) -> Optional[Percentiles]:
+    cleaned = sorted(float(v) for v in values if math.isfinite(float(v)) and float(v) >= 0)
+    if len(cleaned) < MIN_BASELINE_SAMPLES:
+        return None
+    return Percentiles(
+        samples=len(cleaned),
+        p25=_percentile(cleaned, 0.25),
+        p50=_percentile(cleaned, 0.50),
+        p75=_percentile(cleaned, 0.75),
+        p90=_percentile(cleaned, 0.90),
+    )
+
+
+def _baseline(rows: Sequence[Dict[str, Any]], steps: int) -> Optional[DirectionalBaselines]:
+    """Separate bullish and bearish CVD-change distributions.
+
+    Positive CVD changes are compared only with historical positive changes.
+    Negative CVD changes are converted to magnitudes and compared only with
+    historical negative changes. This preserves directional asymmetry instead
+    of mixing +X and -X into one absolute distribution.
+    """
+    positive_values: List[float] = []
+    negative_values: List[float] = []
     times = [row["time"] for row in rows]
     window = timedelta(minutes=steps * 30)
     for idx in range(1, len(rows)):
@@ -180,17 +221,19 @@ def _baseline(rows: Sequence[Dict[str, Any]], steps: int) -> Optional[Percentile
             continue
         ref_idx, _ = nearest
         change = float(rows[idx]["continuous_cvd"]) - float(rows[ref_idx]["continuous_cvd"])
-        if math.isfinite(change):
-            values.append(abs(change))
-    if len(values) < MIN_BASELINE_SAMPLES:
+        if not math.isfinite(change) or change == 0:
+            continue
+        if change > 0:
+            positive_values.append(change)
+        else:
+            negative_values.append(abs(change))
+    total = len(positive_values) + len(negative_values)
+    if total < MIN_BASELINE_SAMPLES:
         return None
-    values.sort()
-    return Percentiles(
-        samples=len(values),
-        p25=_percentile(values, 0.25),
-        p50=_percentile(values, 0.50),
-        p75=_percentile(values, 0.75),
-        p90=_percentile(values, 0.90),
+    return DirectionalBaselines(
+        positive=_percentiles(positive_values),
+        negative=_percentiles(negative_values),
+        total_samples=total,
     )
 
 
@@ -232,13 +275,23 @@ def _window_state(rows: Sequence[Dict[str, Any]], label: str, steps: int) -> Dic
     reference_idx, offset = nearest
     if reference_idx >= latest_idx:
         return {"window": label, "available": False, "reason": "reference is not older"}
-    baseline = _baseline(rows, steps)
-    if baseline is None:
+    directional_baselines = _baseline(rows, steps)
+    if directional_baselines is None:
         return {"window": label, "available": False, "reason": "not enough baseline samples"}
 
     change = float(latest["continuous_cvd"]) - float(rows[reference_idx]["continuous_cvd"])
-    magnitude, level = _magnitude_label(abs(change), baseline)
     direction = "BULLISH" if change > 0 else "BEARISH" if change < 0 else "NEUTRAL"
+    baseline = directional_baselines.for_change(change)
+    if direction != "NEUTRAL" and baseline is None:
+        return {
+            "window": label,
+            "available": False,
+            "reason": f"not enough {direction.lower()} baseline samples",
+        }
+    if direction == "NEUTRAL":
+        magnitude, level = "NOISE", 0
+    else:
+        magnitude, level = _magnitude_label(abs(change), baseline)
     if level == 0 or direction == "NEUTRAL":
         state = "NEUTRAL"
     elif level == 1:
@@ -260,7 +313,8 @@ def _window_state(rows: Sequence[Dict[str, Any]], label: str, steps: int) -> Dic
         "reference_time": rows[reference_idx]["time"].isoformat(),
         "target_time": target.isoformat(),
         "reference_offset_seconds": offset,
-        "baseline": baseline.to_dict(),
+        "baseline": baseline.to_dict() if baseline else None,
+        "directional_baselines": directional_baselines.to_dict(),
     }
 
 
@@ -325,43 +379,63 @@ def _overall(groups: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _early_shift(groups: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    short = groups.get("short") or {}
-    medium = groups.get("medium") or {}
-    broad = groups.get("broad") or {}
-    short_dir = short.get("direction")
-    established = [g.get("direction") for g in (medium, broad) if g.get("state", "").endswith("CONFIRMED")]
-    if short_dir not in {"BULLISH", "BEARISH"} or not established:
+    momentum = groups.get("momentum") or {}
+    trend = groups.get("trend") or {}
+    structure = groups.get("structure") or {}
+    momentum_dir = momentum.get("direction")
+    established = [g.get("direction") for g in (trend, structure) if g.get("state", "").endswith("CONFIRMED")]
+    if momentum_dir not in {"BULLISH", "BEARISH"} or not established:
         return None
-    if all(x == established[0] for x in established) and short_dir != established[0]:
+    if all(x == established[0] for x in established) and momentum_dir != established[0]:
         return {
             "detected": True,
-            "new_direction": short_dir,
+            "new_direction": momentum_dir,
             "established_direction": established[0],
-            "reason": "short flow opposes confirmed medium/broad flow",
+            "reason": "momentum opposes confirmed trend/structure flow",
         }
     return None
 
 
 def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     if not rows:
-        return {"status": "NO_DATA", "rows": 0}
+        return {"status": "NO_DATA", "rows": 0, "reasons": ["no stored rows"]}
     # The local continuous CVD should equal cumulative Buy-Sell. Check the last
     # value against an independent sum to detect corruption or stale rebuilds.
     independent = sum(float(r["delta"]) for r in rows)
     stored = float(rows[-1]["continuous_cvd"])
     tolerance = max(1.0, abs(independent) * 1e-9)
-    cvd_ok = abs(independent - stored) <= tolerance
+    cvd_difference = abs(independent - stored)
+    cvd_ok = cvd_difference <= tolerance
     gaps = []
+    largest_gap_seconds = 0.0
     for prev, cur in zip(rows, rows[1:]):
         gap = (cur["time"] - prev["time"]).total_seconds()
         if gap > 31 * 60:
             gaps.append(gap)
+            largest_gap_seconds = max(largest_gap_seconds, gap)
+
+    reasons: List[str] = []
+    if not cvd_ok:
+        reasons.append(
+            f"continuous CVD mismatch: difference ${cvd_difference:,.2f} exceeds tolerance ${tolerance:,.2f}"
+        )
+    if gaps:
+        reasons.append(
+            f"{len(gaps)} missing 30m interval(s); largest gap {largest_gap_seconds/60:.1f} minutes"
+        )
+    if not reasons:
+        reasons.append("continuous CVD matches Buy-Sell sum and no 30m gaps were found")
+
     return {
         "status": "PASS" if cvd_ok and not gaps else "WARNING",
         "rows": len(rows),
         "continuous_cvd_check": cvd_ok,
+        "continuous_cvd_difference_usd": cvd_difference,
+        "continuous_cvd_tolerance_usd": tolerance,
         "missing_30m_intervals": len(gaps),
+        "largest_gap_seconds": largest_gap_seconds,
         "latest_time": rows[-1]["time"].isoformat(),
+        "reasons": reasons,
     }
 
 
@@ -376,7 +450,8 @@ def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     latest_impulse = None
     if rows:
         latest = rows[-1]
-        baseline_30m = _baseline(rows, 1)
+        directional_baseline_30m = _baseline(rows, 1)
+        baseline_30m = directional_baseline_30m.for_change(float(latest["delta"])) if directional_baseline_30m else None
         if baseline_30m:
             magnitude, level = _magnitude_label(abs(float(latest["delta"])), baseline_30m)
             latest_impulse = {

@@ -33,7 +33,7 @@ def test_group_does_not_double_count_normal_windows():
         "30m": {"available": True, "evidence_level": 1, "direction": "BULLISH"},
         "1h": {"available": True, "evidence_level": 1, "direction": "BULLISH"},
     }
-    state = engine._group_state("short", windows)
+    state = engine._group_state("momentum", windows)
     assert state["state"] == "NEUTRAL"
 
 
@@ -42,7 +42,7 @@ def test_group_confirmed_requires_two_significant_windows():
         "30m": {"available": True, "evidence_level": 2, "direction": "BULLISH"},
         "1h": {"available": True, "evidence_level": 3, "direction": "BULLISH"},
     }
-    state = engine._group_state("short", windows)
+    state = engine._group_state("momentum", windows)
     assert state["state"] == "BULLISH_CONFIRMED"
 
 
@@ -52,14 +52,14 @@ def test_group_conflict_is_mixed():
         "12h": {"available": True, "evidence_level": 2, "direction": "BEARISH"},
         "24h": {"available": True, "evidence_level": 0, "direction": "NEUTRAL"},
     }
-    assert engine._group_state("medium", windows)["state"] == "MIXED"
+    assert engine._group_state("trend", windows)["state"] == "MIXED"
 
 
 def test_early_shift_against_established_flow():
     groups = {
-        "short": {"state": "BEARISH_CONFIRMED", "direction": "BEARISH"},
-        "medium": {"state": "BULLISH_CONFIRMED", "direction": "BULLISH"},
-        "broad": {"state": "BULLISH_CONFIRMED", "direction": "BULLISH"},
+        "momentum": {"state": "BEARISH_CONFIRMED", "direction": "BEARISH"},
+        "trend": {"state": "BULLISH_CONFIRMED", "direction": "BULLISH"},
+        "structure": {"state": "BULLISH_CONFIRMED", "direction": "BULLISH"},
     }
     early = engine._early_shift(groups)
     assert early and early["new_direction"] == "BEARISH"
@@ -70,3 +70,21 @@ def test_quality_validates_continuous_cvd():
     assert engine._quality(rows)["status"] == "PASS"
     rows[-1]["continuous_cvd"] += 100
     assert engine._quality(rows)["status"] == "WARNING"
+
+
+def test_directional_baselines_keep_positive_and_negative_separate():
+    rows = _rows(([10, 20, -100, -200] * 80))
+    baseline = engine._baseline(rows, 1)
+    assert baseline is not None
+    assert baseline.positive is not None
+    assert baseline.negative is not None
+    assert baseline.negative.p50 > baseline.positive.p50
+
+
+def test_quality_explains_warning_reason():
+    rows = _rows([10] * 120)
+    rows[-1]["continuous_cvd"] += 100
+    quality = engine._quality(rows)
+    assert quality["status"] == "WARNING"
+    assert quality["reasons"]
+    assert "mismatch" in quality["reasons"][0]

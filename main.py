@@ -3905,6 +3905,8 @@ def _flow_market_lines(title, data):
     lines=[f"{title}"]
     quality=(data.get("quality") or {})
     lines.append(f"Data quality: {quality.get('status','NO DATA')} | rows {quality.get('rows',0)}")
+    for reason in quality.get("reasons") or []:
+        lines.append(f"Quality reason: {reason}")
     impulse=data.get("current_impulse_30m") or {}
     if impulse:
         lines.append(
@@ -3914,7 +3916,7 @@ def _flow_market_lines(title, data):
     else:
         lines.append("30m impulse: unavailable")
     groups=data.get("groups") or {}
-    for key,label in (("short","Short 30m/1h"),("medium","Medium 4h/12h/24h"),("broad","Broad 48h/72h/7d")):
+    for key,label in (("momentum","Momentum 30m/1h"),("trend","Trend 4h/12h/24h"),("structure","Structure 48h/72h/7d")):
         g=groups.get(key) or {}
         lines.append(f"{label}: {g.get('state','NO DATA')}")
     overall=data.get("overall") or {}
@@ -3973,13 +3975,27 @@ async def flow_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not p:
                 lines.append(f"{label}: No baseline")
                 continue
-            lines.append(
-                f"{label}: P25 {_fmt_flow_money(p['p25'])} | "
-                f"P50 {_fmt_flow_money(p['p50'])} | "
-                f"P75 {_fmt_flow_money(p['p75'])} | "
-                f"P90 {_fmt_flow_money(p['p90'])}"
-            )
-    lines.extend(["", "P75 = עדות משמעותית; P90 = עדות חזקה."] )
+            positive=p.get("positive") or {}
+            negative=p.get("negative") or {}
+            if positive:
+                lines.append(
+                    f"{label} Bullish: P25 {_fmt_flow_money(positive['p25'])} | "
+                    f"P50 {_fmt_flow_money(positive['p50'])} | "
+                    f"P75 {_fmt_flow_money(positive['p75'])} | "
+                    f"P90 {_fmt_flow_money(positive['p90'])}"
+                )
+            else:
+                lines.append(f"{label} Bullish: No baseline")
+            if negative:
+                lines.append(
+                    f"{label} Bearish: P25 -{_fmt_flow_money(negative['p25']).lstrip('+')} | "
+                    f"P50 -{_fmt_flow_money(negative['p50']).lstrip('+')} | "
+                    f"P75 -{_fmt_flow_money(negative['p75']).lstrip('+')} | "
+                    f"P90 -{_fmt_flow_money(negative['p90']).lstrip('+')}"
+                )
+            else:
+                lines.append(f"{label} Bearish: No baseline")
+    lines.extend(["", "Bullish ו-Bearish מחושבים מול התפלגויות היסטוריות נפרדות.", "P75 = עדות משמעותית; P90 = עדות חזקה."] )
     await update.message.reply_text("\n".join(lines))
 
 

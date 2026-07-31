@@ -30,8 +30,11 @@ The reference must be within 20 minutes of the requested target.
 
 ## Historical baseline
 
-For each exact `symbol × market × window`, Stage 88 calculates the distribution
-of absolute rolling CVD changes and derives P25, Median, P75 and P90.
+For each exact `symbol × market × window`, Stage 88 calculates two separate
+rolling-CVD distributions: positive changes and negative-change magnitudes.
+A positive current change is compared only with the positive distribution; a
+negative current change is compared only with the negative distribution.
+Each distribution derives P25, Median, P75 and P90.
 
 - below P25: NOISE / Neutral
 - P25 to P75: NORMAL; displayed but not directional evidence
@@ -40,11 +43,12 @@ of absolute rolling CVD changes and derives P25, Median, P75 and P90.
 
 At least 100 historical changes are required.
 
-## Timeframe families
+## Timeframe layers
 
-- Short: 30m, 1h
-- Medium: 4h, 12h, 24h
-- Broad: 48h, 72h, 7d
+- Impulse: current 30m Buy-Sell delta (display only, not an extra vote)
+- Momentum: 30m, 1h
+- Trend: 4h, 12h, 24h
+- Structure: 48h, 72h, 7d
 
 A family is Confirmed only when at least two meaningful/strong windows agree
 and no meaningful window opposes them. Opposing meaningful windows produce
@@ -52,14 +56,15 @@ MIXED. One meaningful window produces EVIDENCE, not confirmation.
 
 ## Early Shift
 
-Early Shift is raised only when the Short family points in the opposite
-direction from a confirmed Medium and/or Broad family.
+Early Shift is raised only when Momentum points in the opposite direction
+from a confirmed Trend and/or Structure layer.
 
 ## Data quality
 
 The locally continuous CVD is independently checked against the cumulative sum
-of stored Buy-Sell deltas. Missing 30m intervals are reported. Quality warnings
-do not alter any existing trading logic.
+of stored Buy-Sell deltas. Missing 30m intervals and the largest timestamp gap
+are reported. `/flow_state` prints the exact reason behind PASS/WARNING. Quality
+warnings do not alter any existing trading logic.
 
 ## Commands
 

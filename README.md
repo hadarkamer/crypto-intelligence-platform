@@ -106,5 +106,5 @@ not change alert scores or trading decisions.
 Stage 88 adds `/flow_state SYMBOL` and `/flow_stats SYMBOL`.
 It reads the Futures/Spot Buy-Sell and official CVD history saved by Stage 87.2,
 compares CVD changes with P25/P50/P75/P90 baselines for the same symbol, market
-and timeframe, and produces Short/Medium/Broad Flow conclusions. It does not
+and timeframe, and produces Momentum/Trend/Structure Flow conclusions. It does not
 modify Alerts, Watch, Max-Pain score or LONG/SHORT selection.
