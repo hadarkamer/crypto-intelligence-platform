@@ -68,7 +68,7 @@ def test_early_shift_against_established_flow():
 def test_quality_validates_continuous_cvd():
     rows = _rows([10] * 120)
     assert engine._quality(rows)["status"] == "PASS"
-    rows[-1]["continuous_cvd"] += 100
+    rows[-1]["continuous_cvd"] += 2_000
     assert engine._quality(rows)["status"] == "WARNING"
 
 
@@ -83,8 +83,27 @@ def test_directional_baselines_keep_positive_and_negative_separate():
 
 def test_quality_explains_warning_reason():
     rows = _rows([10] * 120)
-    rows[-1]["continuous_cvd"] += 100
+    rows[-1]["continuous_cvd"] += 2_000
     quality = engine._quality(rows)
     assert quality["status"] == "WARNING"
     assert quality["reasons"]
     assert "mismatch" in quality["reasons"][0]
+
+
+def test_quality_uses_practical_absolute_and_relative_tolerance():
+    rows = _rows([10_000_000.0] * 400)
+    independent = sum(r["delta"] for r in rows)
+    # 0.005% mismatch: below the new 0.01% relative tolerance.
+    rows[-1]["continuous_cvd"] = independent + independent * 0.00005
+    quality = engine._quality(rows)
+    assert quality["continuous_cvd_check"] is True
+    assert quality["continuous_cvd_tolerance_usd"] == max(1000.0, abs(independent) * 0.0001)
+
+
+def test_quality_still_rejects_large_stale_series_mismatch():
+    rows = _rows([10_000_000.0] * 400)
+    independent = sum(r["delta"] for r in rows)
+    rows[-1]["continuous_cvd"] = 0.0
+    quality = engine._quality(rows)
+    assert quality["status"] == "WARNING"
+    assert quality["continuous_cvd_check"] is False

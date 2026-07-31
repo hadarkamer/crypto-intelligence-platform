@@ -146,3 +146,20 @@ def test_continuous_cvd_rebuilt_from_buy_minus_sell(tmp_path):
             "WHERE symbol='BTC' ORDER BY candle_time"
         ).fetchall()]
     assert values == [2.0, -3.0]
+
+
+def test_current_backfill_rebuilds_continuous_cvd_before_skip(monkeypatch):
+    from datetime import timedelta
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    monkeypatch.setattr(flow, "coverage", lambda symbol, market: {
+        "count": 4320,
+        "min_time": now - timedelta(days=180),
+        "max_time": now,
+    })
+    rebuilt = []
+    monkeypatch.setattr(flow, "_rebuild_continuous_cvd", lambda symbol, market: rebuilt.append((symbol, market)) or 4320)
+    result = flow.backfill_symbol("BTC", "futures", 180, force=False)
+    assert result["skipped"] is True
+    assert result["total_rows"] == 4320
+    assert rebuilt == [("BTC", "futures")]
+    assert "rebuilt" in result["message"]

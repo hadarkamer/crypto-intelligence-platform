@@ -496,11 +496,15 @@ def backfill_symbol(
     existing = coverage(symbol, market)
 
     if not force and _is_current(existing, end):
+        # Stage 88.2: even a skipped/current market rebuilds its local continuous
+        # CVD from the saved Buy-Sell rows. This repairs stale values left by an
+        # older deployment without downloading the historical data again.
+        total_rows = _rebuild_continuous_cvd(symbol, market)
         return FlowBackfillResult(
-            symbol, market, 0, 0, int(existing["count"]),
+            symbol, market, 0, 0, total_rows,
             existing["min_time"].isoformat() if existing.get("min_time") else requested_start.isoformat(),
             existing["max_time"].isoformat() if existing.get("max_time") else end.isoformat(),
-            True, True, 0, "Already current — skipped",
+            True, True, 0, "Already current — skipped; continuous CVD rebuilt",
         ).to_dict()
 
     # Resume from the next 30m candle after the latest successful stored row.
