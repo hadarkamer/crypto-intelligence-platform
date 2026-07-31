@@ -263,22 +263,46 @@ def _as_utc(v):
     return datetime.fromisoformat(str(v).replace("Z","+00:00")).astimezone(timezone.utc)
 
 def _reference_for_window(rows, now, minutes, symbol=None):
-    """Return a reference only when it is close enough to the requested window."""
-    target=now-timedelta(minutes=minutes)
-    eligible=[r for r in rows if _as_utc(r["collected_at"])<=target]
-    ref=None
-    if eligible:
-        ref=dict(eligible[-1]); ref.setdefault("source", "live_snapshot")
-    elif symbol:
-        ref=history_reference.historical_point_at_or_before(symbol, target)
-    if not ref:
+    """Choose the snapshot nearest to the requested window within tolerance.
+
+    Both the live snapshot table and the separate historical backfill table are
+    considered. This prevents a stale live row from blocking a much closer
+    historical candle, and avoids a systematic bias toward the candle before
+    the requested time.
+    """
+    target = now - timedelta(minutes=minutes)
+    candidates = []
+
+    for row in rows:
+        candidate = dict(row)
+        candidate.setdefault("source", "live_snapshot")
+        candidates.append(candidate)
+
+    if symbol:
+        historical = history_reference.historical_point_nearest(symbol, target)
+        # Backward-compatible fallback for existing installations/tests that
+        # provide only the previous at-or-before bridge.
+        if not historical:
+            historical = history_reference.historical_point_at_or_before(symbol, target)
+        if historical:
+            candidates.append(dict(historical))
+
+    if not candidates:
         return None
-    ref_time=_as_utc(ref["collected_at"])
-    offset_seconds=(target-ref_time).total_seconds()
-    ref["reference_offset_seconds"]=offset_seconds
-    ref["reference_target_time"]=target.isoformat()
-    if offset_seconds < 0 or offset_seconds > REFERENCE_TOLERANCE_MINUTES*60:
+
+    ref = min(
+        candidates,
+        key=lambda row: abs((_as_utc(row["collected_at"]) - target).total_seconds()),
+    )
+    ref_time = _as_utc(ref["collected_at"])
+    signed_offset_seconds = (ref_time - target).total_seconds()
+    absolute_offset_seconds = abs(signed_offset_seconds)
+    if absolute_offset_seconds > REFERENCE_TOLERANCE_MINUTES * 60:
         return None
+
+    ref["reference_offset_seconds"] = absolute_offset_seconds
+    ref["reference_signed_offset_seconds"] = signed_offset_seconds
+    ref["reference_target_time"] = target.isoformat()
     return ref
 
 def _window_results(symbol, price, oi, now=None, history_rows=None):
@@ -302,6 +326,7 @@ def _window_results(symbol, price, oi, now=None, history_rows=None):
             d["comparison_source"]=ref.get("source","live_snapshot")
             d["reference_time"]=_as_utc(ref["collected_at"]).isoformat()
             d["reference_offset_seconds"]=ref.get("reference_offset_seconds")
+            d["reference_signed_offset_seconds"]=ref.get("reference_signed_offset_seconds")
             d["reference_target_time"]=ref.get("reference_target_time")
         d["window_minutes"]=minutes; d["window_label"]=label; out[label]=d
     return out

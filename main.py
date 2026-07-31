@@ -1087,7 +1087,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch_stop SOL — עצירת הצפייה ב-SOL\n"
         "/oi_backfill [180|365] — Backfill היסטורי Price+OI (ברירת מחדל 180 יום)\n"
         "/oi_stats BTC — סטטיסטיקת Price+OI לפי 30m/1h/4h/12h/24h/48h/72h/7d\n"
-        "/flow_backfill [180|365] — שמירת Taker Buy/Sell ו-CVD רשמי בחוזים ובספוט\n"
+        "/flow_backfill [180|365] — שמירת Buy/Sell + CVD רשמי בחוזים ובספוט\n"
         "/oi_validation BTC — בדיקת איכות timestamp ונקודות הייחוס\n"
         "/oi_state BTC — הצגת חישוב Price+OI Regime השמור האחרון\n"
         "/oi_regime BTC — Alias להצגת אותו חישוב Price+OI Regime"
@@ -3884,7 +3884,7 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def flow_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store official 30m aggregated Futures+Spot CVD history."""
+    """Store official 30m aggregated Futures+Spot Buy/Sell and CVD history."""
     global FLOW_BACKFILL_LOCK
     if FLOW_BACKFILL_LOCK is None:
         FLOW_BACKFILL_LOCK = asyncio.Lock()
@@ -3899,24 +3899,30 @@ async def flow_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("שימוש: /flow_backfill 180 או /flow_backfill 365")
             return
     days = max(1, min(days, coinglass_flow_foundation.MAX_BACKFILL_DAYS))
+    force = any(str(arg).strip().lower() == "force" for arg in context.args[1:])
     await update.message.reply_text(
         f"📥 מתחיל Foundation Backfill ל-{days} יום של Buy/Sell + CVD רשמי.\n"
-        "נשמרים Futures ו-Spot בנפרד. אין עדיין Flow, ציון או השפעה על Alerts."
+        "ההורדה מתבצעת בתור יציב עם השהיה, Retry ו-Resume.\n"
+        "נתונים שכבר מעודכנים ידולגו אוטומטית. אין השפעה על Alerts או Watch."
+        + ("\nמצב FORCE פעיל: גם נתונים מעודכנים ירועננו." if force else "")
     )
     try:
         async with FLOW_BACKFILL_LOCK:
-            results = await asyncio.to_thread(coinglass_flow_foundation.backfill_all, days)
+            results = await asyncio.to_thread(coinglass_flow_foundation.backfill_all, days, force)
         lines=["✅ Flow Foundation Backfill הסתיים", ""]
         for symbol in coinglass_flow_foundation.TARGET_SYMBOLS:
             pair=results.get(symbol) or {}
             fut=pair.get("futures") or {}; spot=pair.get("spot") or {}
+            def _flow_part(name, data):
+                if data.get("skipped"):
+                    return f"{name} {data.get('total_rows',0)} ⏭️"
+                return f"{name} {data.get('total_rows',data.get('stored_rows',0))} {'✅' if data.get('ok') else '⚠️'}"
             lines.append(
-                f"{symbol}: Futures {fut.get('stored_rows',0)} {'✅' if fut.get('ok') else '⚠️'} | "
-                f"Spot {spot.get('stored_rows',0)} {'✅' if spot.get('ok') else '⚠️'}"
+                f"{symbol}: {_flow_part('Futures', fut)} | {_flow_part('Spot', spot)}"
             )
             if not fut.get("ok"): lines.append(f"  Futures: {fut.get('message','לא זמין')}")
             if not spot.get("ok"): lines.append(f"  Spot: {spot.get('message','לא זמין')}")
-        lines.extend(["", "Buy/Sell ו-CVD הרשמי נשמרו בטבלאות נפרדות בלבד.", "לא חושב Flow ולא שונתה לוגיקת המסחר."])
+        lines.extend(["", "הנתונים נשמרו בטבלאות נפרדות בלבד.", "נשמר CVD רשמי של CoinGlass; לא נבנתה מסקנת Flow ולא שונתה לוגיקת המסחר."])
         await update.message.reply_text("\n".join(lines))
     except Exception as exc:
         await update.message.reply_text(f"❌ /flow_backfill נכשל: {exc!r}")
@@ -3946,7 +3952,13 @@ async def oi_validation_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ref=w.get("reference_time")
         offset=w.get("reference_offset_seconds")
         if ref:
-            lines.append(f"{label}: reference ✅ | offset {float(offset or 0):.0f}s")
+            target=w.get("reference_target_time") or "-"
+            signed=w.get("reference_signed_offset_seconds")
+            side = "אחרי" if signed is not None and float(signed) > 0 else "לפני" if signed is not None and float(signed) < 0 else "בדיוק"
+            lines.append(f"{label}: reference ✅")
+            lines.append(f"  Target: {target}")
+            lines.append(f"  Chosen: {ref}")
+            lines.append(f"  Offset: {float(offset or 0):.0f}s ({side} היעד)")
         else:
             lines.append(f"{label}: reference ❌ / No Data")
     lines.append("Reference tolerance: עד 20 דקות מהחלון המבוקש.")

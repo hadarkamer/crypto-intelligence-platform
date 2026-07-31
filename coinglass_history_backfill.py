@@ -527,6 +527,67 @@ def historical_point_at_or_before(symbol: str, target_time: datetime) -> Optiona
         "source": "historical_backfill",
     }
 
+
+def historical_point_nearest(symbol: str, target_time: datetime) -> Optional[Dict[str, Any]]:
+    """Return the backfilled 30m candle nearest to ``target_time``.
+
+    The caller is responsible for enforcing its tolerance. Looking on both
+    sides of the requested time avoids systematically selecting the previous
+    candle when the next closed candle is actually closer.
+    """
+    init_db()
+    symbol = str(symbol or "").strip().upper()
+    if target_time.tzinfo is None:
+        target_time = target_time.replace(tzinfo=timezone.utc)
+    else:
+        target_time = target_time.astimezone(timezone.utc)
+
+    before = None
+    after = None
+    if _use_postgres():
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            before = conn.execute(
+                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                "WHERE symbol=%s AND candle_time<=%s ORDER BY candle_time DESC LIMIT 1",
+                (symbol, target_time),
+            ).fetchone()
+            after = conn.execute(
+                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                "WHERE symbol=%s AND candle_time>=%s ORDER BY candle_time ASC LIMIT 1",
+                (symbol, target_time),
+            ).fetchone()
+    else:
+        target_iso = target_time.isoformat()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            before = conn.execute(
+                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                "WHERE symbol=? AND candle_time<=? ORDER BY candle_time DESC LIMIT 1",
+                (symbol, target_iso),
+            ).fetchone()
+            after = conn.execute(
+                "SELECT candle_time,price_close,oi_close_usd FROM oi_price_history "
+                "WHERE symbol=? AND candle_time>=? ORDER BY candle_time ASC LIMIT 1",
+                (symbol, target_iso),
+            ).fetchone()
+
+    candidates = [dict(row) for row in (before, after) if row]
+    if not candidates:
+        return None
+
+    def as_utc(value):
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+
+    data = min(candidates, key=lambda row: abs((as_utc(row["candle_time"]) - target_time).total_seconds()))
+    return {
+        "collected_at": data["candle_time"],
+        "price": float(data["price_close"]),
+        "open_interest_usd": float(data["oi_close_usd"]),
+        "source": "historical_backfill",
+    }
+
 def calculate_reference_ranges(symbol: str) -> Dict[str, Any]:
     """Calculate absolute-change distributions for each analytical window.
 
