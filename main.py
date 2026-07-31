@@ -32,6 +32,7 @@ import coinglass_oi_regime_service
 import coinglass_history_backfill
 import coinglass_flow_foundation
 import coinglass_flow_engine
+import market_confidence_engine
 from collections import defaultdict
 
 try:
@@ -1828,9 +1829,10 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
 
 
 def _build_opportunities_with_regime(rows, limit=500):
-    """Build Stage 76 opportunities and attach independent Price+OI context."""
+    """Build opportunities and attach read-only OI + Flow market evidence."""
     items = alert_engine.build_opportunities(rows, limit=limit)
-    return coinglass_oi_regime_service.attach_to_opportunities(items)
+    items = coinglass_oi_regime_service.attach_to_opportunities(items)
+    return market_confidence_engine.attach_to_opportunities(items)
 
 
 def _regime_block(item: Dict[str, Any]) -> str:
@@ -1890,6 +1892,33 @@ def _regime_block(item: Dict[str, Any]) -> str:
     lines.extend(["", "🧩 מסקנה משולבת", f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"])
     return "\n".join(lines)
 
+
+
+def _market_evidence_block(item: Dict[str, Any]) -> str:
+    evidence = item.get("market_evidence") or {}
+    if not evidence:
+        return ""
+    score = float(evidence.get("alignment_score") or 0.0)
+    expected = html.escape(str(evidence.get("expected_price_direction") or "—"))
+    label = html.escape(str(evidence.get("classification_label") or "—"))
+    coverage = float(evidence.get("coverage_pct") or 0.0)
+    lines = [
+        "",
+        "🧭 <b>Market Evidence</b>",
+        f"כיוון מחיר משתמע: <b>{expected}</b>",
+        f"Alignment: <b>{score:+.2f}/100 — {label}</b>",
+        f"Evidence coverage: {coverage:.0f}%",
+    ]
+    modules = evidence.get("modules") or {}
+    for key, title in (("positioning", "Price+OI"), ("futures_flow", "Futures Flow"), ("spot_flow", "Spot Flow")):
+        module = modules.get(key) or {}
+        contribution = float(module.get("contribution") or 0.0)
+        weight = float(module.get("weight") or 0.0)
+        state = html.escape(str(module.get("label") or module.get("state") or "No data"))
+        relation = html.escape(str(module.get("relation") or "NEUTRAL"))
+        lines.append(f"• {title}: <b>{contribution:+.2f}/{weight:.0f}</b> | {relation} | {state}")
+    lines.append("<i>המדד לקריאה בלבד ואינו משנה את Score או הדירוג.</i>")
+    return "\n".join(lines)
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     """Build the Stage 76 HTML-formatted Telegram alert card."""
@@ -2006,6 +2035,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     card += "\n\n" + counter_line
 
     card += _regime_block(item)
+    card += _market_evidence_block(item)
     card += _quality_block(item, rows)
     card += _all_timeframe_scores_block(item, all_items, rows)
     return card
@@ -3956,6 +3986,43 @@ async def flow_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+
+async def market_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show Stage 89 evidence families; optional LONG/SHORT is price direction."""
+    if not context.args:
+        await update.message.reply_text("שימוש: /market_state BTC [LONG|SHORT]")
+        return
+    symbol = str(context.args[0]).strip().upper()
+    expected = str(context.args[1]).strip().upper() if len(context.args) > 1 else "NEUTRAL"
+    if expected not in {"LONG", "SHORT", "NEUTRAL"}:
+        await update.message.reply_text("הכיוון חייב להיות LONG או SHORT (כיוון מחיר).")
+        return
+    try:
+        result = await asyncio.to_thread(market_confidence_engine.combine, symbol, expected)
+    except Exception as exc:
+        await update.message.reply_text(f"❌ /market_state נכשל: {exc!r}")
+        return
+    lines = [
+        f"🧭 {symbol} — Market Evidence",
+        "המדד לקריאה בלבד ואינו משנה Score, Alerts או Watch.",
+        f"Expected price direction: {result.get('expected_price_direction')}",
+        f"Alignment: {float(result.get('alignment_score') or 0):+.2f}/100 — {result.get('classification_label')}",
+        f"Evidence coverage: {float(result.get('coverage_pct') or 0):.0f}% ({result.get('evidence_quality')})",
+        "",
+    ]
+    for key, title in (("positioning", "Price+OI Positioning"), ("futures_flow", "Futures Flow"), ("spot_flow", "Spot Flow")):
+        module = (result.get("modules") or {}).get(key) or {}
+        lines.extend([
+            title,
+            f"State: {module.get('label') or module.get('state')}",
+            f"Direction: {module.get('direction')} | Relation: {module.get('relation')}",
+            f"Contribution: {float(module.get('contribution') or 0):+.2f}/{float(module.get('weight') or 0):.0f}",
+            "",
+        ])
+    if expected == "NEUTRAL":
+        lines.append("כדי לחשב Alignment לכיוון מסוים: /market_state BTC LONG")
+    await update.message.reply_text("\n".join(lines))
+
 async def flow_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show P25/P50/P75/P90 CVD-change baselines for both markets."""
     if not context.args:
@@ -4202,6 +4269,7 @@ async def main():
     bot_app.add_handler(CommandHandler("flow_backfill", flow_backfill_cmd))
     bot_app.add_handler(CommandHandler("flow_state", flow_state_cmd))
     bot_app.add_handler(CommandHandler("flow_stats", flow_stats_cmd))
+    bot_app.add_handler(CommandHandler("market_state", market_state_cmd))
     bot_app.add_handler(CommandHandler("oi_validation", oi_validation_cmd))
     bot_app.add_handler(CommandHandler("oi_stats", oi_stats_cmd))
     bot_app.add_handler(CommandHandler("oi_state", oi_state_cmd))
