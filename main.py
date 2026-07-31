@@ -1087,7 +1087,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch_stop SOL — עצירת הצפייה ב-SOL\n"
         "/oi_backfill [180|365] — Backfill היסטורי Price+OI (ברירת מחדל 180 יום)\n"
         "/oi_stats BTC — סטטיסטיקת Price+OI לפי 30m/1h/4h/12h/24h/48h/72h/7d\n"
-        "/flow_backfill [180|365] — שמירת Buy/Sell + CVD רשמי בחוזים ובספוט\n"
+        "/flow_backfill [180|365] — שמירת Taker Buy/Sell ו-CVD רשמי בחוזים ובספוט\n"
         "/oi_validation BTC — בדיקת איכות timestamp ונקודות הייחוס\n"
         "/oi_state BTC — הצגת חישוב Price+OI Regime השמור האחרון\n"
         "/oi_regime BTC — Alias להצגת אותו חישוב Price+OI Regime"
@@ -3884,7 +3884,7 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def flow_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store official 30m aggregated Futures+Spot Buy/Sell and CVD history."""
+    """Store official 30m aggregated Futures+Spot CVD history."""
     global FLOW_BACKFILL_LOCK
     if FLOW_BACKFILL_LOCK is None:
         FLOW_BACKFILL_LOCK = asyncio.Lock()
@@ -3916,7 +3916,7 @@ async def flow_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             if not fut.get("ok"): lines.append(f"  Futures: {fut.get('message','לא זמין')}")
             if not spot.get("ok"): lines.append(f"  Spot: {spot.get('message','לא זמין')}")
-        lines.extend(["", "הנתונים נשמרו בטבלאות נפרדות בלבד.", "נשמר CVD רשמי של CoinGlass; לא נבנתה מסקנת Flow ולא שונתה לוגיקת המסחר."])
+        lines.extend(["", "Buy/Sell ו-CVD הרשמי נשמרו בטבלאות נפרדות בלבד.", "לא חושב Flow ולא שונתה לוגיקת המסחר."])
         await update.message.reply_text("\n".join(lines))
     except Exception as exc:
         await update.message.reply_text(f"❌ /flow_backfill נכשל: {exc!r}")

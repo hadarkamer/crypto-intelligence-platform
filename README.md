@@ -97,6 +97,7 @@ Stage 87 adds only isolated historical-data foundations and validation. It does
 not change alert scores or trading decisions.
 
 - `/oi_backfill [180|365]` refreshes Price+OI history and reference ranges.
-- `/flow_backfill [180|365]` stores official aggregated Futures and Spot Buy/Sell + CVD
-  Buy/Sell 30m history. CVD is not calculated yet.
+- `/flow_backfill [180|365]` stores aggregated Futures and Spot 30m candles
+  containing Taker Buy, Taker Sell, and CoinGlass' official cumulative volume delta.
+  It still does not calculate a Flow conclusion or change any alert score.
 - `/oi_validation SYMBOL` displays Price/OI timestamp and reference quality.

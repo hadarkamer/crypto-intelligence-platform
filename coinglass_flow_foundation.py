@@ -1,16 +1,9 @@
 """Stage 87 foundation: official CoinGlass aggregated CVD history.
 
-This module stores CoinGlass 30-minute aggregated Futures and Spot order-flow
-history for the configured symbols. Each saved candle includes:
-
-- official aggregated taker buy volume from CoinGlass
-- official aggregated taker sell volume from CoinGlass
-- the official chunk-relative cumulative volume delta returned by CoinGlass
-- a continuous CVD series stitched across API pagination chunks
-
-It deliberately does NOT turn those values into Flow conclusions, confidence,
-scores, alerts, or trade decisions. Later stages may analyse the saved history
-without changing the existing trading engine.
+This module stores 30-minute futures and spot taker buy/sell volumes together
+with CoinGlass' official cumulative volume delta for the same candle. It does
+NOT calculate a second CVD, Flow, confidence, scores, alerts, or trade decisions.
+The stored Buy/Sell values remain available for validation and future research.
 """
 from __future__ import annotations
 
@@ -21,7 +14,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
@@ -38,9 +31,8 @@ SPOT_ENDPOINT = "/api/spot/aggregated-cvd/history"
 INTERVAL = "30m"
 DEFAULT_BACKFILL_DAYS = 180
 MAX_BACKFILL_DAYS = 365
-# 90 days × 48 half-hour candles = 4,320, below CoinGlass max limit 4,500.
-CHUNK_DAYS = 90
-REQUEST_LIMIT = 4500
+CHUNK_DAYS = 15
+REQUEST_LIMIT = 1000
 REQUEST_PAUSE_SECONDS = 0.15
 API_TIMEOUT_SECONDS = 20
 EXCHANGE_LIST = "Binance,OKX,Bybit"
@@ -55,8 +47,7 @@ CREATE TABLE IF NOT EXISTS futures_taker_history (
     candle_time TEXT NOT NULL,
     buy_volume_usd REAL NOT NULL,
     sell_volume_usd REAL NOT NULL,
-    api_cum_vol_delta_usd REAL NOT NULL DEFAULT 0,
-    continuous_cum_vol_delta_usd REAL NOT NULL DEFAULT 0,
+    cum_vol_delta_usd REAL NOT NULL,
     exchange_list TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'coinglass_futures_aggregated_cvd',
     imported_at TEXT NOT NULL,
@@ -69,8 +60,7 @@ CREATE TABLE IF NOT EXISTS spot_taker_history (
     candle_time TEXT NOT NULL,
     buy_volume_usd REAL NOT NULL,
     sell_volume_usd REAL NOT NULL,
-    api_cum_vol_delta_usd REAL NOT NULL DEFAULT 0,
-    continuous_cum_vol_delta_usd REAL NOT NULL DEFAULT 0,
+    cum_vol_delta_usd REAL NOT NULL,
     exchange_list TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'coinglass_spot_aggregated_cvd',
     imported_at TEXT NOT NULL,
@@ -86,8 +76,7 @@ CREATE TABLE IF NOT EXISTS futures_taker_history (
     candle_time TIMESTAMPTZ NOT NULL,
     buy_volume_usd DOUBLE PRECISION NOT NULL,
     sell_volume_usd DOUBLE PRECISION NOT NULL,
-    api_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-    continuous_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    cum_vol_delta_usd DOUBLE PRECISION NOT NULL,
     exchange_list TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'coinglass_futures_aggregated_cvd',
     imported_at TIMESTAMPTZ NOT NULL,
@@ -100,8 +89,7 @@ CREATE TABLE IF NOT EXISTS spot_taker_history (
     candle_time TIMESTAMPTZ NOT NULL,
     buy_volume_usd DOUBLE PRECISION NOT NULL,
     sell_volume_usd DOUBLE PRECISION NOT NULL,
-    api_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-    continuous_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    cum_vol_delta_usd DOUBLE PRECISION NOT NULL,
     exchange_list TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'coinglass_spot_aggregated_cvd',
     imported_at TIMESTAMPTZ NOT NULL,
@@ -110,7 +98,6 @@ CREATE TABLE IF NOT EXISTS spot_taker_history (
 CREATE INDEX IF NOT EXISTS idx_spot_taker_symbol_time
 ON spot_taker_history(symbol, candle_time);
 """
-
 
 @dataclass(frozen=True)
 class FlowBackfillResult:
@@ -135,46 +122,31 @@ def _api_key() -> str:
     return os.getenv("COINGLASS_API_KEY", "").strip()
 
 
-def _sqlite_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
-
-
-def _migrate_sqlite(conn: sqlite3.Connection) -> None:
-    for table in ("futures_taker_history", "spot_taker_history"):
-        columns = _sqlite_columns(conn, table)
-        if "api_cum_vol_delta_usd" not in columns:
-            conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN api_cum_vol_delta_usd REAL NOT NULL DEFAULT 0"
-            )
-        if "continuous_cum_vol_delta_usd" not in columns:
-            conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN continuous_cum_vol_delta_usd REAL NOT NULL DEFAULT 0"
-            )
-
-
-def _migrate_postgres(conn) -> None:
-    for table in ("futures_taker_history", "spot_taker_history"):
-        conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-            "api_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
-        )
-        conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-            "continuous_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
-        )
-
-
 def init_db() -> None:
+    """Create tables and migrate Stage 87 Taker-only tables in place."""
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
             conn.execute(POSTGRES_SCHEMA)
-            _migrate_postgres(conn)
+            conn.execute(
+                "ALTER TABLE futures_taker_history "
+                "ADD COLUMN IF NOT EXISTS cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
+            )
+            conn.execute(
+                "ALTER TABLE spot_taker_history "
+                "ADD COLUMN IF NOT EXISTS cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
+            )
             conn.commit()
     else:
         Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(DB_PATH) as conn:
             conn.executescript(SQLITE_SCHEMA)
-            _migrate_sqlite(conn)
+            for table in ("futures_taker_history", "spot_taker_history"):
+                columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if "cum_vol_delta_usd" not in columns:
+                    conn.execute(
+                        f"ALTER TABLE {table} "
+                        "ADD COLUMN cum_vol_delta_usd REAL NOT NULL DEFAULT 0"
+                    )
             conn.commit()
 
 
@@ -204,72 +176,43 @@ def _chunks(start: datetime, end: datetime) -> Iterable[Tuple[datetime, datetime
         cursor = chunk_end
 
 
-def _normalise_timestamp(raw: Any) -> int:
-    ts = int(raw)
-    # Some CoinGlass examples return seconds while most return milliseconds.
-    return ts * 1000 if ts < 10_000_000_000 else ts
-
-
 def _normalize(payload: Dict[str, Any]) -> Dict[int, Tuple[float, float, float]]:
+    """Normalize official CoinGlass aggregated CVD candles.
+
+    CoinGlass returns taker Buy, taker Sell, and its cumulative delta from the
+    same endpoint and timestamp. Fallback field names keep the parser tolerant
+    to minor response-name differences without calculating a replacement CVD.
+    """
     rows: Dict[int, Tuple[float, float, float]] = {}
     for row in payload.get("data") or []:
         if not isinstance(row, dict):
             continue
         try:
-            ts = _normalise_timestamp(row.get("time"))
-            buy = float(row.get("agg_taker_buy_vol"))
-            sell = float(row.get("agg_taker_sell_vol"))
-            api_cvd = float(row.get("cum_vol_delta"))
+            ts = int(row.get("time"))
+            buy = float(row.get("agg_taker_buy_vol", row.get("taker_buy_vol")))
+            sell = float(row.get("agg_taker_sell_vol", row.get("taker_sell_vol")))
+            cvd = float(row.get("cum_vol_delta"))
         except (TypeError, ValueError):
             continue
-        if ts > 0 and all(math.isfinite(v) for v in (buy, sell, api_cvd)) and buy >= 0 and sell >= 0:
-            rows[ts] = (buy, sell, api_cvd)
+        if ts > 0 and all(math.isfinite(v) for v in (buy, sell, cvd)) and buy >= 0 and sell >= 0:
+            rows[ts] = (buy, sell, cvd)
     return rows
 
 
-def _stitch_chunks(
-    chunks: List[Dict[int, Tuple[float, float, float]]]
-) -> Dict[int, Tuple[float, float, float, float]]:
-    """Keep CoinGlass CVD and also create one continuous series across chunks.
+def fetch_history(symbol: str, market: str, start: datetime, end: datetime) -> Dict[int, Tuple[float, float, float]]:
+    """Fetch and stitch paginated CoinGlass aggregated CVD history.
 
-    CoinGlass calculates cum_vol_delta from each request's start_time. Because a
-    long backfill needs multiple requests, the API value can restart at each
-    chunk. The raw API value is saved untouched, while the continuous field is
-    offset so the series does not reset at pagination boundaries.
+    CoinGlass calculates cumulative delta from each request's ``start_time``.
+    Because long backfills require more than one request, every later segment is
+    offset by the previous segment's final CVD. This preserves CoinGlass' own
+    per-candle CVD changes while producing one continuous series in the table.
     """
-    output: Dict[int, Tuple[float, float, float, float]] = {}
-    previous_continuous_close: Optional[float] = None
-    for chunk in chunks:
-        if not chunk:
-            continue
-        ordered = sorted(chunk.items())
-        first_api = ordered[0][1][2]
-        # Preserve CoinGlass values in the first chunk. At later pagination
-        # boundaries, offset the new request so its first value continues from
-        # the previous continuous close instead of resetting.
-        chunk_offset = (
-            0.0
-            if previous_continuous_close is None
-            else previous_continuous_close - first_api
-        )
-        for ts, (buy, sell, api_cvd) in ordered:
-            continuous = api_cvd + chunk_offset
-            output[ts] = (buy, sell, api_cvd, continuous)
-        previous_continuous_close = output[ordered[-1][0]][3]
-    return output
-
-
-def fetch_history(
-    symbol: str,
-    market: str,
-    start: datetime,
-    end: datetime,
-) -> Dict[int, Tuple[float, float, float, float]]:
     market = market.lower()
     if market not in {"futures", "spot"}:
         raise ValueError("market must be futures or spot")
     endpoint = FUTURES_ENDPOINT if market == "futures" else SPOT_ENDPOINT
-    fetched_chunks: List[Dict[int, Tuple[float, float, float]]] = []
+    rows: Dict[int, Tuple[float, float, float]] = {}
+    running_offset = 0.0
     for chunk_start, chunk_end in _chunks(start, end):
         payload = _request(endpoint, {
             "exchange_list": EXCHANGE_LIST,
@@ -280,49 +223,47 @@ def fetch_history(
             "end_time": int(chunk_end.timestamp() * 1000),
             "unit": "usd",
         })
-        fetched_chunks.append(_normalize(payload))
+        segment = _normalize(payload)
+        added = False
+        last_stitched = running_offset
+        for ts, (buy, sell, raw_cvd) in sorted(segment.items()):
+            if ts in rows:
+                continue
+            stitched_cvd = raw_cvd + running_offset
+            rows[ts] = (buy, sell, stitched_cvd)
+            last_stitched = stitched_cvd
+            added = True
+        if added:
+            running_offset = last_stitched
         time.sleep(REQUEST_PAUSE_SECONDS)
-    return _stitch_chunks(fetched_chunks)
+    return rows
 
 
-def _store(
-    symbol: str,
-    market: str,
-    rows: Dict[int, Tuple[float, float, float, float]],
-) -> int:
+def _store(symbol: str, market: str, rows: Dict[int, Tuple[float, float, float]]) -> int:
     init_db()
     table = "futures_taker_history" if market == "futures" else "spot_taker_history"
     source = f"coinglass_{market}_aggregated_cvd"
     now = datetime.now(timezone.utc)
     values = []
-    for ts, (buy, sell, api_cvd, continuous_cvd) in sorted(rows.items()):
+    for ts, (buy, sell, cvd) in sorted(rows.items()):
         candle = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
         values.append((
             str(symbol).upper(),
             candle if _use_postgres() else candle.isoformat(),
-            float(buy),
-            float(sell),
-            float(api_cvd),
-            float(continuous_cvd),
-            EXCHANGE_LIST,
-            source,
+            float(buy), float(sell), float(cvd), EXCHANGE_LIST, source,
             now if _use_postgres() else now.isoformat(),
         ))
     if not values:
         return 0
-
     if _use_postgres():
         sql = f"""
         INSERT INTO {table}
-        (symbol,candle_time,buy_volume_usd,sell_volume_usd,
-         api_cum_vol_delta_usd,continuous_cum_vol_delta_usd,
-         exchange_list,source,imported_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        (symbol,candle_time,buy_volume_usd,sell_volume_usd,cum_vol_delta_usd,exchange_list,source,imported_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (symbol,candle_time) DO UPDATE SET
           buy_volume_usd=EXCLUDED.buy_volume_usd,
           sell_volume_usd=EXCLUDED.sell_volume_usd,
-          api_cum_vol_delta_usd=EXCLUDED.api_cum_vol_delta_usd,
-          continuous_cum_vol_delta_usd=EXCLUDED.continuous_cum_vol_delta_usd,
+          cum_vol_delta_usd=EXCLUDED.cum_vol_delta_usd,
           exchange_list=EXCLUDED.exchange_list,
           source=EXCLUDED.source,
           imported_at=EXCLUDED.imported_at
@@ -334,15 +275,12 @@ def _store(
     else:
         sql = f"""
         INSERT INTO {table}
-        (symbol,candle_time,buy_volume_usd,sell_volume_usd,
-         api_cum_vol_delta_usd,continuous_cum_vol_delta_usd,
-         exchange_list,source,imported_at)
-        VALUES (?,?,?,?,?,?,?,?,?)
+        (symbol,candle_time,buy_volume_usd,sell_volume_usd,cum_vol_delta_usd,exchange_list,source,imported_at)
+        VALUES (?,?,?,?,?,?,?,?)
         ON CONFLICT(symbol,candle_time) DO UPDATE SET
           buy_volume_usd=excluded.buy_volume_usd,
           sell_volume_usd=excluded.sell_volume_usd,
-          api_cum_vol_delta_usd=excluded.api_cum_vol_delta_usd,
-          continuous_cum_vol_delta_usd=excluded.continuous_cum_vol_delta_usd,
+          cum_vol_delta_usd=excluded.cum_vol_delta_usd,
           exchange_list=excluded.exchange_list,
           source=excluded.source,
           imported_at=excluded.imported_at
@@ -364,14 +302,8 @@ def backfill_symbol(symbol: str, market: str, days: int = DEFAULT_BACKFILL_DAYS)
         rows = fetch_history(symbol, market, start, end)
         stored = _store(symbol, market, rows)
         return FlowBackfillResult(
-            symbol,
-            market,
-            len(rows),
-            stored,
-            start.isoformat(),
-            end.isoformat(),
-            len(rows) >= 100,
-            "OK" if len(rows) >= 100 else "Too few 30m rows",
+            symbol, market, len(rows), stored, start.isoformat(), end.isoformat(),
+            len(rows) >= 100, "OK" if len(rows) >= 100 else "Too few 30m rows",
         ).to_dict()
     except Exception as exc:
         return FlowBackfillResult(
