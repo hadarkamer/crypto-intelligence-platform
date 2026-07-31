@@ -90,3 +90,13 @@ Stage 77 adds an independent 30-minute Price + Open Interest context layer using
 ## Stage 77 historical Price+OI reference
 For BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB and XRP, `/oi_backfill` stores a separate 30-day Price+OI history and `/oi_stats SYMBOL` shows P25/Median/P75/P90/P95 by 30m/1h/4h/12h/24h.
 The live Price+OI Regime now uses P25 as the minimum valid movement for the same symbol and timeframe. Strength labels are: Weak/Noise, Normal, Elevated, Strong, Extreme. Price and OI strengths remain separate. Max-Pain scoring is unchanged.
+
+## Stage 87 — Data Foundation
+
+Stage 87 adds only isolated historical-data foundations and validation. It does
+not change alert scores or trading decisions.
+
+- `/oi_backfill [180|365]` refreshes Price+OI history and reference ranges.
+- `/flow_backfill [180|365]` stores official aggregated Futures and Spot Buy/Sell + CVD
+  Buy/Sell 30m history. CVD is not calculated yet.
+- `/oi_validation SYMBOL` displays Price/OI timestamp and reference quality.

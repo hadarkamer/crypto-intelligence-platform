@@ -16,8 +16,7 @@ def test_live_reference_has_priority(monkeypatch):
         lambda symbol, target: {"collected_at": "2026-07-25T15:00:00+00:00", "price": 80, "open_interest_usd": 800, "source": "historical_backfill"},
     )
     ref = svc._reference_for_window(rows, now, 240, "BTC")
-    assert ref["price"] == 90
-    assert ref["source"] == "live_snapshot"
+    assert ref is None  # 30-minute offset exceeds the new 20-minute tolerance
 
 
 def test_backfill_reference_used_when_live_history_too_short(monkeypatch):

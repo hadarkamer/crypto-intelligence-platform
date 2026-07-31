@@ -26,5 +26,5 @@ def test_freshness_checked_backfill_loop_is_wired_into_startup():
     assert "async def _history_backfill_loop" in source
     assert "HISTORY_BACKFILL_TASK = asyncio.create_task(_history_backfill_loop())" in source
     assert "last_backfill_run" in source
-    assert "_run_history_backfill_once(\"automatic_due\")" in source
+    assert "_run_history_backfill_once(\"automatic_due\", coinglass_history_backfill.DAILY_REFRESH_DAYS)" in source
     assert "HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES" in source

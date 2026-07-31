@@ -31,7 +31,10 @@ API_BASE_URL = "https://open-api-v4.coinglass.com"
 OI_ENDPOINT = "/api/futures/open-interest/exchange-list"
 API_TIMEOUT_SECONDS = 15
 COLLECTION_INTERVAL_MINUTES = 30
-HISTORY_RETENTION_DAYS = 60
+HISTORY_RETENTION_DAYS = 365
+REFERENCE_TOLERANCE_MINUTES = 20
+PRICE_OI_PASS_SECONDS = 30
+PRICE_OI_WARNING_SECONDS = 60
 REGIME_WINDOWS_MINUTES = (30, 60, 240, 720, 1440)
 WINDOW_LABELS = {30: "30m", 60: "1h", 240: "4h", 720: "12h", 1440: "24h"}
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -49,6 +52,12 @@ CREATE TABLE IF NOT EXISTS oi_regime_snapshots (
     state TEXT NOT NULL,
     direction TEXT NOT NULL,
     reason TEXT NOT NULL,
+    price_fetched_at TEXT,
+    oi_fetched_at TEXT,
+    time_gap_seconds REAL,
+    data_quality_status TEXT,
+    price_source TEXT,
+    oi_source TEXT,
     UNIQUE(collected_at, symbol)
 );
 CREATE INDEX IF NOT EXISTS idx_oi_regime_symbol_time
@@ -66,6 +75,12 @@ CREATE TABLE IF NOT EXISTS oi_regime_snapshots (
     state TEXT NOT NULL,
     direction TEXT NOT NULL,
     reason TEXT NOT NULL,
+    price_fetched_at TIMESTAMPTZ,
+    oi_fetched_at TIMESTAMPTZ,
+    time_gap_seconds DOUBLE PRECISION,
+    data_quality_status TEXT,
+    price_source TEXT,
+    oi_source TEXT,
     UNIQUE(collected_at, symbol)
 );
 CREATE INDEX IF NOT EXISTS idx_oi_regime_symbol_time
@@ -90,11 +105,33 @@ def _use_postgres(): return bool(DATABASE_URL and psycopg)
 def init_db():
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-            conn.execute(POSTGRES_SCHEMA); conn.commit()
+            conn.execute(POSTGRES_SCHEMA)
+            for column, ctype in (
+                ("price_fetched_at", "TIMESTAMPTZ"),
+                ("oi_fetched_at", "TIMESTAMPTZ"),
+                ("time_gap_seconds", "DOUBLE PRECISION"),
+                ("data_quality_status", "TEXT"),
+                ("price_source", "TEXT"),
+                ("oi_source", "TEXT"),
+            ):
+                conn.execute(f"ALTER TABLE oi_regime_snapshots ADD COLUMN IF NOT EXISTS {column} {ctype}")
+            conn.commit()
     else:
         Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(DB_PATH) as conn:
-            conn.executescript(SQLITE_SCHEMA); conn.commit()
+            conn.executescript(SQLITE_SCHEMA)
+            existing={row[1] for row in conn.execute("PRAGMA table_info(oi_regime_snapshots)").fetchall()}
+            for column, ctype in (
+                ("price_fetched_at", "TEXT"),
+                ("oi_fetched_at", "TEXT"),
+                ("time_gap_seconds", "REAL"),
+                ("data_quality_status", "TEXT"),
+                ("price_source", "TEXT"),
+                ("oi_source", "TEXT"),
+            ):
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE oi_regime_snapshots ADD COLUMN {column} {ctype}")
+            conn.commit()
 
 def _pct_change(new, old):
     if old is None or float(old) == 0.0: return None
@@ -175,11 +212,13 @@ def _classify_with_historical_reference(symbol, window_label, price_change_pct, 
     return d
 
 
-def fetch_aggregated_oi(symbol):
+def fetch_aggregated_oi_with_meta(symbol):
     symbol=str(symbol or "").upper()
     key=_api_key()
     if not key: raise RuntimeError("COINGLASS_API_KEY is not configured")
+    requested_at=datetime.now(timezone.utc)
     r=requests.get(API_BASE_URL+OI_ENDPOINT,params={"symbol":symbol},headers={"CG-API-KEY":key,"accept":"application/json"},timeout=API_TIMEOUT_SECONDS)
+    received_at=datetime.now(timezone.utc)
     r.raise_for_status(); payload=r.json()
     if not isinstance(payload,dict) or str(payload.get("code")) not in {"0","200"}: raise RuntimeError(f"CoinGlass API error: {payload.get('msg') if isinstance(payload,dict) else 'invalid response'!r}")
 
@@ -194,26 +233,23 @@ def fetch_aggregated_oi(symbol):
             continue
         exchange_values.append((exchange,value))
         if exchange.lower()=="all":
-            print(f"[oi-regime] {symbol} OI source=coinglass_all exchanges={len(rows)} value={value}")
-            return value
+            return {"value":value,"fetched_at":received_at,"requested_at":requested_at,"source":"coinglass_all"}
 
-    # Some CoinGlass symbols (notably exchange-native assets such as HYPE)
-    # may omit the synthetic `All` row while still returning valid per-exchange
-    # OI. In that case, sum only the positive per-exchange rows. This preserves
-    # all-exchange coverage without mixing in a single-exchange fallback.
     per_exchange=[(name,value) for name,value in exchange_values if name.lower()!="all"]
     if per_exchange:
         total=sum(value for _,value in per_exchange)
-        names=",".join(name or "unknown" for name,_ in per_exchange)
-        print(f"[oi-regime] {symbol} OI source=coinglass_exchange_sum exchanges={names} count={len(per_exchange)} value={total}")
-        return total
+        return {"value":total,"fetched_at":received_at,"requested_at":requested_at,"source":"coinglass_exchange_sum"}
 
     returned_names=",".join(str(row.get("exchange","")).strip() or "unknown" for row in rows) or "none"
     raise ValueError(f"CoinGlass returned no usable OI for {symbol}; exchanges={returned_names}")
 
+
+def fetch_aggregated_oi(symbol):
+    return float(fetch_aggregated_oi_with_meta(symbol)["value"])
+
 def _history(symbol):
     init_db(); symbol=str(symbol or "").upper()
-    sql="SELECT collected_at,price,open_interest_usd FROM oi_regime_snapshots WHERE symbol=? ORDER BY collected_at ASC"
+    sql="SELECT collected_at,price,open_interest_usd,price_fetched_at,oi_fetched_at,time_gap_seconds,data_quality_status,price_source,oi_source FROM oi_regime_snapshots WHERE symbol=? ORDER BY collected_at ASC"
     if _use_postgres():
         with psycopg.connect(DATABASE_URL,row_factory=dict_row) as conn: rows=conn.execute(sql.replace("?","%s"),(symbol,)).fetchall()
     else:
@@ -227,22 +263,23 @@ def _as_utc(v):
     return datetime.fromisoformat(str(v).replace("Z","+00:00")).astimezone(timezone.utc)
 
 def _reference_for_window(rows, now, minutes, symbol=None):
-    """Find the best reference point for a regime window.
-
-    Priority is always the live snapshot history. If the service has not yet
-    accumulated a live sample old enough for this window, fall back read-only
-    to the CoinGlass historical backfill table. This never writes into the live
-    table and never changes Max-Pain calculations.
-    """
+    """Return a reference only when it is close enough to the requested window."""
     target=now-timedelta(minutes=minutes)
     eligible=[r for r in rows if _as_utc(r["collected_at"])<=target]
+    ref=None
     if eligible:
-        ref=dict(eligible[-1])
-        ref.setdefault("source", "live_snapshot")
-        return ref
-    if symbol:
-        return history_reference.historical_point_at_or_before(symbol, target)
-    return None
+        ref=dict(eligible[-1]); ref.setdefault("source", "live_snapshot")
+    elif symbol:
+        ref=history_reference.historical_point_at_or_before(symbol, target)
+    if not ref:
+        return None
+    ref_time=_as_utc(ref["collected_at"])
+    offset_seconds=(target-ref_time).total_seconds()
+    ref["reference_offset_seconds"]=offset_seconds
+    ref["reference_target_time"]=target.isoformat()
+    if offset_seconds < 0 or offset_seconds > REFERENCE_TOLERANCE_MINUTES*60:
+        return None
+    return ref
 
 def _window_results(symbol, price, oi, now=None, history_rows=None):
     now=now or datetime.now(timezone.utc); rows=_history(symbol) if history_rows is None else history_rows
@@ -264,6 +301,8 @@ def _window_results(symbol, price, oi, now=None, history_rows=None):
             d=_classify_with_historical_reference(symbol,label,pchange,ochange)
             d["comparison_source"]=ref.get("source","live_snapshot")
             d["reference_time"]=_as_utc(ref["collected_at"]).isoformat()
+            d["reference_offset_seconds"]=ref.get("reference_offset_seconds")
+            d["reference_target_time"]=ref.get("reference_target_time")
         d["window_minutes"]=minutes; d["window_label"]=label; out[label]=d
     return out
 
@@ -340,24 +379,51 @@ def _early_transition(windows, overall):
     broad_states=[x.get("state") for x in broad if x.get("available") and x.get("state") not in {"NEUTRAL_INCONCLUSIVE","UNAVAILABLE"}]
     return len(short_states)==2 and short_states[0]==short_states[1] and len(broad_states)>=2 and short_states[0]!=overall.get("state")
 
-def _insert_snapshot(symbol,price,oi,result):
+def _quality_status(price_time, oi_time):
+    gap=abs((oi_time-price_time).total_seconds())
+    if gap <= PRICE_OI_PASS_SECONDS: status="PASS"
+    elif gap <= PRICE_OI_WARNING_SECONDS: status="WARNING"
+    else: status="INVALID"
+    return gap,status
+
+
+def _insert_snapshot(symbol,price,oi,result,price_meta=None,oi_meta=None):
     init_db(); now=datetime.now(timezone.utc); collected_at=now if _use_postgres() else now.isoformat()
-    params=(collected_at,str(symbol).upper(),float(price),float(oi),result.price_change_pct,result.oi_change_pct,result.state,result.direction,result.reason)
-    sql="INSERT INTO oi_regime_snapshots (collected_at,symbol,price,open_interest_usd,price_change_pct,oi_change_pct,state,direction,reason) VALUES (?,?,?,?,?,?,?,?,?)"
+    price_meta=price_meta or {}; oi_meta=oi_meta or {}
+    pt=_as_utc(price_meta.get("fetched_at") or now); ot=_as_utc(oi_meta.get("fetched_at") or now)
+    gap,status=_quality_status(pt,ot)
+    params=(collected_at,str(symbol).upper(),float(price),float(oi),result.price_change_pct,result.oi_change_pct,result.state,result.direction,result.reason,
+            pt if _use_postgres() else pt.isoformat(),ot if _use_postgres() else ot.isoformat(),gap,status,
+            str(price_meta.get("source") or "unknown"),str(oi_meta.get("source") or "unknown"))
+    sql="INSERT INTO oi_regime_snapshots (collected_at,symbol,price,open_interest_usd,price_change_pct,oi_change_pct,state,direction,reason,price_fetched_at,oi_fetched_at,time_gap_seconds,data_quality_status,price_source,oi_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     if _use_postgres():
         with psycopg.connect(DATABASE_URL,row_factory=dict_row) as conn:
             conn.execute(sql.replace("?","%s"),params); conn.execute("DELETE FROM oi_regime_snapshots WHERE collected_at < %s",(now-timedelta(days=HISTORY_RETENTION_DAYS),)); conn.commit()
     else:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(sql,params); conn.execute("DELETE FROM oi_regime_snapshots WHERE collected_at < ?",((now-timedelta(days=HISTORY_RETENTION_DAYS)).isoformat(),)); conn.commit()
+    return {"price_fetched_at":pt.isoformat(),"oi_fetched_at":ot.isoformat(),"time_gap_seconds":gap,"data_quality_status":status,
+            "price_source":price_meta.get("source") or "unknown","oi_source":oi_meta.get("source") or "unknown"}
 
-def collect_symbol(symbol,price):
-    symbol=str(symbol or "").upper(); oi=fetch_aggregated_oi(symbol); now=datetime.now(timezone.utc); rows=_history(symbol)
-    windows=_window_results(symbol,float(price),float(oi),now,rows); overall=_overall(windows); early=_early_transition(windows,overall); observations=_significance_observations(windows)
-    # Persist current sample. Legacy columns retain the 30m result for DB compatibility only.
-    r30=windows["30m"]; legacy=RegimeResult(symbol,r30["state"],r30["label"],r30["direction"],r30["price_change_pct"],r30["oi_change_pct"],r30["reason"],r30["available"])
-    _insert_snapshot(symbol,float(price),float(oi),legacy)
-    return {"symbol":symbol,"price":float(price),"open_interest_usd":float(oi),"windows":windows,"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
+
+def collect_symbol(symbol,price_input):
+    symbol=str(symbol or "").upper()
+    if isinstance(price_input,dict):
+        price=float(price_input.get("price")); price_meta={"fetched_at":price_input.get("fetched_at_utc") or price_input.get("fetched_at"),"source":price_input.get("source")}
+    else:
+        price=float(price_input); price_meta={"fetched_at":datetime.now(timezone.utc),"source":"legacy_price"}
+    oi_meta=fetch_aggregated_oi_with_meta(symbol); oi=float(oi_meta["value"]); now=datetime.now(timezone.utc); rows=_history(symbol)
+    gap,status=_quality_status(_as_utc(price_meta.get("fetched_at") or now),_as_utc(oi_meta.get("fetched_at") or now))
+    if status=="INVALID":
+        windows={label:{**classify(symbol,None,None).to_dict(),"window_label":label,"window_minutes":minutes,"data_quality_status":status,"time_gap_seconds":gap}
+                 for minutes,label in WINDOW_LABELS.items()}
+        overall={"state":"UNAVAILABLE","label":"Price/OI timestamp gap too large","strength":"Unavailable","agreement":0,"valid_windows":0}
+        early=False; observations=[]
+    else:
+        windows=_window_results(symbol,price,oi,now,rows); overall=_overall(windows); early=_early_transition(windows,overall); observations=_significance_observations(windows)
+    r30=windows["30m"]; legacy=RegimeResult(symbol,r30["state"],r30["label"],r30["direction"],r30.get("price_change_pct"),r30.get("oi_change_pct"),r30["reason"],r30["available"])
+    quality=_insert_snapshot(symbol,price,oi,legacy,price_meta,oi_meta)
+    return {"symbol":symbol,"price":price,"open_interest_usd":oi,"windows":windows,"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,**quality}
 
 def collect_many(symbol_prices):
     out={}
@@ -376,7 +442,10 @@ def latest(symbol):
     history_before=rows[:-1]
     windows=_window_results(symbol,float(current["price"]),float(current["open_interest_usd"]),now,history_before)
     overall=_overall(windows); early=_early_transition(windows,overall); observations=_significance_observations(windows)
-    return {"symbol":symbol,"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
+    return {"symbol":symbol,"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,
+            "price_fetched_at":current.get("price_fetched_at"),"oi_fetched_at":current.get("oi_fetched_at"),
+            "time_gap_seconds":current.get("time_gap_seconds"),"data_quality_status":current.get("data_quality_status"),
+            "price_source":current.get("price_source"),"oi_source":current.get("oi_source")}
 
 def composite_conclusion(regime,alert_side):
     # Backward-compatible with the original single-window Stage 77 payload,

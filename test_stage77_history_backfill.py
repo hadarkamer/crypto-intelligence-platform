@@ -29,7 +29,7 @@ def test_reference_ranges_are_per_window(tmp_path):
     h._store_rows("BTC", matched, "Binance", "BTCUSDT")
     stats = h.calculate_reference_ranges("BTC")
     assert stats["available"] is True
-    assert set(stats["windows"]) == {"30m", "1h", "4h", "12h", "24h"}
+    assert set(stats["windows"]) == {"30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"}
     assert stats["windows"]["30m"]["oi_abs_change_pct"]["median"] > 1.9
     assert stats["windows"]["1h"]["oi_abs_change_pct"]["median"] > 4.0
     assert stats["windows"]["24h"]["samples"] == 12

@@ -36,7 +36,9 @@ API_BASE_URL = "https://open-api-v4.coinglass.com"
 OI_HISTORY_ENDPOINT = "/api/futures/open-interest/aggregated-history"
 PRICE_HISTORY_ENDPOINT = "/api/futures/price/history"
 API_TIMEOUT_SECONDS = 20
-BACKFILL_DAYS = 30
+BACKFILL_DAYS = 180
+DAILY_REFRESH_DAYS = 3
+MAX_BACKFILL_DAYS = 365
 HISTORY_INTERVAL = "30m"
 # 30 days = about 1,440 candles. Two 15-day chunks stay safely under the
 # documented maximum of 1,000 records per request.
@@ -54,6 +56,9 @@ WINDOWS: Dict[str, int] = {
     "4h": 8,
     "12h": 24,
     "24h": 48,
+    "48h": 96,
+    "72h": 144,
+    "7d": 336,
 }
 
 _REFERENCE_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -388,6 +393,7 @@ def backfill_symbol(symbol: str, days: int = BACKFILL_DAYS) -> Dict[str, Any]:
             f"Symbol is not in Stage 77 historical set: {', '.join(TARGET_SYMBOLS)}",
         ).to_dict()
 
+    days = max(1, min(int(days), MAX_BACKFILL_DAYS))
     end = datetime.now(timezone.utc)
     # Round down to the latest completed 30-minute boundary, avoiding a
     # partially formed current candle.

@@ -30,6 +30,7 @@ import alert_summary
 import technical_signal_store
 import coinglass_oi_regime_service
 import coinglass_history_backfill
+import coinglass_flow_foundation
 from collections import defaultdict
 
 try:
@@ -82,6 +83,7 @@ SPECIFIC_WATCH_TASK = None
 OI_REGIME_TASK = None
 HISTORY_BACKFILL_TASK = None
 HISTORY_BACKFILL_LOCK = None
+FLOW_BACKFILL_LOCK = None
 SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
 SPECIFIC_WATCH_INTERVAL_MINUTES = 5
 ALERT_COMMAND_LOCK = None
@@ -1083,9 +1085,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch_status — הצגת מצב הצפיות\n"
         "/watch_stop — עצירת הצפייה הכללית\n"
         "/watch_stop SOL — עצירת הצפייה ב-SOL\n"
-        "/oi_backfill — הורדת 30 יום Price+OI היסטוריים ל-8 מטבעות\n"
-        "/oi_stats BTC — סטטיסטיקת Price+OI היסטורית לפי 30m/1h/4h/12h/24h\n"
-        "/oi_state BTC — הצגת חישוב Price+OI Regime השמור האחרון"
+        "/oi_backfill [180|365] — Backfill היסטורי Price+OI (ברירת מחדל 180 יום)\n"
+        "/oi_stats BTC — סטטיסטיקת Price+OI לפי 30m/1h/4h/12h/24h/48h/72h/7d\n"
+        "/flow_backfill [180|365] — שמירת Buy/Sell + CVD רשמי בחוזים ובספוט\n"
+        "/oi_validation BTC — בדיקת איכות timestamp ונקודות הייחוס\n"
+        "/oi_state BTC — הצגת חישוב Price+OI Regime השמור האחרון\n"
         "/oi_regime BTC — Alias להצגת אותו חישוב Price+OI Regime"
     )
 
@@ -1842,7 +1846,7 @@ def _regime_block(item: Dict[str, Any]) -> str:
     clock = {"30m": "🕒", "1h": "🕐", "4h": "🕓", "12h": "🕛", "24h": "🕛"}
     indent = "\u00a0\u00a0\u00a0\u00a0"
     lines = [""]
-    for label in ("30m", "1h", "4h", "12h", "24h"):
+    for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
         w = windows.get(label) or {}
         icon = clock.get(label, "🕒")
         if not w.get("available"):
@@ -3634,7 +3638,7 @@ def _fmt_hist_stat(value: Any) -> str:
         return "-"
 
 
-async def _run_history_backfill_once(source: str = "automatic") -> Dict[str, Dict[str, Any]]:
+async def _run_history_backfill_once(source: str = "automatic", days: int = coinglass_history_backfill.BACKFILL_DAYS) -> Dict[str, Dict[str, Any]]:
     """Run the isolated historical Price+OI refresh without overlapping runs."""
     global HISTORY_BACKFILL_LOCK
     if HISTORY_BACKFILL_LOCK is None:
@@ -3646,7 +3650,7 @@ async def _run_history_backfill_once(source: str = "automatic") -> Dict[str, Dic
     async with HISTORY_BACKFILL_LOCK:
         started = datetime.now(timezone.utc)
         print(f"[oi-backfill] {source} started at {started.isoformat()}", flush=True)
-        results = await asyncio.to_thread(coinglass_history_backfill.backfill_all)
+        results = await asyncio.to_thread(coinglass_history_backfill.backfill_all, days)
         ok_count = sum(1 for result in results.values() if result.get("ok"))
         completed = datetime.now(timezone.utc)
         await asyncio.to_thread(
@@ -3684,7 +3688,7 @@ async def _history_backfill_loop() -> None:
                     last_at = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
 
             if last_at is None or now - last_at >= due_after:
-                await _run_history_backfill_once("automatic_due")
+                await _run_history_backfill_once("automatic_due", coinglass_history_backfill.DAILY_REFRESH_DAYS)
             else:
                 remaining = due_after - (now - last_at)
                 print(
@@ -3700,23 +3704,30 @@ async def _history_backfill_loop() -> None:
 
 
 async def oi_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual, isolated 30-day CoinGlass historical Price+OI backfill."""
+    """Manual, isolated CoinGlass historical Price+OI backfill."""
     global HISTORY_BACKFILL_LOCK
     if HISTORY_BACKFILL_LOCK is None:
         HISTORY_BACKFILL_LOCK = asyncio.Lock()
-
     if HISTORY_BACKFILL_LOCK.locked():
         await update.message.reply_text("⏳ /oi_backfill כבר פעיל. לא נפתחה הורדה נוספת.")
         return
 
+    days = coinglass_history_backfill.BACKFILL_DAYS
+    if context.args:
+        try:
+            days = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("שימוש: /oi_backfill 180 או /oi_backfill 365")
+            return
+    days = max(1, min(days, coinglass_history_backfill.MAX_BACKFILL_DAYS))
     await update.message.reply_text(
-        "📚 מתחיל Backfill היסטורי של Price + OI ל-30 יום.\n"
+        f"📚 מתחיל Backfill היסטורי של Price + OI ל-{days} יום.\n"
         "מטבעות: BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB, XRP.\n"
-        "הפעולה מבודדת ואינה משנה Max Pain או ציונים קיימים. לאחר השלמתה, ה-Reference ההיסטורי משמש רק לסינון עוצמת Price+OI ב-Regime."
+        "הפעולה מבודדת ואינה משנה Max Pain או ציונים קיימים."
     )
 
     try:
-        results = await _run_history_backfill_once("manual")
+        results = await _run_history_backfill_once("manual", days)
         lines = ["✅ OI + Price Historical Backfill הסתיים", ""]
         ok_count = 0
         for symbol in coinglass_history_backfill.TARGET_SYMBOLS:
@@ -3871,6 +3882,77 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+
+async def flow_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store official 30m aggregated Futures+Spot Buy/Sell and CVD history."""
+    global FLOW_BACKFILL_LOCK
+    if FLOW_BACKFILL_LOCK is None:
+        FLOW_BACKFILL_LOCK = asyncio.Lock()
+    if FLOW_BACKFILL_LOCK.locked():
+        await update.message.reply_text("⏳ /flow_backfill כבר פעיל.")
+        return
+    days = coinglass_flow_foundation.DEFAULT_BACKFILL_DAYS
+    if context.args:
+        try:
+            days = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("שימוש: /flow_backfill 180 או /flow_backfill 365")
+            return
+    days = max(1, min(days, coinglass_flow_foundation.MAX_BACKFILL_DAYS))
+    await update.message.reply_text(
+        f"📥 מתחיל Foundation Backfill ל-{days} יום של Buy/Sell + CVD רשמי.\n"
+        "נשמרים Futures ו-Spot בנפרד. אין עדיין Flow, ציון או השפעה על Alerts."
+    )
+    try:
+        async with FLOW_BACKFILL_LOCK:
+            results = await asyncio.to_thread(coinglass_flow_foundation.backfill_all, days)
+        lines=["✅ Flow Foundation Backfill הסתיים", ""]
+        for symbol in coinglass_flow_foundation.TARGET_SYMBOLS:
+            pair=results.get(symbol) or {}
+            fut=pair.get("futures") or {}; spot=pair.get("spot") or {}
+            lines.append(
+                f"{symbol}: Futures {fut.get('stored_rows',0)} {'✅' if fut.get('ok') else '⚠️'} | "
+                f"Spot {spot.get('stored_rows',0)} {'✅' if spot.get('ok') else '⚠️'}"
+            )
+            if not fut.get("ok"): lines.append(f"  Futures: {fut.get('message','לא זמין')}")
+            if not spot.get("ok"): lines.append(f"  Spot: {spot.get('message','לא זמין')}")
+        lines.extend(["", "הנתונים נשמרו בטבלאות נפרדות בלבד.", "נשמר CVD רשמי של CoinGlass; לא נבנתה מסקנת Flow ולא שונתה לוגיקת המסחר."])
+        await update.message.reply_text("\n".join(lines))
+    except Exception as exc:
+        await update.message.reply_text(f"❌ /flow_backfill נכשל: {exc!r}")
+
+
+async def oi_validation_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Read-only validation of latest Price/OI timestamps and reference windows."""
+    if not context.args:
+        await update.message.reply_text("שימוש: /oi_validation BTC")
+        return
+    symbol=str(context.args[0]).strip().upper()
+    regime=await asyncio.to_thread(coinglass_oi_regime_service.latest, symbol)
+    if not regime.get("price_fetched_at") and not regime.get("windows"):
+        await update.message.reply_text(f"אין נתוני Price+OI שמורים עבור {symbol}.")
+        return
+    lines=[f"🔎 {symbol} — Price/OI Data Validation"]
+    lines.append(f"Price source: {regime.get('price_source','-')}")
+    lines.append(f"OI source: {regime.get('oi_source','-')}")
+    lines.append(f"Price fetched: {regime.get('price_fetched_at','-')}")
+    lines.append(f"OI fetched: {regime.get('oi_fetched_at','-')}")
+    gap=regime.get('time_gap_seconds')
+    lines.append(f"Time gap: {float(gap):.1f}s" if gap is not None else "Time gap: -")
+    lines.append(f"Quality: {regime.get('data_quality_status','-')}")
+    lines.append("")
+    for label in ("30m","1h","4h","12h","24h"):
+        w=(regime.get("windows") or {}).get(label) or {}
+        ref=w.get("reference_time")
+        offset=w.get("reference_offset_seconds")
+        if ref:
+            lines.append(f"{label}: reference ✅ | offset {float(offset or 0):.0f}s")
+        else:
+            lines.append(f"{label}: reference ❌ / No Data")
+    lines.append("Reference tolerance: עד 20 דקות מהחלון המבוקש.")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _collect_oi_regime_once() -> Dict[str, Dict[str, Any]]:
     # HYPE can be absent from the latest Max Pain snapshot even though it is a
     # supported Price+OI asset. Keep it in the collector explicitly so the
@@ -3886,7 +3968,7 @@ async def _collect_oi_regime_once() -> Dict[str, Dict[str, Any]]:
     )
     prices = price_result.get("prices") or {}
     usable_prices = {
-        symbol: float(prices[symbol]["price"])
+        symbol: dict(prices[symbol])
         for symbol in symbols
         if isinstance(prices.get(symbol), dict)
         and prices[symbol].get("price") is not None
@@ -3989,6 +4071,8 @@ async def main():
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_handler(CommandHandler("technical_status", technical_status_cmd))
     bot_app.add_handler(CommandHandler("oi_backfill", oi_backfill_cmd))
+    bot_app.add_handler(CommandHandler("flow_backfill", flow_backfill_cmd))
+    bot_app.add_handler(CommandHandler("oi_validation", oi_validation_cmd))
     bot_app.add_handler(CommandHandler("oi_stats", oi_stats_cmd))
     bot_app.add_handler(CommandHandler("oi_state", oi_state_cmd))
     bot_app.add_handler(CommandHandler("oi_regime", oi_state_cmd))
