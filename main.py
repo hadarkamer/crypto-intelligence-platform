@@ -31,6 +31,7 @@ import technical_signal_store
 import coinglass_oi_regime_service
 import coinglass_history_backfill
 import coinglass_flow_foundation
+import coinglass_flow_engine
 from collections import defaultdict
 
 try:
@@ -1088,6 +1089,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/oi_backfill [180|365] — Backfill היסטורי Price+OI (ברירת מחדל 180 יום)\n"
         "/oi_stats BTC — סטטיסטיקת Price+OI לפי 30m/1h/4h/12h/24h/48h/72h/7d\n"
         "/flow_backfill [180|365] — שמירת Buy/Sell + CVD רשמי בחוזים ובספוט\n"
+        "/flow_state BTC — ניתוח Futures Flow ו-Spot Flow לקריאה בלבד\n"
+        "/flow_stats BTC — P25/P50/P75/P90 של שינויי CVD לפי טווח\n"
         "/oi_validation BTC — בדיקת איכות timestamp ונקודות הייחוס\n"
         "/oi_state BTC — הצגת חישוב Price+OI Regime השמור האחרון\n"
         "/oi_regime BTC — Alias להצגת אותו חישוב Price+OI Regime"
@@ -3883,6 +3886,103 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+def _fmt_flow_money(value):
+    if value is None:
+        return "-"
+    value=float(value)
+    sign="+" if value>0 else ""
+    av=abs(value)
+    if av>=1_000_000_000:
+        return f"{sign}{value/1_000_000_000:.2f}B$"
+    if av>=1_000_000:
+        return f"{sign}{value/1_000_000:.2f}M$"
+    if av>=1_000:
+        return f"{sign}{value/1_000:.2f}K$"
+    return f"{sign}{value:.2f}$"
+
+
+def _flow_market_lines(title, data):
+    lines=[f"{title}"]
+    quality=(data.get("quality") or {})
+    lines.append(f"Data quality: {quality.get('status','NO DATA')} | rows {quality.get('rows',0)}")
+    impulse=data.get("current_impulse_30m") or {}
+    if impulse:
+        lines.append(
+            f"30m impulse: {impulse.get('direction','-')} "
+            f"{_fmt_flow_money(impulse.get('delta_usd'))} — {impulse.get('magnitude','-')}"
+        )
+    else:
+        lines.append("30m impulse: unavailable")
+    groups=data.get("groups") or {}
+    for key,label in (("short","Short 30m/1h"),("medium","Medium 4h/12h/24h"),("broad","Broad 48h/72h/7d")):
+        g=groups.get(key) or {}
+        lines.append(f"{label}: {g.get('state','NO DATA')}")
+    overall=data.get("overall") or {}
+    lines.append(f"Overall: {overall.get('state','NO DATA')}")
+    early=data.get("early_shift")
+    if early:
+        lines.append(
+            f"⚠️ Early Shift: {early.get('new_direction')} מול "
+            f"{early.get('established_direction')} הרחב"
+        )
+    return lines
+
+
+async def flow_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Read-only Futures and Spot CVD flow analysis; never changes alerts."""
+    if not context.args:
+        await update.message.reply_text("שימוש: /flow_state BTC")
+        return
+    symbol=str(context.args[0]).strip().upper()
+    try:
+        result=await asyncio.to_thread(coinglass_flow_engine.analyze_symbol, symbol)
+    except Exception as exc:
+        await update.message.reply_text(f"❌ /flow_state נכשל: {exc!r}")
+        return
+    lines=[
+        f"📈 {symbol} — CVD Flow Engine",
+        "הניתוח לקריאה בלבד ואינו משנה Alerts, Watch או Score.",
+        "",
+    ]
+    lines.extend(_flow_market_lines("Futures Flow", result.get("futures") or {}))
+    lines.append("")
+    lines.extend(_flow_market_lines("Spot Flow", result.get("spot") or {}))
+    lines.extend([
+        "",
+        "כלל: Buy/Sell ו-CVD הם משפחת נתונים אחת; 30m impulse אינו נספר כאישור נוסף.",
+    ])
+    await update.message.reply_text("\n".join(lines))
+
+
+async def flow_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show P25/P50/P75/P90 CVD-change baselines for both markets."""
+    if not context.args:
+        await update.message.reply_text("שימוש: /flow_stats BTC")
+        return
+    symbol=str(context.args[0]).strip().upper()
+    lines=[f"📊 {symbol} — Historical CVD Baselines"]
+    for market,title in (("futures","Futures"),("spot","Spot")):
+        try:
+            data=await asyncio.to_thread(coinglass_flow_engine.stats, symbol, market)
+        except Exception as exc:
+            lines.extend(["",f"{title}: ERROR {exc!r}"])
+            continue
+        lines.extend(["",title])
+        for label,_ in coinglass_flow_engine.WINDOWS:
+            p=(data.get("windows") or {}).get(label)
+            if not p:
+                lines.append(f"{label}: No baseline")
+                continue
+            lines.append(
+                f"{label}: P25 {_fmt_flow_money(p['p25'])} | "
+                f"P50 {_fmt_flow_money(p['p50'])} | "
+                f"P75 {_fmt_flow_money(p['p75'])} | "
+                f"P90 {_fmt_flow_money(p['p90'])}"
+            )
+    lines.extend(["", "P75 = עדות משמעותית; P90 = עדות חזקה."] )
+    await update.message.reply_text("\n".join(lines))
+
+
 async def flow_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Store official 30m aggregated Futures+Spot Buy/Sell and CVD history."""
     global FLOW_BACKFILL_LOCK
@@ -4084,6 +4184,8 @@ async def main():
     bot_app.add_handler(CommandHandler("technical_status", technical_status_cmd))
     bot_app.add_handler(CommandHandler("oi_backfill", oi_backfill_cmd))
     bot_app.add_handler(CommandHandler("flow_backfill", flow_backfill_cmd))
+    bot_app.add_handler(CommandHandler("flow_state", flow_state_cmd))
+    bot_app.add_handler(CommandHandler("flow_stats", flow_stats_cmd))
     bot_app.add_handler(CommandHandler("oi_validation", oi_validation_cmd))
     bot_app.add_handler(CommandHandler("oi_stats", oi_stats_cmd))
     bot_app.add_handler(CommandHandler("oi_state", oi_state_cmd))

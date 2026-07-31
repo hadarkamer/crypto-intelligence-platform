@@ -100,3 +100,11 @@ not change alert scores or trading decisions.
 - `/flow_backfill [180|365]` stores official aggregated Futures and Spot Buy/Sell + CVD
   Buy/Sell 30m history. CVD is not calculated yet.
 - `/oi_validation SYMBOL` displays Price/OI timestamp and reference quality.
+
+## Stage 88 — Read-only CVD Flow Engine
+
+Stage 88 adds `/flow_state SYMBOL` and `/flow_stats SYMBOL`.
+It reads the Futures/Spot Buy-Sell and official CVD history saved by Stage 87.2,
+compares CVD changes with P25/P50/P75/P90 baselines for the same symbol, market
+and timeframe, and produces Short/Medium/Broad Flow conclusions. It does not
+modify Alerts, Watch, Max-Pain score or LONG/SHORT selection.
