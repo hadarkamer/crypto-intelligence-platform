@@ -22,6 +22,8 @@ from bisect import bisect_left
 import os
 from pathlib import Path
 import sqlite3
+
+import time_family_engine
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
@@ -46,6 +48,11 @@ WINDOWS: Tuple[Tuple[str, int], ...] = (
 )
 WINDOW_STEPS = dict(WINDOWS)
 GROUPS: Dict[str, Tuple[str, ...]] = {
+    "now": ("30m",),
+    "short": ("1h", "4h"),
+    "medium": ("12h", "24h"),
+    "long": ("48h", "72h", "7d"),
+    # Backward-compatible aliases retained for Stage 88 tests/helpers only.
     "momentum": ("30m", "1h"),
     "trend": ("4h", "12h", "24h"),
     "structure": ("48h", "72h", "7d"),
@@ -447,9 +454,24 @@ def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     rows = _load_rows(symbol, market)
     quality = _quality(rows)
     windows = {label: _window_state(rows, label, steps) for label, steps in WINDOWS}
-    groups = {name: _group_state(name, windows) for name in GROUPS}
-    overall = _overall(groups)
-    early = _early_shift(groups)
+    # Stage 90: one shared weighted time-family model is used in regular scans
+    # and in confirmation. Keep legacy group fields for backward compatibility.
+    weighted = time_family_engine.aggregate(windows, time_family_engine.flow_window_evaluator)
+    groups = weighted["families"]
+    overall = {
+        "state": f"{weighted['direction']}_EVIDENCE" if weighted["direction"] != "NEUTRAL" else "NEUTRAL",
+        "direction": weighted["direction"],
+        "weighted_score": weighted["score"],
+        "quality": weighted["quality"],
+        "confirmed_groups": sum(1 for g in groups.values() if g.get("quality", 0) >= 0.5 and g.get("direction") != "NEUTRAL"),
+    }
+    now_dir=(groups.get("now") or {}).get("direction")
+    broader=[(groups.get(k) or {}).get("direction") for k in ("short","medium","long") if (groups.get(k) or {}).get("quality",0) >= 0.35]
+    early = None
+    if now_dir in {"BULLISH","BEARISH"} and broader:
+        established = "BULLISH" if broader.count("BULLISH") > broader.count("BEARISH") else "BEARISH" if broader.count("BEARISH") > broader.count("BULLISH") else None
+        if established and established != now_dir:
+            early={"detected":True,"new_direction":now_dir,"established_direction":established,"reason":"now family opposes broader weighted families"}
 
     latest_impulse = None
     if rows:

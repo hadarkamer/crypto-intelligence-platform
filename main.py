@@ -1878,6 +1878,19 @@ def _regime_block(item: Dict[str, Any]) -> str:
             lines.append(f"{indent}Price: {ptxt}")
             lines.append(f"{indent}OI   : {otxt}")
 
+    time_families = regime.get("time_families") or {}
+    if time_families:
+        lines.extend(["", "<b>משפחות זמן משוקללות</b>"])
+        for key in ("now", "short", "medium", "long"):
+            family = time_families.get(key) or {}
+            direction = str(family.get("direction") or "NEUTRAL").upper()
+            icon = _flow_direction_icon(direction)
+            label = html.escape(str(family.get("label") or key))
+            quality = float(family.get("quality") or 0.0) * 100.0
+            agreement = float(family.get("agreement") or 0.0) * 100.0
+            weight = float(family.get("weight") or 0.0)
+            lines.append(f"{icon} {label}: <b>{direction.title()}</b> | משקל {weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%")
+
     overall_label = html.escape(str(overall.get("label") or "אין מסקנה"))
     strength = html.escape(str(overall.get("strength") or "—"))
     agreement = int(overall.get("agreement") or 0)
@@ -1918,8 +1931,21 @@ def _flow_detail_block(item: Dict[str, Any]) -> str:
             magnitude=html.escape(str(w.get("magnitude") or "—").title())
             state=html.escape(str(w.get("state") or "NEUTRAL").replace("_"," ").title())
             lines.append(f"{icon} {label}: <b>{change}</b> [{magnitude}] — {state}")
+        groups=market.get("groups") or {}
+        if groups:
+            lines.append(f"<b>משפחות זמן — {title}</b>")
+            for family_key in ("now","short","medium","long"):
+                family=groups.get(family_key) or {}
+                direction=str(family.get("direction") or "NEUTRAL").upper()
+                icon=_flow_direction_icon(direction)
+                label=html.escape(str(family.get("label") or family_key))
+                quality=float(family.get("quality") or 0.0)*100.0
+                agreement=float(family.get("agreement") or 0.0)*100.0
+                weight=float(family.get("weight") or 0.0)
+                lines.append(f"{icon} {label}: <b>{direction.title()}</b> | {weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%")
         overall=market.get("overall") or {}
-        lines.append(f"Overall {title}: <b>{html.escape(str(overall.get('state') or 'NO DATA').replace('_',' ').title())}</b>")
+        weighted_score=float(overall.get("weighted_score") or 0.0)
+        lines.append(f"Overall {title}: <b>{html.escape(str(overall.get('state') or 'NO DATA').replace('_',' ').title())}</b> ({weighted_score:+.1f})")
         early=market.get("early_shift")
         if early:
             lines.append(f"⚠️ Early Shift: {html.escape(str(early.get('new_direction')))} מול {html.escape(str(early.get('established_direction')))}")
@@ -1932,22 +1958,26 @@ def _market_evidence_block(item: Dict[str, Any]) -> str:
     expected=str(evidence.get("expected_price_direction") or "NEUTRAL").upper()
     counts=evidence.get("counts") or {}
     modules=evidence.get("modules") or {}
+    confirmation=evidence.get("confirmation") or item.get("maxpain_confirmation") or {}
+    status=str(confirmation.get("status") or "UNCONFIRMED")
+    status_icon={"STRONG_CONFIRMED":"🔥","CONFIRMED":"✅","CONFLICT":"⚠️","BELOW_SCORE":"⚪"}.get(status,"🟡")
     lines=["", "🧭 <b>Market Evidence — הסכמה בין משפחות</b>"]
     for key,title in (("positioning","Price+OI"),("futures_flow","Futures Flow"),("spot_flow","Spot Flow")):
         module=modules.get(key) or {}; direction=str(module.get("direction") or "NEUTRAL").upper()
         icon=_flow_direction_icon(direction); label=html.escape(str(module.get("label") or module.get("state") or "No data"))
-        lines.append(f"{icon} {title}: <b>{direction.title()}</b> — {label}")
+        score=float(module.get("score") or 0.0)
+        lines.append(f"{icon} {title}: <b>{direction.title()}</b> ({score:+.1f}) — {label}")
     lines.extend([
         "",
-        f"הסכמה: 🟢 {int(counts.get('BULLISH',0))} | ⚪ {int(counts.get('NEUTRAL',0))} | 🔴 {int(counts.get('BEARISH',0))} | 🟡 {int(counts.get('MIXED',0))}",
+        f"הסכמה: 🟢 {int(counts.get('BULLISH',0))} | ⚪ {int(counts.get('NEUTRAL',0))} | 🔴 {int(counts.get('BEARISH',0))}",
         f"מסקנה: <b>{html.escape(str(evidence.get('classification_label') or '—'))}</b>",
+        f"{status_icon} <b>{html.escape(str(confirmation.get('label') or 'Max Pain לא מאומת כרגע'))}</b>",
     ])
-    relation=str(evidence.get("relation_to_alert") or "NO_CONFIRMATION")
     expected_he="LONG" if expected=="BULLISH" else "SHORT" if expected=="BEARISH" else expected
-    relation_he={"SUPPORT":"אישור","CONFLICT":"קונפליקט","NO_CONFIRMATION":"אין אישור"}.get(relation,relation)
-    lines.append(f"התאמה לכיוון {expected_he}: <b>{relation_he}</b>")
-    lines.append("<i>לקריאה בלבד; אינו משנה את Score או הדירוג.</i>")
+    lines.append(f"כיוון מחיר נבדק: <b>{expected_he}</b>")
+    lines.append("<i>ה-Confirmation אינו משנה את Score או הדירוג.</i>")
     return "\n".join(lines)
+
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     """Build the Stage 76 HTML-formatted Telegram alert card."""
@@ -4032,12 +4062,14 @@ async def market_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as exc:
         await update.message.reply_text(f"❌ /market_state נכשל: {exc!r}")
         return
+    confirmation=result.get("confirmation") or {}
     lines = [
         f"🧭 {symbol} — Market Evidence",
         "המדד לקריאה בלבד ואינו משנה Score, Alerts או Watch.",
         f"Expected price direction: {result.get('expected_price_direction')}",
-        f"Alignment: {float(result.get('alignment_score') or 0):+.2f}/100 — {result.get('classification_label')}",
-        f"Evidence coverage: {float(result.get('coverage_pct') or 0):.0f}% ({result.get('evidence_quality')})",
+        f"Conclusion: {result.get('classification_label')}",
+        f"Support: {result.get('supporting_families',0)}/3 | Opposition: {result.get('opposing_families',0)}",
+        f"Confirmation: {confirmation.get('label')}",
         "",
     ]
     for key, title in (("positioning", "Price+OI Positioning"), ("futures_flow", "Futures Flow"), ("spot_flow", "Spot Flow")):
@@ -4046,9 +4078,14 @@ async def market_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title,
             f"State: {module.get('label') or module.get('state')}",
             f"Direction: {module.get('direction')} | Relation: {module.get('relation')}",
-            f"Contribution: {float(module.get('contribution') or 0):+.2f}/{float(module.get('weight') or 0):.0f}",
+            f"Weighted time-family score: {float(module.get('score') or 0):+.2f}/100",
             "",
         ])
+        for family_key in ("now","short","medium","long"):
+            family=(module.get("time_families") or {}).get(family_key) or {}
+            if family:
+                lines.append(f"  {family.get('label')}: {family.get('direction')} | weight {float(family.get('weight') or 0):.0f}% | quality {float(family.get('quality') or 0)*100:.0f}% | agreement {float(family.get('agreement') or 0)*100:.0f}%")
+        lines.append("")
     if expected == "NEUTRAL":
         lines.append("כדי לחשב Alignment לכיוון מסוים: /market_state BTC LONG")
     await update.message.reply_text("\n".join(lines))

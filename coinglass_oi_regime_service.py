@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+import time_family_engine
+
 import coinglass_history_backfill as history_reference
 
 try:
@@ -441,10 +443,10 @@ def collect_symbol(symbol,price_input):
         overall={"state":"UNAVAILABLE","label":"Price/OI timestamp gap too large","strength":"Unavailable","agreement":0,"valid_windows":0}
         early=False; observations=[]
     else:
-        windows=_window_results(symbol,price,oi,now,rows); overall=_overall(windows); early=_early_transition(windows,overall); observations=_significance_observations(windows)
+        windows=_window_results(symbol,price,oi,now,rows); weighted=time_family_engine.aggregate(windows,time_family_engine.oi_window_evaluator); overall=_overall(windows); overall.update({"weighted_direction":weighted["direction"],"weighted_score":weighted["score"],"weighted_quality":weighted["quality"]}); early=_early_transition(windows,overall); observations=_significance_observations(windows)
     r30=windows["30m"]; legacy=RegimeResult(symbol,r30["state"],r30["label"],r30["direction"],r30.get("price_change_pct"),r30.get("oi_change_pct"),r30["reason"],r30["available"])
     quality=_insert_snapshot(symbol,price,oi,legacy,price_meta,oi_meta)
-    return {"symbol":symbol,"price":price,"open_interest_usd":oi,"windows":windows,"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,**quality}
+    return {"symbol":symbol,"price":price,"open_interest_usd":oi,"windows":windows,"time_families":weighted["families"],"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,**quality}
 
 def collect_many(symbol_prices):
     out={}
@@ -462,8 +464,8 @@ def latest(symbol):
     current=rows[-1]; now=_as_utc(current["collected_at"])
     history_before=rows[:-1]
     windows=_window_results(symbol,float(current["price"]),float(current["open_interest_usd"]),now,history_before)
-    overall=_overall(windows); early=_early_transition(windows,overall); observations=_significance_observations(windows)
-    return {"symbol":symbol,"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,
+    weighted=time_family_engine.aggregate(windows,time_family_engine.oi_window_evaluator); overall=_overall(windows); overall.update({"weighted_direction":weighted["direction"],"weighted_score":weighted["score"],"weighted_quality":weighted["quality"]}); early=_early_transition(windows,overall); observations=_significance_observations(windows)
+    return {"symbol":symbol,"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"time_families":weighted["families"],"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,
             "price_fetched_at":current.get("price_fetched_at"),"oi_fetched_at":current.get("oi_fetched_at"),
             "time_gap_seconds":current.get("time_gap_seconds"),"data_quality_status":current.get("data_quality_status"),
             "price_source":current.get("price_source"),"oi_source":current.get("oi_source")}
