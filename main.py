@@ -84,6 +84,7 @@ WATCH_SCAN_TASK = None
 SPECIFIC_WATCH_TASK = None
 OI_REGIME_TASK = None
 HISTORY_BACKFILL_TASK = None
+FLOW_COLLECTION_TASK = None
 HISTORY_BACKFILL_LOCK = None
 FLOW_BACKFILL_LOCK = None
 SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
@@ -1911,6 +1912,22 @@ def _regime_block(item: Dict[str, Any]) -> str:
 def _flow_direction_icon(direction: str) -> str:
     return {"BULLISH":"🟢","BEARISH":"🔴","MIXED":"🟡"}.get(str(direction or "").upper(),"⚪")
 
+def _flow_snapshot_line(market: Dict[str, Any]) -> str:
+    quality = market.get("quality") or {}
+    raw = quality.get("latest_time")
+    if not raw:
+        return "🕒 Snapshot: לא זמין"
+    try:
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        stamp = stamp.astimezone(timezone.utc)
+        age_minutes = max(0, int((datetime.now(timezone.utc) - stamp).total_seconds() // 60))
+        freshness = "טרי" if age_minutes <= coinglass_flow_foundation.FRESHNESS_TOLERANCE_MINUTES else "⚠️ ישן"
+        return f"🕒 Snapshot: {stamp.strftime('%Y-%m-%d %H:%M UTC')} | גיל {age_minutes} דק׳ | {freshness}"
+    except Exception:
+        return f"🕒 Snapshot: {html.escape(str(raw))}"
+
 def _flow_detail_block(item: Dict[str, Any]) -> str:
     context = item.get("flow_context") or {}
     if not context:
@@ -1923,7 +1940,7 @@ def _flow_detail_block(item: Dict[str, Any]) -> str:
     ):
         market = context.get(key) or {}
         windows = market.get("windows") or {}
-        lines = ["", "━━━━━━━━━━━━━━━━━━━━", heading]
+        lines = ["", "━━━━━━━━━━━━━━━━━━━━", heading, _flow_snapshot_line(market)]
         for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
             w = windows.get(label) or {}
             if not w.get("available"):
@@ -4018,6 +4035,7 @@ def _fmt_flow_money(value):
 def _flow_market_lines(title, data):
     lines=[f"{title}"]
     quality=(data.get("quality") or {})
+    lines.append(_flow_snapshot_line(data))
     lines.append(f"Data quality: {quality.get('status','NO DATA')} | rows {quality.get('rows',0)}")
     for reason in quality.get("reasons") or []:
         lines.append(f"Quality reason: {reason}")
@@ -4289,6 +4307,57 @@ async def _oi_regime_loop() -> None:
         await asyncio.sleep(interval_seconds)
 
 
+async def _collect_flow_once() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Refresh official 30m Futures and Spot CVD rows for all target symbols.
+
+    The collector is independent of Max-Pain DOM scans. Database primary keys
+    prevent duplicate candles, while one-candle overlap refreshes the boundary.
+    """
+    global FLOW_BACKFILL_LOCK
+    if FLOW_BACKFILL_LOCK is None:
+        FLOW_BACKFILL_LOCK = asyncio.Lock()
+    if FLOW_BACKFILL_LOCK.locked():
+        print("[flow-live] skipped: flow backfill/refresh already running", flush=True)
+        return {}
+    started = datetime.now(timezone.utc)
+    print(f"[flow-live] refresh started at {started.isoformat()}", flush=True)
+    async with FLOW_BACKFILL_LOCK:
+        results = await asyncio.to_thread(
+            coinglass_flow_foundation.backfill_all,
+            coinglass_flow_foundation.DEFAULT_BACKFILL_DAYS,
+            False,
+        )
+    ok_count = 0
+    for symbol in coinglass_flow_foundation.TARGET_SYMBOLS:
+        pair = results.get(symbol) or {}
+        parts = []
+        for market in ("futures", "spot"):
+            data = pair.get(market) or {}
+            coverage = await asyncio.to_thread(coinglass_flow_foundation.coverage, symbol, market)
+            latest = coverage.get("max_time")
+            latest_text = latest.isoformat() if latest else "none"
+            ok = bool(data.get("ok"))
+            ok_count += int(ok)
+            action = "skipped-current" if data.get("skipped") else f"received={data.get('received_rows', 0)}"
+            parts.append(f"{market}:{'ok' if ok else 'warning'} {action} latest={latest_text}")
+        print(f"[flow-live] {symbol} | " + " | ".join(parts), flush=True)
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    print(f"[flow-live] refresh finished ok={ok_count}/16 duration={elapsed:.1f}s", flush=True)
+    return results
+
+
+async def _flow_collection_loop() -> None:
+    interval_seconds = coinglass_flow_foundation.FLOW_COLLECTION_INTERVAL_MINUTES * 60
+    while True:
+        try:
+            await _collect_flow_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[flow-live] refresh failed: {exc!r}", flush=True)
+        await asyncio.sleep(interval_seconds)
+
+
 async def start_web_server(bot_app):
     app = web.Application()
     app["bot_app"] = bot_app
@@ -4315,7 +4384,7 @@ async def main():
 
     init_db()
 
-    global WATCH_TASK, WATCH_SCAN_TASK, OI_REGIME_TASK, HISTORY_BACKFILL_TASK
+    global WATCH_TASK, WATCH_SCAN_TASK, OI_REGIME_TASK, HISTORY_BACKFILL_TASK, FLOW_COLLECTION_TASK
     WATCH_TASK = None
     WATCH_SCAN_TASK = None
     WATCH_RUNTIME.update({
@@ -4370,7 +4439,7 @@ async def main():
     await bot_app.start()
 
     print(
-        "[startup] manual-only mode; no collection, alert, or Watch task created",
+        "[startup] manual-only trading mode; no Max-Pain alert or Watch scan started automatically",
         flush=True,
     )
 
@@ -4380,7 +4449,14 @@ async def main():
         coinglass_oi_regime_service.init_db()
         OI_REGIME_TASK = asyncio.create_task(_oi_regime_loop())
         HISTORY_BACKFILL_TASK = asyncio.create_task(_history_backfill_loop())
+        FLOW_COLLECTION_TASK = asyncio.create_task(_flow_collection_loop())
         print("[startup] Price+OI collector enabled (30m)", flush=True)
+        print(
+            f"[startup] Futures+Spot CVD collector enabled "
+            f"({coinglass_flow_foundation.FLOW_COLLECTION_INTERVAL_MINUTES}m; "
+            f"freshness tolerance {coinglass_flow_foundation.FRESHNESS_TOLERANCE_MINUTES}m)",
+            flush=True,
+        )
         print(
             f"[startup] Historical Price+OI backfill freshness check enabled "
             f"(due after {HISTORY_BACKFILL_INTERVAL_HOURS}h; check every "
@@ -4391,7 +4467,8 @@ async def main():
     else:
         OI_REGIME_TASK = None
         HISTORY_BACKFILL_TASK = None
-        print("[startup] Price+OI collector disabled: COINGLASS_API_KEY missing", flush=True)
+        FLOW_COLLECTION_TASK = None
+        print("[startup] Price+OI and CVD collectors disabled: COINGLASS_API_KEY missing", flush=True)
 
     webhook_url = f"{PUBLIC_URL}/telegram"
     await bot_app.bot.delete_webhook(drop_pending_updates=True)
@@ -4425,6 +4502,13 @@ async def main():
             HISTORY_BACKFILL_TASK.cancel()
             try:
                 await HISTORY_BACKFILL_TASK
+            except asyncio.CancelledError:
+                pass
+
+        if FLOW_COLLECTION_TASK is not None and not FLOW_COLLECTION_TASK.done():
+            FLOW_COLLECTION_TASK.cancel()
+            try:
+                await FLOW_COLLECTION_TASK
             except asyncio.CancelledError:
                 pass
 

@@ -121,3 +121,15 @@ Alert and Watch cards are separated into Max Pain, Price+OI, Futures CVD, Spot C
 - Price+OI Early Shift against the expected trade direction now creates Conflict, matching Futures Early Shift behavior.
 - Price+OI Early Shift aligned with the trade does not block Confirmation.
 - Spot remains secondary information only and does not participate in Confirmation or Conflict.
+
+## Stage 91 — Live Futures/Spot CVD freshness
+
+- Futures and Spot CVD are refreshed automatically every 30 minutes when `COINGLASS_API_KEY` is configured.
+- The refresh remains separate from Max-Pain DOM scans and does not share DOM snapshots between commands.
+- Each market is stored in its own table; `(symbol, candle_time)` primary keys prevent duplicate candles.
+- The downloader keeps a one-candle overlap so the latest boundary candle can be refreshed safely through UPSERT.
+- Flow sections now show the latest stored UTC candle, its age, and a stale warning when it exceeds the configured freshness tolerance.
+- Render logs now print one refresh summary for every symbol and for both Futures and Spot.
+- Optional environment settings:
+  - `FLOW_COLLECTION_INTERVAL_MINUTES` (default `30`)
+  - `FLOW_FRESHNESS_TOLERANCE_MINUTES` (default `35`)
