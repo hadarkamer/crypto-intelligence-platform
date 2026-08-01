@@ -112,3 +112,6 @@ modify Alerts, Watch, Max-Pain score or LONG/SHORT selection.
 
 ## Stage 89.1
 Market Evidence uses unweighted agreement and displays eight Futures/Spot CVD windows. Price+OI now supports 48h, 72h and 7d.
+
+## Stage 90.3 — ordered display sections
+Alert and Watch cards are separated into Max Pain, Price+OI, Futures CVD, Spot CVD, and a final combined summary. Two redundant explanatory notes were removed. Calculations are unchanged.

@@ -45,7 +45,7 @@ def test_confirmation_two_of_three_without_opposition():
     out = confidence.combine("BTC", "LONG", regime, flow, maxpain_score=72)
     assert out["supporting_families"] == 2
     assert out["opposing_families"] == 0
-    assert out["confirmation"]["status"] == "CONFIRMED"
+    assert out["confirmation"]["status"] == "STRONG_CONFIRMED"
 
 
 def test_confirmation_requires_score_70():

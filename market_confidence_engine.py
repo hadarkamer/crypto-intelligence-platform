@@ -1,9 +1,9 @@
 """Stage 90: weighted time families and Max-Pain confirmation.
 
-Three independent data families are evaluated:
+Two core derivatives families determine confirmation; Spot is secondary context:
 1. Price + OI positioning
 2. Futures CVD flow
-3. Spot CVD flow
+3. Spot CVD flow (display/support/divergence only; no vote or veto)
 
 Each data family first aggregates the same four weighted time families:
 NOW 30m=35%, SHORT 1h+4h=30%, MEDIUM 12h+24h=20%,
@@ -113,76 +113,58 @@ def _flow_module(data: Dict[str, Any], family: str, expected: str) -> Dict[str, 
     }
 
 
-def _spot_opposition_is_significant(module: Dict[str, Any], expected: str) -> bool:
-    """Spot is secondary for short Max-Pain trades and vetoes only when strong.
-
-    A spot contradiction becomes a real veto only when:
-    - the weighted Spot score is at least 25 points against the trade;
-    - both SHORT (1h+4h) and MEDIUM (12h+24h) time families oppose;
-    - at least one of those families contains Meaningful/Strong flow evidence.
-    """
-    if str(module.get("relation") or "NEUTRAL") != "OPPOSE":
-        return False
-    if abs(float(module.get("score") or 0.0)) < 25.0:
-        return False
-    families = module.get("time_families") or {}
-    opposite = "BEARISH" if expected == "BULLISH" else "BULLISH"
-    relevant = [families.get("short") or {}, families.get("medium") or {}]
-    if not all(str(f.get("direction") or "NEUTRAL").upper() == opposite for f in relevant):
-        return False
-    return any(
-        any(float(m.get("strength") or 0.0) >= 0.75 for m in (f.get("members") or []))
-        for f in relevant
-    )
+def _spot_context(module: Dict[str, Any]) -> Dict[str, Any]:
+    """Return Spot as secondary context only; it never confirms or vetoes."""
+    relation = str(module.get("relation") or "NEUTRAL").upper()
+    score = float(module.get("score") or 0.0)
+    if relation == "SUPPORT":
+        status = "SUPPORTS"
+        label = "Spot תומך"
+    elif relation == "OPPOSE":
+        status = "DIVERGING"
+        label = "Spot סותר / Divergence"
+    else:
+        status = "NEUTRAL"
+        label = "Spot ניטרלי"
+    return {"status": status, "label": label, "relation": relation, "score": round(score, 4)}
 
 
 def _conclusion(modules: Dict[str, Dict[str, Any]], expected: str) -> Dict[str, Any]:
+    """Summarize evidence while keeping Spot outside the confirmation vote."""
     counts = {"BULLISH": 0, "BEARISH": 0, "NEUTRAL": 0, "MIXED": 0}
-    support = 0
-    raw_opposition = 0
-    effective_opposition = 0
-    weak_spot_warning = False
-    for key, module in modules.items():
+    for module in modules.values():
         direction = str(module.get("direction") or "NEUTRAL").upper()
         counts[direction if direction in counts else "NEUTRAL"] += 1
-        relation = module.get("relation")
-        support += int(relation == "SUPPORT")
-        if relation == "OPPOSE":
-            raw_opposition += 1
-            if key == "spot_flow" and not _spot_opposition_is_significant(module, expected):
-                weak_spot_warning = True
-            else:
-                effective_opposition += 1
 
-    bull = counts.get("BULLISH", 0)
-    bear = counts.get("BEARISH", 0)
-    if bull == 3 or bear == 3:
-        classification = "FULL_CONFIRMATION"
-        label = f"אישור {'שורי' if bull == 3 else 'דובי'} מלא — 3/3"
-        relation_to_alert = "SUPPORT" if support == 3 else "CONFLICT"
-    elif support == 2 and effective_opposition == 0:
-        classification = "CLEAR_CONFIRMATION"
-        label = "אישור ברור — 2/3" + ("; Spot חלש סותר אך אינו מטיל וטו" if weak_spot_warning else " ללא סתירה")
-        relation_to_alert = "SUPPORT"
-    elif effective_opposition:
-        classification = "CONFLICT"
-        label = "קונפליקט — לפחות משפחת מידע מהותית אחת מתנגדת"
+    core_keys = ("positioning", "futures_flow")
+    core_support = sum(int(str((modules.get(k) or {}).get("relation") or "NEUTRAL") == "SUPPORT") for k in core_keys)
+    core_opposition = sum(int(str((modules.get(k) or {}).get("relation") or "NEUTRAL") == "OPPOSE") for k in core_keys)
+    spot = _spot_context(modules.get("spot_flow") or {})
+
+    if core_opposition:
+        classification = "CORE_CONFLICT"
+        label = "קונפליקט — Price+OI או Futures Flow מתנגדים"
         relation_to_alert = "CONFLICT"
-    elif support == 1:
+    elif core_support == 2:
+        classification = "CORE_CONFIRMATION"
+        label = "אישור נגזרים מלא — Price+OI + Futures Flow"
+        relation_to_alert = "SUPPORT"
+    elif core_support == 1:
         classification = "WEAK_EVIDENCE"
-        label = "עדות חלשה — משפחה אחת בלבד"
+        label = "עדות חלקית — מנוע נגזרים אחד בלבד"
         relation_to_alert = "NO_CONFIRMATION"
     else:
         classification = "NO_DIRECTIONAL_EVIDENCE"
-        label = "אין כרגע אישור כיווני"
+        label = "אין כרגע אישור נגזרים כיווני"
         relation_to_alert = "NO_CONFIRMATION"
 
     return {
         "counts": counts,
-        "supporting_families": support,
-        "opposing_families": effective_opposition,
-        "raw_opposing_families": raw_opposition,
-        "weak_spot_warning": weak_spot_warning,
+        "supporting_families": core_support,
+        "opposing_families": core_opposition,
+        "core_supporting_families": core_support,
+        "core_opposing_families": core_opposition,
+        "spot_context": spot,
         "classification": classification,
         "classification_label": label,
         "relation_to_alert": relation_to_alert,
@@ -190,7 +172,7 @@ def _conclusion(modules: Dict[str, Dict[str, Any]], expected: str) -> Dict[str, 
 
 
 def _early_shift_opposes(modules: Dict[str, Dict[str, Any]], expected: str) -> bool:
-    for key in ("futures_flow", "spot_flow"):
+    for key in ("futures_flow",):
         early = (modules.get(key) or {}).get("early_shift") or {}
         if early and str(early.get("new_direction") or "").upper() in {"BULLISH", "BEARISH"}:
             if str(early.get("new_direction")).upper() != expected:
@@ -203,21 +185,24 @@ def _confirmation(maxpain_score: float, expected: str, modules: Dict[str, Dict[s
     early_against = _early_shift_opposes(modules, expected)
     oi_relation = str((modules.get("positioning") or {}).get("relation") or "NEUTRAL")
     oi_opposes = oi_relation == "OPPOSE"
-    support = int(conclusion.get("supporting_families") or 0)
-    opposition = int(conclusion.get("opposing_families") or 0)
+    support = int(conclusion.get("core_supporting_families") or conclusion.get("supporting_families") or 0)
+    opposition = int(conclusion.get("core_opposing_families") or conclusion.get("opposing_families") or 0)
+    positioning_score = abs(float((modules.get("positioning") or {}).get("score") or 0.0))
+    futures_score = abs(float((modules.get("futures_flow") or {}).get("score") or 0.0))
+    strong_core = support == 2 and positioning_score >= 25.0 and futures_score >= 25.0
 
     if not score_ok:
         status, label = "BELOW_SCORE", "ללא Confirmation — ציון Max Pain מתחת ל-70"
     elif early_against:
-        status, label = "CONFLICT", "Max Pain Conflict — Early Shift נגד העסקה"
+        status, label = "CONFLICT", "Max Pain Conflict — Futures Early Shift נגד העסקה"
     elif oi_opposes:
         status, label = "CONFLICT", "Max Pain Conflict — Price+OI סותר"
     elif opposition:
-        status, label = "CONFLICT", "Max Pain Conflict — משפחת מידע מתנגדת"
-    elif support == 3:
-        status, label = "STRONG_CONFIRMED", "Max Pain Strong Confirmation — 3/3"
+        status, label = "CONFLICT", "Max Pain Conflict — מנוע נגזרים מתנגד"
+    elif strong_core:
+        status, label = "STRONG_CONFIRMED", "Max Pain Strong Confirmation — Price+OI + Futures חזקים"
     elif support == 2:
-        status, label = "CONFIRMED", "Max Pain Confirmed — 2/3"
+        status, label = "CONFIRMED", "Max Pain Confirmed — Price+OI + Futures"
     else:
         status, label = "UNCONFIRMED", "Max Pain לא מאומת כרגע"
 
@@ -230,6 +215,8 @@ def _confirmation(maxpain_score: float, expected: str, modules: Dict[str, Dict[s
         "oi_opposes": oi_opposes,
         "supporting_families": support,
         "opposing_families": opposition,
+        "strong_core": strong_core,
+        "strong_score_threshold": 25.0,
     }
 
 

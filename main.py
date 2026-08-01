@@ -1850,7 +1850,7 @@ def _regime_block(item: Dict[str, Any]) -> str:
 
     clock = {"30m":"🕒","1h":"🕐","4h":"🕓","12h":"🕛","24h":"🕛","48h":"🕑","72h":"🕒","7d":"🗓️"}
     indent = "\u00a0\u00a0\u00a0\u00a0"
-    lines = [""]
+    lines = ["", "━━━━━━━━━━━━━━━━━━━━", "📊 <b>Price + OI</b>"]
     for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
         w = windows.get(label) or {}
         icon = clock.get(label, "🕒")
@@ -1912,45 +1912,60 @@ def _flow_direction_icon(direction: str) -> str:
     return {"BULLISH":"🟢","BEARISH":"🔴","MIXED":"🟡"}.get(str(direction or "").upper(),"⚪")
 
 def _flow_detail_block(item: Dict[str, Any]) -> str:
-    context=item.get("flow_context") or {}
+    context = item.get("flow_context") or {}
     if not context:
         return ""
-    lines=["", "📈 <b>CVD Flow לפי טווחים</b>"]
-    for key,title in (("futures","Futures"),("spot","Spot")):
-        market=context.get(key) or {}; windows=market.get("windows") or {}
-        lines.append(f"<b>{title}</b>")
-        for label in ("30m","1h","4h","12h","24h","48h","72h","7d"):
-            w=windows.get(label) or {}
+
+    sections = []
+    for key, title, heading in (
+        ("futures", "Futures", "📈 <b>Futures CVD</b>"),
+        ("spot", "Spot", "💱 <b>Spot CVD</b>"),
+    ):
+        market = context.get(key) or {}
+        windows = market.get("windows") or {}
+        lines = ["", "━━━━━━━━━━━━━━━━━━━━", heading]
+        for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
+            w = windows.get(label) or {}
             if not w.get("available"):
-                reason=html.escape(str(w.get("reason") or "אין היסטוריה מספקת"))
+                reason = html.escape(str(w.get("reason") or "אין היסטוריה מספקת"))
                 lines.append(f"⚪ {label}: אין נתון ({reason})")
                 continue
-            direction=str(w.get("direction") or "NEUTRAL").upper()
-            icon=_flow_direction_icon(direction)
-            change=_fmt_flow_money(w.get("cvd_change_usd"))
-            magnitude=html.escape(str(w.get("magnitude") or "—").title())
-            state=html.escape(str(w.get("state") or "NEUTRAL").replace("_"," ").title())
+            direction = str(w.get("direction") or "NEUTRAL").upper()
+            icon = _flow_direction_icon(direction)
+            change = _fmt_flow_money(w.get("cvd_change_usd"))
+            magnitude = html.escape(str(w.get("magnitude") or "—").title())
+            state = html.escape(str(w.get("state") or "NEUTRAL").replace("_", " ").title())
             lines.append(f"{icon} {label}: <b>{change}</b> [{magnitude}] — {state}")
-        groups=market.get("groups") or {}
+
+        groups = market.get("groups") or {}
         if groups:
             lines.append(f"<b>משפחות זמן — {title}</b>")
-            for family_key in ("now","short","medium","long"):
-                family=groups.get(family_key) or {}
-                direction=str(family.get("direction") or "NEUTRAL").upper()
-                icon=_flow_direction_icon(direction)
-                label=html.escape(str(family.get("label") or family_key))
-                quality=float(family.get("quality") or 0.0)*100.0
-                agreement=float(family.get("agreement") or 0.0)*100.0
-                weight=float(family.get("weight") or 0.0)
-                lines.append(f"{icon} {label}: <b>{direction.title()}</b> | {weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%")
-        overall=market.get("overall") or {}
-        weighted_score=float(overall.get("weighted_score") or 0.0)
-        lines.append(f"Overall {title}: <b>{html.escape(str(overall.get('state') or 'NO DATA').replace('_',' ').title())}</b> ({weighted_score:+.1f})")
-        early=market.get("early_shift")
+            for family_key in ("now", "short", "medium", "long"):
+                family = groups.get(family_key) or {}
+                direction = str(family.get("direction") or "NEUTRAL").upper()
+                icon = _flow_direction_icon(direction)
+                label = html.escape(str(family.get("label") or family_key))
+                quality = float(family.get("quality") or 0.0) * 100.0
+                agreement = float(family.get("agreement") or 0.0) * 100.0
+                weight = float(family.get("weight") or 0.0)
+                lines.append(
+                    f"{icon} {label}: <b>{direction.title()}</b> | "
+                    f"{weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%"
+                )
+
+        overall = market.get("overall") or {}
+        weighted_score = float(overall.get("weighted_score") or 0.0)
+        state_text = html.escape(str(overall.get("state") or "NO DATA").replace("_", " ").title())
+        lines.append(f"Overall {title}: <b>{state_text}</b> ({weighted_score:+.1f})")
+        early = market.get("early_shift")
         if early:
-            lines.append(f"⚠️ Early Shift: {html.escape(str(early.get('new_direction')))} מול {html.escape(str(early.get('established_direction')))}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
+            lines.append(
+                f"⚠️ Early Shift: {html.escape(str(early.get('new_direction')))} "
+                f"מול {html.escape(str(early.get('established_direction')))}"
+            )
+        sections.append("\n".join(lines))
+
+    return "\n".join(sections).rstrip()
 
 def _market_evidence_block(item: Dict[str, Any]) -> str:
     evidence=item.get("market_evidence") or {}
@@ -1961,7 +1976,7 @@ def _market_evidence_block(item: Dict[str, Any]) -> str:
     confirmation=evidence.get("confirmation") or item.get("maxpain_confirmation") or {}
     status=str(confirmation.get("status") or "UNCONFIRMED")
     status_icon={"STRONG_CONFIRMED":"🔥","CONFIRMED":"✅","CONFLICT":"⚠️","BELOW_SCORE":"⚪"}.get(status,"🟡")
-    lines=["", "🧭 <b>Market Evidence — הסכמה בין משפחות</b>"]
+    lines=["", "━━━━━━━━━━━━━━━━━━━━", "🧭 <b>סיכום Price+OI, Futures ו-Spot</b>"]
     for key,title in (("positioning","Price+OI"),("futures_flow","Futures Flow"),("spot_flow","Spot Flow")):
         module=modules.get(key) or {}; direction=str(module.get("direction") or "NEUTRAL").upper()
         icon=_flow_direction_icon(direction); label=html.escape(str(module.get("label") or module.get("state") or "No data"))
@@ -1973,9 +1988,10 @@ def _market_evidence_block(item: Dict[str, Any]) -> str:
         f"מסקנה: <b>{html.escape(str(evidence.get('classification_label') or '—'))}</b>",
         f"{status_icon} <b>{html.escape(str(confirmation.get('label') or 'Max Pain לא מאומת כרגע'))}</b>",
     ])
-    expected_he="LONG" if expected=="BULLISH" else "SHORT" if expected=="BEARISH" else expected
-    lines.append(f"כיוון מחיר נבדק: <b>{expected_he}</b>")
-    lines.append("<i>ה-Confirmation אינו משנה את Score או הדירוג.</i>")
+    spot_context=evidence.get("spot_context") or {}
+    if spot_context:
+        spot_icon={"SUPPORTS":"✅","NEUTRAL":"⚪","DIVERGING":"⚠️"}.get(str(spot_context.get("status") or "NEUTRAL"),"⚪")
+        lines.append(f"{spot_icon} Spot משני: <b>{html.escape(str(spot_context.get('label') or 'Spot ניטרלי'))}</b> — ללא השפעה על ה-Confirmation")
     return "\n".join(lines)
 
 
@@ -2039,6 +2055,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
 
     card = (
         conflict_banner
+        + "━━━━━━━━━━━━━━━━━━━━\n🎯 <b>Max Pain</b>\n"
         + f"#{index} {item['symbol']} / {item['timeframe']} | "
         f"{'🔴' if item.get('side') == 'SHORT' else '🟢'} {item['side']} | "
         f"<b>{fmt(item.get('score', item.get('priority')))}</b>\n"
@@ -2099,11 +2116,12 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         )
     card += "\n\n" + counter_line
 
+    card += _quality_block(item, rows)
+    card += "\n\n<b>ציוני Max Pain בכל הטווחים</b>"
+    card += _all_timeframe_scores_block(item, all_items, rows)
     card += _regime_block(item)
     card += _flow_detail_block(item)
     card += _market_evidence_block(item)
-    card += _quality_block(item, rows)
-    card += _all_timeframe_scores_block(item, all_items, rows)
     return card
 
 
@@ -4074,7 +4092,7 @@ async def market_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "המדד לקריאה בלבד ואינו משנה Score, Alerts או Watch.",
         f"Expected price direction: {result.get('expected_price_direction')}",
         f"Conclusion: {result.get('classification_label')}",
-        f"Support: {result.get('supporting_families',0)}/3 | Opposition: {result.get('opposing_families',0)}",
+        f"Core support: {result.get('supporting_families',0)}/2 | Core opposition: {result.get('opposing_families',0)}",
         f"Confirmation: {confirmation.get('label')}",
         "",
     ]

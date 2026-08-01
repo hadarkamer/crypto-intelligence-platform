@@ -17,14 +17,14 @@ def _market(state="BULLISH_CONFIRMED", direction="BULLISH", quality="PASS"):
 def test_all_three_support_long_is_full_confirmation():
     out=m.combine("BTC","LONG",_regime(),{"futures":_market(),"spot":_market()})
     assert out["counts"]["BULLISH"] == 3
-    assert out["classification"] == "FULL_CONFIRMATION"
+    assert out["classification"] == "CORE_CONFIRMATION"
     assert out["relation_to_alert"] == "SUPPORT"
 
 def test_all_three_oppose_long_is_conflict():
     flow={"futures":_market("BEARISH_CONFIRMED","BEARISH"),"spot":_market("BEARISH_CONFIRMED","BEARISH")}
     out=m.combine("BTC","LONG",_regime("BEARISH_BUILDUP"),flow)
     assert out["counts"]["BEARISH"] == 3
-    assert out["classification"] == "FULL_CONFIRMATION"
+    assert out["classification"] == "CORE_CONFLICT"
     assert out["relation_to_alert"] == "CONFLICT"
 
 def test_one_support_two_neutral_is_weak_evidence():
