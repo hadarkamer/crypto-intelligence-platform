@@ -2032,8 +2032,14 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         marker = "🔴 " if value < 500_000 else ""
         return f"{marker}{label}: ${fmt(value, 0)}"
 
+    confirmation = (item.get("maxpain_confirmation") or (item.get("market_evidence") or {}).get("confirmation") or {})
+    conflict_banner = ""
+    if str(confirmation.get("status") or "").upper() == "CONFLICT":
+        conflict_banner = f"⚠️ <b>{html.escape(str(confirmation.get('label') or 'Max Pain Conflict'))}</b>\n\n"
+
     card = (
-        f"#{index} {item['symbol']} / {item['timeframe']} | "
+        conflict_banner
+        + f"#{index} {item['symbol']} / {item['timeframe']} | "
         f"{'🔴' if item.get('side') == 'SHORT' else '🟢'} {item['side']} | "
         f"<b>{fmt(item.get('score', item.get('priority')))}</b>\n"
         f"ממוצע {item['side']} בכל הטווחים: <b>{fmt(average_score)}</b>\n\n"

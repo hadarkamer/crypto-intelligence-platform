@@ -113,15 +113,46 @@ def _flow_module(data: Dict[str, Any], family: str, expected: str) -> Dict[str, 
     }
 
 
+def _spot_opposition_is_significant(module: Dict[str, Any], expected: str) -> bool:
+    """Spot is secondary for short Max-Pain trades and vetoes only when strong.
+
+    A spot contradiction becomes a real veto only when:
+    - the weighted Spot score is at least 25 points against the trade;
+    - both SHORT (1h+4h) and MEDIUM (12h+24h) time families oppose;
+    - at least one of those families contains Meaningful/Strong flow evidence.
+    """
+    if str(module.get("relation") or "NEUTRAL") != "OPPOSE":
+        return False
+    if abs(float(module.get("score") or 0.0)) < 25.0:
+        return False
+    families = module.get("time_families") or {}
+    opposite = "BEARISH" if expected == "BULLISH" else "BULLISH"
+    relevant = [families.get("short") or {}, families.get("medium") or {}]
+    if not all(str(f.get("direction") or "NEUTRAL").upper() == opposite for f in relevant):
+        return False
+    return any(
+        any(float(m.get("strength") or 0.0) >= 0.75 for m in (f.get("members") or []))
+        for f in relevant
+    )
+
+
 def _conclusion(modules: Dict[str, Dict[str, Any]], expected: str) -> Dict[str, Any]:
     counts = {"BULLISH": 0, "BEARISH": 0, "NEUTRAL": 0, "MIXED": 0}
-    support = opposition = 0
-    for module in modules.values():
+    support = 0
+    raw_opposition = 0
+    effective_opposition = 0
+    weak_spot_warning = False
+    for key, module in modules.items():
         direction = str(module.get("direction") or "NEUTRAL").upper()
         counts[direction if direction in counts else "NEUTRAL"] += 1
         relation = module.get("relation")
         support += int(relation == "SUPPORT")
-        opposition += int(relation == "OPPOSE")
+        if relation == "OPPOSE":
+            raw_opposition += 1
+            if key == "spot_flow" and not _spot_opposition_is_significant(module, expected):
+                weak_spot_warning = True
+            else:
+                effective_opposition += 1
 
     bull = counts.get("BULLISH", 0)
     bear = counts.get("BEARISH", 0)
@@ -129,13 +160,13 @@ def _conclusion(modules: Dict[str, Dict[str, Any]], expected: str) -> Dict[str, 
         classification = "FULL_CONFIRMATION"
         label = f"אישור {'שורי' if bull == 3 else 'דובי'} מלא — 3/3"
         relation_to_alert = "SUPPORT" if support == 3 else "CONFLICT"
-    elif support == 2 and opposition == 0:
+    elif support == 2 and effective_opposition == 0:
         classification = "CLEAR_CONFIRMATION"
-        label = "אישור ברור — 2/3 ללא סתירה"
+        label = "אישור ברור — 2/3" + ("; Spot חלש סותר אך אינו מטיל וטו" if weak_spot_warning else " ללא סתירה")
         relation_to_alert = "SUPPORT"
-    elif opposition:
+    elif effective_opposition:
         classification = "CONFLICT"
-        label = "קונפליקט — לפחות משפחת מידע אחת מתנגדת"
+        label = "קונפליקט — לפחות משפחת מידע מהותית אחת מתנגדת"
         relation_to_alert = "CONFLICT"
     elif support == 1:
         classification = "WEAK_EVIDENCE"
@@ -149,7 +180,9 @@ def _conclusion(modules: Dict[str, Dict[str, Any]], expected: str) -> Dict[str, 
     return {
         "counts": counts,
         "supporting_families": support,
-        "opposing_families": opposition,
+        "opposing_families": effective_opposition,
+        "raw_opposing_families": raw_opposition,
+        "weak_spot_warning": weak_spot_warning,
         "classification": classification,
         "classification_label": label,
         "relation_to_alert": relation_to_alert,

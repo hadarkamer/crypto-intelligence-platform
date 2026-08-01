@@ -127,7 +127,7 @@ def oi_window_evaluator(window: Mapping[str, Any]) -> Tuple[str, float]:
             except (TypeError, ValueError):
                 pass
     if ranks:
-        rank_factor = {0: 0.0, 1: 0.45, 2: 0.75, 3: 1.0}.get(min(ranks), 0.0)
+        rank_factor = {0: 0.0, 1: 0.45, 2: 0.75, 3: 0.90, 4: 1.0}.get(min(ranks), 0.0)
         base *= rank_factor
     return direction, base
 
