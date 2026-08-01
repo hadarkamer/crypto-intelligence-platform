@@ -8,8 +8,9 @@ def test_five_windows_and_majority():
     now=datetime.now(timezone.utc)
     hist=[row(now,1440,90,900),row(now,720,92,920),row(now,240,94,940),row(now,60,98,980),row(now,30,99,990)]
     w=r._window_results("BTC",100,1000,now,hist)
-    assert list(w)==["30m","1h","4h","12h","24h"]
-    assert all(x["state"]=="BULLISH_BUILDUP" for x in w.values())
+    assert list(w)==["30m","1h","4h","12h","24h","48h","72h","7d"]
+    assert all(w[label]["state"]=="BULLISH_BUILDUP" for label in ("30m","1h","4h","12h","24h"))
+    assert all(not w[label]["available"] for label in ("48h","72h","7d"))
     o=r._overall(w)
     assert o["agreement"]==5 and o["strength"]=="Strong"
 

@@ -1848,7 +1848,7 @@ def _regime_block(item: Dict[str, Any]) -> str:
             f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"
         )
 
-    clock = {"30m": "🕒", "1h": "🕐", "4h": "🕓", "12h": "🕛", "24h": "🕛"}
+    clock = {"30m":"🕒","1h":"🕐","4h":"🕓","12h":"🕛","24h":"🕛","48h":"🕑","72h":"🕒","7d":"🗓️"}
     indent = "\u00a0\u00a0\u00a0\u00a0"
     lines = [""]
     for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
@@ -1881,7 +1881,8 @@ def _regime_block(item: Dict[str, Any]) -> str:
     overall_label = html.escape(str(overall.get("label") or "אין מסקנה"))
     strength = html.escape(str(overall.get("strength") or "—"))
     agreement = int(overall.get("agreement") or 0)
-    lines.extend(["", f"Overall: <b>{overall_label} — {strength}</b> ({agreement}/5)"])
+    valid_windows = int(overall.get("valid_windows") or 0)
+    lines.extend(["", f"Overall: <b>{overall_label} — {strength}</b> ({agreement}/{valid_windows or 8})"])
     if regime.get("early_transition"):
         lines.append("⚠️ <b>Early Transition:</b> 30m + 1h סוטים מהמבנה הרחב")
     observations = regime.get("significance_observations") or []
@@ -1894,30 +1895,58 @@ def _regime_block(item: Dict[str, Any]) -> str:
 
 
 
-def _market_evidence_block(item: Dict[str, Any]) -> str:
-    evidence = item.get("market_evidence") or {}
-    if not evidence:
+def _flow_direction_icon(direction: str) -> str:
+    return {"BULLISH":"🟢","BEARISH":"🔴","MIXED":"🟡"}.get(str(direction or "").upper(),"⚪")
+
+def _flow_detail_block(item: Dict[str, Any]) -> str:
+    context=item.get("flow_context") or {}
+    if not context:
         return ""
-    score = float(evidence.get("alignment_score") or 0.0)
-    expected = html.escape(str(evidence.get("expected_price_direction") or "—"))
-    label = html.escape(str(evidence.get("classification_label") or "—"))
-    coverage = float(evidence.get("coverage_pct") or 0.0)
-    lines = [
+    lines=["", "📈 <b>CVD Flow לפי טווחים</b>"]
+    for key,title in (("futures","Futures"),("spot","Spot")):
+        market=context.get(key) or {}; windows=market.get("windows") or {}
+        lines.append(f"<b>{title}</b>")
+        for label in ("30m","1h","4h","12h","24h","48h","72h","7d"):
+            w=windows.get(label) or {}
+            if not w.get("available"):
+                reason=html.escape(str(w.get("reason") or "אין היסטוריה מספקת"))
+                lines.append(f"⚪ {label}: אין נתון ({reason})")
+                continue
+            direction=str(w.get("direction") or "NEUTRAL").upper()
+            icon=_flow_direction_icon(direction)
+            change=_fmt_flow_money(w.get("cvd_change_usd"))
+            magnitude=html.escape(str(w.get("magnitude") or "—").title())
+            state=html.escape(str(w.get("state") or "NEUTRAL").replace("_"," ").title())
+            lines.append(f"{icon} {label}: ΔCVD <b>{change}</b> [{magnitude}] — {state}")
+        overall=market.get("overall") or {}
+        lines.append(f"Overall {title}: <b>{html.escape(str(overall.get('state') or 'NO DATA').replace('_',' ').title())}</b>")
+        early=market.get("early_shift")
+        if early:
+            lines.append(f"⚠️ Early Shift: {html.escape(str(early.get('new_direction')))} מול {html.escape(str(early.get('established_direction')))}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+def _market_evidence_block(item: Dict[str, Any]) -> str:
+    evidence=item.get("market_evidence") or {}
+    if not evidence: return ""
+    expected=str(evidence.get("expected_price_direction") or "NEUTRAL").upper()
+    counts=evidence.get("counts") or {}
+    modules=evidence.get("modules") or {}
+    lines=["", "🧭 <b>Market Evidence — הסכמה בין משפחות</b>"]
+    for key,title in (("positioning","Price+OI"),("futures_flow","Futures Flow"),("spot_flow","Spot Flow")):
+        module=modules.get(key) or {}; direction=str(module.get("direction") or "NEUTRAL").upper()
+        icon=_flow_direction_icon(direction); label=html.escape(str(module.get("label") or module.get("state") or "No data"))
+        lines.append(f"{icon} {title}: <b>{direction.title()}</b> — {label}")
+    lines.extend([
         "",
-        "🧭 <b>Market Evidence</b>",
-        f"כיוון מחיר משתמע: <b>{expected}</b>",
-        f"Alignment: <b>{score:+.2f}/100 — {label}</b>",
-        f"Evidence coverage: {coverage:.0f}%",
-    ]
-    modules = evidence.get("modules") or {}
-    for key, title in (("positioning", "Price+OI"), ("futures_flow", "Futures Flow"), ("spot_flow", "Spot Flow")):
-        module = modules.get(key) or {}
-        contribution = float(module.get("contribution") or 0.0)
-        weight = float(module.get("weight") or 0.0)
-        state = html.escape(str(module.get("label") or module.get("state") or "No data"))
-        relation = html.escape(str(module.get("relation") or "NEUTRAL"))
-        lines.append(f"• {title}: <b>{contribution:+.2f}/{weight:.0f}</b> | {relation} | {state}")
-    lines.append("<i>המדד לקריאה בלבד ואינו משנה את Score או הדירוג.</i>")
+        f"הסכמה: 🟢 {int(counts.get('BULLISH',0))} | ⚪ {int(counts.get('NEUTRAL',0))} | 🔴 {int(counts.get('BEARISH',0))} | 🟡 {int(counts.get('MIXED',0))}",
+        f"מסקנה: <b>{html.escape(str(evidence.get('classification_label') or '—'))}</b>",
+    ])
+    relation=str(evidence.get("relation_to_alert") or "NO_CONFIRMATION")
+    expected_he="LONG" if expected=="BULLISH" else "SHORT" if expected=="BEARISH" else expected
+    relation_he={"SUPPORT":"אישור","CONFLICT":"קונפליקט","NO_CONFIRMATION":"אין אישור"}.get(relation,relation)
+    lines.append(f"התאמה לכיוון {expected_he}: <b>{relation_he}</b>")
+    lines.append("<i>לקריאה בלבד; אינו משנה את Score או הדירוג.</i>")
     return "\n".join(lines)
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
@@ -2035,6 +2064,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     card += "\n\n" + counter_line
 
     card += _regime_block(item)
+    card += _flow_detail_block(item)
     card += _market_evidence_block(item)
     card += _quality_block(item, rows)
     card += _all_timeframe_scores_block(item, all_items, rows)
@@ -3823,7 +3853,7 @@ async def oi_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "P25–P75 = הטווח האמצעי/טיפוסי בהיסטוריה.",
         "P90/P95 = תנועות גדולות יותר היסטורית.",
     ]
-    for label in ("30m", "1h", "4h", "12h", "24h"):
+    for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
         window = (stats.get("windows") or {}).get(label) or {}
         price = window.get("price_abs_change_pct") or {}
         oi = window.get("oi_abs_change_pct") or {}
@@ -3883,7 +3913,7 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 {symbol} — Price + OI Regime",
         "הפקודה מציגה את החישוב השמור האחרון; היא אינה אוספת נתונים מחדש.",
     ]
-    for label in ("30m", "1h", "4h", "12h", "24h"):
+    for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
         w = windows.get(label) or {}
         lines.append("")
         if not w.get("available"):
@@ -3904,7 +3934,7 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         f"מסקנה כוללת: {overall.get('label') or 'לא זמינה'}",
         f"עוצמה: {overall.get('strength') or 'לא זמינה'}",
-        f"הסכמה: {overall.get('agreement', 0)}/5",
+        f"הסכמה: {overall.get('agreement', 0)}/{overall.get('valid_windows', 0) or 8}",
         f"Early Transition: {'כן' if regime.get('early_transition') else 'לא'}",
     ])
 
@@ -4269,7 +4299,6 @@ async def main():
     bot_app.add_handler(CommandHandler("flow_backfill", flow_backfill_cmd))
     bot_app.add_handler(CommandHandler("flow_state", flow_state_cmd))
     bot_app.add_handler(CommandHandler("flow_stats", flow_stats_cmd))
-    bot_app.add_handler(CommandHandler("market_state", market_state_cmd))
     bot_app.add_handler(CommandHandler("oi_validation", oi_validation_cmd))
     bot_app.add_handler(CommandHandler("oi_stats", oi_stats_cmd))
     bot_app.add_handler(CommandHandler("oi_state", oi_state_cmd))

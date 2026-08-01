@@ -108,3 +108,7 @@ It reads the Futures/Spot Buy-Sell and official CVD history saved by Stage 87.2,
 compares CVD changes with P25/P50/P75/P90 baselines for the same symbol, market
 and timeframe, and produces Momentum/Trend/Structure Flow conclusions. It does not
 modify Alerts, Watch, Max-Pain score or LONG/SHORT selection.
+
+
+## Stage 89.1
+Market Evidence uses unweighted agreement and displays eight Futures/Spot CVD windows. Price+OI now supports 48h, 72h and 7d.

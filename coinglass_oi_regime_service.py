@@ -35,8 +35,11 @@ HISTORY_RETENTION_DAYS = 365
 REFERENCE_TOLERANCE_MINUTES = 20
 PRICE_OI_PASS_SECONDS = 30
 PRICE_OI_WARNING_SECONDS = 60
-REGIME_WINDOWS_MINUTES = (30, 60, 240, 720, 1440)
-WINDOW_LABELS = {30: "30m", 60: "1h", 240: "4h", 720: "12h", 1440: "24h"}
+REGIME_WINDOWS_MINUTES = (30, 60, 240, 720, 1440, 2880, 4320, 10080)
+WINDOW_LABELS = {
+    30: "30m", 60: "1h", 240: "4h", 720: "12h", 1440: "24h",
+    2880: "48h", 4320: "72h", 10080: "7d",
+}
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
 
@@ -332,44 +335,37 @@ def _window_results(symbol, price, oi, now=None, history_rows=None):
     return out
 
 def _overall(windows):
-    """Aggregate the five regime windows without treating neutral as disagreement.
+    """Aggregate all available Price+OI windows by a true majority.
 
-    Neutral/Inconclusive is a real classified outcome once a window is available.
-    A lone directional window against four neutral windows must therefore remain
-    Neutral/Inconclusive, not Mixed/Transition. Mixed is reserved for cases where
-    directional evidence is genuinely split and no state reaches 3/5.
+    The denominator is dynamic because a newly deployed installation may not
+    yet have every long window. Neutral is a real outcome. A directional or
+    neutral state is confirmed only when it reaches a strict majority of the
+    available windows.
     """
     available=[w for w in windows.values() if w.get("available") and w.get("state") != "UNAVAILABLE"]
     total=len(available)
     if not available:
         return {"state":"NEUTRAL_INCONCLUSIVE","label":"Neutral / Inconclusive","strength":"Inconclusive","agreement":0,"valid_windows":0}
 
-    neutral_count=sum(1 for w in available if w.get("state") == "NEUTRAL_INCONCLUSIVE")
-    directional=[w for w in available if w.get("state") != "NEUTRAL_INCONCLUSIVE"]
+    majority=(total//2)+1
     counts={}
-    for w in directional:
-        counts[w["state"]]=counts.get(w["state"],0)+1
-
-    # Neutral majority is itself the dominant conclusion.
-    if neutral_count >= 3:
-        strength = "Strong / Confirmed" if neutral_count >= 4 else "Confirmed"
-        return {"state":"NEUTRAL_INCONCLUSIVE","label":"Neutral / Inconclusive","strength":strength,
-                "agreement":neutral_count,"valid_windows":total}
-
-    if not counts:
-        return {"state":"NEUTRAL_INCONCLUSIVE","label":"Neutral / Inconclusive","strength":"Inconclusive",
-                "agreement":neutral_count,"valid_windows":total}
-
+    for w in available:
+        state=w.get("state") or "NEUTRAL_INCONCLUSIVE"
+        counts[state]=counts.get(state,0)+1
     state,n=max(counts.items(),key=lambda kv:kv[1])
-    if n>=5: strength="Strong"
-    elif n==4: strength="Strong / Confirmed"
-    elif n==3: strength="Confirmed"
-    else: strength="Mixed / Transition"
 
-    if n < 3:
-        state="MIXED_TRANSITION"; label="Mixed / Transition"
+    if n < majority:
+        return {"state":"MIXED_TRANSITION","label":"Mixed / Transition","strength":"Mixed / Transition",
+                "agreement":n,"valid_windows":total}
+
+    ratio=n/total if total else 0.0
+    if n == total:
+        strength="Strong"
+    elif ratio >= 0.75:
+        strength="Strong / Confirmed"
     else:
-        label=_state_label(state)
+        strength="Confirmed"
+    label="Neutral / Inconclusive" if state=="NEUTRAL_INCONCLUSIVE" else _state_label(state)
     return {"state":state,"label":label,"strength":strength,"agreement":n,"valid_windows":total}
 
 def _significance_observations(windows):
@@ -399,7 +395,7 @@ def _significance_observations(windows):
 def _early_transition(windows, overall):
     if overall.get("state") in {"MIXED_TRANSITION","NEUTRAL_INCONCLUSIVE"}: return False
     short=[windows.get("30m",{}),windows.get("1h",{})]
-    broad=[windows.get("4h",{}),windows.get("12h",{}),windows.get("24h",{})]
+    broad=[windows.get("4h",{}),windows.get("12h",{}),windows.get("24h",{}),windows.get("48h",{}),windows.get("72h",{}),windows.get("7d",{})]
     short_states=[x.get("state") for x in short if x.get("available") and x.get("state") not in {"NEUTRAL_INCONCLUSIVE","UNAVAILABLE"}]
     broad_states=[x.get("state") for x in broad if x.get("available") and x.get("state") not in {"NEUTRAL_INCONCLUSIVE","UNAVAILABLE"}]
     return len(short_states)==2 and short_states[0]==short_states[1] and len(broad_states)>=2 and short_states[0]!=overall.get("state")
@@ -490,7 +486,8 @@ def composite_conclusion(regime,alert_side):
     if state=="MIXED_TRANSITION": return "Price+OI מציג Mixed / Transition; אין אישור כיווני כולל."
     direction="LONG" if state in {"BULLISH_BUILDUP","SHORT_COVERING"} else "SHORT"
     relation="תומך" if implied_price_direction==direction else "מנוגד"
-    suffix=f" ({agreement}/5)" if agreement is not None else ""
+    valid_windows=overall.get("valid_windows") or 5
+    suffix=f" ({agreement}/{valid_windows})" if agreement is not None else ""
     # Long Unwinding and Short Covering still participate in the same
     # support/opposition comparison. Their falling OI describes the quality of
     # the move; it must not bypass the directional conclusion.
