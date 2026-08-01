@@ -1917,7 +1917,7 @@ def _flow_detail_block(item: Dict[str, Any]) -> str:
             change=_fmt_flow_money(w.get("cvd_change_usd"))
             magnitude=html.escape(str(w.get("magnitude") or "—").title())
             state=html.escape(str(w.get("state") or "NEUTRAL").replace("_"," ").title())
-            lines.append(f"{icon} {label}: ΔCVD <b>{change}</b> [{magnitude}] — {state}")
+            lines.append(f"{icon} {label}: <b>{change}</b> [{magnitude}] — {state}")
         overall=market.get("overall") or {}
         lines.append(f"Overall {title}: <b>{html.escape(str(overall.get('state') or 'NO DATA').replace('_',' ').title())}</b>")
         early=market.get("early_shift")
