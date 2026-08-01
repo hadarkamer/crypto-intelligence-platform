@@ -66,6 +66,29 @@ def _positioning_module(regime: Dict[str, Any], expected: str) -> Dict[str, Any]
         }.get(state)
         if fallback:
             direction, score = fallback
+    early_shift = None
+    if bool(regime.get("early_transition")):
+        # Price+OI early transition is confirmed by the two shortest windows
+        # (30m and 1h) agreeing against the established broader state.
+        short_states = [
+            str((windows.get(label) or {}).get("state") or "").upper()
+            for label in ("30m", "1h")
+            if (windows.get(label) or {}).get("available")
+        ]
+        if len(short_states) == 2 and short_states[0] == short_states[1]:
+            state_direction = {
+                "BULLISH_BUILDUP": "BULLISH",
+                "SHORT_COVERING": "BULLISH",
+                "BEARISH_BUILDUP": "BEARISH",
+                "LONG_UNWINDING": "BEARISH",
+            }.get(short_states[0])
+            if state_direction:
+                early_shift = {
+                    "new_direction": state_direction,
+                    "new_state": short_states[0],
+                    "source": "Price+OI",
+                }
+
     return {
         "family": "Price+OI",
         "available": available,
@@ -76,7 +99,7 @@ def _positioning_module(regime: Dict[str, Any], expected: str) -> Dict[str, Any]
         "state": str(overall.get("state") or "UNAVAILABLE").upper(),
         "label": str(overall.get("label") or overall.get("state") or "No data").replace("_", " "),
         "time_families": weighted.get("families") or {},
-        "early_shift": bool(regime.get("early_transition")),
+        "early_shift": early_shift,
     }
 
 
@@ -172,7 +195,7 @@ def _conclusion(modules: Dict[str, Dict[str, Any]], expected: str) -> Dict[str, 
 
 
 def _early_shift_opposes(modules: Dict[str, Dict[str, Any]], expected: str) -> bool:
-    for key in ("futures_flow",):
+    for key in ("positioning", "futures_flow"):
         early = (modules.get(key) or {}).get("early_shift") or {}
         if early and str(early.get("new_direction") or "").upper() in {"BULLISH", "BEARISH"}:
             if str(early.get("new_direction")).upper() != expected:
@@ -194,7 +217,17 @@ def _confirmation(maxpain_score: float, expected: str, modules: Dict[str, Dict[s
     if not score_ok:
         status, label = "BELOW_SCORE", "ללא Confirmation — ציון Max Pain מתחת ל-70"
     elif early_against:
-        status, label = "CONFLICT", "Max Pain Conflict — Futures Early Shift נגד העסקה"
+        position_early = (modules.get("positioning") or {}).get("early_shift") or {}
+        futures_early = (modules.get("futures_flow") or {}).get("early_shift") or {}
+        position_against = str(position_early.get("new_direction") or "").upper() in {"BULLISH", "BEARISH"} and str(position_early.get("new_direction") or "").upper() != expected
+        futures_against = str(futures_early.get("new_direction") or "").upper() in {"BULLISH", "BEARISH"} and str(futures_early.get("new_direction") or "").upper() != expected
+        if position_against and futures_against:
+            label = "Max Pain Conflict — Price+OI ו-Futures Early Shift נגד העסקה"
+        elif position_against:
+            label = "Max Pain Conflict — Price+OI Early Shift נגד העסקה"
+        else:
+            label = "Max Pain Conflict — Futures Early Shift נגד העסקה"
+        status = "CONFLICT"
     elif oi_opposes:
         status, label = "CONFLICT", "Max Pain Conflict — Price+OI סותר"
     elif opposition:

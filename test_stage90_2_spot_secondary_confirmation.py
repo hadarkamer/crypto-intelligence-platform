@@ -55,3 +55,26 @@ def test_spot_early_shift_does_not_create_conflict():
     conclusion = m._conclusion(modules, "BULLISH")
     out = m._confirmation(72, "BULLISH", modules, conclusion)
     assert out["status"] == "STRONG_CONFIRMED"
+
+
+def test_price_oi_early_shift_against_trade_creates_conflict():
+    modules = {
+        "positioning": _module("SUPPORT", "BULLISH", 40, {"new_direction": "BEARISH"}),
+        "futures_flow": _module("SUPPORT", "BULLISH", 35),
+        "spot_flow": _module("NEUTRAL", "NEUTRAL", 0),
+    }
+    conclusion = m._conclusion(modules, "BULLISH")
+    out = m._confirmation(72, "BULLISH", modules, conclusion)
+    assert out["status"] == "CONFLICT"
+    assert "Price+OI Early Shift" in out["label"]
+
+
+def test_price_oi_early_shift_with_trade_does_not_create_conflict():
+    modules = {
+        "positioning": _module("SUPPORT", "BULLISH", 40, {"new_direction": "BULLISH"}),
+        "futures_flow": _module("SUPPORT", "BULLISH", 35),
+        "spot_flow": _module("NEUTRAL", "NEUTRAL", 0),
+    }
+    conclusion = m._conclusion(modules, "BULLISH")
+    out = m._confirmation(72, "BULLISH", modules, conclusion)
+    assert out["status"] == "STRONG_CONFIRMED"

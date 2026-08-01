@@ -115,3 +115,9 @@ Market Evidence uses unweighted agreement and displays eight Futures/Spot CVD wi
 
 ## Stage 90.3 — ordered display sections
 Alert and Watch cards are separated into Max Pain, Price+OI, Futures CVD, Spot CVD, and a final combined summary. Two redundant explanatory notes were removed. Calculations are unchanged.
+
+## Stage 90.4 — ordered display + Price+OI Early Shift conflict
+- Preserves the ordered alert display sections from Stage 90.3.
+- Price+OI Early Shift against the expected trade direction now creates Conflict, matching Futures Early Shift behavior.
+- Price+OI Early Shift aligned with the trade does not block Confirmation.
+- Spot remains secondary information only and does not participate in Confirmation or Conflict.
