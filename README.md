@@ -136,3 +136,10 @@ Alert and Watch cards are separated into Max Pain, Price+OI, Futures CVD, Spot C
 
 ## Stage 91.1 — Fast CVD refresh
 The automatic Futures+Spot CVD refresh checks every 5 minutes by default. CVD freshness is displayed from the close of the official 30-minute CoinGlass candle, avoiding an artificial extra 30 minutes of age.
+
+
+## Stage 92 — Directional alert and separate confirmation
+
+- `/alert SYMBOL long|short` uses the existing full directional scoring and the normal alert card layout.
+- Confirmation/strong-confirmation/conflict transitions can produce a short separate Telegram message.
+- Repeated unchanged statuses are suppressed per symbol, timeframe and direction during the running process.

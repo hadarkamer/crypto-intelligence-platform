@@ -94,6 +94,7 @@ PROCESSED_UPDATE_IDS = set()
 PROCESSED_UPDATE_ORDER = []
 MAX_PROCESSED_UPDATE_IDS = 500
 ALERT_ACTIVE = False
+CONFIRMATION_STATE: Dict[str, str] = {}
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 HISTORY_BACKFILL_INTERVAL_HOURS = max(1, int(os.getenv("HISTORY_BACKFILL_INTERVAL_HOURS", "24")))
 HISTORY_BACKFILL_STARTUP_DELAY_SECONDS = max(0, int(os.getenv("HISTORY_BACKFILL_STARTUP_DELAY_SECONDS", "60")))
@@ -1081,6 +1082,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/alerts_top8 — סריקה חיה רק עבור 8 מטבעות הליבה\n"
         "/alerts_liq 1000000 — Alerts רק מעל סך נזילות מינימלי בדולרים\n"
         "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
+        "/alert BTC long|short — אותו חישוב מלא, בכיוון שנבחר ידנית\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — הפעלת צפייה כללית\n"
         "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
@@ -2016,6 +2018,77 @@ def _market_evidence_block(item: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+
+def _confirmation_state_key(item: Dict[str, Any]) -> str:
+    return "|".join([
+        str(item.get("symbol") or "").upper(),
+        str(item.get("timeframe") or ""),
+        str(item.get("side") or "").upper(),
+    ])
+
+
+def _confirmation_transition_message(item: Dict[str, Any]) -> Optional[str]:
+    """Return one short, separate Telegram message only on a meaningful transition."""
+    confirmation = (
+        item.get("maxpain_confirmation")
+        or (item.get("market_evidence") or {}).get("confirmation")
+        or {}
+    )
+    status = str(confirmation.get("status") or "UNCONFIRMED").upper()
+    key = _confirmation_state_key(item)
+    previous = CONFIRMATION_STATE.get(key)
+    CONFIRMATION_STATE[key] = status
+
+    if status not in {"CONFIRMED", "STRONG_CONFIRMED", "CONFLICT"}:
+        return None
+    if previous == status:
+        return None
+
+    symbol = html.escape(str(item.get("symbol") or "—"))
+    timeframe = html.escape(str(item.get("timeframe") or "—"))
+    side = str(item.get("side") or "—").upper()
+    side_icon = "🟢" if side == "LONG" else "🔴" if side == "SHORT" else "⚪"
+    score = fmt(item.get("score", item.get("priority")))
+    evidence = item.get("market_evidence") or {}
+    modules = evidence.get("modules") or {}
+
+    def module_line(key_name: str, title: str) -> str:
+        module = modules.get(key_name) or {}
+        direction = str(module.get("direction") or "NEUTRAL").upper()
+        icon = _flow_direction_icon(direction)
+        return f"{icon} {title}: <b>{html.escape(direction.title())}</b>"
+
+    if status == "STRONG_CONFIRMED":
+        title = "🔥🔥 <b>MAX PAIN STRONG CONFIRMATION</b> 🔥🔥"
+        conclusion = "אישור חזק לכיוון העסקה התקבל כעת."
+    elif status == "CONFIRMED":
+        title = "✅ <b>MAX PAIN CONFIRMED</b>"
+        conclusion = "אישור לכיוון העסקה התקבל כעת."
+    else:
+        title = "⚠️ <b>MAX PAIN CONFLICT</b>"
+        conclusion = "ראיות השוק מתנגשות כעת עם כיוון העסקה."
+
+    label = html.escape(str(confirmation.get("label") or conclusion))
+    return "\n".join([
+        title,
+        "",
+        f"<b>{symbol} | {side_icon} {side} | {timeframe}</b>",
+        f"Score: <b>{score}</b>",
+        "",
+        module_line("positioning", "Price+OI"),
+        module_line("futures_flow", "Futures CVD"),
+        module_line("spot_flow", "Spot CVD"),
+        "",
+        f"<b>{label}</b>",
+    ])
+
+
+async def _send_alert_with_confirmation(bot, chat_id: int, card: str, item: Dict[str, Any]) -> None:
+    await bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
+    separate = _confirmation_transition_message(item)
+    if separate:
+        await bot.send_message(chat_id=chat_id, text=separate, parse_mode="HTML")
+
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     """Build the Stage 76 HTML-formatted Telegram alert card."""
     c = item.get("components", {})
@@ -2251,10 +2324,11 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             for index, item in enumerate(items, start=1):
-                await update.message.reply_text(
-                    _alert_card(index, item, all_items, rows),
-                    parse_mode="HTML",
-                )
+                card = _alert_card(index, item, all_items, rows)
+                await update.message.reply_text(card, parse_mode="HTML")
+                separate = _confirmation_transition_message(item)
+                if separate:
+                    await update.message.reply_text(separate, parse_mode="HTML")
             await update.message.reply_text(alert_summary.format_alert_count_summary(items))
 
         except asyncio.CancelledError:
@@ -2333,10 +2407,11 @@ async def alert_check_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             for index, item in enumerate(items, start=1):
-                await update.message.reply_text(
-                    _alert_card(index, item, top8_all_items, rows),
-                    parse_mode="HTML",
-                )
+                card = _alert_card(index, item, top8_all_items, rows)
+                await update.message.reply_text(card, parse_mode="HTML")
+                separate = _confirmation_transition_message(item)
+                if separate:
+                    await update.message.reply_text(separate, parse_mode="HTML")
             await update.message.reply_text(
                 alert_summary.format_alert_count_summary(items)
             )
@@ -2431,10 +2506,11 @@ async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAUL
                 f"טווחים שנקלטו: {', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in TIMEFRAMES)}"
             )
             for index, item in enumerate(items, start=1):
-                await update.message.reply_text(
-                    _alert_card(index, item, all_items, rows),
-                    parse_mode="HTML",
-                )
+                card = _alert_card(index, item, all_items, rows)
+                await update.message.reply_text(card, parse_mode="HTML")
+                separate = _confirmation_transition_message(item)
+                if separate:
+                    await update.message.reply_text(separate, parse_mode="HTML")
             await update.message.reply_text(
                 alert_summary.format_alert_count_summary(items)
             )
@@ -2452,14 +2528,20 @@ async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAUL
 
 async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run one live scan and send a separate alert card for each timeframe."""
-    if not context.args:
+    if not context.args or len(context.args) > 2:
         await update.message.reply_text(
-            "שימוש: /alert BTC\n"
-            "אפשר להחליף את BTC בכל סימול מטבע אחר."
+            "שימוש: /alert BTC או /alert BTC long|short\n"
+            "הכיוון הידני משתמש באותו חישוב ובאותה תצוגה של ההתראות הרגילות."
         )
         return
 
     symbol = str(context.args[0]).strip().upper()
+    requested_side = None
+    if len(context.args) == 2:
+        requested_side = str(context.args[1]).strip().upper()
+        if requested_side not in {"LONG", "SHORT"}:
+            await update.message.reply_text("הכיוון חייב להיות long או short. לדוגמה: /alert BTC long")
+            return
     if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
         await update.message.reply_text("סימול המטבע אינו תקין. לדוגמה: /alert BTC")
         return
@@ -2482,13 +2564,20 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with command_lock:
         try:
             async with scrape_lock:
-                WATCH_RUNTIME["scan_owner"] = f"/alert {symbol}"
+                WATCH_RUNTIME["scan_owner"] = f"/alert {symbol}" + (f" {requested_side}" if requested_side else "")
                 await update.message.reply_text(
-                    f"🔎 מתחילה סריקה חיה של 7 הטווחים עבור {symbol}."
+                    f"🔎 מתחילה סריקה חיה של 7 הטווחים עבור {symbol}" + (f" בכיוון {requested_side}." if requested_side else ".")
                 )
                 rows, _live_result = await collect_live_rows_for_watch()
 
-            all_items = _build_opportunities_with_regime(rows, limit=500)
+            if requested_side:
+                raw_items = alert_engine.build_opportunities(
+                    rows, limit=500, forced_symbol=symbol, forced_side=requested_side
+                )
+                raw_items = coinglass_oi_regime_service.attach_to_opportunities(raw_items)
+                all_items = market_confidence_engine.attach_to_opportunities(raw_items)
+            else:
+                all_items = _build_opportunities_with_regime(rows, limit=500)
             symbol_items = [
                 item for item in all_items
                 if str(item.get("symbol") or "").upper() == symbol
@@ -2523,10 +2612,11 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     continue
                 sent_index += 1
-                await update.message.reply_text(
-                    _alert_card(sent_index, item, all_items, rows),
-                    parse_mode="HTML",
-                )
+                card = _alert_card(sent_index, item, all_items, rows)
+                await update.message.reply_text(card, parse_mode="HTML")
+                separate = _confirmation_transition_message(item)
+                if separate:
+                    await update.message.reply_text(separate, parse_mode="HTML")
 
         except asyncio.CancelledError:
             raise
@@ -2535,7 +2625,7 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ /alert {symbol} נכשל: {exc!r}"
             )
         finally:
-            if WATCH_RUNTIME.get("scan_owner") == f"/alert {symbol}":
+            if str(WATCH_RUNTIME.get("scan_owner") or "").startswith(f"/alert {symbol}"):
                 WATCH_RUNTIME["scan_owner"] = None
 
 
@@ -2893,10 +2983,8 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
 
         await bot_app.bot.send_message(chat_id=chat_id, text=header)
         for index, item in enumerate(result_items, start=1):
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=_alert_card(index, item, all_items, rows),
-                parse_mode="HTML",
+            await _send_alert_with_confirmation(
+                bot_app.bot, chat_id, _alert_card(index, item, all_items, rows), item
             )
         if result_items:
             await bot_app.bot.send_message(
@@ -3177,7 +3265,7 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
             # Add the compact target status only once, after the final normal card.
             if index == len(ordered_items):
                 card += _specific_watch_progress_text(watch, current_price)
-            await bot_app.bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
+            await _send_alert_with_confirmation(bot_app.bot, chat_id, card, item)
 
         missing_timeframes = [
             timeframe for timeframe in timeframe_order

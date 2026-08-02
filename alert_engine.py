@@ -819,8 +819,20 @@ def _choose_scored_side(
 def build_opportunities(
     rows: List[Any],
     limit: int = 30,
+    forced_symbol: Optional[str] = None,
+    forced_side: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Score LONG and SHORT fully, then select the stronger direction."""
+    """Score LONG and SHORT fully, then select the stronger direction.
+
+    When ``forced_symbol`` and ``forced_side`` are supplied, only that symbol
+    is displayed from the requested side.  The score itself is still produced
+    by the exact same directional calculation used by ordinary alerts; all
+    other symbols (including the BTC reference) keep automatic selection.
+    """
+    forced_symbol = str(forced_symbol or "").upper() or None
+    forced_side = str(forced_side or "").upper() or None
+    if forced_side not in (None, "LONG", "SHORT"):
+        raise ValueError("forced_side must be LONG or SHORT")
     rows, duplicate_counts = _dedupe_rows(rows)
     consensus = _consensus_map(rows)
     market = _market_bias_map(rows)
@@ -869,7 +881,10 @@ def build_opportunities(
                 candidates.append(details)
                 directional_scores[symbol][side][timeframe] = float(details["score"])
 
-        selected = _choose_scored_side(row, candidates)
+        if forced_symbol == symbol and forced_side:
+            selected = next((x for x in candidates if x.get("side") == forced_side), None)
+        else:
+            selected = _choose_scored_side(row, candidates)
         if selected is None:
             continue
 
