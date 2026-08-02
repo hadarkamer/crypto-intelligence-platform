@@ -133,3 +133,6 @@ Alert and Watch cards are separated into Max Pain, Price+OI, Futures CVD, Spot C
 - Optional environment settings:
   - `FLOW_COLLECTION_INTERVAL_MINUTES` (default `30`)
   - `FLOW_FRESHNESS_TOLERANCE_MINUTES` (default `35`)
+
+## Stage 91.1 — Fast CVD refresh
+The automatic Futures+Spot CVD refresh checks every 5 minutes by default. CVD freshness is displayed from the close of the official 30-minute CoinGlass candle, avoiding an artificial extra 30 minutes of age.

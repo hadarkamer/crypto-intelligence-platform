@@ -1922,9 +1922,13 @@ def _flow_snapshot_line(market: Dict[str, Any]) -> str:
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
         stamp = stamp.astimezone(timezone.utc)
-        age_minutes = max(0, int((datetime.now(timezone.utc) - stamp).total_seconds() // 60))
-        freshness = "טרי" if age_minutes <= coinglass_flow_foundation.FRESHNESS_TOLERANCE_MINUTES else "⚠️ ישן"
-        return f"🕒 Snapshot: {stamp.strftime('%Y-%m-%d %H:%M UTC')} | גיל {age_minutes} דק׳ | {freshness}"
+        # CoinGlass stores a 30m candle by its opening timestamp.  The data in
+        # that row covers the full half-hour, so freshness must be measured
+        # from the candle close rather than making it appear 30 minutes older.
+        candle_close = stamp + timedelta(minutes=30)
+        age_minutes = max(0, int((datetime.now(timezone.utc) - candle_close).total_seconds() // 60))
+        freshness = "טרי" if age_minutes <= 10 else "⚠️ ישן"
+        return f"🕒 נתוני CVD עד: {candle_close.strftime('%Y-%m-%d %H:%M UTC')} | גיל בפועל {age_minutes} דק׳ | {freshness}"
     except Exception:
         return f"🕒 Snapshot: {html.escape(str(raw))}"
 
@@ -4347,15 +4351,21 @@ async def _collect_flow_once() -> Dict[str, Dict[str, Dict[str, Any]]]:
 
 
 async def _flow_collection_loop() -> None:
+    # Poll every five minutes (or the configured interval) so a newly closed
+    # CoinGlass 30m candle is picked up quickly.  Sleep only the remaining time
+    # in the cycle, preventing long downloads from permanently drifting the
+    # schedule.
     interval_seconds = coinglass_flow_foundation.FLOW_COLLECTION_INTERVAL_MINUTES * 60
     while True:
+        cycle_started = time.monotonic()
         try:
             await _collect_flow_once()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             print(f"[flow-live] refresh failed: {exc!r}", flush=True)
-        await asyncio.sleep(interval_seconds)
+        elapsed = time.monotonic() - cycle_started
+        await asyncio.sleep(max(5.0, interval_seconds - elapsed))
 
 
 async def start_web_server(bot_app):
