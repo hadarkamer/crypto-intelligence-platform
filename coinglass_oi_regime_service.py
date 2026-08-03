@@ -441,6 +441,7 @@ def collect_symbol(symbol,price_input):
         windows={label:{**classify(symbol,None,None).to_dict(),"window_label":label,"window_minutes":minutes,"data_quality_status":status,"time_gap_seconds":gap}
                  for minutes,label in WINDOW_LABELS.items()}
         overall={"state":"UNAVAILABLE","label":"Price/OI timestamp gap too large","strength":"Unavailable","agreement":0,"valid_windows":0}
+        weighted={"direction":"NEUTRAL","score":0.0,"quality":"Unavailable","families":{}}
         early=False; observations=[]
     else:
         windows=_window_results(symbol,price,oi,now,rows); weighted=time_family_engine.aggregate(windows,time_family_engine.oi_window_evaluator); overall=_overall(windows); overall.update({"weighted_direction":weighted["direction"],"weighted_score":weighted["score"],"weighted_quality":weighted["quality"]}); early=_early_transition(windows,overall); observations=_significance_observations(windows)
