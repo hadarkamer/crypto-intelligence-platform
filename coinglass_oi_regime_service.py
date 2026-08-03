@@ -118,7 +118,16 @@ def init_db():
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_ADVISORY_LOCK_ID,))
-            conn.execute(POSTGRES_SCHEMA)
+            exists = conn.execute(
+                "SELECT to_regclass('public.oi_regime_snapshots') AS relation"
+            ).fetchone()["relation"] is not None
+            if not exists:
+                conn.execute(POSTGRES_SCHEMA)
+            rows = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='oi_regime_snapshots'"
+            ).fetchall()
+            existing = {str(row["column_name"]) for row in rows}
             for column, ctype in (
                     ("price_fetched_at", "TIMESTAMPTZ"),
                     ("oi_fetched_at", "TIMESTAMPTZ"),
@@ -127,7 +136,8 @@ def init_db():
                     ("price_source", "TEXT"),
                     ("oi_source", "TEXT"),
                 ):
-                conn.execute(f"ALTER TABLE oi_regime_snapshots ADD COLUMN IF NOT EXISTS {column} {ctype}")
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE oi_regime_snapshots ADD COLUMN {column} {ctype}")
             conn.commit()
     else:
         Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)

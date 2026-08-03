@@ -169,14 +169,22 @@ def _migrate_sqlite(conn: sqlite3.Connection) -> None:
 
 def _migrate_postgres(conn) -> None:
     for table in ("futures_taker_history", "spot_taker_history"):
-        conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-            "api_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
-        )
-        conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-            "continuous_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
-        )
+        rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name=%s",
+            (table,),
+        ).fetchall()
+        columns = {str(row["column_name"]) for row in rows}
+        if "api_cum_vol_delta_usd" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN "
+                "api_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
+            )
+        if "continuous_cum_vol_delta_usd" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN "
+                "continuous_cum_vol_delta_usd DOUBLE PRECISION NOT NULL DEFAULT 0"
+            )
 
 
 def init_db() -> None:
@@ -187,7 +195,14 @@ def init_db() -> None:
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_ADVISORY_LOCK_ID,))
-            conn.execute(POSTGRES_SCHEMA)
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name = ANY(%s)",
+                (["futures_taker_history", "spot_taker_history"],),
+            ).fetchall()
+            existing_tables = {str(row["table_name"]) for row in rows}
+            if existing_tables != {"futures_taker_history", "spot_taker_history"}:
+                conn.execute(POSTGRES_SCHEMA)
             _migrate_postgres(conn)
             conn.commit()
     else:

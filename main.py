@@ -229,16 +229,30 @@ def use_postgres() -> bool:
     return bool(DATABASE_URL and psycopg)
 
 def ensure_amount_columns(conn=None):
-    """Add amount columns to existing tables created before this version."""
+    """Add legacy amount columns only when they are actually missing.
+
+    Avoiding unconditional ``ALTER TABLE ... IF NOT EXISTS`` prevents an
+    AccessExclusiveLock on every Render deploy while the previous instance may
+    still be writing rows.
+    """
     if use_postgres():
-        if conn is not None:
-            conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS short_liquidation_amount DOUBLE PRECISION")
-            conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS long_liquidation_amount DOUBLE PRECISION")
-        else:
-            with psycopg.connect(DATABASE_URL, row_factory=dict_row) as local_conn:
-                local_conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS short_liquidation_amount DOUBLE PRECISION")
-                local_conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS long_liquidation_amount DOUBLE PRECISION")
+        owns_connection = conn is None
+        local_conn = conn or psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        try:
+            rows = local_conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='max_pain_snapshots'"
+            ).fetchall()
+            existing = {str(row['column_name']) for row in rows}
+            if "short_liquidation_amount" not in existing:
+                local_conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN short_liquidation_amount DOUBLE PRECISION")
+            if "long_liquidation_amount" not in existing:
+                local_conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN long_liquidation_amount DOUBLE PRECISION")
+            if owns_connection:
                 local_conn.commit()
+        finally:
+            if owns_connection:
+                local_conn.close()
     else:
         Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(DB_PATH) as conn:
@@ -252,6 +266,40 @@ def ensure_amount_columns(conn=None):
 
 _MAIN_SCHEMA_INITIALIZED_FOR = None
 _SCHEMA_ADVISORY_LOCK_ID = 94837211
+_FLOW_COLLECTOR_LOCK_ID = 94837221
+_OI_COLLECTOR_LOCK_ID = 94837222
+
+
+def _postgres_schema_tables_exist(conn, table_names):
+    rows = conn.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_name = ANY(%s)",
+        (list(table_names),),
+    ).fetchall()
+    return {str(row['table_name']) for row in rows} == set(table_names)
+
+
+def _try_process_lock(lock_id: int):
+    """Return a PostgreSQL connection holding a session advisory lock.
+
+    The caller must release/close it. SQLite mode needs no cross-process lock.
+    """
+    if not use_postgres():
+        return None
+    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=True)
+    row = conn.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (lock_id,)).fetchone()
+    if not row or not bool(row['acquired']):
+        conn.close()
+        return False
+    return conn
+
+
+def _release_process_lock(conn, lock_id: int) -> None:
+    if conn not in (None, False):
+        try:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (lock_id,))
+        finally:
+            conn.close()
 
 def init_db():
     """Initialize the core schema once per process.
@@ -268,7 +316,8 @@ def init_db():
     if use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_ADVISORY_LOCK_ID,))
-            conn.execute(POSTGRES_SCHEMA)
+            if not _postgres_schema_tables_exist(conn, {"max_pain_snapshots", "bot_settings", "alert_history"}):
+                conn.execute(POSTGRES_SCHEMA)
             ensure_amount_columns(conn=conn)
             conn.commit()
     else:
@@ -4371,6 +4420,17 @@ async def oi_validation_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _collect_oi_regime_once() -> Dict[str, Dict[str, Any]]:
+    process_lock = await asyncio.to_thread(_try_process_lock, _OI_COLLECTOR_LOCK_ID)
+    if process_lock is False:
+        print("[oi-regime] skipped: another service instance is collecting", flush=True)
+        return {}
+    try:
+        return await _collect_oi_regime_once_locked()
+    finally:
+        await asyncio.to_thread(_release_process_lock, process_lock, _OI_COLLECTOR_LOCK_ID)
+
+
+async def _collect_oi_regime_once_locked() -> Dict[str, Dict[str, Any]]:
     # HYPE can be absent from the latest Max Pain snapshot even though it is a
     # supported Price+OI asset. Keep it in the collector explicitly so the
     # dedicated live-price fallbacks and CoinGlass OI logic can run.
@@ -4421,6 +4481,17 @@ async def _oi_regime_loop() -> None:
 
 
 async def _collect_flow_once() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    process_lock = await asyncio.to_thread(_try_process_lock, _FLOW_COLLECTOR_LOCK_ID)
+    if process_lock is False:
+        print("[flow-live] skipped: another service instance is refreshing", flush=True)
+        return {}
+    try:
+        return await _collect_flow_once_locked()
+    finally:
+        await asyncio.to_thread(_release_process_lock, process_lock, _FLOW_COLLECTOR_LOCK_ID)
+
+
+async def _collect_flow_once_locked() -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Refresh official 30m Futures and Spot CVD rows for all target symbols.
 
     The collector is independent of Max-Pain DOM scans. Database primary keys
