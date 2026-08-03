@@ -228,13 +228,17 @@ CREATE INDEX IF NOT EXISTS idx_alert_created_at ON alert_history(created_at);
 def use_postgres() -> bool:
     return bool(DATABASE_URL and psycopg)
 
-def ensure_amount_columns():
+def ensure_amount_columns(conn=None):
     """Add amount columns to existing tables created before this version."""
     if use_postgres():
-        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+        if conn is not None:
             conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS short_liquidation_amount DOUBLE PRECISION")
             conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS long_liquidation_amount DOUBLE PRECISION")
-            conn.commit()
+        else:
+            with psycopg.connect(DATABASE_URL, row_factory=dict_row) as local_conn:
+                local_conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS short_liquidation_amount DOUBLE PRECISION")
+                local_conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN IF NOT EXISTS long_liquidation_amount DOUBLE PRECISION")
+                local_conn.commit()
     else:
         Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(DB_PATH) as conn:
@@ -246,17 +250,34 @@ def ensure_amount_columns():
                 conn.execute("ALTER TABLE max_pain_snapshots ADD COLUMN long_liquidation_amount REAL")
             conn.commit()
 
+_MAIN_SCHEMA_INITIALIZED_FOR = None
+_SCHEMA_ADVISORY_LOCK_ID = 94837211
+
 def init_db():
+    """Initialize the core schema once per process.
+
+    A PostgreSQL advisory lock serializes schema migrations across the short
+    old/new instance overlap that can occur during a Render deploy. Routine
+    reads and writes may still call this function safely; after startup it is
+    an in-memory no-op and never re-runs DDL.
+    """
+    global _MAIN_SCHEMA_INITIALIZED_FOR
+    schema_key = ("postgres", DATABASE_URL) if use_postgres() else ("sqlite", DB_PATH)
+    if _MAIN_SCHEMA_INITIALIZED_FOR == schema_key:
+        return
     if use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_ADVISORY_LOCK_ID,))
             conn.execute(POSTGRES_SCHEMA)
+            ensure_amount_columns(conn=conn)
             conn.commit()
     else:
         Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(DB_PATH) as conn:
             conn.executescript(SQLITE_SCHEMA)
             conn.commit()
-    ensure_amount_columns()
+        ensure_amount_columns()
+    _MAIN_SCHEMA_INITIALIZED_FOR = schema_key
 
 def query(sql: str, params: tuple = ()):
     init_db()
@@ -4544,7 +4565,11 @@ async def main():
     # Stage 77 is data collection only; it does not start alerts or Watch.
     # The API key is read from Render. No additional environment variables are required.
     if os.getenv("COINGLASS_API_KEY", "").strip():
+        # Complete every CREATE/ALTER operation before any collector starts.
+        # The module-level guards make later compatibility calls no-ops.
+        coinglass_history_backfill.init_db()
         coinglass_oi_regime_service.init_db()
+        coinglass_flow_foundation.init_db()
         OI_REGIME_TASK = asyncio.create_task(_oi_regime_loop())
         HISTORY_BACKFILL_TASK = asyncio.create_task(_history_backfill_loop())
         FLOW_COLLECTION_TASK = asyncio.create_task(_flow_collection_loop())

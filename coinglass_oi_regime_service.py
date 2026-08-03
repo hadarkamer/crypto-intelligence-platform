@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -43,6 +44,8 @@ WINDOW_LABELS = {
     2880: "48h", 4320: "72h", 10080: "7d",
 }
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+_SCHEMA_INITIALIZED_FOR = None
+_SCHEMA_ADVISORY_LOCK_ID = 94837211
 DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
 
 SQLITE_SCHEMA = """
@@ -108,17 +111,22 @@ def _api_key(): return os.getenv("COINGLASS_API_KEY", "").strip()
 def _use_postgres(): return bool(DATABASE_URL and psycopg)
 
 def init_db():
+    global _SCHEMA_INITIALIZED_FOR
+    schema_key = ("postgres", DATABASE_URL) if _use_postgres() else ("sqlite", DB_PATH)
+    if _SCHEMA_INITIALIZED_FOR == schema_key:
+        return
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_ADVISORY_LOCK_ID,))
             conn.execute(POSTGRES_SCHEMA)
             for column, ctype in (
-                ("price_fetched_at", "TIMESTAMPTZ"),
-                ("oi_fetched_at", "TIMESTAMPTZ"),
-                ("time_gap_seconds", "DOUBLE PRECISION"),
-                ("data_quality_status", "TEXT"),
-                ("price_source", "TEXT"),
-                ("oi_source", "TEXT"),
-            ):
+                    ("price_fetched_at", "TIMESTAMPTZ"),
+                    ("oi_fetched_at", "TIMESTAMPTZ"),
+                    ("time_gap_seconds", "DOUBLE PRECISION"),
+                    ("data_quality_status", "TEXT"),
+                    ("price_source", "TEXT"),
+                    ("oi_source", "TEXT"),
+                ):
                 conn.execute(f"ALTER TABLE oi_regime_snapshots ADD COLUMN IF NOT EXISTS {column} {ctype}")
             conn.commit()
     else:
@@ -137,6 +145,7 @@ def init_db():
                 if column not in existing:
                     conn.execute(f"ALTER TABLE oi_regime_snapshots ADD COLUMN {column} {ctype}")
             conn.commit()
+    _SCHEMA_INITIALIZED_FOR = schema_key
 
 def _pct_change(new, old):
     if old is None or float(old) == 0.0: return None
@@ -420,8 +429,17 @@ def _insert_snapshot(symbol,price,oi,result,price_meta=None,oi_meta=None):
             str(price_meta.get("source") or "unknown"),str(oi_meta.get("source") or "unknown"))
     sql="INSERT INTO oi_regime_snapshots (collected_at,symbol,price,open_interest_usd,price_change_pct,oi_change_pct,state,direction,reason,price_fetched_at,oi_fetched_at,time_gap_seconds,data_quality_status,price_source,oi_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     if _use_postgres():
-        with psycopg.connect(DATABASE_URL,row_factory=dict_row) as conn:
-            conn.execute(sql.replace("?","%s"),params); conn.execute("DELETE FROM oi_regime_snapshots WHERE collected_at < %s",(now-timedelta(days=HISTORY_RETENTION_DAYS),)); conn.commit()
+        for attempt in range(3):
+            try:
+                with psycopg.connect(DATABASE_URL,row_factory=dict_row) as conn:
+                    conn.execute(sql.replace("?","%s"),params)
+                    conn.execute("DELETE FROM oi_regime_snapshots WHERE collected_at < %s",(now-timedelta(days=HISTORY_RETENTION_DAYS),))
+                    conn.commit()
+                break
+            except psycopg.errors.DeadlockDetected:
+                if attempt >= 2:
+                    raise
+                time.sleep(0.4 * (attempt + 1))
     else:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(sql,params); conn.execute("DELETE FROM oi_regime_snapshots WHERE collected_at < ?",((now-timedelta(days=HISTORY_RETENTION_DAYS)).isoformat(),)); conn.commit()

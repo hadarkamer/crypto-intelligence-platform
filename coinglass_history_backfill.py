@@ -79,6 +79,8 @@ PRICE_MARKET_CANDIDATES: Dict[str, Sequence[Tuple[str, str]]] = {
 DEFAULT_EXCHANGES: Tuple[str, ...] = ("Binance", "Bybit", "OKX", "Gate")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+_SCHEMA_INITIALIZED_FOR = None
+_SCHEMA_ADVISORY_LOCK_ID = 94837211
 DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
 
 SQLITE_SCHEMA = """
@@ -159,8 +161,13 @@ def _api_key() -> str:
 
 
 def init_db() -> None:
+    global _SCHEMA_INITIALIZED_FOR
+    schema_key = ("postgres", DATABASE_URL) if _use_postgres() else ("sqlite", DB_PATH)
+    if _SCHEMA_INITIALIZED_FOR == schema_key:
+        return
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_ADVISORY_LOCK_ID,))
             conn.execute(POSTGRES_SCHEMA)
             conn.commit()
     else:
@@ -168,6 +175,7 @@ def init_db() -> None:
         with sqlite3.connect(DB_PATH) as conn:
             conn.executescript(SQLITE_SCHEMA)
             conn.commit()
+    _SCHEMA_INITIALIZED_FOR = schema_key
 
 
 def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:

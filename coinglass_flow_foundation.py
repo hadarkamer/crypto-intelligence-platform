@@ -53,6 +53,8 @@ EXCHANGE_LIST = "Binance,OKX,Bybit"
 TARGET_SYMBOLS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+_SCHEMA_INITIALIZED_FOR = None
+_SCHEMA_ADVISORY_LOCK_ID = 94837211
 DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
 
 SQLITE_SCHEMA = """
@@ -178,8 +180,13 @@ def _migrate_postgres(conn) -> None:
 
 
 def init_db() -> None:
+    global _SCHEMA_INITIALIZED_FOR
+    schema_key = ("postgres", DATABASE_URL) if _use_postgres() else ("sqlite", DB_PATH)
+    if _SCHEMA_INITIALIZED_FOR == schema_key:
+        return
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_ADVISORY_LOCK_ID,))
             conn.execute(POSTGRES_SCHEMA)
             _migrate_postgres(conn)
             conn.commit()
@@ -189,6 +196,7 @@ def init_db() -> None:
             conn.executescript(SQLITE_SCHEMA)
             _migrate_sqlite(conn)
             conn.commit()
+    _SCHEMA_INITIALIZED_FOR = schema_key
 
 
 def _is_rate_limit_message(message: Any) -> bool:
@@ -373,10 +381,17 @@ def _store(
           source=EXCLUDED.source,
           imported_at=EXCLUDED.imported_at
         """
-        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-            with conn.cursor() as cur:
-                cur.executemany(sql, values)
-            conn.commit()
+        for attempt in range(3):
+            try:
+                with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+                    with conn.cursor() as cur:
+                        cur.executemany(sql, values)
+                    conn.commit()
+                break
+            except psycopg.errors.DeadlockDetected:
+                if attempt >= 2:
+                    raise
+                time.sleep(0.4 * (attempt + 1))
     else:
         sql = f"""
         INSERT INTO {table}
