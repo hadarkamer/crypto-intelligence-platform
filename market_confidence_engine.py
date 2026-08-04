@@ -204,7 +204,9 @@ def _early_shift_opposes(modules: Dict[str, Dict[str, Any]], expected: str) -> b
 
 
 def _confirmation(maxpain_score: float, expected: str, modules: Dict[str, Dict[str, Any]], conclusion: Dict[str, Any]) -> Dict[str, Any]:
-    score_ok = float(maxpain_score or 0.0) >= 70.0
+    score = float(maxpain_score or 0.0)
+    score_ok = score >= 65.0
+    strong_score_ok = score >= 75.0
     early_against = _early_shift_opposes(modules, expected)
     oi_relation = str((modules.get("positioning") or {}).get("relation") or "NEUTRAL")
     oi_opposes = oi_relation == "OPPOSE"
@@ -215,7 +217,7 @@ def _confirmation(maxpain_score: float, expected: str, modules: Dict[str, Dict[s
     strong_core = support == 2 and positioning_score >= 25.0 and futures_score >= 25.0
 
     if not score_ok:
-        status, label = "BELOW_SCORE", "ללא Confirmation — ציון Max Pain מתחת ל-70"
+        status, label = "BELOW_SCORE", "ללא Confirmation — ציון Max Pain מתחת ל-65"
     elif early_against:
         position_early = (modules.get("positioning") or {}).get("early_shift") or {}
         futures_early = (modules.get("futures_flow") or {}).get("early_shift") or {}
@@ -232,24 +234,26 @@ def _confirmation(maxpain_score: float, expected: str, modules: Dict[str, Dict[s
         status, label = "CONFLICT", "Max Pain Conflict — Price+OI סותר"
     elif opposition:
         status, label = "CONFLICT", "Max Pain Conflict — מנוע נגזרים מתנגד"
-    elif strong_core:
-        status, label = "STRONG_CONFIRMED", "Max Pain Strong Confirmation — Price+OI + Futures חזקים"
+    elif support == 2 and strong_score_ok:
+        status, label = "STRONG_CONFIRMED", "Max Pain Strong Confirmation — ציון 75+ עם Price+OI + Futures"
     elif support == 2:
-        status, label = "CONFIRMED", "Max Pain Confirmed — Price+OI + Futures"
+        status, label = "CONFIRMED", "Max Pain Confirmed — ציון 65–74.99 עם Price+OI + Futures"
     else:
         status, label = "UNCONFIRMED", "Max Pain לא מאומת כרגע"
 
     return {
         "status": status,
         "label": label,
-        "score_threshold": 70.0,
+        "score_threshold": 65.0,
+        "strong_score_threshold": 75.0,
         "score_ok": score_ok,
+        "strong_score_ok": strong_score_ok,
         "early_shift_opposes": early_against,
         "oi_opposes": oi_opposes,
         "supporting_families": support,
         "opposing_families": opposition,
         "strong_core": strong_core,
-        "strong_score_threshold": 25.0,
+        "strong_evidence_threshold": 25.0,
     }
 
 

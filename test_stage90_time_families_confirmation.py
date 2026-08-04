@@ -42,12 +42,12 @@ def test_confirmation_two_of_three_without_opposition():
         },
         "spot": {"available": False, "quality": {"status": "NO_DATA"}, "windows": {}, "overall": {}},
     }
-    out = confidence.combine("BTC", "LONG", regime, flow, maxpain_score=72)
+    out = confidence.combine("BTC", "LONG", regime, flow, maxpain_score=76)
     assert out["supporting_families"] == 2
     assert out["opposing_families"] == 0
     assert out["confirmation"]["status"] == "STRONG_CONFIRMED"
 
 
-def test_confirmation_requires_score_70():
-    out = confidence.combine("BTC", "LONG", {"available": False}, {"futures": {}, "spot": {}}, maxpain_score=69.9)
+def test_confirmation_requires_score_65():
+    out = confidence.combine("BTC", "LONG", {"available": False}, {"futures": {}, "spot": {}}, maxpain_score=64.99)
     assert out["confirmation"]["status"] == "BELOW_SCORE"

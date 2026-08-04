@@ -31,7 +31,7 @@ def test_strong_confirmation_uses_two_strong_core_engines():
         "spot_flow": _module("NEUTRAL", "NEUTRAL", 0),
     }
     conclusion = m._conclusion(modules, "BULLISH")
-    out = m._confirmation(72, "BULLISH", modules, conclusion)
+    out = m._confirmation(76, "BULLISH", modules, conclusion)
     assert out["status"] == "STRONG_CONFIRMED"
 
 
@@ -53,7 +53,7 @@ def test_spot_early_shift_does_not_create_conflict():
         "spot_flow": _module("OPPOSE", "BEARISH", -90, {"new_direction": "BEARISH"}),
     }
     conclusion = m._conclusion(modules, "BULLISH")
-    out = m._confirmation(72, "BULLISH", modules, conclusion)
+    out = m._confirmation(76, "BULLISH", modules, conclusion)
     assert out["status"] == "STRONG_CONFIRMED"
 
 
@@ -76,5 +76,5 @@ def test_price_oi_early_shift_with_trade_does_not_create_conflict():
         "spot_flow": _module("NEUTRAL", "NEUTRAL", 0),
     }
     conclusion = m._conclusion(modules, "BULLISH")
-    out = m._confirmation(72, "BULLISH", modules, conclusion)
+    out = m._confirmation(76, "BULLISH", modules, conclusion)
     assert out["status"] == "STRONG_CONFIRMED"

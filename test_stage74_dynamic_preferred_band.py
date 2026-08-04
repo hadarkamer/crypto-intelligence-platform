@@ -13,16 +13,17 @@ class Stage74DynamicPreferredBandTests(unittest.TestCase):
 
     def test_25_point_band_expands_by_threshold(self):
         self.assertEqual(alert_engine._target_proximity_points(1.3, 2.5), 25.0)
-        self.assertEqual(alert_engine._target_proximity_points(1.31, 2.5), 20.0)
+        self.assertAlmostEqual(alert_engine._target_proximity_points(1.31, 2.5), 24.92, places=2)
         self.assertEqual(alert_engine._target_proximity_points(1.4, 2.7), 25.0)
         self.assertEqual(alert_engine._target_proximity_points(1.5, 3.0), 25.0)
         self.assertEqual(alert_engine._target_proximity_points(1.7, 3.5), 25.0)
         self.assertEqual(alert_engine._target_proximity_points(2.0, 4.0), 25.0)
 
-    def test_existing_outer_bands_remain(self):
+    def test_continuous_decay_reaches_existing_minimum(self):
         self.assertEqual(alert_engine._target_proximity_points(0.79, 4.0), 0.0)
-        self.assertEqual(alert_engine._target_proximity_points(1.8, 3.5), 20.0)
-        self.assertEqual(alert_engine._target_proximity_points(2.1, 3.5), 15.0)
+        self.assertAlmostEqual(alert_engine._target_proximity_points(1.8, 3.5), 24.44, places=2)
+        self.assertAlmostEqual(alert_engine._target_proximity_points(2.1, 3.5), 22.78, places=2)
+        self.assertEqual(alert_engine._target_proximity_points(3.5, 3.5), 15.0)
         self.assertEqual(alert_engine._target_proximity_points(3.6, 3.5), 0.0)
 
 

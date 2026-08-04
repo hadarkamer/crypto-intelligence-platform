@@ -32,15 +32,20 @@ def btc_rows():
 
 
 class Stage57CalculationTests(unittest.TestCase):
-    def test_consensus_is_side_specific(self):
-        items = alert_engine.build_opportunities(btc_rows(), limit=100)
+    def test_consensus_is_gap_weighted_and_excludes_alert_timeframe(self):
+        rows = btc_rows()
+        items = alert_engine.build_opportunities(rows, limit=100)
         for item in items:
-            if item["side"] == "LONG":
-                self.assertEqual(item["consensus_hits"], 3)
-                self.assertAlmostEqual(item["components"]["consensus"], 12.86, places=2)
-            else:
-                self.assertEqual(item["consensus_hits"], 4)
-                self.assertAlmostEqual(item["components"]["consensus"], 17.14, places=2)
+            expected = alert_engine._gap_consensus_points(
+                rows,
+                "BTC",
+                item["side"],
+                item["timeframe"],
+                30.0,
+            )
+            self.assertAlmostEqual(item["components"]["consensus"], expected, places=2)
+            # Legacy hit counters remain available for display compatibility.
+            self.assertEqual(item["consensus_total"], 7)
 
     def test_cluster_is_side_specific(self):
         items = alert_engine.build_opportunities(btc_rows(), limit=100)

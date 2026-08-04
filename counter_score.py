@@ -129,12 +129,17 @@ def calculate_counter_score(
                 "score": btc_item.get("score", 0.0),
             }
 
+    consensus_max = 30.0 if symbol == "BTC" else 15.0
+    gap_consensus_points = alert_engine._gap_consensus_points(
+        deduped_rows, symbol, counter_side, timeframe, consensus_max
+    )
     directional = alert_engine._directional_alignment(
         symbol,
         consensus_hits,
         consensus_total,
         counter_side,
         btc_reference,
+        consensus_points_override=gap_consensus_points,
     )
     allowed_distance = alert_engine._allowed_distance_pct(
         symbol, _get(row, "rank")
