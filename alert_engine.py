@@ -143,12 +143,51 @@ def _relative_gap_points_for_side(row: Any, side: str) -> float:
     return round(advantage * 15.0, 2)
 
 
+
+
+def _gap_consensus_points(
+    rows: List[Any],
+    symbol: str,
+    side: str,
+    excluded_timeframe: str,
+    max_points: float,
+) -> float:
+    """Consensus from the Gap quality of the other available timeframes.
+
+    The alert timeframe is excluded. Each remaining timeframe contributes its
+    existing directional relative-Gap quality (0..15). The quality itself is
+    also used as its weight, so stronger Gap evidence has proportionally more
+    influence than weaker evidence. The result is scaled to ``max_points``.
+    """
+    qualities: List[float] = []
+    wanted_symbol = str(symbol or "").upper()
+    wanted_side = str(side or "").upper()
+    excluded = str(excluded_timeframe or "")
+
+    for other_row in rows:
+        if str(_get(other_row, "symbol", "") or "").upper() != wanted_symbol:
+            continue
+        timeframe = str(_get(other_row, "timeframe", "") or "")
+        if timeframe not in TIMEFRAMES or timeframe == excluded:
+            continue
+        quality = float(_relative_gap_points_for_side(other_row, wanted_side) or 0.0)
+        qualities.append(max(0.0, min(15.0, quality)))
+
+    total_weight = sum(qualities)
+    if total_weight <= 0.0:
+        return 0.0
+
+    weighted_quality = sum(value * value for value in qualities) / total_weight
+    return round(max(0.0, min(float(max_points), weighted_quality / 15.0 * float(max_points))), 2)
+
+
 def _score_explicit_side(
     row: Any,
     side: str,
     consensus: Dict[str, Dict[str, Any]],
     clusters: Dict[str, Dict[str, Dict[str, Any]]],
     btc_reference_by_timeframe: Dict[str, Dict[str, Any]],
+    all_rows: Optional[List[Any]] = None,
 ) -> Optional[float]:
     """Calculate one direction's score without selecting the leading side."""
     symbol = str(_get(row, "symbol", "") or "").upper()
@@ -158,12 +197,17 @@ def _score_explicit_side(
         return None
 
     cons = consensus.get(symbol, {})
+    consensus_max = 30.0 if symbol == "BTC" else 15.0
+    gap_consensus_points = _gap_consensus_points(
+        list(all_rows or []), symbol, side, timeframe, consensus_max
+    )
     directional = _directional_alignment(
         symbol,
         int(cons.get(side, 0) or 0),
         int(cons.get("total", 0) or 0),
         side,
         btc_reference_by_timeframe.get(timeframe),
+        consensus_points_override=gap_consensus_points,
     )
     allowed = _allowed_distance_pct(symbol, _get(row, "rank"))
     target_points = _target_proximity_points(distance, allowed)
@@ -216,11 +260,12 @@ def _target_proximity_points(
     distance_pct: Optional[float],
     allowed_distance_pct: float,
 ) -> float:
-    """Tradable target-distance score, 0..25.
+    """Tradable target-distance score, 0..25, with continuous decay.
 
-    0.8% is always the beginning of the ideal band. Its upper edge expands
-    according to the coin's dynamic Max Pain threshold. The remaining score
-    bands retain their previous values.
+    The existing ideal band remains worth 25 points. Beyond its upper edge,
+    the score declines linearly and continuously to the existing 15-point
+    minimum at the symbol-specific allowed distance. Distances below 0.8% or
+    above the allowed distance remain worth 0 points.
     """
     if distance_pct is None or allowed_distance_pct <= 0:
         return 0.0
@@ -233,9 +278,11 @@ def _target_proximity_points(
         return 0.0
     if distance <= preferred_ceiling:
         return 25.0
-    if distance <= 2.0:
-        return 20.0
-    return 15.0
+    if allowed <= preferred_ceiling:
+        return 15.0
+
+    progress = (distance - preferred_ceiling) / (allowed - preferred_ceiling)
+    return round(25.0 - max(0.0, min(1.0, progress)) * 10.0, 2)
 
 
 def _proximity_points(distance_pct: Optional[float]) -> float:
@@ -333,6 +380,7 @@ def _directional_alignment(
     consensus_total: int,
     side: str,
     btc_reference: Optional[Dict[str, Any]] = None,
+    consensus_points_override: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Directional Alignment, 0..30, with continuous BTC confirmation.
 
@@ -352,8 +400,12 @@ def _directional_alignment(
     is_btc = symbol.upper() == "BTC"
     consensus_max = 30.0 if is_btc else 15.0
     consensus_points = (
-        round(consensus_hits / consensus_total * consensus_max, 2)
-        if consensus_total else 0.0
+        round(max(0.0, min(consensus_max, float(consensus_points_override))), 2)
+        if consensus_points_override is not None
+        else (
+            round(consensus_hits / consensus_total * consensus_max, 2)
+            if consensus_total else 0.0
+        )
     )
 
     btc_score = None
@@ -707,6 +759,7 @@ def _score_details_for_side(
     market: Dict[str, Any],
     clusters: Dict[str, Dict[str, Dict[str, Any]]],
     btc_reference_by_timeframe: Dict[str, Dict[str, Any]],
+    all_rows: List[Any],
 ) -> Optional[Dict[str, Any]]:
     """Build the complete score details for one explicit direction."""
     symbol = str(_get(row, "symbol", "") or "").upper()
@@ -719,12 +772,17 @@ def _score_details_for_side(
     cons = consensus.get(symbol, {})
     consensus_hits = int(cons.get(side, 0) or 0)
     consensus_total = int(cons.get("total", 0) or 0)
+    consensus_max = 30.0 if symbol == "BTC" else 15.0
+    gap_consensus_points = _gap_consensus_points(
+        all_rows, symbol, side, timeframe, consensus_max
+    )
     directional = _directional_alignment(
         symbol,
         consensus_hits,
         consensus_total,
         side,
         btc_reference_by_timeframe.get(timeframe),
+        consensus_points_override=gap_consensus_points,
     )
     allowed_distance = _allowed_distance_pct(symbol, rank)
     target_proximity = _target_proximity_points(distance, allowed_distance)
@@ -848,7 +906,7 @@ def build_opportunities(
         candidates = []
         for side in ("LONG", "SHORT"):
             details = _score_details_for_side(
-                btc_row, side, consensus, market, clusters, {}
+                btc_row, side, consensus, market, clusters, {}, rows
             )
             if details is not None:
                 candidates.append(details)
@@ -875,7 +933,7 @@ def build_opportunities(
         for side in ("LONG", "SHORT"):
             details = _score_details_for_side(
                 row, side, consensus, market, clusters,
-                btc_reference_by_timeframe if symbol != "BTC" else {},
+                btc_reference_by_timeframe if symbol != "BTC" else {}, rows,
             )
             if details is not None:
                 candidates.append(details)
