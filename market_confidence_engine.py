@@ -61,8 +61,8 @@ def _positioning_module(regime: Dict[str, Any], expected: str) -> Dict[str, Any]
     if available and not windows:
         state = str(overall.get("state") or "").upper()
         fallback = {
-            "BULLISH_BUILDUP": ("BULLISH", 100.0), "SHORT_COVERING": ("BULLISH", 65.0),
-            "BEARISH_BUILDUP": ("BEARISH", -100.0), "LONG_UNWINDING": ("BEARISH", -65.0),
+            "BULLISH_BUILDUP": ("BULLISH", 100.0), "SHORT_COVERING": ("BULLISH", 100.0),
+            "BEARISH_BUILDUP": ("BEARISH", -100.0), "LONG_UNWINDING": ("BEARISH", -100.0),
         }.get(state)
         if fallback:
             direction, score = fallback
