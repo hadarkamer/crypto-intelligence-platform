@@ -185,7 +185,7 @@ def classify(symbol, price_change_pct, oi_change_pct):
     else: st,di,rs="LONG_UNWINDING","SHORT","המחיר ירד וה-OI ירד: Long Unwinding."
     return RegimeResult(symbol,st,_state_label(st),di,round(p,6),round(o,6),rs)
 
-def _classify_with_historical_reference(symbol, window_label, price_change_pct, oi_change_pct):
+def _classify_with_historical_reference(symbol, window_label, price_change_pct, oi_change_pct, window_start=None, window_end=None):
     """Classify direction only when both movements clear their own historical P25.
 
     If no historical reference exists for this symbol/window, preserve the
@@ -193,7 +193,14 @@ def _classify_with_historical_reference(symbol, window_label, price_change_pct, 
     """
     base = classify(symbol, price_change_pct, oi_change_pct)
     d = base.to_dict()
-    ref = history_reference.reference_for_window(symbol, window_label)
+    if window_start is None or window_end is None:
+        ref = history_reference.reference_for_window(symbol, window_label)
+    else:
+        try:
+            ref = history_reference.reference_for_window(symbol, window_label, window_start, window_end)
+        except TypeError:
+            # Backward-compatible with injected test/legacy two-argument providers.
+            ref = history_reference.reference_for_window(symbol, window_label)
     price_dist = ref.get("price_abs_change_pct") or {}
     oi_dist = ref.get("oi_abs_change_pct") or {}
     price_strength = history_reference.strength_from_distribution(price_change_pct, price_dist)
@@ -346,7 +353,7 @@ def _window_results(symbol, price, oi, now=None, history_rows=None):
         else:
             pchange=_pct_change(price,ref["price"])
             ochange=_pct_change(oi,ref["open_interest_usd"])
-            d=_classify_with_historical_reference(symbol,label,pchange,ochange)
+            d=_classify_with_historical_reference(symbol,label,pchange,ochange,_as_utc(ref["collected_at"]),now)
             d["comparison_source"]=ref.get("source","live_snapshot")
             d["reference_time"]=_as_utc(ref["collected_at"]).isoformat()
             d["reference_offset_seconds"]=ref.get("reference_offset_seconds")

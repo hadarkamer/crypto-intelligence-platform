@@ -24,6 +24,7 @@ from pathlib import Path
 import sqlite3
 
 import time_family_engine
+import market_session_baseline as session_baseline
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
@@ -78,12 +79,18 @@ class DirectionalBaselines:
     positive: Optional[Percentiles]
     negative: Optional[Percentiles]
     total_samples: int
+    active_ratio: float = 1.0
+    weekend_ratio: float = 0.0
+    baseline_mode: str = "GLOBAL"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "positive": self.positive.to_dict() if self.positive else None,
             "negative": self.negative.to_dict() if self.negative else None,
             "total_samples": self.total_samples,
+            "active_ratio": self.active_ratio,
+            "weekend_ratio": self.weekend_ratio,
+            "baseline_mode": self.baseline_mode,
         }
 
     def for_change(self, change: float) -> Optional[Percentiles]:
@@ -136,6 +143,8 @@ def _load_rows(symbol: str, market: str) -> List[Dict[str, Any]]:
         item = dict(row)
         ts = _as_utc(item.get("candle_time"))
         if ts is None:
+            continue
+        if not session_baseline.is_closed_candle(ts, datetime.now(timezone.utc), interval_minutes=30, grace_minutes=2):
             continue
         try:
             buy = float(item.get("buy_volume_usd") or 0)
@@ -209,18 +218,60 @@ def _percentiles(values: Sequence[float]) -> Optional[Percentiles]:
     )
 
 
-def _baseline(rows: Sequence[Dict[str, Any]], steps: int) -> Optional[DirectionalBaselines]:
-    """Separate bullish and bearish CVD-change distributions.
+def _weighted_percentiles(values_and_weights: Sequence[Tuple[float, float]]) -> Optional[Percentiles]:
+    cleaned = [
+        (float(value), float(weight))
+        for value, weight in values_and_weights
+        if math.isfinite(float(value)) and float(value) >= 0 and math.isfinite(float(weight)) and float(weight) > 0
+    ]
+    effective_samples = sum(weight for _, weight in cleaned)
+    if effective_samples < MIN_BASELINE_SAMPLES:
+        return None
+    return Percentiles(
+        samples=int(round(effective_samples)),
+        p25=float(session_baseline.weighted_percentile(cleaned, 0.25)),
+        p50=float(session_baseline.weighted_percentile(cleaned, 0.50)),
+        p75=float(session_baseline.weighted_percentile(cleaned, 0.75)),
+        p90=float(session_baseline.weighted_percentile(cleaned, 0.90)),
+    )
 
-    Positive CVD changes are compared only with historical positive changes.
-    Negative CVD changes are converted to magnitudes and compared only with
-    historical negative changes. This preserves directional asymmetry instead
-    of mixing +X and -X into one absolute distribution.
+
+def _blend_percentiles(active: Optional[Percentiles], weekend: Optional[Percentiles], global_pct: Optional[Percentiles], active_ratio: float, weekend_ratio: float) -> Optional[Percentiles]:
+    if global_pct is None and active is None and weekend is None:
+        return None
+    fallback = global_pct or active or weekend
+    active = active or fallback
+    weekend = weekend or fallback
+    if active is None or weekend is None:
+        return fallback
+    return Percentiles(
+        samples=min(active.samples, weekend.samples),
+        p25=float(session_baseline.blend_values(active.p25, weekend.p25, active_ratio, weekend_ratio, fallback.p25)),
+        p50=float(session_baseline.blend_values(active.p50, weekend.p50, active_ratio, weekend_ratio, fallback.p50)),
+        p75=float(session_baseline.blend_values(active.p75, weekend.p75, active_ratio, weekend_ratio, fallback.p75)),
+        p90=float(session_baseline.blend_values(active.p90, weekend.p90, active_ratio, weekend_ratio, fallback.p90)),
+    )
+
+
+def _baseline(rows: Sequence[Dict[str, Any]], steps: int, current_end: Optional[datetime] = None) -> Optional[DirectionalBaselines]:
+    """Directional CVD baseline matched to the current session composition.
+
+    Historical changes remain intact. Each receives a similarity weight based
+    on how closely its exact ACTIVE/WEEKEND ratio matches the current window.
+    Positive and negative changes use separate distributions. If the matched
+    sample is too small, the corresponding global directional distribution is
+    used as a safe fallback.
     """
+    positive_samples: List[Tuple[float, float]] = []
+    negative_samples: List[Tuple[float, float]] = []
     positive_values: List[float] = []
     negative_values: List[float] = []
     times = [row["time"] for row in rows]
     window = timedelta(minutes=steps * 30)
+    end = current_end or (times[-1] if times else datetime.now(timezone.utc))
+    start = end - window
+    current_active_ratio, current_weekend_ratio, _ = session_baseline.session_ratios(start, end)
+
     for idx in range(1, len(rows)):
         target = times[idx] - window
         nearest = _nearest_index_by_time(rows, times, target, end_exclusive=idx)
@@ -230,19 +281,37 @@ def _baseline(rows: Sequence[Dict[str, Any]], steps: int) -> Optional[Directiona
         change = float(rows[idx]["continuous_cvd"]) - float(rows[ref_idx]["continuous_cvd"])
         if not math.isfinite(change) or change == 0:
             continue
+        historical_active_ratio, _, _ = session_baseline.session_ratios(times[ref_idx], times[idx])
+        magnitude = abs(change)
         if change > 0:
-            positive_values.append(change)
+            positive_values.append(magnitude)
+            positive_samples.append((magnitude, historical_active_ratio))
         else:
-            negative_values.append(abs(change))
+            negative_values.append(magnitude)
+            negative_samples.append((magnitude, historical_active_ratio))
+
     total = len(positive_values) + len(negative_values)
     if total < MIN_BASELINE_SAMPLES:
         return None
-    return DirectionalBaselines(
-        positive=_percentiles(positive_values),
-        negative=_percentiles(negative_values),
-        total_samples=total,
-    )
 
+    positive_global = _percentiles(positive_values)
+    negative_global = _percentiles(negative_values)
+    positive_matched = _weighted_percentiles(
+        session_baseline.composition_weighted_values(positive_samples, current_active_ratio)
+    )
+    negative_matched = _weighted_percentiles(
+        session_baseline.composition_weighted_values(negative_samples, current_active_ratio)
+    )
+    positive = positive_matched or positive_global
+    negative = negative_matched or negative_global
+    return DirectionalBaselines(
+        positive=positive,
+        negative=negative,
+        total_samples=total,
+        active_ratio=current_active_ratio,
+        weekend_ratio=current_weekend_ratio,
+        baseline_mode="SESSION_COMPOSITION_MATCHED" if (positive_matched or negative_matched) else "GLOBAL",
+    )
 
 def _nearest_reference(rows: Sequence[Dict[str, Any]], target: datetime) -> Optional[Tuple[int, float]]:
     return _nearest_index_by_time(rows, [row["time"] for row in rows], target)
@@ -282,7 +351,7 @@ def _window_state(rows: Sequence[Dict[str, Any]], label: str, steps: int) -> Dic
     reference_idx, offset = nearest
     if reference_idx >= latest_idx:
         return {"window": label, "available": False, "reason": "reference is not older"}
-    directional_baselines = _baseline(rows, steps)
+    directional_baselines = _baseline(rows, steps, current_end=latest["time"])
     if directional_baselines is None:
         return {"window": label, "available": False, "reason": "not enough baseline samples"}
 
@@ -476,7 +545,7 @@ def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     latest_impulse = None
     if rows:
         latest = rows[-1]
-        directional_baseline_30m = _baseline(rows, 1)
+        directional_baseline_30m = _baseline(rows, 1, current_end=latest["time"])
         baseline_30m = directional_baseline_30m.for_change(float(latest["delta"])) if directional_baseline_30m else None
         if baseline_30m:
             magnitude, level = _magnitude_label(abs(float(latest["delta"])), baseline_30m)
@@ -518,6 +587,6 @@ def stats(symbol: str, market: str) -> Dict[str, Any]:
         "windows": {},
     }
     for label, steps in WINDOWS:
-        baseline = _baseline(rows, steps)
+        baseline = _baseline(rows, steps, current_end=rows[-1]["time"] if rows else None)
         result["windows"][label] = baseline.to_dict() if baseline else None
     return result

@@ -143,3 +143,16 @@ The automatic Futures+Spot CVD refresh checks every 5 minutes by default. CVD fr
 - `/alert SYMBOL long|short` uses the existing full directional scoring and the normal alert card layout.
 - Confirmation/strong-confirmation/conflict transitions can produce a short separate Telegram message.
 - Repeated unchanged statuses are suppressed per symbol, timeframe and direction during the running process.
+
+## Stage 97 — accurate session-composition baselines
+
+- ACTIVE/WEEKEND ratios are split at exact New York session boundaries.
+- Price, OI, Futures CVD and Spot CVD use historical windows with a similar
+  ACTIVE/WEEKEND composition instead of splitting observations or blending
+  percentile thresholds.
+- Weighted and ordinary percentile calculations now use one consistent linear
+  interpolation definition.
+- Open 30-minute CVD candles are excluded until close plus a two-minute grace
+  period, including protection from legacy open rows already in the database.
+- Historical Price/OI windows with missing 30-minute references are skipped
+  instead of being compared by row index.

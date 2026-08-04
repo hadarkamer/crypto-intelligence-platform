@@ -25,6 +25,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
+import market_session_baseline as session_baseline
+
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -370,6 +372,8 @@ def _store(
     values = []
     for ts, (buy, sell, api_cvd, continuous_cvd) in sorted(rows.items()):
         candle = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
+        if not session_baseline.is_closed_candle(candle, now, interval_minutes=30, grace_minutes=2):
+            continue
         values.append((
             str(symbol).upper(),
             candle if _use_postgres() else candle.isoformat(),
@@ -441,21 +445,23 @@ def coverage(symbol: str, market: str) -> Dict[str, Any]:
     init_db()
     table = _table_for_market(market)
     symbol = str(symbol).upper()
-    sql = f"SELECT COUNT(*) AS n, MIN(candle_time) AS min_time, MAX(candle_time) AS max_time FROM {table} WHERE symbol=?"
+    # Ignore any legacy/current open candle when deciding freshness.
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=32)
     if _use_postgres():
+        sql = f"SELECT COUNT(*) AS n, MIN(candle_time) AS min_time, MAX(candle_time) AS max_time FROM {table} WHERE symbol=%s AND candle_time<=%s"
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-            row = conn.execute(sql.replace("?", "%s"), (symbol,)).fetchone()
+            row = conn.execute(sql, (symbol, cutoff)).fetchone()
     else:
+        sql = f"SELECT COUNT(*) AS n, MIN(candle_time) AS min_time, MAX(candle_time) AS max_time FROM {table} WHERE symbol=? AND candle_time<=?"
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(sql, (symbol,)).fetchone()
+            row = conn.execute(sql, (symbol, cutoff.isoformat())).fetchone()
     data = dict(row) if row else {"n": 0, "min_time": None, "max_time": None}
     return {
         "count": int(data.get("n") or 0),
         "min_time": _as_utc(data.get("min_time")),
         "max_time": _as_utc(data.get("max_time")),
     }
-
 
 def _is_current(existing: Dict[str, Any], end: datetime) -> bool:
     latest = existing.get("max_time")

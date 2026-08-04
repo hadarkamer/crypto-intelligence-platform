@@ -28,12 +28,12 @@ def test_weak_spot_opposition_does_not_veto_two_core_supports():
         "spot_flow": _module("OPPOSE", "BEARISH", -12),
     }
     out = m._conclusion(modules, "BULLISH")
-    assert out["classification"] == "CLEAR_CONFIRMATION"
+    assert out["classification"] == "CORE_CONFIRMATION"
     assert out["opposing_families"] == 0
-    assert out["weak_spot_warning"] is True
+    assert out["spot_context"]["status"] == "DIVERGING"
 
 
-def test_strong_short_and_medium_spot_opposition_still_vetoes():
+def test_strong_short_and_medium_spot_opposition_is_secondary_context_only():
     families = {
         "short": {"direction": "BEARISH", "members": [{"strength": 0.75}]},
         "medium": {"direction": "BEARISH", "members": [{"strength": 0.35}]},
@@ -44,5 +44,6 @@ def test_strong_short_and_medium_spot_opposition_still_vetoes():
         "spot_flow": _module("OPPOSE", "BEARISH", -29, families),
     }
     out = m._conclusion(modules, "BULLISH")
-    assert out["classification"] == "CONFLICT"
-    assert out["opposing_families"] == 1
+    assert out["classification"] == "CORE_CONFIRMATION"
+    assert out["opposing_families"] == 0
+    assert out["spot_context"]["status"] == "DIVERGING"

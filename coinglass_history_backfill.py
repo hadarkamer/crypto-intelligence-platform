@@ -15,6 +15,7 @@ Watch, or live OI conclusions. Its output is reference statistics only.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 import math
 import os
@@ -24,6 +25,8 @@ import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
+
+import market_session_baseline as session_baseline
 
 try:
     import psycopg
@@ -499,6 +502,76 @@ def _distribution(values: Sequence[float]) -> Dict[str, Optional[float]]:
     }
 
 
+def _weighted_distribution(values_and_weights: Sequence[Tuple[float, float]]) -> Dict[str, Optional[float]]:
+    cleaned = [
+        (abs(float(value)), float(weight))
+        for value, weight in values_and_weights
+        if value is not None and math.isfinite(float(value)) and math.isfinite(float(weight)) and float(weight) > 0
+    ]
+    effective_samples = sum(weight for _, weight in cleaned)
+    return {
+        "count": len(cleaned),
+        "effective_samples": effective_samples,
+        "p25": session_baseline.weighted_percentile(cleaned, 0.25),
+        "median": session_baseline.weighted_percentile(cleaned, 0.50),
+        "p75": session_baseline.weighted_percentile(cleaned, 0.75),
+        "p90": session_baseline.weighted_percentile(cleaned, 0.90),
+        "p95": session_baseline.weighted_percentile(cleaned, 0.95),
+    }
+
+
+def _composition_distribution(
+    samples: Sequence[Tuple[float, float]],
+    current_active_ratio: float,
+    global_dist: Dict[str, Any],
+    min_effective_samples: float = 30.0,
+) -> Dict[str, Any]:
+    weighted = session_baseline.composition_weighted_values(samples, current_active_ratio)
+    matched = _weighted_distribution(weighted)
+    if float(matched.get("effective_samples") or 0.0) < min_effective_samples:
+        out = dict(global_dist or {})
+        out.update({
+            "baseline_mode": "GLOBAL_FALLBACK",
+            "active_ratio": current_active_ratio,
+            "weekend_ratio": 1.0 - current_active_ratio,
+            "matched_effective_samples": float(matched.get("effective_samples") or 0.0),
+        })
+        return out
+    matched.update({
+        "baseline_mode": "SESSION_COMPOSITION_MATCHED",
+        "active_ratio": current_active_ratio,
+        "weekend_ratio": 1.0 - current_active_ratio,
+        "matched_effective_samples": float(matched.get("effective_samples") or 0.0),
+    })
+    return matched
+
+
+def _blend_distribution(active: Dict[str, Any], weekend: Dict[str, Any], global_dist: Dict[str, Any], active_ratio: float, weekend_ratio: float) -> Dict[str, Any]:
+    # Require enough effective observations per component.  When one component
+    # is still sparse, its percentiles fall back to the global distribution;
+    # the current window remains continuously weighted and never jumps.
+    min_effective = 30.0
+    active_ok = float(active.get("effective_samples") or 0.0) >= min_effective
+    weekend_ok = float(weekend.get("effective_samples") or 0.0) >= min_effective
+    out: Dict[str, Any] = {
+        "count": int(global_dist.get("count") or 0),
+        "active_ratio": active_ratio,
+        "weekend_ratio": weekend_ratio,
+        "active_effective_samples": float(active.get("effective_samples") or 0.0),
+        "weekend_effective_samples": float(weekend.get("effective_samples") or 0.0),
+        "baseline_mode": "ACTIVE_WEEKEND_CONTINUOUS",
+        "fallback_used": not (active_ok and weekend_ok),
+    }
+    for key in ("p25", "median", "p75", "p90", "p95"):
+        global_value = global_dist.get(key)
+        active_value = active.get(key) if active_ok else global_value
+        weekend_value = weekend.get(key) if weekend_ok else global_value
+        out[key] = session_baseline.blend_values(
+            active_value, weekend_value, active_ratio, weekend_ratio, global_value
+        )
+    return out
+
+
 
 def historical_point_at_or_before(symbol: str, target_time: datetime) -> Optional[Dict[str, Any]]:
     """Return the newest backfilled 30m candle at or before ``target_time``.
@@ -604,43 +677,79 @@ def historical_point_nearest(symbol: str, target_time: datetime) -> Optional[Dic
     }
 
 def calculate_reference_ranges(symbol: str) -> Dict[str, Any]:
-    """Calculate absolute-change distributions for each analytical window.
+    """Build composition-aware Price/OI historical reference samples.
 
-    The historical table remains separate from the live snapshot table. These
-    statistics are now used only to judge whether each live Price/OI movement is
-    large enough to be meaningful for the same symbol and the same timeframe.
-    They never modify Max-Pain scoring.
+    Each historical window is kept intact with its exact ACTIVE ratio. Live
+    windows are later compared mainly with historical windows having a similar
+    composition. No historical change is split between session buckets.
     """
     symbol = str(symbol or "").strip().upper()
     rows = _history_rows(symbol)
     if len(rows) < 2:
         return {"symbol": symbol, "available": False, "reason": "No backfill data", "windows": {}}
 
+    normalized_rows = []
+    for row in rows:
+        item = dict(row)
+        value = item.get("candle_time")
+        if isinstance(value, datetime):
+            ts = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        else:
+            ts = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+        item["_time"] = ts
+        normalized_rows.append(item)
+
     windows: Dict[str, Any] = {}
     for label, step in WINDOWS.items():
         price_changes: List[float] = []
         oi_changes: List[float] = []
-        for i in range(step, len(rows)):
-            p = _pct_change(rows[i]["price_close"], rows[i-step]["price_close"])
-            o = _pct_change(rows[i]["oi_close_usd"], rows[i-step]["oi_close_usd"])
+        price_composition_samples: List[Tuple[float, float]] = []
+        oi_composition_samples: List[Tuple[float, float]] = []
+        times = [item["_time"] for item in normalized_rows]
+        target_delta = timedelta(minutes=step * 30)
+        for i in range(1, len(normalized_rows)):
+            target_time = times[i] - target_delta
+            pos = bisect_left(times, target_time, 0, i)
+            candidates = []
+            if pos < i:
+                candidates.append(pos)
+            if pos > 0:
+                candidates.append(pos - 1)
+            if not candidates:
+                continue
+            ref_idx = min(candidates, key=lambda idx: abs((times[idx] - target_time).total_seconds()))
+            if abs((times[ref_idx] - target_time).total_seconds()) > 20 * 60:
+                continue
+            p = _pct_change(normalized_rows[i]["price_close"], normalized_rows[ref_idx]["price_close"])
+            o = _pct_change(normalized_rows[i]["oi_close_usd"], normalized_rows[ref_idx]["oi_close_usd"])
+            start_time = normalized_rows[ref_idx]["_time"]
+            end_time = normalized_rows[i]["_time"]
+            active_ratio, _, _ = session_baseline.session_ratios(start_time, end_time)
             if p is not None:
-                price_changes.append(abs(p))
+                magnitude = abs(p)
+                price_changes.append(magnitude)
+                price_composition_samples.append((magnitude, active_ratio))
             if o is not None:
-                oi_changes.append(abs(o))
+                magnitude = abs(o)
+                oi_changes.append(magnitude)
+                oi_composition_samples.append((magnitude, active_ratio))
+        price_global = _distribution(price_changes)
+        oi_global = _distribution(oi_changes)
         windows[label] = {
             "samples": min(len(price_changes), len(oi_changes)),
-            "price_abs_change_pct": _distribution(price_changes),
-            "oi_abs_change_pct": _distribution(oi_changes),
+            "price_abs_change_pct": {**price_global, "global": price_global},
+            "oi_abs_change_pct": {**oi_global, "global": oi_global},
+            "price_composition_samples": price_composition_samples,
+            "oi_composition_samples": oi_composition_samples,
         }
 
     return {
         "symbol": symbol,
         "available": True,
-        "rows": len(rows),
+        "rows": len(normalized_rows),
         "windows": windows,
-        "note": "Historical reference for live Price+OI significance only; Max-Pain remains independent.",
+        "note": "Session-composition matched historical reference for live Price+OI significance only; Max-Pain remains independent.",
     }
-
 
 def get_reference_ranges(symbol: str, refresh: bool = False) -> Dict[str, Any]:
     """Cached historical reference for one symbol.
@@ -689,12 +798,48 @@ def strength_from_distribution(change_pct: Optional[float], distribution: Dict[s
     }
 
 
-def reference_for_window(symbol: str, label: str) -> Dict[str, Any]:
+def reference_for_window(
+    symbol: str,
+    label: str,
+    window_start: Optional[datetime] = None,
+    window_end: Optional[datetime] = None,
+) -> Dict[str, Any]:
     stats = get_reference_ranges(symbol)
     if not stats.get("available"):
         return {}
-    return dict((stats.get("windows") or {}).get(label) or {})
-
+    raw = dict((stats.get("windows") or {}).get(label) or {})
+    if not raw:
+        return {}
+    price_sets = raw.get("price_abs_change_pct") or {}
+    oi_sets = raw.get("oi_abs_change_pct") or {}
+    price_global = dict(price_sets.get("global") or price_sets)
+    oi_global = dict(oi_sets.get("global") or oi_sets)
+    if window_start is None or window_end is None:
+        return {
+            "samples": raw.get("samples"),
+            "price_abs_change_pct": price_global,
+            "oi_abs_change_pct": oi_global,
+            "baseline_mode": "GLOBAL",
+        }
+    active_ratio, weekend_ratio, segments = session_baseline.session_ratios(window_start, window_end)
+    price_distribution = _composition_distribution(
+        raw.get("price_composition_samples") or [], active_ratio, price_global
+    )
+    oi_distribution = _composition_distribution(
+        raw.get("oi_composition_samples") or [], active_ratio, oi_global
+    )
+    mode = "SESSION_COMPOSITION_MATCHED"
+    if price_distribution.get("baseline_mode") == "GLOBAL_FALLBACK" or oi_distribution.get("baseline_mode") == "GLOBAL_FALLBACK":
+        mode = "PARTIAL_GLOBAL_FALLBACK"
+    return {
+        "samples": raw.get("samples"),
+        "price_abs_change_pct": price_distribution,
+        "oi_abs_change_pct": oi_distribution,
+        "baseline_mode": mode,
+        "active_ratio": active_ratio,
+        "weekend_ratio": weekend_ratio,
+        "segments": segments,
+    }
 
 def calculate_all_reference_ranges() -> Dict[str, Dict[str, Any]]:
     return {symbol: get_reference_ranges(symbol, refresh=True) for symbol in TARGET_SYMBOLS}
