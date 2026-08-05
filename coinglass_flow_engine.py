@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
     dict_row = None
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
+DB_PATH = os.getenv("DB_PATH", "coinglass.db")
 
 WINDOWS: Tuple[Tuple[str, int], ...] = (
     ("30m", 1),

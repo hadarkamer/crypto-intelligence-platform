@@ -46,7 +46,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
+DB_PATH = os.getenv("DB_PATH", "coinglass.db")
 PORT = int(os.getenv("PORT", "10000"))
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 COINGLASS_MAX_PAIN_URL = os.getenv("COINGLASS_MAX_PAIN_URL", "https://www.coinglass.com/liquidation-maxpain")
@@ -2217,6 +2217,15 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     if str(confirmation.get("status") or "").upper() == "CONFLICT":
         conflict_banner = f"⚠️ <b>{html.escape(str(confirmation.get('label') or 'Max Pain Conflict'))}</b>\n\n"
 
+    cluster_candidate_count = int(item.get("cluster_candidate_count", 0) or 0)
+    cluster_members = ", ".join(item.get("cluster_members") or []) or "-"
+    multiple_cluster_note = ""
+    if cluster_candidate_count > 1:
+        multiple_cluster_note = (
+            f"⚠️ <b>נמצאו {cluster_candidate_count} קלאסטרים אפשריים בצד זה.</b> "
+            f"הניקוד משתמש בחזק ביותר: [{html.escape(cluster_members)}].\n"
+        )
+
     card = (
         conflict_banner
         + "━━━━━━━━━━━━━━━━━━━━\n🎯 <b>Max Pain</b>\n"
@@ -2239,15 +2248,17 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         + "\n\n"
         + score_block("Cluster", c.get("cluster_confidence"), " / 30")
         + "\n"
-        + score_block("צפיפות יעדים", c.get("cluster_density"), " / 12")
+        + score_block("צפיפות יעדים", c.get("cluster_density"), " / 10")
         + "\n"
-        + score_block("מספר טווחים", c.get("cluster_coverage"), " / 8")
+        + score_block("מספר טווחים", c.get("cluster_coverage"), " / 10")
         + "\n"
         + score_block(
             f"הצטברות נזילות (מכפיל {fmt(c.get('cluster_liquidity_multiplier'))}x)",
             c.get("cluster_liquidity_growth"), " / 10",
         )
-        + "\n\n"
+        + "\n"
+        + multiple_cluster_note
+        + "\n"
         + score_block("Gap", c.get("relative_gap"), " / 15")
         + "\n\n"
         f"סוגי חריגה:\n{types_text}\n\n"

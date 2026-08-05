@@ -84,7 +84,7 @@ DEFAULT_EXCHANGES: Tuple[str, ...] = ("Binance", "Bybit", "OKX", "Gate")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 _SCHEMA_INITIALIZED_FOR = None
 _SCHEMA_ADVISORY_LOCK_ID = 94837211
-DB_PATH = os.getenv("DB_PATH", "data/coinglass.db")
+DB_PATH = os.getenv("DB_PATH", "coinglass.db")
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS oi_price_history (
