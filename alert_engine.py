@@ -460,7 +460,7 @@ def _market_bias_map(rows: List[Any]) -> Dict[str, Any]:
     }
 
 
-CLUSTER_MEMBER_MAX_DISTANCE_PCT = 1.5
+CLUSTER_MAX_SPREAD_PCT = 1.0
 
 LIQUIDITY_GROWTH_THRESHOLDS = {
     ("12h", "24h"): 0.15,
@@ -471,13 +471,19 @@ LIQUIDITY_GROWTH_THRESHOLDS = {
     ("2w", "1m"): 0.30,
 }
 
-CLUSTER_COVERAGE_POINTS = {
-    3: 2.0,
-    4: 4.0,
-    5: 6.0,
-    6: 7.0,
-    7: 8.0,
-}
+def _coverage_points(cluster_count: int) -> float:
+    """Continuous 0..10 coverage score for 2..7 cluster timeframes.
+
+    Fewer than two timeframes are not a cluster. From two timeframes onward,
+    coverage increases linearly until all seven Max Pain timeframes are
+    represented.
+    """
+    count = int(cluster_count or 0)
+    if count < 2:
+        return 0.0
+    capped = min(count, len(TIMEFRAMES))
+    return round(10.0 * (capped - 1) / (len(TIMEFRAMES) - 1), 4)
+
 
 
 def _median(values: List[float]) -> Optional[float]:
@@ -518,7 +524,12 @@ def _transition_growth_score(
 
 
 def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
-    """Calculate one independent cluster for one direction."""
+    """Calculate the strongest independent cluster for one direction.
+
+    Cluster membership no longer depends on a median. A valid cluster is the
+    best contiguous group of at least two directional targets whose full
+    low-to-high spread is no more than 1% of their average target.
+    """
     directional_entries: List[Dict[str, Any]] = []
     for row in symbol_rows:
         if _closest_side(row) != side:
@@ -552,51 +563,149 @@ def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
         "growth_points": 0.0,
         "liquidity_multiplier": 0.0,
         "growth_transition_scores": {},
+        "candidate_cluster_count": 0,
+        "candidate_clusters": [],
         "points": 0.0,
     }
-    if same_direction_count < 3:
+    if same_direction_count < 2:
         return empty
 
-    median_target = _median([item["target"] for item in directional_entries])
-    if median_target is None or median_target <= 0:
+    # Sort by price only for cluster discovery. Every contiguous price window is
+    # evaluated, and the strongest valid window is selected deterministically:
+    # most members, then narrowest spread, then greatest represented liquidity.
+    by_target = sorted(directional_entries, key=lambda item: item["target"])
+    candidates: List[Dict[str, Any]] = []
+    for left in range(len(by_target)):
+        for right in range(left + 1, len(by_target)):
+            group = by_target[left:right + 1]
+            targets = [item["target"] for item in group]
+            average_target = sum(targets) / len(targets)
+            if average_target <= 0:
+                continue
+            spread_pct = (max(targets) - min(targets)) / average_target * 100.0
+            if spread_pct <= CLUSTER_MAX_SPREAD_PCT + 1e-12:
+                candidates.append({
+                    "entries": group,
+                    "spread_pct": spread_pct,
+                    "amount": sum(item["amount"] for item in group),
+                    "left": left,
+                    "right": right,
+                })
+
+    if not candidates:
         return empty
 
-    cluster_entries = []
-    for item in directional_entries:
-        deviation = abs(item["target"] - median_target) / median_target * 100.0
-        if deviation <= CLUSTER_MEMBER_MAX_DISTANCE_PCT:
-            cluster_entries.append({**item, "distance_from_median_pct": deviation})
-    cluster_count = len(cluster_entries)
-    if cluster_count < 3:
-        return {**empty, "median_target": median_target, "count": cluster_count,
-                "members": [x["timeframe"] for x in cluster_entries]}
-
-    deviations = [x["distance_from_median_pct"] for x in cluster_entries]
-    mean_deviation_pct = sum(deviations) / len(deviations)
-    targets = [x["target"] for x in cluster_entries]
-    average_target = sum(targets) / len(targets)
-    spread_pct = ((max(targets)-min(targets))/average_target*100.0) if average_target else None
-    density_points = round(max(0.0, 1.0 - mean_deviation_pct / CLUSTER_MEMBER_MAX_DISTANCE_PCT) * 12.0, 2)
-    coverage_points = CLUSTER_COVERAGE_POINTS.get(min(cluster_count, 7), 0.0)
-
-    entries_by_tf = {x["timeframe"]: x for x in cluster_entries}
-    transition_scores: Dict[str, float] = {}
-    for (previous_tf, current_tf), threshold in LIQUIDITY_GROWTH_THRESHOLDS.items():
-        previous = entries_by_tf.get(previous_tf)
-        current = entries_by_tf.get(current_tf)
-        if previous is None or current is None:
-            continue
-        transition_scores[f"{previous_tf}->{current_tf}"] = _transition_growth_score(
-            previous["amount"], current["amount"], threshold
+    # Evaluate every valid price window with the complete cluster formula. This
+    # avoids selecting a very tight but non-growing group when another valid
+    # group has a stronger final cluster score.
+    evaluated_candidates: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        entries = sorted(candidate["entries"], key=lambda item: item["hours"])
+        count = len(entries)
+        spread = float(candidate["spread_pct"] or 0.0)
+        density = round(
+            max(0.0, 1.0 - spread / CLUSTER_MAX_SPREAD_PCT) * 10.0,
+            2,
         )
-    growth_score = round(sum(transition_scores.values()) / len(transition_scores) * 10.0, 2) if transition_scores else 0.0
-    liquidity_multiplier = round(growth_score / 10.0 * 1.5, 4)
-    cluster_points = round(min(30.0, (density_points + coverage_points) * liquidity_multiplier), 2)
+        coverage = round(_coverage_points(count), 2)
+        entries_by_tf = {item["timeframe"]: item for item in entries}
+        transitions: Dict[str, float] = {}
+        for (previous_tf, current_tf), threshold in LIQUIDITY_GROWTH_THRESHOLDS.items():
+            previous = entries_by_tf.get(previous_tf)
+            current = entries_by_tf.get(current_tf)
+            if previous is None or current is None:
+                continue
+            transitions[f"{previous_tf}->{current_tf}"] = _transition_growth_score(
+                previous["amount"], current["amount"], threshold
+            )
+        growth = (
+            round(sum(transitions.values()) / len(transitions) * 10.0, 2)
+            if transitions else 0.0
+        )
+        multiplier = round(growth / 10.0 * 1.5, 4)
+        points = round(min(30.0, (density + coverage) * multiplier), 2)
+        evaluated_candidates.append({
+            **candidate,
+            "entries": entries,
+            "density_points": density,
+            "coverage_points": coverage,
+            "growth_transition_scores": transitions,
+            "growth_points": growth,
+            "liquidity_multiplier": multiplier,
+            "points": points,
+        })
+
+    # Count only maximal candidate windows so nested sub-windows are not
+    # reported as separate clusters. Overlapping maximal windows remain visible
+    # because they represent genuinely different valid groupings under the 1%
+    # full-width rule.
+    maximal_candidates: List[Dict[str, Any]] = []
+    for candidate in evaluated_candidates:
+        left = int(candidate.get("left", 0))
+        right = int(candidate.get("right", 0))
+        contained = any(
+            int(other.get("left", 0)) <= left
+            and int(other.get("right", 0)) >= right
+            and (
+                int(other.get("left", 0)) < left
+                or int(other.get("right", 0)) > right
+            )
+            for other in evaluated_candidates
+        )
+        if not contained:
+            maximal_candidates.append(candidate)
+
+    candidate_summaries = []
+    for candidate in sorted(
+        maximal_candidates,
+        key=lambda item: (-float(item.get("points", 0.0)), float(item.get("spread_pct", 0.0))),
+    ):
+        candidate_entries = list(candidate.get("entries") or [])
+        candidate_targets = [float(item["target"]) for item in candidate_entries]
+        candidate_summaries.append({
+            "count": len(candidate_entries),
+            "members": [item["timeframe"] for item in candidate_entries],
+            "min_target": min(candidate_targets) if candidate_targets else None,
+            "max_target": max(candidate_targets) if candidate_targets else None,
+            "spread_pct": float(candidate.get("spread_pct", 0.0) or 0.0),
+            "points": float(candidate.get("points", 0.0) or 0.0),
+        })
+
+    selected = max(
+        evaluated_candidates,
+        key=lambda candidate: (
+            candidate["points"],
+            len(candidate["entries"]),
+            -candidate["spread_pct"],
+            candidate["amount"],
+        ),
+    )
+    cluster_entries = selected["entries"]
+    cluster_count = len(cluster_entries)
+    targets = [item["target"] for item in cluster_entries]
+    median_target = _median(targets)  # informational/display compatibility only
+    average_target = sum(targets) / len(targets)
+    spread_pct = float(selected["spread_pct"] or 0.0)
+    mean_deviation_pct = (
+        sum(abs(target - average_target) / average_target * 100.0 for target in targets)
+        / len(targets)
+        if average_target else None
+    )
+    density_points = float(selected["density_points"] or 0.0)
+    coverage_points = float(selected["coverage_points"] or 0.0)
+    transition_scores = dict(selected["growth_transition_scores"] or {})
+
+    # Growth receives no separate component points. It affects the cluster only
+    # through the existing continuous 0..1.5 multiplier. The legacy
+    # growth_points field remains as a transparent 0..10 display value.
+    growth_score = float(selected["growth_points"] or 0.0)
+    liquidity_multiplier = float(selected["liquidity_multiplier"] or 0.0)
+    cluster_points = float(selected["points"] or 0.0)
     return {
         "side": side,
         "same_direction_count": same_direction_count,
         "count": cluster_count,
-        "members": [x["timeframe"] for x in cluster_entries],
+        "members": [item["timeframe"] for item in cluster_entries],
         "median_target": median_target,
         "mean_deviation_pct": mean_deviation_pct,
         "spread_pct": spread_pct,
@@ -605,6 +714,8 @@ def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
         "growth_points": growth_score,
         "liquidity_multiplier": liquidity_multiplier,
         "growth_transition_scores": transition_scores,
+        "candidate_cluster_count": len(candidate_summaries),
+        "candidate_clusters": candidate_summaries,
         "points": cluster_points,
     }
 
@@ -792,7 +903,8 @@ def _score_details_for_side(
         "median_target": None, "density_points": 0.0,
         "coverage_points": 0.0, "growth_points": 0.0,
         "liquidity_multiplier": 0.0,
-        "growth_transition_scores": {}, "points": 0.0, "side": side,
+        "growth_transition_scores": {}, "candidate_cluster_count": 0,
+        "candidate_clusters": [], "points": 0.0, "side": side,
     })
     cluster_points = float(cluster.get("points", 0.0) or 0.0)
 
@@ -1042,6 +1154,8 @@ def build_opportunities(
             "cluster_growth_points": cluster.get("growth_points", 0.0),
             "cluster_liquidity_multiplier": cluster.get("liquidity_multiplier", 0.0),
             "cluster_growth_transition_scores": cluster.get("growth_transition_scores", {}),
+            "cluster_candidate_count": cluster.get("candidate_cluster_count", 0),
+            "cluster_candidates": cluster.get("candidate_clusters", []),
             "cluster_side": cluster.get("side"),
             "cluster_members": cluster.get("members", []),
             "duplicate_rows_removed": int(duplicate_counts.get(symbol, 0) or 0),
