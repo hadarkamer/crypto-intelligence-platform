@@ -126,9 +126,22 @@ def test_rate_limit_message_detection():
 
 def test_current_coverage_is_skipped():
     from datetime import timedelta
-    end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    assert flow._is_current({"count": 4319, "max_time": end - timedelta(minutes=30)}, end)
-    assert not flow._is_current({"count": 0, "max_time": None}, end)
+    now = datetime(2026, 8, 5, 10, 47, tzinfo=timezone.utc)
+    # At 10:47 with 2m grace, the newest eligible open timestamp is 10:00.
+    assert flow.latest_eligible_candle_time(now) == datetime(2026, 8, 5, 10, 0, tzinfo=timezone.utc)
+    assert flow._is_current({"count": 4319, "max_time": now.replace(minute=0)}, now)
+    # 09:30 is one closed candle behind and must never be treated as current.
+    assert not flow._is_current({"count": 4319, "max_time": now.replace(hour=9, minute=30)}, now)
+    assert not flow._is_current({"count": 0, "max_time": None}, now)
+
+
+def test_latest_eligible_candle_respects_grace_period():
+    # 10:31 is still inside the 2-minute grace window after the 10:30 close.
+    before_grace = datetime(2026, 8, 5, 10, 31, tzinfo=timezone.utc)
+    assert flow.latest_eligible_candle_time(before_grace) == datetime(2026, 8, 5, 9, 30, tzinfo=timezone.utc)
+    # At 10:32, the 10:00 open / 10:30 close candle becomes eligible.
+    after_grace = datetime(2026, 8, 5, 10, 32, tzinfo=timezone.utc)
+    assert flow.latest_eligible_candle_time(after_grace) == datetime(2026, 8, 5, 10, 0, tzinfo=timezone.utc)
 
 
 def test_continuous_cvd_rebuilt_from_buy_minus_sell(tmp_path):

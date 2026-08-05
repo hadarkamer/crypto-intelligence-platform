@@ -518,14 +518,33 @@ def coverage(symbol: str, market: str) -> Dict[str, Any]:
         "max_time": _as_utc(data.get("max_time")),
     }
 
-def _is_current(existing: Dict[str, Any], end: datetime) -> bool:
-    latest = existing.get("max_time")
-    age = candle_age_minutes(latest, end)
-    return bool(
-        int(existing.get("count") or 0) >= 100
-        and age is not None
-        and age <= MAX_CVD_AGE_MINUTES
+def latest_eligible_candle_time(now: Optional[datetime] = None) -> datetime:
+    """Return the newest CoinGlass 30m timestamp that is safe to store.
+
+    The endpoint timestamps rows by candle *open* by default. A row becomes
+    eligible only after its close plus the configured grace period. This
+    helper deliberately derives eligibility from real wall-clock time rather
+    than from a rounded request boundary; otherwise a database that is one
+    full candle behind can be mistaken for current.
+    """
+    current = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    safe_time = current - timedelta(minutes=CANDLE_GRACE_MINUTES)
+    close_boundary = safe_time.replace(
+        minute=30 if safe_time.minute >= 30 else 0,
+        second=0,
+        microsecond=0,
     )
+    if CVD_TIMESTAMP_MODE == "close":
+        return close_boundary
+    return close_boundary - timedelta(minutes=CANDLE_INTERVAL_MINUTES)
+
+
+def _is_current(existing: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """Whether the DB already contains the newest closed, grace-cleared row."""
+    latest = _as_utc(existing.get("max_time"))
+    if int(existing.get("count") or 0) < 100 or latest is None:
+        return False
+    return latest >= latest_eligible_candle_time(now)
 
 
 def _rebuild_continuous_cvd(symbol: str, market: str) -> int:
@@ -582,13 +601,16 @@ def backfill_symbol(
     market = market.lower()
     _table_for_market(market)
     days = max(1, min(int(days), MAX_BACKFILL_DAYS))
-    end = datetime.now(timezone.utc)
-    minute = 30 if end.minute >= 30 else 0
-    end = end.replace(minute=minute, second=0, microsecond=0)
+    now = datetime.now(timezone.utc)
+    end = now.replace(
+        minute=30 if now.minute >= 30 else 0,
+        second=0,
+        microsecond=0,
+    )
     requested_start = end - timedelta(days=days)
     existing = coverage(symbol, market)
 
-    if not force and _is_current(existing, end):
+    if not force and _is_current(existing, now):
         # Stage 88.2: even a skipped/current market rebuilds its local continuous
         # CVD from the saved Buy-Sell rows. This repairs stale values left by an
         # older deployment without downloading the historical data again.
@@ -628,7 +650,7 @@ def backfill_symbol(
 
         total_rows = _rebuild_continuous_cvd(symbol, market)
         current = coverage(symbol, market)
-        ok = total_rows >= 100 or _is_current(current, end)
+        ok = total_rows >= 100 or _is_current(current, now)
         message = "OK" if ok else "Too few 30m rows"
         print(
             f"[flow-backfill] {symbol} {market} done: "
