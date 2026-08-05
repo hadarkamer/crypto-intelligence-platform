@@ -1994,12 +1994,19 @@ def _flow_snapshot_line(market: Dict[str, Any]) -> str:
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
         stamp = stamp.astimezone(timezone.utc)
-        # CoinGlass stores a 30m candle by its opening timestamp.  The data in
-        # that row covers the full half-hour, so freshness must be measured
-        # from the candle close rather than making it appear 30 minutes older.
-        candle_close = stamp + timedelta(minutes=30)
-        age_minutes = max(0, int((datetime.now(timezone.utc) - candle_close).total_seconds() // 60))
-        freshness = "טרי" if age_minutes <= 10 else "⚠️ ישן"
+        close_raw = quality.get("candle_close")
+        if close_raw:
+            candle_close = datetime.fromisoformat(str(close_raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+        else:
+            candle_close = coinglass_flow_foundation.candle_close_time(stamp)
+        age_value = quality.get("age_minutes")
+        age_minutes = max(0, int(float(age_value))) if age_value is not None else max(0, int((datetime.now(timezone.utc) - candle_close).total_seconds() // 60))
+        if age_minutes > coinglass_flow_foundation.MAX_CVD_AGE_MINUTES:
+            freshness = "⛔ ישן — לא נכלל באישור"
+        elif age_minutes > 10:
+            freshness = "⚠️ מתעכב אך תקף"
+        else:
+            freshness = "טרי"
         return f"🕒 נתוני CVD עד: {candle_close.strftime('%Y-%m-%d %H:%M UTC')} | גיל בפועל {age_minutes} דק׳ | {freshness}"
     except Exception:
         return f"🕒 Snapshot: {html.escape(str(raw))}"
@@ -4531,10 +4538,15 @@ async def _collect_flow_once_locked() -> Dict[str, Dict[str, Dict[str, Any]]]:
             coverage = await asyncio.to_thread(coinglass_flow_foundation.coverage, symbol, market)
             latest = coverage.get("max_time")
             latest_text = latest.isoformat() if latest else "none"
+            fresh = await asyncio.to_thread(coinglass_flow_foundation.freshness, symbol, market)
+            close = fresh.get("candle_close")
+            close_text = close.isoformat() if close else "none"
+            age = fresh.get("age_minutes")
+            age_text = f"{float(age):.1f}m" if age is not None else "unknown"
             ok = bool(data.get("ok"))
             ok_count += int(ok)
             action = "skipped-current" if data.get("skipped") else f"received={data.get('received_rows', 0)}"
-            parts.append(f"{market}:{'ok' if ok else 'warning'} {action} latest={latest_text}")
+            parts.append(f"{market}:{'ok' if ok else 'warning'} {action} raw={latest_text} close={close_text} age={age_text} fresh={fresh.get('fresh')}")
         print(f"[flow-live] {symbol} | " + " | ".join(parts), flush=True)
     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
     print(f"[flow-live] refresh finished ok={ok_count}/16 duration={elapsed:.1f}s", flush=True)
@@ -4659,7 +4671,7 @@ async def main():
         print(
             f"[startup] Futures+Spot CVD collector enabled "
             f"({coinglass_flow_foundation.FLOW_COLLECTION_INTERVAL_MINUTES}m; "
-            f"freshness tolerance {coinglass_flow_foundation.FRESHNESS_TOLERANCE_MINUTES}m)",
+            f"hard maximum age {coinglass_flow_foundation.MAX_CVD_AGE_MINUTES}m; timestamp mode {coinglass_flow_foundation.CVD_TIMESTAMP_MODE})",
             flush=True,
         )
         print(

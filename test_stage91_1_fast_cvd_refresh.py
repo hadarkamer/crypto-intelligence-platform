@@ -8,7 +8,7 @@ def test_default_flow_collection_interval_is_five_minutes(monkeypatch):
 
 def test_display_uses_candle_close_and_actual_age():
     source = Path('main.py').read_text()
-    assert 'candle_close = stamp + timedelta(minutes=30)' in source
+    assert 'coinglass_flow_foundation.candle_close_time(stamp)' in source
     assert 'גיל בפועל' in source
 
 

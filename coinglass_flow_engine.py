@@ -25,6 +25,7 @@ import sqlite3
 
 import time_family_engine
 import market_session_baseline as session_baseline
+import coinglass_flow_foundation as flow_foundation
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
@@ -144,7 +145,7 @@ def _load_rows(symbol: str, market: str) -> List[Dict[str, Any]]:
         ts = _as_utc(item.get("candle_time"))
         if ts is None:
             continue
-        if not session_baseline.is_closed_candle(ts, datetime.now(timezone.utc), interval_minutes=30, grace_minutes=2):
+        if not flow_foundation.is_candle_closed(ts, datetime.now(timezone.utc)):
             continue
         try:
             buy = float(item.get("buy_volume_usd") or 0)
@@ -494,6 +495,11 @@ def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             gaps.append(gap)
             largest_gap_seconds = max(largest_gap_seconds, gap)
 
+    latest_time = rows[-1]["time"]
+    latest_close = flow_foundation.candle_close_time(latest_time)
+    age_minutes = flow_foundation.candle_age_minutes(latest_time)
+    stale = age_minutes is None or age_minutes > flow_foundation.MAX_CVD_AGE_MINUTES
+
     reasons: List[str] = []
     if not cvd_ok:
         reasons.append(
@@ -503,11 +509,23 @@ def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         reasons.append(
             f"{len(gaps)} missing 30m interval(s); largest gap {largest_gap_seconds/60:.1f} minutes"
         )
+    if stale:
+        reasons.append(
+            f"latest closed CVD candle is {age_minutes:.1f} minutes old; "
+            f"maximum allowed is {flow_foundation.MAX_CVD_AGE_MINUTES} minutes"
+        )
     if not reasons:
         reasons.append("continuous CVD matches Buy-Sell sum and no 30m gaps were found")
 
     return {
         "status": "PASS" if cvd_ok and not gaps else "WARNING",
+        "freshness_status": "STALE" if stale else "FRESH",
+        "usable_for_confirmation": not stale and cvd_ok,
+        "stale": stale,
+        "age_minutes": age_minutes,
+        "max_age_minutes": flow_foundation.MAX_CVD_AGE_MINUTES,
+        "candle_close": latest_close.isoformat(),
+        "timestamp_mode": flow_foundation.CVD_TIMESTAMP_MODE,
         "rows": len(rows),
         "continuous_cvd_check": cvd_ok,
         "continuous_cvd_difference_usd": cvd_difference,

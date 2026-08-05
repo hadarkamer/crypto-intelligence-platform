@@ -108,7 +108,8 @@ def _flow_module(data: Dict[str, Any], family: str, expected: str) -> Dict[str, 
     weighted = time_family_engine.aggregate(windows, time_family_engine.flow_window_evaluator)
     quality_data = data.get("quality") or {}
     quality_status = str(quality_data.get("status") or "NO_DATA").upper()
-    available = bool(data.get("available")) and quality_status in {"PASS", "WARNING"}
+    usable_for_confirmation = bool(quality_data.get("usable_for_confirmation", quality_status in {"PASS", "WARNING"}))
+    available = bool(data.get("available")) and usable_for_confirmation
     score = float(weighted.get("score") or 0.0) if available else 0.0
     # A warning reduces confidence but preserves direction.
     if quality_status == "WARNING":
@@ -130,6 +131,8 @@ def _flow_module(data: Dict[str, Any], family: str, expected: str) -> Dict[str, 
         "state": str(overall.get("state") or "NO_DATA").upper(),
         "label": str(overall.get("state") or "No data").replace("_", " ").title(),
         "quality_status": quality_status,
+        "freshness_status": str(quality_data.get("freshness_status") or "UNKNOWN").upper(),
+        "age_minutes": quality_data.get("age_minutes"),
         "quality_reasons": list(quality_data.get("reasons") or []),
         "time_families": weighted.get("families") or {},
         "early_shift": data.get("early_shift"),

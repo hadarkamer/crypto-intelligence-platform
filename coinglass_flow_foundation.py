@@ -49,7 +49,15 @@ REQUEST_PAUSE_SECONDS = 1.0
 API_TIMEOUT_SECONDS = 20
 MAX_REQUEST_ATTEMPTS = 5
 RETRY_BACKOFF_SECONDS: Tuple[int, ...] = (5, 10, 20, 40)
-FRESHNESS_TOLERANCE_MINUTES = max(30, int(os.getenv("FLOW_FRESHNESS_TOLERANCE_MINUTES", "35")))
+# A flow snapshot older than 30 minutes from the interpreted candle close is
+# never eligible for confirmation. This is intentionally a hard ceiling.
+MAX_CVD_AGE_MINUTES = 30
+FRESHNESS_TOLERANCE_MINUTES = MAX_CVD_AGE_MINUTES
+CANDLE_INTERVAL_MINUTES = 30
+CANDLE_GRACE_MINUTES = 2
+CVD_TIMESTAMP_MODE = os.getenv("COINGLASS_CVD_TIMESTAMP_MODE", "open").strip().lower()
+if CVD_TIMESTAMP_MODE not in {"open", "close"}:
+    CVD_TIMESTAMP_MODE = "open"
 FLOW_COLLECTION_INTERVAL_MINUTES = max(5, int(os.getenv("FLOW_COLLECTION_INTERVAL_MINUTES", "5")))
 EXCHANGE_LIST = "Binance,OKX,Bybit"
 TARGET_SYMBOLS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP")
@@ -372,7 +380,7 @@ def _store(
     values = []
     for ts, (buy, sell, api_cvd, continuous_cvd) in sorted(rows.items()):
         candle = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
-        if not session_baseline.is_closed_candle(candle, now, interval_minutes=30, grace_minutes=2):
+        if not is_candle_closed(candle, now):
             continue
         values.append((
             str(symbol).upper(),
@@ -441,12 +449,59 @@ def _as_utc(value: Any) -> Optional[datetime]:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+def candle_close_time(candle_time: datetime) -> datetime:
+    """Return the market-data coverage end for one CoinGlass timestamp.
+
+    CoinGlass has historically exposed the 30m row timestamp as the candle
+    opening time. ``COINGLASS_CVD_TIMESTAMP_MODE=close`` is available only if a
+    live probe proves that the endpoint returns closing timestamps instead.
+    """
+    candle = _as_utc(candle_time)
+    if candle is None:
+        raise ValueError("invalid candle time")
+    if CVD_TIMESTAMP_MODE == "close":
+        return candle
+    return candle + timedelta(minutes=CANDLE_INTERVAL_MINUTES)
+
+
+def candle_age_minutes(candle_time: Optional[datetime], now: Optional[datetime] = None) -> Optional[float]:
+    if candle_time is None:
+        return None
+    current = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    close_time = candle_close_time(candle_time)
+    return max(0.0, (current - close_time).total_seconds() / 60.0)
+
+
+def is_candle_closed(candle_time: datetime, now: Optional[datetime] = None) -> bool:
+    current = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    return candle_close_time(candle_time) + timedelta(minutes=CANDLE_GRACE_MINUTES) <= current
+
+
+def freshness(symbol: str, market: str, now: Optional[datetime] = None) -> Dict[str, Any]:
+    data = coverage(symbol, market)
+    latest = data.get("max_time")
+    current = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    age = candle_age_minutes(latest, current)
+    return {
+        **data,
+        "candle_close": candle_close_time(latest) if latest is not None else None,
+        "age_minutes": age,
+        "fresh": age is not None and age <= MAX_CVD_AGE_MINUTES,
+        "max_age_minutes": MAX_CVD_AGE_MINUTES,
+        "timestamp_mode": CVD_TIMESTAMP_MODE,
+    }
+
+
 def coverage(symbol: str, market: str) -> Dict[str, Any]:
     init_db()
     table = _table_for_market(market)
     symbol = str(symbol).upper()
-    # Ignore any legacy/current open candle when deciding freshness.
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=32)
+    # Ignore any current/open candle when deciding freshness. The database
+    # timestamp meaning is governed by CVD_TIMESTAMP_MODE.
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=CANDLE_GRACE_MINUTES)
+    if CVD_TIMESTAMP_MODE == "open":
+        cutoff -= timedelta(minutes=CANDLE_INTERVAL_MINUTES)
     if _use_postgres():
         sql = f"SELECT COUNT(*) AS n, MIN(candle_time) AS min_time, MAX(candle_time) AS max_time FROM {table} WHERE symbol=%s AND candle_time<=%s"
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
@@ -465,10 +520,11 @@ def coverage(symbol: str, market: str) -> Dict[str, Any]:
 
 def _is_current(existing: Dict[str, Any], end: datetime) -> bool:
     latest = existing.get("max_time")
+    age = candle_age_minutes(latest, end)
     return bool(
         int(existing.get("count") or 0) >= 100
-        and latest is not None
-        and latest >= end - timedelta(minutes=FRESHNESS_TOLERANCE_MINUTES)
+        and age is not None
+        and age <= MAX_CVD_AGE_MINUTES
     )
 
 
@@ -609,3 +665,67 @@ def backfill_all(
 
 def table_count(symbol: str, market: str) -> int:
     return int(coverage(symbol, market)["count"])
+
+
+
+def probe_latest_api(symbol: str, market: str) -> Dict[str, Any]:
+    """Fetch recent API rows without storing them, for timestamp diagnostics."""
+    now = datetime.now(timezone.utc)
+    payload, attempts = _request(
+        FUTURES_ENDPOINT if market.lower() == "futures" else SPOT_ENDPOINT,
+        {
+            "exchange_list": EXCHANGE_LIST,
+            "symbol": str(symbol).upper(),
+            "interval": INTERVAL,
+            "limit": 12,
+            "start_time": int((now - timedelta(hours=6)).timestamp() * 1000),
+            "end_time": int(now.timestamp() * 1000),
+            "unit": "usd",
+        },
+    )
+    normalized = _normalize(payload)
+    rows = []
+    for ts, (buy, sell, api_cvd) in sorted(normalized.items())[-6:]:
+        raw = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
+        rows.append({
+            "raw_timestamp": raw.isoformat(),
+            "age_if_open_minutes": round(max(0.0, (now - (raw + timedelta(minutes=30))).total_seconds() / 60.0), 2),
+            "age_if_close_minutes": round(max(0.0, (now - raw).total_seconds() / 60.0), 2),
+            "buy_volume_usd": buy,
+            "sell_volume_usd": sell,
+            "api_cvd": api_cvd,
+        })
+    return {
+        "requested_at": now.isoformat(),
+        "symbol": str(symbol).upper(),
+        "market": market.lower(),
+        "attempts": attempts,
+        "configured_timestamp_mode": CVD_TIMESTAMP_MODE,
+        "rows": rows,
+    }
+
+
+def _cli() -> int:
+    import json
+    import sys
+    action = sys.argv[1].lower() if len(sys.argv) > 1 else ""
+    if action == "probe" and len(sys.argv) >= 4:
+        print(json.dumps(probe_latest_api(sys.argv[2], sys.argv[3]), indent=2, ensure_ascii=False))
+        return 0
+    if action == "freshness" and len(sys.argv) >= 4:
+        data = freshness(sys.argv[2], sys.argv[3])
+        serializable = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in data.items()}
+        print(json.dumps(serializable, indent=2, ensure_ascii=False))
+        return 0
+    if action == "refresh" and len(sys.argv) >= 3:
+        symbol = sys.argv[2]
+        markets = (sys.argv[3].lower(),) if len(sys.argv) >= 4 else ("futures", "spot")
+        output = {market: backfill_symbol(symbol, market, days=2, force=True) for market in markets}
+        print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+        return 0
+    print("Usage: python coinglass_flow_foundation.py probe BTC spot | freshness BTC spot | refresh BTC [spot|futures]")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
