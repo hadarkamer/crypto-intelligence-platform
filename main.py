@@ -2247,7 +2247,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         )
         + "\n\n"
         + score_block(
-            f"קונצנזוס: {item.get('consensus_hits', 0)}/{item.get('consensus_total', 0)}",
+            f"קונצנזוס Gap: {item.get('gap_consensus_supporting', 0)}/{item.get('gap_consensus_total', 0)}",
             c.get("consensus"),
         )
         + "\n\n"
@@ -2759,7 +2759,7 @@ async def debug_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status = "✅" if not item.get("calculation_validation_errors") else "❌"
                 lines.extend([
                     f"{status} {item['timeframe']} {item['side']} | Score {float(item['score']):.2f}",
-                    f"  Consensus {item.get('consensus_hits',0)}/{item.get('consensus_total',0)} = {float(c.get('consensus',0)):.2f}/{float(c.get('consensus_max',0)):.0f}",
+                    f"  Gap consensus {item.get('gap_consensus_supporting',0)}/{item.get('gap_consensus_total',0)} = {float(c.get('consensus',0)):.2f}/{float(c.get('consensus_max',0)):.0f}",
                     (f"  BTC aligned {c.get('btc_reference_side')} Score {float(c.get('btc_reference_score') or 0):.2f}: +{float(c.get('btc_approval') or 0):.2f}/15"
                      if c.get('btc_relation') == 'ALIGNED' else
                      f"  BTC opposite {c.get('btc_reference_side')} Score {float(c.get('btc_reference_score') or 0):.2f}: -{float(c.get('btc_conflict_penalty') or 0):.2f}/10"
