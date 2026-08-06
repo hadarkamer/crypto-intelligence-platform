@@ -145,6 +145,65 @@ def _relative_gap_points_for_side(row: Any, side: str) -> float:
 
 
 
+def _gap_consensus_details(
+    rows: List[Any],
+    symbol: str,
+    side: str,
+    excluded_timeframe: str,
+    max_points: float,
+) -> Dict[str, Any]:
+    """Consensus from the Gap quality of the other available timeframes.
+
+    The alert timeframe is excluded, leaving six fixed comparison slots. Each
+    slot contributes its directional relative-Gap quality (0..15). Stronger
+    Gap evidence receives more influence, but a zero-quality timeframe keeps a
+    base weight of 1 so it cannot disappear from the consensus average.
+
+    weight = 1 + quality / 15
+    weighted_quality = sum(quality * weight) / sum(weight)
+    """
+    wanted_symbol = str(symbol or "").upper()
+    wanted_side = str(side or "").upper()
+    excluded = str(excluded_timeframe or "")
+    rows_by_timeframe = {
+        str(_get(other_row, "timeframe", "") or ""): other_row
+        for other_row in rows
+        if str(_get(other_row, "symbol", "") or "").upper() == wanted_symbol
+        and str(_get(other_row, "timeframe", "") or "") in TIMEFRAMES
+    }
+
+    qualities: List[float] = []
+    for timeframe in TIMEFRAMES:
+        if timeframe == excluded:
+            continue
+        other_row = rows_by_timeframe.get(timeframe)
+        quality = (
+            float(_relative_gap_points_for_side(other_row, wanted_side) or 0.0)
+            if other_row is not None else 0.0
+        )
+        qualities.append(max(0.0, min(15.0, quality)))
+
+    if not qualities:
+        return {"points": 0.0, "supporting": 0, "total": 0, "qualities": []}
+
+    weights = [1.0 + value / 15.0 for value in qualities]
+    total_weight = sum(weights)
+    weighted_quality = (
+        sum(value * weight for value, weight in zip(qualities, weights)) / total_weight
+        if total_weight > 0.0 else 0.0
+    )
+    points = round(
+        max(0.0, min(float(max_points), weighted_quality / 15.0 * float(max_points))),
+        2,
+    )
+    return {
+        "points": points,
+        "supporting": sum(1 for value in qualities if value > 0.0),
+        "total": len(qualities),
+        "qualities": qualities,
+    }
+
+
 def _gap_consensus_points(
     rows: List[Any],
     symbol: str,
@@ -152,33 +211,10 @@ def _gap_consensus_points(
     excluded_timeframe: str,
     max_points: float,
 ) -> float:
-    """Consensus from the Gap quality of the other available timeframes.
-
-    The alert timeframe is excluded. Each remaining timeframe contributes its
-    existing directional relative-Gap quality (0..15). The quality itself is
-    also used as its weight, so stronger Gap evidence has proportionally more
-    influence than weaker evidence. The result is scaled to ``max_points``.
-    """
-    qualities: List[float] = []
-    wanted_symbol = str(symbol or "").upper()
-    wanted_side = str(side or "").upper()
-    excluded = str(excluded_timeframe or "")
-
-    for other_row in rows:
-        if str(_get(other_row, "symbol", "") or "").upper() != wanted_symbol:
-            continue
-        timeframe = str(_get(other_row, "timeframe", "") or "")
-        if timeframe not in TIMEFRAMES or timeframe == excluded:
-            continue
-        quality = float(_relative_gap_points_for_side(other_row, wanted_side) or 0.0)
-        qualities.append(max(0.0, min(15.0, quality)))
-
-    total_weight = sum(qualities)
-    if total_weight <= 0.0:
-        return 0.0
-
-    weighted_quality = sum(value * value for value in qualities) / total_weight
-    return round(max(0.0, min(float(max_points), weighted_quality / 15.0 * float(max_points))), 2)
+    """Compatibility wrapper returning only the new Gap-consensus score."""
+    return float(_gap_consensus_details(
+        rows, symbol, side, excluded_timeframe, max_points
+    )["points"])
 
 
 def _score_explicit_side(
@@ -884,7 +920,7 @@ def _score_details_for_side(
     consensus_hits = int(cons.get(side, 0) or 0)
     consensus_total = int(cons.get("total", 0) or 0)
     consensus_max = 30.0 if symbol == "BTC" else 15.0
-    gap_consensus_points = _gap_consensus_points(
+    gap_consensus = _gap_consensus_details(
         all_rows, symbol, side, timeframe, consensus_max
     )
     directional = _directional_alignment(
@@ -893,7 +929,7 @@ def _score_details_for_side(
         consensus_total,
         side,
         btc_reference_by_timeframe.get(timeframe),
-        consensus_points_override=gap_consensus_points,
+        consensus_points_override=float(gap_consensus["points"]),
     )
     allowed_distance = _allowed_distance_pct(symbol, rank)
     target_proximity = _target_proximity_points(distance, allowed_distance)
@@ -957,6 +993,8 @@ def _score_details_for_side(
         "allowed_distance": allowed_distance,
         "consensus_hits": consensus_hits,
         "consensus_total": consensus_total,
+        "gap_consensus_supporting": int(gap_consensus["supporting"]),
+        "gap_consensus_total": int(gap_consensus["total"]),
         "directional": directional,
         "cluster": cluster,
         "gap": gap,
@@ -1138,6 +1176,8 @@ def build_opportunities(
             "liquidity_balance": balance["balance"],
             "consensus_hits": consensus_hits,
             "consensus_total": consensus_total,
+            "gap_consensus_supporting": int(selected.get("gap_consensus_supporting", 0) or 0),
+            "gap_consensus_total": int(selected.get("gap_consensus_total", 0) or 0),
             "btc_reference_score": selected["directional"].get("btc_reference_score"),
             "btc_reference_side": selected["directional"].get("btc_reference_side"),
             "btc_relation": selected["directional"].get("btc_relation"),
