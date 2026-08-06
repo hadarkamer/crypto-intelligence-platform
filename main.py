@@ -1851,26 +1851,25 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
         short_mp = _row_get(row, "short_max_pain") if row is not None else None
         long_mp = _row_get(row, "long_max_pain") if row is not None else None
 
-        active_distances = []
+        directional_distance = None
         try:
             price_value = float(price)
             if price_value > 0:
-                if short_mp is not None and float(short_mp) > price_value:
-                    active_distances.append(
+                if alert_side == "SHORT" and short_mp is not None and float(short_mp) > price_value:
+                    directional_distance = (
                         (float(short_mp) - price_value) / price_value * 100.0
                     )
-                if long_mp is not None and float(long_mp) < price_value:
-                    active_distances.append(
+                elif alert_side == "LONG" and long_mp is not None and float(long_mp) < price_value:
+                    directional_distance = (
                         (price_value - float(long_mp)) / price_value * 100.0
                     )
         except (TypeError, ValueError):
-            active_distances = []
+            directional_distance = None
 
-        nearest_active_distance = min(active_distances) if active_distances else None
         value = directional_scores.get(timeframe)
 
-        if not active_distances:
-            lines.append(f"🔴 {timeframe:<3}  אין יעד פעיל (Max Pain נלקח)")
+        if directional_distance is None:
+            lines.append(f"🔴 {timeframe:<3}  אין יעד פעיל לכיוון {alert_side}")
             continue
 
         if value is None:
@@ -1880,11 +1879,11 @@ def _all_timeframe_scores_block(item: Dict[str, Any], all_items, rows) -> str:
         value = float(value)
         values.append(value)
 
-        if nearest_active_distance is not None and nearest_active_distance < MIN_DISPLAY_DISTANCE_PCT:
+        if directional_distance < MIN_DISPLAY_DISTANCE_PCT:
             # Below-threshold rows remain visible: the yellow marker is the warning,
-            # while both actual proximity and the directional score stay transparent.
+            # while both the same-direction distance and score stay transparent.
             lines.append(
-                f"🟡 {timeframe:<3}  {nearest_active_distance:.2f}% | {value:.2f}"
+                f"🟡 {timeframe:<3}  {directional_distance:.2f}% | {value:.2f}"
             )
             continue
 
