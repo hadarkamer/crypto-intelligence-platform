@@ -24,6 +24,7 @@ from coinglass_dom_reader import collect_coinglass_dom_snapshot
 import analysis
 import decision_engine
 import alert_engine
+import magnet_v1
 import live_price_provider
 import counter_score
 import alert_summary
@@ -1157,6 +1158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/alert BTC long|short — אותו חישוב מלא, בכיוון שנבחר ידנית\n"
         "/maxpain BTC — סריקה חיה והצגת Max Pain בלבד ב-7 הטווחים\n"
         "/maxpain BTC long|short — Max Pain בלבד בכיוון שנבחר ידנית\n"
+        "/magnet BTC — סריקה חיה והצגת Magnet V1 בלבד\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — הפעלת צפייה כללית\n"
         "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
@@ -2586,6 +2588,135 @@ async def maxpain_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             if str(WATCH_RUNTIME.get("scan_owner") or "").startswith(
                 f"/maxpain {symbol}"
+            ):
+                WATCH_RUNTIME["scan_owner"] = None
+
+
+def _fmt_magnet_liquidity(value: Any) -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    absolute = abs(amount)
+    if absolute >= 1_000_000_000:
+        return f"${amount / 1_000_000_000:.2f}B"
+    if absolute >= 1_000_000:
+        return f"${amount / 1_000_000:.2f}M"
+    if absolute >= 1_000:
+        return f"${amount / 1_000:.2f}K"
+    return f"${amount:.0f}"
+
+
+async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run a live scan and show isolated Magnet V1 diagnostics only."""
+    if len(context.args) != 1:
+        await update.message.reply_text("שימוש: /magnet BTC")
+        return
+
+    symbol = str(context.args[0]).strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
+        await update.message.reply_text(
+            "סימול המטבע אינו תקין. לדוגמה: /magnet BTC"
+        )
+        return
+
+    command_lock = _get_alert_command_lock()
+    if command_lock.locked():
+        await update.message.reply_text(
+            "⏳ סריקת Alerts אחרת פעילה כרגע. נסו שוב לאחר שתסתיים."
+        )
+        return
+
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
+        await update.message.reply_text(
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
+            "/magnet ימתין ויתחיל כשהסורק יתפנה."
+        )
+
+    async with command_lock:
+        try:
+            async with scrape_lock:
+                WATCH_RUNTIME["scan_owner"] = f"/magnet {symbol}"
+                await update.message.reply_text(
+                    f"🧲 סורק Magnet V1 עבור {symbol} ב-7 טווחי Max Pain."
+                )
+                rows, _live_result = await collect_live_rows_for_watch()
+
+            magnets = magnet_v1.build_magnets(rows, symbol=symbol)
+            if not magnets:
+                await update.message.reply_text(
+                    f"⚪ לא נמצא כרגע קלאסטר Magnet V1 תקף עבור {symbol}."
+                )
+                return
+
+            await update.message.reply_text(
+                f"🧲 <b>{html.escape(symbol)} — Magnet V1</b>\n"
+                "מדד עצמאי לתקופת ולידציה; אינו משנה את ה-Score הקיים.",
+                parse_mode="HTML",
+            )
+
+            side_counts: Dict[str, int] = defaultdict(int)
+            for magnet in magnets:
+                side = str(magnet.get("side") or "")
+                side_counts[side] += 1
+                icon = "🔺" if side == "UPPER" else "🔻"
+                side_label = "עליון" if side == "UPPER" else "תחתון"
+                min_target = magnet.get("min_target")
+                max_target = magnet.get("max_target")
+                if min_target is not None and max_target is not None:
+                    if abs(float(max_target) - float(min_target)) < 1e-12:
+                        target_text = "$" + fmt_price(min_target)
+                    else:
+                        target_text = (
+                            "$" + fmt_price(min_target)
+                            + " – $" + fmt_price(max_target)
+                        )
+                else:
+                    target_text = "—"
+
+                edge = magnet.get("liquidity_edge_pct")
+                consistency = magnet.get("consistency_pct")
+                edge_text = f"{float(edge):+.2f}%" if edge is not None else "—"
+                consistency_text = (
+                    f"{float(consistency):.2f}%" if consistency is not None else "—"
+                )
+                members = ", ".join(magnet.get("members") or []) or "—"
+                lines = [
+                    f"{icon} <b>מגנט {side_label} #{side_counts[side]}</b>",
+                    f"אזור: <b>{html.escape(target_text)}</b>",
+                    f"טווחים: <b>{html.escape(members)}</b>",
+                    f"Magnet Quality: <b>{float(magnet.get('magnet_quality') or 0.0):.2f}/100</b>",
+                    f"Spread: {float(magnet.get('spread_pct') or 0.0):.4f}%",
+                    f"Liquidity Edge: <b>{edge_text}</b>",
+                    f"Consistency: <b>{consistency_text}</b>",
+                    "",
+                    "נזילות לפי טווח:",
+                ]
+                for detail in magnet.get("liquidity_details") or []:
+                    detail_edge = detail.get("edge_pct")
+                    detail_edge_text = (
+                        f"{float(detail_edge):+.2f}%"
+                        if detail_edge is not None else "—"
+                    )
+                    lines.append(
+                        f"• {html.escape(str(detail.get('timeframe') or '—'))}: "
+                        f"{_fmt_magnet_liquidity(detail.get('candidate_liquidity'))} "
+                        f"מול {_fmt_magnet_liquidity(detail.get('opposite_liquidity'))} "
+                        f"→ {detail_edge_text}"
+                    )
+                await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await update.message.reply_text(
+                f"❌ /magnet {symbol} נכשל: {exc!r}"
+            )
+        finally:
+            if str(WATCH_RUNTIME.get("scan_owner") or "").startswith(
+                f"/magnet {symbol}"
             ):
                 WATCH_RUNTIME["scan_owner"] = None
 
@@ -4886,6 +5017,7 @@ async def main():
     bot_app.add_handler(CommandHandler("alerts_liq", alert_check_min_liquidity))
     bot_app.add_handler(CommandHandler("alert", alert_coin))
     bot_app.add_handler(CommandHandler("maxpain", maxpain_cmd))
+    bot_app.add_handler(CommandHandler("magnet", magnet_cmd))
     bot_app.add_handler(CommandHandler("debug", debug_coin))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_on_top8", watch_on_top8))
