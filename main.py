@@ -95,6 +95,8 @@ PROCESSED_UPDATE_ORDER = []
 MAX_PROCESSED_UPDATE_IDS = 500
 ALERT_ACTIVE = False
 CONFIRMATION_STATE: Dict[str, str] = {}
+HIGH_SCORE_83_STATE: Dict[str, bool] = {}
+SPECIAL_HIGH_SCORE_THRESHOLD = 83.0
 WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
 HISTORY_BACKFILL_INTERVAL_HOURS = max(1, int(os.getenv("HISTORY_BACKFILL_INTERVAL_HOURS", "24")))
 HISTORY_BACKFILL_STARTUP_DELAY_SECONDS = max(0, int(os.getenv("HISTORY_BACKFILL_STARTUP_DELAY_SECONDS", "60")))
@@ -1153,6 +1155,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/alerts_liq 1000000 — Alerts רק מעל סך נזילות מינימלי בדולרים\n"
         "/alert BTC — סריקה חיה והצגת כל 7 הטווחים של מטבע אחד\n"
         "/alert BTC long|short — אותו חישוב מלא, בכיוון שנבחר ידנית\n"
+        "/maxpain BTC — סריקה חיה והצגת Max Pain בלבד ב-7 הטווחים\n"
+        "/maxpain BTC long|short — Max Pain בלבד בכיוון שנבחר ידנית\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — הפעלת צפייה כללית\n"
         "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
@@ -1914,15 +1918,13 @@ def _regime_block(item: Dict[str, Any]) -> str:
     overall = regime.get("overall") or {}
     if not windows:
         return (
-            "\n\n<b>אין מספיק נתוני Price + OI</b>\n"
-            f"{html.escape(str(regime.get('reason') or 'טרם נאספה דגימת Price + OI.'))}\n\n"
-            "🧩 מסקנה משולבת\n"
-            f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"
+            "\n\n<b>אין מספיק נתוני מחיר + OI</b>\n"
+            f"{html.escape(_display_text_he(regime.get('reason') or 'טרם נאספה דגימת מחיר + OI.'))}"
         )
 
     clock = {"30m":"🕒","1h":"🕐","4h":"🕓","12h":"🕛","24h":"🕛","48h":"🕑","72h":"🕒","7d":"🗓️"}
     indent = "\u00a0\u00a0\u00a0\u00a0"
-    lines = ["", "━━━━━━━━━━━━━━━━━━━━", "📊 <b>Price + OI</b>"]
+    lines = ["", "━━━━━━━━━━━━━━━━━━━━", "📊 <b>מחיר + OI</b>"]
     for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
         w = windows.get(label) or {}
         icon = clock.get(label, "🕒")
@@ -1934,21 +1936,21 @@ def _regime_block(item: Dict[str, Any]) -> str:
         od = w.get("oi_change_pct")
         ptxt = "—" if pd is None else f"{float(pd):+.4f}%"
         otxt = "—" if od is None else f"{float(od):+.4f}%"
-        state = html.escape(str(w.get("label") or "—"))
+        state = html.escape(_display_text_he(w.get("label") or "—"))
         ps = (w.get("price_strength") or {}).get("label")
         os_ = (w.get("oi_strength") or {}).get("label")
 
         lines.append(f"{icon} {label} | <b>{state}</b>")
         if w.get("historical_reference_available") and ps and os_:
             lines.append(
-                f"{indent}Price: {ptxt} [{html.escape(str(ps))}]"
+                f"{indent}מחיר: {ptxt} [{html.escape(_display_text_he(ps))}]"
             )
             lines.append(
-                f"{indent}OI   : {otxt} [{html.escape(str(os_))}]"
+                f"{indent}OI: {otxt} [{html.escape(_display_text_he(os_))}]"
             )
         else:
-            lines.append(f"{indent}Price: {ptxt}")
-            lines.append(f"{indent}OI   : {otxt}")
+            lines.append(f"{indent}מחיר: {ptxt}")
+            lines.append(f"{indent}OI: {otxt}")
 
     time_families = regime.get("time_families") or {}
     if time_families:
@@ -1961,21 +1963,22 @@ def _regime_block(item: Dict[str, Any]) -> str:
             quality = float(family.get("quality") or 0.0) * 100.0
             agreement = float(family.get("agreement") or 0.0) * 100.0
             weight = float(family.get("weight") or 0.0)
-            lines.append(f"{icon} {label}: <b>{direction.title()}</b> | משקל {weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%")
+            lines.append(f"{icon} {label}: <b>{_direction_display_he(direction)}</b> | משקל {weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%")
 
-    overall_label = html.escape(str(overall.get("label") or "אין מסקנה"))
-    strength = html.escape(str(overall.get("strength") or "—"))
+    overall_label = html.escape(_display_text_he(overall.get("label") or "אין מסקנה"))
+    strength = html.escape(_display_text_he(overall.get("strength") or "—"))
     agreement = int(overall.get("agreement") or 0)
     valid_windows = int(overall.get("valid_windows") or 0)
-    lines.extend(["", f"Overall: <b>{overall_label} — {strength}</b> ({agreement}/{valid_windows or 8})"])
+    lines.extend(["", f"סיכום: <b>{overall_label} — {strength}</b> ({agreement}/{valid_windows or 8})"])
     if regime.get("early_transition"):
-        lines.append("⚠️ <b>Early Transition:</b> 30m + 1h סוטים מהמבנה הרחב")
+        lines.append("⚠️ <b>שינוי מוקדם:</b> 30m + 1h סוטים מהמבנה הרחב")
     observations = regime.get("significance_observations") or []
     if observations:
-        lines.append("🔎 <b>Historical significance</b>")
+        lines.append("🔎 <b>משמעות היסטורית</b>")
         for obs in observations[:3]:
-            lines.append(f"• {html.escape(str(obs.get('text') or ''))}")
-    lines.extend(["", "🧩 מסקנה משולבת", f"<b>{html.escape(str(item.get('composite_conclusion') or '—'))}</b>"])
+            obs_text = _display_text_he(obs.get("text") or "")
+            obs_text = obs_text.replace("Price", "מחיר")
+            lines.append(f"• {html.escape(obs_text)}")
     return "\n".join(lines)
 
 
@@ -1987,7 +1990,7 @@ def _flow_snapshot_line(market: Dict[str, Any]) -> str:
     quality = market.get("quality") or {}
     raw = quality.get("latest_time")
     if not raw:
-        return "🕒 Snapshot: לא זמין"
+        return "🕒 דגימה: לא זמינה"
     try:
         stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         if stamp.tzinfo is None:
@@ -2008,7 +2011,7 @@ def _flow_snapshot_line(market: Dict[str, Any]) -> str:
             freshness = "טרי"
         return f"🕒 נתוני CVD עד: {candle_close.strftime('%Y-%m-%d %H:%M UTC')} | גיל בפועל {age_minutes} דק׳ | {freshness}"
     except Exception:
-        return f"🕒 Snapshot: {html.escape(str(raw))}"
+        return f"🕒 דגימה: {html.escape(str(raw))}"
 
 def _flow_detail_block(item: Dict[str, Any]) -> str:
     context = item.get("flow_context") or {}
@@ -2032,8 +2035,9 @@ def _flow_detail_block(item: Dict[str, Any]) -> str:
             direction = str(w.get("direction") or "NEUTRAL").upper()
             icon = _flow_direction_icon(direction)
             change = _fmt_flow_money(w.get("cvd_change_usd"))
-            magnitude = html.escape(str(w.get("magnitude") or "—").title())
-            state = html.escape(str(w.get("state") or "NEUTRAL").replace("_", " ").title())
+            magnitude = html.escape(_display_text_he(str(w.get("magnitude") or "—").title()))
+            raw_state = str(w.get("state") or "NEUTRAL").replace("_", " ").title()
+            state = html.escape(_display_text_he(raw_state))
             lines.append(f"{icon} {label}: <b>{change}</b> [{magnitude}] — {state}")
 
         groups = market.get("groups") or {}
@@ -2048,19 +2052,19 @@ def _flow_detail_block(item: Dict[str, Any]) -> str:
                 agreement = float(family.get("agreement") or 0.0) * 100.0
                 weight = float(family.get("weight") or 0.0)
                 lines.append(
-                    f"{icon} {label}: <b>{direction.title()}</b> | "
+                    f"{icon} {label}: <b>{_direction_display_he(direction)}</b> | "
                     f"{weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%"
                 )
 
         overall = market.get("overall") or {}
         weighted_score = float(overall.get("weighted_score") or 0.0)
-        state_text = html.escape(str(overall.get("state") or "NO DATA").replace("_", " ").title())
-        lines.append(f"Overall {title}: <b>{state_text}</b> ({weighted_score:+.1f})")
+        state_text = html.escape(_display_text_he(str(overall.get("state") or "NO DATA").replace("_", " ").title()))
+        lines.append(f"סיכום {title}: <b>{state_text}</b> ({weighted_score:+.1f})")
         early = market.get("early_shift")
         if early:
             lines.append(
-                f"⚠️ Early Shift: {html.escape(str(early.get('new_direction')))} "
-                f"מול {html.escape(str(early.get('established_direction')))}"
+                f"⚠️ שינוי מוקדם: {html.escape(_direction_display_he(early.get('new_direction')))} "
+                f"מול {html.escape(_direction_display_he(early.get('established_direction')))}"
             )
         sections.append("\n".join(lines))
 
@@ -2075,22 +2079,23 @@ def _market_evidence_block(item: Dict[str, Any]) -> str:
     confirmation=evidence.get("confirmation") or item.get("maxpain_confirmation") or {}
     status=str(confirmation.get("status") or "UNCONFIRMED")
     status_icon={"STRONG_CONFIRMED":"🔥","CONFIRMED":"✅","CONFLICT":"⚠️","BELOW_SCORE":"⚪"}.get(status,"🟡")
-    lines=["", "━━━━━━━━━━━━━━━━━━━━", "🧭 <b>סיכום Price+OI, Futures ו-Spot</b>"]
-    for key,title in (("positioning","Price+OI"),("futures_flow","Futures Flow"),("spot_flow","Spot Flow")):
+    lines=["", "━━━━━━━━━━━━━━━━━━━━", "🧭 <b>סיכום מחיר+OI, חוזים ו-Spot</b>"]
+    for key,title in (("positioning","מחיר+OI"),("futures_flow","CVD חוזים"),("spot_flow","CVD Spot")):
         module=modules.get(key) or {}; direction=str(module.get("direction") or "NEUTRAL").upper()
-        icon=_flow_direction_icon(direction); label=html.escape(str(module.get("label") or module.get("state") or "No data"))
+        icon=_flow_direction_icon(direction); label=html.escape(_display_text_he(module.get("label") or module.get("state") or "No data"))
         score=float(module.get("score") or 0.0)
-        lines.append(f"{icon} {title}: <b>{direction.title()}</b> ({score:+.1f}) — {label}")
+        lines.append(f"{icon} {title}: <b>{_direction_display_he(direction)}</b> ({score:+.1f}) — {label}")
     lines.extend([
         "",
         f"הסכמה: 🟢 {int(counts.get('BULLISH',0))} | ⚪ {int(counts.get('NEUTRAL',0))} | 🔴 {int(counts.get('BEARISH',0))}",
-        f"מסקנה: <b>{html.escape(str(evidence.get('classification_label') or '—'))}</b>",
-        f"{status_icon} <b>{html.escape(str(confirmation.get('label') or 'Max Pain לא מאומת כרגע'))}</b>",
+        f"מסקנה: <b>{html.escape(_display_text_he(evidence.get('classification_label') or '—'))}</b>",
+        f"{status_icon} <b>{html.escape(_display_text_he(confirmation.get('label') or 'Max Pain לא מאומת כרגע'))}</b>",
     ])
     spot_context=evidence.get("spot_context") or {}
     if spot_context:
         spot_icon={"SUPPORTS":"✅","NEUTRAL":"⚪","DIVERGING":"⚠️"}.get(str(spot_context.get("status") or "NEUTRAL"),"⚪")
-        lines.append(f"{spot_icon} Spot משני: <b>{html.escape(str(spot_context.get('label') or 'Spot ניטרלי'))}</b> — ללא השפעה על ה-Confirmation")
+        spot_label = html.escape(_display_text_he(spot_context.get('label') or 'Spot ניטרלי'))
+        lines.append(f"{spot_icon} Spot משני: <b>{spot_label}</b> — אינו משפיע על האישור")
     return "\n".join(lines)
 
 
@@ -2115,7 +2120,7 @@ def _confirmation_transition_message(item: Dict[str, Any]) -> Optional[str]:
     previous = CONFIRMATION_STATE.get(key)
     CONFIRMATION_STATE[key] = status
 
-    if status not in {"CONFIRMED", "STRONG_CONFIRMED", "CONFLICT"}:
+    if status not in {"CONFIRMED", "STRONG_CONFIRMED"}:
         return None
     if previous == status:
         return None
@@ -2132,24 +2137,21 @@ def _confirmation_transition_message(item: Dict[str, Any]) -> Optional[str]:
         module = modules.get(key_name) or {}
         direction = str(module.get("direction") or "NEUTRAL").upper()
         icon = _flow_direction_icon(direction)
-        return f"{icon} {title}: <b>{html.escape(direction.title())}</b>"
+        return f"{icon} {title}: <b>{html.escape(_direction_display_he(direction))}</b>"
 
     if status == "STRONG_CONFIRMED":
-        title = "🔥🔥 <b>MAX PAIN STRONG CONFIRMATION</b> 🔥🔥"
+        title = "🔥🔥 <b>אישור Max Pain חזק</b> 🔥🔥"
         conclusion = "אישור חזק לכיוון העסקה התקבל כעת."
-    elif status == "CONFIRMED":
-        title = "✅ <b>MAX PAIN CONFIRMED</b>"
-        conclusion = "אישור לכיוון העסקה התקבל כעת."
     else:
-        title = "⚠️ <b>MAX PAIN CONFLICT</b>"
-        conclusion = "ראיות השוק מתנגשות כעת עם כיוון העסקה."
+        title = "✅ <b>אישור Max Pain</b>"
+        conclusion = "אישור לכיוון העסקה התקבל כעת."
 
-    label = html.escape(str(confirmation.get("label") or conclusion))
+    label = html.escape(_display_text_he(confirmation.get("label") or conclusion))
     return "\n".join([
         title,
         "",
         f"<b>{symbol} | {side_icon} {side} | {timeframe}</b>",
-        f"Score: <b>{score}</b>",
+        f"ציון: <b>{score}</b>",
         "",
         module_line("positioning", "Price+OI"),
         module_line("futures_flow", "Futures CVD"),
@@ -2159,10 +2161,56 @@ def _confirmation_transition_message(item: Dict[str, Any]) -> Optional[str]:
     ])
 
 
+def _high_score_83_transition_message(item: Dict[str, Any]) -> Optional[str]:
+    """Emit once when a symbol/timeframe/direction crosses into score 83+."""
+    key = _confirmation_state_key(item)
+    score = float(item.get("score", item.get("priority", 0)) or 0.0)
+    is_high = score >= SPECIAL_HIGH_SCORE_THRESHOLD
+    was_high = bool(HIGH_SCORE_83_STATE.get(key, False))
+    HIGH_SCORE_83_STATE[key] = is_high
+    if not is_high or was_high:
+        return None
+
+    symbol = html.escape(str(item.get("symbol") or "—"))
+    timeframe = html.escape(str(item.get("timeframe") or "—"))
+    side = str(item.get("side") or "—").upper()
+    side_icon = "🟢" if side == "LONG" else "🔴" if side == "SHORT" else "⚪"
+    target = item.get("target_price")
+    distance = item.get("distance_pct")
+    target_text = "$" + fmt_price(target) if target is not None else "לא זמין"
+    distance_text = f"{float(distance):.2f}%" if distance is not None else "לא זמין"
+    return "\n".join([
+        "🚨 <b>Max Pain — ציון 83+</b>",
+        "",
+        f"<b>{symbol} | {side_icon} {side} | {timeframe}</b>",
+        f"ציון: <b>{score:.2f}</b>",
+        f"יעד Max Pain: <b>{target_text}</b> ({distance_text})",
+    ])
+
+
+def _special_transition_messages(item: Dict[str, Any]) -> List[str]:
+    """Return independent short alerts without changing any scoring logic."""
+    messages: List[str] = []
+    confirmation = _confirmation_transition_message(item)
+    if confirmation:
+        messages.append(confirmation)
+    high_score = _high_score_83_transition_message(item)
+    if high_score:
+        messages.append(high_score)
+    return messages
+
+
+def _collect_special_transition_messages(items: List[Dict[str, Any]]) -> List[str]:
+    """Evaluate special-alert transitions independently of normal alert ranking."""
+    messages: List[str] = []
+    for item in items:
+        messages.extend(_special_transition_messages(item))
+    return messages
+
+
 async def _send_alert_with_confirmation(bot, chat_id: int, card: str, item: Dict[str, Any]) -> None:
     await bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
-    separate = _confirmation_transition_message(item)
-    if separate:
+    for separate in _special_transition_messages(item):
         await bot.send_message(chat_id=chat_id, text=separate, parse_mode="HTML")
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
@@ -2170,20 +2218,29 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     c = item.get("components", {})
     types = item.get("types", [])
     type_prefix = "🟢 " if len(types) > 1 else ""
+    type_labels = {
+        "NEAR_MAX_PAIN": "קרוב ל-Max Pain",
+        "TARGET_CLUSTER": "קלאסטר יעדים",
+        "RELATIVE_GAP_ADVANTAGE": "יתרון Gap יחסי",
+        "LIQUIDITY_BALANCE_SUPPORT": "תמיכת מאזן נזילות",
+    }
     types_text = (
-        "\n".join(f"{type_prefix}• {type_name}" for type_name in types)
+        "\n".join(
+            f"{type_prefix}• {type_labels.get(type_name, type_name)}"
+            for type_name in types
+        )
         if types else "• ללא סוג חריגה"
     )
 
     near_share = item.get("near_share_pct")
     if near_share is None:
-        balance_text = "⚪ Liquidity Balance: אין נתון"
+        balance_text = "⚪ מאזן נזילות: אין נתון"
     elif float(near_share) >= 60.0:
-        balance_text = f"🟢 Liquidity Balance: {fmt(near_share)}% לצד הנבחר"
+        balance_text = f"🟢 מאזן נזילות: {fmt(near_share)}% לצד הנבחר"
     elif float(near_share) <= 40.0:
-        balance_text = f"🔴 Liquidity Balance: {fmt(near_share)}% לצד הנבחר"
+        balance_text = f"🔴 מאזן נזילות: {fmt(near_share)}% לצד הנבחר"
     else:
-        balance_text = f"⚪ Liquidity Balance: {fmt(near_share)}% לצד הנבחר"
+        balance_text = f"⚪ מאזן נזילות: {fmt(near_share)}% לצד הנבחר"
 
     average_score = item.get("average_score_all_timeframes")
     if average_score is None:
@@ -2196,10 +2253,10 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     btc_reference_side = c.get("btc_reference_side")
     btc_relation = c.get("btc_relation")
     if btc_relation == "ALIGNED":
-        btc_label = f"אישור BTC: {btc_reference_side}, Score {fmt(btc_reference_score)}"
+        btc_label = f"אישור BTC: {btc_reference_side}, ציון {fmt(btc_reference_score)}"
         btc_points = c.get("btc_approval")
     elif btc_relation == "OPPOSITE":
-        btc_label = f"התנגדות BTC: {btc_reference_side}, Score {fmt(btc_reference_score)}"
+        btc_label = f"התנגדות BTC: {btc_reference_side}, ציון {fmt(btc_reference_score)}"
         btc_points = -float(c.get("btc_conflict_penalty", 0) or 0)
     else:
         btc_label = "BTC: אין נתון באותו טווח"
@@ -2221,7 +2278,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     confirmation = (item.get("maxpain_confirmation") or (item.get("market_evidence") or {}).get("confirmation") or {})
     conflict_banner = ""
     if str(confirmation.get("status") or "").upper() == "CONFLICT":
-        conflict_banner = f"⚠️ <b>{html.escape(str(confirmation.get('label') or 'Max Pain Conflict'))}</b>\n\n"
+        conflict_banner = f"⚠️ <b>{html.escape(_display_text_he(confirmation.get('label') or 'סתירת Max Pain'))}</b>\n\n"
 
     cluster_candidate_count = int(item.get("cluster_candidate_count", 0) or 0)
     cluster_members = ", ".join(item.get("cluster_members") or []) or "-"
@@ -2252,7 +2309,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
         + "\n\n"
         + score_block(btc_label, btc_points)
         + "\n\n"
-        + score_block("Cluster", c.get("cluster_confidence"), " / 30")
+        + score_block("קלאסטר", c.get("cluster_confidence"), " / 30")
         + "\n"
         + score_block("צפיפות יעדים", c.get("cluster_density"), " / 10")
         + "\n"
@@ -2347,6 +2404,192 @@ def _distance_trade_label(distance_pct: Any) -> str:
     return "רחוק יותר"
 
 
+def _direction_display_he(direction: Any) -> str:
+    return {
+        "BULLISH": "שורי",
+        "BEARISH": "דובי",
+        "NEUTRAL": "ניטרלי",
+        "MIXED": "מעורב",
+        "LONG": "LONG",
+        "SHORT": "SHORT",
+    }.get(str(direction or "").upper(), str(direction or "לא ידוע"))
+
+
+def _display_text_he(value: Any) -> str:
+    """Translate known analysis labels for Telegram display only."""
+    text = str(value or "")
+    replacements = (
+        ("Max Pain Strong Confirmation", "אישור Max Pain חזק"),
+        ("Max Pain Confirmed", "Max Pain מאומת"),
+        ("Max Pain Conflict", "סתירת Max Pain"),
+        ("Price+OI Early Shift", "שינוי מוקדם במחיר+OI"),
+        ("Futures Early Shift", "שינוי מוקדם בחוזים"),
+        ("Price+OI", "מחיר+OI"),
+        ("Futures Flow", "CVD חוזים"),
+        ("Strong / Confirmed", "חזק / מאומת"),
+        ("Neutral / Inconclusive", "ניטרלי / לא חד-משמעי"),
+        ("Mixed / Transition", "מעורב / מעבר"),
+        ("Bullish Build-up", "בנייה שורית"),
+        ("Bearish Build-up", "בנייה דובית"),
+        ("Short Covering", "סגירת שורטים"),
+        ("Long Unwinding", "פירוק לונגים"),
+        ("Weak / Noise", "חלש / רעש"),
+        ("Spot סותר / Divergence", "Spot סותר את הכיוון"),
+        ("Price/OI timestamp gap too large", "פער הזמנים בין המחיר ל-OI גדול מדי"),
+        ("Inconclusive", "לא חד-משמעי"),
+        ("Unavailable", "לא זמין"),
+        ("Unknown", "לא ידוע"),
+        ("Elevated", "מוגבר"),
+        ("Extreme", "קיצוני"),
+        ("Confirmed", "מאומת"),
+        ("Strong", "חזק"),
+        ("Normal", "רגיל"),
+        ("Bullish", "שורי"),
+        ("Bearish", "דובי"),
+        ("Neutral", "ניטרלי"),
+        ("Mixed", "מעורב"),
+        ("No data", "אין נתון"),
+        ("NO DATA", "אין נתון"),
+    )
+    for source, target in replacements:
+        text = text.replace(source, target)
+    return text
+
+
+async def maxpain_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run the normal live scan but display only compact Max Pain information."""
+    if not context.args or len(context.args) > 2:
+        await update.message.reply_text(
+            "שימוש: /maxpain BTC או /maxpain BTC long|short"
+        )
+        return
+
+    symbol = str(context.args[0]).strip().upper()
+    requested_side = None
+    if len(context.args) == 2:
+        requested_side = str(context.args[1]).strip().upper()
+        if requested_side not in {"LONG", "SHORT"}:
+            await update.message.reply_text(
+                "הכיוון חייב להיות long או short. לדוגמה: /maxpain BTC long"
+            )
+            return
+    if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
+        await update.message.reply_text(
+            "סימול המטבע אינו תקין. לדוגמה: /maxpain BTC"
+        )
+        return
+
+    command_lock = _get_alert_command_lock()
+    if command_lock.locked():
+        await update.message.reply_text(
+            "⏳ סריקת Alerts אחרת פעילה כרגע. נסו שוב לאחר שתסתיים."
+        )
+        return
+
+    scrape_lock = _get_scrape_lock()
+    if scrape_lock.locked():
+        owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
+        await update.message.reply_text(
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
+            "/maxpain ימתין ויתחיל כשהסורק יתפנה."
+        )
+
+    async with command_lock:
+        try:
+            async with scrape_lock:
+                WATCH_RUNTIME["scan_owner"] = (
+                    f"/maxpain {symbol}"
+                    + (f" {requested_side}" if requested_side else "")
+                )
+                await update.message.reply_text(
+                    f"🔎 סורק 7 טווחי Max Pain עבור {symbol}"
+                    + (f" בכיוון {requested_side}." if requested_side else ".")
+                )
+                rows, _live_result = await collect_live_rows_for_watch()
+
+            if requested_side:
+                all_items = alert_engine.build_opportunities(
+                    rows,
+                    limit=500,
+                    forced_symbol=symbol,
+                    forced_side=requested_side,
+                )
+            else:
+                all_items = alert_engine.build_opportunities(rows, limit=500)
+
+            symbol_items = [
+                item for item in all_items
+                if str(item.get("symbol") or "").upper() == symbol
+            ]
+            item_by_tf = {
+                str(item.get("timeframe") or ""): item
+                for item in symbol_items
+            }
+            if not symbol_items:
+                await update.message.reply_text(
+                    f"⚠️ לא נמצאו יעדי Max Pain פעילים עבור {symbol}"
+                    + (f" בכיוון {requested_side}." if requested_side else ".")
+                )
+                return
+
+            current_price = next(
+                (
+                    item.get("current_price")
+                    for item in symbol_items
+                    if item.get("current_price") is not None
+                ),
+                None,
+            )
+            lines = [
+                f"🎯 <b>{html.escape(symbol)} — Max Pain בלבד</b>",
+                (
+                    "מחיר נוכחי: <b>$" + fmt_price(current_price) + "</b>"
+                    if current_price is not None
+                    else "מחיר נוכחי: לא זמין"
+                ),
+                "",
+            ]
+            for timeframe in TIMEFRAMES:
+                item = item_by_tf.get(timeframe)
+                if item is None:
+                    suffix = f" בכיוון {requested_side}" if requested_side else ""
+                    lines.append(f"⚪ {timeframe}: אין יעד פעיל{suffix}")
+                    continue
+                side = str(item.get("side") or "").upper()
+                icon = "🟢" if side == "LONG" else "🔴" if side == "SHORT" else "⚪"
+                target = item.get("target_price")
+                distance = item.get("distance_pct")
+                proximity = float(
+                    (item.get("components") or {}).get("target_proximity", 0.0)
+                    or 0.0
+                )
+                target_text = (
+                    "$" + fmt_price(target) if target is not None else "לא זמין"
+                )
+                distance_text = (
+                    f"{float(distance):.2f}%"
+                    if distance is not None else "מרחק לא זמין"
+                )
+                lines.append(
+                    f"{icon} {timeframe} {side} | {target_text} | "
+                    f"{distance_text} | קרבה {proximity:.2f}/25"
+                )
+
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await update.message.reply_text(
+                f"❌ /maxpain {symbol} נכשל: {exc!r}"
+            )
+        finally:
+            if str(WATCH_RUNTIME.get("scan_owner") or "").startswith(
+                f"/maxpain {symbol}"
+            ):
+                WATCH_RUNTIME["scan_owner"] = None
+
+
 async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run /alerts, or route /alerts SYMBOL to the single-coin scan."""
     limit = 10
@@ -2413,8 +2656,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for index, item in enumerate(items, start=1):
                 card = _alert_card(index, item, all_items, rows)
                 await update.message.reply_text(card, parse_mode="HTML")
-                separate = _confirmation_transition_message(item)
-                if separate:
+                for separate in _special_transition_messages(item):
                     await update.message.reply_text(separate, parse_mode="HTML")
             await update.message.reply_text(alert_summary.format_alert_count_summary(items))
 
@@ -2496,8 +2738,7 @@ async def alert_check_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for index, item in enumerate(items, start=1):
                 card = _alert_card(index, item, top8_all_items, rows)
                 await update.message.reply_text(card, parse_mode="HTML")
-                separate = _confirmation_transition_message(item)
-                if separate:
+                for separate in _special_transition_messages(item):
                     await update.message.reply_text(separate, parse_mode="HTML")
             await update.message.reply_text(
                 alert_summary.format_alert_count_summary(items)
@@ -2595,8 +2836,7 @@ async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAUL
             for index, item in enumerate(items, start=1):
                 card = _alert_card(index, item, all_items, rows)
                 await update.message.reply_text(card, parse_mode="HTML")
-                separate = _confirmation_transition_message(item)
-                if separate:
+                for separate in _special_transition_messages(item):
                     await update.message.reply_text(separate, parse_mode="HTML")
             await update.message.reply_text(
                 alert_summary.format_alert_count_summary(items)
@@ -2701,8 +2941,7 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent_index += 1
                 card = _alert_card(sent_index, item, all_items, rows)
                 await update.message.reply_text(card, parse_mode="HTML")
-                separate = _confirmation_transition_message(item)
-                if separate:
+                for separate in _special_transition_messages(item):
                     await update.message.reply_text(separate, parse_mode="HTML")
 
         except asyncio.CancelledError:
@@ -3038,6 +3277,7 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
             for item in all_items
             if _is_displayable_opportunity(item)
         ]
+        special_messages = _collect_special_transition_messages(displayable_items)
         candidates = [
             item
             for item in displayable_items
@@ -3077,6 +3317,12 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
             await bot_app.bot.send_message(
                 chat_id=chat_id,
                 text=alert_summary.format_alert_count_summary(result_items),
+            )
+        for special_message in special_messages:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=special_message,
+                parse_mode="HTML",
             )
 
         top_item = (
@@ -4153,14 +4399,14 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not regime.get("available"):
         reason = regime.get("reason") or "אין עדיין מספיק דגימות חיות להשוואה."
         await update.message.reply_text(
-            f"📊 {symbol} — Price + OI Regime\n\n"
+            f"📊 {symbol} — מצב מחיר + OI\n\n"
             f"אין עדיין חישוב זמין.\n{reason}\n\n"
             "הפקודה מציגה נתונים שכבר נאספו ואינה מפעילה איסוף חדש."
         )
         return
 
     lines = [
-        f"📊 {symbol} — Price + OI Regime",
+        f"📊 {symbol} — מצב מחיר + OI",
         "הפקודה מציגה את החישוב השמור האחרון; היא אינה אוספת נתונים מחדש.",
     ]
     for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
@@ -4171,26 +4417,32 @@ async def oi_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         ps = w.get("price_strength") or {}
         os_ = w.get("oi_strength") or {}
-        p_strength = ps.get("label") or "ללא Reference"
-        o_strength = os_.get("label") or "ללא Reference"
+        p_strength = _display_text_he(ps.get("label") or "ללא ייחוס היסטורי")
+        o_strength = _display_text_he(os_.get("label") or "ללא ייחוס היסטורי")
         lines.extend([
             f"⏱ {label}",
-            f"Price: {_fmt_signed_pct(w.get('price_change_pct'))} — {p_strength}",
+            f"מחיר: {_fmt_signed_pct(w.get('price_change_pct'))} — {p_strength}",
             f"OI: {_fmt_signed_pct(w.get('oi_change_pct'))} — {o_strength}",
-            f"State: {w.get('label') or w.get('state') or 'לא ידוע'}",
+            f"מצב: {_display_text_he(w.get('label') or w.get('state') or 'לא ידוע')}",
         ])
 
     lines.extend([
         "",
-        f"מסקנה כוללת: {overall.get('label') or 'לא זמינה'}",
-        f"עוצמה: {overall.get('strength') or 'לא זמינה'}",
+        f"מסקנה כוללת: {_display_text_he(overall.get('label') or 'לא זמינה')}",
+        f"עוצמה: {_display_text_he(overall.get('strength') or 'לא זמינה')}",
         f"הסכמה: {overall.get('agreement', 0)}/{overall.get('valid_windows', 0) or 8}",
-        f"Early Transition: {'כן' if regime.get('early_transition') else 'לא'}",
+        f"שינוי מוקדם: {'כן' if regime.get('early_transition') else 'לא'}",
     ])
 
     observations = regime.get("significance_observations") or []
     if observations:
-        lines.extend(["", "הערות משמעותיות:"] + [f"• {x.get('text')}" for x in observations if x.get('text')])
+        translated = []
+        for observation in observations:
+            if not observation.get("text"):
+                continue
+            observation_text = _display_text_he(observation.get("text"))
+            translated.append("• " + observation_text.replace("Price", "מחיר"))
+        lines.extend(["", "הערות משמעותיות:"] + translated)
 
     await update.message.reply_text("\n".join(lines))
 
@@ -4215,28 +4467,30 @@ def _flow_market_lines(title, data):
     lines=[f"{title}"]
     quality=(data.get("quality") or {})
     lines.append(_flow_snapshot_line(data))
-    lines.append(f"Data quality: {quality.get('status','NO DATA')} | rows {quality.get('rows',0)}")
+    lines.append(f"איכות נתונים: {_display_text_he(quality.get('status','NO DATA'))} | שורות {quality.get('rows',0)}")
     for reason in quality.get("reasons") or []:
-        lines.append(f"Quality reason: {reason}")
+        lines.append(f"סיבת איכות: {_display_text_he(reason)}")
     impulse=data.get("current_impulse_30m") or {}
     if impulse:
         lines.append(
-            f"30m impulse: {impulse.get('direction','-')} "
-            f"{_fmt_flow_money(impulse.get('delta_usd'))} — {impulse.get('magnitude','-')}"
+            f"דחף 30m: {_direction_display_he(impulse.get('direction','-'))} "
+            f"{_fmt_flow_money(impulse.get('delta_usd'))} — {_display_text_he(impulse.get('magnitude','-'))}"
         )
     else:
-        lines.append("30m impulse: unavailable")
+        lines.append("דחף 30m: לא זמין")
     groups=data.get("groups") or {}
-    for key,label in (("momentum","Momentum 30m/1h"),("trend","Trend 4h/12h/24h"),("structure","Structure 48h/72h/7d")):
+    for key,label in (("momentum","מומנטום 30m/1h"),("trend","מגמה 4h/12h/24h"),("structure","מבנה 48h/72h/7d")):
         g=groups.get(key) or {}
-        lines.append(f"{label}: {g.get('state','NO DATA')}")
+        state_text = _display_text_he(str(g.get('state','NO DATA')).replace("_", " ").title())
+        lines.append(f"{label}: {state_text}")
     overall=data.get("overall") or {}
-    lines.append(f"Overall: {overall.get('state','NO DATA')}")
+    overall_text = _display_text_he(str(overall.get('state','NO DATA')).replace("_", " ").title())
+    lines.append(f"סיכום: {overall_text}")
     early=data.get("early_shift")
     if early:
         lines.append(
-            f"⚠️ Early Shift: {early.get('new_direction')} מול "
-            f"{early.get('established_direction')} הרחב"
+            f"⚠️ שינוי מוקדם: {_direction_display_he(early.get('new_direction'))} מול "
+            f"{_direction_display_he(early.get('established_direction'))} הרחב"
         )
     return lines
 
@@ -4253,13 +4507,13 @@ async def flow_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ /flow_state נכשל: {exc!r}")
         return
     lines=[
-        f"📈 {symbol} — CVD Flow Engine",
+        f"📈 {symbol} — ניתוח CVD",
         "הניתוח לקריאה בלבד ואינו משנה Alerts, Watch או Score.",
         "",
     ]
-    lines.extend(_flow_market_lines("Futures Flow", result.get("futures") or {}))
+    lines.extend(_flow_market_lines("CVD חוזים", result.get("futures") or {}))
     lines.append("")
-    lines.extend(_flow_market_lines("Spot Flow", result.get("spot") or {}))
+    lines.extend(_flow_market_lines("CVD Spot", result.get("spot") or {}))
     lines.extend([
         "",
         "כלל: Buy/Sell ו-CVD הם משפחת נתונים אחת; 30m impulse אינו נספר כאישור נוסף.",
@@ -4631,6 +4885,7 @@ async def main():
     bot_app.add_handler(CommandHandler("alerts_top8", alert_check_top8))
     bot_app.add_handler(CommandHandler("alerts_liq", alert_check_min_liquidity))
     bot_app.add_handler(CommandHandler("alert", alert_coin))
+    bot_app.add_handler(CommandHandler("maxpain", maxpain_cmd))
     bot_app.add_handler(CommandHandler("debug", debug_coin))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_on_top8", watch_on_top8))
