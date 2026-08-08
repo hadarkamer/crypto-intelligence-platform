@@ -15,6 +15,11 @@ from typing import Any, Dict, Iterable, List, Optional
 TIMEFRAMES = ("12h", "24h", "48h", "3d", "1w", "2w", "1m")
 TIMEFRAME_ORDER = {timeframe: index for index, timeframe in enumerate(TIMEFRAMES)}
 MAX_CLUSTER_SPREAD_PCT = 1.0
+CONFIRMATION_MIN_QUALITY = 60.0
+STRONG_CONFIRMATION_MIN_QUALITY = 75.0
+LIQUIDITY_OPPOSITION_PCT = -10.0
+LIQUIDITY_SUPPORT_PCT = 10.0
+STRONG_LIQUIDITY_SUPPORT_PCT = 20.0
 
 
 def _get(row: Any, key: str, default=None):
@@ -53,6 +58,133 @@ def _side_fields(side: str) -> Dict[str, str]:
             "opposite_liquidity": "short_liquidation_amount",
         }
     raise ValueError("side must be UPPER or LOWER")
+
+
+def expected_price_direction(side: str) -> str:
+    """Map a Magnet side to the price direction used by Confirmation."""
+    normalized = str(side or "").upper()
+    if normalized == "UPPER":
+        return "BULLISH"
+    if normalized == "LOWER":
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def _derivatives_state(market_evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """Read the existing Confirmation evidence without changing its engine.
+
+    Price+OI and Futures Flow remain the two voting families. Spot stays
+    secondary. Existing early-shift / opposition flags remain vetoes. The raw
+    state is intentionally independent of Magnet Quality so weak valid magnets
+    can still collect useful validation evidence.
+    """
+    confirmation = market_evidence.get("confirmation") or {}
+    support = int(
+        market_evidence.get("core_supporting_families")
+        or market_evidence.get("supporting_families")
+        or confirmation.get("supporting_families")
+        or 0
+    )
+    opposition = int(
+        market_evidence.get("core_opposing_families")
+        or market_evidence.get("opposing_families")
+        or confirmation.get("opposing_families")
+        or 0
+    )
+    early_against = bool(confirmation.get("early_shift_opposes"))
+    oi_opposes = bool(confirmation.get("oi_opposes"))
+    strong_core = bool(confirmation.get("strong_core"))
+
+    if early_against or oi_opposes or opposition:
+        status = "CONFLICT"
+        label = "נגזרים סותרים את כיוון המגנט"
+    elif support == 2:
+        status = "STRONG_CONFIRMED" if strong_core else "CONFIRMED"
+        label = (
+            "Price+OI + Futures CVD מאשרים בעוצמה"
+            if strong_core
+            else "Price+OI + Futures CVD מאשרים"
+        )
+    else:
+        status = "UNCONFIRMED"
+        label = "אין עדיין אישור מלא מ-Price+OI + Futures CVD"
+
+    return {
+        "status": status,
+        "label": label,
+        "supporting_families": support,
+        "opposing_families": opposition,
+        "early_shift_opposes": early_against,
+        "oi_opposes": oi_opposes,
+        "strong_core": strong_core,
+    }
+
+
+def evaluate_confirmation(
+    magnet: Dict[str, Any], market_evidence: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Gate existing derivatives evidence with Magnet V1 MQ and Liquidity Edge.
+
+    MQ, Liquidity Edge and derivatives evidence are never averaged. This is a
+    decision matrix layered on top of the read-only V1 diagnostics.
+    """
+    quality = float(magnet.get("magnet_quality") or 0.0)
+    raw_edge = magnet.get("liquidity_edge_pct")
+    edge = float(raw_edge) if raw_edge is not None else None
+    derivatives = _derivatives_state(market_evidence)
+
+    if edge is None:
+        liquidity_status = "UNAVAILABLE"
+        liquidity_label = "אין נתון Liquidity Edge"
+    elif edge <= LIQUIDITY_OPPOSITION_PCT:
+        liquidity_status = "OPPOSE"
+        liquidity_label = "נזילות מתנגדת למגנט"
+    elif edge >= LIQUIDITY_SUPPORT_PCT:
+        liquidity_status = "SUPPORT"
+        liquidity_label = "נזילות תומכת במגנט"
+    else:
+        liquidity_status = "NEUTRAL"
+        liquidity_label = "נזילות מאוזנת / ניטרלית"
+
+    derivatives_status = derivatives["status"]
+    derivatives_confirm = derivatives_status in {"CONFIRMED", "STRONG_CONFIRMED"}
+
+    if quality < CONFIRMATION_MIN_QUALITY:
+        status = "OBSERVATION"
+        label = "👁 Observation — MQ מתחת ל-60"
+    elif derivatives_status == "CONFLICT":
+        status = "NOT_CONFIRMED"
+        label = "❌ Magnet לא מאומת — נגזרים סותרים"
+    elif not derivatives_confirm:
+        status = "NOT_CONFIRMED"
+        label = "❌ Magnet עדיין לא מאומת"
+    elif liquidity_status == "UNAVAILABLE":
+        status = "LIQUIDITY_UNAVAILABLE"
+        label = "⚪ אין הכרעת Magnet — חסר Liquidity Edge"
+    elif liquidity_status == "OPPOSE":
+        status = "LIQUIDITY_CONFLICT"
+        label = "⚠️ Liquidity Conflict — ה-Confirmation הגולמי נשמר"
+    elif (
+        quality >= STRONG_CONFIRMATION_MIN_QUALITY
+        and edge is not None
+        and edge >= STRONG_LIQUIDITY_SUPPORT_PCT
+        and derivatives_status == "STRONG_CONFIRMED"
+    ):
+        status = "STRONG_CONFIRMED"
+        label = "🔥 Strong Magnet Confirmation"
+    else:
+        status = "CONFIRMED"
+        label = "✅ Magnet Confirmed"
+
+    return {
+        "status": status,
+        "label": label,
+        "magnet_quality": quality,
+        "liquidity_edge_pct": edge,
+        "liquidity_status": liquidity_status,
+        "liquidity_label": liquidity_label,
+        "derivatives": derivatives,
+    }
 
 
 def _is_active_target(side: str, target: float, current_price: float) -> bool:
@@ -223,4 +355,3 @@ def build_magnets(rows: Iterable[Any], symbol: Optional[str] = None) -> List[Dic
         float(item["average_target"]),
     ))
     return magnets
-

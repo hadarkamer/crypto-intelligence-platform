@@ -1158,7 +1158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/alert BTC long|short — אותו חישוב מלא, בכיוון שנבחר ידנית\n"
         "/maxpain BTC — סריקה חיה והצגת Max Pain בלבד ב-7 הטווחים\n"
         "/maxpain BTC long|short — Max Pain בלבד בכיוון שנבחר ידנית\n"
-        "/magnet BTC — סריקה חיה והצגת Magnet V1 בלבד\n"
+        "/magnet BTC — Magnet V1 + אישור נגזרים\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — הפעלת צפייה כללית\n"
         "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
@@ -2608,7 +2608,7 @@ def _fmt_magnet_liquidity(value: Any) -> str:
 
 
 async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run a live scan and show isolated Magnet V1 diagnostics only."""
+    """Run Magnet V1 and attach read-only derivatives Confirmation evidence."""
     if len(context.args) != 1:
         await update.message.reply_text("שימוש: /magnet BTC")
         return
@@ -2653,13 +2653,33 @@ async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(
                 f"🧲 <b>{html.escape(symbol)} — Magnet V1</b>\n"
-                "מדד עצמאי לתקופת ולידציה; אינו משנה את ה-Score הקיים.",
+                "MQ + Liquidity Edge + Confirmation; אינו משנה את ה-Score הקיים.",
                 parse_mode="HTML",
             )
+
+            evidence_by_direction: Dict[str, Dict[str, Any]] = {}
+            for direction in {
+                magnet_v1.expected_price_direction(magnet.get("side"))
+                for magnet in magnets
+            }:
+                if direction not in {"BULLISH", "BEARISH"}:
+                    continue
+                # maxpain_score=0 is deliberate: Magnet has its own MQ gates.
+                # We consume only the existing raw derivatives modules/flags.
+                evidence_by_direction[direction] = await asyncio.to_thread(
+                    market_confidence_engine.combine,
+                    symbol,
+                    direction,
+                )
 
             side_counts: Dict[str, int] = defaultdict(int)
             for magnet in magnets:
                 side = str(magnet.get("side") or "")
+                direction = magnet_v1.expected_price_direction(side)
+                market_evidence = evidence_by_direction.get(direction) or {}
+                magnet_confirmation = magnet_v1.evaluate_confirmation(
+                    magnet, market_evidence
+                )
                 side_counts[side] += 1
                 icon = "🔺" if side == "UPPER" else "🔻"
                 side_label = "עליון" if side == "UPPER" else "תחתון"
@@ -2683,6 +2703,27 @@ async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{float(consistency):.2f}%" if consistency is not None else "—"
                 )
                 members = ", ".join(magnet.get("members") or []) or "—"
+                derivatives = magnet_confirmation.get("derivatives") or {}
+                modules = market_evidence.get("modules") or {}
+                positioning = modules.get("positioning") or {}
+                futures_flow = modules.get("futures_flow") or {}
+                spot_flow = modules.get("spot_flow") or {}
+
+                def _relation_text(module: Dict[str, Any]) -> str:
+                    relation = str(module.get("relation") or "NEUTRAL").upper()
+                    direction_text = str(module.get("direction") or "NEUTRAL").upper()
+                    relation_he = {
+                        "SUPPORT": "תומך",
+                        "OPPOSE": "סותר",
+                        "NEUTRAL": "ניטרלי",
+                    }.get(relation, relation)
+                    direction_he = {
+                        "BULLISH": "עולה",
+                        "BEARISH": "יורד",
+                        "NEUTRAL": "ניטרלי",
+                    }.get(direction_text, direction_text)
+                    return f"{relation_he} ({direction_he})"
+
                 lines = [
                     f"{icon} <b>מגנט {side_label} #{side_counts[side]}</b>",
                     f"אזור: <b>{html.escape(target_text)}</b>",
@@ -2691,6 +2732,13 @@ async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Spread: {float(magnet.get('spread_pct') or 0.0):.4f}%",
                     f"Liquidity Edge: <b>{edge_text}</b>",
                     f"Consistency: <b>{consistency_text}</b>",
+                    "",
+                    "<b>Confirmation נגזרים:</b>",
+                    f"Price+OI: {_relation_text(positioning)}",
+                    f"Futures CVD: {_relation_text(futures_flow)}",
+                    f"Spot (משני בלבד): {_relation_text(spot_flow)}",
+                    f"נגזרים: <b>{html.escape(str(derivatives.get('label') or '—'))}</b>",
+                    f"מסקנה: <b>{html.escape(str(magnet_confirmation.get('label') or '—'))}</b>",
                     "",
                     "נזילות לפי טווח:",
                 ]
