@@ -1918,6 +1918,17 @@ def _regime_block(item: Dict[str, Any]) -> str:
     regime = item.get("market_regime") or {}
     windows = regime.get("windows") or {}
     overall = regime.get("overall") or {}
+    quality_status = str(regime.get("data_quality_status") or "PASS").upper()
+    if quality_status == "INVALID":
+        gap = regime.get("time_gap_seconds")
+        gap_text = f"{float(gap):.1f} שניות" if gap is not None else "לא ידוע"
+        return (
+            "\n\n━━━━━━━━━━━━━━━━━━━━\n"
+            "📊 <b>מחיר + OI</b>\n"
+            "⛔ <b>הדגימה לא נכללה ב-Confirmation</b>\n"
+            f"פער הזמן בין המחיר ל-OI: {gap_text} (המקסימום הוא 60 שניות).\n"
+            "המערכת תנסה שוב במחזור האיסוף הבא."
+        )
     if not windows:
         return (
             "\n\n<b>אין מספיק נתוני מחיר + OI</b>\n"
@@ -2075,29 +2086,32 @@ def _flow_detail_block(item: Dict[str, Any]) -> str:
 def _market_evidence_block(item: Dict[str, Any]) -> str:
     evidence=item.get("market_evidence") or {}
     if not evidence: return ""
-    expected=str(evidence.get("expected_price_direction") or "NEUTRAL").upper()
-    counts=evidence.get("counts") or {}
     modules=evidence.get("modules") or {}
     confirmation=evidence.get("confirmation") or item.get("maxpain_confirmation") or {}
     status=str(confirmation.get("status") or "UNCONFIRMED")
     status_icon={"STRONG_CONFIRMED":"🔥","CONFIRMED":"✅","CONFLICT":"⚠️","BELOW_SCORE":"⚪"}.get(status,"🟡")
-    lines=["", "━━━━━━━━━━━━━━━━━━━━", "🧭 <b>סיכום מחיר+OI, חוזים ו-Spot</b>"]
-    for key,title in (("positioning","מחיר+OI"),("futures_flow","CVD חוזים"),("spot_flow","CVD Spot")):
+    lines=["", "━━━━━━━━━━━━━━━━━━━━", "🧭 <b>סיכום מנועי Confirmation</b>"]
+    for key,title in (("positioning","מחיר+OI"),("futures_flow","CVD חוזים")):
         module=modules.get(key) or {}; direction=str(module.get("direction") or "NEUTRAL").upper()
         icon=_flow_direction_icon(direction); label=html.escape(_display_text_he(module.get("label") or module.get("state") or "No data"))
         score=float(module.get("score") or 0.0)
-        lines.append(f"{icon} {title}: <b>{_direction_display_he(direction)}</b> ({score:+.1f}) — {label}")
+        direction_text="לא זמין" if module.get("available") is False else _direction_display_he(direction)
+        lines.append(f"{icon} {title}: <b>{direction_text}</b> ({score:+.1f}) — {label}")
+    core_support=int(evidence.get("core_supporting_families") or evidence.get("supporting_families") or 0)
+    core_opposition=int(evidence.get("core_opposing_families") or evidence.get("opposing_families") or 0)
+    core_neutral=max(0,2-core_support-core_opposition)
+    spot_module=modules.get("spot_flow") or {}
+    spot_direction=str(spot_module.get("direction") or "NEUTRAL").upper()
+    spot_icon=_flow_direction_icon(spot_direction)
+    spot_score=float(spot_module.get("score") or 0.0)
+    spot_direction_text="לא זמין" if spot_module.get("available") is False else _direction_display_he(spot_direction)
     lines.extend([
         "",
-        f"הסכמה: 🟢 {int(counts.get('BULLISH',0))} | ⚪ {int(counts.get('NEUTRAL',0))} | 🔴 {int(counts.get('BEARISH',0))}",
+        f"מנועי ליבה תומכים: <b>{core_support}/2</b> | ללא כיוון/לא זמינים: {core_neutral}/2 | מתנגדים: {core_opposition}/2",
+        f"{spot_icon} Spot משני בלבד: <b>{spot_direction_text}</b> ({spot_score:+.1f}) — אינו מצביע באישור",
         f"מסקנה: <b>{html.escape(_display_text_he(evidence.get('classification_label') or '—'))}</b>",
         f"{status_icon} <b>{html.escape(_display_text_he(confirmation.get('label') or 'Max Pain לא מאומת כרגע'))}</b>",
     ])
-    spot_context=evidence.get("spot_context") or {}
-    if spot_context:
-        spot_icon={"SUPPORTS":"✅","NEUTRAL":"⚪","DIVERGING":"⚠️"}.get(str(spot_context.get("status") or "NEUTRAL"),"⚪")
-        spot_label = html.escape(_display_text_he(spot_context.get('label') or 'Spot ניטרלי'))
-        lines.append(f"{spot_icon} Spot משני: <b>{spot_label}</b> — אינו משפיע על האישור")
     return "\n".join(lines)
 
 

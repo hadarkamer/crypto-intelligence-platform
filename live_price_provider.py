@@ -248,8 +248,6 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
     2. USD-M Futures mark price as fallback when Spot is unavailable.
     """
     requested = sorted({_normalize_symbol(s) for s in symbols if _normalize_symbol(s)})
-    fetched_at = datetime.now(timezone.utc)
-
     futures_error = None
     spot_error = None
     bybit_futures_error = None
@@ -262,22 +260,28 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
 
     try:
         futures_prices = _fetch_futures_mark_prices()
+        futures_fetched_at = datetime.now(timezone.utc)
     except Exception as exc:
         futures_prices = {}
+        futures_fetched_at = None
         futures_error = repr(exc)
 
     try:
         spot_prices = _fetch_spot_prices()
+        spot_fetched_at = datetime.now(timezone.utc)
     except Exception as exc:
         spot_prices = {}
+        spot_fetched_at = None
         spot_error = repr(exc)
 
     bybit_hype_price: Optional[float] = None
     bybit_hype_source: Optional[str] = None
+    hype_fetched_at: Optional[datetime] = None
     if "HYPE" in requested:
         try:
             bybit_hype_price = _fetch_bybit_hype_price("linear")
             bybit_hype_source = "bybit_futures_mark"
+            hype_fetched_at = datetime.now(timezone.utc)
             print(
                 f"[price] HYPE fetched from Bybit Futures: {bybit_hype_price}",
                 flush=True,
@@ -291,6 +295,7 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
             try:
                 bybit_hype_price = _fetch_bybit_hype_price("spot")
                 bybit_hype_source = "bybit_spot"
+                hype_fetched_at = datetime.now(timezone.utc)
                 print(
                     f"[price] HYPE fetched from Bybit Spot: {bybit_hype_price}",
                     flush=True,
@@ -302,6 +307,8 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
                     flush=True,
                 )
                 bybit_hype_price, bybit_hype_source, hype_fallback_errors = _fetch_hype_fallback_price()
+                if bybit_hype_price is not None:
+                    hype_fetched_at = datetime.now(timezone.utc)
 
     prices: Dict[str, Dict[str, Any]] = {}
     missing: List[str] = []
@@ -313,12 +320,15 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
         if pair in spot_prices:
             raw_price = spot_prices[pair]
             source = "binance_spot"
+            source_fetched_at = spot_fetched_at
         elif pair in futures_prices:
             raw_price = futures_prices[pair]
             source = "binance_futures_mark"
+            source_fetched_at = futures_fetched_at
         elif symbol == "HYPE" and bybit_hype_price is not None:
             raw_price = bybit_hype_price
             source = bybit_hype_source or "bybit_futures_mark"
+            source_fetched_at = hype_fetched_at
             pair = "HYPEUSDT"
         else:
             missing.append(symbol)
@@ -331,13 +341,14 @@ def fetch_binance_usdt_prices(symbols: Iterable[str]) -> Dict[str, Any]:
             "raw_price": raw_price,
             "multiplier": multiplier,
             "source": source,
-            "fetched_at_utc": fetched_at.isoformat(),
+            "fetched_at_utc": (source_fetched_at or datetime.now(timezone.utc)).isoformat(),
         }
 
+    completed_at = datetime.now(timezone.utc)
     return {
         "ok": bool(prices),
         "source": "binance_spot_then_futures_mark",
-        "fetched_at_utc": fetched_at.isoformat(),
+        "fetched_at_utc": completed_at.isoformat(),
         "requested_count": len(requested),
         "found_count": len(prices),
         "missing_count": len(missing),

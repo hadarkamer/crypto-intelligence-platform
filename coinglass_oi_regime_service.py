@@ -8,6 +8,7 @@ percentage threshold is shared between coins or timeframes.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import math
@@ -38,6 +39,7 @@ HISTORY_RETENTION_DAYS = 365
 REFERENCE_TOLERANCE_MINUTES = 20
 PRICE_OI_PASS_SECONDS = 30
 PRICE_OI_WARNING_SECONDS = 60
+OI_FETCH_WORKERS = 4
 REGIME_WINDOWS_MINUTES = (30, 60, 240, 720, 1440, 2880, 4320, 10080)
 WINDOW_LABELS = {
     30: "30m", 60: "1h", 240: "4h", 720: "12h", 1440: "24h",
@@ -305,6 +307,8 @@ def _reference_for_window(rows, now, minutes, symbol=None):
     candidates = []
 
     for row in rows:
+        if str(row.get("data_quality_status") or "PASS").upper() == "INVALID":
+            continue
         candidate = dict(row)
         candidate.setdefault("source", "live_snapshot")
         candidates.append(candidate)
@@ -464,19 +468,24 @@ def _insert_snapshot(symbol,price,oi,result,price_meta=None,oi_meta=None):
             "price_source":price_meta.get("source") or "unknown","oi_source":oi_meta.get("source") or "unknown"}
 
 
-def collect_symbol(symbol,price_input):
+def _invalid_snapshot_parts(symbol, status, gap):
+    windows={label:{**classify(symbol,None,None).to_dict(),"window_label":label,"window_minutes":minutes,"data_quality_status":status,"time_gap_seconds":gap}
+             for minutes,label in WINDOW_LABELS.items()}
+    overall={"state":"UNAVAILABLE","label":"Price/OI timestamp gap too large","strength":"Unavailable","agreement":0,"valid_windows":0}
+    weighted={"direction":"NEUTRAL","score":0.0,"quality":"Unavailable","families":{}}
+    return windows,overall,weighted
+
+
+def _collect_symbol_with_oi_meta(symbol,price_input,oi_meta):
     symbol=str(symbol or "").upper()
     if isinstance(price_input,dict):
         price=float(price_input.get("price")); price_meta={"fetched_at":price_input.get("fetched_at_utc") or price_input.get("fetched_at"),"source":price_input.get("source")}
     else:
         price=float(price_input); price_meta={"fetched_at":datetime.now(timezone.utc),"source":"legacy_price"}
-    oi_meta=fetch_aggregated_oi_with_meta(symbol); oi=float(oi_meta["value"]); now=datetime.now(timezone.utc); rows=_history(symbol)
+    oi=float(oi_meta["value"]); now=datetime.now(timezone.utc); rows=_history(symbol)
     gap,status=_quality_status(_as_utc(price_meta.get("fetched_at") or now),_as_utc(oi_meta.get("fetched_at") or now))
     if status=="INVALID":
-        windows={label:{**classify(symbol,None,None).to_dict(),"window_label":label,"window_minutes":minutes,"data_quality_status":status,"time_gap_seconds":gap}
-                 for minutes,label in WINDOW_LABELS.items()}
-        overall={"state":"UNAVAILABLE","label":"Price/OI timestamp gap too large","strength":"Unavailable","agreement":0,"valid_windows":0}
-        weighted={"direction":"NEUTRAL","score":0.0,"quality":"Unavailable","families":{}}
+        windows,overall,weighted=_invalid_snapshot_parts(symbol,status,gap)
         early=False; observations=[]
     else:
         windows=_window_results(symbol,price,oi,now,rows); weighted=time_family_engine.aggregate(windows,time_family_engine.oi_window_evaluator); overall=_overall(windows); overall.update({"weighted_direction":weighted["direction"],"weighted_score":weighted["score"],"weighted_quality":weighted["quality"]}); early=_early_transition(windows,overall); observations=_significance_observations(windows)
@@ -484,11 +493,43 @@ def collect_symbol(symbol,price_input):
     quality=_insert_snapshot(symbol,price,oi,legacy,price_meta,oi_meta)
     return {"symbol":symbol,"price":price,"open_interest_usd":oi,"windows":windows,"time_families":weighted["families"],"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,**quality}
 
+
+def collect_symbol(symbol,price_input):
+    symbol=str(symbol or "").upper()
+    return _collect_symbol_with_oi_meta(
+        symbol,
+        price_input,
+        fetch_aggregated_oi_with_meta(symbol),
+    )
+
 def collect_many(symbol_prices):
+    """Collect OI close to the shared live-price timestamp, then write serially.
+
+    Only the network reads run concurrently. Classification and database writes
+    remain serial, preserving the existing locking and schema behaviour while
+    preventing late alphabetic symbols from exceeding the 60-second pairing
+    tolerance solely because earlier CoinGlass requests occupied the queue.
+    """
     out={}
-    for symbol,price in sorted(symbol_prices.items()):
+    ordered=sorted(symbol_prices.items())
+    oi_results={}
+    oi_errors={}
+    if ordered:
+        workers=min(OI_FETCH_WORKERS,len(ordered))
+        with ThreadPoolExecutor(max_workers=workers,thread_name_prefix="oi-fetch") as pool:
+            futures={pool.submit(fetch_aggregated_oi_with_meta,symbol):symbol for symbol,_price in ordered}
+            for future in as_completed(futures):
+                symbol=futures[future]
+                try:
+                    oi_results[symbol]=future.result()
+                except Exception as exc:
+                    oi_errors[symbol]=exc
+
+    for symbol,price in ordered:
         try:
-            out[symbol]=collect_symbol(symbol,price)
+            if symbol in oi_errors:
+                raise oi_errors[symbol]
+            out[symbol]=_collect_symbol_with_oi_meta(symbol,price,oi_results[symbol])
         except Exception as exc:
             print(f"[oi-regime] {symbol} failed: {type(exc).__name__}: {exc}")
             out[symbol]={"symbol":symbol,"windows":{},"overall":{"state":"UNAVAILABLE","label":"נתוני Price + OI לא זמינים","strength":"Unavailable","agreement":0,"valid_windows":0},"early_transition":False,"available":False,"reason":str(exc),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
@@ -499,8 +540,14 @@ def latest(symbol):
     if not rows: return {"symbol":symbol,"windows":{},"overall":{"state":"UNAVAILABLE","label":"אין נתוני Price + OI","strength":"Unavailable","agreement":0,"valid_windows":0},"early_transition":False,"available":False,"reason":"טרם נאספה דגימת Price + OI.","collection_interval_minutes":COLLECTION_INTERVAL_MINUTES}
     current=rows[-1]; now=_as_utc(current["collected_at"])
     history_before=rows[:-1]
-    windows=_window_results(symbol,float(current["price"]),float(current["open_interest_usd"]),now,history_before)
-    weighted=time_family_engine.aggregate(windows,time_family_engine.oi_window_evaluator); overall=_overall(windows); overall.update({"weighted_direction":weighted["direction"],"weighted_score":weighted["score"],"weighted_quality":weighted["quality"]}); early=_early_transition(windows,overall); observations=_significance_observations(windows)
+    quality_status=str(current.get("data_quality_status") or "PASS").upper()
+    time_gap=current.get("time_gap_seconds")
+    if quality_status=="INVALID":
+        windows,overall,weighted=_invalid_snapshot_parts(symbol,quality_status,time_gap)
+        early=False; observations=[]
+    else:
+        windows=_window_results(symbol,float(current["price"]),float(current["open_interest_usd"]),now,history_before)
+        weighted=time_family_engine.aggregate(windows,time_family_engine.oi_window_evaluator); overall=_overall(windows); overall.update({"weighted_direction":weighted["direction"],"weighted_score":weighted["score"],"weighted_quality":weighted["quality"]}); early=_early_transition(windows,overall); observations=_significance_observations(windows)
     return {"symbol":symbol,"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"time_families":weighted["families"],"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,
             "price_fetched_at":current.get("price_fetched_at"),"oi_fetched_at":current.get("oi_fetched_at"),
             "time_gap_seconds":current.get("time_gap_seconds"),"data_quality_status":current.get("data_quality_status"),
