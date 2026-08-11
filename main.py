@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import html
 import json
 import os
@@ -83,12 +84,16 @@ SCRAPE_LOCK = None
 WATCH_TASK = None
 WATCH_SCAN_TASK = None
 SPECIFIC_WATCH_TASK = None
+OI_REFRESH_TASK = None
+FLOW_REFRESH_TASK = None
 OI_REGIME_TASK = None
 HISTORY_BACKFILL_TASK = None
 FLOW_COLLECTION_TASK = None
 HISTORY_BACKFILL_LOCK = None
 FLOW_BACKFILL_LOCK = None
 SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
+MAGNET_V1_WATCHES: Dict[str, Dict[str, Any]] = {}
+WATCH_GENERAL_ENABLED = False
 SPECIFIC_WATCH_INTERVAL_MINUTES = 5
 ALERT_COMMAND_LOCK = None
 PROCESSED_UPDATE_IDS = set()
@@ -98,7 +103,25 @@ ALERT_ACTIVE = False
 CONFIRMATION_STATE: Dict[str, str] = {}
 HIGH_SCORE_83_STATE: Dict[str, bool] = {}
 SPECIAL_HIGH_SCORE_THRESHOLD = 83.0
-WATCH_INTERVAL_MINUTES = int(os.getenv("WATCH_INTERVAL_MINUTES", "15"))
+# A derivatives-aware Watch generation cannot be newer than its closed 30m
+# CVD candle.  Keep the public setting backward-compatible, but never schedule
+# full Watch generations faster than the underlying closed-candle cadence.
+WATCH_INTERVAL_MINUTES = max(30, int(os.getenv("WATCH_INTERVAL_MINUTES", "30")))
+WATCH_SYNC_GRACE_SECONDS = max(
+    0,
+    int(
+        os.getenv(
+            "WATCH_SYNC_GRACE_SECONDS",
+            str(coinglass_flow_foundation.CANDLE_GRACE_MINUTES * 60 + 15),
+        )
+    ),
+)
+WATCH_DERIVATIVES_TIMEOUT_SECONDS = max(
+    30, int(os.getenv("WATCH_DERIVATIVES_TIMEOUT_SECONDS", "240"))
+)
+WATCH_DERIVATIVES_MAX_ATTEMPTS = max(
+    1, int(os.getenv("WATCH_DERIVATIVES_MAX_ATTEMPTS", "3"))
+)
 HISTORY_BACKFILL_INTERVAL_HOURS = max(1, int(os.getenv("HISTORY_BACKFILL_INTERVAL_HOURS", "24")))
 HISTORY_BACKFILL_STARTUP_DELAY_SECONDS = max(0, int(os.getenv("HISTORY_BACKFILL_STARTUP_DELAY_SECONDS", "60")))
 HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES = max(5, int(os.getenv("HISTORY_BACKFILL_CHECK_INTERVAL_MINUTES", "60")))
@@ -123,6 +146,11 @@ WATCH_RUNTIME = {
     "scan_owner": None,
     "cycle_number": 0,
     "mode": "all",
+    "derivatives_generation": None,
+    "derivatives_status": None,
+    "oi_ready": 0,
+    "cvd_ready": 0,
+    "spot_ready": 0,
 }
 
 SQLITE_SCHEMA = """
@@ -271,6 +299,7 @@ _MAIN_SCHEMA_INITIALIZED_FOR = None
 _SCHEMA_ADVISORY_LOCK_ID = 94837211
 _FLOW_COLLECTOR_LOCK_ID = 94837221
 _OI_COLLECTOR_LOCK_ID = 94837222
+_HISTORY_BACKFILL_LOCK_ID = 94837223
 
 
 def _postgres_schema_tables_exist(conn, table_names):
@@ -1160,16 +1189,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/maxpain BTC long|short — Max Pain בלבד בכיוון שנבחר ידנית\n"
         "/magnet BTC — Magnet V1 + אישור נגזרים\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
-        "/watch_on — הפעלת צפייה כללית\n"
+        "/watch_on — Watch כללי מסונכרן ל-OI+CVD כל חצי שעה\n"
         "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
         "/watch_on SOL 160 — צפייה ב-SOL עד יעד 160, כל 5 דקות\n"
+        "/watch_magnet_v1 BTC — Watch נפרד ל-Magnet על המחזור המשותף\n"
+        "/watch_magnet_v1_status — מצב מעקבי Magnet\n"
+        "/watch_magnet_v1_stop [BTC] — עצירת Magnet Watch אחד או כולם\n"
         "/watch_status — הצגת מצב הצפיות\n"
         "/watch_stop — עצירת הצפייה הכללית\n"
         "/watch_stop SOL — עצירת הצפייה ב-SOL\n"
         "/oi_backfill [180|365] — Backfill היסטורי Price+OI (ברירת מחדל 180 יום)\n"
+        "/oi_refresh — רענון בטוח של צילום Price+OI הנוכחי\n"
         "/oi_stats BTC — סטטיסטיקת Price+OI לפי 30m/1h/4h/12h/24h/48h/72h/7d\n"
         "/flow_backfill [180|365] — שמירת Buy/Sell + CVD רשמי בחוזים ובספוט\n"
         "/flow_state BTC — ניתוח Futures Flow ו-Spot Flow לקריאה בלבד\n"
+        "/market_state BTC [LONG|SHORT] — מצב Price+OI, CVD ו-Confirmation לפי כיוון מחיר\n"
         "/flow_stats BTC — P25/P50/P75/P90 של שינויי CVD לפי טווח\n"
         "/oi_validation BTC — בדיקת איכות timestamp ונקודות הייחוס\n"
         "/oi_state BTC — הצגת חישוב Price+OI Regime השמור האחרון\n"
@@ -2621,6 +2655,123 @@ def _fmt_magnet_liquidity(value: Any) -> str:
     return f"${amount:.0f}"
 
 
+def _magnet_relation_text(module: Dict[str, Any]) -> str:
+    relation = str(module.get("relation") or "NEUTRAL").upper()
+    direction = str(module.get("direction") or "NEUTRAL").upper()
+    relation_he = {
+        "SUPPORT": "תומך",
+        "OPPOSE": "סותר",
+        "NEUTRAL": "ניטרלי",
+    }.get(relation, relation)
+    direction_he = {
+        "BULLISH": "עולה",
+        "BEARISH": "יורד",
+        "NEUTRAL": "ניטרלי",
+    }.get(direction, direction)
+    return f"{relation_he} ({direction_he})"
+
+
+async def _build_magnet_report(symbol: str, rows: List[Dict[str, Any]]) -> List[str]:
+    """Build the same Magnet report for the command and its shared Watch."""
+    magnets = magnet_v1.build_magnets(rows, symbol=symbol)
+    if not magnets:
+        return [f"⚪ לא נמצא כרגע קלאסטר Magnet V1 תקף עבור {symbol}."]
+
+    messages = [
+        f"🧲 <b>{html.escape(symbol)} — Magnet V1 / Liquidity V2</b>\n"
+        "MQ + Liquidity Edge + Confirmation; מרחק אינו מחושב; "
+        "ה-Score הקיים נשאר ללא שינוי."
+    ]
+    evidence_by_direction: Dict[str, Dict[str, Any]] = {}
+    for direction in {
+        magnet_v1.expected_price_direction(magnet.get("side"))
+        for magnet in magnets
+    }:
+        if direction not in {"BULLISH", "BEARISH"}:
+            continue
+        evidence_by_direction[direction] = await asyncio.to_thread(
+            market_confidence_engine.combine,
+            symbol,
+            direction,
+        )
+
+    side_counts: Dict[str, int] = defaultdict(int)
+    for magnet in magnets:
+        side = str(magnet.get("side") or "")
+        direction = magnet_v1.expected_price_direction(side)
+        market_evidence = evidence_by_direction.get(direction) or {}
+        magnet_confirmation = magnet_v1.evaluate_confirmation(magnet, market_evidence)
+        side_counts[side] += 1
+        icon = "🔺" if side == "UPPER" else "🔻"
+        side_label = "עליון" if side == "UPPER" else "תחתון"
+        min_target = magnet.get("min_target")
+        max_target = magnet.get("max_target")
+        if min_target is not None and max_target is not None:
+            target_text = (
+                "$" + fmt_price(min_target)
+                if abs(float(max_target) - float(min_target)) < 1e-12
+                else "$" + fmt_price(min_target) + " – $" + fmt_price(max_target)
+            )
+        else:
+            target_text = "—"
+
+        edge = magnet.get("liquidity_edge_pct")
+        consistency = magnet.get("consistency_pct")
+        edge_text = f"{float(edge):+.2f}%" if edge is not None else "—"
+        consistency_text = (
+            f"{float(consistency):.2f}%" if consistency is not None else "—"
+        )
+        members = ", ".join(magnet.get("members") or []) or "—"
+        derivatives = magnet_confirmation.get("derivatives") or {}
+        modules = market_evidence.get("modules") or {}
+
+        lines = [
+            f"{icon} <b>מגנט {side_label} #{side_counts[side]}</b>",
+            f"אזור: <b>{html.escape(target_text)}</b>",
+            f"טווחים: <b>{html.escape(members)}</b>",
+            f"Magnet Quality: <b>{float(magnet.get('magnet_quality') or 0.0):.2f}/100</b>",
+            f"Spread: {float(magnet.get('spread_pct') or 0.0):.4f}%",
+            f"Liquidity Edge V2: <b>{edge_text}</b>",
+            f"Consistency V2: <b>{consistency_text}</b>",
+            "חישוב נזילות: שכבות מצטברות ללא חפיפה + התאמת √זמן; ללא מרחק.",
+            "",
+            "<b>Confirmation נגזרים:</b>",
+            f"Price+OI: {_magnet_relation_text(modules.get('positioning') or {})}",
+            f"Futures CVD: {_magnet_relation_text(modules.get('futures_flow') or {})}",
+            f"Spot (משני בלבד): {_magnet_relation_text(modules.get('spot_flow') or {})}",
+            f"נגזרים: <b>{html.escape(str(derivatives.get('label') or '—'))}</b>",
+            f"מסקנה: <b>{html.escape(str(magnet_confirmation.get('label') or '—'))}</b>",
+            "",
+            "שכבות נזילות:",
+        ]
+        for detail in magnet.get("liquidity_details") or []:
+            timeframe = str(detail.get("timeframe") or "—")
+            previous = detail.get("previous_timeframe")
+            layer_label = (
+                f"בסיס {timeframe}"
+                if detail.get("layer_type") == "BASE"
+                else f"תוספת {previous}→{timeframe}"
+            )
+            if not detail.get("valid", True):
+                lines.append(
+                    f"• {html.escape(layer_label)}: ⚠️ נתון מצטבר לא תקין — "
+                    "השכבה הושמטה מחישוב V2"
+                )
+                continue
+            detail_edge = detail.get("edge_pct")
+            detail_edge_text = (
+                f"{float(detail_edge):+.2f}%" if detail_edge is not None else "—"
+            )
+            lines.append(
+                f"• {html.escape(layer_label)}: חדש "
+                f"{_fmt_magnet_liquidity(detail.get('candidate_liquidity'))} מול "
+                f"{_fmt_magnet_liquidity(detail.get('opposite_liquidity'))} "
+                f"→ {detail_edge_text}"
+            )
+        messages.append("\n".join(lines))
+    return messages
+
+
 async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run Magnet V1 and attach read-only derivatives Confirmation evidence."""
     if len(context.args) != 1:
@@ -2629,9 +2780,7 @@ async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     symbol = str(context.args[0]).strip().upper()
     if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
-        await update.message.reply_text(
-            "סימול המטבע אינו תקין. לדוגמה: /magnet BTC"
-        )
+        await update.message.reply_text("סימול המטבע אינו תקין. לדוגמה: /magnet BTC")
         return
 
     command_lock = _get_alert_command_lock()
@@ -2645,8 +2794,7 @@ async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if scrape_lock.locked():
         owner = WATCH_RUNTIME.get("scan_owner") or "פקודה אחרת"
         await update.message.reply_text(
-            f"⏳ הסורק תפוס כרגע על ידי {owner}. "
-            "/magnet ימתין ויתחיל כשהסורק יתפנה."
+            f"⏳ הסורק תפוס כרגע על ידי {owner}. /magnet ימתין ויתחיל כשהסורק יתפנה."
         )
 
     async with command_lock:
@@ -2657,125 +2805,12 @@ async def magnet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🧲 סורק Magnet V1 עבור {symbol} ב-7 טווחי Max Pain."
                 )
                 rows, _live_result = await collect_live_rows_for_watch()
-
-            magnets = magnet_v1.build_magnets(rows, symbol=symbol)
-            if not magnets:
-                await update.message.reply_text(
-                    f"⚪ לא נמצא כרגע קלאסטר Magnet V1 תקף עבור {symbol}."
-                )
-                return
-
-            await update.message.reply_text(
-                f"🧲 <b>{html.escape(symbol)} — Magnet V1</b>\n"
-                "MQ + Liquidity Edge + Confirmation; אינו משנה את ה-Score הקיים.",
-                parse_mode="HTML",
-            )
-
-            evidence_by_direction: Dict[str, Dict[str, Any]] = {}
-            for direction in {
-                magnet_v1.expected_price_direction(magnet.get("side"))
-                for magnet in magnets
-            }:
-                if direction not in {"BULLISH", "BEARISH"}:
-                    continue
-                # maxpain_score=0 is deliberate: Magnet has its own MQ gates.
-                # We consume only the existing raw derivatives modules/flags.
-                evidence_by_direction[direction] = await asyncio.to_thread(
-                    market_confidence_engine.combine,
-                    symbol,
-                    direction,
-                )
-
-            side_counts: Dict[str, int] = defaultdict(int)
-            for magnet in magnets:
-                side = str(magnet.get("side") or "")
-                direction = magnet_v1.expected_price_direction(side)
-                market_evidence = evidence_by_direction.get(direction) or {}
-                magnet_confirmation = magnet_v1.evaluate_confirmation(
-                    magnet, market_evidence
-                )
-                side_counts[side] += 1
-                icon = "🔺" if side == "UPPER" else "🔻"
-                side_label = "עליון" if side == "UPPER" else "תחתון"
-                min_target = magnet.get("min_target")
-                max_target = magnet.get("max_target")
-                if min_target is not None and max_target is not None:
-                    if abs(float(max_target) - float(min_target)) < 1e-12:
-                        target_text = "$" + fmt_price(min_target)
-                    else:
-                        target_text = (
-                            "$" + fmt_price(min_target)
-                            + " – $" + fmt_price(max_target)
-                        )
-                else:
-                    target_text = "—"
-
-                edge = magnet.get("liquidity_edge_pct")
-                consistency = magnet.get("consistency_pct")
-                edge_text = f"{float(edge):+.2f}%" if edge is not None else "—"
-                consistency_text = (
-                    f"{float(consistency):.2f}%" if consistency is not None else "—"
-                )
-                members = ", ".join(magnet.get("members") or []) or "—"
-                derivatives = magnet_confirmation.get("derivatives") or {}
-                modules = market_evidence.get("modules") or {}
-                positioning = modules.get("positioning") or {}
-                futures_flow = modules.get("futures_flow") or {}
-                spot_flow = modules.get("spot_flow") or {}
-
-                def _relation_text(module: Dict[str, Any]) -> str:
-                    relation = str(module.get("relation") or "NEUTRAL").upper()
-                    direction_text = str(module.get("direction") or "NEUTRAL").upper()
-                    relation_he = {
-                        "SUPPORT": "תומך",
-                        "OPPOSE": "סותר",
-                        "NEUTRAL": "ניטרלי",
-                    }.get(relation, relation)
-                    direction_he = {
-                        "BULLISH": "עולה",
-                        "BEARISH": "יורד",
-                        "NEUTRAL": "ניטרלי",
-                    }.get(direction_text, direction_text)
-                    return f"{relation_he} ({direction_he})"
-
-                lines = [
-                    f"{icon} <b>מגנט {side_label} #{side_counts[side]}</b>",
-                    f"אזור: <b>{html.escape(target_text)}</b>",
-                    f"טווחים: <b>{html.escape(members)}</b>",
-                    f"Magnet Quality: <b>{float(magnet.get('magnet_quality') or 0.0):.2f}/100</b>",
-                    f"Spread: {float(magnet.get('spread_pct') or 0.0):.4f}%",
-                    f"Liquidity Edge: <b>{edge_text}</b>",
-                    f"Consistency: <b>{consistency_text}</b>",
-                    "",
-                    "<b>Confirmation נגזרים:</b>",
-                    f"Price+OI: {_relation_text(positioning)}",
-                    f"Futures CVD: {_relation_text(futures_flow)}",
-                    f"Spot (משני בלבד): {_relation_text(spot_flow)}",
-                    f"נגזרים: <b>{html.escape(str(derivatives.get('label') or '—'))}</b>",
-                    f"מסקנה: <b>{html.escape(str(magnet_confirmation.get('label') or '—'))}</b>",
-                    "",
-                    "נזילות לפי טווח:",
-                ]
-                for detail in magnet.get("liquidity_details") or []:
-                    detail_edge = detail.get("edge_pct")
-                    detail_edge_text = (
-                        f"{float(detail_edge):+.2f}%"
-                        if detail_edge is not None else "—"
-                    )
-                    lines.append(
-                        f"• {html.escape(str(detail.get('timeframe') or '—'))}: "
-                        f"{_fmt_magnet_liquidity(detail.get('candidate_liquidity'))} "
-                        f"מול {_fmt_magnet_liquidity(detail.get('opposite_liquidity'))} "
-                        f"→ {detail_edge_text}"
-                    )
-                await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
+            for message in await _build_magnet_report(symbol, rows):
+                await update.message.reply_text(message, parse_mode="HTML")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await update.message.reply_text(
-                f"❌ /magnet {symbol} נכשל: {exc!r}"
-            )
+            await update.message.reply_text(f"❌ /magnet {symbol} נכשל: {exc!r}")
         finally:
             if str(WATCH_RUNTIME.get("scan_owner") or "").startswith(
                 f"/magnet {symbol}"
@@ -3447,8 +3482,45 @@ def _watch_message(item, all_items, rows) -> str:
     )
 
 
-async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dict[str, Any]:
-    """Run one complete Watch cycle and always send a Telegram outcome."""
+async def _send_magnet_watch_reports(
+    bot_app,
+    rows: List[Dict[str, Any]],
+    derivatives_status: Dict[str, Any],
+    cycle_number: int,
+) -> int:
+    """Serve every Magnet subscriber from the already-collected Watch snapshot."""
+    sent = 0
+    for symbol, watch in list(MAGNET_V1_WATCHES.items()):
+        # The command may stop a symbol while a shared cycle is finishing.
+        if symbol not in MAGNET_V1_WATCHES:
+            continue
+        target_chat = int(watch.get("chat_id"))
+        await bot_app.bot.send_message(
+            chat_id=target_chat,
+            text=(
+                f"🧲 Magnet Watch V1 #{cycle_number} — {symbol}\n"
+                + _watch_derivatives_line(derivatives_status)
+            ),
+        )
+        for message in await _build_magnet_report(symbol, rows):
+            await bot_app.bot.send_message(
+                chat_id=target_chat,
+                text=message,
+                parse_mode="HTML",
+            )
+            sent += 1
+        watch["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
+        watch["last_generation"] = derivatives_status.get("generation")
+    return sent
+
+
+async def run_watch_cycle(
+    bot_app,
+    chat_id: int,
+    top8_only: bool = False,
+    general_enabled: bool = True,
+) -> Dict[str, Any]:
+    """Run one shared DOM + derivatives generation for all Watch consumers."""
     WATCH_RUNTIME["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
     WATCH_RUNTIME["scan_in_progress"] = True
     WATCH_RUNTIME["scan_owner"] = "Watch"
@@ -3459,8 +3531,16 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
 
     try:
         scrape_lock = _get_scrape_lock()
-        async with scrape_lock:
-            rows, live_result = await collect_live_rows_for_watch()
+        async def _collect_dom():
+            async with scrape_lock:
+                WATCH_RUNTIME["scan_owner"] = "Watch משותף"
+                return await collect_live_rows_for_watch()
+
+        dom_result, derivatives_status = await asyncio.gather(
+            _collect_dom(),
+            _ensure_watch_derivatives_ready(),
+        )
+        rows, live_result = dom_result
 
         all_items = _build_opportunities_with_regime(rows, limit=500)
         if top8_only:
@@ -3485,38 +3565,52 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
                 f"✅ סריקת {watch_label} #{cycle_number} הסתיימה\n"
                 f"נמצאו {len(candidates)} תוצאות בציון "
                 f"{WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
-                f"מוצגות {len(result_items)} התוצאות המובילות."
+                f"מוצגות {len(result_items)} התוצאות המובילות.\n"
+                + _watch_derivatives_line(derivatives_status)
             )
         elif displayable_items:
             result_items = [displayable_items[0]]
             header = (
                 f"✅ סריקת {watch_label} #{cycle_number} הסתיימה\n"
                 f"אין תוצאה בציון {WATCH_PRIORITY_THRESHOLD:.0f} ומעלה.\n"
-                "מוצגת התוצאה בעלת הציון הגבוה ביותר."
+                "מוצגת התוצאה בעלת הציון הגבוה ביותר.\n"
+                + _watch_derivatives_line(derivatives_status)
             )
         else:
             result_items = []
             header = (
                 f"⚠️ סריקת {watch_label} #{cycle_number} הסתיימה ללא "
-                "הזדמנויות פעילות להצגה."
+                "הזדמנויות פעילות להצגה.\n"
+                + _watch_derivatives_line(derivatives_status)
             )
 
-        await bot_app.bot.send_message(chat_id=chat_id, text=header)
-        for index, item in enumerate(result_items, start=1):
-            await _send_alert_with_confirmation(
-                bot_app.bot, chat_id, _alert_card(index, item, all_items, rows), item
-            )
-        if result_items:
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=alert_summary.format_alert_count_summary(result_items),
-            )
-        for special_message in special_messages:
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=special_message,
-                parse_mode="HTML",
-            )
+        if general_enabled:
+            await bot_app.bot.send_message(chat_id=chat_id, text=header)
+            for index, item in enumerate(result_items, start=1):
+                await _send_alert_with_confirmation(
+                    bot_app.bot,
+                    chat_id,
+                    _alert_card(index, item, all_items, rows),
+                    item,
+                )
+            if result_items:
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=alert_summary.format_alert_count_summary(result_items),
+                )
+            for special_message in special_messages:
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=special_message,
+                    parse_mode="HTML",
+                )
+
+        magnet_sent = await _send_magnet_watch_reports(
+            bot_app,
+            rows,
+            derivatives_status,
+            cycle_number,
+        )
 
         top_item = (
             displayable_items[0]
@@ -3541,6 +3635,8 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
             "found": len(all_items),
             "candidates": len(candidates),
             "sent": len(result_items),
+            "magnet_sent": magnet_sent,
+            "derivatives": derivatives_status,
             "timeframe_integrity": live_result.get("timeframe_integrity"),
         }
 
@@ -3554,9 +3650,9 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
             await bot_app.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"❌ סריקת {'Watch Top 8' if top8_only else 'Watch'} #{cycle_number} נכשלה\n"
+                    f"❌ מחזור Watch משותף #{cycle_number} נכשל\n"
                     f"{exc!r}\n"
-                    "הלולאה נשארת פעילה ותנסה שוב בעוד 15 דקות."
+                    f"הלולאה נשארת פעילה ותנסה שוב במועד חצי השעה הבא."
                 ),
             )
         except Exception:
@@ -3567,25 +3663,73 @@ async def run_watch_cycle(bot_app, chat_id: int, top8_only: bool = False) -> Dic
         WATCH_RUNTIME["scan_owner"] = None
 
 
+def _watch_consumers_active() -> bool:
+    return bool(WATCH_GENERAL_ENABLED or MAGNET_V1_WATCHES)
+
+
+def _next_aligned_watch_time(now: Optional[datetime] = None) -> datetime:
+    """Next UTC half-hour slot plus the closed-CVD publication grace."""
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    midnight = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    anchor = midnight + timedelta(seconds=WATCH_SYNC_GRACE_SECONDS)
+    interval_seconds = WATCH_INTERVAL_MINUTES * 60
+    elapsed = (current - anchor).total_seconds()
+    slots = int(elapsed // interval_seconds) + 1 if elapsed >= 0 else 0
+    candidate = anchor + timedelta(seconds=slots * interval_seconds)
+    if candidate <= current:
+        candidate += timedelta(seconds=interval_seconds)
+    return candidate
+
+
+def _watch_chat_id(fallback: int) -> int:
+    if WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") is not None:
+        return int(WATCH_RUNTIME["chat_id"])
+    for watch in MAGNET_V1_WATCHES.values():
+        if watch.get("chat_id") is not None:
+            return int(watch["chat_id"])
+    return int(fallback)
+
+
 async def watch_loop(bot_app, chat_id: int, top8_only: bool = False):
-    """Persistent single Watch loop; only /watch_stop cancels it."""
+    """One deadline-anchored coordinator serves regular and Magnet Watch."""
     global WATCH_SCAN_TASK
 
     print(
         f"[watch] loop started; chat_id={chat_id}; "
-        f"interval={WATCH_INTERVAL_MINUTES}m; mode={'top8' if top8_only else 'all'}",
+        f"interval={WATCH_INTERVAL_MINUTES}m; shared regular+magnet coordinator",
         flush=True,
     )
 
     try:
-        while True:
+        first_cycle = True
+        while _watch_consumers_active():
+            if not first_cycle:
+                next_scan = _next_aligned_watch_time()
+                WATCH_RUNTIME["next_scan_utc"] = next_scan.isoformat()
+                WATCH_RUNTIME["last_cycle_status"] = "waiting"
+                delay = max(
+                    0.0,
+                    (next_scan - datetime.now(timezone.utc)).total_seconds(),
+                )
+                await asyncio.sleep(delay)
+                if not _watch_consumers_active():
+                    break
+
             WATCH_RUNTIME["last_cycle_status"] = "starting_cycle"
             WATCH_RUNTIME["next_scan_utc"] = datetime.now(
                 timezone.utc
             ).isoformat()
 
+            cycle_chat_id = _watch_chat_id(chat_id)
+            cycle_top8 = WATCH_RUNTIME.get("mode") == "top8"
+            cycle_general_enabled = bool(WATCH_GENERAL_ENABLED)
             WATCH_SCAN_TASK = asyncio.create_task(
-                run_watch_cycle(bot_app, chat_id, top8_only=top8_only),
+                run_watch_cycle(
+                    bot_app,
+                    cycle_chat_id,
+                    top8_only=cycle_top8,
+                    general_enabled=cycle_general_enabled,
+                ),
                 name="watch-scan-cycle",
             )
             try:
@@ -3599,14 +3743,7 @@ async def watch_loop(bot_app, chat_id: int, top8_only: bool = False):
                 print(f"[watch] uncaught cycle error: {exc!r}", flush=True)
             finally:
                 WATCH_SCAN_TASK = None
-
-            next_scan = datetime.now(timezone.utc) + timedelta(
-                minutes=WATCH_INTERVAL_MINUTES
-            )
-            WATCH_RUNTIME["next_scan_utc"] = next_scan.isoformat()
-            WATCH_RUNTIME["last_cycle_status"] = "waiting"
-
-            await asyncio.sleep(WATCH_INTERVAL_MINUTES * 60)
+            first_cycle = False
 
     except asyncio.CancelledError:
         current_scan = WATCH_SCAN_TASK
@@ -3623,8 +3760,43 @@ async def watch_loop(bot_app, chat_id: int, top8_only: bool = False):
         WATCH_RUNTIME["scan_owner"] = None
         WATCH_RUNTIME["next_scan_utc"] = None
         WATCH_RUNTIME["last_cycle_status"] = "stopped"
-        WATCH_RUNTIME["mode"] = "all"
         print("[watch] loop stopped", flush=True)
+
+
+async def _ensure_watch_coordinator(bot_app, chat_id: int) -> bool:
+    """Start the one shared coordinator; return True only when newly started."""
+    global WATCH_TASK
+    if WATCH_TASK is not None and not WATCH_TASK.done():
+        return False
+    WATCH_TASK = asyncio.create_task(
+        watch_loop(bot_app, chat_id),
+        name="shared-watch-coordinator",
+    )
+    await asyncio.sleep(0)
+    if WATCH_TASK.done():
+        error = WATCH_TASK.exception()
+        WATCH_TASK = None
+        raise RuntimeError(f"Watch coordinator failed to start: {error!r}")
+    return True
+
+
+async def _stop_watch_coordinator_if_idle() -> None:
+    """Cancel the shared loop only when no regular or Magnet subscriber remains."""
+    global WATCH_TASK, WATCH_SCAN_TASK
+    if _watch_consumers_active():
+        return
+    loop_task = WATCH_TASK
+    scan_task = WATCH_SCAN_TASK
+    if scan_task is not None and not scan_task.done():
+        scan_task.cancel()
+    if loop_task is not None and not loop_task.done():
+        loop_task.cancel()
+        try:
+            await asyncio.wait_for(loop_task, timeout=30)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    WATCH_TASK = None
+    WATCH_SCAN_TASK = None
 
 
 ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -3914,37 +4086,31 @@ async def _start_specific_watch(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start general Watch, or /watch_on SYMBOL TARGET for an independent watch."""
-    global WATCH_TASK
+    global WATCH_GENERAL_ENABLED
 
     if context.args:
         await _start_specific_watch(update, context)
         return
 
-    if WATCH_TASK is not None and not WATCH_TASK.done():
+    if WATCH_GENERAL_ENABLED:
         await update.message.reply_text(
             "👁 Watch כבר פעיל. לא נפתחה לולאה נוספת."
         )
         return
 
     chat_id = int(update.effective_chat.id)
+    WATCH_GENERAL_ENABLED = True
     WATCH_RUNTIME["last_error"] = None
     WATCH_RUNTIME["last_cycle_status"] = "starting"
     WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
     WATCH_RUNTIME["mode"] = "all"
-
-    WATCH_TASK = asyncio.create_task(
-        watch_loop(context.application, chat_id, top8_only=False),
-        name="persistent-watch-loop",
-    )
-
-    # Give the task one event-loop turn and verify that it remained alive.
-    await asyncio.sleep(0)
-    if WATCH_TASK.done():
-        try:
-            error = WATCH_TASK.exception()
-        except Exception as exc:
-            error = exc
-        WATCH_TASK = None
+    WATCH_RUNTIME["chat_id"] = chat_id
+    try:
+        newly_started = await _ensure_watch_coordinator(
+            context.application, chat_id
+        )
+    except Exception as error:
+        WATCH_GENERAL_ENABLED = False
         WATCH_RUNTIME["last_cycle_status"] = "failed_to_start"
         WATCH_RUNTIME["last_error"] = repr(error)
         await update.message.reply_text(
@@ -3954,22 +4120,26 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "✅ Watch הופעל\n"
-        "לולאה אחת פעילה. הסריקה הראשונה מתחילה כעת.\n"
-        f"לאחר סיום כל סריקה תתחיל סריקה נוספת בעוד "
-        f"{WATCH_INTERVAL_MINUTES} דקות.\n"
+        + (
+            "המחזור הראשון מתחיל כעת.\n"
+            if newly_started
+            else "ה-Watch הצטרף למחזור המשותף שכבר פעיל.\n"
+        )
+        + "המחזורים הבאים מעוגנים לכל חצי שעה לאחר מוכנות OI+CVD.\n"
+        "Watch רגיל ו-Magnet Watch משתמשים באותה סריקה ואינם יוצרים כפל.\n"
         "העצירה מתבצעת רק באמצעות /watch_stop."
     )
 
 
 async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start the persistent Watch loop restricted to the fixed Top-8 list."""
-    global WATCH_TASK
+    global WATCH_GENERAL_ENABLED
 
     if context.args:
         await update.message.reply_text("שימוש: /watch_on_top8")
         return
 
-    if WATCH_TASK is not None and not WATCH_TASK.done():
+    if WATCH_GENERAL_ENABLED:
         mode = WATCH_RUNTIME.get("mode", "all")
         active_label = "Watch Top 8" if mode == "top8" else "Watch רגיל"
         await update.message.reply_text(
@@ -3978,23 +4148,18 @@ async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = int(update.effective_chat.id)
+    WATCH_GENERAL_ENABLED = True
     WATCH_RUNTIME["last_error"] = None
     WATCH_RUNTIME["last_cycle_status"] = "starting"
     WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
     WATCH_RUNTIME["mode"] = "top8"
-
-    WATCH_TASK = asyncio.create_task(
-        watch_loop(context.application, chat_id, top8_only=True),
-        name="persistent-watch-top8-loop",
-    )
-
-    await asyncio.sleep(0)
-    if WATCH_TASK.done():
-        try:
-            error = WATCH_TASK.exception()
-        except Exception as exc:
-            error = exc
-        WATCH_TASK = None
+    WATCH_RUNTIME["chat_id"] = chat_id
+    try:
+        newly_started = await _ensure_watch_coordinator(
+            context.application, chat_id
+        )
+    except Exception as error:
+        WATCH_GENERAL_ENABLED = False
         WATCH_RUNTIME["last_cycle_status"] = "failed_to_start"
         WATCH_RUNTIME["last_error"] = repr(error)
         await update.message.reply_text(
@@ -4005,16 +4170,121 @@ async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ Watch Top 8 הופעל\n"
         "המעקב מוגבל ל-BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB ו-XRP.\n"
-        "הסריקה הראשונה מתחילה כעת.\n"
-        f"לאחר סיום כל סריקה תתחיל סריקה נוספת בעוד "
-        f"{WATCH_INTERVAL_MINUTES} דקות.\n"
+        + (
+            "המחזור הראשון מתחיל כעת.\n"
+            if newly_started
+            else "המעקב הצטרף למחזור המשותף שכבר פעיל.\n"
+        )
+        + "המחזורים הבאים מעוגנים לכל חצי שעה לאחר מוכנות OI+CVD.\n"
         "העצירה מתבצעת באמצעות /watch_stop."
     )
 
 
+async def watch_magnet_v1_cmd(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Subscribe one symbol to the shared 30m Magnet V1 Watch."""
+    if len(context.args) != 1:
+        await update.message.reply_text("שימוש: /watch_magnet_v1 BTC")
+        return
+    symbol = str(context.args[0]).strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
+        await update.message.reply_text(
+            "סימול המטבע אינו תקין. לדוגמה: /watch_magnet_v1 BTC"
+        )
+        return
+    if symbol in MAGNET_V1_WATCHES:
+        await update.message.reply_text(
+            f"🧲 Magnet Watch כבר פעיל עבור {symbol}. לא נפתחה לולאה נוספת."
+        )
+        return
+
+    chat_id = int(update.effective_chat.id)
+    MAGNET_V1_WATCHES[symbol] = {
+        "symbol": symbol,
+        "chat_id": chat_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "last_scan_utc": None,
+        "last_generation": None,
+    }
+    try:
+        newly_started = await _ensure_watch_coordinator(
+            context.application, chat_id
+        )
+    except Exception as exc:
+        MAGNET_V1_WATCHES.pop(symbol, None)
+        await update.message.reply_text(
+            f"❌ Magnet Watch לא הצליח להתחיל: {exc!r}"
+        )
+        return
+
+    await update.message.reply_text(
+        f"✅ Magnet Watch V1 הופעל עבור {symbol}\n"
+        + (
+            "המחזור הראשון מתחיל כעת.\n"
+            if newly_started
+            else "המעקב הצטרף למחזור המשותף שכבר פעיל.\n"
+        )
+        + "Magnet וה-Watch הרגיל משתמשים באותה סריקת Max Pain ובאותו דור OI+CVD.\n"
+        "המחזורים הבאים מעוגנים לכל חצי שעה; אין לולאת DOM נוספת.\n"
+        f"לעצירה: /watch_magnet_v1_stop {symbol}"
+    )
+
+
+async def watch_magnet_v1_stop_cmd(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Stop one Magnet symbol, or all Magnet watches when no symbol is given."""
+    if len(context.args) > 1:
+        await update.message.reply_text(
+            "שימוש: /watch_magnet_v1_stop BTC או /watch_magnet_v1_stop"
+        )
+        return
+    if context.args:
+        symbol = str(context.args[0]).strip().upper()
+        removed = MAGNET_V1_WATCHES.pop(symbol, None)
+        text = (
+            f"🛑 Magnet Watch הופסק עבור {symbol}."
+            if removed
+            else f"לא קיים Magnet Watch פעיל עבור {symbol}."
+        )
+    else:
+        count = len(MAGNET_V1_WATCHES)
+        MAGNET_V1_WATCHES.clear()
+        text = (
+            f"🛑 הופסקו {count} מעקבי Magnet Watch."
+            if count
+            else "אין מעקבי Magnet Watch פעילים."
+        )
+    await _stop_watch_coordinator_if_idle()
+    await update.message.reply_text(text)
+
+
+async def watch_magnet_v1_status_cmd(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Read-only Magnet Watch status; never start a scan."""
+    if context.args:
+        await update.message.reply_text("שימוש: /watch_magnet_v1_status")
+        return
+    if not MAGNET_V1_WATCHES:
+        await update.message.reply_text("🧲 אין מעקבי Magnet Watch פעילים.")
+        return
+    lines = ["🧲 Magnet Watch V1 פעילים:"]
+    for symbol, watch in sorted(MAGNET_V1_WATCHES.items()):
+        lines.append(
+            f"• {symbol} | דור אחרון: {watch.get('last_generation') or '—'} | "
+            f"סריקה: {_format_watch_time(watch.get('last_scan_utc'))}"
+        )
+    lines.append(
+        "הסריקה משותפת ל-Watch הרגיל ואינה פותחת דפדפן נוסף."
+    )
+    await update.message.reply_text("\n".join(lines))
+
+
 async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop general Watch, or only one symbol when /watch_stop SYMBOL is used."""
-    global WATCH_TASK, WATCH_SCAN_TASK, SPECIFIC_WATCH_TASK
+    global WATCH_GENERAL_ENABLED, SPECIFIC_WATCH_TASK
 
     if context.args:
         symbol = str(context.args[0]).upper().strip()
@@ -4032,35 +4302,18 @@ async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    loop_task = WATCH_TASK
-    scan_task = WATCH_SCAN_TASK
-    was_active = (
-        loop_task is not None and not loop_task.done()
-    ) or (
-        scan_task is not None and not scan_task.done()
-    )
-
-    if scan_task is not None and not scan_task.done():
-        scan_task.cancel()
-
-    if loop_task is not None and not loop_task.done():
-        loop_task.cancel()
-        try:
-            await asyncio.wait_for(loop_task, timeout=30)
-        except asyncio.CancelledError:
-            pass
-        except asyncio.TimeoutError:
-            print("[watch] stop timed out", flush=True)
-
-    WATCH_TASK = None
-    WATCH_SCAN_TASK = None
-    WATCH_RUNTIME["scan_in_progress"] = False
-    WATCH_RUNTIME["scan_owner"] = None
-    WATCH_RUNTIME["next_scan_utc"] = None
-    WATCH_RUNTIME["last_cycle_status"] = "stopped"
+    was_active = bool(WATCH_GENERAL_ENABLED)
+    WATCH_GENERAL_ENABLED = False
+    await _stop_watch_coordinator_if_idle()
+    if MAGNET_V1_WATCHES:
+        WATCH_RUNTIME["last_cycle_status"] = "magnet_only"
 
     await update.message.reply_text(
-        "🛑 Watch הופסק."
+        (
+            "🛑 Watch הרגיל הופסק. Magnet Watch נשאר פעיל במחזור המשותף."
+            if was_active and MAGNET_V1_WATCHES
+            else "🛑 Watch הופסק."
+        )
         if was_active
         else "🛑 Watch כבר היה כבוי."
     )
@@ -4070,6 +4323,8 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Read-only status. This function never starts a scan."""
     loop_active = WATCH_TASK is not None and not WATCH_TASK.done()
     scan_active = WATCH_SCAN_TASK is not None and not WATCH_SCAN_TASK.done()
+    specific_text = ", ".join(sorted(SPECIFIC_WATCHES)) or "אין"
+    magnet_text = ", ".join(sorted(MAGNET_V1_WATCHES)) or "אין"
 
     next_dt = _parse_utc_setting(WATCH_RUNTIME.get("next_scan_utc"))
     countdown = "-"
@@ -4092,8 +4347,8 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        f"👁 Watch: {'פעיל' if loop_active else 'כבוי'}\n\n"
-        f"לולאה פעילה: {'כן' if loop_active else 'לא'}\n"
+        f"👁 Watch רגיל: {'פעיל' if WATCH_GENERAL_ENABLED else 'כבוי'}\n\n"
+        f"מתאם משותף פעיל: {'כן' if loop_active else 'לא'}\n"
         f"סריקה פעילה כרגע: {'כן' if scan_active else 'לא'}\n"
         f"בעל הסורק: {WATCH_RUNTIME.get('scan_owner') or '-'}\n"
         f"סטטוס מחזור: {WATCH_RUNTIME.get('last_cycle_status') or '-'}\n"
@@ -4107,7 +4362,12 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{WATCH_RUNTIME.get('last_candidates', 0)}\n"
         f"תוצאות שנשלחו: {WATCH_RUNTIME.get('last_sent', 0)}\n"
         f"מועמד מוביל: {top_text}\n"
-        f"צפיות מטבע פעילות: {specific_text}"
+        f"צפיות יעד פעילות: {specific_text}\n"
+        f"Magnet Watch פעילים: {magnet_text}\n"
+        f"דור נגזרים: {WATCH_RUNTIME.get('derivatives_generation') or '-'}\n"
+        f"מוכנות OI/CVD/Spot: {WATCH_RUNTIME.get('oi_ready', 0)}/"
+        f"{WATCH_RUNTIME.get('cvd_ready', 0)}/"
+        f"{WATCH_RUNTIME.get('spot_ready', 0)}"
         + (
             f"\nשגיאה אחרונה: {WATCH_RUNTIME['last_error']}"
             if WATCH_RUNTIME.get("last_error")
@@ -4391,7 +4651,11 @@ def _fmt_hist_stat(value: Any) -> str:
 
 
 async def _run_history_backfill_once(source: str = "automatic", days: int = coinglass_history_backfill.BACKFILL_DAYS) -> Dict[str, Dict[str, Any]]:
-    """Run the isolated historical Price+OI refresh without overlapping runs."""
+    """Run historical Price+OI once, with local and cross-process exclusion.
+
+    Only a complete target set advances the persisted 24-hour freshness clock.
+    A partial run keeps its already-upserted rows, but remains due for retry.
+    """
     global HISTORY_BACKFILL_LOCK
     if HISTORY_BACKFILL_LOCK is None:
         HISTORY_BACKFILL_LOCK = asyncio.Lock()
@@ -4400,24 +4664,45 @@ async def _run_history_backfill_once(source: str = "automatic", days: int = coin
         return {}
 
     async with HISTORY_BACKFILL_LOCK:
-        started = datetime.now(timezone.utc)
-        print(f"[oi-backfill] {source} started at {started.isoformat()}", flush=True)
-        results = await asyncio.to_thread(coinglass_history_backfill.backfill_all, days)
-        ok_count = sum(1 for result in results.values() if result.get("ok"))
-        completed = datetime.now(timezone.utc)
-        await asyncio.to_thread(
-            coinglass_history_backfill.record_backfill_run,
-            source,
-            ok_count,
-            len(coinglass_history_backfill.TARGET_SYMBOLS),
-            completed,
+        process_lock = await asyncio.to_thread(
+            _try_process_lock, _HISTORY_BACKFILL_LOCK_ID
         )
-        print(
-            f"[oi-backfill] {source} completed: "
-            f"{ok_count}/{len(coinglass_history_backfill.TARGET_SYMBOLS)} symbols",
-            flush=True,
-        )
-        return results
+        if process_lock is False:
+            print(
+                f"[oi-backfill] {source} skipped: another service instance is active",
+                flush=True,
+            )
+            return {}
+        try:
+            started = datetime.now(timezone.utc)
+            print(f"[oi-backfill] {source} started at {started.isoformat()}", flush=True)
+            results = await asyncio.to_thread(
+                coinglass_history_backfill.backfill_all, days
+            )
+            total_count = len(coinglass_history_backfill.TARGET_SYMBOLS)
+            ok_count = sum(1 for result in results.values() if result.get("ok"))
+            completed = datetime.now(timezone.utc)
+            if ok_count == total_count:
+                await asyncio.to_thread(
+                    coinglass_history_backfill.record_backfill_run,
+                    source,
+                    ok_count,
+                    total_count,
+                    completed,
+                )
+                completion_note = "freshness advanced"
+            else:
+                completion_note = "partial; freshness NOT advanced"
+            print(
+                f"[oi-backfill] {source} completed: {ok_count}/{total_count} "
+                f"symbols; {completion_note}",
+                flush=True,
+            )
+            return results
+        finally:
+            await asyncio.to_thread(
+                _release_process_lock, process_lock, _HISTORY_BACKFILL_LOCK_ID
+            )
 
 
 async def _history_backfill_loop() -> None:
@@ -4432,7 +4717,12 @@ async def _history_backfill_loop() -> None:
             last = await asyncio.to_thread(coinglass_history_backfill.last_backfill_run)
             now = datetime.now(timezone.utc)
             last_at = None
-            if last and last.get("completed_at"):
+            last_complete = bool(
+                last
+                and int(last.get("ok_count") or 0)
+                >= int(last.get("total_count") or 1)
+            )
+            if last_complete and last.get("completed_at"):
                 value = last["completed_at"]
                 if isinstance(value, datetime):
                     last_at = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -4480,6 +4770,11 @@ async def oi_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         results = await _run_history_backfill_once("manual", days)
+        if not results:
+            await update.message.reply_text(
+                "⏳ Backfill כבר רץ בתהליך אחר. לא נפתחה הורדה כפולה."
+            )
+            return
         lines = ["✅ OI + Price Historical Backfill הסתיים", ""]
         ok_count = 0
         for symbol in coinglass_history_backfill.TARGET_SYMBOLS:
@@ -4502,6 +4797,11 @@ async def oi_backfill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.extend([
             "",
             f"הושלמו בהצלחה: {ok_count}/{len(coinglass_history_backfill.TARGET_SYMBOLS)}",
+            (
+                "הריצה נרשמה כמוצלחת והרענון היומי הבא יחול בעוד 24 שעות."
+                if ok_count == len(coinglass_history_backfill.TARGET_SYMBOLS)
+                else "הריצה חלקית ולכן לא דחתה את הרענון האוטומטי הבא."
+            ),
             "הנתונים נשמרו בטבלה נפרדת oi_price_history בלבד.",
             "כעת אפשר לבדוק למשל: /oi_stats BTC",
         ])
@@ -4883,6 +5183,228 @@ async def oi_validation_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def _request_oi_refresh() -> Dict[str, Dict[str, Any]]:
+    """Join one in-process Price+OI refresh instead of starting duplicates."""
+    global OI_REFRESH_TASK
+    task = OI_REFRESH_TASK
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _collect_oi_regime_once(), name="price-oi-single-flight"
+        )
+        OI_REFRESH_TASK = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and OI_REFRESH_TASK is task:
+            OI_REFRESH_TASK = None
+
+
+async def _request_flow_refresh() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Join one in-process CVD refresh instead of starting duplicates."""
+    global FLOW_REFRESH_TASK
+    task = FLOW_REFRESH_TASK
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _collect_flow_once(), name="cvd-single-flight"
+        )
+        FLOW_REFRESH_TASK = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and FLOW_REFRESH_TASK is task:
+            FLOW_REFRESH_TASK = None
+
+
+def _derivatives_generation_status(
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Describe the newest fully closed generation available in the database."""
+    checked_at = now or datetime.now(timezone.utc)
+    eligible = coinglass_flow_foundation.latest_eligible_candle_time(checked_at)
+    expected_close = coinglass_flow_foundation.candle_close_time(eligible)
+    target_symbols = tuple(coinglass_flow_foundation.TARGET_SYMBOLS)
+
+    oi_times: Dict[str, datetime] = {}
+    try:
+        for row in query(
+            "SELECT symbol, MAX(collected_at) AS latest_time "
+            "FROM oi_regime_snapshots GROUP BY symbol"
+        ):
+            parsed = _parse_utc_setting(row["latest_time"])
+            if parsed is not None:
+                oi_times[str(row["symbol"]).upper()] = parsed
+    except Exception:
+        oi_times = {}
+
+    oi_ready_symbols = [
+        symbol
+        for symbol in target_symbols
+        if oi_times.get(symbol) is not None
+        and oi_times[symbol] >= expected_close
+    ]
+    futures_ready: List[str] = []
+    spot_ready: List[str] = []
+    futures_closes: List[datetime] = []
+    spot_closes: List[datetime] = []
+    for symbol in target_symbols:
+        for market, ready_list, closes in (
+            ("futures", futures_ready, futures_closes),
+            ("spot", spot_ready, spot_closes),
+        ):
+            try:
+                freshness = coinglass_flow_foundation.freshness(
+                    symbol, market, now=checked_at
+                )
+            except Exception:
+                continue
+            close = freshness.get("candle_close")
+            if isinstance(close, datetime):
+                closes.append(close)
+            if close is not None and close >= expected_close:
+                ready_list.append(symbol)
+
+    total = len(target_symbols)
+    core_ready = (
+        len(oi_ready_symbols) == total and len(futures_ready) == total
+    )
+    oi_latest = max(oi_times.values()) if oi_times else None
+    cvd_through = min(futures_closes) if futures_closes else None
+    spot_through = min(spot_closes) if spot_closes else None
+    return {
+        "generation": expected_close.isoformat(),
+        "expected_close": expected_close,
+        "checked_at": checked_at.isoformat(),
+        "target_count": total,
+        "oi_ready_count": len(oi_ready_symbols),
+        "oi_ready_symbols": oi_ready_symbols,
+        "oi_latest": oi_latest,
+        "cvd_ready_count": len(futures_ready),
+        "cvd_ready_symbols": futures_ready,
+        "cvd_through": cvd_through,
+        "spot_ready_count": len(spot_ready),
+        "spot_ready_symbols": spot_ready,
+        "spot_through": spot_through,
+        "core_ready": core_ready,
+        "status": "READY" if core_ready else "PARTIAL",
+    }
+
+
+async def _ensure_watch_derivatives_ready() -> Dict[str, Any]:
+    """Refresh/join OI+CVD and return only after a completed generation or timeout."""
+    if not os.getenv("COINGLASS_API_KEY", "").strip():
+        return {
+            "generation": None,
+            "target_count": len(coinglass_flow_foundation.TARGET_SYMBOLS),
+            "oi_ready_count": 0,
+            "cvd_ready_count": 0,
+            "spot_ready_count": 0,
+            "core_ready": False,
+            "status": "API_KEY_MISSING",
+        }
+
+    started = time.monotonic()
+    status: Dict[str, Any] = {}
+    for attempt in range(1, WATCH_DERIVATIVES_MAX_ATTEMPTS + 1):
+        remaining = WATCH_DERIVATIVES_TIMEOUT_SECONDS - (
+            time.monotonic() - started
+        )
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    _request_oi_refresh(),
+                    _request_flow_refresh(),
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(
+                f"[watch-sync] derivatives attempt {attempt} failed: {exc!r}",
+                flush=True,
+            )
+
+        status = await asyncio.to_thread(_derivatives_generation_status)
+        if status.get("core_ready"):
+            break
+        if attempt < WATCH_DERIVATIVES_MAX_ATTEMPTS:
+            remaining = WATCH_DERIVATIVES_TIMEOUT_SECONDS - (
+                time.monotonic() - started
+            )
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(30.0 * attempt, remaining))
+
+    if not status:
+        status = await asyncio.to_thread(_derivatives_generation_status)
+    previous_generation = WATCH_RUNTIME.get("derivatives_generation")
+    generation = status.get("generation")
+    status["generation_changed"] = bool(
+        generation and generation != previous_generation
+    )
+    WATCH_RUNTIME["derivatives_generation"] = generation
+    WATCH_RUNTIME["derivatives_status"] = status.get("status")
+    WATCH_RUNTIME["oi_ready"] = status.get("oi_ready_count", 0)
+    WATCH_RUNTIME["cvd_ready"] = status.get("cvd_ready_count", 0)
+    WATCH_RUNTIME["spot_ready"] = status.get("spot_ready_count", 0)
+    return status
+
+
+def _format_sync_time(value: Any) -> str:
+    if value is None:
+        return "—"
+    parsed = value if isinstance(value, datetime) else _parse_utc_setting(str(value))
+    if parsed is None:
+        return "—"
+    return parsed.astimezone(timezone.utc).strftime("%H:%M UTC")
+
+
+def _watch_derivatives_line(status: Dict[str, Any]) -> str:
+    total = int(status.get("target_count") or 0)
+    state = "מוכן" if status.get("core_ready") else "חלקי / לא זמין"
+    changed = "חדש" if status.get("generation_changed") else "ללא שינוי"
+    return (
+        f"נגזרים: {state} ({changed}) | "
+        f"OI {int(status.get('oi_ready_count') or 0)}/{total} | "
+        f"CVD {int(status.get('cvd_ready_count') or 0)}/{total} עד "
+        f"{_format_sync_time(status.get('cvd_through'))} | "
+        f"Spot {int(status.get('spot_ready_count') or 0)}/{total}"
+    )
+
+
+async def oi_refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force one safe paired live Price+OI refresh; never run history backfill."""
+    if context.args:
+        await update.message.reply_text("שימוש: /oi_refresh")
+        return
+    if not os.getenv("COINGLASS_API_KEY", "").strip():
+        await update.message.reply_text("❌ COINGLASS_API_KEY אינו מוגדר.")
+        return
+    await update.message.reply_text(
+        "🔄 מרענן צילום Price+OI נוכחי. הפעולה אינה מפעילה Backfill היסטורי."
+    )
+    try:
+        results = await _request_oi_refresh()
+        status = await asyncio.to_thread(_derivatives_generation_status)
+        available = sum(
+            1 for result in results.values() if result.get("available")
+        )
+        await update.message.reply_text(
+            "✅ רענון Price+OI הסתיים\n"
+            f"נאספו: {len(results)} | סווגו: {available}\n"
+            f"עדכניים לדור {_format_sync_time(status.get('expected_close'))}: "
+            f"{status.get('oi_ready_count', 0)}/{status.get('target_count', 0)}"
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await update.message.reply_text(f"❌ /oi_refresh נכשל: {exc!r}")
+
+
 async def _collect_oi_regime_once() -> Dict[str, Dict[str, Any]]:
     process_lock = await asyncio.to_thread(_try_process_lock, _OI_COLLECTOR_LOCK_ID)
     if process_lock is False:
@@ -4899,6 +5421,7 @@ async def _collect_oi_regime_once_locked() -> Dict[str, Dict[str, Any]]:
     # supported Price+OI asset. Keep it in the collector explicitly so the
     # dedicated live-price fallbacks and CoinGlass OI logic can run.
     symbols = sorted(set(_latest_active_symbols()) | {"HYPE"})
+    symbols = sorted(set(symbols) | set(coinglass_history_backfill.TARGET_SYMBOLS))
     if not symbols:
         print("[oi-regime] skipped: no saved crypto symbols", flush=True)
         return {}
@@ -4935,7 +5458,7 @@ async def _oi_regime_loop() -> None:
     interval_seconds = coinglass_oi_regime_service.COLLECTION_INTERVAL_MINUTES * 60
     while True:
         try:
-            await _collect_oi_regime_once()
+            await _request_oi_refresh()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4976,6 +5499,7 @@ async def _collect_flow_once_locked() -> Dict[str, Dict[str, Dict[str, Any]]]:
             False,
         )
     ok_count = 0
+    changed_symbols = set()
     for symbol in coinglass_flow_foundation.TARGET_SYMBOLS:
         pair = results.get(symbol) or {}
         parts = []
@@ -4991,10 +5515,16 @@ async def _collect_flow_once_locked() -> Dict[str, Dict[str, Dict[str, Any]]]:
             age_text = f"{float(age):.1f}m" if age is not None else "unknown"
             ok = bool(data.get("ok"))
             ok_count += int(ok)
+            if int(data.get("received_rows") or 0) > 0 or int(
+                data.get("stored_rows") or 0
+            ) > 0:
+                changed_symbols.add(symbol)
             action = "skipped-current" if data.get("skipped") else f"received={data.get('received_rows', 0)}"
             parts.append(f"{market}:{'ok' if ok else 'warning'} {action} raw={latest_text} close={close_text} age={age_text} fresh={fresh.get('fresh')}")
         print(f"[flow-live] {symbol} | " + " | ".join(parts), flush=True)
     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    for symbol in changed_symbols:
+        market_confidence_engine.clear_flow_cache(symbol)
     print(f"[flow-live] refresh finished ok={ok_count}/16 duration={elapsed:.1f}s", flush=True)
     return results
 
@@ -5008,7 +5538,7 @@ async def _flow_collection_loop() -> None:
     while True:
         cycle_started = time.monotonic()
         try:
-            await _collect_flow_once()
+            await _request_flow_refresh()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -5043,9 +5573,16 @@ async def main():
 
     init_db()
 
-    global WATCH_TASK, WATCH_SCAN_TASK, OI_REGIME_TASK, HISTORY_BACKFILL_TASK, FLOW_COLLECTION_TASK
+    global WATCH_TASK, WATCH_SCAN_TASK, WATCH_GENERAL_ENABLED
+    global OI_REFRESH_TASK, FLOW_REFRESH_TASK
+    global OI_REGIME_TASK, HISTORY_BACKFILL_TASK, FLOW_COLLECTION_TASK
     WATCH_TASK = None
     WATCH_SCAN_TASK = None
+    WATCH_GENERAL_ENABLED = False
+    OI_REFRESH_TASK = None
+    FLOW_REFRESH_TASK = None
+    MAGNET_V1_WATCHES.clear()
+    SPECIFIC_WATCHES.clear()
     WATCH_RUNTIME.update({
         "last_scan_utc": None,
         "next_scan_utc": None,
@@ -5060,6 +5597,12 @@ async def main():
         "scan_in_progress": False,
         "scan_owner": None,
         "cycle_number": 0,
+        "chat_id": None,
+        "derivatives_generation": None,
+        "derivatives_status": None,
+        "oi_ready": 0,
+        "cvd_ready": 0,
+        "spot_ready": 0,
     })
 
     # Remove legacy activation flags. Startup never launches a scan.
@@ -5083,12 +5626,17 @@ async def main():
     bot_app.add_handler(CommandHandler("debug", debug_coin))
     bot_app.add_handler(CommandHandler("watch_on", watch_on))
     bot_app.add_handler(CommandHandler("watch_on_top8", watch_on_top8))
+    bot_app.add_handler(CommandHandler("watch_magnet_v1", watch_magnet_v1_cmd))
+    bot_app.add_handler(CommandHandler("watch_magnet_v1_status", watch_magnet_v1_status_cmd))
+    bot_app.add_handler(CommandHandler("watch_magnet_v1_stop", watch_magnet_v1_stop_cmd))
     bot_app.add_handler(CommandHandler("watch_status", watch_status))
     bot_app.add_handler(CommandHandler("watch_stop", watch_off))
     bot_app.add_handler(CommandHandler("technical_status", technical_status_cmd))
     bot_app.add_handler(CommandHandler("oi_backfill", oi_backfill_cmd))
+    bot_app.add_handler(CommandHandler("oi_refresh", oi_refresh_cmd))
     bot_app.add_handler(CommandHandler("flow_backfill", flow_backfill_cmd))
     bot_app.add_handler(CommandHandler("flow_state", flow_state_cmd))
+    bot_app.add_handler(CommandHandler("market_state", market_state_cmd))
     bot_app.add_handler(CommandHandler("flow_stats", flow_stats_cmd))
     bot_app.add_handler(CommandHandler("oi_validation", oi_validation_cmd))
     bot_app.add_handler(CommandHandler("oi_stats", oi_stats_cmd))
@@ -5176,6 +5724,14 @@ async def main():
                 await FLOW_COLLECTION_TASK
             except asyncio.CancelledError:
                 pass
+
+        for refresh_task in (OI_REFRESH_TASK, FLOW_REFRESH_TASK):
+            if refresh_task is not None and not refresh_task.done():
+                refresh_task.cancel()
+                try:
+                    await refresh_task
+                except asyncio.CancelledError:
+                    pass
 
         await bot_app.bot.delete_webhook(drop_pending_updates=False)
         await bot_app.stop()

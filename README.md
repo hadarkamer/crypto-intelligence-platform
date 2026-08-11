@@ -88,7 +88,7 @@
 Stage 77 adds an independent 30-minute Price + Open Interest context layer using CoinGlass V4. It does not change the existing alert score. Only `COINGLASS_API_KEY` is required in Render; the bot stores raw Price/OI changes and a five-state classification for later calibration.
 
 ## Stage 77 historical Price+OI reference
-For BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB and XRP, `/oi_backfill` stores a separate 30-day Price+OI history and `/oi_stats SYMBOL` shows P25/Median/P75/P90/P95 by 30m/1h/4h/12h/24h.
+For BTC, ETH, SOL, HYPE, DOGE, ZEC, BNB and XRP, `/oi_backfill` stores a separate Price+OI history (180 days by default) and `/oi_stats SYMBOL` shows P25/Median/P75/P90/P95 by 30m/1h/4h/12h/24h.
 The live Price+OI Regime now uses P25 as the minimum valid movement for the same symbol and timeframe. Strength labels are: Weak/Noise, Normal, Elevated, Strong, Extreme. Price and OI strengths remain separate. Max-Pain scoring is unchanged.
 
 ## Stage 87 — Data Foundation
@@ -156,3 +156,32 @@ The automatic Futures+Spot CVD refresh checks every 5 minutes by default. CVD fr
   period, including protection from legacy open rows already in the database.
 - Historical Price/OI windows with missing 30-minute references are skipped
   instead of being compared by row index.
+
+## Stage 103 — synchronized Watch, Magnet Watch and Liquidity V2
+
+- `/watch_on` and `/watch_on_top8` run through one deadline-anchored 30-minute
+  coordinator. A cycle starts immediately on activation; following cycles are
+  aligned to UTC half-hour boundaries plus the closed-CVD grace period.
+- Max Pain DOM collection and the single-flight Price+OI/CVD refresh run in
+  parallel. Alert calculation starts only after both paths finish or the
+  bounded derivatives timeout is reached. Existing freshness gates still
+  exclude unavailable or stale evidence.
+- `/watch_magnet_v1 SYMBOL` subscribes Magnet to that same snapshot and does
+  not start another DOM browser or derivatives collector. Use
+  `/watch_magnet_v1_status` and `/watch_magnet_v1_stop [SYMBOL]` to inspect or
+  stop it.
+- `/oi_refresh` forces one paired live Price+OI snapshot. It never runs the
+  isolated historical Backfill.
+- The automatic historical refresh remains due every 24 hours and refreshes
+  the latest three days. A partial symbol set does not advance that clock;
+  requests retry with backoff and a PostgreSQL advisory lock prevents a second
+  service instance from running the same Backfill.
+- Magnet Liquidity V2 treats the first available timeframe as a named baseline,
+  subtracts cumulative overlap from later timeframes and normalizes each added
+  layer by the square root of its added hours. Liquidity Edge is amount-weighted
+  and Consistency reflects the strength of conflicting layers.
+- Distance/reachability is intentionally absent from Liquidity V2. Magnet
+  Quality, the legacy score, legacy alert thresholds and existing Max Pain
+  distance/proximity calculations are unchanged.
+- `/market_state BTC [LONG|SHORT]` is registered as a Telegram command and
+  reports the latest stored Price+OI, Futures CVD, Spot context and Confirmation.

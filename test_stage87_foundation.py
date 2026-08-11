@@ -161,7 +161,7 @@ def test_continuous_cvd_rebuilt_from_buy_minus_sell(tmp_path):
     assert values == [2.0, -3.0]
 
 
-def test_current_backfill_rebuilds_continuous_cvd_before_skip(monkeypatch):
+def test_current_backfill_skips_without_continuous_cvd_rewrite(monkeypatch):
     from datetime import timedelta
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     monkeypatch.setattr(flow, "coverage", lambda symbol, market: {
@@ -174,5 +174,5 @@ def test_current_backfill_rebuilds_continuous_cvd_before_skip(monkeypatch):
     result = flow.backfill_symbol("BTC", "futures", 180, force=False)
     assert result["skipped"] is True
     assert result["total_rows"] == 4320
-    assert rebuilt == [("BTC", "futures")]
-    assert "rebuilt" in result["message"]
+    assert rebuilt == []
+    assert "without database writes" in result["message"]

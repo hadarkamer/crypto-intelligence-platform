@@ -24,6 +24,19 @@ _FLOW_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _FLOW_CACHE_TTL_SECONDS = 300
 
 
+def clear_flow_cache(symbol: Optional[str] = None) -> None:
+    """Invalidate cached Flow immediately after a completed CVD write.
+
+    The collector calls this only when new rows were stored.  A no-change poll
+    keeps the existing cache, while Watch can never remain five minutes behind
+    a newly closed candle.
+    """
+    if symbol is None:
+        _FLOW_CACHE.clear()
+    else:
+        _FLOW_CACHE.pop(str(symbol or "").upper(), None)
+
+
 def _cached_flow(symbol: str) -> Dict[str, Any]:
     symbol = str(symbol or "").upper()
     now = time.monotonic()

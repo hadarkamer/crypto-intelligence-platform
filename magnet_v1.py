@@ -9,11 +9,21 @@ the existing production scoring system.
 from __future__ import annotations
 
 from collections import defaultdict
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 
 TIMEFRAMES = ("12h", "24h", "48h", "3d", "1w", "2w", "1m")
 TIMEFRAME_ORDER = {timeframe: index for index, timeframe in enumerate(TIMEFRAMES)}
+TIMEFRAME_HOURS = {
+    "12h": 12.0,
+    "24h": 24.0,
+    "48h": 48.0,
+    "3d": 72.0,
+    "1w": 168.0,
+    "2w": 336.0,
+    "1m": 720.0,
+}
 MAX_CLUSTER_SPREAD_PCT = 1.0
 CONFIRMATION_MIN_QUALITY = 60.0
 STRONG_CONFIRMATION_MIN_QUALITY = 75.0
@@ -266,39 +276,134 @@ def _maximal_price_clusters(entries: List[Dict[str, Any]]) -> List[List[Dict[str
 
 
 def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build amount-aware, non-overlapping Liquidity V2 diagnostics.
+
+    CoinGlass timeframe totals are cumulative.  The first available timeframe
+    is therefore a named baseline (normally ``12h``), not a subtraction from a
+    nonexistent earlier range. Every later layer contains only the positive amount
+    added since the previous available timeframe.  A square-root time
+    normalization reduces the automatic accumulation advantage of wider
+    windows.  Distance/reachability is deliberately excluded from this
+    transitional version.
+    """
     details: List[Dict[str, Any]] = []
-    signed_edges: List[float] = []
-    for entry in sorted(
+    signed_layer_imbalances: List[float] = []
+    weighted_candidate_total = 0.0
+    weighted_opposite_total = 0.0
+    non_monotonic_layers: List[str] = []
+    previous_candidate: Optional[float] = None
+    previous_opposite: Optional[float] = None
+    previous_hours = 0.0
+    previous_timeframe: Optional[str] = None
+
+    ordered = sorted(
         list(entries), key=lambda item: TIMEFRAME_ORDER.get(item["timeframe"], 99)
-    ):
-        candidate = float(entry.get("candidate_liquidity", 0.0) or 0.0)
-        opposite = float(entry.get("opposite_liquidity", 0.0) or 0.0)
-        total = candidate + opposite
-        edge = (candidate - opposite) / total if total > 0.0 else None
+    )
+    for entry in ordered:
+        timeframe = str(entry["timeframe"])
+        timeframe_hours = float(TIMEFRAME_HOURS[timeframe])
+        cumulative_candidate = float(entry.get("candidate_liquidity", 0.0) or 0.0)
+        cumulative_opposite = float(entry.get("opposite_liquidity", 0.0) or 0.0)
+
+        is_baseline = previous_candidate is None
+        additional_hours = (
+            timeframe_hours if is_baseline else timeframe_hours - previous_hours
+        )
+        layer_candidate = (
+            cumulative_candidate
+            if is_baseline
+            else cumulative_candidate - float(previous_candidate)
+        )
+        layer_opposite = (
+            cumulative_opposite
+            if is_baseline
+            else cumulative_opposite - float(previous_opposite)
+        )
+
+        tolerance = max(
+            1e-6,
+            cumulative_candidate * 1e-9,
+            cumulative_opposite * 1e-9,
+        )
+        valid = (
+            additional_hours > 0.0
+            and layer_candidate >= -tolerance
+            and layer_opposite >= -tolerance
+        )
+        issue = None
+        if not valid:
+            issue = "NON_MONOTONIC_CUMULATIVE_LIQUIDITY"
+            non_monotonic_layers.append(timeframe)
+
+        # Tiny floating-point negatives at an otherwise monotonic boundary are
+        # zero, but a materially negative layer is flagged and excluded.
+        layer_candidate = max(0.0, layer_candidate)
+        layer_opposite = max(0.0, layer_opposite)
+        time_divisor = math.sqrt(additional_hours) if additional_hours > 0.0 else 0.0
+        weighted_candidate = (
+            layer_candidate / time_divisor if valid and time_divisor > 0.0 else 0.0
+        )
+        weighted_opposite = (
+            layer_opposite / time_divisor if valid and time_divisor > 0.0 else 0.0
+        )
+        weighted_total = weighted_candidate + weighted_opposite
+        edge = (
+            (weighted_candidate - weighted_opposite) / weighted_total
+            if valid and weighted_total > 0.0
+            else None
+        )
         if edge is not None:
-            signed_edges.append(edge)
+            signed_layer_imbalances.append(weighted_candidate - weighted_opposite)
+            weighted_candidate_total += weighted_candidate
+            weighted_opposite_total += weighted_opposite
+
         details.append({
-            "timeframe": entry["timeframe"],
-            "candidate_liquidity": candidate,
-            "opposite_liquidity": opposite,
+            "timeframe": timeframe,
+            "layer_type": "BASE" if is_baseline else "INCREMENT",
+            "previous_timeframe": previous_timeframe,
+            "additional_hours": additional_hours,
+            "candidate_liquidity": layer_candidate,
+            "opposite_liquidity": layer_opposite,
+            "cumulative_candidate_liquidity": cumulative_candidate,
+            "cumulative_opposite_liquidity": cumulative_opposite,
+            "time_weighted_candidate": weighted_candidate,
+            "time_weighted_opposite": weighted_opposite,
             "edge_pct": round(edge * 100.0, 2) if edge is not None else None,
+            "valid": valid,
+            "validation_issue": issue,
+            "distance_weight_applied": False,
         })
 
+        previous_candidate = cumulative_candidate
+        previous_opposite = cumulative_opposite
+        previous_hours = timeframe_hours
+        previous_timeframe = timeframe
+
+    weighted_total = weighted_candidate_total + weighted_opposite_total
     liquidity_edge_pct = (
-        round(sum(signed_edges) / len(signed_edges) * 100.0, 2)
-        if signed_edges else None
+        round(
+            (weighted_candidate_total - weighted_opposite_total)
+            / weighted_total
+            * 100.0,
+            2,
+        )
+        if weighted_total > 0.0
+        else None
     )
-    absolute_sum = sum(abs(value) for value in signed_edges)
+    absolute_sum = sum(abs(value) for value in signed_layer_imbalances)
     consistency_pct = (
-        round(abs(sum(signed_edges)) / absolute_sum * 100.0, 2)
-        if len(signed_edges) >= 2 and absolute_sum > 1e-12
+        round(abs(sum(signed_layer_imbalances)) / absolute_sum * 100.0, 2)
+        if len(signed_layer_imbalances) >= 2 and absolute_sum > 1e-12
         else None
     )
     return {
         "liquidity_edge_pct": liquidity_edge_pct,
         "consistency_pct": consistency_pct,
-        "liquidity_samples": len(signed_edges),
+        "liquidity_samples": len(signed_layer_imbalances),
         "liquidity_details": details,
+        "non_monotonic_layers": non_monotonic_layers,
+        "distance_weighting_enabled": False,
+        "liquidity_calculation_version": "V2_INCREMENTAL_TIME_NO_DISTANCE",
     }
 
 
@@ -325,9 +430,10 @@ def _build_candidate(symbol: str, side: str, entries: List[Dict[str, Any]]) -> D
 def build_magnets(rows: Iterable[Any], symbol: Optional[str] = None) -> List[Dict[str, Any]]:
     """Build independent UPPER/LOWER Magnet V1 candidates.
 
-    Every participating timeframe gets one equal vote in Liquidity Edge. Raw
-    dollar liquidity is never summed across timeframes. Consistency is returned
-    only as a diagnostic and does not alter Magnet Quality or the legacy score.
+    Liquidity V2 removes cumulative overlap and applies square-root time
+    normalization. Distance is intentionally absent. Consistency remains a
+    diagnostic and neither it nor Liquidity Edge alters Magnet Quality or the
+    legacy score.
     """
     requested_symbol = str(symbol or "").strip().upper() or None
     grouped: Dict[str, Dict[str, Any]] = defaultdict(dict)
