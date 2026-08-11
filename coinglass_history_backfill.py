@@ -47,7 +47,13 @@ HISTORY_INTERVAL = "30m"
 # documented maximum of 1,000 records per request.
 CHUNK_DAYS = 15
 REQUEST_LIMIT = 1000
-REQUEST_PAUSE_SECONDS = 0.15
+REQUEST_PAUSE_SECONDS = max(
+    0.25, float(os.getenv("OI_BACKFILL_REQUEST_PAUSE_SECONDS", "0.5"))
+)
+MAX_REQUEST_ATTEMPTS = max(
+    1, int(os.getenv("OI_BACKFILL_MAX_REQUEST_ATTEMPTS", "4"))
+)
+RETRY_BACKOFF_SECONDS: Tuple[float, ...] = (2.0, 5.0, 10.0)
 
 TARGET_SYMBOLS: Tuple[str, ...] = (
     "BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP"
@@ -192,18 +198,45 @@ def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     key = _api_key()
     if not key:
         raise RuntimeError("COINGLASS_API_KEY is not configured")
-    response = requests.get(
-        API_BASE_URL + path,
-        params=params,
-        headers={"CG-API-KEY": key, "accept": "application/json"},
-        timeout=API_TIMEOUT_SECONDS,
+    last_error: Optional[Exception] = None
+    for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+        try:
+            response = requests.get(
+                API_BASE_URL + path,
+                params=params,
+                headers={"CG-API-KEY": key, "accept": "application/json"},
+                timeout=API_TIMEOUT_SECONDS,
+            )
+            if response.status_code in {401, 403}:
+                response.raise_for_status()
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or str(payload.get("code")) not in {"0", "200"}:
+                msg = payload.get("msg") if isinstance(payload, dict) else "invalid response"
+                raise RuntimeError(f"CoinGlass API error: {msg!r}")
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if attempt >= MAX_REQUEST_ATTEMPTS:
+                break
+            retry_after = 0.0
+            try:
+                retry_after = float(response.headers.get("Retry-After") or 0.0)
+            except Exception:
+                retry_after = 0.0
+            fallback = RETRY_BACKOFF_SECONDS[
+                min(attempt - 1, len(RETRY_BACKOFF_SECONDS) - 1)
+            ]
+            delay = max(retry_after, fallback)
+            print(
+                f"[oi-backfill] request retry {attempt}/{MAX_REQUEST_ATTEMPTS} "
+                f"in {delay:.1f}s: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            time.sleep(delay)
+    raise RuntimeError(
+        f"CoinGlass request failed after {MAX_REQUEST_ATTEMPTS} attempts: {last_error!r}"
     )
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict) or str(payload.get("code")) not in {"0", "200"}:
-        msg = payload.get("msg") if isinstance(payload, dict) else "invalid response"
-        raise RuntimeError(f"CoinGlass API error: {msg!r}")
-    return payload
 
 
 def _chunks(start: datetime, end: datetime) -> Iterable[Tuple[datetime, datetime]]:
