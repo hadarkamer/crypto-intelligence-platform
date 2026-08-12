@@ -179,9 +179,30 @@ The automatic Futures+Spot CVD refresh checks every 5 minutes by default. CVD fr
 - Magnet Liquidity V2 treats Liquidity Edge as gross cumulative liquidity from
   the widest available timeframe: candidate side vs opposite side, with no time
   reduction. It still builds non-overlapping layers for Consistency, so
-  conflicting layers remain visible without distorting the gross edge.
+  conflicting layers remain visible without distorting the gross edge. A
+  non-monotonic window is skipped and cannot become the comparison anchor for
+  the following layer.
 - Distance/reachability is intentionally absent from Liquidity V2. Magnet
   Quality, the legacy score, legacy alert thresholds and existing Max Pain
   distance/proximity calculations are unchanged.
 - `/market_state BTC [LONG|SHORT]` is registered as a Telegram command and
   reports the latest stored Price+OI, Futures CVD, Spot context and Confirmation.
+
+## Stage 105 — combined confirmation alert and Magnet data-quality anchor
+
+- Every active general Watch cycle evaluates combined evidence for every
+  scanned coin and direction. No new Telegram command, DOM browser or API
+  collector is created.
+- A dedicated combined alert is emitted when at least two occurrences intersect:
+  regular Confirmation, Strong Confirmation, score above 80, three or more
+  active anomaly types, confirmed Magnet V1, or same-side liquidity imbalance
+  of at least 60%.
+- Multiple regular and Strong confirmations are counted and displayed by
+  timeframe. An unchanged setup is suppressed; it is sent again only after the
+  setup ended or genuinely new evidence joined it.
+- Magnet is evaluated for the combined alert across all rows already collected
+  by Watch, even when no `/watch_magnet_v1 SYMBOL` subscription exists.
+- A non-monotonic Liquidity V2 window is now compared with the last valid
+  cumulative anchor and skipped only from Consistency. It cannot create a false
+  increment in the following window. Gross Liquidity Edge, Magnet Quality, the
+  legacy score and all legacy alert thresholds remain unchanged.

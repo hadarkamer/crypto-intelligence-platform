@@ -283,18 +283,22 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 
     The first available timeframe
     is therefore a named baseline (normally ``12h``), not a subtraction from a
-    nonexistent earlier range. Every later layer contains only the positive amount
-    added since the previous available timeframe. These layers are used only for
-    Consistency. Distance/reachability and time reduction are deliberately
-    excluded from this transitional version.
+    nonexistent earlier range. Every later valid layer contains only the
+    positive amount added since the previous valid timeframe. A non-monotonic
+    window is reported and skipped without becoming the next comparison anchor.
+    These layers are used only for Consistency. Distance/reachability and time
+    reduction are deliberately excluded from this transitional version.
     """
     details: List[Dict[str, Any]] = []
     signed_layer_imbalances: List[float] = []
     non_monotonic_layers: List[str] = []
-    previous_candidate: Optional[float] = None
-    previous_opposite: Optional[float] = None
-    previous_hours = 0.0
-    previous_timeframe: Optional[str] = None
+    # Keep the last *valid* cumulative window as the comparison anchor.  A
+    # non-monotonic window must not become the baseline for the following one;
+    # otherwise one bad 24h sample can manufacture a false 24h→48h increment.
+    anchor_candidate: Optional[float] = None
+    anchor_opposite: Optional[float] = None
+    anchor_hours = 0.0
+    anchor_timeframe: Optional[str] = None
 
     ordered = sorted(
         list(entries), key=lambda item: TIMEFRAME_ORDER.get(item["timeframe"], 99)
@@ -311,19 +315,19 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         gross_opposite_total = cumulative_opposite
         gross_timeframe = timeframe
 
-        is_baseline = previous_candidate is None
+        is_baseline = anchor_candidate is None
         additional_hours = (
-            timeframe_hours if is_baseline else timeframe_hours - previous_hours
+            timeframe_hours if is_baseline else timeframe_hours - anchor_hours
         )
         layer_candidate = (
             cumulative_candidate
             if is_baseline
-            else cumulative_candidate - float(previous_candidate)
+            else cumulative_candidate - float(anchor_candidate)
         )
         layer_opposite = (
             cumulative_opposite
             if is_baseline
-            else cumulative_opposite - float(previous_opposite)
+            else cumulative_opposite - float(anchor_opposite)
         )
 
         tolerance = max(
@@ -359,12 +363,14 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         details.append({
             "timeframe": timeframe,
             "layer_type": "BASE" if is_baseline else "INCREMENT",
-            "previous_timeframe": previous_timeframe,
+            "previous_timeframe": anchor_timeframe,
             "additional_hours": additional_hours,
             "candidate_liquidity": layer_candidate,
             "opposite_liquidity": layer_opposite,
             "cumulative_candidate_liquidity": cumulative_candidate,
             "cumulative_opposite_liquidity": cumulative_opposite,
+            "previous_cumulative_candidate_liquidity": anchor_candidate,
+            "previous_cumulative_opposite_liquidity": anchor_opposite,
             "time_weighted_candidate": weighted_candidate,
             "time_weighted_opposite": weighted_opposite,
             "edge_pct": round(edge * 100.0, 2) if edge is not None else None,
@@ -373,10 +379,11 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
             "distance_weight_applied": False,
         })
 
-        previous_candidate = cumulative_candidate
-        previous_opposite = cumulative_opposite
-        previous_hours = timeframe_hours
-        previous_timeframe = timeframe
+        if valid:
+            anchor_candidate = cumulative_candidate
+            anchor_opposite = cumulative_opposite
+            anchor_hours = timeframe_hours
+            anchor_timeframe = timeframe
 
     weighted_candidate_total = float(gross_candidate_total or 0.0)
     weighted_opposite_total = float(gross_opposite_total or 0.0)

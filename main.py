@@ -23,7 +23,6 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from coinglass_dom_reader import collect_coinglass_dom_snapshot
 import analysis
-import decision_engine
 import alert_engine
 import magnet_v1
 import live_price_provider
@@ -102,7 +101,10 @@ MAX_PROCESSED_UPDATE_IDS = 500
 ALERT_ACTIVE = False
 CONFIRMATION_STATE: Dict[str, str] = {}
 HIGH_SCORE_83_STATE: Dict[str, bool] = {}
+COMBINED_CONFIRMATION_STATE: Dict[str, set] = {}
 SPECIAL_HIGH_SCORE_THRESHOLD = 83.0
+COMBINED_HIGH_SCORE_THRESHOLD = 80.0
+COMBINED_MIN_SIGNALS = 2
 # A derivatives-aware Watch generation cannot be newer than its closed 30m
 # CVD candle.  Keep the public setting backward-compatible, but never schedule
 # full Watch generations faster than the underlying closed-candle cadence.
@@ -1190,6 +1192,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/magnet BTC — Magnet V1 + אישור נגזרים\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
         "/watch_on — Watch כללי מסונכרן ל-OI+CVD כל חצי שעה\n"
+        "  ↳ כולל התראת קונפירמיישן משולב אוטומטית לכל המטבעות שנסרקו\n"
         "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
         "/watch_on SOL 160 — צפייה ב-SOL עד יעד 160, כל 5 דקות\n"
         "/watch_magnet_v1 BTC — Watch נפרד ל-Magnet על המחזור המשותף\n"
@@ -1679,79 +1682,6 @@ async def btc_like(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tablefmt="plain",
     )
     await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
-
-async def score(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show transparent setup strength breakdown for one coin."""
-    if not context.args:
-        await update.message.reply_text("שימוש: /score BTC")
-        return
-
-    symbol = context.args[0].upper()
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
-        return
-
-    result = decision_engine.calculate_score_for_symbol(rows, symbol)
-    if not result.get("ok"):
-        await update.message.reply_text(f"לא נמצאו נתונים עבור {symbol}.")
-        return
-
-    header = [
-        ["Coin", result["symbol"]],
-        ["Direction", result["direction"]],
-        ["SetupStrength", result["setup_strength"]],
-        ["Confidence", result["confidence"]],
-        ["Consensus", f'{result["consensus_hits"]}/{result["consensus_total"]}'],
-        ["AvgDist%", fmt(result.get("avg_distance"))],
-        ["AvgGap%", fmt(result.get("gap_avg_pct"))],
-    ]
-
-    comp_table = [[
-        c["name"],
-        f'{fmt(c["score"])}/{c["max"]}',
-        c["direction"],
-        c["reason"],
-    ] for c in result["components"]]
-
-    text1 = tabulate(header, tablefmt="plain")
-    text2 = tabulate(comp_table, headers=["Component", "Score", "Dir", "Reason"], tablefmt="plain")
-    await update.message.reply_text(f"<pre>{html.escape(text1 + chr(10) + chr(10) + text2)}</pre>", parse_mode="HTML")
-
-
-async def score_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show top coins by setup strength."""
-    limit = 15
-    if context.args:
-        try:
-            limit = max(1, min(50, int(context.args[0])))
-        except Exception:
-            limit = 15
-
-    rows = latest_snapshot_rows()
-    if not rows:
-        await update.message.reply_text("אין נתונים לניתוח. הריצו /collect קודם.")
-        return
-
-    results = decision_engine.calculate_scores(rows, limit=limit)
-    if not results:
-        await update.message.reply_text("אין מספיק נתונים לחישוב Setup Strength.")
-        return
-
-    table = [[
-        r["symbol"],
-        r["direction"],
-        r["setup_strength"],
-        r["confidence"],
-        f'{r["consensus_hits"]}/{r["consensus_total"]}',
-        fmt(r.get("avg_distance")),
-        fmt(r.get("gap_avg_pct")),
-    ] for r in results]
-
-    output = tabulate(table, headers=["Coin", "Dir", "Strength", "Conf", "Cons", "AvgDist%", "AvgGap%"], tablefmt="plain")
-    await update.message.reply_text(f"<pre>{html.escape(output)}</pre>", parse_mode="HTML")
-
-
 
 def _row_get(row, key, default=None):
     try:
@@ -2258,6 +2188,313 @@ def _collect_special_transition_messages(items: List[Dict[str, Any]]) -> List[st
     return messages
 
 
+def _combined_group_key(symbol: Any, side: Any) -> str:
+    return f"{str(symbol or '').upper()}|{str(side or '').upper()}"
+
+
+def _magnet_alert_side(magnet_side: Any) -> Optional[str]:
+    """Map Magnet geometry to the existing Max-Pain side label.
+
+    An upper magnet hurts shorts and a lower magnet hurts longs.  Keeping the
+    legacy side label makes combined alerts directly comparable with the
+    existing alert cards without changing any score or direction calculation.
+    """
+    normalized = str(magnet_side or "").upper()
+    if normalized == "UPPER":
+        return "SHORT"
+    if normalized == "LOWER":
+        return "LONG"
+    return None
+
+
+def _combined_magnet_confirmations(
+    rows: List[Dict[str, Any]], items: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """Evaluate Magnet for every scanned coin from the shared Watch snapshot.
+
+    This is deliberately independent of ``MAGNET_V1_WATCHES``.  It performs no
+    DOM or API collection: all coins are evaluated in memory from the same rows,
+    OI generation and CVD generation already used by the regular Watch cycle.
+    """
+    source_by_symbol: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        symbol = str(item.get("symbol") or "").upper()
+        if symbol and symbol not in source_by_symbol:
+            source_by_symbol[symbol] = item
+
+    confirmed: Dict[str, Dict[str, Any]] = {}
+    for magnet in magnet_v1.build_magnets(rows):
+        symbol = str(magnet.get("symbol") or "").upper()
+        source = source_by_symbol.get(symbol)
+        alert_side = _magnet_alert_side(magnet.get("side"))
+        expected_direction = magnet_v1.expected_price_direction(magnet.get("side"))
+        if source is None or alert_side is None:
+            continue
+        try:
+            evidence = market_confidence_engine.combine(
+                symbol,
+                expected_direction,
+                regime=source.get("market_regime") or {},
+                flow=source.get("flow_context") or {},
+                maxpain_score=0.0,
+            )
+            result = magnet_v1.evaluate_confirmation(magnet, evidence)
+        except Exception as exc:
+            print(
+                f"[combined-confirmation] magnet evaluation failed "
+                f"symbol={symbol} side={alert_side}: {exc!r}",
+                flush=True,
+            )
+            continue
+
+        status = str(result.get("status") or "").upper()
+        if status not in {"CONFIRMED", "STRONG_CONFIRMED"}:
+            continue
+        candidate = {
+            "status": status,
+            "magnet_quality": float(magnet.get("magnet_quality") or 0.0),
+            "liquidity_edge_pct": magnet.get("liquidity_edge_pct"),
+            "members": list(magnet.get("members") or []),
+            "magnet_side": str(magnet.get("side") or "").upper(),
+            "label": result.get("label"),
+        }
+        key = _combined_group_key(symbol, alert_side)
+        previous = confirmed.get(key)
+        candidate_rank = (
+            1 if status == "STRONG_CONFIRMED" else 0,
+            candidate["magnet_quality"],
+            float(candidate.get("liquidity_edge_pct") or 0.0),
+            len(candidate["members"]),
+        )
+        previous_rank = (
+            1 if str((previous or {}).get("status") or "").upper() == "STRONG_CONFIRMED" else 0,
+            float((previous or {}).get("magnet_quality") or 0.0),
+            float((previous or {}).get("liquidity_edge_pct") or 0.0),
+            len((previous or {}).get("members") or []),
+        )
+        if previous is None or candidate_rank > previous_rank:
+            confirmed[key] = candidate
+    return confirmed
+
+
+def _combined_confirmation_candidates(
+    items: List[Dict[str, Any]], rows: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Aggregate independent Watch evidence by coin and direction.
+
+    Every qualifying occurrence is one intersection signal.  For example, two
+    confirmed timeframes qualify; so do one confirmation plus 60% liquidity, or
+    a score above 80 plus a three-anomaly setup.  Strong and regular
+    confirmations are counted separately and displayed separately.
+    """
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        symbol = str(item.get("symbol") or "").upper()
+        side = str(item.get("side") or "").upper()
+        if symbol and side in {"LONG", "SHORT"}:
+            grouped[_combined_group_key(symbol, side)].append(item)
+
+    magnet_by_group = _combined_magnet_confirmations(rows, items)
+    candidates: List[Dict[str, Any]] = []
+    for key, group_items in grouped.items():
+        ordered_items = sorted(
+            group_items,
+            key=lambda item: (
+                -float(item.get("score", item.get("priority", 0)) or 0.0),
+                TIMEFRAMES.index(str(item.get("timeframe")))
+                if str(item.get("timeframe")) in TIMEFRAMES else 99,
+            ),
+        )
+        symbol, side = key.split("|", 1)
+        normal_confirmations: List[Dict[str, Any]] = []
+        strong_confirmations: List[Dict[str, Any]] = []
+        high_scores: List[Dict[str, Any]] = []
+        anomaly_setups: List[Dict[str, Any]] = []
+        liquidity_imbalances: List[Dict[str, Any]] = []
+        signal_keys = set()
+
+        for item in ordered_items:
+            timeframe = str(item.get("timeframe") or "—")
+            confirmation = (
+                item.get("maxpain_confirmation")
+                or (item.get("market_evidence") or {}).get("confirmation")
+                or {}
+            )
+            status = str(confirmation.get("status") or "").upper()
+            score = float(item.get("score", item.get("priority", 0)) or 0.0)
+            types = sorted(set(item.get("types") or []))
+            try:
+                near_share = float(item.get("near_share_pct"))
+            except (TypeError, ValueError):
+                near_share = None
+
+            if status == "CONFIRMED":
+                normal_confirmations.append({"timeframe": timeframe, "score": score})
+                signal_keys.add(f"confirmation:{timeframe}")
+            elif status == "STRONG_CONFIRMED":
+                strong_confirmations.append({"timeframe": timeframe, "score": score})
+                signal_keys.add(f"strong_confirmation:{timeframe}")
+
+            if score > COMBINED_HIGH_SCORE_THRESHOLD:
+                high_scores.append({"timeframe": timeframe, "score": score})
+                signal_keys.add(f"score_over_80:{timeframe}")
+
+            if len(types) >= 3:
+                anomaly_setups.append({
+                    "timeframe": timeframe,
+                    "count": len(types),
+                    "types": types,
+                })
+                signal_keys.add(f"three_anomalies:{timeframe}")
+
+            if near_share is not None and near_share >= 60.0:
+                liquidity_imbalances.append({
+                    "timeframe": timeframe,
+                    "share_pct": near_share,
+                })
+                signal_keys.add(f"liquidity_60:{timeframe}")
+
+        magnet = magnet_by_group.get(key)
+        if magnet:
+            signal_keys.add(
+                "magnet:"
+                + str(magnet.get("status") or "CONFIRMED").upper()
+                + ":"
+                + ",".join(magnet.get("members") or [])
+            )
+
+        if len(signal_keys) < COMBINED_MIN_SIGNALS:
+            continue
+        candidates.append({
+            "key": key,
+            "symbol": symbol,
+            "side": side,
+            "signal_keys": signal_keys,
+            "signal_count": len(signal_keys),
+            "normal_confirmations": normal_confirmations,
+            "strong_confirmations": strong_confirmations,
+            "high_scores": high_scores,
+            "anomaly_setups": anomaly_setups,
+            "liquidity_imbalances": liquidity_imbalances,
+            "magnet": magnet,
+            "top_item": ordered_items[0],
+        })
+
+    candidates.sort(key=lambda candidate: (
+        -int(candidate.get("signal_count") or 0),
+        -float((candidate.get("top_item") or {}).get("score", 0.0) or 0.0),
+        str(candidate.get("symbol") or ""),
+        str(candidate.get("side") or ""),
+    ))
+    return candidates
+
+
+def _combined_confirmation_message(candidate: Dict[str, Any]) -> str:
+    symbol = html.escape(str(candidate.get("symbol") or "—"))
+    side = str(candidate.get("side") or "—").upper()
+    side_icon = "🟢" if side == "LONG" else "🔴" if side == "SHORT" else "⚪"
+    signal_count = int(candidate.get("signal_count") or 0)
+    top_item = candidate.get("top_item") or {}
+    lines = [
+        "🚨 <b>קונפירמיישן משולב</b>",
+        "",
+        f"<b>{symbol} | {side_icon} {html.escape(side)}</b>",
+        f"נמצאו <b>{signal_count}</b> אינדיקציות מצטלבות באותו כיוון.",
+        f"ציון מוביל: <b>{float(top_item.get('score', 0.0) or 0.0):.2f}</b> "
+        f"({html.escape(str(top_item.get('timeframe') or '—'))})",
+        "",
+    ]
+
+    normal = candidate.get("normal_confirmations") or []
+    strong = candidate.get("strong_confirmations") or []
+    if normal:
+        lines.append(
+            "✅ Confirmation רגיל: <b>"
+            + str(len(normal))
+            + "</b> — "
+            + ", ".join(html.escape(str(entry["timeframe"])) for entry in normal)
+        )
+    if strong:
+        lines.append(
+            "🔥 Strong Confirmation: <b>"
+            + str(len(strong))
+            + "</b> — "
+            + ", ".join(html.escape(str(entry["timeframe"])) for entry in strong)
+        )
+
+    high_scores = candidate.get("high_scores") or []
+    if high_scores:
+        lines.append(
+            "📊 ציון מעל 80: "
+            + ", ".join(
+                f"{html.escape(str(entry['timeframe']))} ({float(entry['score']):.2f})"
+                for entry in high_scores
+            )
+        )
+
+    anomaly_setups = candidate.get("anomaly_setups") or []
+    if anomaly_setups:
+        lines.append(
+            "⚠️ 3 חריגות ומעלה: "
+            + ", ".join(
+                f"{html.escape(str(entry['timeframe']))} ({int(entry['count'])})"
+                for entry in anomaly_setups
+            )
+        )
+
+    liquidity = candidate.get("liquidity_imbalances") or []
+    if liquidity:
+        lines.append(
+            "💧 Liquidity Imbalance ‏60%+: "
+            + ", ".join(
+                f"{html.escape(str(entry['timeframe']))} ({float(entry['share_pct']):.2f}%)"
+                for entry in liquidity
+            )
+        )
+
+    magnet = candidate.get("magnet") or {}
+    if magnet:
+        edge = magnet.get("liquidity_edge_pct")
+        edge_text = f"{float(edge):+.2f}%" if edge is not None else "—"
+        members = ", ".join(magnet.get("members") or []) or "—"
+        magnet_title = (
+            "Strong Magnet Confirmation"
+            if str(magnet.get("status") or "").upper() == "STRONG_CONFIRMED"
+            else "Magnet Confirmation"
+        )
+        lines.append(
+            f"🧲 {magnet_title}: MQ {float(magnet.get('magnet_quality') or 0.0):.2f} | "
+            f"Edge {edge_text} | {html.escape(members)}"
+        )
+
+    lines.extend([
+        "",
+        "ההתראה נוצרה מאותה תמונת Watch מסונכרנת; היא אינה משנה את הציון הקיים.",
+    ])
+    return "\n".join(lines)
+
+
+def _collect_combined_confirmation_messages(
+    items: List[Dict[str, Any]], rows: List[Dict[str, Any]]
+) -> List[str]:
+    """Emit only on entry or when genuinely new evidence joins an active setup."""
+    candidates = _combined_confirmation_candidates(items, rows)
+    active_keys = {str(candidate["key"]) for candidate in candidates}
+    for stale_key in list(COMBINED_CONFIRMATION_STATE):
+        if stale_key not in active_keys:
+            COMBINED_CONFIRMATION_STATE.pop(stale_key, None)
+
+    messages: List[str] = []
+    for candidate in candidates:
+        key = str(candidate["key"])
+        current_signals = set(candidate.get("signal_keys") or set())
+        previous_signals = set(COMBINED_CONFIRMATION_STATE.get(key) or set())
+        if not previous_signals or current_signals - previous_signals:
+            messages.append(_combined_confirmation_message(candidate))
+        COMBINED_CONFIRMATION_STATE[key] = current_signals
+    return messages
+
+
 async def _send_alert_with_confirmation(bot, chat_id: int, card: str, item: Dict[str, Any]) -> None:
     await bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
     for separate in _special_transition_messages(item):
@@ -2754,8 +2991,15 @@ async def _build_magnet_report(symbol: str, rows: List[Dict[str, Any]]) -> List[
             )
             if not detail.get("valid", True):
                 lines.append(
-                    f"• {html.escape(layer_label)}: ⚠️ נתון מצטבר לא תקין — "
-                    "השכבה הושמטה מחישוב V2"
+                    f"• {html.escape(layer_label)}: ⚠️ אי-התאמה בין טווחים — "
+                    f"{html.escape(timeframe)} מציג "
+                    f"{_fmt_magnet_liquidity(detail.get('cumulative_candidate_liquidity'))} מול "
+                    f"{_fmt_magnet_liquidity(detail.get('cumulative_opposite_liquidity'))}; "
+                    f"העוגן {html.escape(str(previous or '—'))} מציג "
+                    f"{_fmt_magnet_liquidity(detail.get('previous_cumulative_candidate_liquidity'))} מול "
+                    f"{_fmt_magnet_liquidity(detail.get('previous_cumulative_opposite_liquidity'))}. "
+                    "הטווח לא נכלל ב-Consistency ואינו הופך לעוגן הבא; "
+                    "Liquidity Edge נשאר לפי הטווח הרחב."
                 )
                 continue
             detail_edge = detail.get("edge_pct")
@@ -3550,7 +3794,16 @@ async def run_watch_cycle(
             for item in all_items
             if _is_displayable_opportunity(item)
         ]
-        special_messages = _collect_special_transition_messages(displayable_items)
+        # A Magnet-only subscriber must not consume regular or combined alert
+        # transitions that were never sent to the general Watch chat.
+        special_messages = (
+            _collect_special_transition_messages(displayable_items)
+            if general_enabled else []
+        )
+        combined_messages = (
+            _collect_combined_confirmation_messages(displayable_items, rows)
+            if general_enabled else []
+        )
         candidates = [
             item
             for item in displayable_items
@@ -3604,6 +3857,12 @@ async def run_watch_cycle(
                     text=special_message,
                     parse_mode="HTML",
                 )
+            for combined_message in combined_messages:
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=combined_message,
+                    parse_mode="HTML",
+                )
 
         magnet_sent = await _send_magnet_watch_reports(
             bot_app,
@@ -3635,6 +3894,7 @@ async def run_watch_cycle(
             "found": len(all_items),
             "candidates": len(candidates),
             "sent": len(result_items),
+            "combined_sent": len(combined_messages) if general_enabled else 0,
             "magnet_sent": magnet_sent,
             "derivatives": derivatives_status,
             "timeframe_integrity": live_result.get("timeframe_integrity"),
