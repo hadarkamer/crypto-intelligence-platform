@@ -2733,7 +2733,7 @@ async def _build_magnet_report(symbol: str, rows: List[Dict[str, Any]]) -> List[
             f"Spread: {float(magnet.get('spread_pct') or 0.0):.4f}%",
             f"Liquidity Edge V2: <b>{edge_text}</b>",
             f"Consistency V2: <b>{consistency_text}</b>",
-            "חישוב נזילות: שכבות מצטברות ללא חפיפה + התאמת √זמן; ללא מרחק.",
+            "חישוב נזילות: Edge לפי נזילות מצטברת נטו; Consistency לפי שכבות ללא חפיפה; ללא מרחק.",
             "",
             "<b>Confirmation נגזרים:</b>",
             f"Price+OI: {_magnet_relation_text(modules.get('positioning') or {})}",

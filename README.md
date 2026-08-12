@@ -176,10 +176,10 @@ The automatic Futures+Spot CVD refresh checks every 5 minutes by default. CVD fr
   the latest three days. A partial symbol set does not advance that clock;
   requests retry with backoff and a PostgreSQL advisory lock prevents a second
   service instance from running the same Backfill.
-- Magnet Liquidity V2 treats the first available timeframe as a named baseline,
-  subtracts cumulative overlap from later timeframes and normalizes each added
-  layer by the square root of its added hours. Liquidity Edge is amount-weighted
-  and Consistency reflects the strength of conflicting layers.
+- Magnet Liquidity V2 treats Liquidity Edge as gross cumulative liquidity from
+  the widest available timeframe: candidate side vs opposite side, with no time
+  reduction. It still builds non-overlapping layers for Consistency, so
+  conflicting layers remain visible without distorting the gross edge.
 - Distance/reachability is intentionally absent from Liquidity V2. Magnet
   Quality, the legacy score, legacy alert thresholds and existing Max Pain
   distance/proximity calculations are unchanged.

@@ -33,10 +33,13 @@
   cumulative timeframe.
 - A materially negative difference is marked `NON_MONOTONIC` and excluded; it
   is never silently converted into positive evidence.
-- Each valid layer is divided by `sqrt(added_hours)`.
-- Liquidity Edge is the normalized balance of the summed time-adjusted
-  candidate and opposite amounts.
-- Consistency is `abs(sum(signed layer imbalance)) / sum(abs(layer imbalance))`.
+- Liquidity Edge is calculated from the widest available cumulative timeframe
+  directly, without time reduction: candidate gross liquidity vs opposite gross
+  liquidity.
+- Consistency is `abs(sum(signed layer imbalance)) / sum(abs(layer imbalance))`
+  using the valid non-overlapping layers only.
+- A non-monotonic layer remains visible as a data-quality warning, but it does
+  not change the gross cumulative Liquidity Edge.
 - Distance and historical reach probability are not used.
 
 ## Explicit non-changes

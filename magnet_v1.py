@@ -9,7 +9,6 @@ the existing production scoring system.
 from __future__ import annotations
 
 from collections import defaultdict
-import math
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -276,20 +275,21 @@ def _maximal_price_clusters(entries: List[Dict[str, Any]]) -> List[List[Dict[str
 
 
 def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    """Build amount-aware, non-overlapping Liquidity V2 diagnostics.
+    """Build gross Liquidity Edge and non-overlapping Consistency diagnostics.
 
-    CoinGlass timeframe totals are cumulative.  The first available timeframe
+    CoinGlass timeframe totals are cumulative. The Liquidity Edge therefore
+    uses the widest available cumulative timeframe directly: it answers which
+    side has more actual gross liquidity in the current cumulative snapshot.
+
+    The first available timeframe
     is therefore a named baseline (normally ``12h``), not a subtraction from a
     nonexistent earlier range. Every later layer contains only the positive amount
-    added since the previous available timeframe.  A square-root time
-    normalization reduces the automatic accumulation advantage of wider
-    windows.  Distance/reachability is deliberately excluded from this
-    transitional version.
+    added since the previous available timeframe. These layers are used only for
+    Consistency. Distance/reachability and time reduction are deliberately
+    excluded from this transitional version.
     """
     details: List[Dict[str, Any]] = []
     signed_layer_imbalances: List[float] = []
-    weighted_candidate_total = 0.0
-    weighted_opposite_total = 0.0
     non_monotonic_layers: List[str] = []
     previous_candidate: Optional[float] = None
     previous_opposite: Optional[float] = None
@@ -299,11 +299,17 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     ordered = sorted(
         list(entries), key=lambda item: TIMEFRAME_ORDER.get(item["timeframe"], 99)
     )
+    gross_candidate_total: Optional[float] = None
+    gross_opposite_total: Optional[float] = None
+    gross_timeframe: Optional[str] = None
     for entry in ordered:
         timeframe = str(entry["timeframe"])
         timeframe_hours = float(TIMEFRAME_HOURS[timeframe])
         cumulative_candidate = float(entry.get("candidate_liquidity", 0.0) or 0.0)
         cumulative_opposite = float(entry.get("opposite_liquidity", 0.0) or 0.0)
+        gross_candidate_total = cumulative_candidate
+        gross_opposite_total = cumulative_opposite
+        gross_timeframe = timeframe
 
         is_baseline = previous_candidate is None
         additional_hours = (
@@ -339,13 +345,8 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         # zero, but a materially negative layer is flagged and excluded.
         layer_candidate = max(0.0, layer_candidate)
         layer_opposite = max(0.0, layer_opposite)
-        time_divisor = math.sqrt(additional_hours) if additional_hours > 0.0 else 0.0
-        weighted_candidate = (
-            layer_candidate / time_divisor if valid and time_divisor > 0.0 else 0.0
-        )
-        weighted_opposite = (
-            layer_opposite / time_divisor if valid and time_divisor > 0.0 else 0.0
-        )
+        weighted_candidate = layer_candidate if valid else 0.0
+        weighted_opposite = layer_opposite if valid else 0.0
         weighted_total = weighted_candidate + weighted_opposite
         edge = (
             (weighted_candidate - weighted_opposite) / weighted_total
@@ -354,8 +355,6 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         )
         if edge is not None:
             signed_layer_imbalances.append(weighted_candidate - weighted_opposite)
-            weighted_candidate_total += weighted_candidate
-            weighted_opposite_total += weighted_opposite
 
         details.append({
             "timeframe": timeframe,
@@ -379,6 +378,8 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         previous_hours = timeframe_hours
         previous_timeframe = timeframe
 
+    weighted_candidate_total = float(gross_candidate_total or 0.0)
+    weighted_opposite_total = float(gross_opposite_total or 0.0)
     weighted_total = weighted_candidate_total + weighted_opposite_total
     liquidity_edge_pct = (
         round(
@@ -401,9 +402,12 @@ def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "consistency_pct": consistency_pct,
         "liquidity_samples": len(signed_layer_imbalances),
         "liquidity_details": details,
+        "gross_liquidity_timeframe": gross_timeframe,
+        "gross_candidate_liquidity": weighted_candidate_total,
+        "gross_opposite_liquidity": weighted_opposite_total,
         "non_monotonic_layers": non_monotonic_layers,
         "distance_weighting_enabled": False,
-        "liquidity_calculation_version": "V2_INCREMENTAL_TIME_NO_DISTANCE",
+        "liquidity_calculation_version": "V2_GROSS_EDGE_INCREMENTAL_CONSISTENCY_NO_DISTANCE",
     }
 
 
@@ -430,10 +434,10 @@ def _build_candidate(symbol: str, side: str, entries: List[Dict[str, Any]]) -> D
 def build_magnets(rows: Iterable[Any], symbol: Optional[str] = None) -> List[Dict[str, Any]]:
     """Build independent UPPER/LOWER Magnet V1 candidates.
 
-    Liquidity V2 removes cumulative overlap and applies square-root time
-    normalization. Distance is intentionally absent. Consistency remains a
-    diagnostic and neither it nor Liquidity Edge alters Magnet Quality or the
-    legacy score.
+    Liquidity V2 uses gross cumulative liquidity for Edge and incremental
+    layers for Consistency. Distance is intentionally absent. Consistency
+    remains a diagnostic and neither it nor Liquidity Edge alters Magnet
+    Quality or the legacy score.
     """
     requested_symbol = str(symbol or "").strip().upper() or None
     grouped: Dict[str, Dict[str, Any]] = defaultdict(dict)

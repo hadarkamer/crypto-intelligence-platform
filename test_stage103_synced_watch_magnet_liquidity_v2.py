@@ -30,9 +30,15 @@ def test_liquidity_v2_uses_named_baseline_and_incremental_layers_without_distanc
     assert increment["previous_timeframe"] == "12h"
     assert increment["candidate_liquidity"] == 15_000_000
     assert increment["opposite_liquidity"] == 60_000_000
+    assert result["gross_liquidity_timeframe"] == "24h"
+    assert result["gross_candidate_liquidity"] == 75_000_000
+    assert result["gross_opposite_liquidity"] == 100_000_000
     assert result["liquidity_edge_pct"] == -14.29
     assert result["consistency_pct"] == 38.46
     assert result["distance_weighting_enabled"] is False
+    assert result["liquidity_calculation_version"] == (
+        "V2_GROSS_EDGE_INCREMENTAL_CONSISTENCY_NO_DISTANCE"
+    )
     assert all(not item["distance_weight_applied"] for item in result["liquidity_details"])
 
 
@@ -51,8 +57,9 @@ def test_non_monotonic_cumulative_layer_is_flagged_and_excluded():
     ])
     assert result["non_monotonic_layers"] == ["24h"]
     assert result["liquidity_details"][1]["valid"] is False
-    # Only the valid 12h baseline remains in the edge.
-    assert result["liquidity_edge_pct"] == 20.0
+    # Gross edge still reflects the widest available cumulative snapshot.
+    assert result["gross_liquidity_timeframe"] == "24h"
+    assert result["liquidity_edge_pct"] == -24.14
 
 
 def test_magnet_quality_and_legacy_score_contract_are_unchanged():
