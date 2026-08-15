@@ -71,7 +71,6 @@ def _counter_gap_points(row: Any, counter_side: str) -> Dict[str, Optional[float
 def calculate_counter_score(
     primary_item: Dict[str, Any],
     rows: Iterable[Any],
-    all_items: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Calculate the opposite-direction score for one displayed alert.
 
@@ -108,28 +107,7 @@ def calculate_counter_score(
     consensus_hits = int(consensus.get(counter_side, 0) or 0)
     consensus_total = int(consensus.get("total", 0) or 0)
 
-    btc_reference = None
-    if symbol != "BTC":
-        available_items = list(all_items or [])
-        if not available_items:
-            available_items = alert_engine.build_opportunities(
-                deduped_rows, limit=500
-            )
-        btc_item = next(
-            (
-                item for item in available_items
-                if item.get("symbol") == "BTC"
-                and item.get("timeframe") == timeframe
-            ),
-            None,
-        )
-        if btc_item:
-            btc_reference = {
-                "side": btc_item.get("side"),
-                "score": btc_item.get("score", 0.0),
-            }
-
-    consensus_max = 30.0 if symbol == "BTC" else 15.0
+    consensus_max = 30.0
     gap_consensus_points = alert_engine._gap_consensus_points(
         deduped_rows, symbol, counter_side, timeframe, consensus_max
     )
@@ -138,7 +116,6 @@ def calculate_counter_score(
         consensus_hits,
         consensus_total,
         counter_side,
-        btc_reference,
         consensus_points_override=gap_consensus_points,
     )
     allowed_distance = alert_engine._allowed_distance_pct(
@@ -172,6 +149,4 @@ def calculate_counter_score(
         "components": components,
         "cluster_count": int(cluster.get("count", 0) or 0),
         "cluster_members": list(cluster.get("members", []) or []),
-        "btc_reference_side": directional.get("btc_reference_side"),
-        "btc_reference_score": directional.get("btc_reference_score"),
     }
