@@ -48,6 +48,50 @@ def _cached_flow(symbol: str) -> Dict[str, Any]:
     return result
 
 
+def capture_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Read OI and CVD once per symbol for one immutable analysis cycle.
+
+    Callers pass this snapshot to every Max-Pain, Magnet and combined report in
+    the cycle.  No downstream function needs to re-read the database or cache,
+    so messages emitted seconds apart cannot describe different generations.
+    """
+    snapshot: Dict[str, Dict[str, Any]] = {}
+    for raw_symbol in symbols:
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol or symbol in snapshot:
+            continue
+        try:
+            regime = coinglass_oi_regime_service.latest(symbol)
+        except Exception as exc:
+            regime = {
+                "symbol": symbol,
+                "available": False,
+                "windows": {},
+                "reason": repr(exc),
+                "data_quality_status": "INVALID",
+            }
+        try:
+            flow = _cached_flow(symbol)
+        except Exception as exc:
+            flow = {
+                "futures": {
+                    "available": False,
+                    "windows": {},
+                    "quality": {"status": "NO_DATA", "reasons": [repr(exc)]},
+                },
+                "spot": {
+                    "available": False,
+                    "windows": {},
+                    "quality": {"status": "NO_DATA", "reasons": [repr(exc)]},
+                },
+            }
+        snapshot[symbol] = {
+            "regime": deepcopy(regime),
+            "flow": deepcopy(flow),
+        }
+    return snapshot
+
+
 def _price_direction_from_side(side: Any) -> str:
     """Displayed Max-Pain side is the side expected to be hurt."""
     side = str(side or "").upper()
@@ -178,19 +222,30 @@ def _conclusion(modules: Dict[str, Dict[str, Any]], expected: str) -> Dict[str, 
     core_keys = ("positioning", "futures_flow")
     core_support = sum(int(str((modules.get(k) or {}).get("relation") or "NEUTRAL") == "SUPPORT") for k in core_keys)
     core_opposition = sum(int(str((modules.get(k) or {}).get("relation") or "NEUTRAL") == "OPPOSE") for k in core_keys)
+    qualified_core_support = sum(
+        int(
+            str((modules.get(k) or {}).get("relation") or "NEUTRAL") == "SUPPORT"
+            and abs(float((modules.get(k) or {}).get("score") or 0.0)) >= 25.0
+        )
+        for k in core_keys
+    )
     spot = _spot_context(modules.get("spot_flow") or {})
 
     if core_opposition:
         classification = "CORE_CONFLICT"
         label = "קונפליקט — Price+OI או Futures Flow מתנגדים"
         relation_to_alert = "CONFLICT"
-    elif core_support == 2:
+    elif qualified_core_support == 2:
         classification = "CORE_CONFIRMATION"
-        label = "אישור נגזרים מלא — Price+OI + Futures Flow"
+        label = "אישור נגזרים מלא — Price+OI + Futures Flow בעוצמה 25+"
         relation_to_alert = "SUPPORT"
     elif core_support == 1:
         classification = "WEAK_EVIDENCE"
         label = "עדות חלקית — מנוע נגזרים אחד בלבד"
+        relation_to_alert = "NO_CONFIRMATION"
+    elif core_support == 2:
+        classification = "WEAK_EVIDENCE"
+        label = "שני מנועי הליבה בכיוון, אך לפחות אחד מתחת לעוצמה 25"
         relation_to_alert = "NO_CONFIRMATION"
     else:
         classification = "NO_DIRECTIONAL_EVIDENCE"
@@ -202,6 +257,7 @@ def _conclusion(modules: Dict[str, Dict[str, Any]], expected: str) -> Dict[str, 
         "supporting_families": core_support,
         "opposing_families": core_opposition,
         "core_supporting_families": core_support,
+        "core_qualified_supporting_families": qualified_core_support,
         "core_opposing_families": core_opposition,
         "spot_context": spot,
         "classification": classification,
@@ -250,9 +306,9 @@ def _confirmation(maxpain_score: float, expected: str, modules: Dict[str, Dict[s
         status, label = "CONFLICT", "Max Pain Conflict — Price+OI סותר"
     elif opposition:
         status, label = "CONFLICT", "Max Pain Conflict — מנוע נגזרים מתנגד"
-    elif support == 2 and strong_score_ok:
+    elif strong_core and strong_score_ok:
         status, label = "STRONG_CONFIRMED", "Max Pain Strong Confirmation — ציון 75+ עם Price+OI + Futures"
-    elif support == 2:
+    elif strong_core:
         status, label = "CONFIRMED", "Max Pain Confirmed — ציון 65–74.99 עם Price+OI + Futures"
     else:
         status, label = "UNCONFIRMED", "Max Pain לא מאומת כרגע"
@@ -263,6 +319,7 @@ def _confirmation(maxpain_score: float, expected: str, modules: Dict[str, Dict[s
         "score_threshold": 65.0,
         "strong_score_threshold": 75.0,
         "score_ok": score_ok,
+        "score_confirmation": score_ok,
         "strong_score_ok": strong_score_ok,
         "early_shift_opposes": early_against,
         "oi_opposes": oi_opposes,
@@ -309,11 +366,17 @@ def max_pain_side_to_price_direction(max_pain_side: Any) -> str:
     return "LONG" if side == "SHORT" else "SHORT" if side == "LONG" else "NEUTRAL"
 
 
-def attach_to_opportunities(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def attach_to_opportunities(
+    items: List[Dict[str, Any]],
+    snapshot_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     flow_cache: Dict[str, Dict[str, Any]] = {}
     regime_cache: Dict[str, Dict[str, Any]] = {}
     for item in items:
         symbol = str(item.get("symbol") or "").upper()
+        captured = (snapshot_by_symbol or {}).get(symbol) or {}
+        if symbol not in flow_cache and captured:
+            flow_cache[symbol] = deepcopy(captured.get("flow") or {})
         if symbol not in flow_cache:
             try:
                 flow_cache[symbol] = _cached_flow(symbol)
@@ -322,11 +385,14 @@ def attach_to_opportunities(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     "futures": {"available": False, "quality": {"status": "NO_DATA", "reasons": [repr(exc)]}},
                     "spot": {"available": False, "quality": {"status": "NO_DATA", "reasons": [repr(exc)]}},
                 }
+        if symbol not in regime_cache and captured:
+            regime_cache[symbol] = deepcopy(captured.get("regime") or {})
         if symbol not in regime_cache:
             regime_cache[symbol] = item.get("market_regime") or coinglass_oi_regime_service.latest(symbol)
         expected = _price_direction_from_side(item.get("side"))
         maxpain_score = float(item.get("score", item.get("priority", 0)) or 0.0)
         item["flow_context"] = flow_cache[symbol]
+        item["market_regime"] = regime_cache[symbol]
         item["market_evidence"] = combine(symbol, expected, regime_cache[symbol], flow_cache[symbol], maxpain_score)
         item["maxpain_confirmation"] = item["market_evidence"].get("confirmation") or {}
     return items

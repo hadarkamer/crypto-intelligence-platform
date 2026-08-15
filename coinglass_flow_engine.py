@@ -9,7 +9,9 @@ Design rules:
 - The official CoinGlass CVD is preserved for audit; analytics use the locally
   rebuilt continuous CVD because it is continuous across API chunks.
 - Every magnitude is compared only with the same symbol, market and timeframe.
-- P75 is the minimum for directional evidence; P90 is strong evidence.
+- Directional family strength is continuous from the P25 noise floor through
+  P90; the existing P75/P90 labels remain available for display and legacy
+  consumers.
 - 30m Buy-Sell is shown as the current impulse and is not counted again beside
   the 30m CVD change (they are mathematically the same family).
 """
@@ -367,8 +369,18 @@ def _window_state(rows: Sequence[Dict[str, Any]], label: str, steps: int) -> Dic
         }
     if direction == "NEUTRAL":
         magnitude, level = "NOISE", 0
+        continuous_strength = 0.0
     else:
         magnitude, level = _magnitude_label(abs(change), baseline)
+        continuous_strength = time_family_engine.continuous_percentile_strength(
+            abs(change),
+            {
+                "p25": baseline.p25,
+                "p50": baseline.p50,
+                "p75": baseline.p75,
+                "p90": baseline.p90,
+            },
+        )
     if level == 0 or direction == "NEUTRAL":
         state = "NEUTRAL"
     elif level == 1:
@@ -385,6 +397,7 @@ def _window_state(rows: Sequence[Dict[str, Any]], label: str, steps: int) -> Dic
         "direction": direction,
         "magnitude": magnitude,
         "evidence_level": level,
+        "continuous_strength": continuous_strength,
         "cvd_change_usd": change,
         "latest_time": latest["time"].isoformat(),
         "reference_time": rows[reference_idx]["time"].isoformat(),

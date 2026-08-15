@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 
 import market_session_baseline as session_baseline
+import time_family_engine
 
 try:
     import psycopg
@@ -799,15 +800,16 @@ def get_reference_ranges(symbol: str, refresh: bool = False) -> Dict[str, Any]:
 
 
 def strength_from_distribution(change_pct: Optional[float], distribution: Dict[str, Any]) -> Dict[str, Any]:
-    """Map an absolute move to transparent historical percentile bands."""
+    """Map an absolute move to labels plus active continuous strength."""
     if change_pct is None or not distribution:
         return {"available": False, "label": "Unknown", "rank": None}
     value = abs(float(change_pct))
     p25 = distribution.get("p25")
+    median = distribution.get("median")
     p75 = distribution.get("p75")
     p90 = distribution.get("p90")
     p95 = distribution.get("p95")
-    if any(x is None for x in (p25, p75, p90, p95)):
+    if any(x is None for x in (p25, median, p75, p90, p95)):
         return {"available": False, "label": "Unknown", "rank": None}
     if value < float(p25):
         label, rank = "Weak / Noise", 0
@@ -819,12 +821,18 @@ def strength_from_distribution(change_pct: Optional[float], distribution: Dict[s
         label, rank = "Strong", 3
     else:
         label, rank = "Extreme", 4
+    continuous_strength = time_family_engine.continuous_percentile_strength(
+        value,
+        distribution,
+    )
     return {
         "available": True,
         "label": label,
         "rank": rank,
+        "continuous_strength": continuous_strength,
         "absolute_change_pct": value,
         "p25": float(p25),
+        "median": float(median),
         "p75": float(p75),
         "p90": float(p90),
         "p95": float(p95),

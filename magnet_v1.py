@@ -1,10 +1,4 @@
-"""Read-only Magnet Engine V1 diagnostics.
-
-This module intentionally does not participate in the legacy alert score.
-It evaluates Max Pain cluster geometry, relative liquidity edge, and liquidity
-consistency as separate diagnostics so the V1 model can be validated alongside
-the existing production scoring system.
-"""
+"""Magnet V1 geometry, quality, liquidity edge and confirmation."""
 
 from __future__ import annotations
 
@@ -28,7 +22,7 @@ CONFIRMATION_MIN_QUALITY = 60.0
 STRONG_CONFIRMATION_MIN_QUALITY = 75.0
 LIQUIDITY_OPPOSITION_PCT = -10.0
 LIQUIDITY_SUPPORT_PCT = 10.0
-STRONG_LIQUIDITY_SUPPORT_PCT = 20.0
+STRONG_LIQUIDITY_SUPPORT_PCT = 10.0
 
 
 def _get(row: Any, key: str, default=None):
@@ -38,11 +32,12 @@ def _get(row: Any, key: str, default=None):
         return default
 
 
-def _as_positive_float(value: Any) -> float:
+def _as_liquidity_float(value: Any) -> Optional[float]:
     try:
-        return max(0.0, float(value or 0.0))
+        parsed = float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return None
+    return parsed if parsed >= 0.0 else None
 
 
 def _as_optional_float(value: Any) -> Optional[float]:
@@ -102,18 +97,21 @@ def _derivatives_state(market_evidence: Dict[str, Any]) -> Dict[str, Any]:
     )
     early_against = bool(confirmation.get("early_shift_opposes"))
     oi_opposes = bool(confirmation.get("oi_opposes"))
-    strong_core = bool(confirmation.get("strong_core"))
+    modules = market_evidence.get("modules") or {}
+    positioning_score = abs(float((modules.get("positioning") or {}).get("score") or 0.0))
+    futures_score = abs(float((modules.get("futures_flow") or {}).get("score") or 0.0))
+    core_confirmed = (
+        support == 2
+        and positioning_score >= 25.0
+        and futures_score >= 25.0
+    )
 
     if early_against or oi_opposes or opposition:
         status = "CONFLICT"
         label = "נגזרים סותרים את כיוון המגנט"
-    elif support == 2:
-        status = "STRONG_CONFIRMED" if strong_core else "CONFIRMED"
-        label = (
-            "Price+OI + Futures CVD מאשרים בעוצמה"
-            if strong_core
-            else "Price+OI + Futures CVD מאשרים"
-        )
+    elif core_confirmed:
+        status = "CONFIRMED"
+        label = "Price+OI + Futures CVD מאשרים"
     else:
         status = "UNCONFIRMED"
         label = "אין עדיין אישור מלא מ-Price+OI + Futures CVD"
@@ -125,7 +123,10 @@ def _derivatives_state(market_evidence: Dict[str, Any]) -> Dict[str, Any]:
         "opposing_families": opposition,
         "early_shift_opposes": early_against,
         "oi_opposes": oi_opposes,
-        "strong_core": strong_core,
+        "strong_core": core_confirmed,
+        "positioning_score": round(positioning_score, 4),
+        "futures_score": round(futures_score, 4),
+        "minimum_engine_score": 25.0,
     }
 
 
@@ -177,7 +178,7 @@ def evaluate_confirmation(
         quality >= STRONG_CONFIRMATION_MIN_QUALITY
         and edge is not None
         and edge >= STRONG_LIQUIDITY_SUPPORT_PCT
-        and derivatives_status == "STRONG_CONFIRMED"
+        and derivatives_confirm
     ):
         status = "STRONG_CONFIRMED"
         label = "🔥 Strong Magnet Confirmation"
@@ -230,10 +231,10 @@ def _candidate_entries(rows_by_timeframe: Dict[str, Any], side: str) -> List[Dic
             "timeframe": timeframe,
             "target": target,
             "current_price": current_price,
-            "candidate_liquidity": _as_positive_float(
+            "candidate_liquidity": _as_liquidity_float(
                 _get(row, fields["candidate_liquidity"])
             ),
-            "opposite_liquidity": _as_positive_float(
+            "opposite_liquidity": _as_liquidity_float(
                 _get(row, fields["opposite_liquidity"])
             ),
         })
@@ -275,146 +276,37 @@ def _maximal_price_clusters(entries: List[Dict[str, Any]]) -> List[List[Dict[str
 
 
 def _liquidity_diagnostics(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    """Build gross Liquidity Edge and non-overlapping Consistency diagnostics.
+    """Compare both sides only in the widest valid member of the cluster.
 
-    CoinGlass timeframe totals are cumulative. The Liquidity Edge therefore
-    uses the widest available cumulative timeframe directly: it answers which
-    side has more actual gross liquidity in the current cumulative snapshot.
-
-    The first available timeframe
-    is therefore a named baseline (normally ``12h``), not a subtraction from a
-    nonexistent earlier range. Every later valid layer contains only the
-    positive amount added since the previous valid timeframe. A non-monotonic
-    window is reported and skipped without becoming the next comparison anchor.
-    These layers are used only for Consistency. Distance/reachability and time
-    reduction are deliberately excluded from this transitional version.
+    Every CoinGlass timeframe is treated as its own snapshot.  We do not
+    subtract one timeframe from another and we do not infer missing data as
+    zero.  This keeps Liquidity Edge independent and avoids false cumulative
+    data warnings.
     """
-    details: List[Dict[str, Any]] = []
-    signed_layer_imbalances: List[float] = []
-    non_monotonic_layers: List[str] = []
-    # Keep the last *valid* cumulative window as the comparison anchor.  A
-    # non-monotonic window must not become the baseline for the following one;
-    # otherwise one bad 24h sample can manufacture a false 24h→48h increment.
-    anchor_candidate: Optional[float] = None
-    anchor_opposite: Optional[float] = None
-    anchor_hours = 0.0
-    anchor_timeframe: Optional[str] = None
-
     ordered = sorted(
         list(entries), key=lambda item: TIMEFRAME_ORDER.get(item["timeframe"], 99)
     )
-    gross_candidate_total: Optional[float] = None
-    gross_opposite_total: Optional[float] = None
-    gross_timeframe: Optional[str] = None
-    for entry in ordered:
-        timeframe = str(entry["timeframe"])
-        timeframe_hours = float(TIMEFRAME_HOURS[timeframe])
-        cumulative_candidate = float(entry.get("candidate_liquidity", 0.0) or 0.0)
-        cumulative_opposite = float(entry.get("opposite_liquidity", 0.0) or 0.0)
-        gross_candidate_total = cumulative_candidate
-        gross_opposite_total = cumulative_opposite
-        gross_timeframe = timeframe
-
-        is_baseline = anchor_candidate is None
-        additional_hours = (
-            timeframe_hours if is_baseline else timeframe_hours - anchor_hours
-        )
-        layer_candidate = (
-            cumulative_candidate
-            if is_baseline
-            else cumulative_candidate - float(anchor_candidate)
-        )
-        layer_opposite = (
-            cumulative_opposite
-            if is_baseline
-            else cumulative_opposite - float(anchor_opposite)
-        )
-
-        tolerance = max(
-            1e-6,
-            cumulative_candidate * 1e-9,
-            cumulative_opposite * 1e-9,
-        )
-        valid = (
-            additional_hours > 0.0
-            and layer_candidate >= -tolerance
-            and layer_opposite >= -tolerance
-        )
-        issue = None
-        if not valid:
-            issue = "NON_MONOTONIC_CUMULATIVE_LIQUIDITY"
-            non_monotonic_layers.append(timeframe)
-
-        # Tiny floating-point negatives at an otherwise monotonic boundary are
-        # zero, but a materially negative layer is flagged and excluded.
-        layer_candidate = max(0.0, layer_candidate)
-        layer_opposite = max(0.0, layer_opposite)
-        weighted_candidate = layer_candidate if valid else 0.0
-        weighted_opposite = layer_opposite if valid else 0.0
-        weighted_total = weighted_candidate + weighted_opposite
-        edge = (
-            (weighted_candidate - weighted_opposite) / weighted_total
-            if valid and weighted_total > 0.0
-            else None
-        )
-        if edge is not None:
-            signed_layer_imbalances.append(weighted_candidate - weighted_opposite)
-
-        details.append({
-            "timeframe": timeframe,
-            "layer_type": "BASE" if is_baseline else "INCREMENT",
-            "previous_timeframe": anchor_timeframe,
-            "additional_hours": additional_hours,
-            "candidate_liquidity": layer_candidate,
-            "opposite_liquidity": layer_opposite,
-            "cumulative_candidate_liquidity": cumulative_candidate,
-            "cumulative_opposite_liquidity": cumulative_opposite,
-            "previous_cumulative_candidate_liquidity": anchor_candidate,
-            "previous_cumulative_opposite_liquidity": anchor_opposite,
-            "time_weighted_candidate": weighted_candidate,
-            "time_weighted_opposite": weighted_opposite,
-            "edge_pct": round(edge * 100.0, 2) if edge is not None else None,
-            "valid": valid,
-            "validation_issue": issue,
-            "distance_weight_applied": False,
-        })
-
-        if valid:
-            anchor_candidate = cumulative_candidate
-            anchor_opposite = cumulative_opposite
-            anchor_hours = timeframe_hours
-            anchor_timeframe = timeframe
-
-    weighted_candidate_total = float(gross_candidate_total or 0.0)
-    weighted_opposite_total = float(gross_opposite_total or 0.0)
-    weighted_total = weighted_candidate_total + weighted_opposite_total
-    liquidity_edge_pct = (
-        round(
-            (weighted_candidate_total - weighted_opposite_total)
-            / weighted_total
-            * 100.0,
-            2,
-        )
-        if weighted_total > 0.0
-        else None
-    )
-    absolute_sum = sum(abs(value) for value in signed_layer_imbalances)
-    consistency_pct = (
-        round(abs(sum(signed_layer_imbalances)) / absolute_sum * 100.0, 2)
-        if len(signed_layer_imbalances) >= 2 and absolute_sum > 1e-12
+    valid = [
+        item for item in ordered
+        if item.get("candidate_liquidity") is not None
+        and item.get("opposite_liquidity") is not None
+    ]
+    widest = valid[-1] if valid else None
+    candidate = float(widest["candidate_liquidity"]) if widest else None
+    opposite = float(widest["opposite_liquidity"]) if widest else None
+    total = (candidate + opposite) if candidate is not None and opposite is not None else 0.0
+    edge = (
+        round((candidate - opposite) / total * 100.0, 2)
+        if candidate is not None and opposite is not None and total > 0.0
         else None
     )
     return {
-        "liquidity_edge_pct": liquidity_edge_pct,
-        "consistency_pct": consistency_pct,
-        "liquidity_samples": len(signed_layer_imbalances),
-        "liquidity_details": details,
-        "gross_liquidity_timeframe": gross_timeframe,
-        "gross_candidate_liquidity": weighted_candidate_total,
-        "gross_opposite_liquidity": weighted_opposite_total,
-        "non_monotonic_layers": non_monotonic_layers,
+        "liquidity_edge_pct": edge,
+        "gross_liquidity_timeframe": widest.get("timeframe") if widest else None,
+        "gross_candidate_liquidity": candidate,
+        "gross_opposite_liquidity": opposite,
         "distance_weighting_enabled": False,
-        "liquidity_calculation_version": "V2_GROSS_EDGE_INCREMENTAL_CONSISTENCY_NO_DISTANCE",
+        "liquidity_calculation_version": "V3_WIDEST_CLUSTER_MEMBER_NO_DISTANCE",
     }
 
 
@@ -441,9 +333,8 @@ def _build_candidate(symbol: str, side: str, entries: List[Dict[str, Any]]) -> D
 def build_magnets(rows: Iterable[Any], symbol: Optional[str] = None) -> List[Dict[str, Any]]:
     """Build independent UPPER/LOWER Magnet V1 candidates.
 
-    Liquidity V2 uses gross cumulative liquidity for Edge and incremental
-    layers for Consistency. Distance is intentionally absent. Consistency
-    remains a diagnostic and neither it nor Liquidity Edge alters Magnet
+    Liquidity Edge compares both sides in the widest valid cluster member.
+    Distance is intentionally absent, and Liquidity Edge does not alter Magnet
     Quality or the legacy score.
     """
     requested_symbol = str(symbol or "").strip().upper() or None

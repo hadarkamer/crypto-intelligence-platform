@@ -13,7 +13,8 @@ are not probabilities.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Mapping, Tuple
+import math
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 TIME_FAMILIES: Dict[str, Dict[str, Any]] = {
     "now": {"label": "עכשיו", "windows": ("30m",), "weight": 35.0},
@@ -23,6 +24,75 @@ TIME_FAMILIES: Dict[str, Dict[str, Any]] = {
 }
 
 DIRECTION_SIGN = {"BULLISH": 1.0, "BEARISH": -1.0, "NEUTRAL": 0.0, "MIXED": 0.0}
+
+
+def continuous_percentile_strength(
+    value_abs: Any,
+    distribution: Mapping[str, Any],
+) -> Optional[float]:
+    """Return continuous 0..1 strength between historical P25 and P90.
+
+    P25 remains the hard noise floor and P90 remains full strength. Inside
+    that valid range, the value is mapped continuously through the
+    P25/P50/P75/P90 anchors. ``None`` means that the reference is incomplete
+    or invalid, allowing callers to retain their legacy compatibility path.
+    """
+    try:
+        value = abs(float(value_abs))
+        p25 = float(distribution.get("p25"))
+        p50_raw = distribution.get("p50")
+        if p50_raw is None:
+            p50_raw = distribution.get("median")
+        p50 = float(p50_raw)
+        p75 = float(distribution.get("p75"))
+        p90 = float(distribution.get("p90"))
+    except (TypeError, ValueError):
+        return None
+
+    if not all(math.isfinite(item) for item in (value, p25, p50, p75, p90)):
+        return None
+    if not (p25 <= p50 <= p75 <= p90):
+        return None
+    if value <= p25:
+        return 0.0
+    if value >= p90:
+        return 1.0
+    if p90 <= p25:
+        return 0.0
+
+    # Flat samples can produce duplicate percentile values. Keep the first
+    # (lowest) percentile at a duplicated value so the curve stays conservative
+    # instead of manufacturing a jump.
+    distinct = []
+    for anchor_value, percentile in (
+        (p25, 0.25),
+        (p50, 0.50),
+        (p75, 0.75),
+        (p90, 0.90),
+    ):
+        if distinct and math.isclose(
+            anchor_value,
+            distinct[-1][0],
+            rel_tol=0.0,
+            abs_tol=max(1e-12, abs(anchor_value) * 1e-12),
+        ):
+            continue
+        distinct.append((anchor_value, percentile))
+
+    percentile_position = 0.25
+    for (lower_value, lower_pct), (upper_value, upper_pct) in zip(
+        distinct,
+        distinct[1:],
+    ):
+        if value <= upper_value:
+            ratio = (value - lower_value) / (upper_value - lower_value)
+            percentile_position = lower_pct + ratio * (upper_pct - lower_pct)
+            break
+    else:
+        percentile_position = 0.90
+
+    strength = (percentile_position - 0.25) / (0.90 - 0.25)
+    return round(max(0.0, min(1.0, strength)), 6)
 
 
 def aggregate(
@@ -112,12 +182,30 @@ def oi_window_evaluator(window: Mapping[str, Any]) -> Tuple[str, float]:
     state = str(window.get("state") or "NEUTRAL_INCONCLUSIVE").upper()
     mapping = {
         "BULLISH_BUILDUP": ("BULLISH", 1.0),
-        "SHORT_COVERING": ("BULLISH", 0.65),
+        "SHORT_COVERING": ("BULLISH", 1.0),
         "BEARISH_BUILDUP": ("BEARISH", 1.0),
-        "LONG_UNWINDING": ("BEARISH", 0.65),
+        "LONG_UNWINDING": ("BEARISH", 1.0),
     }
     direction, base = mapping.get(state, ("NEUTRAL", 0.0))
-    # When historical ranks exist, require their weaker leg to determine quality.
+    # Price and OI are both required. Their weaker continuous historical leg
+    # determines quality. Old payloads retain the rank fallback below.
+    continuous = []
+    continuous_seen = False
+    for name in ("price_strength", "oi_strength"):
+        strength_payload = window.get(name) or {}
+        if "continuous_strength" in strength_payload:
+            continuous_seen = True
+            value = strength_payload.get("continuous_strength")
+            try:
+                continuous.append(max(0.0, min(1.0, float(value))))
+            except (TypeError, ValueError):
+                pass
+    if len(continuous) == 2:
+        return direction, base * min(continuous)
+    if continuous_seen:
+        return direction, 0.0
+
+    # Legacy fallback when historical continuous values are unavailable.
     ranks = []
     for name in ("price_strength", "oi_strength"):
         rank = (window.get(name) or {}).get("rank")
@@ -134,6 +222,17 @@ def oi_window_evaluator(window: Mapping[str, Any]) -> Tuple[str, float]:
 
 def flow_window_evaluator(window: Mapping[str, Any]) -> Tuple[str, float]:
     direction = str(window.get("direction") or "NEUTRAL").upper()
+    if "continuous_strength" in window:
+        continuous = window.get("continuous_strength")
+        try:
+            factor = max(0.0, min(1.0, float(continuous)))
+        except (TypeError, ValueError):
+            factor = 0.0
+        return direction if direction in {"BULLISH", "BEARISH"} else "NEUTRAL", factor
+
+    # Compatibility fallback only for pre-Stage-106 payloads, where the field
+    # does not exist at all. A present-but-invalid continuous value must not
+    # silently regain strength through the legacy step model.
     try:
         level = int(window.get("evidence_level") or 0)
     except (TypeError, ValueError):
