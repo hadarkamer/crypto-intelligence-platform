@@ -140,6 +140,7 @@ TOP8_SYMBOLS = {"BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP"}
 MIN_DISPLAY_DISTANCE_PCT = float(
     os.getenv("MIN_DISPLAY_DISTANCE_PCT", "0.8")
 )
+RTL_MARK = "\u200f"
 WATCH_COOLDOWN_MINUTES = int(os.getenv("WATCH_COOLDOWN_MINUTES", "60"))
 WATCH_RUNTIME = {
     "last_scan_utc": None,
@@ -1917,12 +1918,12 @@ def _regime_block(item: Dict[str, Any]) -> str:
 
     clock = {"30m":"🕒","1h":"🕐","4h":"🕓","12h":"🕛","24h":"🕛","48h":"🕑","72h":"🕒","7d":"🗓️"}
     indent = "\u00a0\u00a0\u00a0\u00a0"
-    lines = ["", "━━━━━━━━━━━━━━━━━━━━", "נתוני 📊 <b>מחיר + OI</b>"]
+    lines = ["", "━━━━━━━━━━━━━━━━━━━━", f"{RTL_MARK}📊 <b>מחיר + OI</b>"]
     for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
         w = windows.get(label) or {}
         icon = clock.get(label, "🕒")
         if not w.get("available"):
-            lines.append(f"טווח {icon} {label} | אין עדיין היסטוריה מספקת")
+            lines.append(f"{RTL_MARK}{icon} {label} | אין עדיין היסטוריה מספקת")
             continue
 
         pd = w.get("price_change_pct")
@@ -1933,7 +1934,7 @@ def _regime_block(item: Dict[str, Any]) -> str:
         ps = (w.get("price_strength") or {}).get("label")
         os_ = (w.get("oi_strength") or {}).get("label")
 
-        lines.append(f"טווח {icon} {label} | <b>{state}</b>")
+        lines.append(f"{RTL_MARK}{icon} {label} | <b>{state}</b>")
         if w.get("historical_reference_available") and ps and os_:
             lines.append(
                 f"{indent}מחיר: {ptxt} [{html.escape(_display_text_he(ps))}]"
@@ -1947,7 +1948,7 @@ def _regime_block(item: Dict[str, Any]) -> str:
 
     time_families = regime.get("time_families") or {}
     if time_families:
-        lines.extend(["", "<b>משפחות זמן משוקללות</b>"])
+        lines.extend(["", "<b>סיכום זמנים משוקלל</b>"])
         for key in ("now", "short", "medium", "long"):
             family = time_families.get(key) or {}
             direction = str(family.get("direction") or "NEUTRAL").upper()
@@ -1956,7 +1957,7 @@ def _regime_block(item: Dict[str, Any]) -> str:
             quality = float(family.get("quality") or 0.0) * 100.0
             agreement = float(family.get("agreement") or 0.0) * 100.0
             weight = float(family.get("weight") or 0.0)
-            lines.append(f"משפחה {icon} {label}: <b>{_direction_display_he(direction)}</b> | משקל {weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%")
+            lines.append(f"{RTL_MARK}{icon} {label}: <b>{_direction_display_he(direction)}</b> | משקל {weight:.0f}% | איכות {quality:.0f}% | הסכמה {agreement:.0f}%")
 
     overall_label = html.escape(_display_text_he(overall.get("label") or "אין מסקנה"))
     strength = html.escape(_display_text_he(overall.get("strength") or "—"))
@@ -2002,7 +2003,7 @@ def _flow_snapshot_line(market: Dict[str, Any]) -> str:
             freshness = "⚠️ מתעכב אך תקף"
         else:
             freshness = "טרי"
-        return f"עדכון 🕒 נתוני CVD עד: {candle_close.strftime('%Y-%m-%d %H:%M UTC')} | גיל בפועל {age_minutes} דק׳ | {freshness}"
+        return f"עדכון 🕒 CVD עד: {candle_close.strftime('%Y-%m-%d %H:%M UTC')} | גיל בפועל {age_minutes} דק׳ | {freshness}"
     except Exception:
         return f"עדכון 🕒 דגימה: {html.escape(str(raw))}"
 
@@ -2016,8 +2017,8 @@ def _flow_detail_block(
 
     sections = []
     for key, title, heading in (
-        ("futures", "Futures", "נתוני 📈 <b>Futures CVD</b>"),
-        ("spot", "Spot", "נתוני 💱 <b>Spot CVD</b>"),
+        ("futures", "Futures", f"{RTL_MARK}📈 <b>Futures CVD</b>"),
+        ("spot", "Spot", f"{RTL_MARK}💱 <b>Spot CVD</b>"),
     ):
         if market_keys is not None and key not in market_keys:
             continue
@@ -2028,19 +2029,19 @@ def _flow_detail_block(
             w = windows.get(label) or {}
             if not w.get("available"):
                 reason = html.escape(str(w.get("reason") or "אין היסטוריה מספקת"))
-                lines.append(f"טווח ⚪ {label}: אין נתון ({reason})")
+                lines.append(f"{RTL_MARK}⚪ {label}: לא זמין ({reason})")
                 continue
             direction = str(w.get("direction") or "NEUTRAL").upper()
             icon = _flow_direction_icon(direction)
             change = _fmt_flow_money(w.get("cvd_change_usd"))
             strength = time_family_engine.flow_window_evaluator(w)[1] * 100.0
             lines.append(
-                f"טווח {icon} {label}: <b>{change}</b> | עוצמה {strength:.0f}/100"
+                f"{RTL_MARK}{icon} {label}: <b>{change}</b> | עוצמה {strength:.0f}/100"
             )
 
         groups = market.get("groups") or {}
         if groups:
-            lines.append(f"<b>משפחות זמן — {title}</b>")
+            lines.append(f"<b>סיכום זמנים — {title}</b>")
             for family_key in ("now", "short", "medium", "long"):
                 family = groups.get(family_key) or {}
                 direction = str(family.get("direction") or "NEUTRAL").upper()
@@ -2050,7 +2051,7 @@ def _flow_detail_block(
                 agreement = float(family.get("agreement") or 0.0) * 100.0
                 weight = float(family.get("weight") or 0.0)
                 lines.append(
-                    f"משפחה {icon} {label}: משקל {weight:.0f}% | "
+                    f"{RTL_MARK}{icon} {label}: משקל {weight:.0f}% | "
                     f"איכות {quality:.0f}% | הסכמה {agreement:.0f}%"
                 )
 
@@ -2082,21 +2083,14 @@ def _market_evidence_block(item: Dict[str, Any]) -> str:
         score=float(module.get("score") or 0.0)
         direction_text="לא זמין" if module.get("available") is False else _direction_display_he(direction)
         if key == "futures_flow" and module.get("available") is not False:
-            lines.append(f"נתון {icon} {title}: ציון <b>{score:+.1f}/100</b> — {label}")
+            lines.append(f"{RTL_MARK}{icon} {title}: ציון <b>{score:+.1f}/100</b> — {label}")
         else:
-            lines.append(f"נתון {icon} {title}: <b>{direction_text}</b> | ציון <b>{score:+.1f}/100</b> — {label}")
+            lines.append(f"{RTL_MARK}{icon} {title}: <b>{direction_text}</b> | ציון <b>{score:+.1f}/100</b> — {label}")
     core_support=int(evidence.get("core_supporting_families") or evidence.get("supporting_families") or 0)
     core_opposition=int(evidence.get("core_opposing_families") or evidence.get("opposing_families") or 0)
     core_neutral=max(0,2-core_support-core_opposition)
-    spot_module=modules.get("spot_flow") or {}
-    spot_direction=str(spot_module.get("direction") or "NEUTRAL").upper()
-    spot_icon=_flow_direction_icon(spot_direction)
-    spot_score=float(spot_module.get("score") or 0.0)
-    spot_direction_text="לא זמין" if spot_module.get("available") is False else _direction_display_he(spot_direction)
     lines.extend([
-        "",
-        f"מנועי ליבה תומכים: <b>{core_support}/2</b> | ללא כיוון/לא זמינים: {core_neutral}/2 | מתנגדים: {core_opposition}/2",
-        f"נתון {spot_icon} Spot משני בלבד: ציון <b>{spot_score:+.1f}/100</b> — אינו מצביע באישור",
+        f"תומכים: <b>{core_support}/2</b> | ללא כיוון/לא זמינים: {core_neutral}/2 | מתנגדים: {core_opposition}/2",
         f"מסקנה: <b>{html.escape(_display_text_he(evidence.get('classification_label') or '—'))}</b>",
         f"{status_icon} <b>{html.escape(_display_text_he(confirmation.get('label') or 'Max Pain לא מאומת כרגע'))}</b>",
     ])
@@ -2277,7 +2271,7 @@ def _derivatives_high_transition_messages(items: List[Dict[str, Any]]) -> List[s
             messages.append("\n".join([
                 f"עוצמה 🚨 <b>{html.escape(title)} — 65+</b>",
                 f"נכס <b>{html.escape(symbol)}</b>",
-                f"נתון {icon} ציון <b>{score:+.2f}/100</b>",
+                f"{RTL_MARK}{icon} ציון <b>{score:+.2f}/100</b>",
                 "הסבר: המנוע עבר לעוצמה חריגה; החישוב והציון הרגיל לא השתנו.",
             ]))
     return messages
@@ -2312,11 +2306,10 @@ def _spot_family_high_transition_messages(items: List[Dict[str, Any]]) -> List[s
             icon = _flow_direction_icon(direction)
             members = ", ".join(str(value) for value in family.get("windows") or []) or "—"
             messages.append("\n".join([
-                "ספוט 🚨 <b>Spot CVD חזק במשפחת זמן</b>",
+                "ספוט 🚨 <b>Spot CVD חזק</b>",
                 f"נכס <b>{html.escape(symbol)}</b>",
-                f"משפחה {icon} <b>{label}</b> | עוצמה <b>{quality:.2f}/100</b>",
-                f"טווחים {html.escape(members)}",
-                "הסבר: Spot הוא מידע משני ואינו מצביע באישור הליבה.",
+                f"{RTL_MARK}{icon} <b>{label}</b> | עוצמה <b>{quality:.2f}/100</b>",
+                f"זמנים: {html.escape(members)}",
             ]))
     return messages
 
@@ -3142,9 +3135,9 @@ async def _build_magnet_report(
             "חישוב נזילות: משווים את שני הצדדים באותו טווח; אין חיסור בין טווחים ואין משקל מרחק.",
             "",
             "<b>אישור Confirmation נגזרים:</b>",
-            f"נתון Price+OI: {_magnet_relation_text(modules.get('positioning') or {})}",
-            f"נתון Futures CVD: {_magnet_relation_text(modules.get('futures_flow') or {})}",
-            f"נתון Spot (משני בלבד): {_magnet_relation_text(modules.get('spot_flow') or {})}",
+            f"{RTL_MARK}Price+OI: {_magnet_relation_text(modules.get('positioning') or {})}",
+            f"{RTL_MARK}Futures CVD: {_magnet_relation_text(modules.get('futures_flow') or {})}",
+            f"{RTL_MARK}Spot: {_magnet_relation_text(modules.get('spot_flow') or {})}",
             f"נגזרים: <b>{html.escape(str(derivatives.get('label') or '—'))}</b>",
             f"מסקנה: <b>{html.escape(str(magnet_confirmation.get('label') or '—'))}</b>",
         ]
