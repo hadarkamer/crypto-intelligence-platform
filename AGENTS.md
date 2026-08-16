@@ -45,6 +45,10 @@ TESTING
 - Identify which tests are relevant before editing code.
 - If behavior changes and an appropriate regression test is missing, propose or add a targeted test.
 - Do not weaken an existing test simply to make a change pass.
+- Automated regression tests are development assets and should remain tracked in the source repository.
+- Tests may be stored under tests/, test_*.py, *_test.py, fixtures, mocks, or other appropriate test-support paths.
+- Do not remove automated tests from the source repository merely because they are not required at runtime.
+- Safe relevant tests should be run before delivering code changes when practical.
 
 DEPENDENCIES
 - Do not add or upgrade production dependencies without explicit approval.
@@ -56,6 +60,9 @@ If asked to generate a ZIP:
 - Never add an extra wrapper directory.
 - Exclude __pycache__, .pyc, caches, temp files and system files.
 - Do not create a new data directory unless explicitly required.
+- Production ZIP archives must exclude tests/, test_*.py, *_test.py, test fixtures, test caches, and generated testing artifacts by default unless explicitly requested otherwise.
+- Tests remain in GitHub/Codex source control even when they are excluded from production ZIP artifacts.
+- Removing tests from a production ZIP is valid release hygiene and must not be treated as permission to delete them from the source repository.
 
 DELIVERY
 After any implementation task report:
