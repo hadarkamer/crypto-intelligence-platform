@@ -66,11 +66,26 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          text = Path('research_event_store.py').read_text(encoding='utf-8').upper()
-          if 'CREATE TABLE' in text or 'ALTER TABLE' in text:
+          store = Path('research_event_store.py').read_text(encoding='utf-8')
+          upper_store = store.upper()
+          if 'CREATE TABLE' in upper_store or 'ALTER TABLE' in upper_store:
               raise SystemExit('Runtime persistence module must not contain schema DDL')
+          for marker in [
+              'RESEARCH_PERSISTENCE_ENABLED',
+              'RESEARCH_DATABASE_URL',
+              'RUNTIME_SESSION_ID',
+              'retry_current_batch_with_backoff',
+              'put_nowait',
+          ]:
+              if marker not in store:
+                  raise SystemExit('Research store missing safety marker: ' + marker)
           migration = Path('migrations/001_research_archive_v1.sql').read_text(encoding='utf-8')
-          required = ['research_events', 'research_alert_outcomes', 'event_fingerprint', 'alert_time_utc']
+          required = [
+              'research_events', 'research_alert_outcomes', 'event_fingerprint',
+              'alert_time_utc', 'DECISION_SAMPLE', 'source_side', 'runtime_session_id',
+              'delivery_attempted_at_utc', 'delivered_at_utc',
+              'time_to_closest_target_seconds', 'path_resolution_seconds',
+          ]
           missing = [x for x in required if x not in migration]
           if missing:
               raise SystemExit('Research migration missing: ' + repr(missing))
@@ -83,8 +98,10 @@ jobs:
           text = Path('main.py').read_text(encoding='utf-8')
           markers = [
               'import research_event_runtime',
-              'research_event_runtime.capture_sent_maxpain(item)',
+              'decision_time = datetime.now(timezone.utc)',
+              'research_event_runtime.capture_sent_maxpain(item, event_time=decision_time)',
               'research_event_runtime.capture_special_transitions(displayable_items)',
+              'research_event_runtime.capture_combined_state_changes(candidates)',
               'research_event_runtime.capture_combined_confirmation(candidate)',
               'research_event_runtime.capture_magnet_watch_symbol(',
           ]
