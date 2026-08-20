@@ -23,7 +23,7 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Compile candidate AI and research modules
         run: |
-          python -m py_compile ai_history_research.py ai_tools.py ai_agent.py ai_telegram.py ai_candidate_main.py research_event_capture.py research_event_capture_selftest.py
+          python -m py_compile ai_history_research.py ai_tools.py ai_agent.py ai_telegram.py ai_candidate_main.py research_event_capture.py research_event_capture_selftest.py research_event_runtime.py research_event_runtime_selftest.py
       - name: Import candidate AI modules without credentials
         env:
           OPENAI_API_KEY: ""
@@ -35,12 +35,19 @@ jobs:
           import ai_agent
           import ai_telegram
           import research_event_capture
+          import research_event_runtime
           print("tools:", ai_tools.tool_names())
           print("status:", ai_agent.status())
-          print("research dry-run:", research_event_capture.DryRunResearchCapture().status())
+          print("research capture:", research_event_capture.DryRunResearchCapture().status())
+          print("research runtime:", research_event_runtime.status())
           PY
-      - name: Run Research Event dry-run self-test
+      - name: Run Research Event capture self-test
         env:
           OPENAI_API_KEY: ""
           DATABASE_URL: ""
         run: python research_event_capture_selftest.py
+      - name: Run Research Event runtime mapper self-test
+        env:
+          OPENAI_API_KEY: ""
+          DATABASE_URL: ""
+        run: python research_event_runtime_selftest.py
