@@ -20,13 +20,13 @@ from telegram.ext import ApplicationBuilder
 import ai_agent
 import ai_telegram
 import research_event_capture
+import research_shadow_replay
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
 PORT = int(os.getenv("PORT", "10000"))
 
-# Memory-only validation sink. It is intentionally NOT connected to production
-# alert paths yet and has no database persistence capability.
+# Memory-only validation sink. It has no database persistence capability.
 RESEARCH_DRY_RUN = research_event_capture.DryRunResearchCapture()
 
 
@@ -53,9 +53,6 @@ async def telegram_webhook(request: web.Request) -> web.Response:
         if update is not None:
             update_id = getattr(update, "update_id", None)
             print(f"[ai-candidate] telegram update received id={update_id}", flush=True)
-            # Application.start() consumes update_queue in the background. Queue
-            # the update and return to Telegram immediately instead of making the
-            # webhook HTTP request wait for a potentially long model response.
             await bot_app.update_queue.put(update)
     except Exception as exc:
         print(f"[ai-candidate] webhook error: {exc!r}", flush=True)
@@ -78,6 +75,24 @@ async def start_web_server(bot_app) -> web.AppRunner:
     return runner
 
 
+async def _startup_research_shadow_smoke() -> None:
+    """One bounded real-history QA replay; read-only and memory-only."""
+    try:
+        result = await asyncio.to_thread(research_shadow_replay.run_shadow_replay, "BTC", 24)
+        print(
+            "[ai-candidate] research shadow smoke: "
+            f"ok={result.get('ok')} "
+            f"rows={result.get('raw_rows')} "
+            f"events={result.get('events_created')} "
+            f"checks={result.get('checks')} "
+            "database_writes=False",
+            flush=True,
+        )
+    except Exception as exc:
+        # QA must never block the staging AI service from starting.
+        print(f"[ai-candidate] research shadow smoke failed: {exc!r}", flush=True)
+
+
 async def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN for the dedicated staging bot")
@@ -87,11 +102,8 @@ async def main() -> None:
         raise RuntimeError("Missing OPENAI_API_KEY")
 
     print(f"[ai-candidate] research capture: {RESEARCH_DRY_RUN.status()}", flush=True)
+    await _startup_research_shadow_smoke()
 
-    # Telegram occasionally responds slowly from a fresh Render instance. The
-    # library defaults are intentionally conservative and caused the first
-    # staging boot to fail on getMe(). Give startup API calls enough time instead
-    # of treating one slow request as a broken bot/token.
     bot_app = (
         ApplicationBuilder()
         .token(TELEGRAM_BOT_TOKEN)
@@ -107,8 +119,6 @@ async def main() -> None:
     await bot_app.start()
 
     webhook_url = f"{PUBLIC_URL}/telegram"
-    # Do NOT drop pending updates in staging. A message sent during a deploy or
-    # restart should be delivered once the new instance is ready, not discarded.
     await bot_app.bot.delete_webhook(drop_pending_updates=False)
     await bot_app.bot.set_webhook(url=webhook_url, drop_pending_updates=False)
     print(f"[ai-candidate] staging webhook set to {webhook_url}", flush=True)
