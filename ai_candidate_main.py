@@ -1,7 +1,7 @@
 """Standalone staging service for the GPT candidate.
 
 This process intentionally DOES NOT start production main.py, Watch, collectors,
-backfills, alerts, or trading jobs.  It only exposes the candidate AI Telegram
+backfills, alerts, or trading jobs. It only exposes the candidate AI Telegram
 commands and read-only analysis tools against the configured database.
 
 Use a dedicated staging Telegram bot token. Telegram supports one webhook per
@@ -45,6 +45,8 @@ async def telegram_webhook(request: web.Request) -> web.Response:
         payload = await request.json()
         update = Update.de_json(payload, bot_app.bot)
         if update is not None:
+            update_id = getattr(update, "update_id", None)
+            print(f"[ai-candidate] telegram update received id={update_id}", flush=True)
             # Application.start() consumes update_queue in the background. Queue
             # the update and return to Telegram immediately instead of making the
             # webhook HTTP request wait for a potentially long model response.
@@ -78,15 +80,29 @@ async def main() -> None:
     if not ai_agent.AGENT.configured:
         raise RuntimeError("Missing OPENAI_API_KEY")
 
-    bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    # Telegram occasionally responds slowly from a fresh Render instance. The
+    # library defaults are intentionally conservative and caused the first
+    # staging boot to fail on getMe(). Give startup API calls enough time instead
+    # of treating one slow request as a broken bot/token.
+    bot_app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .build()
+    )
     ai_telegram.register_ai_handlers(bot_app)
 
     await bot_app.initialize()
     await bot_app.start()
 
     webhook_url = f"{PUBLIC_URL}/telegram"
-    await bot_app.bot.delete_webhook(drop_pending_updates=True)
-    await bot_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    # Do NOT drop pending updates in staging. A message sent during a deploy or
+    # restart should be delivered once the new instance is ready, not discarded.
+    await bot_app.bot.delete_webhook(drop_pending_updates=False)
+    await bot_app.bot.set_webhook(url=webhook_url, drop_pending_updates=False)
     print(f"[ai-candidate] staging webhook set to {webhook_url}", flush=True)
 
     runner = await start_web_server(bot_app)
