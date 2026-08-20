@@ -23,13 +23,14 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Compile candidate AI, research and hooked main modules
         run: |
-          python -m py_compile main.py ai_history_research.py ai_tools.py ai_agent.py ai_telegram.py ai_candidate_main.py research_event_capture.py research_event_capture_selftest.py research_event_runtime.py research_event_runtime_selftest.py research_shadow_replay.py research_event_store.py research_event_store_selftest.py
+          python -m py_compile main.py ai_history_research.py ai_tools.py ai_agent.py ai_telegram.py ai_candidate_main.py research_event_capture.py research_event_capture_selftest.py research_event_runtime.py research_event_runtime_selftest.py research_shadow_replay.py research_event_store.py research_event_store_selftest.py research_schema_admin.py
       - name: Import candidate AI modules without credentials
         env:
           OPENAI_API_KEY: ""
           DATABASE_URL: ""
           RESEARCH_DATABASE_URL: ""
           RESEARCH_PERSISTENCE_ENABLED: "0"
+          RESEARCH_SCHEMA_APPLY: "0"
         run: |
           python - <<'PY'
           import ai_history_research
@@ -40,11 +41,13 @@ jobs:
           import research_event_runtime
           import research_shadow_replay
           import research_event_store
+          import research_schema_admin
           print("tools:", ai_tools.tool_names())
           print("status:", ai_agent.status())
           print("research capture:", research_event_capture.DryRunResearchCapture().status())
           print("research runtime:", research_event_runtime.status())
           print("research persistence:", research_event_store.persistence_status())
+          print("research schema admin:", research_schema_admin.status())
           print("shadow replay module: import PASS")
           PY
       - name: Run Research Event capture self-test
@@ -89,6 +92,13 @@ jobs:
           missing = [x for x in required if x not in migration]
           if missing:
               raise SystemExit('Research migration missing: ' + repr(missing))
+          admin = Path('research_schema_admin.py').read_text(encoding='utf-8')
+          for marker in ['RESEARCH_SCHEMA_APPLY', 'RESEARCH_DATABASE_URL', 'pg_advisory_xact_lock']:
+              if marker not in admin:
+                  raise SystemExit('Research schema admin missing guard: ' + marker)
+          main = Path('main.py').read_text(encoding='utf-8')
+          if 'import research_schema_admin' in main:
+              raise SystemExit('Watch/main must never import research_schema_admin')
           print('Research persistence safety validation: PASS')
           PY
       - name: Verify live alert hooks remain wired
