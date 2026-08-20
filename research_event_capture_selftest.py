@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from research_event_capture import (
     DryRunResearchCapture,
+    build_decision_sample,
     build_generic_alert_event,
     build_magnet_event,
     build_maxpain_event,
@@ -14,12 +15,19 @@ def _maxpain_item():
     return {
         "symbol": "BTC",
         "timeframe": "24h",
-        "side": "LONG",  # liquidation side; target is below price
+        "side": "LONG",  # liquidation/source side; target is below price
         "current_price": 70000.0,
         "target_price": 66500.0,
         "target_direction": "DOWN",
+        "distance_pct": 5.0,
         "score": 82.5,
         "priority": 82.5,
+        "average_score_all_timeframes": 78.25,
+        "opposite_average_score_all_timeframes": 42.0,
+        "directional_scores_all_timeframes": {
+            "LONG": {"12h": 40.0, "24h": 41.0},
+            "SHORT": {"12h": 80.0, "24h": 82.5},
+        },
         "types": ["RELATIVE_GAP_ADVANTAGE", "LIQUIDITY_BALANCE_SUPPORT"],
         "components": {
             "consensus": 24.0,
@@ -31,6 +39,11 @@ def _maxpain_item():
         "directional_edge": 41.5,
         "consensus_hits": 5,
         "consensus_total": 6,
+        "gap_consensus_supporting": 5,
+        "gap_consensus_total": 6,
+        "near_share_pct": 64.0,
+        "near_amount": 5_000_000.0,
+        "far_amount": 2_800_000.0,
         "balance": {"near_share_pct": 64.0},
         "cluster": {
             "points": 25.0,
@@ -57,15 +70,24 @@ def _maxpain_item():
             "modules": {
                 "positioning": {
                     "family": "Price+OI", "direction": "BEARISH", "relation": "SUPPORT",
-                    "score": -58.0, "state": "BEARISH_BUILDUP", "time_families": {"huge": "excluded"},
+                    "score": -58.0, "state": "BEARISH_BUILDUP",
+                    "time_families": {
+                        "now": {"direction": "BEARISH", "score": -70.0, "quality": 0.8, "weight": 35.0}
+                    },
                 },
                 "futures_flow": {
                     "family": "Futures Flow", "direction": "BEARISH", "relation": "SUPPORT",
                     "score": -62.0, "state": "BEARISH", "windows": {"huge": "excluded"},
+                    "time_families": {
+                        "short": {"direction": "BEARISH", "score": -64.0, "quality": 0.7, "weight": 30.0}
+                    },
                 },
                 "spot_flow": {
                     "family": "Spot Flow", "direction": "BULLISH", "relation": "OPPOSE",
                     "score": 31.0, "state": "BULLISH",
+                    "time_families": {
+                        "long": {"direction": "BULLISH", "score": 33.0, "quality": 0.65, "weight": 15.0}
+                    },
                 },
             },
         },
@@ -100,17 +122,21 @@ def run() -> None:
         code_version="abc123",
     )
 
-    assert event0.direction == "SHORT", "Max-Pain expected PRICE direction must be stored, not liquidation side"
+    assert event0.direction == "SHORT", "expected PRICE direction must be stored, not liquidation side"
+    assert event0.source_side == "LONG"
     assert event0.engine_snapshot["alert_side"] == "LONG"
     assert event0.current_price == 70000.0 and event0.target_price == 66500.0
     assert round(event0.initial_target_distance_pct or 0, 3) == 5.0
     assert event0.engine_snapshot["score_components"]["consensus"] == 24.0
+    assert event0.engine_snapshot["average_score_all_timeframes"] == 78.25
+    assert event0.engine_snapshot["directional_scores_all_timeframes"]["SHORT"]["24h"] == 82.5
     assert event0.engine_snapshot["maxpain_confirmation"]["status"] == "STRONG_CONFIRMED"
-    assert event0.engine_snapshot["market_evidence"]["modules"]["positioning"]["score"] == -58.0
-    assert "time_families" not in event0.engine_snapshot["market_evidence"]["modules"]["positioning"]
-    assert "windows" not in event0.engine_snapshot["market_evidence"]["modules"]["futures_flow"]
+    positioning = event0.engine_snapshot["market_evidence"]["modules"]["positioning"]
+    assert positioning["score"] == -58.0
+    assert positioning["time_families"]["now"]["score"] == -70.0
+    futures = event0.engine_snapshot["market_evidence"]["modules"]["futures_flow"]
+    assert "windows" not in futures, "raw windows must stay outside compact event"
 
-    # Repeated occurrences must group together but remain distinct events.
     assert event0.setup_key == event1.setup_key
     assert event0.event_fingerprint != event1.event_fingerprint
     assert event0.event_fingerprint == event0_replay.event_fingerprint
@@ -146,6 +172,7 @@ def run() -> None:
     )
     assert magnet_event.event_type == "STRONG_MAGNET_CONFIRMATION"
     assert magnet_event.direction == "LONG"
+    assert magnet_event.source_side == "UPPER"
     assert magnet_event.score == 82.5
     assert magnet_event.target_price == 180.4
     assert magnet_event.engine_snapshot["magnet_confirmation"]["derivatives"]["futures_score"] == 52.0
@@ -171,6 +198,7 @@ def run() -> None:
         symbol="BTC",
         event_type="COMBINED_CONFIRMATION",
         direction="SHORT",
+        source_side="LONG",
         event_time=t0,
         score=84.0,
         categories=["MAX_PAIN_CONFIRMATION", "FUTURES_CVD_HIGH", "OI_PRICE"],
@@ -182,8 +210,27 @@ def run() -> None:
         strategy_version="candidate-test",
         code_version="abc123",
     )
-    assert "COMBINED_CONFIRMATION" == combined.event_type
+    assert combined.event_type == "COMBINED_CONFIRMATION"
+    assert combined.source_side == "LONG"
     assert len(combined.categories) == 3
+
+    near_miss = build_decision_sample(
+        symbol="BTC",
+        sample_type="MAX_PAIN_NEAR_THRESHOLD",
+        direction="SHORT",
+        source_side="LONG",
+        timeframe="24h",
+        score=64.8,
+        current_price=70000.0,
+        target_price=66500.0,
+        event_time=t0,
+        categories=["NEAR_MISS"],
+        engine_snapshot={"threshold": 65.0, "gap_to_threshold": 0.2},
+        strategy_version="candidate-test",
+        code_version="abc123",
+    )
+    assert near_miss.event_kind == "DECISION_SAMPLE"
+    assert near_miss.event_type == "MAX_PAIN_NEAR_THRESHOLD"
 
     sink = DryRunResearchCapture(max_events=10)
     assert sink.status()["database_writes"] is False
@@ -193,9 +240,9 @@ def run() -> None:
     assert sink.emit(magnet_event) is True
     assert sink.emit(state_change) is True
     assert sink.emit(combined) is True
-    assert len(sink.events()) == 5
+    assert sink.emit(near_miss) is True
+    assert len(sink.events()) == 6
 
-    # State changes with no actual transition are invalid.
     try:
         build_signal_state_change(
             symbol="BTC", signal_name="OI_PRICE", old_state="LONG", new_state="LONG", event_time=t0
@@ -209,6 +256,7 @@ def run() -> None:
     print("Dry-run events:", len(sink.events()))
     print("Repeated setup preserved:", event0.setup_key == event1.setup_key)
     print("Distinct occurrence fingerprints:", event0.event_fingerprint != event1.event_fingerprint)
+    print("Decision sample supported:", near_miss.event_kind)
     print("Database writes:", sink.status()["database_writes"])
 
 
