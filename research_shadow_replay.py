@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import os
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import psycopg
@@ -201,6 +201,15 @@ def _replay_cvd(
     return emitted
 
 
+def _sort_sink_chronologically(sink: research_event_capture.DryRunResearchCapture) -> research_event_capture.DryRunResearchCapture:
+    """Merge separately replayed streams into the same order a live timeline has."""
+    ordered = sorted(sink.events(), key=lambda event: _utc(event["alert_time_utc"]))
+    chronological = research_event_capture.DryRunResearchCapture(max_events=2000)
+    for event_dict in ordered:
+        chronological.emit(research_event_capture.ResearchEvent(**event_dict))
+    return chronological
+
+
 def run_shadow_replay(symbol: str = "BTC", hours: int = 24, max_rows: int = 250) -> Dict[str, Any]:
     """Run a bounded real-history QA replay with zero persistence."""
     symbol = _symbol(symbol)
@@ -212,14 +221,17 @@ def run_shadow_replay(symbol: str = "BTC", hours: int = 24, max_rows: int = 250)
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=hours)
     streams = _fetch_rows(symbol, start, end, limit)
-    sink = research_event_capture.DryRunResearchCapture(max_events=2000)
+    stream_sink = research_event_capture.DryRunResearchCapture(max_events=2000)
 
     emitted_by_stream = {
-        "price_oi": _replay_price_oi(symbol, streams["price_oi"], sink),
-        "futures_cvd": _replay_cvd(symbol, streams["futures"], sink, "SHADOW_FUTURES_CVD_DIRECTION"),
-        "spot_cvd": _replay_cvd(symbol, streams["spot"], sink, "SHADOW_SPOT_CVD_DIRECTION"),
+        "price_oi": _replay_price_oi(symbol, streams["price_oi"], stream_sink),
+        "futures_cvd": _replay_cvd(symbol, streams["futures"], stream_sink, "SHADOW_FUTURES_CVD_DIRECTION"),
+        "spot_cvd": _replay_cvd(symbol, streams["spot"], stream_sink, "SHADOW_SPOT_CVD_DIRECTION"),
     }
 
+    # Historical streams are queried separately. Merge by the original event
+    # timestamp before validation so the replay mirrors one real market timeline.
+    sink = _sort_sink_chronologically(stream_sink)
     events = sink.events()
     timestamps = [_utc(event["alert_time_utc"]) for event in events]
     ordered = timestamps == sorted(timestamps)
