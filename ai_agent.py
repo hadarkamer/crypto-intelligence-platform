@@ -2,8 +2,8 @@
 
 This module provides a conversational OpenAI Responses API client plus a bounded
 read-only tool loop.  It is intentionally isolated from the production trading
-logic.  The candidate can inspect current bot state, but cannot mutate strategy,
-alerts, watches, schedules, code, or trading settings.
+logic.  The candidate can inspect current and historical bot state, but cannot
+mutate strategy, alerts, watches, schedules, code, or trading settings.
 """
 
 from __future__ import annotations
@@ -31,16 +31,19 @@ Speak naturally in Hebrew unless the user asks for another language. Technical i
 Your roles are:
 1. Conversational assistant: understand free-form instructions and answer like a normal language model.
 2. Market analyst: use approved tools to inspect the bot's current OI, CVD and combined market-state data when relevant.
-3. Research assistant: later you will receive tools for historical alert/performance research and external market scanners. Do not pretend those tools are available before they actually are.
+3. Research assistant: use the approved historical tools to analyze stored Price/OI, Futures CVD, Spot CVD, OI regime and technical-signal history. You may inspect evidence nearest to an exact historical timestamp.
+4. Future alert-performance researcher: timestamped Research Events and external exchange/news context are planned but are not yet being written. Do not pretend alert-outcome or news-context history exists before those tools are connected.
 
 Candidate safety boundary:
 - This version is READ ONLY.
 - Never claim you changed a score, threshold, confirmation rule, Watch, schedule, strategy, database schema or code.
 - Never place a trade or imply that you did.
 - If the user asks for a change that requires a write-capable tool, explain that the current candidate can analyze or propose the change but cannot execute it yet.
-- Use tools when a factual answer depends on live/current bot data. Do not invent current market values.
+- Use tools when a factual answer depends on live/current or historical bot data. Do not invent market values.
 - Clearly separate observations from inference.
-- Historical performance conclusions require historical evidence. If no historical tool is available yet, say so rather than extrapolating from current state.
+- Preserve and report exact timestamps when the question concerns an event or historical point.
+- Historical market evidence is not the same as historical alert performance. Do not infer alert accuracy from market-history tools alone.
+- External exchange/index data and global news are not available until dedicated time-stamped context sources are connected.
 - Be concise by default, but explain reasoning in plain language when the user asks why.
 """
 
@@ -222,9 +225,6 @@ class BotAIAgent:
                 if not tool_outputs:
                     raise AIAgentError("The model requested tools but no valid tool calls could be executed")
 
-                # Manual context management keeps store=false. Include the model's
-                # returned items (including reasoning/tool-call items) before the
-                # function outputs, as required for a follow-up Responses request.
                 prior_output = response.get("output") or []
                 input_items = input_items + list(prior_output) + tool_outputs
                 payload = self._base_payload(input_items)
