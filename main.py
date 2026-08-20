@@ -35,6 +35,7 @@ import coinglass_flow_foundation
 import coinglass_flow_engine
 import time_family_engine
 import market_confidence_engine
+import research_event_runtime
 from collections import defaultdict
 
 try:
@@ -2654,12 +2655,24 @@ def _collect_combined_confirmation_messages(
         previous_signals = set(COMBINED_CONFIRMATION_STATE.get(key) or set())
         if not previous_signals or current_signals - previous_signals:
             messages.append(_combined_confirmation_message(candidate))
+            # Capture only the exact Combined transition already approved by
+            # the existing bot logic; active unchanged setups are not duplicated.
+            try:
+                research_event_runtime.capture_combined_confirmation(candidate)
+            except Exception as exc:
+                print(f"[research-dry-run] combined hook failed: {exc!r}", flush=True)
         COMBINED_CONFIRMATION_STATE[key] = current_signals
     return messages
 
 
 async def _send_alert_with_confirmation(bot, chat_id: int, card: str, item: Dict[str, Any]) -> None:
     await bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
+    # Research sidecar runs only after the normal card was actually delivered.
+    # It is memory-only in this Candidate and may never block Telegram alerts.
+    try:
+        research_event_runtime.capture_sent_maxpain(item)
+    except Exception as exc:
+        print(f"[research-dry-run] sent alert hook failed: {exc!r}", flush=True)
     for separate in _special_transition_messages(item):
         await bot.send_message(chat_id=chat_id, text=separate, parse_mode="HTML")
 
@@ -3871,6 +3884,16 @@ async def _send_magnet_watch_reports(
                 + _watch_derivatives_line(derivatives_status)
             ),
         )
+        # Reuse this exact shared Watch generation for research. No new
+        # scrape, DB refresh or market-data request is started by this hook.
+        try:
+            research_event_runtime.capture_magnet_watch_symbol(
+                symbol,
+                rows,
+                derivatives_snapshot,
+            )
+        except Exception as exc:
+            print(f"[research-dry-run] magnet hook failed {symbol}: {exc!r}", flush=True)
         for message in await _build_magnet_report(
             symbol,
             rows,
@@ -3937,6 +3960,15 @@ async def run_watch_cycle(
             for item in all_items
             if _is_displayable_opportunity(item)
         ]
+        # Mirror the same independent transition inputs into the Candidate
+        # research tracker before Telegram formatting mutates its own state.
+        # This also preserves weakening/reset transitions for delayed/inverse
+        # research, but performs no database writes.
+        if general_enabled:
+            try:
+                research_event_runtime.capture_special_transitions(displayable_items)
+            except Exception as exc:
+                print(f"[research-dry-run] special transition hook failed: {exc!r}", flush=True)
         # A Magnet-only subscriber must not consume regular or combined alert
         # transitions that were never sent to the general Watch chat.
         special_messages = (
