@@ -19,10 +19,15 @@ from telegram.ext import ApplicationBuilder
 
 import ai_agent
 import ai_telegram
+import research_event_capture
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
 PORT = int(os.getenv("PORT", "10000"))
+
+# Memory-only validation sink. It is intentionally NOT connected to production
+# alert paths yet and has no database persistence capability.
+RESEARCH_DRY_RUN = research_event_capture.DryRunResearchCapture()
 
 
 async def health(_: web.Request) -> web.Response:
@@ -35,6 +40,7 @@ async def health(_: web.Request) -> web.Response:
             "openai_configured": bool(state.get("configured")),
             "model": state.get("model"),
             "tools": state.get("tools") or [],
+            "research_capture": RESEARCH_DRY_RUN.status(),
         }
     )
 
@@ -79,6 +85,8 @@ async def main() -> None:
         raise RuntimeError("Missing PUBLIC_URL for the dedicated staging service")
     if not ai_agent.AGENT.configured:
         raise RuntimeError("Missing OPENAI_API_KEY")
+
+    print(f"[ai-candidate] research capture: {RESEARCH_DRY_RUN.status()}", flush=True)
 
     # Telegram occasionally responds slowly from a fresh Render instance. The
     # library defaults are intentionally conservative and caused the first
