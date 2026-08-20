@@ -11,6 +11,7 @@ import asyncio
 import json
 from typing import Any, Awaitable, Callable, Dict
 
+import ai_history_research
 import coinglass_flow_engine
 import coinglass_oi_regime_service
 import market_confidence_engine
@@ -82,6 +83,64 @@ TOOL_SPECS = [
                 },
             },
             "required": ["symbol", "expected_direction"],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "research_market_history",
+        "description": (
+            "Research existing historical market data for one symbol over a bounded lookback window. "
+            "Returns compact Price/OI, Futures CVD, Spot CVD, OI-regime and technical-signal summaries instead of raw tables. "
+            "Use this for questions such as how BTC or SOL behaved over the last N hours/days or to compare historical flow evidence."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Crypto symbol such as BTC, ETH, SOL, HYPE, DOGE, BNB or XRP.",
+                },
+                "lookback_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2160,
+                    "description": "Historical lookback in hours, up to 90 days. Convert user-requested days to hours.",
+                },
+            },
+            "required": ["symbol", "lookback_hours"],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "get_market_context_at_time",
+        "description": (
+            "Inspect the bot's stored market evidence nearest to an exact historical UTC timestamp for one symbol. "
+            "Returns nearest Price/OI, Futures/Spot CVD, OI regime, technical signals and available Max-Pain snapshot rows. "
+            "Use this when researching what the market looked like around a known event or alert time."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Crypto symbol such as BTC, ETH, SOL, HYPE, DOGE, BNB or XRP.",
+                },
+                "timestamp_iso": {
+                    "type": "string",
+                    "description": "Exact event timestamp in ISO-8601, preferably with Z or an explicit UTC offset.",
+                },
+                "window_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "description": "How many minutes before and after the event to search for nearest stored evidence.",
+                },
+            },
+            "required": ["symbol", "timestamp_iso", "window_minutes"],
         },
         "strict": True,
     },
@@ -166,6 +225,26 @@ async def _get_market_state(args: Dict[str, Any]) -> Any:
     )
 
 
+async def _research_market_history(args: Dict[str, Any]) -> Any:
+    symbol = _symbol(args.get("symbol"))
+    hours = int(args.get("lookback_hours"))
+    result = await asyncio.to_thread(ai_history_research.historical_summary, symbol, hours)
+    return _bounded(result, max_chars=45000)
+
+
+async def _get_market_context_at_time(args: Dict[str, Any]) -> Any:
+    symbol = _symbol(args.get("symbol"))
+    timestamp_iso = str(args.get("timestamp_iso") or "").strip()
+    window_minutes = int(args.get("window_minutes"))
+    result = await asyncio.to_thread(
+        ai_history_research.context_at_time,
+        symbol,
+        timestamp_iso,
+        window_minutes,
+    )
+    return _bounded(result, max_chars=45000)
+
+
 async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
     return {
         "mode": "candidate_read_only",
@@ -173,10 +252,14 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "get_oi_state",
             "get_cvd_state",
             "get_market_state",
+            "research_market_history",
+            "get_market_context_at_time",
             "get_ai_capabilities",
         ],
         "not_yet_connected": [
-            "historical alert research",
+            "historical alert outcomes (requires timestamped Research Events)",
+            "external exchange/index context archive",
+            "global news context archive",
             "CoinGlass visual scanner from AI Lab",
             "SoSoValue",
             "YouTube",
@@ -196,6 +279,8 @@ _EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
     "get_oi_state": _get_oi_state,
     "get_cvd_state": _get_cvd_state,
     "get_market_state": _get_market_state,
+    "research_market_history": _research_market_history,
+    "get_market_context_at_time": _get_market_context_at_time,
     "get_ai_capabilities": _get_ai_capabilities,
 }
 
