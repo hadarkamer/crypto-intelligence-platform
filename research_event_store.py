@@ -5,10 +5,9 @@ Safety defaults:
 - a dedicated RESEARCH_DATABASE_URL is required when enabled;
 - this module NEVER creates schema;
 - Watch/Telegram callers enqueue with put_nowait and never wait for PostgreSQL;
-- the background writer batches idempotent inserts using event_fingerprint.
-
-The module is present now so the write path can be reviewed and tested before
-any production database permission or schema change is approved.
+- the background writer batches idempotent inserts using event_fingerprint;
+- transient database failures keep the current batch in memory and retry with
+  bounded exponential backoff instead of immediately discarding research data.
 """
 from __future__ import annotations
 
@@ -16,6 +15,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import os
+import uuid
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 try:
@@ -27,22 +27,27 @@ import research_event_capture
 
 _ENABLED = os.getenv("RESEARCH_PERSISTENCE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 _DATABASE_URL = os.getenv("RESEARCH_DATABASE_URL", "").strip()
+RUNTIME_SESSION_ID = os.getenv("RESEARCH_RUNTIME_SESSION_ID", "").strip() or uuid.uuid4().hex
 DEFAULT_QUEUE_CAPACITY = 2000
 DEFAULT_BATCH_SIZE = 50
 DEFAULT_FLUSH_INTERVAL_SECONDS = 0.5
+MAX_RETRY_DELAY_SECONDS = 30.0
 
 _INSERT_SQL = """
 INSERT INTO research_events (
     schema_version, event_kind, event_type, alert_time_utc, symbol, direction,
-    timeframe, score, current_price, target_price, initial_target_distance_pct,
-    categories, setup_key, event_fingerprint, strategy_version, code_version,
-    capture_stage, delivery_status, engine_snapshot
+    source_side, timeframe, score, current_price, target_price,
+    initial_target_distance_pct, categories, setup_key, event_fingerprint,
+    strategy_version, code_version, runtime_session_id, capture_stage,
+    delivery_status, delivery_attempted_at_utc, delivered_at_utc, engine_snapshot
 ) VALUES (
     %(schema_version)s, %(event_kind)s, %(event_type)s, %(alert_time_utc)s,
-    %(symbol)s, %(direction)s, %(timeframe)s, %(score)s, %(current_price)s,
-    %(target_price)s, %(initial_target_distance_pct)s, %(categories)s::jsonb,
-    %(setup_key)s, %(event_fingerprint)s, %(strategy_version)s, %(code_version)s,
-    %(capture_stage)s, %(delivery_status)s, %(engine_snapshot)s::jsonb
+    %(symbol)s, %(direction)s, %(source_side)s, %(timeframe)s, %(score)s,
+    %(current_price)s, %(target_price)s, %(initial_target_distance_pct)s,
+    %(categories)s::jsonb, %(setup_key)s, %(event_fingerprint)s,
+    %(strategy_version)s, %(code_version)s, %(runtime_session_id)s,
+    %(capture_stage)s, %(delivery_status)s, %(delivery_attempted_at_utc)s,
+    %(delivered_at_utc)s, %(engine_snapshot)s::jsonb
 )
 ON CONFLICT (event_fingerprint) DO NOTHING
 """
@@ -58,6 +63,7 @@ class WriterMetrics:
     inserted_or_deduped: int = 0
     queue_full_drops: int = 0
     write_failures: int = 0
+    batch_retries: int = 0
     batches: int = 0
 
 
@@ -69,6 +75,8 @@ def persistence_status() -> Dict[str, Any]:
         "schema_auto_create": False,
         "watch_blocking_writes": False,
         "idempotency": "event_fingerprint",
+        "runtime_session_id": RUNTIME_SESSION_ID,
+        "transient_failure_policy": "retry_current_batch_with_backoff",
         "default_queue_capacity": DEFAULT_QUEUE_CAPACITY,
         "default_batch_size": DEFAULT_BATCH_SIZE,
     }
@@ -77,7 +85,7 @@ def persistence_status() -> Dict[str, Any]:
 def _delivery(value: str, event_kind: str) -> str:
     normalized = str(value or "").strip().upper()
     if not normalized:
-        normalized = "NOT_APPLICABLE" if event_kind == "SIGNAL_STATE_CHANGE" else "UNKNOWN"
+        normalized = "NOT_APPLICABLE" if event_kind != "ALERT" else "UNKNOWN"
     if normalized not in _ALLOWED_DELIVERY:
         raise ValueError(f"invalid research delivery status: {value!r}")
     return normalized
@@ -87,9 +95,19 @@ def serialize_event(
     event: research_event_capture.ResearchEvent,
     *, capture_stage: str = "OBSERVED",
     delivery_status: str = "",
+    delivery_attempted_at_utc: Any = None,
+    delivered_at_utc: Any = None,
 ) -> Dict[str, Any]:
+    """Serialize without changing the event's decision-time timestamp.
+
+    alert_time_utc is always the signal decision/observation anchor. Telegram
+    lifecycle times, when known, are separate metadata and never replace it.
+    """
     research_event_capture.validate_event(event)
     data = event.to_dict()
+    normalized_delivery = _delivery(delivery_status, data["event_kind"])
+    if normalized_delivery == "DELIVERED" and delivered_at_utc is None:
+        raise ValueError("DELIVERED research event requires delivered_at_utc")
     return {
         "schema_version": data["schema_version"],
         "event_kind": data["event_kind"],
@@ -97,6 +115,7 @@ def serialize_event(
         "alert_time_utc": data["alert_time_utc"],
         "symbol": data["symbol"],
         "direction": data["direction"],
+        "source_side": data.get("source_side"),
         "timeframe": data.get("timeframe"),
         "score": data.get("score"),
         "current_price": data.get("current_price"),
@@ -107,8 +126,11 @@ def serialize_event(
         "event_fingerprint": data["event_fingerprint"],
         "strategy_version": data["strategy_version"],
         "code_version": data["code_version"],
+        "runtime_session_id": RUNTIME_SESSION_ID,
         "capture_stage": str(capture_stage or "OBSERVED").strip().upper(),
-        "delivery_status": _delivery(delivery_status, data["event_kind"]),
+        "delivery_status": normalized_delivery,
+        "delivery_attempted_at_utc": delivery_attempted_at_utc,
+        "delivered_at_utc": delivered_at_utc,
         "engine_snapshot": json.dumps(data.get("engine_snapshot") or {}, ensure_ascii=False, separators=(",", ":")),
     }
 
@@ -166,11 +188,19 @@ class AsyncResearchEventWriter:
         *,
         capture_stage: str = "OBSERVED",
         delivery_status: str = "",
+        delivery_attempted_at_utc: Any = None,
+        delivered_at_utc: Any = None,
     ) -> bool:
         """Never blocks Watch/Telegram. Returns False if disabled or saturated."""
         if not _ENABLED:
             return False
-        row = serialize_event(event, capture_stage=capture_stage, delivery_status=delivery_status)
+        row = serialize_event(
+            event,
+            capture_stage=capture_stage,
+            delivery_status=delivery_status,
+            delivery_attempted_at_utc=delivery_attempted_at_utc,
+            delivered_at_utc=delivered_at_utc,
+        )
         try:
             self.queue.put_nowait(row)
             self.metrics.enqueued += 1
@@ -201,16 +231,30 @@ class AsyncResearchEventWriter:
                 continue
             while len(batch) < self.batch_size and not self.queue.empty():
                 batch.append(self.queue.get_nowait())
-            try:
-                await asyncio.to_thread(self._write_batch, batch)
-                self.metrics.inserted_or_deduped += len(batch)
-                self.metrics.batches += 1
-            except Exception as exc:
-                self.metrics.write_failures += len(batch)
-                print(f"[research-store] batch write failed: {exc!r}", flush=True)
-            finally:
-                for _ in batch:
-                    self.queue.task_done()
+
+            attempt = 0
+            while True:
+                try:
+                    await asyncio.to_thread(self._write_batch, batch)
+                    self.metrics.inserted_or_deduped += len(batch)
+                    self.metrics.batches += 1
+                    for _ in batch:
+                        self.queue.task_done()
+                    break
+                except Exception as exc:
+                    attempt += 1
+                    self.metrics.write_failures += len(batch)
+                    self.metrics.batch_retries += 1
+                    delay = min(MAX_RETRY_DELAY_SECONDS, 0.5 * (2 ** min(attempt - 1, 6)))
+                    print(
+                        f"[research-store] batch write failed attempt={attempt}; "
+                        f"retry_in={delay:.1f}s; queued={self.queue.qsize()}; error={exc!r}",
+                        flush=True,
+                    )
+                    # Keep the current batch in memory. Watch/Telegram never wait;
+                    # new events can continue entering the bounded queue. If a long
+                    # DB outage fills the queue, queue_full_drops exposes the loss.
+                    await asyncio.sleep(delay)
 
     def _write_batch(self, rows: Iterable[Mapping[str, Any]]) -> None:
         if not _DATABASE_URL or psycopg is None:
@@ -224,6 +268,6 @@ class AsyncResearchEventWriter:
                 cur.executemany(_INSERT_SQL, list(rows))
 
 
-# Singleton is safe to import: it does not start a task and cannot write until
-# both the explicit enable flag and dedicated research database URL exist.
+# Importing the module is safe: no task starts and no write can happen until
+# both the explicit enable flag and dedicated research DB URL are configured.
 WRITER = AsyncResearchEventWriter()
