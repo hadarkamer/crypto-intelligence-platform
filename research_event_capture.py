@@ -1,20 +1,15 @@
-"""Pure, in-memory Research Event capture for the AI candidate.
+"""Compact Research Event normalization for the AI candidate.
 
 This module is deliberately isolated from PostgreSQL, Telegram and production
-Watch scheduling. It does not import psycopg/sqlite and has no persistence
-function. Its job is to normalize the different alert/signal shapes into one
-compact, timestamp-first research event that can be validated before any
-production database integration is considered.
+Watch scheduling. It does not persist anything by itself.
 
 Design rules:
-- exact UTC event timestamp is preserved;
-- ``setup_key`` groups repeated occurrences of the same logical setup;
-- ``event_fingerprint`` identifies one exact occurrence, so repetitions are not
-  accidentally deduplicated away;
-- only non-reconstructable / decision-time state is retained in the compact
-  engine snapshot; raw time series are excluded;
-- expected price direction is stored separately from Max-Pain liquidation side;
-- the candidate sink is memory-only and bounded.
+- alert_time_utc is the exact decision/observation timestamp, not Telegram completion time;
+- setup_key groups repeated appearances of the same logical setup;
+- event_fingerprint identifies one exact occurrence, preserving repetitions;
+- only non-reconstructable decision-time state is embedded; raw time series stay separate;
+- expected PRICE direction is stored separately from source/liquidation side;
+- DECISION_SAMPLE is supported for future near-miss/control sampling without pretending it was an alert.
 """
 from __future__ import annotations
 
@@ -31,7 +26,7 @@ MAX_ENGINE_SNAPSHOT_BYTES = 32_000
 DEFAULT_DRY_RUN_EVENTS = 500
 
 _ALLOWED_DIRECTIONS = {"LONG", "SHORT", "NEUTRAL"}
-_ALLOWED_KINDS = {"ALERT", "SIGNAL_STATE_CHANGE"}
+_ALLOWED_KINDS = {"ALERT", "SIGNAL_STATE_CHANGE", "DECISION_SAMPLE"}
 
 
 def _utc(value: Any = None) -> datetime:
@@ -50,7 +45,6 @@ def _utc(value: Any = None) -> datetime:
 
 
 def _iso_utc(value: Any = None) -> str:
-    # Keep microseconds. Event order inside one Watch cycle can matter later.
     return _utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
@@ -95,16 +89,38 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def _compact_time_families(value: Any) -> Dict[str, Any]:
+    """Preserve compact family-level scores/directions; never copy raw windows."""
+    if not isinstance(value, Mapping):
+        return {}
+    output: Dict[str, Any] = {}
+    for family_key, family in value.items():
+        if not isinstance(family, Mapping):
+            continue
+        output[str(family_key)] = {
+            key: _json_safe(family.get(key))
+            for key in (
+                "label", "direction", "score", "quality", "agreement", "weight",
+                "state", "available", "windows",
+            )
+            if key in family
+        }
+    return output
+
+
 def _compact_module(module: Any) -> Dict[str, Any]:
-    """Keep the decision-time module state, not reconstructable raw windows."""
     if not isinstance(module, Mapping):
         return {}
     keys = (
         "family", "available", "direction", "relation", "score", "quality",
         "state", "label", "quality_status", "freshness_status", "age_minutes",
-        "early_shift",
+        "early_shift", "quality_reasons",
     )
-    return {key: _json_safe(module.get(key)) for key in keys if key in module}
+    out = {key: _json_safe(module.get(key)) for key in keys if key in module}
+    families = _compact_time_families(module.get("time_families"))
+    if families:
+        out["time_families"] = families
+    return out
 
 
 def _compact_confirmation(value: Any) -> Dict[str, Any]:
@@ -124,7 +140,7 @@ def _compact_confirmation(value: Any) -> Dict[str, Any]:
         out["derivatives"] = {
             key: _json_safe(derivatives.get(key))
             for key in (
-                "status", "supporting_families", "opposing_families",
+                "status", "label", "supporting_families", "opposing_families",
                 "early_shift_opposes", "oi_opposes", "strong_core",
                 "positioning_score", "futures_score", "minimum_engine_score",
             )
@@ -144,7 +160,7 @@ def _compact_market_evidence(value: Any) -> Dict[str, Any]:
             "classification_label", "relation_to_alert", "supporting_families",
             "opposing_families", "core_supporting_families",
             "core_qualified_supporting_families", "core_opposing_families",
-            "spot_context",
+            "spot_context", "counts",
         )
         if key in value
     }
@@ -167,8 +183,7 @@ def _compact_cluster(value: Any) -> Dict[str, Any]:
         key: _json_safe(value.get(key))
         for key in (
             "points", "count", "spread_pct", "average_target", "members",
-            "density_points", "coverage_points", "growth_points",
-            "liquidity_multiplier",
+            "density_points", "coverage_points", "growth_points", "liquidity_multiplier",
         )
         if key in value
     }
@@ -189,7 +204,6 @@ def _bounded_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     raw = _canonical(safe).encode("utf-8")
     if len(raw) <= MAX_ENGINE_SNAPSHOT_BYTES:
         return safe
-    # Fail closed rather than silently sending a giant object to storage/model.
     raise ValueError(
         f"research engine snapshot is too large: {len(raw)} bytes > {MAX_ENGINE_SNAPSHOT_BYTES}"
     )
@@ -206,12 +220,10 @@ def _expected_direction_from_maxpain_item(item: Mapping[str, Any]) -> str:
             return "LONG"
         if target < current:
             return "SHORT"
-    # In this codebase the displayed Max-Pain side is the liquidation side:
-    # SHORT target means price is expected UP; LONG target means price DOWN.
-    alert_side = str(item.get("side") or "").upper()
-    if alert_side == "SHORT":
+    source_side = str(item.get("side") or "").upper()
+    if source_side == "SHORT":
         return "LONG"
-    if alert_side == "LONG":
+    if source_side == "LONG":
         return "SHORT"
     return "NEUTRAL"
 
@@ -225,13 +237,15 @@ def _initial_target_distance_pct(current_price: Any, target_price: Any) -> Optio
 
 
 def _versions(strategy_version: Optional[str], code_version: Optional[str]) -> tuple[str, str]:
-    strategy = str(strategy_version or os.getenv("STRATEGY_VERSION") or "candidate-unspecified")
     code = str(
         code_version
         or os.getenv("RENDER_GIT_COMMIT")
         or os.getenv("GITHUB_SHA")
         or "candidate-unknown"
     )
+    strategy = str(strategy_version or os.getenv("STRATEGY_VERSION") or "").strip()
+    if not strategy:
+        strategy = f"code:{code[:12]}" if code != "candidate-unknown" else "candidate-unspecified"
     return strategy, code
 
 
@@ -269,6 +283,7 @@ class ResearchEvent:
     alert_time_utc: str
     symbol: str
     direction: str
+    source_side: Optional[str]
     timeframe: Optional[str]
     score: Optional[float]
     current_price: Optional[float]
@@ -290,7 +305,6 @@ def build_maxpain_event(
     event_time: Any = None, strategy_version: Optional[str] = None,
     code_version: Optional[str] = None,
 ) -> ResearchEvent:
-    """Normalize one Max-Pain opportunity/confirmation occurrence."""
     symbol = _symbol(item.get("symbol"))
     timeframe = str(item.get("timeframe") or "").strip() or None
     direction = _expected_direction_from_maxpain_item(item)
@@ -299,17 +313,31 @@ def build_maxpain_event(
     current_price = _float(item.get("current_price"))
     target_price = _float(item.get("target_price"))
     categories = sorted({str(x) for x in (item.get("types") or []) if str(x).strip()})
-    alert_side = str(item.get("side") or "").upper() or None
+    source_side = str(item.get("side") or "").upper() or None
 
     snapshot = _bounded_snapshot({
-        "alert_side": alert_side,
+        "alert_side": source_side,
+        "distance_pct": _float(item.get("distance_pct")),
         "score_components": _json_safe(item.get("components") or {}),
+        "average_score_all_timeframes": _float(item.get("average_score_all_timeframes")),
+        "opposite_average_score_all_timeframes": _float(item.get("opposite_average_score_all_timeframes")),
+        "directional_scores_all_timeframes": _json_safe(item.get("directional_scores_all_timeframes") or {}),
         "opposite_score": _float(item.get("opposite_score")),
         "directional_edge": _float(item.get("directional_edge")),
         "consensus_hits": item.get("consensus_hits"),
         "consensus_total": item.get("consensus_total"),
+        "gap_consensus_supporting": item.get("gap_consensus_supporting"),
+        "gap_consensus_total": item.get("gap_consensus_total"),
+        "near_share_pct": _float(item.get("near_share_pct")),
+        "near_amount": _float(item.get("near_amount")),
+        "far_amount": _float(item.get("far_amount")),
+        "cluster_candidate_count": item.get("cluster_candidate_count"),
+        "cluster_members": _json_safe(item.get("cluster_members") or []),
+        "cluster_count": item.get("cluster_count"),
+        "cluster_same_direction_count": item.get("cluster_same_direction_count"),
         "component_sum_check": item.get("component_sum_check"),
         "calculation_validation_errors": _json_safe(item.get("calculation_validation_errors") or []),
+        "duplicate_rows_removed": item.get("duplicate_rows_removed"),
         "balance": _json_safe(item.get("balance") or {}),
         "cluster": _compact_cluster(item.get("cluster")),
         "gap": _compact_gap(item.get("gap")),
@@ -324,11 +352,7 @@ def build_maxpain_event(
         direction=direction,
         timeframe=timeframe,
         event_family="MAX_PAIN",
-        setup_identity={
-            "alert_side": alert_side,
-            # Do not include exact target/score: repeated scans of the same
-            # logical setup must remain groupable as they evolve.
-        },
+        setup_identity={"alert_side": source_side},
     )
     fingerprint = _event_fingerprint(
         setup_key=setup,
@@ -350,6 +374,7 @@ def build_maxpain_event(
         alert_time_utc=timestamp,
         symbol=symbol,
         direction=direction,
+        source_side=source_side,
         timeframe=timeframe,
         score=score,
         current_price=current_price,
@@ -370,10 +395,9 @@ def build_magnet_event(
     event_type: Optional[str] = None, event_time: Any = None,
     strategy_version: Optional[str] = None, code_version: Optional[str] = None,
 ) -> ResearchEvent:
-    """Normalize Magnet / Magnet Confirmation / Strong Magnet Confirmation."""
     symbol = _symbol(magnet.get("symbol"))
-    side = str(magnet.get("side") or "").upper()
-    direction = "LONG" if side == "UPPER" else "SHORT" if side == "LOWER" else "NEUTRAL"
+    source_side = str(magnet.get("side") or "").upper() or None
+    direction = "LONG" if source_side == "UPPER" else "SHORT" if source_side == "LOWER" else "NEUTRAL"
     conf = dict(confirmation or {})
     status = str(conf.get("status") or "").upper()
     inferred_type = {
@@ -392,10 +416,9 @@ def build_magnet_event(
             key: _json_safe(magnet.get(key))
             for key in (
                 "side", "count", "members", "min_target", "max_target",
-                "average_target", "spread_pct", "magnet_quality",
-                "liquidity_edge_pct", "gross_liquidity_timeframe",
-                "gross_candidate_liquidity", "gross_opposite_liquidity",
-                "liquidity_calculation_version",
+                "average_target", "spread_pct", "magnet_quality", "liquidity_edge_pct",
+                "gross_liquidity_timeframe", "gross_candidate_liquidity",
+                "gross_opposite_liquidity", "liquidity_calculation_version",
             )
             if key in magnet
         },
@@ -407,7 +430,7 @@ def build_magnet_event(
         direction=direction,
         timeframe=None,
         event_family="MAGNET",
-        setup_identity={"side": side, "members": members},
+        setup_identity={"side": source_side, "members": members},
     )
     fingerprint = _event_fingerprint(
         setup_key=setup,
@@ -429,6 +452,7 @@ def build_magnet_event(
         alert_time_utc=timestamp,
         symbol=symbol,
         direction=direction,
+        source_side=source_side,
         timeframe=None,
         score=quality,
         current_price=current,
@@ -445,13 +469,13 @@ def build_magnet_event(
 
 def build_generic_alert_event(
     *, symbol: str, event_type: str, direction: str, event_time: Any = None,
-    timeframe: Optional[str] = None, score: Any = None, current_price: Any = None,
-    target_price: Any = None, categories: Optional[Iterable[str]] = None,
+    source_side: Optional[str] = None, timeframe: Optional[str] = None, score: Any = None,
+    current_price: Any = None, target_price: Any = None,
+    categories: Optional[Iterable[str]] = None,
     engine_snapshot: Optional[Mapping[str, Any]] = None,
     setup_identity: Optional[Mapping[str, Any]] = None,
     strategy_version: Optional[str] = None, code_version: Optional[str] = None,
 ) -> ResearchEvent:
-    """Adapter for standalone OI/CVD/Combined and future alert families."""
     normalized_symbol = _symbol(symbol)
     normalized_direction = _direction(direction)
     timestamp = _iso_utc(event_time)
@@ -459,6 +483,7 @@ def build_generic_alert_event(
     normalized_score = _float(score)
     current = _float(current_price)
     target = _float(target_price)
+    normalized_source_side = str(source_side or "").strip().upper() or None
     category_list = sorted({str(x) for x in (categories or []) if str(x).strip()})
     compact = _bounded_snapshot(dict(engine_snapshot or {}))
     family = str(event_type or "GENERIC_ALERT").upper()
@@ -474,11 +499,7 @@ def build_generic_alert_event(
         event_kind="ALERT",
         event_type=family,
         alert_time_utc=timestamp,
-        occurrence_state={
-            "score": normalized_score,
-            "categories": category_list,
-            "snapshot": compact,
-        },
+        occurrence_state={"score": normalized_score, "categories": category_list, "snapshot": compact},
     )
     strategy, code = _versions(strategy_version, code_version)
     return ResearchEvent(
@@ -488,8 +509,67 @@ def build_generic_alert_event(
         alert_time_utc=timestamp,
         symbol=normalized_symbol,
         direction=normalized_direction,
+        source_side=normalized_source_side,
         timeframe=normalized_timeframe,
         score=normalized_score,
+        current_price=current,
+        target_price=target,
+        initial_target_distance_pct=_initial_target_distance_pct(current, target),
+        categories=category_list,
+        setup_key=setup,
+        event_fingerprint=fingerprint,
+        strategy_version=strategy,
+        code_version=code,
+        engine_snapshot=compact,
+    )
+
+
+def build_decision_sample(
+    *, symbol: str, sample_type: str, direction: str = "NEUTRAL", event_time: Any = None,
+    source_side: Optional[str] = None, timeframe: Optional[str] = None, score: Any = None,
+    current_price: Any = None, target_price: Any = None,
+    categories: Optional[Iterable[str]] = None,
+    engine_snapshot: Optional[Mapping[str, Any]] = None,
+    setup_identity: Optional[Mapping[str, Any]] = None,
+    strategy_version: Optional[str] = None, code_version: Optional[str] = None,
+) -> ResearchEvent:
+    """Create a research-only near-miss/control sample; never label it as an alert."""
+    normalized_symbol = _symbol(symbol)
+    normalized_direction = _direction(direction)
+    normalized_timeframe = str(timeframe or "").strip() or None
+    normalized_source_side = str(source_side or "").strip().upper() or None
+    timestamp = _iso_utc(event_time)
+    event_type = str(sample_type or "DECISION_SAMPLE").strip().upper()
+    score_value = _float(score)
+    current = _float(current_price)
+    target = _float(target_price)
+    category_list = sorted({str(x) for x in (categories or []) if str(x).strip()})
+    compact = _bounded_snapshot(dict(engine_snapshot or {}))
+    setup = _setup_key(
+        symbol=normalized_symbol,
+        direction=normalized_direction,
+        timeframe=normalized_timeframe,
+        event_family="DECISION_SAMPLE",
+        setup_identity={"sample_type": event_type, **dict(setup_identity or {})},
+    )
+    fingerprint = _event_fingerprint(
+        setup_key=setup,
+        event_kind="DECISION_SAMPLE",
+        event_type=event_type,
+        alert_time_utc=timestamp,
+        occurrence_state={"score": score_value, "snapshot": compact},
+    )
+    strategy, code = _versions(strategy_version, code_version)
+    return ResearchEvent(
+        schema_version=SCHEMA_VERSION,
+        event_kind="DECISION_SAMPLE",
+        event_type=event_type,
+        alert_time_utc=timestamp,
+        symbol=normalized_symbol,
+        direction=normalized_direction,
+        source_side=normalized_source_side,
+        timeframe=normalized_timeframe,
+        score=score_value,
         current_price=current,
         target_price=target,
         initial_target_distance_pct=_initial_target_distance_pct(current, target),
@@ -505,13 +585,14 @@ def build_generic_alert_event(
 def build_signal_state_change(
     *, symbol: str, signal_name: str, old_state: Any, new_state: Any,
     event_time: Any = None, direction: str = "NEUTRAL",
-    timeframe: Optional[str] = None, score: Any = None,
-    current_price: Any = None, evidence: Optional[Mapping[str, Any]] = None,
+    source_side: Optional[str] = None, timeframe: Optional[str] = None,
+    score: Any = None, current_price: Any = None,
+    evidence: Optional[Mapping[str, Any]] = None,
     strategy_version: Optional[str] = None, code_version: Optional[str] = None,
 ) -> ResearchEvent:
-    """Capture a meaningful state transition without minute-by-minute snapshots."""
     normalized_symbol = _symbol(symbol)
     normalized_direction = _direction(direction)
+    normalized_source_side = str(source_side or "").strip().upper() or None
     name = str(signal_name or "").strip().upper()
     if not name:
         raise ValueError("signal_name is required")
@@ -549,6 +630,7 @@ def build_signal_state_change(
         alert_time_utc=timestamp,
         symbol=normalized_symbol,
         direction=normalized_direction,
+        source_side=normalized_source_side,
         timeframe=normalized_timeframe,
         score=_float(score),
         current_price=_float(current_price),
@@ -588,8 +670,6 @@ class DryRunResearchCapture:
 
     def emit(self, event: ResearchEvent) -> bool:
         validate_event(event)
-        # Exact replay is ignored; a new timestamp is a new occurrence even if
-        # setup_key is identical. This preserves repetition density research.
         if event.event_fingerprint in self._fingerprints:
             return False
         if len(self._events) == self._events.maxlen and self._events:
