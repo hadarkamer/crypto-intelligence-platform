@@ -20,6 +20,8 @@ from telegram.ext import ApplicationBuilder
 import ai_agent
 import ai_telegram
 import research_event_capture
+import research_event_capture_selftest
+import research_event_runtime_selftest
 import research_event_store
 import research_shadow_replay
 
@@ -77,6 +79,16 @@ async def start_web_server(bot_app) -> web.AppRunner:
     return runner
 
 
+def _startup_research_deterministic_audit() -> None:
+    """Candidate-only deterministic checks; no network and no DB writes."""
+    try:
+        research_event_capture_selftest.run()
+        research_event_runtime_selftest.run()
+        print("[ai-candidate] research deterministic audit: PASS", flush=True)
+    except Exception as exc:
+        print(f"[ai-candidate] research deterministic audit: FAIL {exc!r}", flush=True)
+
+
 async def _startup_research_shadow_smoke() -> None:
     """One bounded real-history QA replay; read-only and memory-only."""
     try:
@@ -105,6 +117,7 @@ async def main() -> None:
 
     print(f"[ai-candidate] research capture: {RESEARCH_DRY_RUN.status()}", flush=True)
     print(f"[ai-candidate] research persistence plan: {research_event_store.WRITER.status()}", flush=True)
+    _startup_research_deterministic_audit()
     await _startup_research_shadow_smoke()
 
     bot_app = (
