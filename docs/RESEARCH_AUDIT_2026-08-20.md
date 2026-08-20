@@ -29,7 +29,7 @@ The Research architecture is suitable to proceed to controlled persistence testi
 - Max Pain all-timeframe averages/directional values and compact OI/CVD family state are retained when available.
 - Writer retries transient failed batches instead of discarding them immediately.
 - Outcome rows record price-path resolution/sample count, so low-resolution history cannot be misrepresented as exact MFE/MAE evidence.
-- A guarded one-shot `research_schema_admin.py` was added; it is not imported by Watch and refuses to mutate schema without `RESEARCH_SCHEMA_APPLY=1` plus `RESEARCH_DATABASE_URL`.
+- A guarded one-shot `research_schema_admin.py` was added; it is not imported by Watch and refuses to mutate schema unless `RESEARCH_SCHEMA_APPLY=1` is present plus an explicitly selected database target (`RESEARCH_DATABASE_URL`, or `RESEARCH_USE_PRIMARY_DATABASE=1` with `DATABASE_URL`).
 
 ## Data-source audit
 
@@ -42,7 +42,7 @@ Current PostgreSQL source history checked on 2026-08-20:
 - Max Pain snapshots: last stored 2026-07-19; current Watch uses live Max Pain without persisting raw snapshots.
 - Technical signals: last stored 2026-07-20; currently legacy/stale for historical research.
 
-The database size is about 70 MB on a 1 GB PostgreSQL disk. Separate Research tables in the same PostgreSQL instance are therefore operationally efficient at current volume and allow direct timestamp joins to existing market history. The Research write path still requires a separate explicit `RESEARCH_DATABASE_URL` variable, even if it points to that same approved database.
+The database size is about 70 MB on a 1 GB PostgreSQL disk. Separate Research tables in the same PostgreSQL instance are therefore operationally efficient at current volume and allow direct timestamp joins to existing market history. The database is never selected implicitly: Candidate/production must explicitly choose the Research target.
 
 ## Not blockers for first persistence test, but required before full analytical use
 
