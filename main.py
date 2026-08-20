@@ -2643,6 +2643,13 @@ def _collect_combined_confirmation_messages(
 ) -> List[str]:
     """Emit only on entry or when genuinely new evidence joins an active setup."""
     candidates = _combined_confirmation_candidates(items, rows)
+    # Research-only lifecycle tracking: preserve Combined weakening, component
+    # loss and deactivation even when Telegram correctly emits no new alert.
+    # This sidecar does not change COMBINED_CONFIRMATION_STATE or strategy logic.
+    try:
+        research_event_runtime.capture_combined_state_changes(candidates)
+    except Exception as exc:
+        print(f"[research-dry-run] combined state hook failed: {exc!r}", flush=True)
     active_keys = {str(candidate["key"]) for candidate in candidates}
     for stale_key in list(COMBINED_CONFIRMATION_STATE):
         if stale_key not in active_keys:
@@ -2666,11 +2673,13 @@ def _collect_combined_confirmation_messages(
 
 
 async def _send_alert_with_confirmation(bot, chat_id: int, card: str, item: Dict[str, Any]) -> None:
+    # Freeze the Research Event decision timestamp BEFORE Telegram network latency.
+    # The sidecar is still emitted only after successful delivery, but its market/news
+    # join anchor remains the exact decision/observation time.
+    decision_time = datetime.now(timezone.utc)
     await bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
-    # Research sidecar runs only after the normal card was actually delivered.
-    # It is memory-only in this Candidate and may never block Telegram alerts.
     try:
-        research_event_runtime.capture_sent_maxpain(item)
+        research_event_runtime.capture_sent_maxpain(item, event_time=decision_time)
     except Exception as exc:
         print(f"[research-dry-run] sent alert hook failed: {exc!r}", flush=True)
     for separate in _special_transition_messages(item):
