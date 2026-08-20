@@ -21,9 +21,9 @@ jobs:
           cache: pip
       - name: Install project dependencies
         run: python -m pip install -r requirements.txt
-      - name: Compile candidate AI and research modules
+      - name: Compile candidate AI, research and hooked main modules
         run: |
-          python -m py_compile ai_history_research.py ai_tools.py ai_agent.py ai_telegram.py ai_candidate_main.py research_event_capture.py research_event_capture_selftest.py research_event_runtime.py research_event_runtime_selftest.py
+          python -m py_compile main.py ai_history_research.py ai_tools.py ai_agent.py ai_telegram.py ai_candidate_main.py research_event_capture.py research_event_capture_selftest.py research_event_runtime.py research_event_runtime_selftest.py
       - name: Import candidate AI modules without credentials
         env:
           OPENAI_API_KEY: ""
@@ -51,3 +51,21 @@ jobs:
           OPENAI_API_KEY: ""
           DATABASE_URL: ""
         run: python research_event_runtime_selftest.py
+      - name: Verify live alert hooks remain wired
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('main.py').read_text(encoding='utf-8')
+          markers = [
+              'import research_event_runtime',
+              'research_event_runtime.capture_sent_maxpain(item)',
+              'research_event_runtime.capture_special_transitions(displayable_items)',
+              'research_event_runtime.capture_combined_confirmation(candidate)',
+              'research_event_runtime.capture_magnet_watch_symbol(',
+          ]
+          missing = [marker for marker in markers if marker not in text]
+          if missing:
+              raise SystemExit('Missing Research Event hooks: ' + repr(missing))
+          print('Research Event main hook validation: PASS')
+          PY
+          git diff --check
