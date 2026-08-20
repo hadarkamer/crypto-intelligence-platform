@@ -1,0 +1,37 @@
+name: AI Agent Candidate Check
+
+on:
+  push:
+    branches:
+      - ai-agent-candidate
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile candidate AI modules
+        run: |
+          python -m py_compile ai_tools.py ai_agent.py ai_telegram.py ai_candidate_main.py
+      - name: Import candidate AI modules without credentials
+        env:
+          OPENAI_API_KEY: ""
+        run: |
+          python - <<'PY'
+          import ai_tools
+          import ai_agent
+          import ai_telegram
+          print("tools:", ai_tools.tool_names())
+          print("status:", ai_agent.status())
+          PY
