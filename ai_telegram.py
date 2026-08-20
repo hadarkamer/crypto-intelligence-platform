@@ -1,18 +1,19 @@
 """Telegram surface for the candidate GPT agent.
 
 The production bot is untouched unless a staging entrypoint explicitly registers
-these handlers.  The first candidate exposes /ai, /ai_status and /ai_reset only;
-plain non-command messages are deliberately not intercepted yet.
+these handlers. Plain non-command messages are deliberately not intercepted yet.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Iterable
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import ai_agent
+import research_shadow_replay
 
 TELEGRAM_MESSAGE_LIMIT = 3900
 
@@ -87,7 +88,55 @@ async def ai_reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("🧹 זיכרון השיחה הזמני של ה-AI אופס.")
 
 
+async def ai_research_test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run a bounded, read-only Shadow Replay against stored historical data."""
+    if update.message is None:
+        return
+    symbol = str((context.args or ["BTC"])[0]).strip().upper()
+    hours = 24
+    if len(context.args or []) >= 2:
+        try:
+            hours = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("שימוש: /ai_research_test BTC 24")
+            return
+    await update.message.reply_text(
+        f"🧪 מתחיל Shadow Replay ל-{symbol} על {hours} שעות.\n"
+        "הבדיקה קוראת היסטוריה קיימת בלבד ולא כותבת למסד הנתונים."
+    )
+    try:
+        result = await asyncio.to_thread(research_shadow_replay.run_shadow_replay, symbol, hours)
+    except Exception as exc:
+        await update.message.reply_text(
+            "❌ בדיקת Research Event נכשלה.\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    checks = result.get("checks") or {}
+    check_text = " | ".join(
+        f"{name}: {'✅' if passed else '❌'}"
+        for name, passed in checks.items()
+    )
+    rows = result.get("raw_rows") or {}
+    streams = result.get("events_by_stream") or {}
+    await update.message.reply_text(
+        ("✅" if result.get("ok") else "⚠️") + " Research Event Shadow Replay\n"
+        f"מטבע: {result.get('symbol')} | חלון: {result.get('requested_hours')}h\n"
+        f"שורות אמיתיות שנקראו: Price/OI {rows.get('price_oi', 0)}, "
+        f"Futures CVD {rows.get('futures', 0)}, Spot CVD {rows.get('spot', 0)}\n"
+        f"Research Events שנוצרו בזיכרון: {result.get('events_created', 0)}\n"
+        f"Price/OI: {streams.get('price_oi', 0)} | Futures: {streams.get('futures_cvd', 0)} | "
+        f"Spot: {streams.get('spot_cvd', 0)}\n"
+        f"אירוע ראשון: {result.get('first_event_utc') or '—'}\n"
+        f"אירוע אחרון: {result.get('last_event_utc') or '—'}\n"
+        f"בדיקות: {check_text}\n\n"
+        "הערה: זו בדיקת איכות על נתוני עבר אמיתיים; היא אינה טוענת שהאירועים היו התראות Telegram היסטוריות."
+    )
+
+
 def register_ai_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("ai", ai_cmd))
     app.add_handler(CommandHandler("ai_status", ai_status_cmd))
     app.add_handler(CommandHandler("ai_reset", ai_reset_cmd))
+    app.add_handler(CommandHandler("ai_research_test", ai_research_test_cmd))
