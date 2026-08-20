@@ -20,6 +20,7 @@ from telegram.ext import ApplicationBuilder
 import ai_agent
 import ai_telegram
 import research_event_capture
+import research_event_store
 import research_shadow_replay
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -41,6 +42,7 @@ async def health(_: web.Request) -> web.Response:
             "model": state.get("model"),
             "tools": state.get("tools") or [],
             "research_capture": RESEARCH_DRY_RUN.status(),
+            "research_persistence": research_event_store.WRITER.status(),
         }
     )
 
@@ -102,6 +104,7 @@ async def main() -> None:
         raise RuntimeError("Missing OPENAI_API_KEY")
 
     print(f"[ai-candidate] research capture: {RESEARCH_DRY_RUN.status()}", flush=True)
+    print(f"[ai-candidate] research persistence plan: {research_event_store.WRITER.status()}", flush=True)
     await _startup_research_shadow_smoke()
 
     bot_app = (
