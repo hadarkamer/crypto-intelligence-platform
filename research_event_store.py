@@ -2,12 +2,11 @@
 
 Safety defaults:
 - persistence is OFF unless RESEARCH_PERSISTENCE_ENABLED=1;
-- a dedicated RESEARCH_DATABASE_URL is required when enabled;
+- the DB target must be explicitly selected: either RESEARCH_DATABASE_URL or
+  RESEARCH_USE_PRIMARY_DATABASE=1;
 - this module NEVER creates schema;
 - Watch/Telegram callers enqueue with put_nowait and never wait for PostgreSQL;
-- the background writer batches idempotent inserts using event_fingerprint;
-- transient database failures keep the current batch in memory and retry with
-  bounded exponential backoff instead of immediately discarding research data.
+- transient database failures retain/retry the current batch with backoff.
 """
 from __future__ import annotations
 
@@ -25,8 +24,17 @@ except Exception:  # pragma: no cover
 
 import research_event_capture
 
-_ENABLED = os.getenv("RESEARCH_PERSISTENCE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
-_DATABASE_URL = os.getenv("RESEARCH_DATABASE_URL", "").strip()
+_TRUE = {"1", "true", "yes", "on"}
+_ENABLED = os.getenv("RESEARCH_PERSISTENCE_ENABLED", "").strip().lower() in _TRUE
+_USE_PRIMARY_DATABASE = os.getenv("RESEARCH_USE_PRIMARY_DATABASE", "").strip().lower() in _TRUE
+_RESEARCH_DATABASE_URL = os.getenv("RESEARCH_DATABASE_URL", "").strip()
+_PRIMARY_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+_DATABASE_URL = _RESEARCH_DATABASE_URL or (_PRIMARY_DATABASE_URL if _USE_PRIMARY_DATABASE else "")
+_DATABASE_SOURCE = (
+    "RESEARCH_DATABASE_URL" if _RESEARCH_DATABASE_URL
+    else "DATABASE_URL_EXPLICIT_PRIMARY" if _USE_PRIMARY_DATABASE and _PRIMARY_DATABASE_URL
+    else None
+)
 RUNTIME_SESSION_ID = os.getenv("RESEARCH_RUNTIME_SESSION_ID", "").strip() or uuid.uuid4().hex
 DEFAULT_QUEUE_CAPACITY = 2000
 DEFAULT_BATCH_SIZE = 50
@@ -67,11 +75,17 @@ class WriterMetrics:
     batches: int = 0
 
 
+def database_url() -> str:
+    """Internal accessor used by the separately guarded schema-admin helper."""
+    return _DATABASE_URL
+
+
 def persistence_status() -> Dict[str, Any]:
     return {
         "enabled": _ENABLED,
         "configured": bool(_DATABASE_URL),
-        "database_source": "RESEARCH_DATABASE_URL" if _DATABASE_URL else None,
+        "database_source": _DATABASE_SOURCE,
+        "explicit_primary_database": _USE_PRIMARY_DATABASE,
         "schema_auto_create": False,
         "watch_blocking_writes": False,
         "idempotency": "event_fingerprint",
@@ -98,11 +112,6 @@ def serialize_event(
     delivery_attempted_at_utc: Any = None,
     delivered_at_utc: Any = None,
 ) -> Dict[str, Any]:
-    """Serialize without changing the event's decision-time timestamp.
-
-    alert_time_utc is always the signal decision/observation anchor. Telegram
-    lifecycle times, when known, are separate metadata and never replace it.
-    """
     research_event_capture.validate_event(event)
     data = event.to_dict()
     normalized_delivery = _delivery(delivery_status, data["event_kind"])
@@ -136,8 +145,6 @@ def serialize_event(
 
 
 class AsyncResearchEventWriter:
-    """Bounded non-blocking queue with a separate PostgreSQL batch writer."""
-
     def __init__(
         self,
         *,
@@ -173,7 +180,10 @@ class AsyncResearchEventWriter:
         if not _ENABLED:
             return False
         if not _DATABASE_URL:
-            raise RuntimeError("RESEARCH_PERSISTENCE_ENABLED=1 requires RESEARCH_DATABASE_URL")
+            raise RuntimeError(
+                "Research persistence requires RESEARCH_DATABASE_URL or explicit "
+                "RESEARCH_USE_PRIMARY_DATABASE=1 with DATABASE_URL"
+            )
         if psycopg is None:
             raise RuntimeError("psycopg is unavailable")
         if self._task and not self._task.done():
@@ -191,7 +201,6 @@ class AsyncResearchEventWriter:
         delivery_attempted_at_utc: Any = None,
         delivered_at_utc: Any = None,
     ) -> bool:
-        """Never blocks Watch/Telegram. Returns False if disabled or saturated."""
         if not _ENABLED:
             return False
         row = serialize_event(
@@ -251,9 +260,6 @@ class AsyncResearchEventWriter:
                         f"retry_in={delay:.1f}s; queued={self.queue.qsize()}; error={exc!r}",
                         flush=True,
                     )
-                    # Keep the current batch in memory. Watch/Telegram never wait;
-                    # new events can continue entering the bounded queue. If a long
-                    # DB outage fills the queue, queue_full_drops exposes the loss.
                     await asyncio.sleep(delay)
 
     def _write_batch(self, rows: Iterable[Mapping[str, Any]]) -> None:
@@ -268,6 +274,4 @@ class AsyncResearchEventWriter:
                 cur.executemany(_INSERT_SQL, list(rows))
 
 
-# Importing the module is safe: no task starts and no write can happen until
-# both the explicit enable flag and dedicated research DB URL are configured.
 WRITER = AsyncResearchEventWriter()
