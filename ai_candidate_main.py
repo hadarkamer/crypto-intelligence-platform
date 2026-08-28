@@ -43,6 +43,8 @@ async def health(_: web.Request) -> web.Response:
             "openai_configured": bool(state.get("configured")),
             "model": state.get("model"),
             "tools": state.get("tools") or [],
+            "web_search": state.get("web_search"),
+            "coinglass_vision": state.get("coinglass_vision") or {},
             "research_capture": RESEARCH_DRY_RUN.status(),
             "research_persistence": research_event_store.WRITER.status(),
         }

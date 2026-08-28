@@ -11,8 +11,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections import defaultdict, deque
-from typing import Any, Deque, Dict, Iterable, List
+from datetime import datetime, timezone
+from typing import Any, Deque, Dict, Iterable, List, Tuple
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -23,6 +26,12 @@ DEFAULT_MODEL = os.getenv("OPENAI_AI_MODEL", "gpt-5.6")
 MAX_HISTORY_MESSAGES = max(2, int(os.getenv("AI_MAX_HISTORY_MESSAGES", "12")))
 MAX_TOOL_ROUNDS = max(1, min(6, int(os.getenv("AI_MAX_TOOL_ROUNDS", "4"))))
 REQUEST_TIMEOUT_SECONDS = max(30, int(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "120")))
+WEB_SEARCH_ENABLED = os.getenv("AI_WEB_SEARCH_ENABLED", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 SYSTEM_INSTRUCTIONS = """You are the AI analysis layer inside a crypto-intelligence bot.
@@ -32,7 +41,9 @@ Your roles are:
 1. Conversational assistant: understand free-form instructions and answer like a normal language model.
 2. Market analyst: use approved tools to inspect the bot's current OI, CVD and combined market-state data when relevant.
 3. Research assistant: use the approved historical tools to analyze stored Price/OI, Futures CVD, Spot CVD, OI regime and technical-signal history. You may inspect evidence nearest to an exact historical timestamp.
-4. Future alert-performance researcher: timestamped Research Events and external exchange/news context are planned but are not yet being written. Do not pretend alert-outcome or news-context history exists before those tools are connected.
+4. Live external researcher: use web_search for current information, news, reports and public commentary. Prefer primary sources. For crypto research, explicitly consider CryptoJungle (cryptojungle.co.il), SoSoValue (sosovalue.com), YouTube, unbias.fyi and the verified unbias_fyi account on X when relevant. Treat YouTube, analyst commentary and social posts as opinion/sentiment unless independently corroborated. Include the publication time when visible, say when it is unavailable, and preserve source links.
+5. Visual market scanner: use scan_coinglass_market when the user asks to inspect the current CoinGlass Heatmap or Liquidation Map. Keep 12h/24h and Binance/aggregate/Hyperliquid results separate. Visual intensity is relative, not dollars or probability.
+6. Future alert-performance researcher: timestamped Research Events are not yet being persisted. Do not pretend historical alert outcomes exist before the production-bot integration connects them.
 
 Candidate safety boundary:
 - This version is READ ONLY.
@@ -43,7 +54,9 @@ Candidate safety boundary:
 - Clearly separate observations from inference.
 - Preserve and report exact timestamps when the question concerns an event or historical point.
 - Historical market evidence is not the same as historical alert performance. Do not infer alert accuracy from market-history tools alone.
-- External exchange/index data and global news are not available until dedicated time-stamped context sources are connected.
+- Live web and visual research are available but are not archived in the candidate lab. Clearly distinguish a live lookup from stored bot history.
+- For time-sensitive external facts, use web_search rather than model memory and distinguish publication time from event time.
+- Never invent exact liquidity dollars from CoinGlass colors; report only values explicitly visible in the source.
 - Be concise by default, but explain reasoning in plain language when the user asks why.
 """
 
@@ -69,6 +82,71 @@ def _extract_output_text(payload: Dict[str, Any]) -> str:
                 if text:
                     parts.append(text)
     return "\n".join(parts).strip()
+
+
+def _web_sources(payload: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Collect cited and consulted URLs without depending on display markup."""
+    order: List[str] = []
+    titles: Dict[str, str] = {}
+
+    def add(url: Any, title: Any = "") -> None:
+        clean_url = str(url or "").strip()
+        if not clean_url.startswith(("https://", "http://")):
+            return
+        clean_title = " ".join(str(title or "").split())
+        if clean_url not in titles:
+            order.append(clean_url)
+            titles[clean_url] = clean_title or urlsplit(clean_url).netloc or "מקור אינטרנט"
+        elif clean_title:
+            titles[clean_url] = clean_title
+
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "web_search_call":
+            action = item.get("action") if isinstance(item.get("action"), dict) else {}
+            for source in action.get("sources") or []:
+                if isinstance(source, dict):
+                    add(source.get("url"), source.get("title"))
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            for annotation in content.get("annotations") or []:
+                if isinstance(annotation, dict) and annotation.get("type") == "url_citation":
+                    add(annotation.get("url"), annotation.get("title"))
+    return [(titles[url], url) for url in order]
+
+
+def _clean_web_citation_tokens(text: str) -> str:
+    """Remove provider citation glyphs; clickable URLs are appended explicitly."""
+    value = re.sub(r"cite.*?", "", str(text or ""))
+    value = re.sub(r"[ \t]+\n", "\n", value)
+    value = re.sub(r" {2,}", " ", value)
+    return value.strip()
+
+
+def _answer_with_sources(
+    payload: Dict[str, Any],
+    additional_sources: Iterable[Tuple[str, str]] = (),
+) -> str:
+    answer = _clean_web_citation_tokens(_extract_output_text(payload))
+    sources: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for title, url in list(additional_sources) + _web_sources(payload):
+        if url in seen:
+            continue
+        seen.add(url)
+        sources.append((title, url))
+    if not sources:
+        return answer
+
+    retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    lines = [answer, "", f"מקורות (נאספו {retrieved_at}):"]
+    for title, url in sources[:10]:
+        lines.append(f"• {title}\n  {url}")
+    return "\n".join(lines).strip()
 
 
 def _function_calls(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -161,16 +239,22 @@ class BotAIAgent:
             raise AIAgentError(f"OpenAI connection failed: {exc}") from exc
 
     def _base_payload(self, input_items: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-        return {
+        tools = list(ai_tools.TOOL_SPECS)
+        if WEB_SEARCH_ENABLED:
+            tools.append({"type": "web_search"})
+        payload = {
             "model": self.model,
             "store": False,
             "instructions": SYSTEM_INSTRUCTIONS,
             "input": list(input_items),
-            "tools": ai_tools.TOOL_SPECS,
+            "tools": tools,
             "tool_choice": "auto",
             "reasoning": {"effort": "medium"},
             "text": {"verbosity": "medium"},
         }
+        if WEB_SEARCH_ENABLED:
+            payload["include"] = ["web_search_call.action.sources"]
+        return payload
 
     async def ask(self, user_text: str, *, conversation_id: str | int) -> str:
         prompt = str(user_text or "").strip()
@@ -189,6 +273,7 @@ class BotAIAgent:
 
             payload = self._base_payload(input_items)
             response = await self._post(payload)
+            collected_sources = _web_sources(response)
 
             for _ in range(MAX_TOOL_ROUNDS):
                 calls = _function_calls(response)
@@ -229,10 +314,11 @@ class BotAIAgent:
                 input_items = input_items + list(prior_output) + tool_outputs
                 payload = self._base_payload(input_items)
                 response = await self._post(payload)
+                collected_sources.extend(_web_sources(response))
             else:
                 raise AIAgentError("AI tool loop exceeded the configured safety limit")
 
-            answer = _extract_output_text(response)
+            answer = _answer_with_sources(response, collected_sources)
             if not answer:
                 raise AIAgentError("OpenAI response did not contain assistant text")
 
@@ -252,10 +338,15 @@ def reset_conversation(conversation_id: str | int) -> None:
 
 
 def status() -> Dict[str, Any]:
+    tools = ai_tools.tool_names()
+    if WEB_SEARCH_ENABLED:
+        tools.append("web_search")
     return {
         "configured": AGENT.configured,
         "model": AGENT.model,
         "mode": "candidate_read_only",
-        "tools": ai_tools.tool_names(),
+        "tools": tools,
+        "web_search": "enabled_live_not_persisted" if WEB_SEARCH_ENABLED else "disabled",
+        "coinglass_vision": ai_tools.vision_status(),
         "memory": "in_process_bounded_not_persistent",
     }

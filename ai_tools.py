@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any, Awaitable, Callable, Dict
 
 import ai_history_research
+import ai_market_vision
 import coinglass_flow_engine
 import coinglass_oi_regime_service
 import market_confidence_engine
@@ -146,6 +148,39 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
+        "name": "scan_coinglass_market",
+        "description": (
+            "Capture and visually analyze the live CoinGlass BTC maps. "
+            "The heatmap view covers 12h and 24h; the liquidation-map view separately reads "
+            "Binance BTC/USDT, aggregate exchanges and Hyperliquid. Use this when the user asks "
+            "to scan or inspect the current visible CoinGlass maps. The scan is read-only, can "
+            "take a few minutes, and reports relative visual concentration rather than invented dollar totals."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "enum": ["BTC"],
+                    "description": "The validated visual POC currently supports BTC only.",
+                },
+                "view": {
+                    "type": "string",
+                    "enum": ["heatmap", "liquidation_map", "all"],
+                    "description": "Which live CoinGlass view to capture and analyze.",
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "description": "True only when the user explicitly asks for a fresh capture; otherwise reuse a recent cached scan.",
+                },
+            },
+            "required": ["symbol", "view", "force_refresh"],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "get_ai_capabilities",
         "description": (
             "Return the tools currently approved for the candidate AI agent and the current safety boundary. "
@@ -245,7 +280,27 @@ async def _get_market_context_at_time(args: Dict[str, Any]) -> Any:
     return _bounded(result, max_chars=45000)
 
 
+async def _scan_coinglass_market(args: Dict[str, Any]) -> Any:
+    symbol = _symbol(args.get("symbol"))
+    if symbol != "BTC":
+        raise ValueError("CoinGlass Vision currently supports BTC only")
+    view = str(args.get("view") or "all").strip().lower()
+    force_refresh = bool(args.get("force_refresh"))
+    result = await ai_market_vision.scan(
+        symbol=symbol,
+        view=view,
+        force_refresh=force_refresh,
+    )
+    return _bounded(result, max_chars=60000)
+
+
 async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
+    web_enabled = os.getenv("AI_WEB_SEARCH_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     return {
         "mode": "candidate_read_only",
         "approved_tools": [
@@ -254,15 +309,27 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "get_market_state",
             "research_market_history",
             "get_market_context_at_time",
+            "scan_coinglass_market",
+            "web_search",
             "get_ai_capabilities",
         ],
+        "live_external_research": {
+            "enabled": web_enabled,
+            "preferred_sources": [
+                "cryptojungle.co.il",
+                "sosovalue.com",
+                "youtube.com",
+                "unbias.fyi",
+                "x.com/unbias_fyi",
+            ],
+            "citations": "source links are appended to Telegram answers",
+            "persistence": "not archived in the candidate lab",
+        },
+        "coinglass_vision": ai_market_vision.status(),
         "not_yet_connected": [
             "historical alert outcomes (requires timestamped Research Events)",
-            "external exchange/index context archive",
-            "global news context archive",
-            "CoinGlass visual scanner from AI Lab",
-            "SoSoValue",
-            "YouTube",
+            "persistent external exchange/index context archive",
+            "persistent global news context archive",
             "scheduled natural-language tasks",
         ],
         "prohibited_in_candidate": [
@@ -281,6 +348,7 @@ _EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
     "get_market_state": _get_market_state,
     "research_market_history": _research_market_history,
     "get_market_context_at_time": _get_market_context_at_time,
+    "scan_coinglass_market": _scan_coinglass_market,
     "get_ai_capabilities": _get_ai_capabilities,
 }
 
@@ -294,3 +362,7 @@ async def execute_tool(name: str, arguments: Dict[str, Any]) -> Any:
 
 def tool_names() -> list[str]:
     return list(_EXECUTORS)
+
+
+def vision_status() -> dict[str, Any]:
+    return ai_market_vision.status()

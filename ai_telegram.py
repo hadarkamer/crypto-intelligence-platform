@@ -7,6 +7,7 @@ these handlers. Plain non-command messages are deliberately not intercepted yet.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Iterable
 
 from telegram import Update
@@ -18,8 +19,20 @@ import research_shadow_replay
 TELEGRAM_MESSAGE_LIMIT = 3900
 
 
+def _telegram_text(text: str) -> str:
+    """Make model Markdown readable in Telegram's safe plain-text mode."""
+    value = str(text or "").replace("\r\n", "\n")
+    value = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", value)
+    value = re.sub(r"```(?:[A-Za-z0-9_+-]+)?\n?", "", value)
+    value = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1\n\2", value)
+    value = value.replace("**", "").replace("__", "")
+    value = re.sub(r"`([^`\n]+)`", r"\1", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
 def _chunks(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> Iterable[str]:
-    value = str(text or "").strip()
+    value = _telegram_text(text)
     if not value:
         return []
     chunks = []
@@ -45,7 +58,9 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "שימוש: /ai <הוראה או שאלה>\n\n"
             "דוגמאות:\n"
             "/ai מה מצב ה-OI של BTC?\n"
-            "/ai תשווה לי בין Futures CVD ל-Spot CVD של SOL\n\n"
+            "/ai תשווה לי בין Futures CVD ל-Spot CVD של SOL\n"
+            "/ai סרוק את מפות החיסולים של BTC\n"
+            "/ai מה החדשות החשובות היום על שוק הקריפטו?\n\n"
             "גרסת ה-Candidate כרגע לקריאה בלבד."
         )
         return
@@ -70,12 +85,16 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     state = ai_agent.status()
     key_status = "מחובר" if state.get("configured") else "לא מוגדר"
     tools = ", ".join(state.get("tools") or []) or "אין"
+    vision = state.get("coinglass_vision") or {}
+    vision_status = "פעיל" if vision.get("enabled") else "כבוי בהגדרות"
     await update.message.reply_text(
         "🧠 AI Candidate\n"
         f"OpenAI API: {key_status}\n"
         f"Model: {state.get('model')}\n"
         "Mode: READ ONLY\n"
         f"Tools: {tools}\n"
+        f"Web search: {'פעיל' if state.get('web_search') == 'enabled_live_not_persisted' else 'כבוי'}\n"
+        f"CoinGlass Vision: {vision_status}\n"
         "זיכרון שיחה: זמני ומוגבל; יתאפס בעת restart."
     )
 
