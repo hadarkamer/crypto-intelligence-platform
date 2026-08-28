@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - ai-agent-candidate
+      - ai-lab-capabilities
   workflow_dispatch:
 
 permissions:
