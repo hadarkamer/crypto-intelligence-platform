@@ -86,7 +86,12 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     key_status = "מחובר" if state.get("configured") else "לא מוגדר"
     tools = ", ".join(state.get("tools") or []) or "אין"
     vision = state.get("coinglass_vision") or {}
-    vision_status = "פעיל" if vision.get("enabled") else "כבוי בהגדרות"
+    if not vision.get("enabled"):
+        vision_status = "כבוי בהגדרות"
+    elif vision.get("liquidation_map_available"):
+        vision_status = "פעיל — Heatmap + Liquidation Map"
+    else:
+        vision_status = "פעיל חלקית — Heatmap בלבד"
     await update.message.reply_text(
         "🧠 AI Candidate\n"
         f"OpenAI API: {key_status}\n"

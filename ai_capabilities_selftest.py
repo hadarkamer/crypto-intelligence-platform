@@ -131,12 +131,51 @@ def _test_vision_cache() -> None:
             os.environ["AI_COINGLASS_VISION_ENABLED"] = old_enabled
 
 
+def _test_partial_vision_without_authenticated_session() -> None:
+    old_cookie = os.environ.pop("COINGLASS_COOKIE_HEADER", None)
+    old_state = os.environ.pop("COINGLASS_STORAGE_STATE_JSON", None)
+    original_ensure = ai_market_vision._ensure_chromium
+    original_capture = ai_market_vision.capture_heatmaps
+    original_analyze = ai_market_vision.analyze_heatmap_images
+    original_report = ai_market_vision.build_heatmap_report
+    try:
+        ai_market_vision._ensure_chromium = lambda: None
+        ai_market_vision.capture_heatmaps = lambda *args, **kwargs: [
+            {"image": "mock.png", "timeframe": "12h"}
+        ]
+        ai_market_vision.analyze_heatmap_images = lambda *args, **kwargs: {
+            "symbol": "BTC",
+            "scans": [],
+            "cross_timeframe": {"available": False},
+        }
+        ai_market_vision.build_heatmap_report = lambda result: "mock report"
+        result = ai_market_vision._scan_sync("BTC", "all")
+        assert "heatmap" in result["results"]
+        assert result["results"]["liquidation_map"]["available"] is False
+        try:
+            ai_market_vision._scan_sync("BTC", "liquidation_map")
+        except RuntimeError as exc:
+            assert "authenticated" in str(exc).lower()
+        else:
+            raise AssertionError("Liquidation Map must require an authenticated session")
+    finally:
+        ai_market_vision._ensure_chromium = original_ensure
+        ai_market_vision.capture_heatmaps = original_capture
+        ai_market_vision.analyze_heatmap_images = original_analyze
+        ai_market_vision.build_heatmap_report = original_report
+        if old_cookie is not None:
+            os.environ["COINGLASS_COOKIE_HEADER"] = old_cookie
+        if old_state is not None:
+            os.environ["COINGLASS_STORAGE_STATE_JSON"] = old_state
+
+
 def run() -> None:
     _test_tool_registration()
     _test_source_rendering()
     _test_telegram_cleanup()
     _test_vision_status_redaction()
     _test_vision_cache()
+    _test_partial_vision_without_authenticated_session()
     print("AI candidate capabilities self-test: PASS")
 
 

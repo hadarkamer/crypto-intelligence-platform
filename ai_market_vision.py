@@ -65,13 +65,22 @@ def _view(value: Any) -> str:
     return view
 
 
+def _authenticated_session_configured() -> bool:
+    return bool(
+        os.getenv("COINGLASS_STORAGE_STATE_JSON", "").strip()
+        or os.getenv("COINGLASS_COOKIE_HEADER", "").strip()
+    )
+
+
 def status() -> dict[str, Any]:
     """Return configuration metadata without exposing credentials."""
     return {
         "enabled": _env_flag("AI_COINGLASS_VISION_ENABLED"),
-        "authenticated_session_configured": bool(
-            os.getenv("COINGLASS_STORAGE_STATE_JSON", "").strip()
-            or os.getenv("COINGLASS_COOKIE_HEADER", "").strip()
+        "authenticated_session_configured": _authenticated_session_configured(),
+        "heatmap_available": _env_flag("AI_COINGLASS_VISION_ENABLED"),
+        "liquidation_map_available": (
+            _env_flag("AI_COINGLASS_VISION_ENABLED")
+            and _authenticated_session_configured()
         ),
         "supported_symbols": sorted(SUPPORTED_SYMBOLS),
         "supported_views": sorted(SUPPORTED_VIEWS),
@@ -161,14 +170,26 @@ def _scan_sync(symbol: str, view: str) -> dict[str, Any]:
             }
 
         if view in {"liquidation_map", "all"}:
-            image = capture_liquidation_map(root / "liquidation_map")
-            liquidation_map = _stamp(
-                analyze_liquidation_map(image, symbol=symbol), generated_at
-            )
-            output["results"]["liquidation_map"] = {
-                "structured": liquidation_map,
-                "report": build_liquidation_map_report(liquidation_map),
-            }
+            if not _authenticated_session_configured():
+                unavailable = {
+                    "available": False,
+                    "reason": (
+                        "The authenticated CoinGlass browser session is not configured in this service"
+                    ),
+                }
+                if view == "liquidation_map":
+                    raise RuntimeError(unavailable["reason"])
+                output["results"]["liquidation_map"] = unavailable
+            else:
+                image = capture_liquidation_map(root / "liquidation_map")
+                liquidation_map = _stamp(
+                    analyze_liquidation_map(image, symbol=symbol), generated_at
+                )
+                output["results"]["liquidation_map"] = {
+                    "available": True,
+                    "structured": liquidation_map,
+                    "report": build_liquidation_map_report(liquidation_map),
+                }
 
     return output
 

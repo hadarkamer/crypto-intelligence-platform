@@ -154,7 +154,8 @@ TOOL_SPECS = [
             "The heatmap view covers 12h and 24h; the liquidation-map view separately reads "
             "Binance BTC/USDT, aggregate exchanges and Hyperliquid. Use this when the user asks "
             "to scan or inspect the current visible CoinGlass maps. The scan is read-only, can "
-            "take a few minutes, and reports relative visual concentration rather than invented dollar totals."
+            "take a few minutes, and reports relative visual concentration rather than invented dollar totals. "
+            "Heatmap is public; Liquidation Map availability depends on an authenticated browser session."
         ),
         "parameters": {
             "type": "object",
