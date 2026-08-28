@@ -1,0 +1,41 @@
+name: Production AI Analytics Check
+
+on:
+  push:
+    branches:
+      - ai-production-analytics
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Compile production modules
+        run: |
+          python -m py_compile \
+            main.py ai_agent.py ai_tools.py ai_telegram.py \
+            ai_history_research.py ai_alert_research.py \
+            research_event_capture.py research_event_runtime.py \
+            research_event_store.py research_outcome_worker.py
+      - name: Production analytical boundary
+        run: python production_ai_integration_selftest.py
+      - name: Research Event normalization
+        run: python research_event_capture_selftest.py
+      - name: Research runtime mapping
+        run: python research_event_runtime_selftest.py
+      - name: Research writer disabled-by-default
+        run: python research_event_store_selftest.py
+      - name: Source integrity
+        run: |
+          ! grep -R "scan_coinglass_market\|AI_WEB_SEARCH_ENABLED\|web_search" \
+            ai_agent.py ai_tools.py ai_telegram.py main.py

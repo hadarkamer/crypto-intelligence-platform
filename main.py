@@ -35,6 +35,11 @@ import coinglass_flow_foundation
 import coinglass_flow_engine
 import time_family_engine
 import market_confidence_engine
+import ai_agent
+import ai_telegram
+import research_event_runtime
+import research_event_store
+import research_outcome_worker
 from collections import defaultdict
 
 try:
@@ -1219,7 +1224,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/flow_stats BTC — P25/P50/P75/P90 של שינויי CVD לפי טווח\n"
         "/oi_validation BTC — בדיקת איכות timestamp ונקודות הייחוס\n"
         "/oi_state BTC — הצגת חישוב Price+OI Regime השמור האחרון\n"
-        "/oi_regime BTC — Alias להצגת אותו חישוב Price+OI Regime"
+        "/oi_regime BTC — Alias להצגת אותו חישוב Price+OI Regime\n"
+        "/ai <שאלה> — ניתוח AI של נתוני השוק וארכיון ההתראות\n"
+        "/ai_status — מצב מנוע ה-AI, הארכיון והתוצאות\n"
+        "/ai_reset — איפוס זיכרון השיחה הזמני"
     )
 
 
@@ -2638,30 +2646,139 @@ def _combined_confirmation_message(candidate: Dict[str, Any]) -> str:
 
 
 def _collect_combined_confirmation_messages(
-    items: List[Dict[str, Any]], rows: List[Dict[str, Any]]
-) -> List[str]:
+    items: List[Dict[str, Any]],
+    rows: List[Dict[str, Any]],
+    *,
+    include_metadata: bool = False,
+    event_time: Any = None,
+    persist_research: bool = False,
+) -> List[Any]:
     """Emit only on entry or when genuinely new evidence joins an active setup."""
     candidates = _combined_confirmation_candidates(items, rows)
+    # Research-only lifecycle tracking: preserve Combined weakening, component
+    # loss and deactivation even when Telegram correctly emits no new alert.
+    # This sidecar does not change COMBINED_CONFIRMATION_STATE or strategy logic.
+    try:
+        research_event_runtime.capture_combined_state_changes(
+            candidates,
+            event_time=event_time,
+            persist=persist_research,
+        )
+    except Exception as exc:
+        print(f"[research-dry-run] combined state hook failed: {exc!r}", flush=True)
     active_keys = {str(candidate["key"]) for candidate in candidates}
     for stale_key in list(COMBINED_CONFIRMATION_STATE):
         if stale_key not in active_keys:
             COMBINED_CONFIRMATION_STATE.pop(stale_key, None)
 
-    messages: List[str] = []
+    messages: List[Any] = []
     for candidate in candidates:
         key = str(candidate["key"])
         current_signals = set(candidate.get("signal_keys") or set())
         previous_signals = set(COMBINED_CONFIRMATION_STATE.get(key) or set())
         if not previous_signals or current_signals - previous_signals:
-            messages.append(_combined_confirmation_message(candidate))
+            entry = {
+                "text": _combined_confirmation_message(candidate),
+                "candidate": candidate,
+                "decision_time": event_time or datetime.now(timezone.utc),
+            }
+            messages.append(entry if include_metadata else entry["text"])
         COMBINED_CONFIRMATION_STATE[key] = current_signals
     return messages
 
 
-async def _send_alert_with_confirmation(bot, chat_id: int, card: str, item: Dict[str, Any]) -> None:
-    await bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
+async def _send_alert_with_confirmation(
+    bot,
+    chat_id: int,
+    card: str,
+    item: Dict[str, Any],
+    *,
+    special_transitions_precomputed: bool = False,
+) -> None:
+    # Freeze the Research Event decision timestamp BEFORE Telegram network latency.
+    # The sidecar is still emitted only after successful delivery, but its market/news
+    # join anchor remains the exact decision/observation time.
+    decision_time = datetime.now(timezone.utc)
+    attempted_at = datetime.now(timezone.utc)
+    try:
+        await bot.send_message(chat_id=chat_id, text=card, parse_mode="HTML")
+    except Exception:
+        try:
+            research_event_runtime.capture_sent_maxpain(
+                item,
+                event_time=decision_time,
+                persist=True,
+                delivery_status="DELIVERY_FAILED",
+                delivery_attempted_at_utc=attempted_at,
+            )
+        except Exception as exc:
+            print(f"[research] failed-delivery hook failed: {exc!r}", flush=True)
+        raise
+    delivered_at = datetime.now(timezone.utc)
+    try:
+        research_event_runtime.capture_sent_maxpain(
+            item,
+            event_time=decision_time,
+            persist=True,
+            delivery_status="DELIVERED",
+            delivery_attempted_at_utc=attempted_at,
+            delivered_at_utc=delivered_at,
+        )
+    except Exception as exc:
+        print(f"[research] sent alert hook failed: {exc!r}", flush=True)
+    separate_messages = _special_transition_messages(item)
+    special_attempted_at = datetime.now(timezone.utc)
+    try:
+        for separate in separate_messages:
+            await bot.send_message(chat_id=chat_id, text=separate, parse_mode="HTML")
+    except Exception:
+        if not special_transitions_precomputed:
+            try:
+                research_event_runtime.capture_special_transitions(
+                    [item],
+                    event_time=decision_time,
+                    persist=True,
+                    delivery_status="DELIVERY_FAILED",
+                    delivery_attempted_at_utc=special_attempted_at,
+                )
+            except Exception as exc:
+                print(f"[research] failed special alert hook failed: {exc!r}", flush=True)
+        raise
+    if not special_transitions_precomputed:
+        try:
+            research_event_runtime.capture_special_transitions(
+                [item],
+                event_time=decision_time,
+                persist=True,
+                delivery_status="DELIVERED",
+                delivery_attempted_at_utc=special_attempted_at,
+                delivered_at_utc=datetime.now(timezone.utc),
+            )
+        except Exception as exc:
+            print(f"[research] special alert hook failed: {exc!r}", flush=True)
+
+
+async def _reply_alert_with_archive(
+    update: Update,
+    card: str,
+    item: Dict[str, Any],
+) -> None:
+    """Deliver a manual scan and store it only as a non-alert decision sample."""
+    decision_time = datetime.now(timezone.utc)
+    await update.message.reply_text(card, parse_mode="HTML")
+    try:
+        research_event_runtime.capture_manual_maxpain_sample(
+            item,
+            event_time=decision_time,
+            persist=True,
+        )
+    except Exception as exc:
+        print(f"[research] manual sample hook failed: {exc!r}", flush=True)
+
+    # Preserve the command's existing Telegram output, but never feed a
+    # user-triggered scan into delivered-alert performance statistics.
     for separate in _special_transition_messages(item):
-        await bot.send_message(chat_id=chat_id, text=separate, parse_mode="HTML")
+        await update.message.reply_text(separate, parse_mode="HTML")
 
 def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     """Build the Stage 76 HTML-formatted Telegram alert card."""
@@ -3256,9 +3373,7 @@ async def alert_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             for index, item in enumerate(items, start=1):
                 card = _alert_card(index, item, all_items, rows)
-                await update.message.reply_text(card, parse_mode="HTML")
-                for separate in _special_transition_messages(item):
-                    await update.message.reply_text(separate, parse_mode="HTML")
+                await _reply_alert_with_archive(update, card, item)
             await update.message.reply_text(alert_summary.format_alert_count_summary(items))
 
         except asyncio.CancelledError:
@@ -3338,9 +3453,7 @@ async def alert_check_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             for index, item in enumerate(items, start=1):
                 card = _alert_card(index, item, top8_all_items, rows)
-                await update.message.reply_text(card, parse_mode="HTML")
-                for separate in _special_transition_messages(item):
-                    await update.message.reply_text(separate, parse_mode="HTML")
+                await _reply_alert_with_archive(update, card, item)
             await update.message.reply_text(
                 alert_summary.format_alert_count_summary(items)
             )
@@ -3436,9 +3549,7 @@ async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAUL
             )
             for index, item in enumerate(items, start=1):
                 card = _alert_card(index, item, all_items, rows)
-                await update.message.reply_text(card, parse_mode="HTML")
-                for separate in _special_transition_messages(item):
-                    await update.message.reply_text(separate, parse_mode="HTML")
+                await _reply_alert_with_archive(update, card, item)
             await update.message.reply_text(
                 alert_summary.format_alert_count_summary(items)
             )
@@ -3541,9 +3652,7 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 sent_index += 1
                 card = _alert_card(sent_index, item, all_items, rows)
-                await update.message.reply_text(card, parse_mode="HTML")
-                for separate in _special_transition_messages(item):
-                    await update.message.reply_text(separate, parse_mode="HTML")
+                await _reply_alert_with_archive(update, card, item)
 
         except asyncio.CancelledError:
             raise
@@ -3864,24 +3973,54 @@ async def _send_magnet_watch_reports(
         if symbol not in MAGNET_V1_WATCHES:
             continue
         target_chat = int(watch.get("chat_id"))
-        await bot_app.bot.send_message(
-            chat_id=target_chat,
-            text=(
-                f"🧲 Magnet Watch V1 #{cycle_number} — {symbol}\n"
-                + _watch_derivatives_line(derivatives_status)
-            ),
-        )
-        for message in await _build_magnet_report(
-            symbol,
-            rows,
-            derivatives_snapshot=derivatives_snapshot,
-        ):
+        decision_time = datetime.now(timezone.utc)
+        attempted_at = datetime.now(timezone.utc)
+        try:
             await bot_app.bot.send_message(
                 chat_id=target_chat,
-                text=message,
-                parse_mode="HTML",
+                text=(
+                    f"🧲 Magnet Watch V1 #{cycle_number} — {symbol}\n"
+                    + _watch_derivatives_line(derivatives_status)
+                ),
             )
-            sent += 1
+            for message in await _build_magnet_report(
+                symbol,
+                rows,
+                derivatives_snapshot=derivatives_snapshot,
+            ):
+                await bot_app.bot.send_message(
+                    chat_id=target_chat,
+                    text=message,
+                    parse_mode="HTML",
+                )
+                sent += 1
+        except Exception:
+            try:
+                research_event_runtime.capture_magnet_watch_symbol(
+                    symbol,
+                    rows,
+                    derivatives_snapshot,
+                    event_time=decision_time,
+                    persist=True,
+                    delivery_status="DELIVERY_FAILED",
+                    delivery_attempted_at_utc=attempted_at,
+                )
+            except Exception as exc:
+                print(f"[research] failed Magnet hook {symbol}: {exc!r}", flush=True)
+            raise
+        try:
+            research_event_runtime.capture_magnet_watch_symbol(
+                symbol,
+                rows,
+                derivatives_snapshot,
+                event_time=decision_time,
+                persist=True,
+                delivery_status="DELIVERED",
+                delivery_attempted_at_utc=attempted_at,
+                delivered_at_utc=datetime.now(timezone.utc),
+            )
+        except Exception as exc:
+            print(f"[research] Magnet hook failed {symbol}: {exc!r}", flush=True)
         watch["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
         watch["last_generation"] = derivatives_status.get("generation")
     return sent
@@ -3937,14 +4076,21 @@ async def run_watch_cycle(
             for item in all_items
             if _is_displayable_opportunity(item)
         ]
+        research_decision_time = datetime.now(timezone.utc)
         # A Magnet-only subscriber must not consume regular or combined alert
         # transitions that were never sent to the general Watch chat.
         special_messages = (
             _collect_special_transition_messages(displayable_items)
             if general_enabled else []
         )
-        combined_messages = (
-            _collect_combined_confirmation_messages(displayable_items, rows)
+        combined_deliveries = (
+            _collect_combined_confirmation_messages(
+                displayable_items,
+                rows,
+                include_metadata=True,
+                event_time=research_decision_time,
+                persist_research=True,
+            )
             if general_enabled else []
         )
         candidates = [
@@ -3988,24 +4134,75 @@ async def run_watch_cycle(
                     chat_id,
                     _alert_card(index, item, all_items, rows),
                     item,
+                    special_transitions_precomputed=True,
                 )
             if result_items:
                 await bot_app.bot.send_message(
                     chat_id=chat_id,
                     text=alert_summary.format_alert_count_summary(result_items),
                 )
-            for special_message in special_messages:
-                await bot_app.bot.send_message(
-                    chat_id=chat_id,
-                    text=special_message,
-                    parse_mode="HTML",
+            special_attempted_at = datetime.now(timezone.utc)
+            try:
+                for special_message in special_messages:
+                    await bot_app.bot.send_message(
+                        chat_id=chat_id,
+                        text=special_message,
+                        parse_mode="HTML",
+                    )
+            except Exception:
+                try:
+                    research_event_runtime.capture_special_transitions(
+                        displayable_items,
+                        event_time=research_decision_time,
+                        persist=True,
+                        delivery_status="DELIVERY_FAILED",
+                        delivery_attempted_at_utc=special_attempted_at,
+                    )
+                except Exception as exc:
+                    print(f"[research] failed special hook: {exc!r}", flush=True)
+                raise
+            try:
+                research_event_runtime.capture_special_transitions(
+                    displayable_items,
+                    event_time=research_decision_time,
+                    persist=True,
+                    delivery_status="DELIVERED",
+                    delivery_attempted_at_utc=special_attempted_at,
+                    delivered_at_utc=datetime.now(timezone.utc),
                 )
-            for combined_message in combined_messages:
-                await bot_app.bot.send_message(
-                    chat_id=chat_id,
-                    text=combined_message,
-                    parse_mode="HTML",
-                )
+            except Exception as exc:
+                print(f"[research] special transition hook failed: {exc!r}", flush=True)
+            for combined_delivery in combined_deliveries:
+                attempted_at = datetime.now(timezone.utc)
+                try:
+                    await bot_app.bot.send_message(
+                        chat_id=chat_id,
+                        text=combined_delivery["text"],
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    try:
+                        research_event_runtime.capture_combined_confirmation(
+                            combined_delivery["candidate"],
+                            event_time=combined_delivery["decision_time"],
+                            persist=True,
+                            delivery_status="DELIVERY_FAILED",
+                            delivery_attempted_at_utc=attempted_at,
+                        )
+                    except Exception as exc:
+                        print(f"[research] failed Combined hook: {exc!r}", flush=True)
+                    raise
+                try:
+                    research_event_runtime.capture_combined_confirmation(
+                        combined_delivery["candidate"],
+                        event_time=combined_delivery["decision_time"],
+                        persist=True,
+                        delivery_status="DELIVERED",
+                        delivery_attempted_at_utc=attempted_at,
+                        delivered_at_utc=datetime.now(timezone.utc),
+                    )
+                except Exception as exc:
+                    print(f"[research] Combined hook failed: {exc!r}", flush=True)
 
         magnet_sent = await _send_magnet_watch_reports(
             bot_app,
@@ -4038,7 +4235,7 @@ async def run_watch_cycle(
             "found": len(all_items),
             "candidates": len(candidates),
             "sent": len(result_items),
-            "combined_sent": len(combined_messages) if general_enabled else 0,
+            "combined_sent": len(combined_deliveries) if general_enabled else 0,
             "magnet_sent": magnet_sent,
             "derivatives": derivatives_status,
             "timeframe_integrity": live_result.get("timeframe_integrity"),
@@ -4969,7 +5166,13 @@ async def technical_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("\n".join(lines))
 
 async def health(request):
-    return web.json_response({"status": "ok", "service": "crypto-intelligence-v1"})
+    return web.json_response({
+        "status": "ok",
+        "service": "crypto-intelligence-v1",
+        "ai": ai_agent.status(),
+        "research_capture": research_event_runtime.status(),
+        "research_outcomes": research_outcome_worker.WORKER.status(),
+    })
 
 async def telegram_webhook(request):
     """Acknowledge Telegram immediately and process each update once."""
@@ -6056,10 +6259,31 @@ async def main():
     bot_app.add_handler(CommandHandler("oi_stats", oi_stats_cmd))
     bot_app.add_handler(CommandHandler("oi_state", oi_state_cmd))
     bot_app.add_handler(CommandHandler("oi_regime", oi_state_cmd))
+    ai_telegram.register_ai_handlers(bot_app)
     bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()
     await bot_app.start()
+
+    try:
+        writer_started = await research_event_store.WRITER.start()
+        print(
+            f"[research-store] {'started' if writer_started else 'disabled'}; "
+            f"status={research_event_store.WRITER.status()}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[research-store] startup failed open: {exc!r}", flush=True)
+
+    try:
+        outcomes_started = await research_outcome_worker.WORKER.start()
+        print(
+            f"[research-outcomes] {'started' if outcomes_started else 'disabled'}; "
+            f"status={research_outcome_worker.WORKER.status()}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[research-outcomes] startup failed open: {exc!r}", flush=True)
 
     print(
         "[startup] manual-only trading mode; no Max-Pain alert or Watch scan started automatically",
@@ -6146,6 +6370,9 @@ async def main():
                     await refresh_task
                 except asyncio.CancelledError:
                     pass
+
+        await research_outcome_worker.WORKER.stop()
+        await research_event_store.WRITER.stop()
 
         await bot_app.bot.delete_webhook(drop_pending_updates=False)
         await bot_app.stop()
