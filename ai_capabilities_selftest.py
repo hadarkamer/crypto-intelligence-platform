@@ -93,6 +93,7 @@ def _test_vision_status_redaction() -> None:
         assert "secret-cookie-value" not in repr(state)
         assert state["writes_bot_state"] is False
         assert state["persists_screenshots"] is False
+        assert state["browser"]["auto_install"] is True
     finally:
         if old_cookie is None:
             os.environ.pop("COINGLASS_COOKIE_HEADER", None)
