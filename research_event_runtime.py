@@ -1,9 +1,9 @@
-"""Dry-run mapping from live Watch/alert shapes into Research Events.
+"""Map live Watch/alert shapes into Research Events through a fail-open sidecar.
 
-This module is intentionally persistence-free. It never opens PostgreSQL or
-SQLite and cannot mutate strategy/runtime state outside its own in-memory
-research tracker. Production-like alert paths may call it as a sidecar: if
-research capture fails, the caller should continue normal alert delivery.
+Every event is retained in a bounded in-memory tracker. Explicit production
+delivery hooks may additionally enqueue it to the asynchronous Research writer;
+shadow replay and self-tests keep persistence disabled. The mapper never alters
+strategy, Watch or scoring state, and capture failure must not block Telegram.
 
 Research-only state-change events are emitted on weakening/reset because the
 research brief explicitly requires delayed entries, inverse signals, repeated
@@ -719,8 +719,16 @@ def capture_magnet_watch_symbol(
 
 def status() -> Dict[str, Any]:
     base = dict(SINK.status())
+    persistence = research_event_store.WRITER.status()
+    persistence_running = bool(
+        persistence.get("enabled")
+        and persistence.get("configured")
+        and persistence.get("running")
+    )
     base.update({
-        "runtime_mapper": "live-shapes-dry-run-v2",
+        "mode": "LIVE_ASYNC_PERSISTENCE" if persistence_running else "DRY_RUN_MEMORY_ONLY",
+        "database_writes": persistence_running,
+        "runtime_mapper": "live-alert-sidecar-v3",
         "tracked_confirmation_states": len(_CONFIRMATION_STATE),
         "tracked_score65_states": len(_SCORE_CONFIRMATION_STATE),
         "tracked_score83_states": len(_HIGH_SCORE_83_STATE),
@@ -728,7 +736,7 @@ def status() -> Dict[str, Any]:
         "tracked_spot_family_states": len(_SPOT_FAMILY_HIGH_STATE),
         "tracked_magnet_states": len(_MAGNET_STATE),
         "tracked_combined_states": len(_COMBINED_STATE),
-        "persistence": research_event_store.WRITER.status(),
+        "persistence": persistence,
     })
     return base
 
