@@ -32,6 +32,12 @@ WEB_SEARCH_ENABLED = os.getenv("AI_WEB_SEARCH_ENABLED", "1").strip().lower() in 
     "yes",
     "on",
 }
+CODE_INTERPRETER_ENABLED = os.getenv("AI_CODE_INTERPRETER_ENABLED", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 SYSTEM_INSTRUCTIONS = """You are the AI analysis layer inside a crypto-intelligence bot.
@@ -43,7 +49,8 @@ Your roles are:
 3. Research assistant: use the approved historical tools to analyze stored Price/OI, Futures CVD, Spot CVD, OI regime and technical-signal history. You may inspect evidence nearest to an exact historical timestamp.
 4. Live external researcher: use web_search for current information, news, reports and public commentary. Prefer primary sources. For crypto research, explicitly consider CryptoJungle (cryptojungle.co.il), SoSoValue (sosovalue.com), YouTube, unbias.fyi and the verified unbias_fyi account on X when relevant. Treat YouTube, analyst commentary and social posts as opinion/sentiment unless independently corroborated. Include the publication time when visible, say when it is unavailable, and preserve source links.
 5. Visual market scanner: use scan_coinglass_market when the user asks to inspect the current CoinGlass Heatmap or Liquidation Map. Keep 12h/24h and Binance/aggregate/Hyperliquid results separate. Visual intensity is relative, not dollars or probability.
-6. Future alert-performance researcher: timestamped Research Events are not yet being persisted. Do not pretend historical alert outcomes exist before the production-bot integration connects them.
+6. Quantitative analyst: use the Python/code-interpreter tool for non-trivial arithmetic, comparisons or consistency checks over data returned by approved tools. It is calculation support, not an additional market-data source.
+7. Future alert-performance researcher: timestamped Research Events are not yet being persisted. Do not pretend historical alert outcomes exist before the production-bot integration connects them.
 
 Candidate safety boundary:
 - This version is READ ONLY.
@@ -57,6 +64,7 @@ Candidate safety boundary:
 - Live web and visual research are available but are not archived in the candidate lab. Clearly distinguish a live lookup from stored bot history.
 - For time-sensitive external facts, use web_search rather than model memory and distinguish publication time from event time.
 - Never invent exact liquidity dollars from CoinGlass colors; report only values explicitly visible in the source.
+- The Python tool cannot access the bot, database or private credentials. Do not use it to create files in this Telegram candidate; use it only for calculations and validation.
 - Be concise by default, but explain reasoning in plain language when the user asks why.
 """
 
@@ -242,6 +250,13 @@ class BotAIAgent:
         tools = list(ai_tools.TOOL_SPECS)
         if WEB_SEARCH_ENABLED:
             tools.append({"type": "web_search"})
+        if CODE_INTERPRETER_ENABLED:
+            tools.append(
+                {
+                    "type": "code_interpreter",
+                    "container": {"type": "auto", "memory_limit": "1g"},
+                }
+            )
         payload = {
             "model": self.model,
             "store": False,
@@ -252,8 +267,13 @@ class BotAIAgent:
             "reasoning": {"effort": "medium"},
             "text": {"verbosity": "medium"},
         }
+        include = []
         if WEB_SEARCH_ENABLED:
-            payload["include"] = ["web_search_call.action.sources"]
+            include.append("web_search_call.action.sources")
+        if CODE_INTERPRETER_ENABLED:
+            include.append("code_interpreter_call.outputs")
+        if include:
+            payload["include"] = include
         return payload
 
     async def ask(self, user_text: str, *, conversation_id: str | int) -> str:
@@ -341,12 +361,15 @@ def status() -> Dict[str, Any]:
     tools = ai_tools.tool_names()
     if WEB_SEARCH_ENABLED:
         tools.append("web_search")
+    if CODE_INTERPRETER_ENABLED:
+        tools.append("code_interpreter")
     return {
         "configured": AGENT.configured,
         "model": AGENT.model,
         "mode": "candidate_read_only",
         "tools": tools,
         "web_search": "enabled_live_not_persisted" if WEB_SEARCH_ENABLED else "disabled",
+        "code_interpreter": "enabled_ephemeral_calculation_only" if CODE_INTERPRETER_ENABLED else "disabled",
         "coinglass_vision": ai_tools.vision_status(),
         "memory": "in_process_bounded_not_persistent",
     }

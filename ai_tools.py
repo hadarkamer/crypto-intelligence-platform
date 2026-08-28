@@ -301,6 +301,12 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
         "yes",
         "on",
     }
+    code_enabled = os.getenv("AI_CODE_INTERPRETER_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     return {
         "mode": "candidate_read_only",
         "approved_tools": [
@@ -311,6 +317,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "get_market_context_at_time",
             "scan_coinglass_market",
             "web_search",
+            "code_interpreter",
             "get_ai_capabilities",
         ],
         "live_external_research": {
@@ -326,6 +333,12 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "persistence": "not archived in the candidate lab",
         },
         "coinglass_vision": ai_market_vision.status(),
+        "quantitative_calculation": {
+            "enabled": code_enabled,
+            "tool": "code_interpreter",
+            "container": "ephemeral 1 GB, calculation-only",
+            "bot_or_database_access": False,
+        },
         "not_yet_connected": [
             "historical alert outcomes (requires timestamped Research Events)",
             "persistent external exchange/index context archive",

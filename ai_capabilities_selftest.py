@@ -24,7 +24,11 @@ def _test_tool_registration() -> None:
     }
     assert "scan_coinglass_market" in function_names
     assert "web_search" in hosted_types
-    assert payload.get("include") == ["web_search_call.action.sources"]
+    assert "code_interpreter" in hosted_types
+    assert payload.get("include") == [
+        "web_search_call.action.sources",
+        "code_interpreter_call.outputs",
+    ]
     assert "scan_coinglass_market" in ai_tools.tool_names()
 
 

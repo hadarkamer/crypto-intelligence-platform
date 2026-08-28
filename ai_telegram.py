@@ -94,6 +94,7 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Mode: READ ONLY\n"
         f"Tools: {tools}\n"
         f"Web search: {'פעיל' if state.get('web_search') == 'enabled_live_not_persisted' else 'כבוי'}\n"
+        f"Python לחישובים: {'פעיל' if state.get('code_interpreter') == 'enabled_ephemeral_calculation_only' else 'כבוי'}\n"
         f"CoinGlass Vision: {vision_status}\n"
         "זיכרון שיחה: זמני ומוגבל; יתאפס בעת restart."
     )

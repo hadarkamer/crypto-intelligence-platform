@@ -58,6 +58,7 @@ jobs:
           OPENAI_API_KEY: ""
           DATABASE_URL: ""
           AI_WEB_SEARCH_ENABLED: "1"
+          AI_CODE_INTERPRETER_ENABLED: "1"
           AI_COINGLASS_VISION_ENABLED: "0"
         run: python ai_capabilities_selftest.py
       - name: Run Research Event capture self-test
