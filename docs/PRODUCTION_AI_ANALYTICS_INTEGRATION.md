@@ -112,3 +112,11 @@ the Watch loop. Runtime persistence then requires:
 
 The OpenAI command surface additionally requires the existing `OPENAI_API_KEY`.
 All tool calls remain read-only regardless of the passive archive writers.
+
+## Staging deployment
+
+`ai_candidate_main.py` is a dedicated entrypoint for the existing Render test
+service. It registers the same production analytical tools against the staging
+Telegram bot, exposes `/health`, and starts no Watch, collectors, Research
+writers or outcome worker. This allows the integration branch to be verified
+without changing `main` or the production Telegram webhook.

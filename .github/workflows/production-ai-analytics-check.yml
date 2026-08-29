@@ -23,7 +23,7 @@ jobs:
       - name: Compile production modules
         run: |
           python -m py_compile \
-            main.py ai_agent.py ai_tools.py ai_telegram.py \
+            main.py ai_candidate_main.py ai_agent.py ai_tools.py ai_telegram.py \
             ai_history_research.py ai_alert_research.py \
             research_feature_matrix.py \
             research_event_capture.py research_event_runtime.py \
