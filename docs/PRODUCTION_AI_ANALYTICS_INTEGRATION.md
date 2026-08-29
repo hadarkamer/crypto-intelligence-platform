@@ -14,7 +14,7 @@ Research Archive. The release intentionally excludes all lab collection tools:
 The production AI tools are limited to current OI/CVD/market state, historical
 market context, delivered-alert history, one-alert context, canonical spot outcome
 paths, bounded formula-candidate aggregates, a no-lookahead raw/model research
-matrix and capability status.
+matrix, historical replay coverage and capability status.
 
 ## Historical truth boundary
 
@@ -23,6 +23,11 @@ writer was not connected to the delivery paths. Old Telegram alerts therefore
 cannot be recovered from PostgreSQL. Existing Price/OI, Futures CVD, Spot CVD,
 Max Pain and technical-signal data can be researched as historical market
 evidence, but must never be labelled as delivered alerts.
+
+Those raw archives may also be replayed as neutral market opportunities: every
+safe closed observation receives separate LONG and SHORT canonical spot labels.
+This does not invent an old alert. It asks what happened after the raw state and
+keeps that provenance explicit.
 
 An optional later Telegram export importer can add old delivered alerts with an
 explicit provenance label. It is outside this release because no export is
@@ -83,6 +88,14 @@ Verified later canonical spot path metrics appear only under `outcome_label`.
 This enables direct comparison of pure data and the bot's current scoring logic
 without copying the underlying time series into the Research Event archive.
 
+`research_historical_replay.py` extends this to the pre-alert raw archive. It
+waits until each 30-minute source candle has closed plus two minutes, uses
+Binance Spot one-minute paths (Hyperliquid HYPE/USDT for HYPE), and persists
+only compact LONG/SHORT outcome summaries. Formula discovery switches to this
+dataset only after chronological and cross-symbol coverage gates pass. Archive
+row counts, ages, completeness flags, UTC hour and DST offsets cannot become
+formula conditions.
+
 ## Formula objective and remaining stages
 
 The primary analytical objective is to find reproducible conditions associated
@@ -90,16 +103,14 @@ with high directional probability, low adverse movement and fast favorable
 progress. Existing bot scores and raw source measurements are both valid feature
 families; neither is assumed to be optimal in advance.
 
-After the price path and core feature matrix, the implementation order is:
+After the price path and core feature matrix, the operational order is:
 
-1. extend the matrix with matched near-miss/control samples, event-order and
-   BTC/range-context features where source coverage allows;
-2. generate candidate combinations without look-ahead bias;
-3. rank candidates by baseline improvement, MFE, MAE, speed, target progress and
-   sample coverage rather than hit rate alone;
-4. run chronological holdout/out-of-sample validation and retain failures;
-5. register approved Candidate formulas with versions and monitor them in shadow;
-6. validate the frozen formula on genuinely future Shadow outcomes under the
+1. apply the additive replay schema and backfill every eligible raw observation;
+2. rerun candidate generation independently for 1h, 4h, 12h and 24h;
+3. keep identical timestamps together across the chronological split;
+4. rank by baseline improvement, MFE, MAE, speed and sample coverage;
+5. register only coverage-ready candidates and monitor them in Shadow;
+6. validate each frozen formula on genuinely future Shadow outcomes under the
    owner policy, then expose it as a live alert condition for opted-in chats.
 
 ## Explicit activation gates
@@ -110,6 +121,10 @@ the Watch loop. Runtime persistence then requires:
 - `RESEARCH_USE_PRIMARY_DATABASE=1` (or a dedicated `RESEARCH_DATABASE_URL`);
 - `RESEARCH_PERSISTENCE_ENABLED=1`;
 - `RESEARCH_OUTCOME_ENRICHMENT_ENABLED=1`.
+
+Formula Research additionally applies migrations `002`, `003` and `004` via
+the explicit schema administrator. Historical replay writes require the
+one-shot `HISTORICAL_REPLAY_BACKFILL=1` guard; it is not a persistent Watch flag.
 
 The OpenAI command surface additionally requires the existing `OPENAI_API_KEY`.
 All tool calls remain read-only regardless of the passive archive writers.

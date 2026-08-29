@@ -18,6 +18,7 @@ import coinglass_oi_regime_service
 import market_confidence_engine
 import research_feature_matrix
 import research_formula_store
+import research_historical_replay
 
 
 TOOL_SPECS = [
@@ -372,6 +373,23 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
+        "name": "research_historical_replay_status",
+        "description": (
+            "Read coverage and provenance of the neutral historical Price/OI/CVD opportunity replay. "
+            "It reports which symbols, horizons and dates have canonical Binance Spot or HYPE Hyperliquid "
+            "MFE/MAE labels, without returning or storing one-minute candle history. Use it to verify that "
+            "a formula search has broad historical coverage before interpreting results."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+            "required": [],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "research_formula_registry",
         "description": (
             "Read the versioned automatic formula registry and its latest chronological discovery/holdout metrics. "
@@ -602,6 +620,11 @@ async def _research_formula_registry(args: Dict[str, Any]) -> Any:
     return _bounded(result, max_chars=55000)
 
 
+async def _research_historical_replay_status(_: Dict[str, Any]) -> Any:
+    result = await asyncio.to_thread(research_historical_replay.status)
+    return _bounded(result, max_chars=45000)
+
+
 async def _research_formula_shadow(args: Dict[str, Any]) -> Any:
     result = await asyncio.to_thread(
         research_formula_store.shadow_status,
@@ -631,6 +654,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "research_formula_groups",
             "get_alert_price_path",
             "research_feature_matrix",
+            "research_historical_replay_status",
             "research_formula_registry",
             "research_formula_shadow",
             "get_ai_capabilities",
@@ -663,6 +687,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "score-band comparison",
                 "baseline, rarity, MFE/MAE, speed and target metrics",
                 "versioned no-lookahead raw/model feature matrix",
+                "neutral historical raw Price/OI/CVD opportunity replay with canonical spot labels",
                 "prior-alert repetition and cross-symbol breadth features",
                 "UTC hour plus exact per-window ACTIVE/WEEKEND session composition",
                 "automatic single/pair/triple condition search over thousands of candidates",
@@ -716,6 +741,7 @@ _EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
     "research_formula_groups": _research_formula_groups,
     "get_alert_price_path": _get_alert_price_path,
     "research_feature_matrix": _research_feature_matrix,
+    "research_historical_replay_status": _research_historical_replay_status,
     "research_formula_registry": _research_formula_registry,
     "research_formula_shadow": _research_formula_shadow,
     "get_ai_capabilities": _get_ai_capabilities,

@@ -1,4 +1,4 @@
-# Formula Research Runtime v2
+# Formula Research Runtime v3
 
 ## Objective
 
@@ -8,8 +8,8 @@ adverse excursion, fast favorable progress and useful MFE/MAE efficiency.
 
 ## Evidence contract
 
-- Inputs: immutable Research Event state plus raw Price/OI, Futures CVD and
-  Spot CVD points at or before the alert.
+- Inputs: immutable Research Event state and/or neutral archived raw Price/OI,
+  Futures CVD and Spot CVD observations after their source candles closed.
 - Labels: closed canonical spot one-minute paths at 1h, 4h, 12h and 24h.
 - Binance Spot USDT is the default route. HYPE uses Hyperliquid HYPE/USDT spot
   (`@107`). The exchange and pair stay explicit in every outcome.
@@ -25,13 +25,20 @@ adverse excursion, fast favorable progress and useful MFE/MAE efficiency.
   through Friday 20:00 ET and WEEKEND otherwise. It is evaluated in
   `America/New_York`, including DST. Every input window and future outcome
   horizon carries its own exact ACTIVE/WEEKEND composition.
+- CoinGlass 30-minute timestamps are interval-open timestamps. Replay exposes
+  a row only after the 30-minute close plus a two-minute provider grace; its
+  canonical spot path begins after that safe decision time.
+- Technical metadata such as archive sample counts, point age, completeness,
+  schema versions and raw UTC/DST offsets is diagnostic only and cannot become
+  a formula predicate.
 
 ## Discovery
 
 For each horizon and direction, the engine:
 
-1. sorts verified alerts chronologically;
-2. freezes the earliest 70% as discovery and latest 30% as holdout;
+1. sorts verified observations chronologically;
+2. freezes the earliest approximately 70% as discovery and latest 30% as
+   holdout without ever splitting rows that share the same timestamp;
 3. derives numeric thresholds from discovery quantiles only;
 4. evaluates single, pair and triple conditions in a bounded search;
 5. compares each candidate with its same-direction complement after matching
@@ -72,11 +79,25 @@ high percentage from a single day therefore remains `BACKTESTED` at most.
 - `FORMULA_DISCOVERY_HORIZONS=60,240,720,1440`
 - `FORMULA_DISCOVERY_INTERVAL_SECONDS=21600`
 - `FORMULA_SHADOW_POLL_SECONDS=60`
+- `FORMULA_DISCOVERY_DATASET_MODE=auto` prefers the neutral historical replay
+  only after its minimum coverage gate; `alerts` and `historical_replay` are
+  explicit bounded operator overrides.
+
+The one-shot replay is separate from the Watch loop:
+
+- apply migration `004_historical_opportunity_replay_v1.sql` explicitly;
+- set `HISTORICAL_REPLAY_BACKFILL=1` only for the backfill command;
+- optionally bound symbols, dates, horizons, chunk size and anchor count;
+- run `python research_historical_replay.py`;
+- one-minute candles are discarded after calculation; PostgreSQL retains only
+  compact reference/return/MFE/MAE/speed summaries and provenance.
 
 The Candidate service keeps formula workers disabled. Production uses
-migrations `002_formula_research_v1.sql` and
-`003_formula_autonomous_alerts_v1.sql` before enabling the workers.
+migrations `002_formula_research_v1.sql`,
+`003_formula_autonomous_alerts_v1.sql` and
+`004_historical_opportunity_replay_v1.sql` before enabling the workers.
 
-Formula schema v4 retires earlier non-LIVE candidates on its first persisted
-discovery run. Discovery and holdout are then regenerated from the corrected
-session-composition feature matrix before any new formula can enter Shadow.
+Formula schema v5 retires an earlier non-LIVE cohort only after the replacement
+replay has at least 250 anchors, four symbols, 14 UTC dates and 336 hours of
+span for that horizon. Before that gate, a result is capped at `BACKTESTED` and
+the earlier cohort remains auditable and active.

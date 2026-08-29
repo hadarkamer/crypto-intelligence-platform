@@ -208,6 +208,9 @@ def persist_discovery_run(
     if not discovery.get("available"):
         raise ValueError("cannot persist an unavailable discovery result")
     formulas = list(discovery.get("formulas") or [])
+    coverage = dict(dataset.get("coverage") or {})
+    replacement_ready = bool(coverage.get("replacement_ready"))
+    dataset_kind = str(coverage.get("dataset_kind") or "unknown")
     with _connect(read_only=False) as conn:
         if not _table_exists(conn, "research_formulas"):
             raise RuntimeError("Formula Research schema is not installed")
@@ -238,14 +241,13 @@ def persist_discovery_run(
                 int(discovery.get("holdout_sample_size") or 0),
                 int(discovery.get("candidates_evaluated") or 0),
                 _json(discovery.get("config") or {}),
-                _json(dataset.get("coverage") or {}),
+                _json(coverage),
             ),
         ).fetchone()
         run_id = int(run["run_id"])
-        # v4 uses exact session composition while preserving the wide-move
-        # objective. Older schemas cannot be evaluated under the same feature
-        # contract and therefore remain audit-only. Retire them horizon by
-        # horizon only after that horizon's replacement cohort is ready.
+        # A new schema may retire its predecessor only after the replacement
+        # dataset has broad chronological coverage.  This prevents a tiny
+        # post-deploy alert sample from deleting the last auditable cohort.
         superseded = conn.execute(
             """
             SELECT formula_id, current_stage
@@ -260,8 +262,19 @@ def persist_discovery_run(
                 research_formula_engine.FORMULA_SCHEMA_VERSION,
                 int(discovery["horizon_minutes"]),
             ),
-        ).fetchall()
+        ).fetchall() if replacement_ready else []
         for old_formula in superseded:
+            requested_stage = str(formula["recommended_stage"])
+            gate_notes = list(formula.get("gate_notes") or [])
+            if (
+                not replacement_ready
+                and _STAGE_ORDER.get(requested_stage, 0)
+                > _STAGE_ORDER["BACKTESTED"]
+            ):
+                requested_stage = "BACKTESTED"
+                gate_notes.append(
+                    "automatic stage capped at BACKTESTED until replacement dataset coverage is ready"
+                )
             conn.execute(
                 """
                 INSERT INTO research_formula_stage_history (
@@ -273,7 +286,10 @@ def persist_discovery_run(
                     int(old_formula["formula_id"]),
                     run_id,
                     str(old_formula["current_stage"]),
-                    "superseded by exact-session-composition formula schema v4",
+                    (
+                        "superseded by safe historical-replay formula schema v5 "
+                        f"from {dataset_kind}"
+                    ),
                 ),
             )
         if superseded:
@@ -374,17 +390,20 @@ def persist_discovery_run(
                     _json(formula["discovery_metrics"]),
                     _json(formula["holdout_metrics"]),
                     _json(formula["multiple_testing"]),
-                    formula["recommended_stage"],
-                    _json(formula.get("gate_notes") or []),
+                    requested_stage,
+                    _json(gate_notes),
                 ),
             )
             final_stage = _advance_stage(
                 conn,
                 formula_id=formula_id,
                 current_stage=current_stage,
-                target_stage=formula["recommended_stage"],
+                target_stage=requested_stage,
                 run_id=run_id,
-                reason="automatic chronological discovery/holdout evaluation",
+                reason=(
+                    "automatic chronological discovery/holdout evaluation; "
+                    f"dataset={dataset_kind}; replacement_ready={replacement_ready}"
+                ),
             )
             stage_counts[final_stage] = stage_counts.get(final_stage, 0) + 1
             persisted += 1
@@ -410,7 +429,7 @@ def persist_discovery_run(
                 int(discovery["horizon_minutes"]),
                 run_id,
             ),
-        ).fetchall()
+        ).fetchall() if replacement_ready else []
         for stale_formula in stale_candidates:
             conn.execute(
                 """
@@ -504,6 +523,7 @@ def formula_registry(
                    f.created_at_utc, f.updated_at_utc,
                    e.ranking_score, e.discovery_metrics,
                    e.holdout_metrics, e.multiple_testing, e.gate_notes,
+                   r.coverage AS dataset_coverage,
                    (SELECT COUNT(*) FROM research_formula_shadow_checks c
                     WHERE c.formula_id=f.formula_id) AS shadow_checks,
                    (SELECT COUNT(*) FROM research_formula_shadow_hits h
@@ -511,6 +531,8 @@ def formula_registry(
             FROM research_formulas f
             LEFT JOIN research_formula_evaluations e
               ON e.run_id=f.latest_evaluation_run_id AND e.formula_id=f.formula_id
+            LEFT JOIN research_formula_runs r
+              ON r.run_id=f.latest_evaluation_run_id
             WHERE f.active=TRUE
               {' '.join(clauses)}
             ORDER BY

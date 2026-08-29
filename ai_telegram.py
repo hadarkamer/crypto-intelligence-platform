@@ -21,6 +21,7 @@ import research_event_runtime
 import research_outcome_worker
 import research_formula_store
 import research_formula_worker
+import research_historical_replay
 
 TELEGRAM_MESSAGE_LIMIT = 3900
 
@@ -143,6 +144,12 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     outcomes = research_outcome_worker.WORKER.status()
     formula_schema = await asyncio.to_thread(research_formula_store.schema_status)
     formulas = research_formula_worker.WORKER.status()
+    replay = await asyncio.to_thread(research_historical_replay.status)
+    replay_outcomes = sum(
+        int(item.get("outcomes") or 0)
+        for item in (replay.get("coverage") or {}).values()
+        if isinstance(item, dict)
+    )
     subscription = (
         await asyncio.to_thread(
             research_formula_store.alert_subscription_status,
@@ -176,6 +183,9 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"מנוע נוסחאות: {'פעיל' if formulas.get('discovery_enabled') else 'כבוי'} | "
         f"Shadow: {'פעיל' if formulas.get('shadow_enabled') else 'כבוי'} | "
         f"מאגר: {'מותקן' if formula_schema.get('schema_present') else 'לא הותקן'}\n"
+        f"Replay היסטורי גולמי: {'מותקן' if replay.get('schema_present') else 'לא הותקן'} | "
+        f"תוצאות אופק שנשמרו: {replay_outcomes} | "
+        f"בחירת Dataset: {formulas.get('dataset_mode', 'auto')}\n"
         f"Session ניתוח: {current_session} | ניו־יורק, א׳ 18:00–ו׳ 20:00 פעיל; "
         "כל חלון מושווה לפי הרכב ACTIVE/WEEKEND מדויק\n"
         f"מנוע מסירת נוסחאות: {'פעיל' if formulas.get('live_alerts_enabled') else 'כבוי'} | "

@@ -18,6 +18,8 @@ import math
 
 NEW_YORK = ZoneInfo("America/New_York")
 DEFAULT_COMPOSITION_TOLERANCE = 0.25
+COINGLASS_CANDLE_INTERVAL_MINUTES = 30
+COINGLASS_CANDLE_GRACE_MINUTES = 2
 
 
 def as_utc(value: datetime) -> datetime:
@@ -37,6 +39,50 @@ def is_active_market(moment: datetime) -> bool:
     if weekday == 5:
         return False
     return minutes >= 18 * 60
+
+
+def market_time_features(moment: datetime) -> dict:
+    """Return DST-safe New-York-local time features for research.
+
+    Raw UTC-hour thresholds drift by one hour when New York changes between
+    standard and daylight-saving time.  Formula discovery therefore receives
+    local labels and stable buckets, while UTC remains available only as audit
+    metadata in the feature matrix.
+    """
+    local = as_utc(moment).astimezone(NEW_YORK)
+    minutes = local.hour * 60 + local.minute
+    if minutes < 6 * 60:
+        bucket = "ET_00_05_OVERNIGHT"
+    elif minutes < 9 * 60 + 30:
+        bucket = "ET_06_09_PRE_US"
+    elif minutes < 16 * 60:
+        bucket = "ET_09_15_US_CASH"
+    elif minutes < 20 * 60:
+        bucket = "ET_16_19_AFTER_US"
+    else:
+        bucket = "ET_20_23_LATE"
+    return {
+        "market_local_hour": local.hour,
+        "market_local_minute": local.minute,
+        "market_local_weekday": local.weekday(),
+        "market_local_weekday_name": local.strftime("%A").upper(),
+        "market_time_bucket": bucket,
+        "market_utc_offset_minutes": int(
+            (local.utcoffset() or timedelta(0)).total_seconds() / 60
+        ),
+    }
+
+
+def closed_candle_available_at(
+    candle_time: datetime,
+    *,
+    interval_minutes: int = COINGLASS_CANDLE_INTERVAL_MINUTES,
+    grace_minutes: int = COINGLASS_CANDLE_GRACE_MINUTES,
+) -> datetime:
+    """Return the earliest safe decision time for an interval-open candle."""
+    return as_utc(candle_time) + timedelta(
+        minutes=max(1, int(interval_minutes)) + max(0, int(grace_minutes))
+    )
 
 
 def _session_boundaries(start: datetime, end: datetime) -> List[datetime]:
@@ -182,9 +228,12 @@ def is_closed_candle(
     CoinGlass history timestamps are treated as interval-open timestamps.  A
     small grace period protects against provider finalization latency.
     """
-    candle_start = as_utc(candle_time)
     current = as_utc(now or datetime.now(timezone.utc))
-    return candle_start + timedelta(minutes=max(1, interval_minutes) + max(0, grace_minutes)) <= current
+    return closed_candle_available_at(
+        candle_time,
+        interval_minutes=interval_minutes,
+        grace_minutes=grace_minutes,
+    ) <= current
 
 
 def blend_values(active_value: Optional[float], weekend_value: Optional[float], active_ratio: float, weekend_ratio: float, fallback: Optional[float] = None) -> Optional[float]:

@@ -39,6 +39,7 @@ EXPECTED_TOOLS = [
     "research_formula_groups",
     "get_alert_price_path",
     "research_feature_matrix",
+    "research_historical_replay_status",
     "research_formula_registry",
     "research_formula_shadow",
     "get_ai_capabilities",
@@ -366,6 +367,11 @@ def run() -> None:
     ).read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS research_formula_alert_subscriptions" in autonomous_migration
     assert "CREATE TABLE IF NOT EXISTS research_formula_live_deliveries" in autonomous_migration
+    replay_migration = (
+        root / "migrations" / "004_historical_opportunity_replay_v1.sql"
+    ).read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS research_historical_replay_runs" in replay_migration
+    assert "CREATE TABLE IF NOT EXISTS research_historical_opportunity_outcomes" in replay_migration
 
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS
@@ -374,7 +380,8 @@ def run() -> None:
     assert "MAE p75, p90 and p95 on three separate" in ai_agent.SYSTEM_INSTRUCTIONS
     formula_store_text = (root / "research_formula_store.py").read_text(encoding="utf-8")
     assert "superseded by newer same-horizon discovery cohort" in formula_store_text
-    assert "exact-session-composition formula schema v4" in formula_store_text
+    assert "safe historical-replay formula schema v5" in formula_store_text
+    assert "replacement_ready" in formula_store_text
     assert "latest_evaluation_run_id IS DISTINCT FROM %s" in formula_store_text
     telegram_text = (root / "ai_telegram.py").read_text(encoding="utf-8")
     assert "נוסחאות LIVE פעילות" in telegram_text

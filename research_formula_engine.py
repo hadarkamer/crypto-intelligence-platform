@@ -22,9 +22,43 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 import market_session_baseline
 
-ENGINE_VERSION = "formula-discovery-v4-session-composition"
-FORMULA_SCHEMA_VERSION = "research-formula-v4-session-composition"
+ENGINE_VERSION = "formula-discovery-v5-safe-replay"
+FORMULA_SCHEMA_VERSION = "research-formula-v5-safe-replay"
 ALLOWED_OPERATORS = {">=", "<=", "=="}
+
+# These values describe archive/runtime mechanics rather than market state.
+# They remain visible for diagnostics but may never become formula predicates.
+_FORBIDDEN_CANDIDATE_FEATURES = {
+    "event.strategy_version",
+    "event.code_version",
+    "time.utc_hour",
+    "time.utc_weekday",
+    "time.utc_weekday_name",
+    "time.is_calendar_weekend_utc",
+    "time.fixed_utc_session_bucket",
+    "time.market_utc_offset_minutes",
+}
+_FORBIDDEN_CANDIDATE_SUFFIXES = (
+    "_history_samples",
+    "_session_matched_samples",
+    "_session_matched_effective_samples",
+    ".prior_points",
+    ".sufficient_history",
+)
+
+
+def candidate_feature_allowed(feature: str) -> bool:
+    """Whether a flattened decision-time field represents market evidence."""
+    name = str(feature or "")
+    if not name or name in _FORBIDDEN_CANDIDATE_FEATURES:
+        return False
+    if name.endswith(_FORBIDDEN_CANDIDATE_SUFFIXES):
+        return False
+    if name.endswith(".age_minutes") or name.endswith(".available"):
+        return False
+    if name.endswith(".complete"):
+        return False
+    return True
 MIN_MEDIAN_MFE_BY_HORIZON = {
     60: 0.50,
     240: 1.00,
@@ -821,12 +855,14 @@ def _predicate_catalog(
 
     predicates: Dict[str, Dict[str, Any]] = {}
     for feature, values in sorted(values_by_feature.items()):
+        if not candidate_feature_allowed(feature):
+            continue
         # Weekday numbers are labels, not an ordered magnitude. Formulae may
         # use the explicit weekday name, exact market session, or continuous
         # per-window session ratios instead of a misleading weekday threshold.
         numeric = (
             []
-            if feature == "time.utc_weekday"
+            if feature in {"time.utc_weekday", "time.market_local_weekday"}
             else [
                 number
                 for value in values
@@ -1247,10 +1283,31 @@ def discover_formulas(
             "sample_size": len(ordered),
             "formulas": [],
         }
-    split_index = int(math.floor(len(ordered) * active_config.discovery_fraction))
-    split_index = max(1, min(len(ordered) - 1, split_index))
-    discovery_period = ordered[:split_index]
-    holdout_period = ordered[split_index:]
+    distinct_times = sorted(
+        {_utc(row["event"]["alert_time_utc"]) for row in ordered}
+    )
+    if len(distinct_times) < 2:
+        return {
+            "available": False,
+            "reason": "at least two distinct chronological observation times are required",
+            "sample_size": len(ordered),
+            "formulas": [],
+        }
+    target_index = int(math.floor(len(ordered) * active_config.discovery_fraction))
+    target_index = max(1, min(len(ordered) - 1, target_index))
+    holdout_start = _utc(ordered[target_index]["event"]["alert_time_utc"])
+    if holdout_start == distinct_times[0]:
+        holdout_start = distinct_times[1]
+    discovery_period = [
+        row
+        for row in ordered
+        if _utc(row["event"]["alert_time_utc"]) < holdout_start
+    ]
+    holdout_period = [
+        row
+        for row in ordered
+        if _utc(row["event"]["alert_time_utc"]) >= holdout_start
+    ]
     direction_results = []
     formulas = []
     for direction in ("LONG", "SHORT"):
@@ -1302,7 +1359,10 @@ def discover_formulas(
             "first_alert_time_utc": ordered[0]["event"]["alert_time_utc"],
             "holdout_start_time_utc": holdout_period[0]["event"]["alert_time_utc"],
             "last_alert_time_utc": ordered[-1]["event"]["alert_time_utc"],
-            "split_policy": "earliest 70% discovery; latest 30% frozen chronological holdout",
+            "split_policy": (
+                "earliest approximately 70% discovery; latest approximately 30% "
+                "frozen chronological holdout; identical timestamps never split"
+            ),
             "directions": direction_results,
             "candidates_evaluated": sum(
                 int(result.get("candidates_evaluated") or 0) for result in direction_results

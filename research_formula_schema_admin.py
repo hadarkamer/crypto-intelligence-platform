@@ -15,6 +15,9 @@ _TRUE = {"1", "true", "yes", "on"}
 MIGRATION_PATHS = (
     Path(__file__).resolve().parent / "migrations" / "002_formula_research_v1.sql",
     Path(__file__).resolve().parent / "migrations" / "003_formula_autonomous_alerts_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "004_historical_opportunity_replay_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

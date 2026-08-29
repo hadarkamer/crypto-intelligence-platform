@@ -27,6 +27,9 @@ _DISCOVERY_STARTUP_DELAY_SECONDS = max(
 _SHADOW_POLL_SECONDS = max(30, int(os.getenv("FORMULA_SHADOW_POLL_SECONDS", "60")))
 _LOOKBACK_DAYS = max(1, min(3650, int(os.getenv("FORMULA_DISCOVERY_LOOKBACK_DAYS", "3650"))))
 _DATASET_LIMIT = max(100, min(5000, int(os.getenv("FORMULA_DISCOVERY_DATASET_LIMIT", "2000"))))
+_DATASET_MODE = os.getenv("FORMULA_DISCOVERY_DATASET_MODE", "auto").strip().lower()
+if _DATASET_MODE not in {"auto", "alerts", "historical_replay"}:
+    _DATASET_MODE = "auto"
 
 
 def _horizons() -> tuple[int, ...]:
@@ -99,6 +102,7 @@ class FormulaResearchWorker:
             "horizons_minutes": list(_horizons()),
             "lookback_days": _LOOKBACK_DAYS,
             "dataset_limit": _DATASET_LIMIT,
+            "dataset_mode": _DATASET_MODE,
             "discovery_interval_seconds": _DISCOVERY_INTERVAL_SECONDS,
             "shadow_poll_seconds": _SHADOW_POLL_SECONDS,
             "automatic_stage_ceiling": "LIVE_AFTER_FUTURE_SHADOW_POLICY",
@@ -234,6 +238,9 @@ class FormulaResearchWorker:
                     "holdout_sample_size": discovery.get("holdout_sample_size"),
                     "candidates_evaluated": discovery.get("candidates_evaluated"),
                     "coverage": dataset.get("coverage") or {},
+                    "dataset_kind": (dataset.get("coverage") or {}).get(
+                        "dataset_kind"
+                    ),
                 }
             )
         now = datetime.now(timezone.utc).isoformat()

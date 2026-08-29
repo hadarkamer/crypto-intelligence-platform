@@ -77,6 +77,27 @@ def run() -> None:
     assert matrix.market_session_baseline.is_active_market(
         datetime(2026, 12, 6, 23, 0, tzinfo=timezone.utc)
     )
+    summer_time = matrix.market_session_baseline.market_time_features(
+        datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    )
+    winter_time = matrix.market_session_baseline.market_time_features(
+        datetime(2026, 12, 5, 12, 0, tzinfo=timezone.utc)
+    )
+    assert summer_time["market_local_hour"] == 8
+    assert winter_time["market_local_hour"] == 7
+    assert summer_time["market_utc_offset_minutes"] == -240
+    assert winter_time["market_utc_offset_minutes"] == -300
+    candle_open = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    assert matrix.market_session_baseline.closed_candle_available_at(
+        candle_open
+    ) == datetime(2026, 8, 29, 12, 32, tzinfo=timezone.utc)
+    shifted = matrix._closed_archive_rows(
+        [{"symbol": "BTC", "candle_time": candle_open}]
+    )[0]
+    assert shifted["source_candle_time"] == candle_open
+    assert shifted["candle_time"] == datetime(
+        2026, 8, 29, 12, 32, tzinfo=timezone.utc
+    )
 
     class _Fetched:
         def fetchall(self):
@@ -299,6 +320,8 @@ def run() -> None:
     assert row["time_features"]["utc_hour"] == 12
     assert row["time_features"]["market_session"] == "WEEKEND"
     assert row["time_features"]["market_regime"] == "WEEKEND"
+    assert row["time_features"]["market_local_hour"] == 8
+    assert row["time_features"]["market_time_bucket"] == "ET_06_09_PRE_US"
     historical_60m = row["historical_context"]["windows"]["60m"]
     assert historical_60m["session_composition"] == "WEEKEND_ONLY"
     assert historical_60m["price_change_pct_history_samples"] >= 30

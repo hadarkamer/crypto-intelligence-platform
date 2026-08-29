@@ -149,6 +149,31 @@ def _row(index: int):
 
 def run() -> None:
     rows = [_row(index) for index in range(140)]
+    paired_rows = []
+    for index in range(60):
+        original = _row(index)
+        opposite = _row(index)
+        opposite["event"] = dict(opposite["event"])
+        opposite["event"]["event_id"] = 10_000 + index
+        opposite["event"]["direction"] = (
+            "SHORT" if original["event"]["direction"] == "LONG" else "LONG"
+        )
+        paired_rows.extend((original, opposite))
+    paired_result = engine.discover_formulas(
+        paired_rows,
+        horizon_minutes=240,
+        feature_schema_version="paired-time-selftest",
+        config=engine.DiscoveryConfig(
+            max_single_predicates=8,
+            max_pair_candidates=4,
+            max_triple_candidates=0,
+            max_candidates_evaluated=20,
+            max_formulas_returned=5,
+        ),
+    )
+    assert paired_result["discovery_sample_size"] == 84
+    assert paired_result["holdout_sample_size"] == 36
+    assert "identical timestamps never split" in paired_result["split_policy"]
     selected_ratios = [0.0, 0.2, 0.5, 0.8, 1.0]
     optimized_profile = engine._composition_profile_weights(
         rows[:12], selected_ratios
@@ -205,6 +230,24 @@ def run() -> None:
     assert "aligned.60m.price_change_pct" in features
     assert "raw.60m.session_active_ratio" in features
     assert "historical.60m.price_change_pct_percentile_session_matched" in features
+    assert engine.candidate_feature_allowed(
+        "historical.60m.price_change_pct_percentile_session_matched"
+    )
+    for technical_feature in (
+        "historical.60m.price_change_pct_history_samples",
+        "historical.60m.price_change_pct_session_matched_samples",
+        "historical.60m.prior_points",
+        "historical.60m.sufficient_history",
+        "latest.price_oi.age_minutes",
+        "time.utc_hour",
+        "time.market_utc_offset_minutes",
+    ):
+        assert not engine.candidate_feature_allowed(technical_feature)
+    assert all(
+        engine.candidate_feature_allowed(condition["feature"])
+        for candidate in result["formulas"]
+        for condition in candidate["conditions"]
+    )
     assert engine.formula_key(
         direction=formula["direction"],
         horizon_minutes=240,

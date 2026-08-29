@@ -22,9 +22,10 @@ independently.
 
 `DISCOVERED -> BACKTESTED -> HOLDOUT_PASSED -> SHADOW -> APPROVED -> LIVE`
 
-Runtime status (2026-08-29): automatic discovery, chronological holdout,
-multiple-testing correction, wide-move ranking, versioned registry and future
-Shadow evaluation are implemented. GPT cannot approve a formula. A separate
+Runtime status (2026-08-29): neutral historical raw-opportunity replay,
+automatic discovery, chronological holdout, multiple-testing correction,
+wide-move ranking, versioned registry and future Shadow evaluation are
+implemented. GPT cannot approve a formula. A separate
 deterministic owner-policy validator may promote a frozen formula to `LIVE`
 only after enough future outcomes pass every gate.
 
@@ -71,7 +72,8 @@ with separate feature and label sections:
 It also derives without look-ahead:
 
 - symbol and expected direction;
-- UTC hour and fixed UTC time buckets for exploration;
+- DST-safe New-York local hour, weekday and market-time buckets; raw UTC hour
+  and offset remain diagnostic and are forbidden formula predicates;
 - the production bot's exact `America/New_York` ACTIVE/WEEKEND session, plus
   a separate composition ratio for every 30m, 1h, 4h, 12h and 24h input
   window and for the future outcome horizon;
@@ -79,7 +81,7 @@ It also derives without look-ahead:
   each individual window's session composition rather than a binary UTC day;
 - prior alert/repeat counts at 30m, 2h and 6h;
 - same-setup repetition and cross-symbol directional breadth;
-- strategy/code version and data-quality flags.
+- strategy/code version and data-quality flags for audit only.
 
 Every raw lookup selects the newest stored row at or before the alert. A point
 more than 45 minutes old is missing, and no nearest-future row is permitted.
@@ -90,13 +92,14 @@ only when a prior raw-price calibration has enough effective samples. The
 probability, Wilson, improvement, adverse-excursion, efficiency and relative
 movement gates are unchanged.
 
-Remaining matrix extensions include explicit alert-order/spacing features,
-strengthening/weakening deltas, BTC-to-alt context, range position and matched
-near-miss/control samples.
-
-Alert events alone are selected by existing rules. Bounded near-miss and matched
-control samples are therefore required before alternative thresholds can be
-judged fairly.
+The neutral replay removes the alert-only selection bias for raw Price/OI/CVD:
+each eligible 30-minute observation is evaluated in both LONG and SHORT from
+canonical one-minute spot paths. It stores compact outcomes rather than candle
+history and samples evenly across symbols and time for formula search. Existing
+model/score features remain available in the delivered-alert matrix. Remaining
+extensions include explicit strengthening/weakening deltas, BTC-to-alt context,
+range position and full decision-time reconstruction of model scores where
+their historical source inputs are complete.
 
 ### 3. Candidate search
 
@@ -138,9 +141,10 @@ rarity, sample count and validation state. It never executes a trade.
 
 ## Current boundary
 
-The production AI can explore verified path aggregates, fetch canonical paths,
-inspect raw/model feature rows, enumerate bounded single/pair/triple formulas,
-correct for multiple testing, rank wide movements, validate chronologically,
-observe formulas in Shadow and deliver validated LIVE matches to opted-in
-Telegram chats. Remaining work is accumulation of materially longer future
-history and the optional matrix extensions listed above.
+The production AI can inspect replay coverage, explore verified path
+aggregates, fetch alert paths, inspect raw/model feature rows, enumerate bounded
+single/pair/triple formulas, correct for multiple testing, rank wide movements,
+validate chronologically, observe formulas in Shadow and deliver validated LIVE
+matches to opted-in Telegram chats. Remaining operational work is completing
+the historical backfill, rerunning every horizon, then accumulating genuinely
+future Shadow outcomes; optional context features remain listed above.
