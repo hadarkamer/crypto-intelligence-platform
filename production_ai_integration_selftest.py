@@ -10,6 +10,9 @@ from pathlib import Path
 os.environ["RESEARCH_PERSISTENCE_ENABLED"] = "0"
 os.environ["RESEARCH_OUTCOME_ENRICHMENT_ENABLED"] = "0"
 os.environ["RESEARCH_USE_PRIMARY_DATABASE"] = "0"
+os.environ["FORMULA_DISCOVERY_ENABLED"] = "0"
+os.environ["FORMULA_SHADOW_ENABLED"] = "0"
+os.environ["FORMULA_LIVE_ALERTS_ENABLED"] = "0"
 os.environ.pop("RESEARCH_DATABASE_URL", None)
 
 import ai_agent
@@ -21,6 +24,7 @@ import research_event_capture
 import research_event_runtime
 import research_event_store
 import research_outcome_worker
+import research_formula_worker
 
 
 EXPECTED_TOOLS = [
@@ -34,6 +38,8 @@ EXPECTED_TOOLS = [
     "research_formula_groups",
     "get_alert_price_path",
     "research_feature_matrix",
+    "research_formula_registry",
+    "research_formula_shadow",
     "get_ai_capabilities",
 ]
 
@@ -157,6 +163,8 @@ def run() -> None:
     assert round(raw_long, 8) == 5.0 and round(adjusted_long or 0.0, 8) == 5.0
     assert round(raw_short, 8) == -5.0 and round(adjusted_short or 0.0, 8) == 5.0
     assert research_outcome_worker.WORKER.enabled is False
+    assert research_formula_worker.WORKER.status()["live_alerts_enabled"] is False
+    assert research_formula_worker.WORKER.status()["automatic_stage_ceiling"] == "SHADOW"
     outcome_status = research_outcome_worker.WORKER.status()
     assert outcome_status["method"] == "binance-spot-1m-ohlc-path-v2"
     assert outcome_status["price_path"] == {
@@ -317,6 +325,7 @@ def run() -> None:
     assert "ai_telegram.register_ai_handlers(bot_app)" in main_text
     assert "research_event_store.WRITER.start()" in main_text
     assert "research_outcome_worker.WORKER.start()" in main_text
+    assert "research_formula_worker.WORKER.start()" in main_text
     assert "special_transitions_precomputed=True" in main_text
     assert "scan_coinglass_market" not in main_text
     manual_helper = main_text.split("async def _reply_alert_with_archive", 1)[1].split(
@@ -332,8 +341,18 @@ def run() -> None:
     assert "event_fingerprint CHAR(64) NOT NULL UNIQUE" in migration
     assert "PRIMARY KEY (event_id, horizon_minutes)" in migration
 
+    formula_migration = (root / "migrations" / "002_formula_research_v1.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "CREATE TABLE IF NOT EXISTS research_formulas" in formula_migration
+    assert "CREATE TABLE IF NOT EXISTS research_formula_evaluations" in formula_migration
+    assert "CREATE TABLE IF NOT EXISTS research_formula_shadow_hits" in formula_migration
+    assert "delivery_status = 'NOT_SENT'" in formula_migration
+    assert "current_stage NOT IN ('APPROVED', 'LIVE') OR live_alert_approved = TRUE" in formula_migration
+
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "research_formula_registry" in ai_agent.SYSTEM_INSTRUCTIONS
 
     print("Production AI analytical integration self-test: PASS")
 

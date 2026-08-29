@@ -624,6 +624,84 @@ def _load_verified_events(
         VERIFIED_OUTCOME_METHOD,
         VERIFIED_OUTCOME_QUALITY,
     ]
+
+
+def _load_delivered_events_by_id(
+    conn, event_ids: Sequence[int]
+) -> list[Dict[str, Any]]:
+    """Load immutable decision-time rows without joining any later outcome."""
+    normalized = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
+    if not normalized:
+        return []
+    return [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT event_id, alert_time_utc, symbol, direction,
+                   source_side, timeframe, event_type, score,
+                   current_price, target_price, initial_target_distance_pct,
+                   categories, setup_key, strategy_version, code_version,
+                   engine_snapshot
+            FROM research_events
+            WHERE event_kind='ALERT' AND delivery_status='DELIVERED'
+              AND event_id=ANY(%s)
+            ORDER BY alert_time_utc ASC, event_id ASC
+            """,
+            (normalized,),
+        ).fetchall()
+    ]
+
+
+def _verified_coverage(
+    conn, *, lookback_days: int, horizon_minutes: int
+) -> Dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT e.symbol,
+               COUNT(*)::bigint AS delivered_alerts,
+               COUNT(o.event_id)::bigint AS verified_outcomes
+        FROM research_events e
+        LEFT JOIN research_alert_outcomes o
+          ON o.event_id=e.event_id
+         AND o.horizon_minutes=%s
+         AND o.outcome_method_version=%s
+         AND o.data_quality_status=%s
+        WHERE e.event_kind='ALERT' AND e.delivery_status='DELIVERED'
+          AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
+        GROUP BY e.symbol
+        ORDER BY e.symbol
+        """,
+        (
+            horizon_minutes,
+            VERIFIED_OUTCOME_METHOD,
+            VERIFIED_OUTCOME_QUALITY,
+            lookback_days,
+        ),
+    ).fetchall()
+    by_symbol: Dict[str, Any] = {}
+    excluded: Dict[str, Any] = {}
+    for source in rows:
+        symbol = str(source["symbol"] or "").upper()
+        delivered = int(source["delivered_alerts"] or 0)
+        verified = int(source["verified_outcomes"] or 0)
+        missing = max(0, delivered - verified)
+        by_symbol[symbol] = {
+            "delivered_alerts": delivered,
+            "verified_outcomes": verified,
+            "missing_verified_outcomes": missing,
+        }
+        if missing:
+            reason = (
+                "BINANCE_SPOT_UNAVAILABLE_CANONICAL_SOURCE"
+                if symbol == "HYPE"
+                else "VERIFIED_BINANCE_SPOT_OUTCOME_NOT_AVAILABLE"
+            )
+            excluded[symbol] = {"count": missing, "reason": reason}
+    return {
+        "canonical_outcome_source": "Binance Spot USDT 1m closed candles",
+        "by_symbol": by_symbol,
+        "excluded": excluded,
+    }
     if symbol:
         clauses.append("AND e.symbol=%s")
         params.append(symbol)
@@ -893,3 +971,165 @@ def research_feature_matrix(
             ],
         }
     )
+
+
+def load_formula_dataset(
+    *,
+    lookback_days: int = 3650,
+    horizon_minutes: int = 240,
+    limit: int = 2000,
+) -> Dict[str, Any]:
+    """Load a chronological, bounded dataset for the automatic formula engine.
+
+    This internal research surface is intentionally larger than the GPT-facing
+    ``research_feature_matrix`` tool.  It still accepts only verified delivered
+    alerts and keeps every post-alert value inside ``outcome_label``.
+    """
+    days = max(1, min(int(lookback_days), 3650))
+    horizon = int(horizon_minutes)
+    if horizon not in {60, 240, 720, 1440}:
+        raise ValueError("horizon_minutes must be 60, 240, 720 or 1440")
+    row_limit = max(50, min(int(limit), 5000))
+    research_url = _research_database_url()
+    raw_url = _raw_database_url()
+    if not research_url or not raw_url:
+        return {
+            "available": False,
+            "reason": "research and raw market archives must both be configured",
+        }
+
+    with _connect(research_url) as research_conn:
+        required = ("research_events", "research_alert_outcomes")
+        missing = [table for table in required if not _table_exists(research_conn, table)]
+        if missing:
+            return {
+                "available": False,
+                "reason": "research archive schema is incomplete",
+                "missing_tables": missing,
+            }
+        coverage = _verified_coverage(
+            research_conn,
+            lookback_days=days,
+            horizon_minutes=horizon,
+        )
+        events = _load_verified_events(
+            research_conn,
+            symbol=None,
+            event_type=None,
+            direction=None,
+            lookback_days=days,
+            horizon_minutes=horizon,
+            limit=row_limit,
+        )
+        events.sort(key=lambda row: (_as_utc(row["alert_time_utc"]), int(row["event_id"])))
+        if not events:
+            return {
+                "available": True,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "horizon_minutes": horizon,
+                "sample_size": 0,
+                "rows": [],
+                "coverage": coverage,
+            }
+        first_time = _as_utc(events[0]["alert_time_utc"])
+        last_time = _as_utc(events[-1]["alert_time_utc"])
+        prior_events = _load_prior_events(
+            research_conn,
+            first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
+            last_time,
+        )
+
+    symbols = sorted({str(row["symbol"] or "").upper() for row in events})
+    raw_start = first_time - timedelta(
+        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES
+    )
+    with _connect(raw_url) as raw_conn:
+        required_raw = ("oi_price_history", "futures_taker_history", "spot_taker_history")
+        missing_raw = [table for table in required_raw if not _table_exists(raw_conn, table)]
+        if missing_raw:
+            return {
+                "available": False,
+                "reason": "raw market archive schema is incomplete",
+                "missing_tables": missing_raw,
+            }
+        price_rows, futures_rows, spot_rows = _load_raw_rows(
+            raw_conn,
+            symbols=symbols,
+            start=raw_start,
+            end=last_time,
+        )
+
+    rows = build_feature_rows(
+        events,
+        price_oi_rows=price_rows,
+        futures_rows=futures_rows,
+        spot_rows=spot_rows,
+        prior_events=prior_events,
+        windows_minutes=CORE_WINDOWS_MINUTES,
+    )
+    return _json_safe(
+        {
+            "available": True,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "outcome_method_version": VERIFIED_OUTCOME_METHOD,
+            "outcome_quality": VERIFIED_OUTCOME_QUALITY,
+            "horizon_minutes": horizon,
+            "lookback_days": days,
+            "sample_size": len(rows),
+            "first_alert_time_utc": first_time,
+            "last_alert_time_utc": last_time,
+            "chronological_order": "ascending",
+            "coverage": coverage,
+            "rows": rows,
+        }
+    )
+
+
+def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
+    """Build decision-time-only rows for newly delivered live alerts."""
+    normalized = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
+    if not normalized:
+        return {}
+    if len(normalized) > 250:
+        raise ValueError("shadow feature batch is limited to 250 events")
+    research_url = _research_database_url()
+    raw_url = _raw_database_url()
+    if not research_url or not raw_url:
+        raise RuntimeError("research and raw market archives must both be configured")
+
+    with _connect(research_url) as research_conn:
+        events = _load_delivered_events_by_id(research_conn, normalized)
+        if not events:
+            return {}
+        first_time = min(_as_utc(row["alert_time_utc"]) for row in events)
+        last_time = max(_as_utc(row["alert_time_utc"]) for row in events)
+        prior_events = _load_prior_events(
+            research_conn,
+            first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
+            last_time,
+        )
+
+    symbols = sorted({str(row["symbol"] or "").upper() for row in events})
+    raw_start = first_time - timedelta(
+        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES
+    )
+    with _connect(raw_url) as raw_conn:
+        price_rows, futures_rows, spot_rows = _load_raw_rows(
+            raw_conn,
+            symbols=symbols,
+            start=raw_start,
+            end=last_time,
+        )
+    rows = build_feature_rows(
+        events,
+        price_oi_rows=price_rows,
+        futures_rows=futures_rows,
+        spot_rows=spot_rows,
+        prior_events=prior_events,
+        windows_minutes=CORE_WINDOWS_MINUTES,
+    )
+    return {
+        int(row["event"]["event_id"]): row
+        for row in rows
+        if row.get("event", {}).get("event_id") is not None
+    }

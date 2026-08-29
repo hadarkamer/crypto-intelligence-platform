@@ -40,6 +40,7 @@ import ai_telegram
 import research_event_runtime
 import research_event_store
 import research_outcome_worker
+import research_formula_worker
 from collections import defaultdict
 
 try:
@@ -5172,6 +5173,7 @@ async def health(request):
         "ai": ai_agent.status(),
         "research_capture": research_event_runtime.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
+        "formula_research": research_formula_worker.WORKER.status(),
     })
 
 async def telegram_webhook(request):
@@ -6285,6 +6287,16 @@ async def main():
     except Exception as exc:
         print(f"[research-outcomes] startup failed open: {exc!r}", flush=True)
 
+    try:
+        formulas_started = await research_formula_worker.WORKER.start()
+        print(
+            f"[formula-research] {'started' if formulas_started else 'disabled'}; "
+            f"status={research_formula_worker.WORKER.status()}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[formula-research] startup failed open: {exc!r}", flush=True)
+
     print(
         "[startup] manual-only trading mode; no Max-Pain alert or Watch scan started automatically",
         flush=True,
@@ -6371,6 +6383,7 @@ async def main():
                 except asyncio.CancelledError:
                     pass
 
+        await research_formula_worker.WORKER.stop()
         await research_outcome_worker.WORKER.stop()
         await research_event_store.WRITER.stop()
 

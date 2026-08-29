@@ -20,6 +20,11 @@ independently.
 
 `DISCOVERED -> BACKTESTED -> HOLDOUT_PASSED -> SHADOW -> APPROVED -> LIVE`
 
+Runtime status (2026-08-29): automatic discovery, chronological holdout,
+multiple-testing correction, versioned registry and post-activation Shadow
+evaluation are implemented.  The automatic ceiling is `SHADOW`; neither the
+worker nor GPT can create an `APPROVED` or `LIVE` formula.
+
 - `DISCOVERED`: reproducible conditions and discovery-set metrics exist.
 - `BACKTESTED`: full path metrics, counterexamples and baseline comparisons exist.
 - `HOLDOUT_PASSED`: the frozen formula passes a later chronological sample.

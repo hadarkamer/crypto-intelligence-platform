@@ -17,6 +17,8 @@ import ai_agent
 import ai_alert_research
 import research_event_runtime
 import research_outcome_worker
+import research_formula_store
+import research_formula_worker
 
 TELEGRAM_MESSAGE_LIMIT = 3900
 
@@ -90,6 +92,8 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     archive = await asyncio.to_thread(ai_alert_research.archive_status)
     capture = research_event_runtime.status()
     outcomes = research_outcome_worker.WORKER.status()
+    formula_schema = await asyncio.to_thread(research_formula_store.schema_status)
+    formulas = research_formula_worker.WORKER.status()
     key_status = "מחובר" if state.get("configured") else "לא מוגדר"
     tools = ", ".join(state.get("tools") or []) or "אין"
     await update.message.reply_text(
@@ -104,6 +108,10 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"תוצאות 1/4/12/24h: {'פעילות' if outcomes.get('enabled') else 'כבויות'}\n"
         f"מסלול תוצאה: Binance Spot {((outcomes.get('price_path') or {}).get('interval') or '-')} | "
         f"שיטה: {outcomes.get('method', '-')}\n"
+        f"מנוע נוסחאות: {'פעיל' if formulas.get('discovery_enabled') else 'כבוי'} | "
+        f"Shadow: {'פעיל' if formulas.get('shadow_enabled') else 'כבוי'} | "
+        f"מאגר: {'מותקן' if formula_schema.get('schema_present') else 'לא הותקן'}\n"
+        "התראות נוסחה חיות: נעולות עד אישור נפרד ויעד Telegram מוגדר\n"
         "Web/CoinGlass Vision: מעבדה בלבד, לא מחוברים לייצור\n"
         "זיכרון שיחה: זמני ומוגבל; יתאפס בעת restart."
     )

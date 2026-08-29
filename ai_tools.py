@@ -17,6 +17,7 @@ import coinglass_flow_engine
 import coinglass_oi_regime_service
 import market_confidence_engine
 import research_feature_matrix
+import research_formula_store
 
 
 TOOL_SPECS = [
@@ -370,6 +371,69 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
+        "name": "research_formula_registry",
+        "description": (
+            "Read the versioned automatic formula registry and its latest chronological discovery/holdout metrics. "
+            "Returns reproducible conditions, probability evidence, MFE/MAE efficiency, speed, sample rarity, "
+            "multiple-testing correction and lifecycle stage. This tool never promotes or activates a formula."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "stage": {
+                    "type": ["string", "null"],
+                    "enum": [
+                        "DISCOVERED", "BACKTESTED", "HOLDOUT_PASSED", "SHADOW",
+                        "APPROVED", "LIVE", "RETIRED", None
+                    ],
+                    "description": "Optional exact lifecycle stage; use null for all active formulas.",
+                },
+                "direction": {
+                    "type": ["string", "null"],
+                    "enum": ["LONG", "SHORT", None],
+                    "description": "Optional formula direction; use null for both.",
+                },
+                "horizon_minutes": {
+                    "type": ["integer", "null"],
+                    "enum": [60, 240, 720, 1440, None],
+                    "description": "Optional Binance Spot outcome horizon; use null for all.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum formulas returned.",
+                },
+            },
+            "required": ["stage", "direction", "horizon_minutes", "limit"],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "research_formula_shadow",
+        "description": (
+            "Read formula lifecycle counts and recent matches observed after a formula entered Shadow. "
+            "Shadow matches are observational and are explicitly not sent as Telegram alerts."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum recent Shadow matches returned.",
+                }
+            },
+            "required": ["limit"],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "get_ai_capabilities",
         "description": (
             "Return the tools currently approved for the production AI analysis layer and the current safety boundary. "
@@ -526,6 +590,25 @@ async def _research_feature_matrix(args: Dict[str, Any]) -> Any:
     return _bounded(result, max_chars=55000)
 
 
+async def _research_formula_registry(args: Dict[str, Any]) -> Any:
+    result = await asyncio.to_thread(
+        research_formula_store.formula_registry,
+        stage=args.get("stage"),
+        direction=args.get("direction"),
+        horizon_minutes=args.get("horizon_minutes"),
+        limit=int(args.get("limit")),
+    )
+    return _bounded(result, max_chars=55000)
+
+
+async def _research_formula_shadow(args: Dict[str, Any]) -> Any:
+    result = await asyncio.to_thread(
+        research_formula_store.shadow_status,
+        int(args.get("limit")),
+    )
+    return _bounded(result, max_chars=45000)
+
+
 async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
     archive = await asyncio.to_thread(ai_alert_research.archive_status)
     return {
@@ -546,6 +629,8 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "research_formula_groups",
             "get_alert_price_path",
             "research_feature_matrix",
+            "research_formula_registry",
+            "research_formula_shadow",
             "get_ai_capabilities",
         ],
         "alert_archive": archive,
@@ -572,12 +657,28 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "versioned no-lookahead raw/model feature matrix",
                 "prior-alert repetition and cross-symbol breadth features",
                 "UTC hour and weekend features",
+                "automatic single/pair/triple condition search over thousands of candidates",
+                "frozen chronological discovery/holdout validation",
+                "probability, MFE, MAE, speed, rarity, sample-size and q-value ranking",
+                "versioned formula lifecycle registry",
+                "live Shadow matching without Telegram delivery",
             ],
             "next_required_stages": [
-                "automatic candidate search",
-                "chronological holdout and out-of-sample validation",
-                "versioned shadow formula registry",
+                "accumulate a materially longer out-of-sample alert history",
+                "human review of formulas that pass strict holdout gates",
+                "separate explicit approval and destination before any formula alert is delivered",
             ],
+        },
+        "historical_limitations": {
+            "real_research_events_begin": "2026-08-28",
+            "older_telegram_messages": (
+                "importable only from a Telegram Desktop JSON export into an isolated legacy-message table; "
+                "they are not silently treated as complete Research Events"
+            ),
+            "HYPE": (
+                "not available on the canonical Binance Spot path; excluded from verified outcome training "
+                "without inventing a fallback"
+            ),
         },
         "lab_only_not_connected": [
             "external exchange/index context archive",
@@ -609,6 +710,8 @@ _EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
     "research_formula_groups": _research_formula_groups,
     "get_alert_price_path": _get_alert_price_path,
     "research_feature_matrix": _research_feature_matrix,
+    "research_formula_registry": _research_formula_registry,
+    "research_formula_shadow": _research_formula_shadow,
     "get_ai_capabilities": _get_ai_capabilities,
 }
 

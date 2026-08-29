@@ -19,6 +19,8 @@ import ai_agent
 import ai_alert_research
 import ai_telegram
 import research_outcome_worker
+import research_formula_store
+import research_formula_worker
 
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -48,6 +50,10 @@ async def health(_: web.Request) -> web.Response:
             "tools": state.get("tools") or [],
             "research_archive": archive,
             "outcome_reader": research_outcome_worker.WORKER.status(),
+            "formula_registry": await asyncio.to_thread(
+                research_formula_store.schema_status
+            ),
+            "formula_research": research_formula_worker.WORKER.status(),
             "writers_started_by_this_process": False,
         }
     )
@@ -121,4 +127,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
