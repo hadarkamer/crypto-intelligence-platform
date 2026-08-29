@@ -284,6 +284,7 @@ def run() -> None:
 
         canonical_price_path.fetch_closed_candles = _fake_path
         worker = research_outcome_worker.ResearchOutcomeWorker()
+        worker._load_open_first_touch_events = lambda conn, limit: []
         worker._load_due_events = lambda conn, limit: [due_event]
 
         def _fake_write(conn, **kwargs):
@@ -325,6 +326,7 @@ def run() -> None:
 
         canonical_price_path.fetch_closed_candles = _fake_path_with_unavailable_symbol
         unavailable_worker = research_outcome_worker.ResearchOutcomeWorker()
+        unavailable_worker._load_open_first_touch_events = lambda conn, limit: []
         unavailable_worker._load_due_events = lambda conn, limit: [
             *unavailable_events,
             due_event,

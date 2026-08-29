@@ -22,6 +22,9 @@ def _shadow_row(
         "symbol": symbol,
         "event_type": "SELFTEST_ALERT",
         "evaluation_status": status,
+        "first_touch_available": True,
+        "first_touch_hit": True,
+        "full_horizon_outcome_available": True,
         "outcome_available": True,
         "directional_return_pct": 1.0,
         "path_success": True,
@@ -210,6 +213,9 @@ def run() -> None:
             if "FROM research_formula_shadow_checks" in normalized:
                 assert "research_first_touch_outcomes" in normalized
                 assert "ft.success AS path_success" in normalized
+                assert "AS first_touch_available" in normalized
+                assert "AS first_touch_hit" in normalized
+                assert "AS full_horizon_outcome_available" in normalized
                 assert "ft.pre_qualifying_mae_pct AS mae_pct" in normalized
                 assert "ft.status IN ('HIT', 'MISS')" in normalized
                 assert "ft.method_version=%s" in normalized
@@ -295,6 +301,23 @@ def run() -> None:
     assert label["path_success"] is True
     assert label["first_touch_status"] == "HIT"
     assert label["full_horizon_mae_pct"] == 7.5
+
+    # A verified early touch is visible immediately but cannot enter the
+    # readiness sample until the separate full-horizon diagnostic is present.
+    early_only = {
+        **_shadow_row(21, at=start + timedelta(hours=4)),
+        "outcome_available": False,
+        "full_horizon_outcome_available": False,
+        "outcome_due": False,
+    }
+    early_validation = store._build_shadow_validation(
+        {"horizon_minutes": 240}, [early_only], evaluated_at_utc=start
+    )
+    assert early_validation["metrics"]["sample_size"] == 0
+    assert early_validation["evidence"]["early_first_touch"][
+        "matched_hit_event_ids"
+    ] == [21]
+    assert early_validation["evidence"]["pending_outcome_event_ids"] == [21]
 
     unlabeled_source = {
         **source,

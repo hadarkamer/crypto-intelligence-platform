@@ -54,6 +54,8 @@ jobs:
         run: python live_price_provider_research_selftest.py
       - name: No-dwell first-touch outcome
         run: python research_no_dwell_outcome_selftest.py
+      - name: Prospective first-touch polling
+        run: python research_outcome_worker_selftest.py
       - name: Historical first-touch replay
         run: python research_historical_replay_selftest.py
       - name: Guarded first-touch replay worker

@@ -5,7 +5,10 @@ aged into a configured horizon, one canonical spot one-minute path is
 fetched and converted into fixed-horizon return, MFE, MAE, speed and optional
 target-progress measurements.  A separate additive v6 label records the first
 touch of a frozen favorable width with zero dwell and conservative pre-touch
-MAE. Existing legacy rows and method versions remain available for audit.
+MAE.  Authorized prospective events that match a Shadow formula are polled
+while their relevant horizon is still open, so a verified first touch can be
+frozen without waiting for the horizon to close. Existing legacy rows and
+method versions remain available for audit.
 
 Binance Spot USDT is the default route. HYPE is explicitly routed to the
 Hyperliquid HYPE/USDT spot market. Historical candles may be imported from
@@ -36,7 +39,11 @@ import research_no_dwell_outcome
 _TRUE = {"1", "true", "yes", "on"}
 _ENABLED = os.getenv("RESEARCH_OUTCOME_ENRICHMENT_ENABLED", "").strip().lower() in _TRUE
 _HORIZONS = (60, 240, 720, 1440)
-_POLL_SECONDS = max(60, int(os.getenv("RESEARCH_OUTCOME_POLL_SECONDS", "900")))
+_POLL_SECONDS = max(60, int(os.getenv("RESEARCH_OUTCOME_POLL_SECONDS", "60")))
+_OPEN_FIRST_TOUCH_EVENT_LIMIT = max(
+    1,
+    min(200, int(os.getenv("RESEARCH_OPEN_FIRST_TOUCH_EVENT_LIMIT", "32"))),
+)
 _METHOD_VERSION = canonical_price_path.METHOD_VERSION
 _FIRST_TOUCH_METHOD_VERSION = research_no_dwell_outcome.METHOD_VERSION
 
@@ -59,6 +66,27 @@ def _utc(value: Any) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _latest_closed_candle_cutoff(value: Any) -> datetime:
+    """Return the inclusive cutoff for the latest fully closed UTC minute."""
+    now = _utc(value)
+    minute_open = now.replace(second=0, microsecond=0)
+    return minute_open - timedelta(milliseconds=1)
+
+
+def _first_touch_write_is_safe(
+    first_touch: Optional[Dict[str, Any]], *, observed_prefix_complete: bool
+) -> bool:
+    """Forbid terminal labels from a gapped or otherwise partial 1m prefix."""
+    if first_touch is None:
+        return True
+    status = str(first_touch.get("status") or "").upper()
+    if status == "PENDING":
+        return True
+    if status in {"HIT", "MISS"}:
+        return bool(observed_prefix_complete)
+    return False
 
 
 def calculate_returns(
@@ -121,26 +149,33 @@ def _due_horizons(
     *,
     now: datetime,
     first_touch_enabled: bool = True,
+    open_first_touch_horizons: Iterable[int] = (),
 ) -> list[int]:
-    """Return closed horizons missing legacy or first-touch enrichment.
+    """Return horizons missing legacy or first-touch enrichment.
 
-    The production worker intentionally does not poll open horizons.  This
-    bounds canonical API load; the pure first-touch calculator still exposes
-    PENDING semantics for callers that already possess a partial path.
+    Legacy outcomes and unmatched controls remain close-only.  The caller may
+    explicitly authorize selected open horizons for a prospective event that
+    matched an active Shadow formula.  Limiting open polling to those exact
+    horizons bounds canonical API load without delaying a qualifying touch.
     """
     first_touch_versions = existing_first_touch_versions or {}
+    open_horizons = {
+        int(horizon)
+        for horizon in open_first_touch_horizons
+        if int(horizon) in _HORIZONS
+    }
     due = []
     for horizon in _HORIZONS:
         horizon_end = event_time + timedelta(minutes=horizon)
-        if horizon_end > now:
-            continue
+        horizon_closed = horizon_end <= now
         legacy_due = (
-            horizon_end <= now
+            horizon_closed
             and existing_versions.get(horizon) != _METHOD_VERSION
         )
         first_touch_due = (
             first_touch_enabled
             and first_touch_versions.get(horizon) != _FIRST_TOUCH_METHOD_VERSION
+            and (horizon_closed or horizon in open_horizons)
         )
         if legacy_due or first_touch_due:
             due.append(horizon)
@@ -194,6 +229,7 @@ class OutcomeMetrics:
     first_touch_rows_written: int = 0
     first_touch_hits: int = 0
     first_touch_pending: int = 0
+    first_touch_terminal_rows_deferred_for_incomplete_prefix: int = 0
     failures: int = 0
     last_run_utc: Optional[str] = None
     last_error: Optional[str] = None
@@ -218,11 +254,19 @@ class ResearchOutcomeWorker:
             "poll_seconds": _POLL_SECONDS,
             "method": _METHOD_VERSION,
             "first_touch_method": _FIRST_TOUCH_METHOD_VERSION,
+            "open_first_touch_event_limit": _OPEN_FIRST_TOUCH_EVENT_LIMIT,
             "first_touch_policy": {
                 "success": "first favorable width touch; zero dwell",
                 "failure": "pending until the full horizon closes",
                 "post_hit_reversal": "does not cancel success",
-                "worker_evaluation": "once when each horizon closes",
+                "observation_resolution": (
+                    "official closed 1m OHLC; a wick touch qualifies and the "
+                    "candle need not close beyond the threshold"
+                ),
+                "worker_evaluation": (
+                    "every minute for the exact horizons of authorized "
+                    "prospective Shadow matches; otherwise at horizon close"
+                ),
             },
             "price_paths": {
                 "default": "Binance Spot USDT",
@@ -348,7 +392,9 @@ class ResearchOutcomeWorker:
                              AND ft.method_version=%s
                        ),
                        '{{}}'::jsonb
-                   ) AS first_touch_versions
+                   ) AS first_touch_versions,
+                   ARRAY[]::integer[] AS open_first_touch_horizons,
+                   NULL::timestamptz AS open_first_touch_observed_utc
             FROM research_events e
             LEFT JOIN research_alert_outcomes o ON o.event_id=e.event_id
             WHERE (
@@ -375,6 +421,110 @@ class ResearchOutcomeWorker:
             _FIRST_TOUCH_METHOD_VERSION,
             *condition_params,
             max(1, min(int(limit), 1000)),
+        ]
+        return conn.execute(query, params).fetchall()
+
+    @staticmethod
+    def _load_open_first_touch_events(conn, limit: int) -> list[Dict[str, Any]]:
+        """Load only authorized prospective Shadow matches with a new 1m close.
+
+        This query has its own reserved, bounded queue so a closed historical
+        backlog cannot delay first-touch detection.  Formula horizons are
+        deduplicated before the worker fetches one canonical path per event.
+        """
+        query = """
+            SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+                   e.current_price, e.target_price, e.engine_snapshot,
+                   '{}'::jsonb AS outcome_versions,
+                   COALESCE(
+                       (
+                           SELECT jsonb_object_agg(
+                               ft.horizon_minutes,
+                               CASE
+                                   WHEN ft.status IN ('HIT', 'MISS')
+                                    AND ft.data_quality_status=ANY(%s)
+                                   THEN ft.method_version
+                                   ELSE COALESCE(ft.method_version, '') || ':' || ft.status
+                               END
+                           )
+                           FROM research_first_touch_outcomes ft
+                           WHERE ft.event_id=e.event_id
+                             AND ft.method_version=%s
+                       ),
+                       '{}'::jsonb
+                   ) AS first_touch_versions,
+                   ARRAY_AGG(
+                       DISTINCT open_formula.horizon_minutes
+                       ORDER BY open_formula.horizon_minutes
+                   ) AS open_first_touch_horizons,
+                   MIN(open_pending.observed_through_utc)
+                       AS open_first_touch_observed_utc
+            FROM research_prospective_shadow_events authorized
+            JOIN research_events e ON e.event_id=authorized.event_id
+            JOIN research_formula_shadow_checks open_check
+              ON open_check.event_id=e.event_id
+             AND open_check.matched=TRUE
+             AND open_check.evaluation_status='MATCHED'
+            JOIN research_formulas open_formula
+              ON open_formula.formula_id=open_check.formula_id
+             AND open_formula.active=TRUE
+             AND open_formula.current_stage='SHADOW'
+            LEFT JOIN research_first_touch_outcomes open_pending
+              ON open_pending.event_id=e.event_id
+             AND open_pending.horizon_minutes=open_formula.horizon_minutes
+             AND open_pending.method_version=%s
+             AND open_pending.status='PENDING'
+            WHERE e.direction IN ('LONG', 'SHORT')
+              AND e.event_kind='DECISION_SAMPLE'
+              AND e.delivery_status='NOT_APPLICABLE'
+              AND e.alert_time_utc
+                    + (open_formula.horizon_minutes * INTERVAL '1 minute')
+                  > NOW()
+              AND date_trunc('minute', e.alert_time_utc)
+                    + INTERVAL '1 minute'
+                    + CASE
+                        WHEN e.alert_time_utc > date_trunc(
+                            'minute', e.alert_time_utc
+                        ) THEN INTERVAL '1 minute'
+                        ELSE INTERVAL '0 minutes'
+                      END
+                  <= date_trunc('minute', NOW())
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM research_first_touch_outcomes open_ft
+                  WHERE open_ft.event_id=e.event_id
+                    AND open_ft.horizon_minutes=open_formula.horizon_minutes
+                    AND open_ft.method_version=%s
+                    AND (
+                        (
+                            open_ft.status='HIT'
+                            AND open_ft.data_quality_status=ANY(%s)
+                        )
+                        OR (
+                            open_ft.status='PENDING'
+                            AND open_ft.data_quality_status=ANY(%s)
+                            AND open_ft.observed_through_utc >=
+                                date_trunc('minute', NOW())
+                                - INTERVAL '1 millisecond'
+                        )
+                    )
+              )
+            GROUP BY e.event_id
+            ORDER BY
+                COALESCE(
+                    MIN(open_pending.observed_through_utc), e.alert_time_utc
+                ) ASC,
+                e.event_id ASC
+            LIMIT %s
+        """
+        params = [
+            list(canonical_price_path.COMPLETE_QUALITIES),
+            _FIRST_TOUCH_METHOD_VERSION,
+            _FIRST_TOUCH_METHOD_VERSION,
+            _FIRST_TOUCH_METHOD_VERSION,
+            list(canonical_price_path.COMPLETE_QUALITIES),
+            list(canonical_price_path.COMPLETE_QUALITIES),
+            max(1, min(int(limit), _OPEN_FIRST_TOUCH_EVENT_LIMIT)),
         ]
         return conn.execute(query, params).fetchall()
 
@@ -504,105 +654,38 @@ class ResearchOutcomeWorker:
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (event_id, horizon_minutes, method_version) DO UPDATE SET
-                direction=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.direction
-                    ELSE EXCLUDED.direction
-                END,
-                status=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.status
-                    ELSE EXCLUDED.status
-                END,
-                success=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.success
-                    ELSE EXCLUDED.success
-                END,
-                failure_final=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.failure_final
-                    ELSE EXCLUDED.failure_final
-                END,
-                observed_through_utc=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.observed_through_utc
-                    ELSE EXCLUDED.observed_through_utc
-                END,
-                reference_price=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.reference_price
-                    ELSE EXCLUDED.reference_price
-                END,
-                qualifying_move_price=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.qualifying_move_price
-                    ELSE EXCLUDED.qualifying_move_price
-                END,
-                qualifying_move_threshold_pct=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.qualifying_move_threshold_pct
-                    ELSE EXCLUDED.qualifying_move_threshold_pct
-                END,
-                threshold_scale_factor=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.threshold_scale_factor
-                    ELSE EXCLUDED.threshold_scale_factor
-                END,
-                threshold_source_kind=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.threshold_source_kind
-                    ELSE EXCLUDED.threshold_source_kind
-                END,
-                threshold_source=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.threshold_source
-                    ELSE EXCLUDED.threshold_source
-                END,
-                threshold_policy=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.threshold_policy
-                    ELSE EXCLUDED.threshold_policy
-                END,
-                first_qualifying_move_time_utc=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.first_qualifying_move_time_utc
-                    ELSE EXCLUDED.first_qualifying_move_time_utc
-                END,
-                time_to_first_qualifying_move_seconds=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.time_to_first_qualifying_move_seconds
-                    ELSE EXCLUDED.time_to_first_qualifying_move_seconds
-                END,
-                pre_qualifying_mae_pct=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.pre_qualifying_mae_pct
-                    ELSE EXCLUDED.pre_qualifying_mae_pct
-                END,
-                qualifying_candle_adverse_excursion_pct=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.qualifying_candle_adverse_excursion_pct
-                    ELSE EXCLUDED.qualifying_candle_adverse_excursion_pct
-                END,
-                qualifying_candle_order_ambiguous=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.qualifying_candle_order_ambiguous
-                    ELSE EXCLUDED.qualifying_candle_order_ambiguous
-                END,
+                direction=EXCLUDED.direction,
+                status=EXCLUDED.status,
+                success=EXCLUDED.success,
+                failure_final=EXCLUDED.failure_final,
+                observed_through_utc=EXCLUDED.observed_through_utc,
+                reference_price=EXCLUDED.reference_price,
+                qualifying_move_price=EXCLUDED.qualifying_move_price,
+                qualifying_move_threshold_pct=
+                    EXCLUDED.qualifying_move_threshold_pct,
+                threshold_scale_factor=EXCLUDED.threshold_scale_factor,
+                threshold_source_kind=EXCLUDED.threshold_source_kind,
+                threshold_source=EXCLUDED.threshold_source,
+                threshold_policy=EXCLUDED.threshold_policy,
+                first_qualifying_move_time_utc=
+                    EXCLUDED.first_qualifying_move_time_utc,
+                time_to_first_qualifying_move_seconds=
+                    EXCLUDED.time_to_first_qualifying_move_seconds,
+                pre_qualifying_mae_pct=EXCLUDED.pre_qualifying_mae_pct,
+                qualifying_candle_adverse_excursion_pct=
+                    EXCLUDED.qualifying_candle_adverse_excursion_pct,
+                qualifying_candle_order_ambiguous=
+                    EXCLUDED.qualifying_candle_order_ambiguous,
                 dwell_required_seconds=0,
                 path_resolution_seconds=EXCLUDED.path_resolution_seconds,
                 path_samples=EXCLUDED.path_samples,
-                price_source=CASE
-                    WHEN research_first_touch_outcomes.status='HIT'
-                    THEN research_first_touch_outcomes.price_source
-                    ELSE EXCLUDED.price_source
-                END,
+                price_source=EXCLUDED.price_source,
                 data_quality_status=EXCLUDED.data_quality_status,
                 updated_at_utc=NOW()
-            WHERE research_first_touch_outcomes.status<>'HIT'
-               OR research_first_touch_outcomes.data_quality_status
-                  IS DISTINCT FROM EXCLUDED.data_quality_status
-               OR research_first_touch_outcomes.path_samples < EXCLUDED.path_samples
+            WHERE NOT (
+                research_first_touch_outcomes.status IN ('HIT', 'MISS')
+                AND research_first_touch_outcomes.data_quality_status=ANY(%s)
+            )
             RETURNING event_id
             """,
             (
@@ -636,6 +719,7 @@ class ResearchOutcomeWorker:
                 len(path_result["candles"]),
                 source,
                 quality,
+                list(canonical_price_path.COMPLETE_QUALITIES),
             ),
         ).fetchone()
         return bool(row)
@@ -655,7 +739,9 @@ class ResearchOutcomeWorker:
         first_touch_written = 0
         first_touch_hits = 0
         first_touch_pending = 0
+        first_touch_terminal_deferred = 0
         now = datetime.now(timezone.utc)
+        latest_closed_cutoff = _latest_closed_candle_cutoff(now)
         prepared: list[Dict[str, Any]] = []
         unavailable_symbols: Dict[str, str] = {}
         unavailable_event_counts: Dict[str, int] = {}
@@ -666,7 +752,44 @@ class ResearchOutcomeWorker:
             connect_timeout=5,
             options="-c statement_timeout=15000 -c lock_timeout=1000",
         ) as conn:
-            events = self._load_due_events(conn, limit_per_horizon)
+            open_events = self._load_open_first_touch_events(
+                conn, limit_per_horizon
+            )
+            closed_events = self._load_due_events(conn, limit_per_horizon)
+            # The reserved open queue is intentionally first.  Merge a rare
+            # boundary duplicate so one event still causes one canonical path
+            # fetch even if another horizon closed in the same minute.
+            events_by_id: Dict[int, Dict[str, Any]] = {}
+            event_order: list[int] = []
+            for source_event in [*open_events, *closed_events]:
+                event_id = int(source_event["event_id"])
+                candidate = dict(source_event)
+                if event_id not in events_by_id:
+                    events_by_id[event_id] = candidate
+                    event_order.append(event_id)
+                    continue
+                existing = events_by_id[event_id]
+                existing["outcome_versions"] = {
+                    **_versions(existing.get("outcome_versions")),
+                    **_versions(candidate.get("outcome_versions")),
+                }
+                existing["first_touch_versions"] = {
+                    **_versions(existing.get("first_touch_versions")),
+                    **_versions(candidate.get("first_touch_versions")),
+                }
+                existing["open_first_touch_horizons"] = sorted(
+                    {
+                        *(
+                            existing.get("open_first_touch_horizons")
+                            or ()
+                        ),
+                        *(
+                            candidate.get("open_first_touch_horizons")
+                            or ()
+                        ),
+                    }
+                )
+            events = [events_by_id[event_id] for event_id in event_order]
         # Do not hold a PostgreSQL connection or transaction while waiting for
         # Binance. This keeps outcome research isolated from the live bot load.
         for event in events:
@@ -682,6 +805,9 @@ class ResearchOutcomeWorker:
                 now=now,
                 first_touch_enabled=str(event.get("direction") or "").upper()
                 in {"LONG", "SHORT"},
+                open_first_touch_horizons=(
+                    event.get("open_first_touch_horizons") or ()
+                ),
             )
             if not horizons:
                 continue
@@ -698,7 +824,7 @@ class ResearchOutcomeWorker:
             max_horizon = max(horizons)
             horizon_time = min(
                 event_time + timedelta(minutes=max_horizon),
-                now - timedelta(seconds=1),
+                latest_closed_cutoff,
             )
             try:
                 path_result = canonical_price_path.fetch_closed_candles(
@@ -744,7 +870,7 @@ class ResearchOutcomeWorker:
 
             for horizon in horizons:
                 horizon_cutoff = event_time + timedelta(minutes=horizon)
-                observed_cutoff = min(horizon_cutoff, now - timedelta(seconds=1))
+                observed_cutoff = min(horizon_cutoff, latest_closed_cutoff)
                 candles = _candles_for_horizon(full_path, observed_cutoff)
                 if not candles:
                     path_failures += 1
@@ -788,6 +914,16 @@ class ResearchOutcomeWorker:
                     if first_touch_needed
                     else None
                 )
+                first_touch_write_safe = _first_touch_write_is_safe(
+                    first_touch,
+                    observed_prefix_complete=observed_complete,
+                )
+                if (
+                    first_touch is not None
+                    and first_touch.get("status") in {"HIT", "MISS"}
+                    and not first_touch_write_safe
+                ):
+                    first_touch_terminal_deferred += 1
                 outcome_path = dict(path_result)
                 outcome_path["candles"] = candles
                 prepared.append(
@@ -803,6 +939,7 @@ class ResearchOutcomeWorker:
                         "full_complete": full_complete,
                         "legacy_needed": legacy_needed,
                         "first_touch_needed": first_touch_needed,
+                        "first_touch_write_safe": first_touch_write_safe,
                         "upgrade": horizon in versions,
                     }
                 )
@@ -825,7 +962,10 @@ class ResearchOutcomeWorker:
                 options="-c statement_timeout=15000 -c lock_timeout=1000",
             ) as conn:
                 for outcome in prepared:
-                    if outcome["first_touch_needed"]:
+                    if (
+                        outcome["first_touch_needed"]
+                        and outcome["first_touch_write_safe"]
+                    ):
                         touch_written = self._write_first_touch_outcome(
                             conn,
                             event=outcome["event"],
@@ -871,6 +1011,9 @@ class ResearchOutcomeWorker:
         self.metrics.first_touch_rows_written += first_touch_written
         self.metrics.first_touch_hits += first_touch_hits
         self.metrics.first_touch_pending += first_touch_pending
+        self.metrics.first_touch_terminal_rows_deferred_for_incomplete_prefix += (
+            first_touch_terminal_deferred
+        )
         self.metrics.last_run_utc = datetime.now(timezone.utc).isoformat()
         self.metrics.last_error = None
         return {
@@ -883,6 +1026,9 @@ class ResearchOutcomeWorker:
             "first_touch_rows_written": first_touch_written,
             "first_touch_hits": first_touch_hits,
             "first_touch_pending": first_touch_pending,
+            "first_touch_terminal_rows_deferred_for_incomplete_prefix": (
+                first_touch_terminal_deferred
+            ),
             "unavailable_symbols": {
                 symbol: unavailable_event_counts[symbol]
                 for symbol in sorted(unavailable_symbols)

@@ -140,6 +140,7 @@ def schema_status() -> Dict[str, Any]:
         "research_max_pain_snapshot_rows",
         "research_prospective_anchor_attempts",
         "research_prospective_anchor_slots",
+        "research_prospective_shadow_events",
     )
     required_columns = {
         "research_formula_shadow_checks": (
@@ -181,14 +182,30 @@ def schema_status() -> Dict[str, Any]:
             "first_touch_method_version",
             "first_touch_data_quality_status",
         ),
+        "research_first_touch_outcomes": (
+            "status",
+            "failure_final",
+            "observed_through_utc",
+            "first_qualifying_move_time_utc",
+            "pre_qualifying_mae_pct",
+            "dwell_required_seconds",
+            "path_resolution_seconds",
+            "data_quality_status",
+        ),
         "research_prospective_anchor_attempts": (
             "coverage_snapshot",
+            "source_timestamps",
+            "source_provenance",
+            "frozen_inputs",
             "input_fingerprint",
             "attempt_fingerprint",
         ),
         "research_prospective_anchor_slots": (
             "long_event_id",
             "short_event_id",
+            "source_timestamps",
+            "source_provenance",
+            "frozen_inputs",
             "input_fingerprint",
         ),
     }
@@ -1014,6 +1031,9 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
                e.event_id, e.alert_time_utc, e.symbol, e.event_type,
                e.direction, e.setup_key,
                (e.alert_time_utc + (%s * INTERVAL '1 minute') <= NOW()) AS outcome_due,
+               (ft.event_id IS NOT NULL) AS first_touch_available,
+               (ft.status='HIT') AS first_touch_hit,
+               (o.event_id IS NOT NULL) AS full_horizon_outcome_available,
                (ft.event_id IS NOT NULL AND o.event_id IS NOT NULL)
                  AS outcome_available,
                o.directional_return_pct, ft.success AS path_success,
@@ -1303,6 +1323,24 @@ def _build_shadow_validation(
         if not bool(row.get("outcome_available"))
         and bool(row.get("outcome_due"))
     ]
+    early_first_touch_terminal_event_ids = [
+        int(row["event_id"])
+        for row in independent_rows
+        if bool(row.get("first_touch_available"))
+    ]
+    early_first_touch_hit_event_ids = [
+        int(row["event_id"])
+        for row in independent_rows
+        if bool(row.get("first_touch_available"))
+        and bool(row.get("first_touch_hit"))
+    ]
+    early_matched_first_touch_hit_event_ids = [
+        int(row["event_id"])
+        for row in independent_rows
+        if str(row.get("evaluation_status") or "").upper() == "MATCHED"
+        and bool(row.get("first_touch_available"))
+        and bool(row.get("first_touch_hit"))
+    ]
     gate_results = {
         "matched future outcomes": int(metrics.get("sample_size") or 0)
         >= _SHADOW_MIN_MATCHES,
@@ -1372,6 +1410,21 @@ def _build_shadow_validation(
             ),
             "pending_outcome_event_ids": pending_outcome_event_ids,
             "overdue_outcome_event_ids": overdue_outcome_event_ids,
+            "early_first_touch": {
+                "terminal_event_ids": early_first_touch_terminal_event_ids,
+                "hit_event_ids": early_first_touch_hit_event_ids,
+                "matched_hit_event_ids": (
+                    early_matched_first_touch_hit_event_ids
+                ),
+                "readiness_treatment": (
+                    "observational immediately; statistical LIVE gates still "
+                    "require the verified full-horizon diagnostic row"
+                ),
+                "hold_requirement": (
+                    "none; first favorable touch is final and a later "
+                    "reversal cannot cancel it"
+                ),
+            },
             "independence_policy": (
                 "exact decision cohorts collapse first; same-symbol frozen "
                 "decision-anchor windows must not overlap"
