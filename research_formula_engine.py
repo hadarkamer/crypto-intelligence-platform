@@ -22,9 +22,12 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 import market_session_baseline
 import research_formula_families
+import research_mfe_mae_efficiency
 import research_no_dwell_outcome
 
-ENGINE_VERSION = "formula-discovery-v6-first-touch-maxpain-hierarchical"
+ENGINE_VERSION = (
+    "formula-discovery-v6.1-first-touch-maxpain-hierarchical-zero-mae"
+)
 FORMULA_SCHEMA_VERSION = "research-formula-v6-first-touch-maxpain"
 ALLOWED_OPERATORS = {">=", "<=", "=="}
 
@@ -130,7 +133,14 @@ def _round(value: Any, digits: int = 6) -> Optional[float]:
 
 
 def _json_safe(value: Any) -> Any:
-    return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+    return json.loads(
+        json.dumps(
+            value,
+            default=str,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    )
 
 
 def _quantile(values: Sequence[float], fraction: float) -> Optional[float]:
@@ -794,10 +804,8 @@ def _metrics(
     median_mfe = median(mfe) if mfe else None
     universe_median_mfe = median(universe_mfe) if universe_mfe else None
     universe_p90_mfe = _quantile(universe_mfe, 0.90)
-    efficiency = (
-        median_mfe / median_mae
-        if median_mfe is not None and median_mae not in (None, 0.0)
-        else None
+    efficiency = research_mfe_mae_efficiency.classify(
+        median_mfe, median_mae
     )
     sample_share = len(selected) / len(universe) * 100.0 if universe else 0.0
     rarity_class = "RARE" if sample_share <= 5.0 else "UNCOMMON" if sample_share <= 15.0 else "COMMON"
@@ -927,7 +935,11 @@ def _metrics(
         "mae_p75_pct": _round(_quantile(mae, 0.75), 6),
         "mae_p90_pct": _round(mae_p90, 6),
         "mae_p95_pct": _round(_quantile(mae, 0.95), 6),
-        "median_mfe_mae_ratio": _round(efficiency, 6),
+        "median_mfe_mae_ratio": _round(efficiency.ratio, 6),
+        "median_mfe_mae_ratio_state": efficiency.state,
+        "median_mfe_mae_ratio_policy_version": (
+            research_mfe_mae_efficiency.POLICY_VERSION
+        ),
         "median_time_to_first_progress_seconds": _round(median(first_progress), 2) if first_progress else None,
         "median_time_to_mfe_seconds": _round(median(time_to_mfe), 2) if time_to_mfe else None,
         "avg_target_progress_ratio": _round(mean(target_progress), 6) if target_progress else None,
@@ -1019,7 +1031,7 @@ def rank_prospective_metrics(
     )
     mfe = max(0.0, _number(metrics.get("median_mfe_pct")) or 0.0)
     mae_p90 = max(0.0, _number(metrics.get("mae_p90_pct")) or 0.0)
-    ratio = max(0.0, _number(metrics.get("median_mfe_mae_ratio")) or 0.0)
+    efficiency = research_mfe_mae_efficiency.from_metrics(metrics)
     width_percentile = _number(
         metrics.get("session_adjusted_mfe_percentile_pct")
     )
@@ -1049,7 +1061,7 @@ def rank_prospective_metrics(
         "low_adverse_movement": 0.15 * max(
             0.0, min(1.0, 1.0 - mae_p90 / max(mfe, 0.01))
         ),
-        "mfe_mae_ratio": 0.10 * min(1.0, ratio / 5.0),
+        "mfe_mae_ratio": 0.10 * efficiency.capped_quality(5.0),
         "speed": 0.06 * speed_quality,
         "rarity": 0.03 * rarity_quality,
         "sample_size": 0.10 * min(
@@ -1057,7 +1069,10 @@ def rank_prospective_metrics(
         ),
     }
     return {
-        "policy_version": "prospective-shadow-priority-v1",
+        "policy_version": "prospective-shadow-priority-v2-zero-mae-unbounded",
+        "mfe_mae_efficiency_policy_version": (
+            research_mfe_mae_efficiency.POLICY_VERSION
+        ),
         "score": round(100.0 * sum(components.values()), 4),
         "components": {
             key: round(100.0 * value, 4) for key, value in components.items()
@@ -1137,22 +1152,20 @@ def _preliminary_score(metrics: Mapping[str, Any], complexity: int) -> float:
     improvement = _number(metrics.get("session_hit_rate_improvement_pct_points"))
     if improvement is None:
         improvement = _number(metrics.get("hit_rate_improvement_pct_points")) or 0.0
-    mfe = _number(metrics.get("median_mfe_pct")) or 0.0
-    mae = _number(metrics.get("median_mae_pct")) or 0.0
     movement_percentile = _number(
         metrics.get("session_adjusted_mfe_percentile_pct")
     )
     if movement_percentile is None:
         movement_percentile = _number(metrics.get("median_mfe_percentile_pct")) or 0.0
     favorable_edge = _number(metrics.get("favorable_minus_p90_adverse_pct")) or 0.0
-    efficiency = mfe / max(0.05, mae)
+    efficiency = research_mfe_mae_efficiency.from_metrics(metrics)
     sample = int(metrics.get("sample_size") or 0)
     return (
         0.22 * lower
         + 0.10 * hit
         + 0.12 * max(-20.0, improvement)
         + 0.32 * movement_percentile
-        + 8.0 * min(4.0, efficiency)
+        + 32.0 * efficiency.capped_quality(4.0)
         + 5.0 * max(-1.0, min(3.0, favorable_edge))
         + 3.0 * math.log1p(sample)
         - 2.0 * max(0, complexity - 1)
@@ -1177,8 +1190,8 @@ def _final_score(
     improvement_quality = min(1.0, max(0.0, (improvement + 5.0) / 25.0))
     mae = max(0.0, _number(evidence.get("median_mae_pct")) or 0.0)
     mae_quality = 1.0 / (1.0 + mae)
-    efficiency = max(0.0, _number(evidence.get("median_mfe_mae_ratio")) or 0.0)
-    efficiency_quality = min(1.0, efficiency / 3.0)
+    efficiency = research_mfe_mae_efficiency.from_metrics(evidence)
+    efficiency_quality = efficiency.capped_quality(3.0)
     movement_percentile_value = _number(
         evidence.get("session_adjusted_mfe_percentile_pct")
     )
@@ -1262,7 +1275,7 @@ def _recommended_stage(
     improvement = _number(holdout.get("session_hit_rate_improvement_pct_points"))
     if improvement is None:
         improvement = _number(holdout.get("hit_rate_improvement_pct_points")) or -100.0
-    efficiency = _number(holdout.get("median_mfe_mae_ratio")) or 0.0
+    efficiency = research_mfe_mae_efficiency.from_metrics(holdout)
     median_mfe = _number(holdout.get("median_mfe_pct")) or 0.0
     mae_p90 = _number(holdout.get("mae_p90_pct")) or 0.0
     movement_percentile = _number(
@@ -1293,7 +1306,7 @@ def _recommended_stage(
         "holdout hit rate": holdout_hit >= 60.0,
         "holdout Wilson lower bound": holdout_lower >= 45.0,
         "holdout improvement": improvement >= 5.0,
-        "MFE/MAE efficiency": efficiency >= 1.25,
+        "MFE/MAE efficiency": efficiency.meets_threshold(1.25),
         "wide favorable movement floor": median_mfe
         >= minimum_wide_move_pct(int(horizon_minutes), holdout),
         "wide movement percentile": movement_percentile >= 65.0,

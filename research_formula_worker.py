@@ -13,6 +13,7 @@ from typing import Any, Dict, Mapping, Optional
 import research_feature_matrix
 import research_formula_engine
 import research_formula_store
+import research_mfe_mae_efficiency
 
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -537,6 +538,21 @@ class FormulaResearchWorker:
             if metrics.get("session_adjusted_mfe_percentile_pct") is not None
             else "median_mfe_percentile_pct"
         )
+        efficiency = research_mfe_mae_efficiency.from_metrics(metrics)
+        if efficiency.state == research_mfe_mae_efficiency.UNBOUNDED_ZERO_MAE:
+            efficiency_text = "בלתי־חסום (MAE חציוני 0)"
+        elif (
+            efficiency.state == research_mfe_mae_efficiency.FINITE
+            and efficiency.ratio is not None
+        ):
+            efficiency_text = f"{efficiency.ratio:.2f}"
+        elif (
+            efficiency.state
+            == research_mfe_mae_efficiency.UNDEFINED_ZERO_ZERO
+        ):
+            efficiency_text = "לא מוגדר (MFE ו־MAE חציוניים 0)"
+        else:
+            efficiency_text = "-"
         return (
             "🧠 התראת טרייד AI — נוסחה מאומתת\n"
             f"{direction_icon} {delivery.get('symbol')} {direction} | אופק {horizon_label}\n"
@@ -551,7 +567,7 @@ class FormulaResearchWorker:
             f"מהלך חיובי חציוני MFE: {number(metrics, 'median_mfe_pct', 3)}% | "
             f"תנועה נגדית p90 MAE: {number(metrics, 'mae_p90_pct', 3)}%\n"
             f"אחוזון רוחב מהלך מותאם Session: {number(metrics, movement_percentile_key)} | "
-            f"MFE/MAE: {number(metrics, 'median_mfe_mae_ratio')}\n\n"
+            f"MFE/MAE: {efficiency_text}\n\n"
             "התראה מחקרית אוטונומית בלבד — הבוט לא ביצע עסקה."
         )
 

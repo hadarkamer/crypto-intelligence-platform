@@ -21,11 +21,28 @@ except Exception:  # pragma: no cover - validated at runtime
 import ai_history_research
 import binance_spot_price_path
 import canonical_price_path
+import research_mfe_mae_efficiency
 
 _TRUE = {"1", "true", "yes", "on"}
 _SUPPORTED_HORIZONS = {60, 240, 720, 1440}
 _PATH_V3_METHOD = canonical_price_path.METHOD_VERSION
 _PATH_V3_COMPLETE = canonical_price_path.COMPLETE_QUALITIES
+
+
+def _mfe_mae_group_evidence(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach JSON-safe efficiency evidence to a read-only research group."""
+    group = dict(row)
+    efficiency = research_mfe_mae_efficiency.classify(
+        group.get("median_mfe_pct"), group.get("median_mae_pct")
+    )
+    group["median_mfe_to_mae_ratio"] = (
+        round(efficiency.ratio, 4) if efficiency.ratio is not None else None
+    )
+    group["median_mfe_to_mae_ratio_state"] = efficiency.state
+    group["median_mfe_to_mae_ratio_policy_version"] = (
+        research_mfe_mae_efficiency.POLICY_VERSION
+    )
+    return group
 
 
 def _database_url() -> str:
@@ -60,7 +77,14 @@ def _connect():
 
 
 def _json_safe(value: Any) -> Any:
-    return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+    return json.loads(
+        json.dumps(
+            value,
+            default=str,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    )
 
 
 def _symbol(value: Any) -> Optional[str]:
@@ -454,6 +478,11 @@ def research_formula_groups(
             ],
         ).fetchall()
 
+    groups = [
+        _mfe_mae_group_evidence(dict(row))
+        for row in rows
+    ]
+
     return _json_safe(
         {
             "available": True,
@@ -466,7 +495,7 @@ def research_formula_groups(
                 "outcome_method": _PATH_V3_METHOD,
                 "verified_paths_only": True,
             },
-            "groups": rows,
+            "groups": groups,
             "research_contract": [
                 "These are candidate-discovery aggregates, not validated live formulas.",
                 "Prefer high MFE, low MAE, fast progress and improvement over baseline together; hit rate alone is insufficient.",

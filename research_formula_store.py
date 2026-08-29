@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover
 import canonical_price_path
 import research_feature_matrix
 import research_formula_engine
+import research_mfe_mae_efficiency
 import research_no_dwell_outcome
 
 
@@ -39,9 +40,21 @@ _SHADOW_COMPATIBLE_FORMULA_SCHEMAS = (
     "research-formula-v5-safe-replay",
     research_formula_engine.FORMULA_SCHEMA_VERSION,
 )
-_SHADOW_MONITORING_POLICY_VERSION = (
+
+
+def _bind_efficiency_policy(policy_version: str) -> str:
+    base = str(policy_version or "").strip()
+    if research_mfe_mae_efficiency.POLICY_VERSION in base:
+        return base
+    return f"{base}+{research_mfe_mae_efficiency.POLICY_VERSION}"
+
+
+_SHADOW_MONITORING_POLICY_BASE = (
     os.getenv("FORMULA_SHADOW_MONITORING_POLICY_VERSION", "").strip()
-    or "shadow-monitoring-v1-independent-alert-episodes-2026-08-29"
+    or "shadow-monitoring-v2-independent-alert-episodes-2026-08-29"
+)
+_SHADOW_MONITORING_POLICY_VERSION = _bind_efficiency_policy(
+    _SHADOW_MONITORING_POLICY_BASE
 )
 _SHADOW_MIN_MATCHES = max(
     12, int(os.getenv("FORMULA_SHADOW_MIN_VALIDATED_MATCHES", "12"))
@@ -89,11 +102,60 @@ def _connect(*, read_only: bool = False):
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _json_safe(value: Any) -> Any:
-    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    return json.loads(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            default=str,
+            allow_nan=False,
+        )
+    )
+
+
+def _annotate_mfe_mae_metrics(value: Any) -> Any:
+    """Add zero-safe ratio evidence to legacy registry metrics on read.
+
+    Stored discovery/holdout JSON remains immutable.  This read-side adapter
+    derives the current state only from the archived median MFE and MAE, never
+    from a stale numeric ratio or state field.
+    """
+    metrics = value
+    if isinstance(metrics, str):
+        try:
+            metrics = json.loads(metrics)
+        except json.JSONDecodeError:
+            return value
+    if not isinstance(metrics, Mapping):
+        return value
+    annotated = dict(metrics)
+    efficiency = research_mfe_mae_efficiency.from_metrics(annotated)
+    annotated["median_mfe_mae_ratio"] = (
+        round(efficiency.ratio, 6)
+        if efficiency.ratio is not None
+        else None
+    )
+    annotated["median_mfe_mae_ratio_state"] = efficiency.state
+    annotated["median_mfe_mae_ratio_policy_version"] = (
+        research_mfe_mae_efficiency.POLICY_VERSION
+    )
+    return annotated
+
+
+def _formula_registry_row(value: Mapping[str, Any]) -> Dict[str, Any]:
+    row = dict(value)
+    for key in ("discovery_metrics", "holdout_metrics"):
+        row[key] = _annotate_mfe_mae_metrics(row.get(key))
+    return row
 
 
 def _table_exists(conn, table: str) -> bool:
@@ -697,7 +759,7 @@ def formula_registry(
                     "probability and adverse-excursion gates are unchanged"
                 ),
             },
-            "formulas": [dict(row) for row in rows],
+            "formulas": [_formula_registry_row(row) for row in rows],
         }
     )
 
@@ -1368,6 +1430,7 @@ def _build_shadow_validation(
     movement_percentile = metrics.get("session_adjusted_mfe_percentile_pct")
     if movement_percentile is None:
         movement_percentile = metrics.get("median_mfe_percentile_pct")
+    efficiency = research_mfe_mae_efficiency.from_metrics(metrics)
     raw_status_counts = {
         status: sum(
             1
@@ -1439,10 +1502,7 @@ def _build_shadow_validation(
         ),
         "future wide movement percentile": float(movement_percentile or 0.0)
         >= 70.0,
-        "future MFE/MAE efficiency": float(
-            metrics.get("median_mfe_mae_ratio") or 0.0
-        )
-        >= 1.50,
+        "future MFE/MAE efficiency": efficiency.meets_threshold(1.50),
         "future favorable exceeds p90 adverse": float(
             metrics.get("favorable_minus_p90_adverse_pct") or -999.0
         )
@@ -1450,6 +1510,9 @@ def _build_shadow_validation(
     }
     return {
         "policy_version": _SHADOW_MONITORING_POLICY_VERSION,
+        "mfe_mae_efficiency_policy_version": (
+            research_mfe_mae_efficiency.POLICY_VERSION
+        ),
         "outcome_method_version": research_feature_matrix.VERIFIED_OUTCOME_METHOD,
         "evaluated_at_utc": evaluated_at_utc or datetime.now(timezone.utc),
         "stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",

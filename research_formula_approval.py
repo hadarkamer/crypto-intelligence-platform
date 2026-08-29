@@ -83,6 +83,7 @@ def _canonical_json(value: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
         default=str,
+        allow_nan=False,
     )
 
 
