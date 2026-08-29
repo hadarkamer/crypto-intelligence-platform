@@ -369,6 +369,18 @@ def _metrics(
         for row in selected
         if row.get("outcome_label", {}).get("target_reached") is not None
     ]
+    event_times = sorted(
+        _utc(row["event"]["alert_time_utc"])
+        for row in selected
+        if isinstance(row.get("event"), Mapping)
+        and row["event"].get("alert_time_utc") is not None
+    )
+    distinct_dates = {timestamp.date().isoformat() for timestamp in event_times}
+    time_span_hours = (
+        (event_times[-1] - event_times[0]).total_seconds() / 3600.0
+        if len(event_times) >= 2
+        else 0.0
+    )
     successes = sum(1 for value in directional if value > 0)
     control_successes = sum(1 for value in control_directional if value > 0)
     hit_rate = successes / len(directional) * 100.0 if directional else None
@@ -391,6 +403,24 @@ def _metrics(
         "universe_size": len(universe),
         "sample_share_pct": round(sample_share, 4),
         "rarity_class": rarity_class,
+        "first_sample_time_utc": event_times[0] if event_times else None,
+        "last_sample_time_utc": event_times[-1] if event_times else None,
+        "time_span_hours": round(time_span_hours, 4),
+        "distinct_utc_dates": len(distinct_dates),
+        "distinct_symbols": len(
+            {
+                str(row.get("event", {}).get("symbol") or "")
+                for row in selected
+                if row.get("event", {}).get("symbol")
+            }
+        ),
+        "distinct_event_types": len(
+            {
+                str(row.get("event", {}).get("event_type") or "")
+                for row in selected
+                if row.get("event", {}).get("event_type")
+            }
+        ),
         "successes": successes,
         "hit_rate_pct": _round(hit_rate, 4),
         "wilson_95_lower_pct": _round(
@@ -557,6 +587,14 @@ def _recommended_stage(
     strict_checks = {
         "discovery sample": discovery_n >= config.strict_discovery_samples,
         "holdout sample": holdout_n >= config.strict_holdout_samples,
+        "discovery temporal coverage": (
+            (_number(discovery.get("time_span_hours")) or 0.0) >= 72.0
+            and int(discovery.get("distinct_utc_dates") or 0) >= 3
+        ),
+        "holdout temporal coverage": (
+            (_number(holdout.get("time_span_hours")) or 0.0) >= 24.0
+            and int(holdout.get("distinct_utc_dates") or 0) >= 2
+        ),
         "holdout hit rate": holdout_hit >= 60.0,
         "holdout Wilson lower bound": holdout_lower >= 45.0,
         "holdout improvement": improvement >= 5.0,

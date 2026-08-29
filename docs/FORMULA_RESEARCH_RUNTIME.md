@@ -31,6 +31,9 @@ For each horizon and direction, the engine:
    MAE, MFE/MAE efficiency, speed, rarity, sample reliability and stability.
 
 Small samples remain visible but cannot pass the strict Holdout gate.
+In addition, automatic Shadow promotion requires at least 72 hours across
+three UTC dates in discovery and 24 hours across two UTC dates in holdout. A
+high percentage from a single day therefore remains `BACKTESTED` at most.
 
 ## Lifecycle and safety
 

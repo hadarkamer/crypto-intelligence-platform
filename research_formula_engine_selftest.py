@@ -114,6 +114,10 @@ def run() -> None:
     assert "sample_size" in formula["discovery_metrics"]
     assert "mae_p95_pct" in formula["holdout_metrics"]
     assert "q_value" in formula["multiple_testing"]
+    assert all(
+        candidate["recommended_stage"] != "SHADOW"
+        for candidate in result["formulas"]
+    ), "a sub-day holdout must never enter Shadow"
 
     features = engine.extract_decision_features(rows[0])
     assert all(not key.startswith("outcome") for key in features)
