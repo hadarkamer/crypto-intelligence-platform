@@ -624,6 +624,48 @@ def _load_verified_events(
         VERIFIED_OUTCOME_METHOD,
         VERIFIED_OUTCOME_QUALITY,
     ]
+    if symbol:
+        clauses.append("AND e.symbol=%s")
+        params.append(symbol)
+    if event_type:
+        clauses.append("AND e.event_type=%s")
+        params.append(event_type)
+    if direction:
+        clauses.append("AND e.direction=%s")
+        params.append(direction)
+    params.append(limit)
+    filters = "\n".join(clauses)
+    return [
+        dict(row)
+        for row in conn.execute(
+            f"""
+            SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+                   e.source_side, e.timeframe, e.event_type, e.score,
+                   e.current_price, e.target_price,
+                   e.initial_target_distance_pct, e.categories, e.setup_key,
+                   e.strategy_version, e.code_version, e.engine_snapshot,
+                   o.horizon_minutes, o.measured_at_utc, o.reference_price,
+                   o.price_at_horizon, o.raw_return_pct,
+                   o.directional_return_pct, o.mfe_pct, o.mae_pct,
+                   o.time_to_first_progress_seconds, o.time_to_mfe_seconds,
+                   o.time_to_closest_target_seconds, o.time_to_target_seconds,
+                   o.target_progress_ratio, o.target_reached, o.path_samples,
+                   o.outcome_method_version, o.data_quality_status
+            FROM research_events e
+            JOIN research_alert_outcomes o ON o.event_id=e.event_id
+            WHERE e.event_kind='ALERT'
+              AND e.delivery_status='DELIVERED'
+              AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
+              AND o.horizon_minutes=%s
+              AND o.outcome_method_version=%s
+              AND o.data_quality_status=%s
+              {filters}
+            ORDER BY e.alert_time_utc DESC, e.event_id DESC
+            LIMIT %s
+            """,
+            params,
+        ).fetchall()
+    ]
 
 
 def _load_delivered_events_by_id(
@@ -702,50 +744,6 @@ def _verified_coverage(
         "by_symbol": by_symbol,
         "excluded": excluded,
     }
-    if symbol:
-        clauses.append("AND e.symbol=%s")
-        params.append(symbol)
-    if event_type:
-        clauses.append("AND e.event_type=%s")
-        params.append(event_type)
-    if direction:
-        clauses.append("AND e.direction=%s")
-        params.append(direction)
-    params.append(limit)
-    filters = "\n".join(clauses)
-    return [
-        dict(row)
-        for row in conn.execute(
-            f"""
-            SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
-                   e.source_side, e.timeframe, e.event_type, e.score,
-                   e.current_price, e.target_price,
-                   e.initial_target_distance_pct, e.categories, e.setup_key,
-                   e.strategy_version, e.code_version, e.engine_snapshot,
-                   o.horizon_minutes, o.measured_at_utc, o.reference_price,
-                   o.price_at_horizon, o.raw_return_pct,
-                   o.directional_return_pct, o.mfe_pct, o.mae_pct,
-                   o.time_to_first_progress_seconds, o.time_to_mfe_seconds,
-                   o.time_to_closest_target_seconds, o.time_to_target_seconds,
-                   o.target_progress_ratio, o.target_reached, o.path_samples,
-                   o.outcome_method_version, o.data_quality_status
-            FROM research_events e
-            JOIN research_alert_outcomes o ON o.event_id=e.event_id
-            WHERE e.event_kind='ALERT'
-              AND e.delivery_status='DELIVERED'
-              AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
-              AND o.horizon_minutes=%s
-              AND o.outcome_method_version=%s
-              AND o.data_quality_status=%s
-              {filters}
-            ORDER BY e.alert_time_utc DESC, e.event_id DESC
-            LIMIT %s
-            """,
-            params,
-        ).fetchall()
-    ]
-
-
 def _load_prior_events(conn, start: datetime, end: datetime) -> list[Dict[str, Any]]:
     return [
         dict(row)

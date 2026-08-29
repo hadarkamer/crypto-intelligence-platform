@@ -31,6 +31,29 @@ def _flow(symbol, timestamp, continuous, api, buy=60.0, sell=40.0):
 
 
 def run() -> None:
+    class _Fetched:
+        def fetchall(self):
+            return [{"event_id": 1, "symbol": "BTC"}]
+
+    class _Connection:
+        def execute(self, query, params):
+            assert query.count("%s") == len(params)
+            assert "e.symbol=%s" in query
+            assert "e.event_type=%s" in query
+            assert "e.direction=%s" in query
+            return _Fetched()
+
+    loaded = matrix._load_verified_events(
+        _Connection(),
+        symbol="BTC",
+        event_type="SELFTEST",
+        direction="LONG",
+        lookback_days=30,
+        horizon_minutes=240,
+        limit=100,
+    )
+    assert loaded == [{"event_id": 1, "symbol": "BTC"}]
+
     event_time = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
     reference_time = event_time - timedelta(minutes=61)
     current_time = event_time - timedelta(minutes=1)
