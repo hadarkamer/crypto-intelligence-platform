@@ -351,6 +351,76 @@ def formula_matches(
     )
 
 
+def evaluate_formula(
+    row: Optional[Mapping[str, Any]],
+    *,
+    direction: str,
+    conditions: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Return an auditable, decision-time-only Shadow evaluation.
+
+    A missing feature is ``UNEVALUABLE`` rather than a negative control.  This
+    distinction prevents archive gaps from improving a formula's apparent
+    performance.  No outcome field is read by this function.
+    """
+    normalized_direction = str(direction or "").upper()
+    if not isinstance(row, Mapping):
+        return {
+            "status": "UNEVALUABLE",
+            "matched": False,
+            "reason": "decision-time feature row unavailable",
+            "features": {},
+            "condition_results": [],
+        }
+    event = row.get("event") if isinstance(row.get("event"), Mapping) else {}
+    event_direction = str(event.get("direction") or "").upper()
+    features = extract_decision_features(row)
+    condition_results: list[Dict[str, Any]] = []
+    unavailable = False
+    for condition in conditions:
+        feature = str(condition.get("feature") or "")
+        operator = str(condition.get("operator") or "")
+        expected = condition.get("value")
+        available = bool(
+            feature and operator in ALLOWED_OPERATORS and feature in features
+        )
+        passed = available and condition_matches(features, condition)
+        if not available:
+            unavailable = True
+        condition_results.append(
+            {
+                "feature": feature,
+                "operator": operator,
+                "expected": expected,
+                "actual": features.get(feature),
+                "available": available,
+                "passed": bool(passed),
+            }
+        )
+    if not conditions:
+        status = "UNEVALUABLE"
+        reason = "formula has no conditions"
+    elif event_direction != normalized_direction:
+        status = "UNEVALUABLE"
+        reason = "event direction does not match formula direction"
+    elif unavailable:
+        status = "UNEVALUABLE"
+        reason = "one or more required decision-time features are unavailable"
+    elif all(item["passed"] for item in condition_results):
+        status = "MATCHED"
+        reason = "all formula conditions passed"
+    else:
+        status = "UNMATCHED"
+        reason = "one or more formula conditions failed"
+    return {
+        "status": status,
+        "matched": status == "MATCHED",
+        "reason": reason,
+        "features": features,
+        "condition_results": condition_results,
+    }
+
+
 def _canonical_conditions(conditions: Sequence[Mapping[str, Any]]) -> list[Dict[str, Any]]:
     normalized = [
         {
@@ -589,10 +659,12 @@ def _metrics(
         control_session_profile, "directional_return_pct"
     )
     session_control_mfe = _weighted_outcomes(control_session_profile, "mfe_pct")
+    session_control_mae = _weighted_outcomes(control_session_profile, "mae_pct")
     session_control_effective = sum(
         weight for _, weight in session_control_directional
     )
     session_mfe_effective = sum(weight for _, weight in session_control_mfe)
+    session_mae_effective = sum(weight for _, weight in session_control_mae)
     weighted_successes = sum(
         weight for value, weight in session_control_directional if value > 0.0
     )
@@ -606,6 +678,12 @@ def _metrics(
     )
     session_mfe_p90 = market_session_baseline.weighted_percentile(
         session_control_mfe, 0.90
+    )
+    session_mae_median = market_session_baseline.weighted_percentile(
+        session_control_mae, 0.50
+    )
+    session_mae_p90 = market_session_baseline.weighted_percentile(
+        session_control_mae, 0.90
     )
     active_control_mfe = market_session_baseline.composition_weighted_values(
         [
@@ -647,6 +725,9 @@ def _metrics(
     session_mfe_percentile = _weighted_percentile_rank(
         median_mfe, session_control_mfe
     )
+    session_mae_percentile = _weighted_percentile_rank(
+        median_mae, session_control_mae
+    )
     session_mfe_uplift = (
         (median_mfe / session_mfe_median - 1.0) * 100.0
         if median_mfe is not None
@@ -658,18 +739,6 @@ def _metrics(
     if floor_reference_samples != len(selected):
         floor_scale = 1.0
         floor_source = "no relaxation: insufficient prior-only calibration"
-        if (
-            session_mfe_effective >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
-            and active_control_mfe_effective
-            >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
-            and session_mfe_p90 is not None
-            and active_control_mfe_p90 not in (None, 0.0)
-        ):
-            floor_scale = min(
-                1.0,
-                max(0.50, float(session_mfe_p90) / float(active_control_mfe_p90)),
-            )
-            floor_source = "session-matched observed MFE fallback"
     base_floor = minimum_wide_move_pct(0 if not selected else int(
         _number((selected[0].get("outcome_label") or {}).get("horizon_minutes"))
         or 0
@@ -743,6 +812,15 @@ def _metrics(
             session_mfe_p90, 6
         ),
         "session_adjusted_mfe_uplift_pct": _round(session_mfe_uplift, 4),
+        "session_adjusted_mae_percentile_pct": _round(
+            session_mae_percentile, 4
+        ),
+        "session_matched_control_median_mae_pct": _round(
+            session_mae_median, 6
+        ),
+        "session_matched_control_p90_mae_pct": _round(
+            session_mae_p90, 6
+        ),
         "movement_width_floor_base_pct": _round(base_floor, 6),
         "movement_width_floor_scale_factor": _round(floor_scale, 6),
         "movement_width_floor_effective_pct": _round(effective_floor, 6),
@@ -782,6 +860,9 @@ def _metrics(
         "session_matched_mfe_effective_samples": _round(
             session_mfe_effective, 4
         ),
+        "session_matched_mae_effective_samples": _round(
+            session_mae_effective, 4
+        ),
         "session_matched_hit_rate_baseline_pct": _round(
             session_hit_baseline, 4
         ),
@@ -796,6 +877,7 @@ def _metrics(
             and len(selected_active_ratios) == len(selected)
             and session_control_effective >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
             and session_mfe_effective >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
+            and session_mae_effective >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
         ),
         "baseline_policy": (
             "same outcome-horizon ACTIVE/WEEKEND composition; "

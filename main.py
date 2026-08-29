@@ -40,6 +40,7 @@ import ai_telegram
 import research_event_runtime
 import research_event_store
 import research_outcome_worker
+import research_formula_schema_admin
 import research_formula_worker
 from collections import defaultdict
 
@@ -6289,6 +6290,8 @@ async def main():
         print(f"[research-outcomes] startup failed open: {exc!r}", flush=True)
 
     try:
+        if research_formula_schema_admin.status()["schema_apply_enabled"]:
+            await asyncio.to_thread(research_formula_schema_admin.apply_schema)
         formulas_started = await research_formula_worker.WORKER.start()
         print(
             f"[formula-research] {'started' if formulas_started else 'disabled'}; "

@@ -149,6 +149,58 @@ def _row(index: int):
 
 def run() -> None:
     rows = [_row(index) for index in range(140)]
+
+    # Prospective matching is explicit about all three possible states. It
+    # reads decision-time features only: the guarded outcome mapping must never
+    # be inspected while evaluating a formula.
+    class _OutcomeGuard(dict):
+        def get(self, key, default=None):
+            assert key != "outcome_label", "Shadow matching read an outcome"
+            return super().get(key, default)
+
+        def __getitem__(self, key):
+            assert key != "outcome_label", "Shadow matching read an outcome"
+            return super().__getitem__(key)
+
+    guarded = _OutcomeGuard(_row(0))
+    condition = {
+        "feature": "aligned.60m.price_change_pct",
+        "operator": ">=",
+        "value": 1.0,
+    }
+    matched = engine.evaluate_formula(
+        guarded,
+        direction="LONG",
+        conditions=[condition],
+    )
+    assert matched["status"] == "MATCHED" and matched["matched"] is True
+    assert matched["condition_results"][0]["actual"] == 2.0
+    assert all(not key.startswith("outcome") for key in matched["features"])
+
+    unmatched = engine.evaluate_formula(
+        guarded,
+        direction="LONG",
+        conditions=[{**condition, "value": 3.0}],
+    )
+    assert unmatched["status"] == "UNMATCHED"
+    assert unmatched["matched"] is False
+
+    unevaluable = engine.evaluate_formula(
+        guarded,
+        direction="LONG",
+        conditions=[
+            {
+                "feature": "raw.60m.feature_that_was_not_captured",
+                "operator": ">=",
+                "value": 1.0,
+            }
+        ],
+    )
+    assert unevaluable["status"] == "UNEVALUABLE"
+    assert unevaluable["condition_results"][0]["available"] is False
+    assert engine.evaluate_formula(
+        None, direction="LONG", conditions=[condition]
+    )["status"] == "UNEVALUABLE"
     paired_rows = []
     for index in range(60):
         original = _row(index)
@@ -317,6 +369,101 @@ def run() -> None:
     assert engine.minimum_wide_move_pct(
         240, {"movement_width_floor_scale_factor": 0.60}
     ) == 0.60
+
+    # A missing prior-only reference must never be reconstructed from future
+    # control MFE. This population deliberately has small weekend future MFE
+    # and large active future MFE, which used to imply a lower fallback scale.
+    def _outcome_row(
+        event_id: int,
+        *,
+        active_ratio: float,
+        mfe_pct: float,
+        width_scale=None,
+    ):
+        label = {
+            "horizon_minutes": 240,
+            "session_active_ratio": active_ratio,
+            "session_weekend_ratio": 1.0 - active_ratio,
+            "session_composition": (
+                "ACTIVE_ONLY" if active_ratio == 1.0 else "WEEKEND_ONLY"
+            ),
+            "directional_return_pct": 1.0,
+            "mfe_pct": mfe_pct,
+            "mae_pct": 0.20,
+            "time_to_first_progress_seconds": 60,
+            "time_to_mfe_seconds": 600,
+            "target_progress_ratio": 1.0,
+            "target_reached": True,
+        }
+        if width_scale is not None:
+            label["movement_width_reference"] = {
+                "floor_scale_factor": width_scale,
+                "source": "frozen prior-only self-test calibration",
+            }
+        return {
+            "event": {
+                "event_id": event_id,
+                "alert_time_utc": datetime(2026, 8, 29, tzinfo=timezone.utc)
+                + timedelta(minutes=event_id),
+                "symbol": "BTC",
+                "event_type": "SELFTEST_SIGNAL",
+            },
+            "outcome_label": label,
+        }
+
+    selected_without_reference = [
+        _outcome_row(50_000, active_ratio=0.0, mfe_pct=1.25)
+    ]
+    weekend_controls = [
+        _outcome_row(50_100 + index, active_ratio=0.0, mfe_pct=0.10)
+        for index in range(30)
+    ]
+    active_controls = [
+        _outcome_row(50_200 + index, active_ratio=1.0, mfe_pct=5.0)
+        for index in range(30)
+    ]
+    missing_reference_metrics = engine.summarize_outcomes(
+        selected_without_reference,
+        [*selected_without_reference, *weekend_controls, *active_controls],
+    )
+    assert missing_reference_metrics["session_matched_mfe_effective_samples"] >= 30
+    assert missing_reference_metrics["active_reference_mfe_effective_samples"] >= 30
+    assert (
+        missing_reference_metrics["session_matched_control_p90_mfe_pct"]
+        < missing_reference_metrics["active_reference_mfe_p90_pct"]
+    )
+    assert missing_reference_metrics["movement_width_floor_scale_factor"] == 1.0
+    assert (
+        missing_reference_metrics["movement_width_floor_effective_pct"]
+        == missing_reference_metrics["movement_width_floor_base_pct"]
+    )
+    assert "no relaxation" in missing_reference_metrics["movement_width_floor_source"]
+
+    selected_with_reference = [
+        _outcome_row(
+            50_000,
+            active_ratio=0.0,
+            mfe_pct=1.25,
+            width_scale=0.60,
+        )
+    ]
+    frozen_reference_metrics = engine.summarize_outcomes(
+        selected_with_reference,
+        [*selected_with_reference, *weekend_controls, *active_controls],
+    )
+    assert frozen_reference_metrics["movement_width_floor_scale_factor"] == 0.60
+    assert frozen_reference_metrics["movement_width_floor_effective_pct"] == 0.60
+    for probability_or_risk_metric in (
+        "hit_rate_pct",
+        "wilson_95_lower_pct",
+        "median_mae_pct",
+        "mae_p90_pct",
+        "median_mfe_mae_ratio",
+    ):
+        assert (
+            frozen_reference_metrics[probability_or_risk_metric]
+            == missing_reference_metrics[probability_or_risk_metric]
+        )
 
     print("research formula engine self-test: PASS")
 

@@ -434,7 +434,9 @@ TOOL_SPECS = [
         "name": "research_formula_shadow",
         "description": (
             "Read formula lifecycle counts and recent matches observed after a formula entered Shadow. "
-            "Shadow matches are observational. A formula may emit Telegram alerts only after deterministic future-Shadow validation, owner-policy promotion to LIVE, runtime enablement and chat opt-in."
+            "Shadow matches and rolling metrics are observational, with an automatic ceiling of "
+            "SHADOW_PENDING_EXPLICIT_APPROVAL. They never promote a formula. LIVE requires a separate "
+            "frozen prospective review, explicit immutable human approval, runtime enablement and chat opt-in."
         ),
         "parameters": {
             "type": "object",
@@ -640,8 +642,9 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
         "primary_analytical_objective": (
             "Discover reproducible candidate formulas for the widest practical directional "
             "movement with high probability, low adverse excursion, fast favorable progress "
-            "and strong risk/reward. Live alerts require deterministic future-Shadow validation "
-            "under the owner policy plus an opted-in Telegram destination."
+            "and strong risk/reward. Rolling future-Shadow evidence is observational. Live alerts "
+            "require a separate frozen prospective review, explicit immutable human approval "
+            "and an opted-in Telegram destination."
         ),
         "approved_tools": [
             "get_oi_state",
@@ -694,12 +697,13 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "frozen chronological discovery/holdout validation",
                 "wide-movement percentile, probability, MFE, MAE, speed, sample-size and q-value ranking",
                 "versioned formula lifecycle registry",
-                "future Shadow validation and owner-policy promotion",
-                "autonomous Telegram alerts for validated LIVE formulas in opted-in chats",
+                "future Shadow observation with a SHADOW_PENDING_EXPLICIT_APPROVAL ceiling",
+                "Telegram delivery support for explicitly human-approved LIVE formulas in opted-in chats",
             ],
             "next_required_stages": [
                 "accumulate a materially longer out-of-sample alert history",
-                "allow future Shadow observations to satisfy every validation gate",
+                "accumulate enough future Shadow observations for a frozen prospective review",
+                "record explicit immutable human approval before any LIVE transition",
                 "enable the destination chat with /ai_alerts_on",
             ],
         },

@@ -20,21 +20,29 @@ independently.
 
 ## Formula lifecycle
 
-`DISCOVERED -> BACKTESTED -> HOLDOUT_PASSED -> SHADOW -> APPROVED -> LIVE`
+`DISCOVERED -> BACKTESTED -> HOLDOUT_PASSED -> SHADOW`
+
+Automatic processing stops at the observational readiness state
+`SHADOW_PENDING_EXPLICIT_APPROVAL`. `APPROVED -> LIVE` is a separate human
+activation path, not an automatic continuation of the lifecycle.
 
 Runtime status (2026-08-29): neutral historical raw-opportunity replay,
 automatic discovery, chronological holdout, multiple-testing correction,
 wide-move ranking, versioned registry and future Shadow evaluation are
-implemented. GPT cannot approve a formula. A separate
-deterministic owner-policy validator may promote a frozen formula to `LIVE`
-only after enough future outcomes pass every gate.
+implemented. GPT cannot approve a formula, and rolling Shadow evaluation never
+promotes one. After enough genuinely future evidence exists, a separate review
+freezes a predeclared prospective cutoff and evaluates that fixed sample. Only
+an explicit, immutable human approval may then move a formula to `APPROVED` or
+`LIVE`.
 
 - `DISCOVERED`: reproducible conditions and discovery-set metrics exist.
 - `BACKTESTED`: full path metrics, counterexamples and baseline comparisons exist.
 - `HOLDOUT_PASSED`: the frozen formula passes a later chronological sample.
 - `SHADOW`: evaluated on new live events without sending a trading alert.
-- `APPROVED`: the stored owner policy and future Shadow gates approve alert
-  eligibility.
+- `SHADOW_PENDING_EXPLICIT_APPROVAL`: observational readiness reported after
+  rolling gates pass; it is an automatic ceiling, not an approval or promotion.
+- `APPROVED`: an immutable explicit human decision made after a separate frozen
+  prospective review establishes alert eligibility.
 - `LIVE`: the versioned formula may emit an alert to explicitly opted-in chats.
 
 No stage transition is inferred from GPT prose. Each transition must be stored
@@ -68,6 +76,10 @@ with separate feature and label sections:
 - model: existing scores, families, confirmations and Magnet/Combined state;
 - label: verified later canonical spot return, MFE, MAE, speed and target result,
   kept structurally separate from every input feature.
+
+Future price movement, MFE and MAE are outcomes only. They can rank or review a
+frozen formula after the fact, but they can never be formula predicates,
+decision-time Shadow inputs or sources for a decision-time width reference.
 
 It also derives without look-ahead:
 
@@ -135,10 +147,14 @@ For every candidate report:
 ### 5. Shadow and live gates
 
 Holdout-passed candidates run in Shadow against future events. Shadow records
-every occurrence, including failures. The owner-approved deterministic policy
-requires future sample, control, temporal, probability, width and risk gates.
-Only then may the versioned formula become LIVE. A chat must separately opt in,
-and every message states formula version, direction, horizon, risk evidence,
+every occurrence, including failures. Rolling sample, control, temporal,
+probability, width and risk metrics are observational; passing them reports
+`SHADOW_PENDING_EXPLICIT_APPROVAL` and cannot change the stored formula stage.
+Any activation review must use a separately frozen, predeclared prospective
+cutoff so repeated rolling checks do not become an automatic stopping rule.
+Only an explicit, immutable human approval after that review may transition the
+versioned formula to `APPROVED` or `LIVE`. A chat must separately opt in, and
+every message states formula version, direction, horizon, risk evidence,
 rarity, sample count and validation state. It never executes a trade.
 
 ## Current boundary
@@ -146,7 +162,9 @@ rarity, sample count and validation state. It never executes a trade.
 The production AI can inspect replay coverage, explore verified path
 aggregates, fetch alert paths, inspect raw/model feature rows, enumerate bounded
 single/pair/triple formulas, correct for multiple testing, rank wide movements,
-validate chronologically, observe formulas in Shadow and deliver validated LIVE
-matches to opted-in Telegram chats. Remaining operational work is completing
-the historical backfill, rerunning every horizon, then accumulating genuinely
-future Shadow outcomes; optional context features remain listed above.
+validate chronologically and observe formulas in Shadow. The runtime can deliver
+only separately reviewed and explicitly human-approved LIVE matches to opted-in
+Telegram chats. Remaining operational work is accumulating genuinely future
+Shadow outcomes, freezing a prospective review sample and obtaining explicit
+approval before any LIVE activation; optional context features remain listed
+above.

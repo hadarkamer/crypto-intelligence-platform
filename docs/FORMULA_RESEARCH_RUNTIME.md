@@ -11,6 +11,8 @@ adverse excursion, fast favorable progress and useful MFE/MAE efficiency.
 - Inputs: immutable Research Event state and/or neutral archived raw Price/OI,
   Futures CVD and Spot CVD observations after their source candles closed.
 - Labels: closed canonical spot one-minute paths at 1h, 4h, 12h and 24h.
+- Future price movement, MFE and MAE are labels only. They are never formula
+  conditions, Shadow match inputs or decision-time width-calibration sources.
 - Binance Spot USDT is the default route. HYPE uses Hyperliquid HYPE/USDT spot
   (`@107`). The exchange and pair stay explicit in every outcome.
 - The first partial minute after the alert is excluded.
@@ -53,15 +55,19 @@ For each horizon and direction, the engine:
    movement-percentile gates are never relaxed.
 
 Small samples remain visible but cannot pass the strict Holdout gate.
-In addition, automatic Shadow promotion requires at least 72 hours across
+In addition, automatic eligibility to enter Shadow requires at least 72 hours across
 three UTC dates in discovery and 24 hours across two UTC dates in holdout. A
 high percentage from a single day therefore remains `BACKTESTED` at most.
 
 ## Lifecycle and safety
 
 - Discovery: `DISCOVERED`, `BACKTESTED`, `HOLDOUT_PASSED`, `SHADOW`.
-- Owner-policy validator: `APPROVED`, `LIVE` only after enough genuinely
-  future Shadow outcomes satisfy every stored gate.
+- Automatic rolling evaluation has a hard ceiling of
+  `SHADOW_PENDING_EXPLICIT_APPROVAL`. This is an observational readiness state;
+  it never changes a formula to `APPROVED` or `LIVE`.
+- After enough genuinely future evidence exists, a separate prospective review
+  freezes a predeclared cutoff and evaluates that fixed sample. Only an
+  explicit, immutable human approval may then activate `APPROVED` or `LIVE`.
 - A Shadow formula starts with the latest existing event ID and evaluates only
   genuinely future delivered alerts.
 - Every check and match is idempotent and auditable.
@@ -74,8 +80,9 @@ high percentage from a single day therefore remains `BACKTESTED` at most.
 
 - `FORMULA_DISCOVERY_ENABLED=1`
 - `FORMULA_SHADOW_ENABLED=1`
-- `FORMULA_LIVE_ALERTS_ENABLED=1` enables delivery after all formula and chat
-  gates pass; it does not bypass validation.
+- `FORMULA_LIVE_ALERTS_ENABLED=1` enables delivery only for a formula with an
+  explicit immutable human LIVE approval and an opted-in chat; it never
+  promotes a Shadow formula or bypasses the frozen prospective review.
 - `FORMULA_DISCOVERY_HORIZONS=60,240,720,1440`
 - `FORMULA_DISCOVERY_INTERVAL_SECONDS=21600`
 - `FORMULA_SHADOW_POLL_SECONDS=60`
@@ -95,7 +102,8 @@ The one-shot replay is separate from the Watch loop:
 The Candidate service keeps formula workers disabled. Production uses
 migrations `002_formula_research_v1.sql`,
 `003_formula_autonomous_alerts_v1.sql` and
-`004_historical_opportunity_replay_v1.sql` before enabling the workers.
+`004_historical_opportunity_replay_v1.sql`, followed by
+`005_formula_shadow_safety_v1.sql`, before enabling the workers.
 
 Formula schema v5 retires an earlier non-LIVE cohort only after at least four
 symbols independently have 250 anchors, 14 UTC dates and 336 hours of span for

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -19,6 +19,9 @@ import research_formula_engine
 
 
 _TRUE = {"1", "true", "yes", "on"}
+_LIVE_ALERTS_ENABLED = (
+    os.getenv("FORMULA_LIVE_ALERTS_ENABLED", "").strip().lower() in _TRUE
+)
 _STAGE_ORDER = {
     "DISCOVERED": 0,
     "BACKTESTED": 1,
@@ -29,9 +32,9 @@ _STAGE_ORDER = {
     "RETIRED": 6,
 }
 _AUTOMATIC_STAGE_PATH = ("DISCOVERED", "BACKTESTED", "HOLDOUT_PASSED", "SHADOW")
-_AUTONOMOUS_POLICY_VERSION = (
-    os.getenv("FORMULA_AUTONOMOUS_ALERT_POLICY_VERSION", "").strip()
-    or "owner-policy-v3-session-composition-2026-08-29"
+_SHADOW_MONITORING_POLICY_VERSION = (
+    os.getenv("FORMULA_SHADOW_MONITORING_POLICY_VERSION", "").strip()
+    or "shadow-monitoring-v1-independent-alert-episodes-2026-08-29"
 )
 _SHADOW_MIN_MATCHES = max(
     12, int(os.getenv("FORMULA_SHADOW_MIN_VALIDATED_MATCHES", "12"))
@@ -45,6 +48,9 @@ _SHADOW_MIN_SPAN_HOURS = max(
 _SHADOW_MIN_DATES = max(3, int(os.getenv("FORMULA_SHADOW_MIN_UTC_DATES", "3")))
 _DELIVERY_MAX_ATTEMPTS = max(
     1, int(os.getenv("FORMULA_LIVE_DELIVERY_MAX_ATTEMPTS", "5"))
+)
+_DELIVERY_MAX_AGE_MINUTES = max(
+    1, int(os.getenv("FORMULA_LIVE_DELIVERY_MAX_AGE_MINUTES", "15"))
 )
 
 
@@ -90,6 +96,27 @@ def _table_exists(conn, table: str) -> bool:
     return bool(row and row.get("relation"))
 
 
+def _missing_columns(
+    conn, required: Mapping[str, Sequence[str]]
+) -> list[str]:
+    missing: list[str] = []
+    for table, columns in required.items():
+        rows = conn.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=%s
+              AND column_name=ANY(%s)
+            """,
+            (table, list(columns)),
+        ).fetchall()
+        present = {str(row["column_name"]) for row in rows}
+        missing.extend(
+            f"{table}.{column}" for column in columns if column not in present
+        )
+    return missing
+
+
 def schema_status() -> Dict[str, Any]:
     required = (
         "research_formula_runs",
@@ -101,19 +128,53 @@ def schema_status() -> Dict[str, Any]:
         "research_legacy_alert_messages",
         "research_formula_alert_subscriptions",
         "research_formula_live_deliveries",
+        "research_formula_live_approvals",
     )
+    required_columns = {
+        "research_formula_shadow_checks": (
+            "evaluation_status",
+            "evaluation_reason",
+            "input_snapshot",
+            "condition_results",
+            "decision_cohort_key",
+            "decision_anchor_time_utc",
+        ),
+        "research_formula_live_approvals": (
+            "formula_version",
+            "horizon_minutes",
+            "review_kind",
+            "validation_policy_version",
+            "validation_started_at_utc",
+            "validation_cutoff_event_id",
+            "validation_cutoff_time_utc",
+            "validation_fingerprint",
+            "validated_future_matches",
+            "validated_future_controls",
+            "validated_span_hours",
+            "validated_utc_dates",
+            "thresholds_met",
+            "approved_by",
+            "approval_reason",
+            "validation_snapshot",
+        ),
+    }
     base = {
         "configured": bool(_database_url()),
         "schema_present": False,
         "missing_tables": list(required),
+        "missing_columns": [],
     }
     if not base["configured"] or psycopg is None:
         return base
     with _connect(read_only=True) as conn:
         missing = [table for table in required if not _table_exists(conn, table)]
         base["missing_tables"] = missing
-        base["schema_present"] = not missing
         if missing:
+            return base
+        missing_columns = _missing_columns(conn, required_columns)
+        base["missing_columns"] = missing_columns
+        base["schema_present"] = not missing_columns
+        if missing_columns:
             return base
         counts = conn.execute(
             """
@@ -557,10 +618,10 @@ def formula_registry(
     return _json_safe(
         {
             "available": True,
-            "automatic_stage_ceiling": "LIVE_AFTER_FUTURE_SHADOW_POLICY",
+            "automatic_stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
             "live_alerts_require": [
-                f"owner-approved policy {_AUTONOMOUS_POLICY_VERSION}",
-                "strict chronological holdout plus future Shadow validation",
+                "a separate explicit owner approval record",
+                "strict chronological holdout plus a frozen future Shadow review",
                 "FORMULA_LIVE_ALERTS_ENABLED=1",
                 "an explicit Telegram chat subscription",
             ],
@@ -651,7 +712,7 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
     with _connect(read_only=True) as conn:
         formulas = conn.execute(
             """
-            SELECT f.formula_id, f.formula_version, f.formula_text,
+            SELECT f.formula_id, f.formula_key, f.formula_version, f.formula_text,
                    f.formula_schema_version, f.direction, f.horizon_minutes,
                    f.conditions, f.feature_schema_version,
                    f.last_shadow_event_id, f.shadow_started_at_utc,
@@ -673,7 +734,8 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
         for formula in formulas:
             events = conn.execute(
                 """
-                SELECT event_id, alert_time_utc
+                SELECT event_id, alert_time_utc, symbol, direction,
+                       event_type, setup_key
                 FROM research_events
                 WHERE event_kind='ALERT' AND delivery_status='DELIVERED'
                   AND direction=%s
@@ -715,7 +777,8 @@ def record_shadow_results(
     with _connect(read_only=False) as conn:
         current = conn.execute(
             """
-            SELECT current_stage, active, live_alert_approved
+            SELECT current_stage, active, formula_version,
+                   live_alert_approved, live_alert_approved_by
             FROM research_formulas WHERE formula_id=%s FOR UPDATE
             """,
             (formula_id,),
@@ -734,12 +797,21 @@ def record_shadow_results(
         for result in results:
             event_id = int(result["event_id"])
             max_event_id = max(max_event_id, event_id)
-            is_match = bool(result.get("matched"))
+            evaluation_status = str(
+                result.get("evaluation_status")
+                or ("MATCHED" if result.get("matched") else "UNMATCHED")
+            ).upper()
+            if evaluation_status not in {"MATCHED", "UNMATCHED", "UNEVALUABLE"}:
+                evaluation_status = "UNEVALUABLE"
+            is_match = evaluation_status == "MATCHED"
             inserted = conn.execute(
                 """
                 INSERT INTO research_formula_shadow_checks (
-                    formula_id, event_id, matched, feature_schema_version
-                ) VALUES (%s, %s, %s, %s)
+                    formula_id, event_id, matched, feature_schema_version,
+                    evaluation_status, evaluation_reason, input_snapshot,
+                    condition_results, decision_cohort_key,
+                    decision_anchor_time_utc
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
                 ON CONFLICT (formula_id, event_id) DO NOTHING
                 RETURNING formula_id
                 """,
@@ -748,6 +820,12 @@ def record_shadow_results(
                     event_id,
                     is_match,
                     formula["feature_schema_version"],
+                    evaluation_status,
+                    str(result.get("evaluation_reason") or "")[:1000] or None,
+                    _json(result.get("input_snapshot") or {}),
+                    _json(result.get("condition_results") or []),
+                    result.get("decision_cohort_key"),
+                    result.get("decision_anchor_time_utc"),
                 ),
             ).fetchone()
             if not inserted:
@@ -772,8 +850,10 @@ def record_shadow_results(
                     ),
                 )
                 if (
-                    current["current_stage"] == "LIVE"
+                    _LIVE_ALERTS_ENABLED
+                    and current["current_stage"] == "LIVE"
                     and bool(current["live_alert_approved"])
+                    and bool(str(current.get("live_alert_approved_by") or "").strip())
                 ):
                     inserted_deliveries = conn.execute(
                         """
@@ -783,10 +863,33 @@ def record_shadow_results(
                         SELECT %s, %s, s.chat_id, 'PENDING'
                         FROM research_formula_alert_subscriptions s
                         WHERE s.active=TRUE
+                          AND EXISTS (
+                              SELECT 1
+                              FROM research_formula_live_approvals a
+                              WHERE a.formula_id=%s
+                                AND a.formula_version=%s
+                                AND a.horizon_minutes=%s
+                                AND a.review_kind='FROZEN_PROSPECTIVE'
+                                AND a.thresholds_met=TRUE
+                                AND a.validated_future_matches>=%s
+                                AND a.validated_future_controls>=%s
+                                AND a.validated_span_hours>=%s
+                                AND a.validated_utc_dates>=%s
+                          )
                         ON CONFLICT (event_id, chat_id) DO NOTHING
                         RETURNING delivery_id
                         """,
-                        (formula_id, event_id),
+                        (
+                            formula_id,
+                            event_id,
+                            formula_id,
+                            int(current["formula_version"]),
+                            int(formula["horizon_minutes"]),
+                            _SHADOW_MIN_MATCHES,
+                            _SHADOW_MIN_CONTROLS,
+                            float(_SHADOW_MIN_SPAN_HOURS),
+                            _SHADOW_MIN_DATES,
+                        ),
                     ).fetchall()
                     queued += len(inserted_deliveries)
         if max_event_id:
@@ -809,16 +912,22 @@ def record_shadow_results(
 
 
 def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    horizon_minutes = int(formula["horizon_minutes"])
     rows = conn.execute(
         """
-        SELECT c.matched,
+        SELECT c.matched, c.evaluation_status, c.evaluation_reason,
+               c.input_snapshot, c.condition_results,
+               c.decision_cohort_key, c.decision_anchor_time_utc,
                e.event_id, e.alert_time_utc, e.symbol, e.event_type,
+               e.direction, e.setup_key,
+               (e.alert_time_utc + (%s * INTERVAL '1 minute') <= NOW()) AS outcome_due,
+               (o.event_id IS NOT NULL) AS outcome_available,
                o.directional_return_pct, o.mfe_pct, o.mae_pct,
                o.time_to_first_progress_seconds, o.time_to_mfe_seconds,
                o.target_progress_ratio, o.target_reached
         FROM research_formula_shadow_checks c
         JOIN research_events e ON e.event_id=c.event_id
-        JOIN research_alert_outcomes o
+        LEFT JOIN research_alert_outcomes o
           ON o.event_id=e.event_id
          AND o.horizon_minutes=%s
          AND o.outcome_method_version=%s
@@ -827,7 +936,8 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
         ORDER BY e.alert_time_utc, e.event_id
         """,
         (
-            int(formula["horizon_minutes"]),
+            horizon_minutes,
+            horizon_minutes,
             research_feature_matrix.VERIFIED_OUTCOME_METHOD,
             list(research_feature_matrix.VERIFIED_OUTCOME_QUALITIES),
             int(formula["formula_id"]),
@@ -836,9 +946,153 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
     return [dict(row) for row in rows]
 
 
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _as_utc(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def _windows_overlap(
+    left_start: datetime,
+    right_start: datetime,
+    horizon: timedelta,
+) -> bool:
+    return left_start < right_start + horizon and right_start < left_start + horizon
+
+
+def _select_independent_shadow_rows(
+    rows: Sequence[Mapping[str, Any]], *, horizon_minutes: int
+) -> Dict[str, Any]:
+    """Select outcome-blind, non-overlapping prospective evidence units.
+
+    Formula matches are selected first because they are the target population.
+    Unmatched controls are then retained only when they overlap neither a
+    retained match nor an earlier retained control for the same symbol.  The
+    selection first collapses exact decision cohorts, then uses their frozen
+    decision anchors. It never reads MFE, MAE, return or outcome availability.
+    """
+    horizon = timedelta(minutes=int(horizon_minutes))
+    eligible = sorted(
+        (
+            dict(row)
+            for row in rows
+            if str(row.get("evaluation_status") or "").upper()
+            in {"MATCHED", "UNMATCHED"}
+        ),
+        key=lambda row: (
+            _as_utc(
+                row.get("decision_anchor_time_utc") or row["alert_time_utc"]
+            ),
+            _as_utc(row["alert_time_utc"]),
+            int(row["event_id"]),
+        ),
+    )
+    exact_cohorts: Dict[tuple[str, str], list[Dict[str, Any]]] = {}
+    for row in eligible:
+        symbol = str(row.get("symbol") or "").upper()
+        cohort_key = str(row.get("decision_cohort_key") or f"event:{row['event_id']}")
+        exact_cohorts.setdefault((symbol, cohort_key), []).append(row)
+    collapsed: list[Dict[str, Any]] = []
+    exact_cohort_exclusions: list[int] = []
+    for cohort_rows in exact_cohorts.values():
+        ordered = sorted(
+            cohort_rows,
+            key=lambda row: (
+                0
+                if str(row.get("evaluation_status") or "").upper() == "MATCHED"
+                else 1,
+                _as_utc(row["alert_time_utc"]),
+                int(row["event_id"]),
+            ),
+        )
+        collapsed.append(ordered[0])
+        exact_cohort_exclusions.extend(int(row["event_id"]) for row in ordered[1:])
+    eligible = sorted(
+        collapsed,
+        key=lambda row: (
+            _as_utc(
+                row.get("decision_anchor_time_utc") or row["alert_time_utc"]
+            ),
+            _as_utc(row["alert_time_utc"]),
+            int(row["event_id"]),
+        ),
+    )
+    retained_matches: list[Dict[str, Any]] = []
+    retained_controls: list[Dict[str, Any]] = []
+    excluded_matches: list[int] = []
+    excluded_controls: list[int] = []
+
+    def overlaps_retained(
+        candidate: Mapping[str, Any], retained: Sequence[Mapping[str, Any]]
+    ) -> bool:
+        symbol = str(candidate.get("symbol") or "").upper()
+        start = _as_utc(
+            candidate.get("decision_anchor_time_utc")
+            or candidate["alert_time_utc"]
+        )
+        return any(
+            str(other.get("symbol") or "").upper() == symbol
+            and _windows_overlap(
+                start,
+                _as_utc(
+                    other.get("decision_anchor_time_utc")
+                    or other["alert_time_utc"]
+                ),
+                horizon,
+            )
+            for other in retained
+        )
+
+    for row in eligible:
+        if str(row.get("evaluation_status") or "").upper() != "MATCHED":
+            continue
+        if overlaps_retained(row, retained_matches):
+            excluded_matches.append(int(row["event_id"]))
+        else:
+            retained_matches.append(row)
+
+    for row in eligible:
+        if str(row.get("evaluation_status") or "").upper() != "UNMATCHED":
+            continue
+        if overlaps_retained(row, retained_matches) or overlaps_retained(
+            row, retained_controls
+        ):
+            excluded_controls.append(int(row["event_id"]))
+        else:
+            retained_controls.append(row)
+
+    return {
+        "rows": retained_matches + retained_controls,
+        "matches": retained_matches,
+        "controls": retained_controls,
+        "excluded_match_event_ids": excluded_matches,
+        "excluded_control_event_ids": excluded_controls,
+        "exact_cohort_excluded_event_ids": sorted(exact_cohort_exclusions),
+    }
+
+
 def _metric_row(
     source: Mapping[str, Any], *, horizon_minutes: int
 ) -> Dict[str, Any]:
+    snapshot = _as_mapping(source.get("input_snapshot"))
+    session = _as_mapping(snapshot.get("outcome_window_session"))
+    width_reference = _as_mapping(snapshot.get("movement_width_reference"))
     return {
         "event": {
             "event_id": int(source["event_id"]),
@@ -848,6 +1102,11 @@ def _metric_row(
         },
         "outcome_label": {
             "horizon_minutes": int(horizon_minutes),
+            "session_active_ratio": session.get("session_active_ratio"),
+            "session_weekend_ratio": session.get("session_weekend_ratio"),
+            "session_segments": session.get("session_segments") or [],
+            "session_composition": session.get("session_composition"),
+            "movement_width_reference": dict(width_reference),
             "directional_return_pct": source.get("directional_return_pct"),
             "mfe_pct": source.get("mfe_pct"),
             "mae_pct": source.get("mae_pct"),
@@ -861,14 +1120,22 @@ def _metric_row(
     }
 
 
-def promote_eligible_shadow_formulas() -> Dict[str, Any]:
-    """Apply the owner-approved deterministic future-Shadow live policy."""
+def evaluate_shadow_readiness() -> Dict[str, Any]:
+    """Persist rolling prospective metrics without changing a formula stage.
+
+    These metrics are monitoring evidence only.  The current control population
+    consists of nonmatching delivered bot alerts, not neutral replay anchors,
+    and repeated rolling looks are not an approval test.  No path in this
+    function writes APPROVED/LIVE or ``live_alert_approved``.
+    """
     evaluated = 0
-    promoted: list[int] = []
+    thresholds_met: list[int] = []
     with _connect(read_only=False) as conn:
         formulas = conn.execute(
             """
-            SELECT formula_id, horizon_minutes, latest_evaluation_run_id
+            SELECT formula_id, formula_version, horizon_minutes,
+                   latest_evaluation_run_id, shadow_started_at_utc,
+                   last_shadow_event_id
             FROM research_formulas
             WHERE active=TRUE
               AND current_stage='SHADOW'
@@ -881,14 +1148,21 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
         for formula in formulas:
             source_rows = _shadow_outcome_rows(conn, formula)
             horizon_minutes = int(formula["horizon_minutes"])
+            independent = _select_independent_shadow_rows(
+                source_rows, horizon_minutes=horizon_minutes
+            )
+            independent_rows = list(independent["rows"])
+            complete_rows = [
+                row for row in independent_rows if bool(row.get("outcome_available"))
+            ]
             universe = [
                 _metric_row(row, horizon_minutes=horizon_minutes)
-                for row in source_rows
+                for row in complete_rows
             ]
             selected = [
                 _metric_row(row, horizon_minutes=horizon_minutes)
-                for row in source_rows
-                if bool(row.get("matched"))
+                for row in complete_rows
+                if str(row.get("evaluation_status") or "").upper() == "MATCHED"
             ]
             metrics = research_formula_engine.summarize_outcomes(selected, universe)
             evaluated += 1
@@ -900,6 +1174,26 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
             )
             if movement_percentile is None:
                 movement_percentile = metrics.get("median_mfe_percentile_pct")
+            raw_status_counts = {
+                status: sum(
+                    1
+                    for row in source_rows
+                    if str(row.get("evaluation_status") or "").upper() == status
+                )
+                for status in ("MATCHED", "UNMATCHED", "UNEVALUABLE")
+            }
+            pending_outcome_event_ids = [
+                int(row["event_id"])
+                for row in independent_rows
+                if not bool(row.get("outcome_available"))
+                and not bool(row.get("outcome_due"))
+            ]
+            overdue_outcome_event_ids = [
+                int(row["event_id"])
+                for row in independent_rows
+                if not bool(row.get("outcome_available"))
+                and bool(row.get("outcome_due"))
+            ]
             gate_results = {
                 "matched future outcomes": int(metrics.get("sample_size") or 0)
                 >= _SHADOW_MIN_MATCHES,
@@ -909,6 +1203,7 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
                 >= float(_SHADOW_MIN_SPAN_HOURS),
                 "future UTC dates": int(metrics.get("distinct_utc_dates") or 0)
                 >= _SHADOW_MIN_DATES,
+                "no overdue canonical outcome gaps": not overdue_outcome_event_ids,
                 "future session-composition baseline coverage": bool(
                     metrics.get("session_baseline_complete")
                 ),
@@ -940,13 +1235,46 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
                 > 0.0,
             }
             validation = {
-                "policy_version": _AUTONOMOUS_POLICY_VERSION,
+                "policy_version": _SHADOW_MONITORING_POLICY_VERSION,
                 "evaluated_at_utc": datetime.now(timezone.utc),
+                "stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
+                "statistical_use": (
+                    "rolling descriptive monitoring only; explicit owner approval "
+                    "requires a separately frozen prospective review"
+                ),
+                "sampling_frame": (
+                    "new ALERT+DELIVERED bot events; controls are evaluable "
+                    "formula nonmatches within that population"
+                ),
                 "metrics": metrics,
+                "evidence": {
+                    "raw_checks": len(source_rows),
+                    "raw_evaluation_status": raw_status_counts,
+                    "independent_matches": len(independent["matches"]),
+                    "independent_controls": len(independent["controls"]),
+                    "correlated_match_exclusions": len(
+                        independent["excluded_match_event_ids"]
+                    ),
+                    "correlated_control_exclusions": len(
+                        independent["excluded_control_event_ids"]
+                    ),
+                    "exact_cohort_exclusions": len(
+                        independent["exact_cohort_excluded_event_ids"]
+                    ),
+                    "pending_outcome_event_ids": pending_outcome_event_ids,
+                    "overdue_outcome_event_ids": overdue_outcome_event_ids,
+                    "independence_policy": (
+                        "exact decision cohorts collapse first; same-symbol frozen "
+                        "decision-anchor windows must not overlap"
+                    ),
+                },
                 "gates": gate_results,
                 "failed_gates": [
                     name for name, passed in gate_results.items() if not passed
                 ],
+                "thresholds_met": bool(gate_results) and all(gate_results.values()),
+                "live_eligible": False,
+                "live_blocker": "a separate explicit owner approval record is absent",
             }
             formula_id = int(formula["formula_id"])
             conn.execute(
@@ -957,64 +1285,22 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
                 """,
                 (_json(validation), formula_id),
             )
-            if not all(gate_results.values()):
-                continue
-            run_id = formula.get("latest_evaluation_run_id")
-            conn.execute(
-                """
-                INSERT INTO research_formula_stage_history (
-                    formula_id, run_id, from_stage, to_stage, reason, actor
-                ) VALUES (%s, %s, 'SHADOW', 'APPROVED', %s, %s)
-                ON CONFLICT (formula_id, run_id, to_stage) DO NOTHING
-                """,
-                (
-                    formula_id,
-                    run_id,
-                    "owner policy plus deterministic future Shadow gates passed",
-                    "automatic-shadow-validator",
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO research_formula_stage_history (
-                    formula_id, run_id, from_stage, to_stage, reason, actor
-                ) VALUES (%s, %s, 'APPROVED', 'LIVE', %s, %s)
-                ON CONFLICT (formula_id, run_id, to_stage) DO NOTHING
-                """,
-                (
-                    formula_id,
-                    run_id,
-                    f"autonomous alert policy {_AUTONOMOUS_POLICY_VERSION}",
-                    "automatic-shadow-validator",
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE research_formulas
-                SET current_stage='LIVE',
-                    live_alert_approved=TRUE,
-                    live_alert_approved_at_utc=NOW(),
-                    live_alert_approved_by=%s,
-                    shadow_validated_at_utc=NOW(),
-                    live_alert_policy_version=%s,
-                    shadow_validation_metrics=%s::jsonb,
-                    updated_at_utc=NOW()
-                WHERE formula_id=%s AND current_stage='SHADOW'
-                """,
-                (
-                    _AUTONOMOUS_POLICY_VERSION,
-                    _AUTONOMOUS_POLICY_VERSION,
-                    _json(validation),
-                    formula_id,
-                ),
-            )
-            promoted.append(formula_id)
+            if all(gate_results.values()):
+                thresholds_met.append(formula_id)
         conn.commit()
     return {
-        "policy_version": _AUTONOMOUS_POLICY_VERSION,
+        "policy_version": _SHADOW_MONITORING_POLICY_VERSION,
         "evaluated": evaluated,
-        "promoted": promoted,
+        "thresholds_met": thresholds_met,
+        "ready_for_explicit_review": thresholds_met,
+        "promoted": [],
+        "automatic_stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
     }
+
+
+def promote_eligible_shadow_formulas() -> Dict[str, Any]:
+    """Deprecated compatibility wrapper; automatic promotion is forbidden."""
+    return evaluate_shadow_readiness()
 
 
 def set_alert_subscription(
@@ -1096,6 +1382,22 @@ def load_pending_live_deliveries(limit: int = 50) -> list[Dict[str, Any]]:
             JOIN research_formula_alert_subscriptions s
               ON s.chat_id=d.chat_id AND s.active=TRUE
             WHERE f.active=TRUE AND f.current_stage='LIVE'
+              AND f.live_alert_approved=TRUE
+              AND BTRIM(COALESCE(f.live_alert_approved_by, ''))<>''
+              AND EXISTS (
+                  SELECT 1
+                  FROM research_formula_live_approvals a
+                  WHERE a.formula_id=f.formula_id
+                    AND a.formula_version=f.formula_version
+                    AND a.horizon_minutes=f.horizon_minutes
+                    AND a.review_kind='FROZEN_PROSPECTIVE'
+                    AND a.thresholds_met=TRUE
+                    AND a.validated_future_matches>=%s
+                    AND a.validated_future_controls>=%s
+                    AND a.validated_span_hours>=%s
+                    AND a.validated_utc_dates>=%s
+              )
+              AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 minute')
               AND d.attempts<%s
               AND (
                   d.status='PENDING'
@@ -1107,7 +1409,15 @@ def load_pending_live_deliveries(limit: int = 50) -> list[Dict[str, Any]]:
             ORDER BY d.created_at_utc, d.delivery_id
             LIMIT %s
             """,
-            (_DELIVERY_MAX_ATTEMPTS, row_limit),
+            (
+                _SHADOW_MIN_MATCHES,
+                _SHADOW_MIN_CONTROLS,
+                float(_SHADOW_MIN_SPAN_HOURS),
+                _SHADOW_MIN_DATES,
+                _DELIVERY_MAX_AGE_MINUTES,
+                _DELIVERY_MAX_ATTEMPTS,
+                row_limit,
+            ),
         ).fetchall()
     return _json_safe([dict(row) for row in rows])
 

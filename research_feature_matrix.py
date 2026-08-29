@@ -1957,13 +1957,44 @@ def load_formula_dataset(
     return alerts
 
 
-def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
-    """Build decision-time-only rows for newly delivered live alerts."""
-    normalized = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
+def load_shadow_feature_rows_by_horizon(
+    event_ids_by_horizon: Mapping[int, Sequence[int]],
+) -> Dict[tuple[int, int], Dict[str, Any]]:
+    """Build prior-only Shadow rows keyed by ``(event_id, horizon)``.
+
+    The formula horizon is injected before the feature row is built so the
+    decision-time weekend width reference uses the correct future window.  The
+    reference itself is calculated exclusively from raw history that predates
+    the event; realized return/MFE/MAE are never loaded here.
+    """
+    unsupported = sorted(
+        {
+            int(horizon)
+            for horizon, event_ids in event_ids_by_horizon.items()
+            if event_ids and int(horizon) not in {60, 240, 720, 1440}
+        }
+    )
+    if unsupported:
+        raise ValueError(f"unsupported Shadow horizons: {unsupported}")
+    normalized_by_horizon = {
+        int(horizon): sorted(
+            {int(event_id) for event_id in event_ids if int(event_id) > 0}
+        )
+        for horizon, event_ids in event_ids_by_horizon.items()
+        if int(horizon) in {60, 240, 720, 1440}
+    }
+    normalized_by_horizon = {
+        horizon: event_ids
+        for horizon, event_ids in normalized_by_horizon.items()
+        if event_ids
+    }
+    normalized = sorted(
+        {event_id for event_ids in normalized_by_horizon.values() for event_id in event_ids}
+    )
     if not normalized:
         return {}
     if len(normalized) > 250:
-        raise ValueError("shadow feature batch is limited to 250 events")
+        raise ValueError("shadow feature batch is limited to 250 distinct events")
     research_url = _research_database_url()
     raw_url = _raw_database_url()
     if not research_url or not raw_url:
@@ -1992,6 +2023,69 @@ def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, An
             symbols=symbols,
             start=raw_start,
             end=last_time,
+        )
+    events_by_id = {int(row["event_id"]): dict(row) for row in events}
+    horizon_events = []
+    for horizon, event_ids in sorted(normalized_by_horizon.items()):
+        for event_id in event_ids:
+            source = events_by_id.get(event_id)
+            if source is None:
+                continue
+            event = dict(source)
+            event["horizon_minutes"] = horizon
+            horizon_events.append(event)
+    rows = build_feature_rows(
+        horizon_events,
+        price_oi_rows=price_rows,
+        futures_rows=futures_rows,
+        spot_rows=spot_rows,
+        prior_events=prior_events,
+        windows_minutes=CORE_WINDOWS_MINUTES,
+    )
+    result: Dict[tuple[int, int], Dict[str, Any]] = {}
+    for row in rows:
+        event_id = row.get("event", {}).get("event_id")
+        horizon = row.get("outcome_label", {}).get("horizon_minutes")
+        if event_id is not None and horizon is not None:
+            result[(int(event_id), int(horizon))] = row
+    return result
+
+
+def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
+    """Backward-compatible decision-time rows without a formula horizon.
+
+    Formula Shadow validation must call ``load_shadow_feature_rows_by_horizon``.
+    This wrapper remains for read-only callers that do not need weekend width
+    calibration and therefore receives no relaxation.
+    """
+    normalized = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
+    if not normalized:
+        return {}
+    if len(normalized) > 250:
+        raise ValueError("shadow feature batch is limited to 250 events")
+    research_url = _research_database_url()
+    raw_url = _raw_database_url()
+    if not research_url or not raw_url:
+        raise RuntimeError("research and raw market archives must both be configured")
+    with _connect(research_url) as research_conn:
+        events = _load_delivered_events_by_id(research_conn, normalized)
+        if not events:
+            return {}
+        first_time = min(_as_utc(row["alert_time_utc"]) for row in events)
+        last_time = max(_as_utc(row["alert_time_utc"]) for row in events)
+        prior_events = _load_prior_events(
+            research_conn,
+            first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
+            last_time,
+        )
+    symbols = sorted({str(row["symbol"] or "").upper() for row in events})
+    raw_start = first_time - timedelta(
+        days=HISTORICAL_BASELINE_DAYS,
+        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES,
+    )
+    with _connect(raw_url) as raw_conn:
+        price_rows, futures_rows, spot_rows = _load_raw_rows(
+            raw_conn, symbols=symbols, start=raw_start, end=last_time
         )
     rows = build_feature_rows(
         events,

@@ -18,6 +18,9 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "004_historical_opportunity_replay_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "005_formula_shadow_safety_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

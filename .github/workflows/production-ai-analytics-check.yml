@@ -26,6 +26,8 @@ jobs:
             main.py ai_candidate_main.py ai_agent.py ai_tools.py ai_telegram.py \
             ai_history_research.py ai_alert_research.py \
             research_feature_matrix.py \
+            research_formula_engine.py research_formula_store.py \
+            research_formula_worker.py research_formula_schema_admin.py \
             research_event_capture.py research_event_runtime.py \
             research_event_store.py research_outcome_worker.py \
             binance_spot_price_path.py
@@ -41,6 +43,10 @@ jobs:
         run: python binance_spot_price_path_selftest.py
       - name: No-lookahead research feature matrix
         run: python research_feature_matrix_selftest.py
+      - name: Formula engine safety
+        run: python research_formula_engine_selftest.py
+      - name: Prospective Formula Shadow evidence
+        run: python research_formula_store_selftest.py
       - name: Source integrity
         run: |
           ! grep -R "scan_coinglass_market\|AI_WEB_SEARCH_ENABLED\|web_search" \

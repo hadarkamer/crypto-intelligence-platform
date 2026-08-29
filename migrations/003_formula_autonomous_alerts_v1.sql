@@ -1,7 +1,7 @@
--- Formula autonomous-alert policy v1
--- Additive only. A formula can become LIVE only after future Shadow outcomes
--- satisfy the owner-approved deterministic policy. Telegram delivery also
--- requires an explicit chat subscription and the runtime feature flag.
+-- Legacy Formula live-alert storage v1.
+-- Additive only. This migration supplies delivery/subscription storage; it no
+-- longer authorizes automatic Shadow-to-LIVE promotion. Migration 005 adds the
+-- separate explicit human approval record required by the runtime.
 
 ALTER TABLE research_formulas
     ADD COLUMN IF NOT EXISTS shadow_validation_metrics JSONB NOT NULL DEFAULT '{}'::jsonb;

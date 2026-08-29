@@ -169,7 +169,7 @@ def run() -> None:
     assert research_formula_worker.WORKER.status()["live_alerts_enabled"] is False
     assert (
         research_formula_worker.WORKER.status()["automatic_stage_ceiling"]
-        == "LIVE_AFTER_FUTURE_SHADOW_POLICY"
+        == "SHADOW_PENDING_EXPLICIT_APPROVAL"
     )
     capped_stage, capped_notes = research_formula_store._requested_stage_for_dataset(
         {"recommended_stage": "SHADOW", "gate_notes": []},
@@ -352,6 +352,7 @@ def run() -> None:
     assert "research_outcome_worker.WORKER.start()" in main_text
     assert "research_formula_worker.WORKER.start()" in main_text
     assert "research_formula_worker.WORKER.bind_telegram(bot_app.bot)" in main_text
+    assert "research_formula_schema_admin.apply_schema" in main_text
     assert "special_transitions_precomputed=True" in main_text
     assert "scan_coinglass_market" not in main_text
     manual_helper = main_text.split("async def _reply_alert_with_archive", 1)[1].split(
@@ -385,6 +386,29 @@ def run() -> None:
     ).read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS research_historical_replay_runs" in replay_migration
     assert "CREATE TABLE IF NOT EXISTS research_historical_opportunity_outcomes" in replay_migration
+    shadow_safety_migration = (
+        root / "migrations" / "005_formula_shadow_safety_v1.sql"
+    ).read_text(encoding="utf-8")
+    for required_shadow_column in (
+        "evaluation_status",
+        "evaluation_reason",
+        "input_snapshot",
+        "condition_results",
+        "decision_cohort_key",
+        "decision_anchor_time_utc",
+    ):
+        assert f"ADD COLUMN IF NOT EXISTS {required_shadow_column}" in shadow_safety_migration
+    assert "CREATE TABLE IF NOT EXISTS research_formula_live_approvals" in shadow_safety_migration
+    assert "approved_by TEXT NOT NULL" in shadow_safety_migration
+    assert "approval_reason TEXT NOT NULL" in shadow_safety_migration
+    assert "review_kind TEXT NOT NULL" in shadow_safety_migration
+    assert "validation_cutoff_event_id BIGINT NOT NULL" in shadow_safety_migration
+    assert "validated_future_matches INTEGER NOT NULL" in shadow_safety_migration
+    assert "validated_future_controls INTEGER NOT NULL" in shadow_safety_migration
+    assert "thresholds_met BOOLEAN NOT NULL" in shadow_safety_migration
+    assert "UNIQUE (formula_id, formula_version)" in shadow_safety_migration
+    assert "BEFORE UPDATE OR DELETE ON research_formula_live_approvals" in shadow_safety_migration
+    assert "research_formula_live_approvals is append-only" in shadow_safety_migration
 
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS
@@ -396,6 +420,17 @@ def run() -> None:
     assert "safe historical-replay formula schema v5" in formula_store_text
     assert "replacement_ready" in formula_store_text
     assert "latest_evaluation_run_id IS DISTINCT FROM %s" in formula_store_text
+    readiness_body = formula_store_text.split(
+        "def evaluate_shadow_readiness", 1
+    )[1].split("def promote_eligible_shadow_formulas", 1)[0]
+    assert "ready_for_explicit_review" in readiness_body
+    assert '"promoted": []' in readiness_body
+    assert "SET current_stage='LIVE'" not in readiness_body
+    assert "live_alert_approved=TRUE" not in readiness_body
+    assert "FROM research_formula_live_approvals a" in formula_store_text
+    assert "f.live_alert_approved=TRUE" in formula_store_text
+    assert "and current[\"current_stage\"] == \"LIVE\"" in formula_store_text
+    assert "_DELIVERY_MAX_AGE_MINUTES" in formula_store_text
     telegram_text = (root / "ai_telegram.py").read_text(encoding="utf-8")
     assert "נוסחאות LIVE פעילות" in telegram_text
     assert "MAE p75: \\1" in telegram_text

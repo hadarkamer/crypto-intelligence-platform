@@ -87,6 +87,8 @@ market-breadth features, and places them beside compact captured model features.
 Verified later canonical spot path metrics appear only under `outcome_label`.
 This enables direct comparison of pure data and the bot's current scoring logic
 without copying the underlying time series into the Research Event archive.
+Future price movement, MFE and MAE remain outcomes only: they are never formula
+conditions, Shadow match inputs or decision-time width-calibration values.
 
 `research_historical_replay.py` extends this to the pre-alert raw archive. It
 waits until each 30-minute source candle has closed plus two minutes, uses
@@ -112,8 +114,17 @@ After the price path and core feature matrix, the operational order is:
 3. keep identical timestamps together across the chronological split;
 4. rank by baseline improvement, MFE, MAE, speed and sample coverage;
 5. register only coverage-ready candidates and monitor them in Shadow;
-6. validate each frozen formula on genuinely future Shadow outcomes under the
-   owner policy, then expose it as a live alert condition for opted-in chats.
+6. accumulate genuinely future Shadow observations without promotion;
+7. freeze a predeclared prospective cutoff for a separate review and require
+   explicit immutable human approval before any LIVE alert condition is
+   available to opted-in chats.
+
+Rolling Shadow metrics are observational. Their automatic ceiling is
+`SHADOW_PENDING_EXPLICIT_APPROVAL`; passing every rolling gate does not change
+the stored stage, approve a formula or emit an alert. Weekend calibration may
+adjust only the absolute movement-width floor from sufficient prior-only
+evidence. Probability, directional advantage, MAE, efficiency and relative
+width gates remain unchanged.
 
 ## Explicit activation gates
 
@@ -124,7 +135,7 @@ the Watch loop. Runtime persistence then requires:
 - `RESEARCH_PERSISTENCE_ENABLED=1`;
 - `RESEARCH_OUTCOME_ENRICHMENT_ENABLED=1`.
 
-Formula Research additionally applies migrations `002`, `003` and `004` via
+Formula Research additionally applies migrations `002`, `003`, `004` and `005` via
 the explicit schema administrator. Historical replay writes require the
 one-shot `HISTORICAL_REPLAY_BACKFILL=1` guard; it is not a persistent Watch flag.
 

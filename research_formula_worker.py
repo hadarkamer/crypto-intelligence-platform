@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from typing import Any, Dict, Mapping, Optional
@@ -53,6 +54,132 @@ def _conditions(value: Any) -> list[Dict[str, Any]]:
     return [dict(item) for item in value or [] if isinstance(item, dict)]
 
 
+def _as_utc(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def _shadow_snapshot(
+    *,
+    formula: Mapping[str, Any],
+    event: Mapping[str, Any],
+    row: Optional[Mapping[str, Any]],
+    evaluation: Mapping[str, Any],
+) -> Dict[str, Any]:
+    features = evaluation.get("features")
+    if not isinstance(features, Mapping):
+        features = {}
+    conditions = _conditions(formula.get("conditions"))
+    raw = row.get("raw_features") if isinstance(row, Mapping) else {}
+    if not isinstance(raw, Mapping):
+        raw = {}
+    latest = raw.get("latest_at_or_before_alert")
+    if not isinstance(latest, Mapping):
+        latest = {}
+    label = row.get("outcome_label") if isinstance(row, Mapping) else {}
+    if not isinstance(label, Mapping):
+        label = {}
+    session = {
+        key: label.get(key)
+        for key in (
+            "session_active_ratio",
+            "session_weekend_ratio",
+            "session_segments",
+            "session_composition",
+        )
+    }
+    return {
+        "formula_key": formula.get("formula_key"),
+        "formula_version": int(formula.get("formula_version") or 0),
+        "horizon_minutes": int(formula.get("horizon_minutes") or 0),
+        "event": {
+            "event_id": int(event["event_id"]),
+            "alert_time_utc": event.get("alert_time_utc"),
+            "symbol": event.get("symbol"),
+            "direction": event.get("direction"),
+            "event_type": event.get("event_type"),
+            "setup_key": event.get("setup_key"),
+        },
+        "formula_key_features": {
+            condition["feature"]: features.get(condition["feature"])
+            for condition in conditions
+            if condition.get("feature")
+        },
+        "conditions": conditions,
+        "condition_results": list(evaluation.get("condition_results") or []),
+        "feature_schema_version": formula.get("feature_schema_version"),
+        "source_inputs": {
+            family: dict(values) if isinstance(values, Mapping) else {}
+            for family, values in latest.items()
+            if family in {"price_oi", "futures_cvd", "spot_cvd"}
+        },
+        "outcome_window_session": session,
+        "movement_width_reference": (
+            dict(label.get("movement_width_reference"))
+            if isinstance(label.get("movement_width_reference"), Mapping)
+            else {}
+        ),
+        "lookahead_contract": (
+            "decision-time inputs and prior-only width calibration; no realized "
+            "return, MFE or MAE"
+        ),
+    }
+
+
+def _decision_cohort(
+    *,
+    formula: Mapping[str, Any],
+    event: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+) -> tuple[str, datetime]:
+    source_inputs = snapshot.get("source_inputs")
+    if not isinstance(source_inputs, Mapping):
+        source_inputs = {}
+    timestamps: list[datetime] = []
+    canonical_timestamps: list[str] = []
+    for family in ("price_oi", "futures_cvd", "spot_cvd"):
+        values = source_inputs.get(family)
+        value = values.get("timestamp_utc") if isinstance(values, Mapping) else None
+        if value in (None, ""):
+            canonical_timestamps.append(f"{family}:missing")
+            continue
+        timestamp = _as_utc(value)
+        timestamps.append(timestamp)
+        canonical_timestamps.append(f"{family}:{timestamp.isoformat()}")
+    alert_time = _as_utc(event["alert_time_utc"])
+    if timestamps:
+        anchor = max(timestamps)
+    else:
+        anchor = alert_time.replace(
+            minute=(alert_time.minute // 30) * 30,
+            second=0,
+            microsecond=0,
+        )
+        canonical_timestamps.append(f"fallback_30m:{anchor.isoformat()}")
+    payload = "|".join(
+        [
+            str(formula.get("formula_id") or ""),
+            str(event.get("symbol") or "").upper(),
+            str(event.get("direction") or "").upper(),
+            str(int(formula.get("horizon_minutes") or 0)),
+            *canonical_timestamps,
+            json.dumps(
+                snapshot.get("formula_key_features") or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            ),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest(), anchor
+
+
 @dataclass
 class FormulaWorkerMetrics:
     discovery_cycles: int = 0
@@ -66,6 +193,7 @@ class FormulaWorkerMetrics:
     live_deliveries_sent: int = 0
     live_deliveries_failed: int = 0
     formulas_promoted_live: int = 0
+    formulas_ready_for_review: int = 0
     failures: int = 0
     last_discovery_utc: Optional[str] = None
     last_shadow_utc: Optional[str] = None
@@ -105,15 +233,15 @@ class FormulaResearchWorker:
             "dataset_mode": _DATASET_MODE,
             "discovery_interval_seconds": _DISCOVERY_INTERVAL_SECONDS,
             "shadow_poll_seconds": _SHADOW_POLL_SECONDS,
-            "automatic_stage_ceiling": "LIVE_AFTER_FUTURE_SHADOW_POLICY",
+            "automatic_stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
             "live_delivery_gate": {
                 "environment_enabled": _LIVE_ALERTS_ENABLED,
                 "formula_validation_required": True,
                 "telegram_delivery_connected": self._telegram_bot is not None,
                 "chat_subscription_required": True,
                 "reason": (
-                    "delivery requires owner-policy validation, runtime enablement "
-                    "and /ai_alerts_on in the destination chat"
+                    "delivery requires a separate explicit owner approval record, LIVE "
+                    "stage, runtime enablement and /ai_alerts_on in the destination chat"
                 ),
             },
             "canonical_outcomes": (
@@ -252,14 +380,35 @@ class FormulaResearchWorker:
     def run_shadow_once(self) -> Dict[str, Any]:
         self.metrics.shadow_cycles += 1
         work = research_formula_store.load_shadow_work()
-        event_ids = sorted(
-            {
+        events_by_id = {
+            int(event["event_id"]): event
+            for formula in work
+            for event in formula.get("events") or []
+        }
+        event_ids = [
+            event_id
+            for event_id, _ in sorted(
+                events_by_id.items(),
+                key=lambda item: (
+                    _as_utc(item[1]["alert_time_utc"]),
+                    int(item[0]),
+                ),
+            )[:250]
+        ]
+        selected_event_ids = set(event_ids)
+        event_ids_by_horizon: Dict[int, list[int]] = {}
+        for formula in work:
+            horizon = int(formula["horizon_minutes"])
+            selected = [
                 int(event["event_id"])
-                for formula in work
                 for event in formula.get("events") or []
-            }
+                if int(event["event_id"]) in selected_event_ids
+            ]
+            if selected:
+                event_ids_by_horizon.setdefault(horizon, []).extend(selected)
+        feature_rows = research_feature_matrix.load_shadow_feature_rows_by_horizon(
+            event_ids_by_horizon
         )
-        feature_rows = research_feature_matrix.load_shadow_feature_rows(event_ids)
         checked = 0
         matched = 0
         queued = 0
@@ -268,28 +417,37 @@ class FormulaResearchWorker:
             results = []
             for event in formula.get("events") or []:
                 event_id = int(event["event_id"])
-                row = feature_rows.get(event_id)
-                if row is None:
+                if event_id not in selected_event_ids:
                     continue
-                is_match = research_formula_engine.formula_matches(
+                horizon = int(formula["horizon_minutes"])
+                row = feature_rows.get((event_id, horizon))
+                evaluation = research_formula_engine.evaluate_formula(
                     row,
                     direction=formula["direction"],
                     conditions=conditions,
                 )
-                features = research_formula_engine.extract_decision_features(row)
+                snapshot = _shadow_snapshot(
+                    formula=formula,
+                    event=event,
+                    row=row,
+                    evaluation=evaluation,
+                )
+                cohort_key, cohort_anchor = _decision_cohort(
+                    formula=formula,
+                    event=event,
+                    snapshot=snapshot,
+                )
                 results.append(
                     {
                         "event_id": event_id,
                         "alert_time_utc": event.get("alert_time_utc"),
-                        "matched": is_match,
-                        "input_snapshot": {
-                            "formula_key_features": {
-                                condition["feature"]: features.get(condition["feature"])
-                                for condition in conditions
-                            },
-                            "conditions": conditions,
-                            "feature_schema_version": formula["feature_schema_version"],
-                        },
+                        "matched": bool(evaluation.get("matched")),
+                        "evaluation_status": evaluation.get("status"),
+                        "evaluation_reason": evaluation.get("reason"),
+                        "condition_results": evaluation.get("condition_results") or [],
+                        "input_snapshot": snapshot,
+                        "decision_cohort_key": cohort_key,
+                        "decision_anchor_time_utc": cohort_anchor,
                     }
                 )
             persisted = research_formula_store.record_shadow_results(
@@ -299,19 +457,20 @@ class FormulaResearchWorker:
             checked += persisted["checked"]
             matched += persisted["matched"]
             queued += int(persisted.get("queued") or 0)
-        promotion = research_formula_store.promote_eligible_shadow_formulas()
-        promoted = len(promotion.get("promoted") or [])
+        validation = research_formula_store.evaluate_shadow_readiness()
+        ready_for_review = len(validation.get("ready_for_explicit_review") or [])
         self.metrics.shadow_checks += checked
         self.metrics.shadow_hits += matched
         self.metrics.live_candidates_queued += queued
-        self.metrics.formulas_promoted_live += promoted
+        self.metrics.formulas_ready_for_review = ready_for_review
         now = datetime.now(timezone.utc).isoformat()
         self.metrics.last_shadow_utc = now
         self.metrics.last_error = None
         if checked or matched:
             print(
                 f"[formula-shadow] checked={checked}; matched={matched}; "
-                f"queued={queued}; promoted_live={promoted}",
+                f"queued={queued}; ready_for_explicit_review={ready_for_review}; "
+                "promoted_live=0",
                 flush=True,
             )
         return {
@@ -321,7 +480,8 @@ class FormulaResearchWorker:
             "checked": checked,
             "matched": matched,
             "queued_live_deliveries": queued,
-            "promotion": promotion,
+            "validation": validation,
+            "automatic_promotions": 0,
             "delivery": (
                 "ENABLED_FOR_SUBSCRIBED_CHATS"
                 if _LIVE_ALERTS_ENABLED
