@@ -63,7 +63,8 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/ai מה מצב ה-OI של BTC?\n"
             "/ai תשווה לי בין Futures CVD ל-Spot CVD של SOL\n"
             "/ai נתח את ביצועי התראות BTC ב-30 הימים האחרונים אחרי 4 שעות\n"
-            "/ai חפש שילובי התראות עם MAE נמוך והתקדמות מהירה ב-4 שעות\n\n"
+            "/ai חפש שילובי התראות עם MAE נמוך והתקדמות מהירה ב-4 שעות\n"
+            "/ai השווה נתוני OI/CVD גולמיים מול ציוני הבוט בהתראות האחרונות\n\n"
             "שכבת ה-AI מנתחת בלבד ואינה משנה את מנגנון ההתראות."
         )
         return

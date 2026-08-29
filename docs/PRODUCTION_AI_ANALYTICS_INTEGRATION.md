@@ -13,7 +13,8 @@ Research Archive. The release intentionally excludes all lab collection tools:
 
 The production AI tools are limited to current OI/CVD/market state, historical
 market context, delivered-alert history, one-alert context, Binance Spot outcome
-paths, bounded formula-candidate aggregates and capability status.
+paths, bounded formula-candidate aggregates, a no-lookahead raw/model research
+matrix and capability status.
 
 ## Historical truth boundary
 
@@ -73,6 +74,14 @@ Binance Spot path on demand, computes metrics from the full one-minute series
 and returns only a bounded candle sample to GPT. This gives the engine direct
 path access without copying every candle into every Research Event.
 
+`research_feature_matrix` reads existing raw Price/OI and Futures/Spot CVD
+histories in bounded batches. For each delivered alert it selects only rows at
+or before the decision time, derives fixed-window changes, time/repetition and
+market-breadth features, and places them beside compact captured model features.
+Verified later Binance Spot path metrics appear only under `outcome_label`.
+This enables direct comparison of pure data and the bot's current scoring logic
+without copying the underlying time series into the Research Event archive.
+
 ## Formula objective and remaining stages
 
 The primary analytical objective is to find reproducible conditions associated
@@ -80,10 +89,10 @@ with high directional probability, low adverse movement and fast favorable
 progress. Existing bot scores and raw source measurements are both valid feature
 families; neither is assumed to be optimal in advance.
 
-After the price path, the implementation order is:
+After the price path and core feature matrix, the implementation order is:
 
-1. normalize raw measurements, model scores, families, alert components, time,
-   sequence and repetition features into a versioned Research matrix;
+1. extend the matrix with matched near-miss/control samples, event-order and
+   BTC/range-context features where source coverage allows;
 2. generate candidate combinations without look-ahead bias;
 3. rank candidates by baseline improvement, MFE, MAE, speed, target progress and
    sample coverage rather than hit rate alone;

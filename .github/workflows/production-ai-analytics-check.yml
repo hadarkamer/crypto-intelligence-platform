@@ -25,6 +25,7 @@ jobs:
           python -m py_compile \
             main.py ai_agent.py ai_tools.py ai_telegram.py \
             ai_history_research.py ai_alert_research.py \
+            research_feature_matrix.py \
             research_event_capture.py research_event_runtime.py \
             research_event_store.py research_outcome_worker.py \
             binance_spot_price_path.py
@@ -38,6 +39,8 @@ jobs:
         run: python research_event_store_selftest.py
       - name: Binance Spot outcome path
         run: python binance_spot_price_path_selftest.py
+      - name: No-lookahead research feature matrix
+        run: python research_feature_matrix_selftest.py
       - name: Source integrity
         run: |
           ! grep -R "scan_coinglass_market\|AI_WEB_SEARCH_ENABLED\|web_search" \

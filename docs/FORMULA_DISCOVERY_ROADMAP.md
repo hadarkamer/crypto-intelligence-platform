@@ -43,25 +43,35 @@ and auditable.
 - First partial minute excluded to avoid movement from before the alert.
 - No exchange fallback may be labelled as Binance Spot.
 
-### 2. Research feature matrix — next
+### 2. Research feature matrix — core implemented
 
-Build one versioned row per decision timestamp with two parallel feature sets:
+The first version now builds one bounded row per delivered-alert decision time
+with separate feature and label sections:
 
-- raw: Price/OI changes, Futures and Spot CVD values/changes, raw Max Pain
-  distances/averages, liquidity balances, gaps, cluster values and other stored
-  measurements;
-- model: existing scores, families, confirmations, Magnet/Combined states and
-  alternative Research-only regroupings/weights.
+- raw archive: prior-only Price/OI changes and Futures/Spot CVD values and
+  changes over 30m, 1h, 4h, 12h and 24h; the extended profile also adds 48h,
+  72h and 7d;
+- captured event inputs: decision price/target plus available Max Pain distance,
+  liquidity, gap, cluster and Magnet inputs frozen into the event;
+- model: existing scores, families, confirmations and Magnet/Combined state;
+- label: verified later Binance Spot return, MFE, MAE, speed and target result,
+  kept structurally separate from every input feature.
 
-Also derive without look-ahead:
+It also derives without look-ahead:
 
 - symbol and expected direction;
-- UTC hour, weekday/weekend and defined market sessions;
-- repeat count, spacing, recency and strengthening/weakening;
-- order of different alert families;
-- breadth across symbols and agreement with BTC;
-- range position and distance from relevant targets where source data supports it;
+- UTC hour, weekday/weekend and fixed UTC time buckets;
+- prior alert/repeat counts at 30m, 2h and 6h;
+- same-setup repetition and cross-symbol directional breadth;
 - strategy/code version and data-quality flags.
+
+Every raw lookup selects the newest stored row at or before the alert. A point
+more than 45 minutes old is missing, and no nearest-future row is permitted.
+Raw histories are read in bounded batches; they are not copied into each event.
+
+Remaining matrix extensions include explicit alert-order/spacing features,
+strengthening/weakening deltas, BTC-to-alt context, range position and matched
+near-miss/control samples.
 
 Alert events alone are selected by existing rules. Bounded near-miss and matched
 control samples are therefore required before alternative thresholds can be
@@ -107,8 +117,9 @@ sample count and validation state.
 ## Current boundary
 
 The production AI can now explore verified path aggregates by exact signal
-combination, event type, symbol and score band, and can fetch a bounded direct
-Binance Spot path for an individual archived alert. It cannot yet autonomously
-scan the full raw feature space, generate sequences, correct for multiple
+combination, event type, symbol and score band, fetch a bounded direct Binance
+Spot path for an individual archived alert, and inspect versioned raw/model
+feature rows with strict prior-only joins. It cannot yet autonomously enumerate
+the full candidate space, create matched controls, correct for multiple
 hypothesis testing or promote a formula through the lifecycle. Those are stages
-2–5 above.
+3–5 plus the listed matrix extensions above.

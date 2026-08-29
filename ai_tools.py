@@ -16,6 +16,7 @@ import ai_history_research
 import coinglass_flow_engine
 import coinglass_oi_regime_service
 import market_confidence_engine
+import research_feature_matrix
 
 
 TOOL_SPECS = [
@@ -305,6 +306,70 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
+        "name": "research_feature_matrix",
+        "description": (
+            "Build bounded, versioned research rows that place decision-time raw Price/OI, Futures CVD and Spot CVD "
+            "features beside the bot's captured model/score features and verified later Binance Spot outcome labels. "
+            "Includes prior-alert repetition/breadth and UTC time features. Every input feature is timestamped at or "
+            "before the alert; later outcomes are kept in a separate label object. Use this to search for formulas "
+            "that may outperform the bot's existing score construction without assuming those scores are optimal."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "symbol": {
+                    "type": ["string", "null"],
+                    "description": "Optional crypto symbol. Use null to sample all archived symbols.",
+                },
+                "event_type": {
+                    "type": ["string", "null"],
+                    "description": "Optional exact archived event type. Use null for every alert type.",
+                },
+                "direction": {
+                    "type": ["string", "null"],
+                    "enum": ["LONG", "SHORT", None],
+                    "description": "Optional expected price direction. Use null to return LONG and SHORT rows.",
+                },
+                "lookback_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3650,
+                    "description": "Research Archive lookback in days.",
+                },
+                "horizon_minutes": {
+                    "type": "integer",
+                    "enum": [60, 240, 720, 1440],
+                    "description": "Verified Binance Spot outcome horizon used as the label.",
+                },
+                "window_profile": {
+                    "type": "string",
+                    "enum": ["core", "extended"],
+                    "description": (
+                        "core returns 30m/1h/4h/12h/24h raw windows; extended also returns 48h/72h/7d."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 25,
+                    "description": "Maximum feature rows returned to model context.",
+                },
+            },
+            "required": [
+                "symbol",
+                "event_type",
+                "direction",
+                "lookback_days",
+                "horizon_minutes",
+                "window_profile",
+                "limit"
+            ],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "get_ai_capabilities",
         "description": (
             "Return the tools currently approved for the production AI analysis layer and the current safety boundary. "
@@ -447,6 +512,20 @@ async def _get_alert_price_path(args: Dict[str, Any]) -> Any:
     return _bounded(result, max_chars=50000)
 
 
+async def _research_feature_matrix(args: Dict[str, Any]) -> Any:
+    result = await asyncio.to_thread(
+        research_feature_matrix.research_feature_matrix,
+        symbol=args.get("symbol"),
+        event_type=args.get("event_type"),
+        direction=args.get("direction"),
+        lookback_days=int(args.get("lookback_days")),
+        horizon_minutes=int(args.get("horizon_minutes")),
+        window_profile=str(args.get("window_profile")),
+        limit=int(args.get("limit")),
+    )
+    return _bounded(result, max_chars=55000)
+
+
 async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
     archive = await asyncio.to_thread(ai_alert_research.archive_status)
     return {
@@ -466,6 +545,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "get_alert_context",
             "research_formula_groups",
             "get_alert_price_path",
+            "research_feature_matrix",
             "get_ai_capabilities",
         ],
         "alert_archive": archive,
@@ -489,10 +569,11 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "symbol comparison",
                 "score-band comparison",
                 "baseline, rarity, MFE/MAE, speed and target metrics",
+                "versioned no-lookahead raw/model feature matrix",
+                "prior-alert repetition and cross-symbol breadth features",
+                "UTC hour and weekend features",
             ],
             "next_required_stages": [
-                "normalized raw-feature matrix",
-                "sequence and repetition feature generation",
                 "automatic candidate search",
                 "chronological holdout and out-of-sample validation",
                 "versioned shadow formula registry",
@@ -527,6 +608,7 @@ _EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
     "get_alert_context": _get_alert_context,
     "research_formula_groups": _research_formula_groups,
     "get_alert_price_path": _get_alert_price_path,
+    "research_feature_matrix": _research_feature_matrix,
     "get_ai_capabilities": _get_ai_capabilities,
 }
 

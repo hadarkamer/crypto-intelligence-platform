@@ -33,6 +33,7 @@ EXPECTED_TOOLS = [
     "get_alert_context",
     "research_formula_groups",
     "get_alert_price_path",
+    "research_feature_matrix",
     "get_ai_capabilities",
 ]
 
