@@ -26,6 +26,7 @@ import research_event_runtime
 import research_event_store
 import research_outcome_worker
 import research_formula_worker
+import research_formula_store
 
 
 EXPECTED_TOOLS = [
@@ -170,6 +171,18 @@ def run() -> None:
         research_formula_worker.WORKER.status()["automatic_stage_ceiling"]
         == "LIVE_AFTER_FUTURE_SHADOW_POLICY"
     )
+    capped_stage, capped_notes = research_formula_store._requested_stage_for_dataset(
+        {"recommended_stage": "SHADOW", "gate_notes": []},
+        replacement_ready=False,
+    )
+    assert capped_stage == "BACKTESTED"
+    assert capped_notes
+    ready_stage, ready_notes = research_formula_store._requested_stage_for_dataset(
+        {"recommended_stage": "SHADOW", "gate_notes": ["strict gates passed"]},
+        replacement_ready=True,
+    )
+    assert ready_stage == "SHADOW"
+    assert ready_notes == ["strict gates passed"]
     outcome_status = research_outcome_worker.WORKER.status()
     assert outcome_status["method"] == "canonical-spot-1m-ohlc-path-v3"
     assert outcome_status["price_paths"] == {

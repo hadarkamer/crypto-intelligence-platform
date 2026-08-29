@@ -198,6 +198,23 @@ def _advance_stage(
     return current
 
 
+def _requested_stage_for_dataset(
+    formula: Mapping[str, Any], *, replacement_ready: bool
+) -> tuple[str, list[Any]]:
+    """Apply the dataset-readiness ceiling to one discovered formula."""
+    requested_stage = str(formula["recommended_stage"])
+    gate_notes = list(formula.get("gate_notes") or [])
+    if (
+        not replacement_ready
+        and _STAGE_ORDER.get(requested_stage, 0) > _STAGE_ORDER["BACKTESTED"]
+    ):
+        requested_stage = "BACKTESTED"
+        gate_notes.append(
+            "automatic stage capped at BACKTESTED until replacement dataset coverage is ready"
+        )
+    return requested_stage, gate_notes
+
+
 def persist_discovery_run(
     *,
     dataset: Mapping[str, Any],
@@ -264,17 +281,6 @@ def persist_discovery_run(
             ),
         ).fetchall() if replacement_ready else []
         for old_formula in superseded:
-            requested_stage = str(formula["recommended_stage"])
-            gate_notes = list(formula.get("gate_notes") or [])
-            if (
-                not replacement_ready
-                and _STAGE_ORDER.get(requested_stage, 0)
-                > _STAGE_ORDER["BACKTESTED"]
-            ):
-                requested_stage = "BACKTESTED"
-                gate_notes.append(
-                    "automatic stage capped at BACKTESTED until replacement dataset coverage is ready"
-                )
             conn.execute(
                 """
                 INSERT INTO research_formula_stage_history (
@@ -310,6 +316,10 @@ def persist_discovery_run(
         persisted = 0
         stage_counts: Dict[str, int] = {}
         for global_rank, formula in enumerate(formulas, start=1):
+            requested_stage, gate_notes = _requested_stage_for_dataset(
+                formula,
+                replacement_ready=replacement_ready,
+            )
             existing = conn.execute(
                 "SELECT formula_id, current_stage FROM research_formulas WHERE formula_key=%s",
                 (formula["formula_key"],),
