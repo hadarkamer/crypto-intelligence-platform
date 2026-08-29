@@ -208,6 +208,10 @@ def run() -> None:
         "interval": "1m",
         "first_partial_minute": "excluded_to_prevent_pre_alert_leakage",
         "historical_imports": "allowed_with_source_and_quality_provenance",
+        "alert_reference_policy": (
+            "fail closed: exact binance_spot SYMBOLUSDT; HYPE exact "
+            "Hyperliquid Spot HYPE/USDT instrument @107"
+        ),
     }
 
     # One Binance fetch covers the maximum due horizon. Existing v1 rows are
@@ -232,6 +236,8 @@ def run() -> None:
         "alert_time_utc": event_time,
         "symbol": "BTC",
         "direction": "LONG",
+        "event_kind": "ALERT",
+        "delivery_status": "DELIVERED",
         "current_price": 100.0,
         "target_price": 101.0,
         "engine_snapshot": {"price_source": "binance_spot", "price_pair": "BTCUSDT"},
@@ -309,14 +315,31 @@ def run() -> None:
         assert worker_result["inserted"] == 2
         assert worker_result["upgraded"] == 2
         assert worker_result["first_touch_rows_written"] == 4
+        assert worker_result["alert_reference_provenance_rejections"] == 0
 
         # An unavailable canonical symbol is requested only once per run,
         # even when several archived alerts need outcomes.  It remains
         # eligible for a retry on the next worker cycle.
         unavailable_fetch_calls = []
         unavailable_events = [
-            {**due_event, "event_id": 100, "symbol": "NOPE"},
-            {**due_event, "event_id": 101, "symbol": "NOPE"},
+            {
+                **due_event,
+                "event_id": 100,
+                "symbol": "NOPE",
+                "engine_snapshot": {
+                    "price_source": "binance_spot",
+                    "price_pair": "NOPEUSDT",
+                },
+            },
+            {
+                **due_event,
+                "event_id": 101,
+                "symbol": "NOPE",
+                "engine_snapshot": {
+                    "price_source": "binance_spot",
+                    "price_pair": "NOPEUSDT",
+                },
+            },
         ]
 
         def _fake_path_with_unavailable_symbol(symbol, start, end):

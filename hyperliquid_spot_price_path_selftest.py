@@ -41,6 +41,7 @@ class _Response:
 
 
 def run() -> None:
+    assert price_path.HYPE_SPOT_COIN == "@107"
     calls = []
     payload = [
         _row("2026-08-28T10:00:00Z", 80.0, 80.8, 79.8, 80.5),

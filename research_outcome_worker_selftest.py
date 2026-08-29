@@ -62,6 +62,9 @@ def _run_once_with_path(
     horizon=60,
     frozen_scales=(),
     first_touch_versions=None,
+    event_kind="DECISION_SAMPLE",
+    delivery_status="NOT_APPLICABLE",
+    engine_snapshot=None,
 ):
     now = datetime.now(timezone.utc)
     event_time = now.replace(second=0, microsecond=0) - timedelta(minutes=3)
@@ -70,9 +73,11 @@ def _run_once_with_path(
         "alert_time_utc": event_time,
         "symbol": "BTC",
         "direction": "LONG",
+        "event_kind": event_kind,
+        "delivery_status": delivery_status,
         "current_price": 100.0,
         "target_price": None,
-        "engine_snapshot": {},
+        "engine_snapshot": dict(engine_snapshot or {}),
         "outcome_versions": {},
         "first_touch_versions": first_touch_versions or {},
         "open_first_touch_horizons": [horizon],
@@ -200,6 +205,7 @@ def run() -> None:
     ) == []
     assert closed_capture.query.count("%s") == len(closed_capture.params)
     assert "ARRAY[]::integer[] AS open_first_touch_horizons" in closed_capture.query
+    assert "e.event_kind, e.delivery_status" in closed_capture.query
     assert "research_formula_shadow_checks open_check" not in closed_capture.query
 
     captured = _CaptureResult()
@@ -212,14 +218,139 @@ def run() -> None:
         "research_formula_shadow_checks open_check",
         "open_check.evaluation_status='MATCHED'",
         "open_formula.current_stage='SHADOW'",
-        "open_ft.status='HIT'",
+        "open_ft.status IN ('HIT', 'MISS')",
         "open_first_touch_horizons",
         "DISTINCT open_formula.horizon_minutes",
         "date_trunc('minute', NOW())",
         "INTERVAL '1 millisecond'",
+        "e.event_kind='ALERT'",
+        "e.delivery_status='DELIVERED'",
+        "e.event_kind='DECISION_SAMPLE'",
+        "e.delivery_status='NOT_APPLICABLE'",
     ):
         assert required in captured.query
+    assert "e.event_kind, e.delivery_status" in captured.query
+    assert "FROM research_events e" in captured.query
     assert "research_formula_live_deliveries" not in captured.query
+
+    canonical_alert = {
+        "event_kind": "ALERT",
+        "delivery_status": "DELIVERED",
+        "symbol": "ZEC",
+        "engine_snapshot": {
+            "price_source": "binance_spot",
+            "price_pair": "ZECUSDT",
+        },
+    }
+    assert worker._alert_reference_provenance_error(canonical_alert) is None
+    for invalid_alert in (
+        {
+            **canonical_alert,
+            "engine_snapshot": {
+                "price_source": "binance_futures_mark",
+                "price_pair": "ZECUSDT",
+            },
+        },
+        {
+            **canonical_alert,
+            "engine_snapshot": {
+                "price_source": "binance_spot",
+                "price_pair": "BTCUSDT",
+            },
+        },
+        {
+            **canonical_alert,
+            "engine_snapshot": {
+                "price_source": "binance_spot",
+                "price_pair": "ZECUSDT",
+                "price_exchange": "bybit",
+            },
+        },
+        {
+            **canonical_alert,
+            "engine_snapshot": {
+                "price_source": "binance_spot",
+                "price_pair": "ZECUSDT",
+                "price_market": "perpetual",
+            },
+        },
+        {**canonical_alert, "engine_snapshot": {}},
+    ):
+        assert worker._alert_reference_provenance_error(invalid_alert) is not None
+
+    canonical_hype = {
+        "event_kind": "ALERT",
+        "delivery_status": "DELIVERED",
+        "symbol": "HYPE",
+        "engine_snapshot": {
+            "price_source": "hyperliquid",
+            "price_exchange": "hyperliquid",
+            "price_market": "spot",
+            "price_pair": "HYPE/USDT",
+            "price_instrument": "@107",
+        },
+    }
+    assert worker._alert_reference_provenance_error(canonical_hype) is None
+    for field, bad_value in (
+        ("price_source", "bybit_spot"),
+        ("price_exchange", "bybit"),
+        ("price_market", "perpetual"),
+        ("price_pair", "HYPEUSDT"),
+        ("price_instrument", "HYPE"),
+    ):
+        bad_snapshot = dict(canonical_hype["engine_snapshot"])
+        bad_snapshot[field] = bad_value
+        assert worker._alert_reference_provenance_error(
+            {**canonical_hype, "engine_snapshot": bad_snapshot}
+        ) is not None
+    # Authorized Decision Samples retain their dedicated view-based admission;
+    # Alert provenance rules must not reject them or invent a replacement.
+    assert worker._alert_reference_provenance_error(
+        {
+            "event_kind": "DECISION_SAMPLE",
+            "delivery_status": "NOT_APPLICABLE",
+            "symbol": "BTC",
+            "engine_snapshot": {},
+        }
+    ) is None
+    queue_priority = worker._alert_reference_queue_priority_sql("e")
+    assert "CASE" in queue_priority
+    assert "e.event_kind<>'ALERT'" in queue_priority
+    assert "binance_spot" in queue_priority
+    assert "HYPE/USDT" in queue_priority
+    assert "@107" in queue_priority
+    for queue_query in (captured.query, closed_capture.query):
+        assert "e.event_kind<>'ALERT'" in queue_query
+        assert queue_query.index("e.event_kind<>'ALERT'") < queue_query.index("LIMIT %s")
+    assert "open_ft.status IN ('HIT', 'MISS')" in captured.query
+
+    canonical_binance_path = {
+        "symbol": "ZEC",
+        "exchange": "binance",
+        "market": "spot",
+        "pair": "ZECUSDT",
+        "interval": "1m",
+    }
+    assert worker._canonical_path_provenance_error(
+        "ZEC", canonical_binance_path
+    ) is None
+    assert worker._canonical_path_provenance_error(
+        "ZEC", {**canonical_binance_path, "market": "futures"}
+    ) is not None
+    canonical_hype_path = {
+        "symbol": "HYPE",
+        "exchange": "hyperliquid",
+        "market": "spot",
+        "pair": "HYPE/USDT",
+        "api_coin": "@107",
+        "interval": "1m",
+    }
+    assert worker._canonical_path_provenance_error(
+        "HYPE", canonical_hype_path
+    ) is None
+    assert worker._canonical_path_provenance_error(
+        "HYPE", {**canonical_hype_path, "api_coin": "HYPE"}
+    ) is not None
 
     reference_capture = _CaptureResult()
     assert worker.ResearchOutcomeWorker._load_frozen_threshold_references(
@@ -354,6 +485,40 @@ def run() -> None:
         + timedelta(seconds=59, milliseconds=999)
     )
 
+    delivered_alert, delivered_alert_writes = _run_once_with_path(
+        lambda event_time: [
+            _candle(event_time, high=100.6, low=99.8, close=100.1),
+            _candle(event_time + timedelta(minutes=1)),
+            _candle(event_time + timedelta(minutes=2)),
+        ],
+        event_kind="ALERT",
+        delivery_status="DELIVERED",
+        engine_snapshot={
+            "price_source": "binance_spot",
+            "price_pair": "BTCUSDT",
+        },
+    )
+    assert delivered_alert["alert_reference_provenance_rejections"] == 0
+    assert delivered_alert["first_touch_hits"] == 1
+    assert len(delivered_alert_writes) == 1
+
+    rejected_alert, rejected_alert_writes = _run_once_with_path(
+        lambda event_time: [
+            _candle(event_time, high=100.6),
+            _candle(event_time + timedelta(minutes=1)),
+            _candle(event_time + timedelta(minutes=2)),
+        ],
+        event_kind="ALERT",
+        delivery_status="DELIVERED",
+        engine_snapshot={
+            "price_source": "binance_futures_mark",
+            "price_pair": "BTCUSDT",
+        },
+    )
+    assert rejected_alert_writes == []
+    assert rejected_alert["alert_reference_provenance_rejections"] == 1
+    assert rejected_alert["missing_price_paths"] == 0
+
     # A legacy PENDING row is due again.  The worker rebuilds the whole closed
     # prefix with the frozen weekend width and can discover an earlier touch;
     # no manual database mutation or future candle is needed.
@@ -435,6 +600,8 @@ def run() -> None:
     assert policy["success"] == "first favorable width touch; zero dwell"
     assert policy["post_hit_reversal"] == "does not cancel success"
     assert "every minute" in policy["worker_evaluation"]
+    assert "eligible delivered Alerts" in policy["worker_evaluation"]
+    assert "fail closed" in status["price_paths"]["alert_reference_policy"]
     assert worker._POLL_SECONDS >= 60
 
     print("prospective first-touch outcome worker self-test: PASS")

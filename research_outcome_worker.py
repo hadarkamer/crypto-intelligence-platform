@@ -5,10 +5,10 @@ aged into a configured horizon, one canonical spot one-minute path is
 fetched and converted into fixed-horizon return, MFE, MAE, speed and optional
 target-progress measurements.  A separate additive v6 label records the first
 touch of a frozen favorable width with zero dwell and conservative pre-touch
-MAE.  Authorized prospective events that match a Shadow formula are polled
-while their relevant horizon is still open, so a verified first touch can be
-frozen without waiting for the horizon to close. Existing legacy rows and
-method versions remain available for audit.
+MAE.  Eligible delivered Alerts and authorized prospective Decision Samples
+that match a Shadow formula are polled while their relevant horizon is still
+open, so a verified first touch can be frozen without waiting for the horizon
+to close. Existing legacy rows and method versions remain available for audit.
 
 Binance Spot USDT is the default route. HYPE is explicitly routed to the
 Hyperliquid HYPE/USDT spot market. Historical candles may be imported from
@@ -273,30 +273,172 @@ def calculate_returns(
 
 
 def _snapshot_price_source(value: Any) -> str:
-    snapshot = value
-    if isinstance(snapshot, str):
-        try:
-            snapshot = json.loads(snapshot)
-        except json.JSONDecodeError:
-            snapshot = {}
-    if not isinstance(snapshot, dict):
-        snapshot = {}
-    market_evidence = snapshot.get("market_evidence")
-    if not isinstance(market_evidence, dict):
-        market_evidence = {}
-    source = str(
-        snapshot.get("price_source")
-        or snapshot.get("top_item_price_source")
-        or market_evidence.get("price_source")
-        or "research_event_current_price"
-    ).strip()
-    pair = str(
-        snapshot.get("price_pair")
-        or snapshot.get("top_item_price_pair")
-        or market_evidence.get("price_pair")
-        or ""
-    ).strip()
+    provenance = _snapshot_price_provenance(value)
+    source = provenance["source"] or "research_event_current_price"
+    pair = provenance["pair"]
     return ":".join(part for part in (source, pair) if part)
+
+
+def _snapshot_price_provenance(value: Any) -> Dict[str, str]:
+    """Return archived decision-price provenance without inventing defaults."""
+    snapshot = _mapping(value)
+    market_evidence = _mapping(snapshot.get("market_evidence"))
+
+    def field(name: str) -> str:
+        return str(
+            snapshot.get(f"price_{name}")
+            or snapshot.get(f"top_item_price_{name}")
+            or market_evidence.get(f"price_{name}")
+            or ""
+        ).strip()
+
+    return {
+        "source": field("source"),
+        "exchange": field("exchange"),
+        "market": field("market"),
+        "pair": field("pair"),
+        "instrument": field("instrument"),
+    }
+
+
+def _alert_reference_provenance_error(event: Mapping[str, Any]) -> Optional[str]:
+    """Reject delivered Alerts whose immutable reference route is not official.
+
+    Decision Samples are admitted only through the separately guarded
+    ``research_prospective_shadow_events`` view and intentionally do not use
+    this Alert-specific check.  A missing or operational fallback provenance is
+    never repaired from a later candle because that would be look-ahead.
+    """
+    if str(event.get("event_kind") or "").strip().upper() != "ALERT":
+        return None
+    if str(event.get("delivery_status") or "").strip().upper() != "DELIVERED":
+        return "Alert is not archived as DELIVERED"
+
+    symbol = str(event.get("symbol") or "").strip().upper()
+    if not symbol:
+        return "Alert symbol is missing"
+    provenance = _snapshot_price_provenance(event.get("engine_snapshot"))
+    source = provenance["source"].lower()
+    exchange = provenance["exchange"].lower()
+    market = provenance["market"].lower()
+    pair = provenance["pair"].upper()
+
+    if symbol != "HYPE":
+        expected_pair = f"{symbol}USDT"
+        if (
+            source != "binance_spot"
+            or pair != expected_pair
+            or exchange not in {"", "binance"}
+            or market not in {"", "spot"}
+        ):
+            return (
+                "non-HYPE Alert requires exact binance_spot/"
+                f"{expected_pair} reference provenance without a conflicting "
+                "exchange or market"
+            )
+        return None
+
+    if (
+        source != "hyperliquid"
+        or exchange != "hyperliquid"
+        or market != "spot"
+        or pair != "HYPE/USDT"
+        or provenance["instrument"] != "@107"
+    ):
+        return (
+            "HYPE Alert requires exact Hyperliquid Spot HYPE/USDT "
+            "instrument @107 reference provenance"
+        )
+    return None
+
+
+def _alert_reference_queue_priority_sql(event_alias: str = "e") -> str:
+    """Place canonical Alerts ahead of rejected rows before a bounded LIMIT.
+
+    Python remains the authoritative provenance gate.  This equivalent SQL
+    priority prevents a permanently rejected archived Alert from starving a
+    later canonical event without mutating or relabelling the audit archive.
+    Missing optional Binance exchange/market fields remain acceptable, but
+    contradictory values do not receive canonical priority.
+    """
+    alias = str(event_alias).strip()
+    if alias != "e":
+        raise ValueError("unsupported event SQL alias")
+
+    def archived_field(name: str, *, case: str = "LOWER") -> str:
+        raw = (
+            f"COALESCE("
+            f"NULLIF(BTRIM({alias}.engine_snapshot->>'price_{name}'), ''), "
+            f"NULLIF(BTRIM({alias}.engine_snapshot->>'top_item_price_{name}'), ''), "
+            f"NULLIF(BTRIM({alias}.engine_snapshot->'market_evidence'->>"
+            f"'price_{name}'), ''), '')"
+        )
+        return f"{case}({raw})"
+
+    source = archived_field("source")
+    exchange = archived_field("exchange")
+    market = archived_field("market")
+    pair = archived_field("pair", case="UPPER")
+    instrument = archived_field("instrument", case="BTRIM")
+    symbol = f"UPPER(BTRIM({alias}.symbol))"
+    return f"""
+        CASE
+            WHEN {alias}.event_kind<>'ALERT' THEN 0
+            WHEN {symbol}<>'HYPE'
+             AND {source}='binance_spot'
+             AND {pair}=({symbol} || 'USDT')
+             AND {exchange} IN ('', 'binance')
+             AND {market} IN ('', 'spot')
+            THEN 0
+            WHEN {symbol}='HYPE'
+             AND {source}='hyperliquid'
+             AND {exchange}='hyperliquid'
+             AND {market}='spot'
+             AND {pair}='HYPE/USDT'
+             AND {instrument}='@107'
+            THEN 0
+            ELSE 1
+        END
+    """.strip()
+
+
+def _canonical_path_provenance_error(
+    symbol: Any, path_result: Mapping[str, Any]
+) -> Optional[str]:
+    """Reject a fetched candle path unless its official route is explicit."""
+    normalized = str(symbol or "").strip().upper()
+    exchange = str(path_result.get("exchange") or "").strip().lower()
+    market = str(path_result.get("market") or "").strip().lower()
+    pair = str(path_result.get("pair") or "").strip().upper()
+    interval = str(path_result.get("interval") or "").strip().lower()
+    returned_symbol = str(path_result.get("symbol") or "").strip().upper()
+
+    if normalized == "HYPE":
+        api_coin = str(path_result.get("api_coin") or "").strip()
+        if (
+            returned_symbol != "HYPE"
+            or exchange != "hyperliquid"
+            or market != "spot"
+            or pair != "HYPE/USDT"
+            or api_coin != "@107"
+            or interval != "1m"
+        ):
+            return "HYPE candle path is not exact Hyperliquid Spot @107 1m"
+        return None
+
+    try:
+        expected_pair, _ = binance_spot_price_path.resolve_pair(normalized)
+    except (TypeError, ValueError) as exc:
+        return f"unsupported Binance Spot symbol: {exc}"
+    if (
+        returned_symbol != normalized
+        or exchange != "binance"
+        or market != "spot"
+        or pair != expected_pair
+        or interval != "1m"
+    ):
+        return f"{normalized} candle path is not exact Binance Spot {expected_pair} 1m"
+    return None
 
 
 def _path_source(reference_source: str, path_result: Dict[str, Any]) -> str:
@@ -397,6 +539,7 @@ class OutcomeMetrics:
     first_touch_hits: int = 0
     first_touch_pending: int = 0
     first_touch_threshold_policy_conflicts: int = 0
+    alert_reference_provenance_rejections: int = 0
     first_touch_terminal_rows_deferred_for_incomplete_prefix: int = 0
     failures: int = 0
     last_run_utc: Optional[str] = None
@@ -432,8 +575,9 @@ class ResearchOutcomeWorker:
                     "candle need not close beyond the threshold"
                 ),
                 "worker_evaluation": (
-                    "every minute for the exact horizons of authorized "
-                    "prospective Shadow matches; otherwise at horizon close"
+                    "every minute for the exact horizons of eligible delivered "
+                    "Alerts and authorized prospective Shadow matches; otherwise "
+                    "at horizon close"
                 ),
             },
             "price_paths": {
@@ -443,6 +587,10 @@ class ResearchOutcomeWorker:
                 "interval": canonical_price_path.INTERVAL,
                 "first_partial_minute": "excluded_to_prevent_pre_alert_leakage",
                 "historical_imports": "allowed_with_source_and_quality_provenance",
+                "alert_reference_policy": (
+                    "fail closed: exact binance_spot SYMBOLUSDT; HYPE exact "
+                    "Hyperliquid Spot HYPE/USDT instrument @107"
+                ),
             },
             "complete_quality_statuses": list(canonical_price_path.COMPLETE_QUALITIES),
             "metrics": self.metrics.__dict__.copy(),
@@ -554,6 +702,7 @@ class ResearchOutcomeWorker:
             )
         query = f"""
             SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+                   e.event_kind, e.delivery_status,
                    e.current_price, e.target_price, e.engine_snapshot,
                    COALESCE(
                        jsonb_object_agg(
@@ -603,7 +752,10 @@ class ResearchOutcomeWorker:
               )
               AND ({' OR '.join(clauses)})
             GROUP BY e.event_id
-            ORDER BY e.alert_time_utc ASC
+            ORDER BY
+                {_alert_reference_queue_priority_sql("e")} ASC,
+                e.alert_time_utc ASC,
+                e.event_id ASC
             LIMIT %s
         """
         params: list[Any] = [
@@ -618,16 +770,19 @@ class ResearchOutcomeWorker:
 
     @staticmethod
     def _load_open_first_touch_events(conn, limit: int) -> list[Dict[str, Any]]:
-        """Load only authorized prospective Shadow matches with a new 1m close.
+        """Load eligible matched Shadow events with a newly closed 1m candle.
 
         This query has its own reserved, bounded queue so a closed historical
         backlog cannot delay first-touch detection.  Formula horizons are
         deduplicated before the worker fetches one canonical path per event.
+        Delivered Alerts and authorized silent Decision Samples are the only
+        admitted event classes; this query never reads any delivery queue.
         """
-        query = """
+        query = f"""
             SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+                   e.event_kind, e.delivery_status,
                    e.current_price, e.target_price, e.engine_snapshot,
-                   '{}'::jsonb AS outcome_versions,
+                   '{{}}'::jsonb AS outcome_versions,
                    COALESCE(
                        (
                            SELECT jsonb_object_agg(
@@ -643,7 +798,7 @@ class ResearchOutcomeWorker:
                            WHERE ft.event_id=e.event_id
                              AND ft.method_version=%s
                        ),
-                       '{}'::jsonb
+                       '{{}}'::jsonb
                    ) AS first_touch_versions,
                    ARRAY_AGG(
                        DISTINCT open_formula.horizon_minutes
@@ -651,8 +806,7 @@ class ResearchOutcomeWorker:
                    ) AS open_first_touch_horizons,
                    MIN(open_pending.observed_through_utc)
                        AS open_first_touch_observed_utc
-            FROM research_prospective_shadow_events authorized
-            JOIN research_events e ON e.event_id=authorized.event_id
+            FROM research_events e
             JOIN research_formula_shadow_checks open_check
               ON open_check.event_id=e.event_id
              AND open_check.matched=TRUE
@@ -667,8 +821,21 @@ class ResearchOutcomeWorker:
              AND open_pending.method_version=%s
              AND open_pending.status='PENDING'
             WHERE e.direction IN ('LONG', 'SHORT')
-              AND e.event_kind='DECISION_SAMPLE'
-              AND e.delivery_status='NOT_APPLICABLE'
+              AND (
+                    (
+                        e.event_kind='ALERT'
+                        AND e.delivery_status='DELIVERED'
+                    )
+                    OR (
+                        e.event_kind='DECISION_SAMPLE'
+                        AND e.delivery_status='NOT_APPLICABLE'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM research_prospective_shadow_events authorized
+                            WHERE authorized.event_id=e.event_id
+                        )
+                    )
+                  )
               AND e.alert_time_utc
                     + (open_formula.horizon_minutes * INTERVAL '1 minute')
                   > NOW()
@@ -689,7 +856,7 @@ class ResearchOutcomeWorker:
                     AND open_ft.method_version=%s
                     AND (
                         (
-                            open_ft.status='HIT'
+                            open_ft.status IN ('HIT', 'MISS')
                             AND open_ft.data_quality_status=ANY(%s)
                         )
                         OR (
@@ -703,6 +870,7 @@ class ResearchOutcomeWorker:
               )
             GROUP BY e.event_id
             ORDER BY
+                {_alert_reference_queue_priority_sql("e")} ASC,
                 COALESCE(
                     MIN(open_pending.observed_through_utc), e.alert_time_utc
                 ) ASC,
@@ -943,6 +1111,7 @@ class ResearchOutcomeWorker:
         first_touch_hits = 0
         first_touch_pending = 0
         first_touch_policy_conflicts = 0
+        alert_reference_provenance_rejections = 0
         first_touch_terminal_deferred = 0
         now = datetime.now(timezone.utc)
         latest_closed_cutoff = _latest_closed_candle_cutoff(now)
@@ -1028,6 +1197,17 @@ class ResearchOutcomeWorker:
             if not horizons:
                 continue
 
+            provenance_error = _alert_reference_provenance_error(event)
+            if provenance_error is not None:
+                alert_reference_provenance_rejections += 1
+                print(
+                    "[research-outcomes] non-canonical Alert reference "
+                    f"event={event['event_id']} symbol={symbol}; skipped: "
+                    f"{provenance_error}",
+                    flush=True,
+                )
+                continue
+
             # A symbol whose canonical provider rejected it earlier in this run will be
             # retried on the next scheduled run, but never once per event in
             # the same batch.  Missing metrics still count every affected
@@ -1054,6 +1234,21 @@ class ResearchOutcomeWorker:
                     f"[research-outcomes] canonical {canonical_price_path.provider_for_symbol(symbol)} "
                     f"spot path unavailable event={event['event_id']} "
                     f"symbol={symbol}: {exc!r}",
+                    flush=True,
+                )
+                continue
+
+            path_provenance_error = _canonical_path_provenance_error(
+                symbol, path_result
+            )
+            if path_provenance_error is not None:
+                path_failures += 1
+                unavailable_symbols[symbol] = path_provenance_error
+                unavailable_event_counts[symbol] = 1
+                print(
+                    "[research-outcomes] non-canonical fetched path "
+                    f"event={event['event_id']} symbol={symbol}; skipped: "
+                    f"{path_provenance_error}",
                     flush=True,
                 )
                 continue
@@ -1258,6 +1453,9 @@ class ResearchOutcomeWorker:
         self.metrics.first_touch_threshold_policy_conflicts += (
             first_touch_policy_conflicts
         )
+        self.metrics.alert_reference_provenance_rejections += (
+            alert_reference_provenance_rejections
+        )
         self.metrics.first_touch_terminal_rows_deferred_for_incomplete_prefix += (
             first_touch_terminal_deferred
         )
@@ -1275,6 +1473,9 @@ class ResearchOutcomeWorker:
             "first_touch_pending": first_touch_pending,
             "first_touch_threshold_policy_conflicts": (
                 first_touch_policy_conflicts
+            ),
+            "alert_reference_provenance_rejections": (
+                alert_reference_provenance_rejections
             ),
             "first_touch_terminal_rows_deferred_for_incomplete_prefix": (
                 first_touch_terminal_deferred

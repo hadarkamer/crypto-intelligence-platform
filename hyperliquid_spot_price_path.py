@@ -26,7 +26,10 @@ from binance_spot_price_path import (
 HYPERLIQUID_INFO_URL = os.getenv(
     "HYPERLIQUID_INFO_URL", "https://api.hyperliquid.xyz/info"
 ).strip()
-HYPE_SPOT_COIN = os.getenv("HYPERLIQUID_HYPE_SPOT_COIN", "@107").strip() or "@107"
+# This identifier is part of the official Research data contract, not an
+# operational tuning knob.  A deployment environment must never redirect HYPE
+# outcomes to another Hyperliquid instrument while retaining canonical labels.
+HYPE_SPOT_COIN = "@107"
 REQUEST_TIMEOUT_SECONDS = max(
     3, int(os.getenv("HYPERLIQUID_PRICE_PATH_TIMEOUT_SECONDS", "15"))
 )
