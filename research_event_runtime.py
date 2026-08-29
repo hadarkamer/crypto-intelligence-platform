@@ -84,6 +84,14 @@ def _row_get(row: Any, key: str, default=None):
             return default
 
 
+def _price_provenance(item: Mapping[str, Any]) -> Dict[str, Any]:
+    """Preserve the decision-price source needed for reproducible outcomes."""
+    return {
+        "price_source": item.get("price_source"),
+        "price_pair": item.get("price_pair"),
+    }
+
+
 def _compact_time_families(value: Any) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -398,6 +406,7 @@ def capture_special_transitions(
                         "module": _compact_module(module),
                         "threshold": DERIVATIVES_HIGH_THRESHOLD,
                         "reset_threshold": DERIVATIVES_HIGH_RESET_THRESHOLD,
+                        **_price_provenance(item),
                     },
                     setup_identity={"module": module_key},
                 )
@@ -453,6 +462,7 @@ def capture_special_transitions(
                         "family": {key: family.get(key) for key in ("label", "direction", "score", "quality", "agreement", "weight", "windows") if key in family},
                         "threshold": DERIVATIVES_HIGH_THRESHOLD,
                         "reset_threshold": DERIVATIVES_HIGH_RESET_THRESHOLD,
+                        **_price_provenance(item),
                     },
                     setup_identity={"spot_family": family_key},
                 )
@@ -580,6 +590,8 @@ def capture_combined_confirmation(
                 "top_item_components": top_item.get("components") or {},
                 "top_item_confirmation": top_item.get("maxpain_confirmation") or {},
                 "top_item_average_score_all_timeframes": top_item.get("average_score_all_timeframes"),
+                "top_item_price_source": top_item.get("price_source"),
+                "top_item_price_pair": top_item.get("price_pair"),
             },
             setup_identity={
                 "alert_side": source_side,
@@ -647,12 +659,19 @@ def capture_magnet_watch_symbol(
             captured.get("flow") or {},
         )
 
-    current_price = next((
-        _safe_float(_row_get(row, "current_price"))
+    price_row = next((
+        row
         for row in row_list
         if str(_row_get(row, "symbol", "") or "").upper() == symbol
         and _safe_float(_row_get(row, "current_price")) is not None
     ), None)
+    current_price = (
+        _safe_float(_row_get(price_row, "current_price"))
+        if price_row is not None
+        else None
+    )
+    price_source = _row_get(price_row, "price_source") if price_row is not None else None
+    price_pair = _row_get(price_row, "price_pair") if price_row is not None else None
 
     emitted = 0
     active_keys = set()
@@ -673,6 +692,8 @@ def capture_magnet_watch_symbol(
             confirmation=confirmation,
             market_evidence=evidence,
             current_price=current_price,
+            price_source=price_source,
+            price_pair=price_pair,
             event_time=timestamp,
         )
         emitted += int(_emit(

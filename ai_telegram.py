@@ -62,7 +62,8 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "דוגמאות:\n"
             "/ai מה מצב ה-OI של BTC?\n"
             "/ai תשווה לי בין Futures CVD ל-Spot CVD של SOL\n"
-            "/ai נתח את ביצועי התראות BTC ב-30 הימים האחרונים אחרי 4 שעות\n\n"
+            "/ai נתח את ביצועי התראות BTC ב-30 הימים האחרונים אחרי 4 שעות\n"
+            "/ai חפש שילובי התראות עם MAE נמוך והתקדמות מהירה ב-4 שעות\n\n"
             "שכבת ה-AI מנתחת בלבד ואינה משנה את מנגנון ההתראות."
         )
         return
@@ -100,6 +101,8 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"התראות שנמסרו: {archive.get('delivered_alerts', 0)}\n"
         f"שמירת אירועים: {'פעילה' if (capture.get('persistence') or {}).get('enabled') else 'כבויה'} | "
         f"תוצאות 1/4/12/24h: {'פעילות' if outcomes.get('enabled') else 'כבויות'}\n"
+        f"מסלול תוצאה: Binance Spot {((outcomes.get('price_path') or {}).get('interval') or '-')} | "
+        f"שיטה: {outcomes.get('method', '-')}\n"
         "Web/CoinGlass Vision: מעבדה בלבד, לא מחוברים לייצור\n"
         "זיכרון שיחה: זמני ומוגבל; יתאפס בעת restart."
     )

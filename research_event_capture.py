@@ -392,6 +392,7 @@ def build_maxpain_event(
 def build_magnet_event(
     magnet: Mapping[str, Any], *, confirmation: Optional[Mapping[str, Any]] = None,
     market_evidence: Optional[Mapping[str, Any]] = None, current_price: Any = None,
+    price_source: Any = None, price_pair: Any = None,
     event_type: Optional[str] = None, event_time: Any = None,
     strategy_version: Optional[str] = None, code_version: Optional[str] = None,
 ) -> ResearchEvent:
@@ -424,6 +425,8 @@ def build_magnet_event(
         },
         "magnet_confirmation": _compact_confirmation(conf),
         "market_evidence": _compact_market_evidence(market_evidence or {}),
+        "price_source": str(price_source or "").strip() or None,
+        "price_pair": str(price_pair or "").strip().upper() or None,
     })
     setup = _setup_key(
         symbol=symbol,

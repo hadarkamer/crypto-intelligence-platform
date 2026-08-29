@@ -214,6 +214,97 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
+        "name": "research_formula_groups",
+        "description": (
+            "Search verified Binance Spot one-minute alert outcomes for candidate formula groups. "
+            "Groups by exact signal combination, alert type, symbol, or score band and returns sample size, "
+            "baseline comparison, hit rate, MFE, MAE percentiles, speed, target progress, rarity share and sample event IDs. "
+            "Use it to discover high-probability, low-adverse-movement, fast candidate setups. "
+            "It is exploratory evidence, not permission to activate a live formula."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "symbol": {
+                    "type": ["string", "null"],
+                    "description": "Optional crypto symbol. Use null to search across all archived symbols.",
+                },
+                "lookback_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3650,
+                    "description": "Research Archive lookback in days.",
+                },
+                "horizon_minutes": {
+                    "type": "integer",
+                    "enum": [60, 240, 720, 1440],
+                    "description": "Price-path outcome horizon to compare.",
+                },
+                "group_by": {
+                    "type": "string",
+                    "enum": ["signal_combination", "event_type", "symbol", "score_band"],
+                    "description": "Reproducible candidate dimension to aggregate.",
+                },
+                "minimum_samples": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Minimum observations per returned candidate group.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum candidate groups returned.",
+                },
+            },
+            "required": [
+                "symbol",
+                "lookback_days",
+                "horizon_minutes",
+                "group_by",
+                "minimum_samples",
+                "limit"
+            ],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "get_alert_price_path",
+        "description": (
+            "Fetch the canonical Binance Spot one-minute path for one archived delivered alert after a completed horizon. "
+            "Returns full-path MFE, MAE, speed and target metrics plus a bounded candle sample. "
+            "Use it to inspect the exact post-alert path or a formula counterexample. No futures or third-party fallback is allowed."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "event_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Research Event ID returned by an alert or formula research tool.",
+                },
+                "horizon_minutes": {
+                    "type": "integer",
+                    "enum": [60, 240, 720, 1440],
+                    "description": "Completed post-alert path horizon.",
+                },
+                "max_points": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 120,
+                    "description": "Maximum sampled candles returned to model context; metrics always use the full path.",
+                },
+            },
+            "required": ["event_id", "horizon_minutes", "max_points"],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "get_ai_capabilities",
         "description": (
             "Return the tools currently approved for the production AI analysis layer and the current safety boundary. "
@@ -333,10 +424,38 @@ async def _get_alert_context(args: Dict[str, Any]) -> Any:
     return _bounded(result, max_chars=50000)
 
 
+async def _research_formula_groups(args: Dict[str, Any]) -> Any:
+    result = await asyncio.to_thread(
+        ai_alert_research.research_formula_groups,
+        symbol=args.get("symbol"),
+        lookback_days=int(args.get("lookback_days")),
+        horizon_minutes=int(args.get("horizon_minutes")),
+        group_by=str(args.get("group_by")),
+        minimum_samples=int(args.get("minimum_samples")),
+        limit=int(args.get("limit")),
+    )
+    return _bounded(result, max_chars=50000)
+
+
+async def _get_alert_price_path(args: Dict[str, Any]) -> Any:
+    result = await asyncio.to_thread(
+        ai_alert_research.alert_price_path,
+        int(args.get("event_id")),
+        int(args.get("horizon_minutes")),
+        int(args.get("max_points")),
+    )
+    return _bounded(result, max_chars=50000)
+
+
 async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
     archive = await asyncio.to_thread(ai_alert_research.archive_status)
     return {
         "mode": "production_analysis_read_only",
+        "primary_analytical_objective": (
+            "Discover reproducible candidate formulas for high directional probability, "
+            "low adverse excursion, fast favorable progress and strong risk/reward; "
+            "validated formulas require a separate approval before live alerts."
+        ),
         "approved_tools": [
             "get_oi_state",
             "get_cvd_state",
@@ -345,9 +464,40 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "get_market_context_at_time",
             "research_alert_history",
             "get_alert_context",
+            "research_formula_groups",
+            "get_alert_price_path",
             "get_ai_capabilities",
         ],
         "alert_archive": archive,
+        "outcome_path": {
+            "source": "Binance Spot USDT",
+            "resolution": "1m closed candles",
+            "metrics": [
+                "fixed-horizon return",
+                "MFE",
+                "MAE",
+                "time to first progress",
+                "time to MFE",
+                "target progress",
+                "target timing",
+            ],
+        },
+        "formula_research": {
+            "available_now": [
+                "exact archived signal-combination groups",
+                "alert-type comparison",
+                "symbol comparison",
+                "score-band comparison",
+                "baseline, rarity, MFE/MAE, speed and target metrics",
+            ],
+            "next_required_stages": [
+                "normalized raw-feature matrix",
+                "sequence and repetition feature generation",
+                "automatic candidate search",
+                "chronological holdout and out-of-sample validation",
+                "versioned shadow formula registry",
+            ],
+        },
         "lab_only_not_connected": [
             "external exchange/index context archive",
             "global news context archive",
@@ -375,6 +525,8 @@ _EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
     "get_market_context_at_time": _get_market_context_at_time,
     "research_alert_history": _research_alert_history,
     "get_alert_context": _get_alert_context,
+    "research_formula_groups": _research_formula_groups,
+    "get_alert_price_path": _get_alert_price_path,
     "get_ai_capabilities": _get_ai_capabilities,
 }
 
