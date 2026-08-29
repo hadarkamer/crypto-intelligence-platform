@@ -357,6 +357,11 @@ class FormulaResearchWorker:
         current = delivery.get("current_price")
         current_text = f"{float(current):,.6g}" if current not in (None, "") else "-"
         rarity = str(holdout.get("rarity_class") or "-")
+        movement_percentile_key = (
+            "session_adjusted_mfe_percentile_pct"
+            if metrics.get("session_adjusted_mfe_percentile_pct") is not None
+            else "median_mfe_percentile_pct"
+        )
         return (
             "🧠 התראת טרייד AI — נוסחה מאומתת\n"
             f"{direction_icon} {delivery.get('symbol')} {direction} | אופק {horizon_label}\n"
@@ -370,7 +375,7 @@ class FormulaResearchWorker:
             f"(Wilson תחתון {number(metrics, 'wilson_95_lower_pct')}%)\n"
             f"מהלך חיובי חציוני MFE: {number(metrics, 'median_mfe_pct', 3)}% | "
             f"תנועה נגדית p90 MAE: {number(metrics, 'mae_p90_pct', 3)}%\n"
-            f"אחוזון רוחב מהלך: {number(metrics, 'median_mfe_percentile_pct')} | "
+            f"אחוזון רוחב מהלך מותאם Session: {number(metrics, movement_percentile_key)} | "
             f"MFE/MAE: {number(metrics, 'median_mfe_mae_ratio')}\n\n"
             "התראה מחקרית אוטונומית בלבד — הבוט לא ביצע עסקה."
         )

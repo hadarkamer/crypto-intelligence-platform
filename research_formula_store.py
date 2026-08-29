@@ -31,7 +31,7 @@ _STAGE_ORDER = {
 _AUTOMATIC_STAGE_PATH = ("DISCOVERED", "BACKTESTED", "HOLDOUT_PASSED", "SHADOW")
 _AUTONOMOUS_POLICY_VERSION = (
     os.getenv("FORMULA_AUTONOMOUS_ALERT_POLICY_VERSION", "").strip()
-    or "owner-policy-v2-weekend-regime-2026-08-29"
+    or "owner-policy-v3-session-composition-2026-08-29"
 )
 _SHADOW_MIN_MATCHES = max(
     12, int(os.getenv("FORMULA_SHADOW_MIN_VALIDATED_MATCHES", "12"))
@@ -270,7 +270,7 @@ def persist_discovery_run(
                     int(old_formula["formula_id"]),
                     run_id,
                     str(old_formula["current_stage"]),
-                    "superseded by weekend-regime formula schema v3",
+                    "superseded by exact-session-composition formula schema v4",
                 ),
             )
         if superseded:
@@ -530,6 +530,20 @@ def formula_registry(
                 "direction": normalized_direction,
                 "horizon_minutes": horizon,
             },
+            "feature_semantics": {
+                "aligned_log": (
+                    "signed log10(1 + abs(raw aligned value)); inverse is "
+                    "sign(value) * (10^abs(value) - 1)"
+                ),
+                "session": (
+                    "ACTIVE Sunday 18:00 ET through Friday 20:00 ET; "
+                    "WEEKEND otherwise; exact America/New_York composition"
+                ),
+                "weekend_width_calibration": (
+                    "may reduce only the absolute movement-width floor; "
+                    "probability and adverse-excursion gates are unchanged"
+                ),
+            },
             "formulas": [dict(row) for row in rows],
         }
     )
@@ -783,7 +797,9 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
     return [dict(row) for row in rows]
 
 
-def _metric_row(source: Mapping[str, Any]) -> Dict[str, Any]:
+def _metric_row(
+    source: Mapping[str, Any], *, horizon_minutes: int
+) -> Dict[str, Any]:
     return {
         "event": {
             "event_id": int(source["event_id"]),
@@ -792,6 +808,7 @@ def _metric_row(source: Mapping[str, Any]) -> Dict[str, Any]:
             "event_type": source.get("event_type"),
         },
         "outcome_label": {
+            "horizon_minutes": int(horizon_minutes),
             "directional_return_pct": source.get("directional_return_pct"),
             "mfe_pct": source.get("mfe_pct"),
             "mae_pct": source.get("mae_pct"),
@@ -824,17 +841,23 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
         ).fetchall()
         for formula in formulas:
             source_rows = _shadow_outcome_rows(conn, formula)
-            universe = [_metric_row(row) for row in source_rows]
+            horizon_minutes = int(formula["horizon_minutes"])
+            universe = [
+                _metric_row(row, horizon_minutes=horizon_minutes)
+                for row in source_rows
+            ]
             selected = [
-                _metric_row(row) for row in source_rows if bool(row.get("matched"))
+                _metric_row(row, horizon_minutes=horizon_minutes)
+                for row in source_rows
+                if bool(row.get("matched"))
             ]
             metrics = research_formula_engine.summarize_outcomes(selected, universe)
             evaluated += 1
-            improvement = metrics.get("regime_hit_rate_improvement_pct_points")
+            improvement = metrics.get("session_hit_rate_improvement_pct_points")
             if improvement is None:
                 improvement = metrics.get("hit_rate_improvement_pct_points")
             movement_percentile = metrics.get(
-                "regime_adjusted_mfe_percentile_pct"
+                "session_adjusted_mfe_percentile_pct"
             )
             if movement_percentile is None:
                 movement_percentile = metrics.get("median_mfe_percentile_pct")
@@ -847,8 +870,8 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
                 >= float(_SHADOW_MIN_SPAN_HOURS),
                 "future UTC dates": int(metrics.get("distinct_utc_dates") or 0)
                 >= _SHADOW_MIN_DATES,
-                "future regime-matched baseline coverage": bool(
-                    metrics.get("regime_baseline_complete")
+                "future session-composition baseline coverage": bool(
+                    metrics.get("session_baseline_complete")
                 ),
                 "future hit rate": float(metrics.get("hit_rate_pct") or 0.0) >= 65.0,
                 "future Wilson lower bound": float(
@@ -861,7 +884,8 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
                     metrics.get("median_mfe_pct") or 0.0
                 )
                 >= research_formula_engine.minimum_wide_move_pct(
-                    int(formula["horizon_minutes"])
+                    horizon_minutes,
+                    metrics,
                 ),
                 "future wide movement percentile": float(
                     movement_percentile or 0.0

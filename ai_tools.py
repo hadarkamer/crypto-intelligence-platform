@@ -664,7 +664,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "baseline, rarity, MFE/MAE, speed and target metrics",
                 "versioned no-lookahead raw/model feature matrix",
                 "prior-alert repetition and cross-symbol breadth features",
-                "UTC hour and weekend features",
+                "UTC hour plus exact per-window ACTIVE/WEEKEND session composition",
                 "automatic single/pair/triple condition search over thousands of candidates",
                 "frozen chronological discovery/holdout validation",
                 "wide-movement percentile, probability, MFE, MAE, speed, sample-size and q-value ranking",

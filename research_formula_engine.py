@@ -12,16 +12,17 @@ messages, or alter any production score/threshold.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
 from statistics import mean, median
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
+import market_session_baseline
 
-ENGINE_VERSION = "formula-discovery-v3-weekend-regime"
-FORMULA_SCHEMA_VERSION = "research-formula-v3-weekend-regime"
+ENGINE_VERSION = "formula-discovery-v4-session-composition"
+FORMULA_SCHEMA_VERSION = "research-formula-v4-session-composition"
 ALLOWED_OPERATORS = {">=", "<=", "=="}
 MIN_MEDIAN_MFE_BY_HORIZON = {
     60: 0.50,
@@ -29,6 +30,7 @@ MIN_MEDIAN_MFE_BY_HORIZON = {
     720: 1.50,
     1440: 2.00,
 }
+SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES = 30.0
 
 
 @dataclass(frozen=True)
@@ -178,7 +180,11 @@ def extract_decision_features(row: Mapping[str, Any]) -> Dict[str, Any]:
 
     historical = row.get("historical_context")
     if isinstance(historical, Mapping):
-        _put_feature(output, "historical.regime", historical.get("regime"))
+        _put_feature(
+            output,
+            "historical.event_market_session",
+            historical.get("event_market_session"),
+        )
         historical_windows = historical.get("windows")
         if isinstance(historical_windows, Mapping):
             for window, values in historical_windows.items():
@@ -212,6 +218,9 @@ def extract_decision_features(row: Mapping[str, Any]) -> Dict[str, Any]:
             if not isinstance(values, Mapping):
                 continue
             for key in (
+                "session_active_ratio",
+                "session_weekend_ratio",
+                "session_composition",
                 "price_change_pct",
                 "oi_change_pct",
                 "futures_continuous_cvd_change_usd",
@@ -369,24 +378,93 @@ def _empirical_percentile(value: Optional[float], population: Sequence[float]) -
     return sum(1 for item in ordered if item <= value) / len(ordered) * 100.0
 
 
-def _row_market_regime(row: Mapping[str, Any]) -> str:
-    time_features = row.get("time_features")
-    if isinstance(time_features, Mapping):
-        explicit = str(time_features.get("market_regime") or "").upper()
-        if explicit in {"WEEKEND_UTC", "WEEKDAY_UTC"}:
-            return explicit
-        if isinstance(time_features.get("is_weekend_utc"), bool):
-            return (
-                "WEEKEND_UTC"
-                if bool(time_features["is_weekend_utc"])
-                else "WEEKDAY_UTC"
-            )
+def _row_outcome_active_ratio(row: Mapping[str, Any]) -> float:
+    label = row.get("outcome_label")
+    if isinstance(label, Mapping):
+        explicit = _number(label.get("session_active_ratio"))
+        if explicit is not None:
+            return min(1.0, max(0.0, explicit))
+        horizon = int(_number(label.get("horizon_minutes")) or 0)
+    else:
+        horizon = 0
     event = row.get("event") if isinstance(row.get("event"), Mapping) else {}
-    return (
-        "WEEKEND_UTC"
-        if _utc(event.get("alert_time_utc")).weekday() >= 5
-        else "WEEKDAY_UTC"
+    alert_time = event.get("alert_time_utc")
+    if alert_time is None or horizon <= 0:
+        return 1.0
+    start = _utc(alert_time)
+    active_ratio, _, _ = market_session_baseline.session_ratios(
+        start, start + timedelta(minutes=horizon)
     )
+    return active_ratio
+
+
+def _session_composition_label(active_ratio: float) -> str:
+    if active_ratio >= 1.0 - 1e-9:
+        return "ACTIVE_ONLY"
+    if active_ratio <= 1e-9:
+        return "WEEKEND_ONLY"
+    return "MIXED"
+
+
+def _profile_weighted_outcomes(
+    rows: Sequence[Mapping[str, Any]],
+    selected_active_ratios: Sequence[float],
+    outcome_key: str,
+) -> list[tuple[float, float]]:
+    if not selected_active_ratios:
+        return []
+    weighted: list[tuple[float, float]] = []
+    for row in rows:
+        label = row.get("outcome_label")
+        value = _number(label.get(outcome_key)) if isinstance(label, Mapping) else None
+        if value is None:
+            continue
+        historical_ratio = _row_outcome_active_ratio(row)
+        weight = mean(
+            market_session_baseline.composition_weight(
+                current_ratio,
+                historical_ratio,
+                market_session_baseline.DEFAULT_COMPOSITION_TOLERANCE,
+            )
+            for current_ratio in selected_active_ratios
+        )
+        if weight > 0.0:
+            weighted.append((value, weight))
+    return weighted
+
+
+def _weighted_percentile_rank(
+    value: Optional[float], population: Sequence[tuple[float, float]]
+) -> Optional[float]:
+    if value is None or not population:
+        return None
+    total = sum(weight for _, weight in population)
+    if total <= 0.0:
+        return None
+    below = sum(weight for item, weight in population if item < value)
+    equal = sum(weight for item, weight in population if item == value)
+    return (below + 0.5 * equal) / total * 100.0
+
+
+def _width_floor_scale(selected: Sequence[Mapping[str, Any]]) -> tuple[float, int]:
+    factors: list[float] = []
+    for row in selected:
+        label = row.get("outcome_label")
+        reference = (
+            label.get("movement_width_reference")
+            if isinstance(label, Mapping)
+            else None
+        )
+        factor = (
+            _number(reference.get("floor_scale_factor"))
+            if isinstance(reference, Mapping)
+            else None
+        )
+        if factor is not None:
+            factors.append(min(1.0, max(0.50, factor)))
+    if not selected or len(factors) != len(selected):
+        return 1.0, len(factors)
+    return float(median(factors)), len(factors)
 
 
 def _metrics(
@@ -403,21 +481,17 @@ def _metrics(
         for row in universe
         if int(row.get("event", {}).get("event_id") or -1) not in selected_ids
     ]
-    selected_regime_counts = {
-        regime: sum(1 for row in selected if _row_market_regime(row) == regime)
-        for regime in ("WEEKDAY_UTC", "WEEKEND_UTC")
+    selected_active_ratios = [_row_outcome_active_ratio(row) for row in selected]
+    session_composition_counts = {
+        label: sum(
+            1
+            for ratio in selected_active_ratios
+            if _session_composition_label(ratio) == label
+        )
+        for label in ("ACTIVE_ONLY", "MIXED", "WEEKEND_ONLY")
     }
-    represented_regimes = {
-        regime for regime, count in selected_regime_counts.items() if count > 0
-    }
-    regime_controls = [
-        row for row in controls if _row_market_regime(row) in represented_regimes
-    ]
     directional = _outcome_values(selected, "directional_return_pct")
     control_directional = _outcome_values(controls, "directional_return_pct")
-    regime_control_directional = _outcome_values(
-        regime_controls, "directional_return_pct"
-    )
     mfe = _outcome_values(selected, "mfe_pct")
     mae = _outcome_values(selected, "mae_pct")
     universe_mfe = _outcome_values(universe, "mfe_pct")
@@ -443,64 +517,79 @@ def _metrics(
     )
     successes = sum(1 for value in directional if value > 0)
     control_successes = sum(1 for value in control_directional if value > 0)
-    regime_control_successes = sum(
-        1 for value in regime_control_directional if value > 0
-    )
     hit_rate = successes / len(directional) * 100.0 if directional else None
     control_hit_rate = (
         control_successes / len(control_directional) * 100.0
         if control_directional
         else None
     )
-    regime_control_hit_rate = (
-        regime_control_successes / len(regime_control_directional) * 100.0
-        if regime_control_directional
+    session_control_directional = _profile_weighted_outcomes(
+        controls, selected_active_ratios, "directional_return_pct"
+    )
+    session_control_mfe = _profile_weighted_outcomes(
+        controls, selected_active_ratios, "mfe_pct"
+    )
+    session_control_effective = sum(
+        weight for _, weight in session_control_directional
+    )
+    session_mfe_effective = sum(weight for _, weight in session_control_mfe)
+    weighted_successes = sum(
+        weight for value, weight in session_control_directional if value > 0.0
+    )
+    session_hit_baseline = (
+        weighted_successes / session_control_effective * 100.0
+        if session_control_effective > 0.0
         else None
     )
-
-    weighted_regime_hit_baseline = 0.0
-    weighted_regime_mfe_baseline = 0.0
-    weighted_regime_p90_mfe_baseline = 0.0
-    covered_weight = 0.0
-    regime_mfe_percentiles: list[float] = []
-    selected_total = max(1, len(selected))
-    for regime in represented_regimes:
-        weight = selected_regime_counts[regime] / selected_total
-        regime_control_directional_values = _outcome_values(
-            [row for row in controls if _row_market_regime(row) == regime],
-            "directional_return_pct",
+    session_mfe_median = market_session_baseline.weighted_percentile(
+        session_control_mfe, 0.50
+    )
+    session_mfe_p90 = market_session_baseline.weighted_percentile(
+        session_control_mfe, 0.90
+    )
+    active_control_mfe = market_session_baseline.composition_weighted_values(
+        [
+            (value, _row_outcome_active_ratio(control))
+            for control in controls
+            for value in [
+                _number(
+                    (control.get("outcome_label") or {}).get("mfe_pct")
+                    if isinstance(control.get("outcome_label"), Mapping)
+                    else None
+                )
+            ]
+            if value is not None
+        ],
+        1.0,
+        market_session_baseline.DEFAULT_COMPOSITION_TOLERANCE,
+    )
+    active_control_mfe_effective = sum(weight for _, weight in active_control_mfe)
+    active_control_mfe_p90 = market_session_baseline.weighted_percentile(
+        active_control_mfe, 0.90
+    )
+    session_mfe_percentiles: list[float] = []
+    for row, active_ratio in zip(selected, selected_active_ratios):
+        label = row.get("outcome_label")
+        row_mfe = _number(label.get("mfe_pct")) if isinstance(label, Mapping) else None
+        per_row_population = market_session_baseline.composition_weighted_values(
+            [
+                (value, _row_outcome_active_ratio(control))
+                for control in controls
+                for value in [
+                    _number(
+                        (control.get("outcome_label") or {}).get("mfe_pct")
+                        if isinstance(control.get("outcome_label"), Mapping)
+                        else None
+                    )
+                ]
+                if value is not None
+            ],
+            active_ratio,
+            market_session_baseline.DEFAULT_COMPOSITION_TOLERANCE,
         )
-        regime_universe_mfe = _outcome_values(
-            [row for row in universe if _row_market_regime(row) == regime],
-            "mfe_pct",
-        )
-        if regime_control_directional_values and regime_universe_mfe:
-            weighted_regime_hit_baseline += weight * (
-                sum(1 for value in regime_control_directional_values if value > 0)
-                / len(regime_control_directional_values)
-                * 100.0
-            )
-            weighted_regime_mfe_baseline += weight * median(regime_universe_mfe)
-            weighted_regime_p90_mfe_baseline += weight * (
-                _quantile(regime_universe_mfe, 0.90) or 0.0
-            )
-            covered_weight += weight
-        for row in selected:
-            if _row_market_regime(row) != regime:
-                continue
-            label = row.get("outcome_label")
-            row_mfe = _number(label.get("mfe_pct")) if isinstance(label, Mapping) else None
-            percentile = _empirical_percentile(row_mfe, regime_universe_mfe)
-            if percentile is not None:
-                regime_mfe_percentiles.append(percentile)
-    if covered_weight > 0:
-        weighted_regime_hit_baseline /= covered_weight
-        weighted_regime_mfe_baseline /= covered_weight
-        weighted_regime_p90_mfe_baseline /= covered_weight
-    else:
-        weighted_regime_hit_baseline = math.nan
-        weighted_regime_mfe_baseline = math.nan
-        weighted_regime_p90_mfe_baseline = math.nan
+        percentile = _weighted_percentile_rank(row_mfe, per_row_population)
+        if percentile is not None:
+            session_mfe_percentiles.append(percentile)
     median_mae = median(mae) if mae else None
     median_mfe = median(mfe) if mfe else None
     universe_median_mfe = median(universe_mfe) if universe_mfe else None
@@ -518,16 +607,37 @@ def _metrics(
         if median_mfe is not None and universe_median_mfe not in (None, 0.0)
         else None
     )
-    regime_mfe_percentile = (
-        median(regime_mfe_percentiles) if regime_mfe_percentiles else None
+    session_mfe_percentile = (
+        median(session_mfe_percentiles) if session_mfe_percentiles else None
     )
-    regime_mfe_uplift = (
-        (median_mfe / weighted_regime_mfe_baseline - 1.0) * 100.0
+    session_mfe_uplift = (
+        (median_mfe / session_mfe_median - 1.0) * 100.0
         if median_mfe is not None
-        and math.isfinite(weighted_regime_mfe_baseline)
-        and weighted_regime_mfe_baseline != 0.0
+        and session_mfe_median not in (None, 0.0)
         else None
     )
+    floor_scale, floor_reference_samples = _width_floor_scale(selected)
+    floor_source = "prior raw-price session calibration"
+    if floor_reference_samples != len(selected):
+        floor_scale = 1.0
+        floor_source = "no relaxation: insufficient prior-only calibration"
+        if (
+            session_mfe_effective >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
+            and active_control_mfe_effective
+            >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
+            and session_mfe_p90 is not None
+            and active_control_mfe_p90 not in (None, 0.0)
+        ):
+            floor_scale = min(
+                1.0,
+                max(0.50, float(session_mfe_p90) / float(active_control_mfe_p90)),
+            )
+            floor_source = "session-matched observed MFE fallback"
+    base_floor = minimum_wide_move_pct(0 if not selected else int(
+        _number((selected[0].get("outcome_label") or {}).get("horizon_minutes"))
+        or 0
+    ))
+    effective_floor = base_floor * floor_scale
     mae_p90 = _quantile(mae, 0.90)
     favorable_minus_p90_adverse = (
         median_mfe - mae_p90
@@ -548,13 +658,18 @@ def _metrics(
         "last_sample_time_utc": event_times[-1] if event_times else None,
         "time_span_hours": round(time_span_hours, 4),
         "distinct_utc_dates": len(distinct_dates),
-        "market_regime_counts": selected_regime_counts,
-        "represented_market_regimes": sorted(represented_regimes),
-        "weekend_sample_size": selected_regime_counts["WEEKEND_UTC"],
-        "weekday_sample_size": selected_regime_counts["WEEKDAY_UTC"],
-        "weekend_sample_share_pct": _round(
-            selected_regime_counts["WEEKEND_UTC"] / selected_total * 100.0, 4
+        "outcome_session_composition_counts": session_composition_counts,
+        "outcome_mean_active_ratio": _round(
+            mean(selected_active_ratios) if selected_active_ratios else None, 6
         ),
+        "outcome_mean_weekend_ratio": _round(
+            1.0 - mean(selected_active_ratios)
+            if selected_active_ratios
+            else None,
+            6,
+        ),
+        "outcome_session_timezone": "America/New_York",
+        "outcome_session_definition": "SUN_18_ET__FRI_20_ET_ACTIVE",
         "distinct_symbols": len(
             {
                 str(row.get("event", {}).get("symbol") or "")
@@ -581,16 +696,29 @@ def _metrics(
         "universe_p90_mfe_pct": _round(universe_p90_mfe, 6),
         "median_mfe_percentile_pct": _round(median_mfe_percentile, 4),
         "median_mfe_uplift_vs_universe_pct": _round(mfe_uplift, 4),
-        "regime_adjusted_mfe_percentile_pct": _round(
-            regime_mfe_percentile, 4
+        "session_adjusted_mfe_percentile_pct": _round(
+            session_mfe_percentile, 4
         ),
-        "regime_matched_universe_median_mfe_pct": _round(
-            weighted_regime_mfe_baseline, 6
+        "session_matched_control_median_mfe_pct": _round(
+            session_mfe_median, 6
         ),
-        "regime_matched_universe_p90_mfe_pct": _round(
-            weighted_regime_p90_mfe_baseline, 6
+        "session_matched_control_p90_mfe_pct": _round(
+            session_mfe_p90, 6
         ),
-        "regime_adjusted_mfe_uplift_pct": _round(regime_mfe_uplift, 4),
+        "session_adjusted_mfe_uplift_pct": _round(session_mfe_uplift, 4),
+        "movement_width_floor_base_pct": _round(base_floor, 6),
+        "movement_width_floor_scale_factor": _round(floor_scale, 6),
+        "movement_width_floor_effective_pct": _round(effective_floor, 6),
+        "movement_width_floor_reference_samples": floor_reference_samples,
+        "movement_width_floor_source": floor_source,
+        "active_reference_mfe_effective_samples": _round(
+            active_control_mfe_effective, 4
+        ),
+        "active_reference_mfe_p90_pct": _round(active_control_mfe_p90, 6),
+        "movement_width_floor_policy": (
+            "absolute floor only; prior raw-price session calibration; "
+            "probability and adverse-excursion gates unchanged"
+        ),
         "expected_favorable_excursion_pct": _round(expected_favorable, 6),
         "favorable_minus_p90_adverse_pct": _round(
             favorable_minus_p90_adverse, 6
@@ -610,19 +738,32 @@ def _metrics(
             hit_rate - control_hit_rate,
             4,
         ) if hit_rate is not None and control_hit_rate is not None else None,
-        "regime_control_sample_size": len(regime_controls),
-        "regime_control_hit_rate_pct": _round(regime_control_hit_rate, 4),
-        "regime_matched_hit_rate_baseline_pct": _round(
-            weighted_regime_hit_baseline, 4
+        "session_matched_control_sample_size": len(session_control_directional),
+        "session_matched_control_effective_samples": _round(
+            session_control_effective, 4
         ),
-        "regime_hit_rate_improvement_pct_points": _round(
-            hit_rate - weighted_regime_hit_baseline,
+        "session_matched_mfe_effective_samples": _round(
+            session_mfe_effective, 4
+        ),
+        "session_matched_hit_rate_baseline_pct": _round(
+            session_hit_baseline, 4
+        ),
+        "session_hit_rate_improvement_pct_points": _round(
+            hit_rate - session_hit_baseline,
             4,
         )
-        if hit_rate is not None and math.isfinite(weighted_regime_hit_baseline)
+        if hit_rate is not None and session_hit_baseline is not None
         else None,
-        "regime_baseline_complete": covered_weight >= 0.999999,
-        "baseline_policy": "same UTC weekend/weekday regime as selected sample",
+        "session_baseline_complete": (
+            bool(selected)
+            and len(selected_active_ratios) == len(selected)
+            and session_control_effective >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
+            and session_mfe_effective >= SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES
+        ),
+        "baseline_policy": (
+            "same outcome-horizon ACTIVE/WEEKEND composition; "
+            "America/New_York session; triangular similarity weighting"
+        ),
         "unadjusted_one_sided_p_value": _round(
             _one_sided_two_proportion_p(
                 successes,
@@ -636,8 +777,8 @@ def _metrics(
             _one_sided_two_proportion_p(
                 successes,
                 len(directional),
-                regime_control_successes,
-                len(regime_control_directional),
+                weighted_successes,
+                session_control_effective,
             ),
             8,
         ),
@@ -653,8 +794,16 @@ def summarize_outcomes(
     return _metrics(selected, universe)
 
 
-def minimum_wide_move_pct(horizon_minutes: int) -> float:
-    return float(MIN_MEDIAN_MFE_BY_HORIZON.get(int(horizon_minutes), 0.0))
+def minimum_wide_move_pct(
+    horizon_minutes: int, metrics: Optional[Mapping[str, Any]] = None
+) -> float:
+    base = float(MIN_MEDIAN_MFE_BY_HORIZON.get(int(horizon_minutes), 0.0))
+    if not isinstance(metrics, Mapping):
+        return base
+    factor = _number(metrics.get("movement_width_floor_scale_factor"))
+    if factor is None:
+        return base
+    return base * min(1.0, max(0.50, factor))
 
 
 def _predicate_catalog(
@@ -669,9 +818,9 @@ def _predicate_catalog(
 
     predicates: Dict[str, Dict[str, Any]] = {}
     for feature, values in sorted(values_by_feature.items()):
-        # Weekday numbers are labels, not an ordered magnitude.  Formulae may
-        # use the explicit weekday name or WEEKEND/WEEKDAY regime instead of a
-        # misleading threshold such as ``utc_weekday >= 4``.
+        # Weekday numbers are labels, not an ordered magnitude. Formulae may
+        # use the explicit weekday name, exact market session, or continuous
+        # per-window session ratios instead of a misleading weekday threshold.
         numeric = (
             []
             if feature == "time.utc_weekday"
@@ -710,13 +859,13 @@ def _predicate_catalog(
 def _preliminary_score(metrics: Mapping[str, Any], complexity: int) -> float:
     hit = _number(metrics.get("hit_rate_pct")) or 0.0
     lower = _number(metrics.get("wilson_95_lower_pct")) or 0.0
-    improvement = _number(metrics.get("regime_hit_rate_improvement_pct_points"))
+    improvement = _number(metrics.get("session_hit_rate_improvement_pct_points"))
     if improvement is None:
         improvement = _number(metrics.get("hit_rate_improvement_pct_points")) or 0.0
     mfe = _number(metrics.get("median_mfe_pct")) or 0.0
     mae = _number(metrics.get("median_mae_pct")) or 0.0
     movement_percentile = _number(
-        metrics.get("regime_adjusted_mfe_percentile_pct")
+        metrics.get("session_adjusted_mfe_percentile_pct")
     )
     if movement_percentile is None:
         movement_percentile = _number(metrics.get("median_mfe_percentile_pct")) or 0.0
@@ -746,7 +895,7 @@ def _final_score(
     evidence = holdout if int(holdout.get("sample_size") or 0) else discovery
     hit = (_number(evidence.get("hit_rate_pct")) or 0.0) / 100.0
     lower = (_number(evidence.get("wilson_95_lower_pct")) or 0.0) / 100.0
-    improvement = _number(evidence.get("regime_hit_rate_improvement_pct_points"))
+    improvement = _number(evidence.get("session_hit_rate_improvement_pct_points"))
     if improvement is None:
         improvement = _number(evidence.get("hit_rate_improvement_pct_points")) or 0.0
     improvement_quality = min(1.0, max(0.0, (improvement + 5.0) / 25.0))
@@ -755,7 +904,7 @@ def _final_score(
     efficiency = max(0.0, _number(evidence.get("median_mfe_mae_ratio")) or 0.0)
     efficiency_quality = min(1.0, efficiency / 3.0)
     movement_percentile_value = _number(
-        evidence.get("regime_adjusted_mfe_percentile_pct")
+        evidence.get("session_adjusted_mfe_percentile_pct")
     )
     if movement_percentile_value is None:
         movement_percentile_value = (
@@ -764,13 +913,13 @@ def _final_score(
     movement_percentile = max(0.0, min(100.0, movement_percentile_value))
     movement_quality = movement_percentile / 100.0
     median_mfe = max(0.0, _number(evidence.get("median_mfe_pct")) or 0.0)
-    regime_p90_mfe = _number(
-        evidence.get("regime_matched_universe_p90_mfe_pct")
+    session_p90_mfe = _number(
+        evidence.get("session_matched_control_p90_mfe_pct")
     )
     universe_p90_mfe = max(
         0.01,
-        regime_p90_mfe
-        if regime_p90_mfe is not None
+        session_p90_mfe
+        if session_p90_mfe is not None
         else (_number(evidence.get("universe_p90_mfe_pct")) or 0.01),
     )
     absolute_movement_quality = min(1.0, median_mfe / universe_p90_mfe)
@@ -832,14 +981,14 @@ def _recommended_stage(
     stage = "BACKTESTED"
     holdout_hit = _number(holdout.get("hit_rate_pct")) or 0.0
     holdout_lower = _number(holdout.get("wilson_95_lower_pct")) or 0.0
-    improvement = _number(holdout.get("regime_hit_rate_improvement_pct_points"))
+    improvement = _number(holdout.get("session_hit_rate_improvement_pct_points"))
     if improvement is None:
         improvement = _number(holdout.get("hit_rate_improvement_pct_points")) or -100.0
     efficiency = _number(holdout.get("median_mfe_mae_ratio")) or 0.0
     median_mfe = _number(holdout.get("median_mfe_pct")) or 0.0
     mae_p90 = _number(holdout.get("mae_p90_pct")) or 0.0
     movement_percentile = _number(
-        holdout.get("regime_adjusted_mfe_percentile_pct")
+        holdout.get("session_adjusted_mfe_percentile_pct")
     )
     if movement_percentile is None:
         movement_percentile = _number(
@@ -857,18 +1006,18 @@ def _recommended_stage(
             (_number(holdout.get("time_span_hours")) or 0.0) >= 24.0
             and int(holdout.get("distinct_utc_dates") or 0) >= 2
         ),
-        "discovery regime-matched baseline coverage": bool(
-            discovery.get("regime_baseline_complete")
+        "discovery session-composition baseline coverage": bool(
+            discovery.get("session_baseline_complete")
         ),
-        "regime-matched baseline coverage": bool(
-            holdout.get("regime_baseline_complete")
+        "session-composition baseline coverage": bool(
+            holdout.get("session_baseline_complete")
         ),
         "holdout hit rate": holdout_hit >= 60.0,
         "holdout Wilson lower bound": holdout_lower >= 45.0,
         "holdout improvement": improvement >= 5.0,
         "MFE/MAE efficiency": efficiency >= 1.25,
         "wide favorable movement floor": median_mfe
-        >= MIN_MEDIAN_MFE_BY_HORIZON.get(int(horizon_minutes), 0.0),
+        >= minimum_wide_move_pct(int(horizon_minutes), holdout),
         "wide movement percentile": movement_percentile >= 65.0,
         "favorable excursion exceeds p90 adverse excursion": median_mfe > mae_p90,
         "discovery/holdout stability": abs(discovery_hit - holdout_hit) <= 20.0,

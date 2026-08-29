@@ -71,7 +71,12 @@ with separate feature and label sections:
 It also derives without look-ahead:
 
 - symbol and expected direction;
-- UTC hour, weekday/weekend and fixed UTC time buckets;
+- UTC hour and fixed UTC time buckets for exploration;
+- the production bot's exact `America/New_York` ACTIVE/WEEKEND session, plus
+  a separate composition ratio for every 30m, 1h, 4h, 12h and 24h input
+  window and for the future outcome horizon;
+- prior-only historical Price/OI/Futures CVD/Spot CVD percentiles matched to
+  each individual window's session composition rather than a binary UTC day;
 - prior alert/repeat counts at 30m, 2h and 6h;
 - same-setup repetition and cross-symbol directional breadth;
 - strategy/code version and data-quality flags.
@@ -79,6 +84,11 @@ It also derives without look-ahead:
 Every raw lookup selects the newest stored row at or before the alert. A point
 more than 45 minutes old is missing, and no nearest-future row is permitted.
 Raw histories are read in bounded batches; they are not copied into each event.
+
+The absolute wide-move floor may be reduced for thinner weekend/mixed horizons
+only when a prior raw-price calibration has enough effective samples. The
+probability, Wilson, improvement, adverse-excursion, efficiency and relative
+movement gates are unchanged.
 
 Remaining matrix extensions include explicit alert-order/spacing features,
 strengthening/weakening deltas, BTC-to-alt context, range position and matched

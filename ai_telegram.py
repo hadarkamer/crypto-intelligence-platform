@@ -16,6 +16,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 import ai_agent
 import ai_alert_research
+import market_session_baseline
 import research_event_runtime
 import research_outcome_worker
 import research_formula_store
@@ -152,10 +153,12 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     key_status = "מחובר" if state.get("configured") else "לא מוגדר"
     tools = ", ".join(state.get("tools") or []) or "אין"
-    current_regime = (
-        "סוף שבוע (UTC)"
-        if datetime.now(timezone.utc).weekday() >= 5
-        else "אמצע שבוע (UTC)"
+    current_session = (
+        "סוף שבוע"
+        if not market_session_baseline.is_active_market(
+            datetime.now(timezone.utc)
+        )
+        else "מסחר פעיל"
     )
     await update.message.reply_text(
         "🧠 AI — הבוט הקיים\n"
@@ -173,7 +176,8 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"מנוע נוסחאות: {'פעיל' if formulas.get('discovery_enabled') else 'כבוי'} | "
         f"Shadow: {'פעיל' if formulas.get('shadow_enabled') else 'כבוי'} | "
         f"מאגר: {'מותקן' if formula_schema.get('schema_present') else 'לא הותקן'}\n"
-        f"משטר ניתוח: {current_regime}; השוואה היסטורית מול אותו משטר\n"
+        f"Session ניתוח: {current_session} | ניו־יורק, א׳ 18:00–ו׳ 20:00 פעיל; "
+        "כל חלון מושווה לפי הרכב ACTIVE/WEEKEND מדויק\n"
         f"מנוע מסירת נוסחאות: {'פעיל' if formulas.get('live_alerts_enabled') else 'כבוי'} | "
         f"נוסחאות Shadow פעילות: {formula_schema.get('shadow_formulas', 0)} | "
         f"נוסחאות LIVE פעילות: {formula_schema.get('live_formulas', 0)}\n"

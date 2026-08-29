@@ -370,11 +370,11 @@ def run() -> None:
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_registry" in ai_agent.SYSTEM_INSTRUCTIONS
-    assert "Weekend/weekday regime" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "Market session is a first-class analytical variable" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "MAE p75, p90 and p95 on three separate" in ai_agent.SYSTEM_INSTRUCTIONS
     formula_store_text = (root / "research_formula_store.py").read_text(encoding="utf-8")
     assert "superseded by newer same-horizon discovery cohort" in formula_store_text
-    assert "weekend-regime formula schema v3" in formula_store_text
+    assert "exact-session-composition formula schema v4" in formula_store_text
     assert "latest_evaluation_run_id IS DISTINCT FROM %s" in formula_store_text
     telegram_text = (root / "ai_telegram.py").read_text(encoding="utf-8")
     assert "נוסחאות LIVE פעילות" in telegram_text

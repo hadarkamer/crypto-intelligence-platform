@@ -19,10 +19,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import os
-from statistics import median
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 import canonical_price_path
+import market_session_baseline
 
 try:
     import psycopg
@@ -32,7 +32,7 @@ except Exception:  # pragma: no cover - validated at runtime
     dict_row = None
 
 
-FEATURE_SCHEMA_VERSION = "research-feature-matrix-v2-weekend-baseline"
+FEATURE_SCHEMA_VERSION = "research-feature-matrix-v3-session-composition"
 VERIFIED_OUTCOME_METHOD = canonical_price_path.METHOD_VERSION
 VERIFIED_OUTCOME_QUALITIES = canonical_price_path.COMPLETE_QUALITIES
 # Compatibility alias for callers that persist one textual dataset contract.
@@ -47,11 +47,14 @@ SEQUENCE_WINDOWS_MINUTES: tuple[int, ...] = (30, 120, 360)
 # evidence to an alert.
 MAX_POINT_AGE_MINUTES = 45
 # Historical comparisons use only observations that existed before the alert,
-# from the same symbol and the same UTC weekend/weekday regime.  The archive is
-# currently smaller than this ceiling, so this loads all available history
-# while keeping the query and computation explicitly bounded.
+# from the same symbol and with an ACTIVE/WEEKEND composition similar to the
+# current window.  The session contract is shared with the production bot and
+# is evaluated in America/New_York, including DST transitions.
 HISTORICAL_BASELINE_DAYS = 180
-HISTORICAL_BASELINE_MIN_SAMPLES = 24
+HISTORICAL_BASELINE_MIN_SAMPLES = 30
+HISTORICAL_BASELINE_COMPOSITION_TOLERANCE = (
+    market_session_baseline.DEFAULT_COMPOSITION_TOLERANCE
+)
 HISTORICAL_BASELINE_FEATURES: tuple[str, ...] = (
     "price_change_pct",
     "oi_change_pct",
@@ -271,6 +274,9 @@ def _window_features(
     spot_series: Optional[_Series],
 ) -> Dict[str, Any]:
     reference_time = event_time - timedelta(minutes=minutes)
+    active_ratio, weekend_ratio, session_segments = (
+        market_session_baseline.session_ratios(reference_time, event_time)
+    )
     current_price, current_price_age = _prior_point(price_series, event_time)
     prior_price, prior_price_age = _prior_point(price_series, reference_time)
     current_futures, current_futures_age = _prior_point(futures_series, event_time)
@@ -311,6 +317,10 @@ def _window_features(
     return {
         "window_minutes": minutes,
         "reference_time_utc": reference_time,
+        "session_active_ratio": round(active_ratio, 6),
+        "session_weekend_ratio": round(weekend_ratio, 6),
+        "session_segments": session_segments,
+        "session_composition": _session_composition_label(active_ratio),
         "price_change_pct": price_change,
         "oi_change_pct": oi_change,
         "price_oi_state": _price_oi_state(price_change, oi_change),
@@ -481,13 +491,21 @@ def _time_features(event_time: datetime) -> Dict[str, Any]:
         bucket = "UTC_13_20"
     else:
         bucket = "UTC_21_23"
-    regime = "WEEKEND_UTC" if timestamp.weekday() >= 5 else "WEEKDAY_UTC"
+    market_session = (
+        "ACTIVE"
+        if market_session_baseline.is_active_market(timestamp)
+        else "WEEKEND"
+    )
     return {
         "utc_hour": hour,
         "utc_weekday": timestamp.weekday(),
         "utc_weekday_name": timestamp.strftime("%A").upper(),
-        "is_weekend_utc": timestamp.weekday() >= 5,
-        "market_regime": regime,
+        "is_calendar_weekend_utc": timestamp.weekday() >= 5,
+        "is_market_weekend": market_session == "WEEKEND",
+        "market_session": market_session,
+        "market_regime": market_session,
+        "market_session_timezone": "America/New_York",
+        "market_session_definition": "SUN_18_ET__FRI_20_ET_ACTIVE",
         "fixed_utc_session_bucket": bucket,
     }
 
@@ -496,20 +514,36 @@ def _time_features(event_time: datetime) -> Dict[str, Any]:
 class _HistoricalWindowSeries:
     times: tuple[datetime, ...]
     values: tuple[Dict[str, float], ...]
+    active_ratios: tuple[float, ...]
 
 
-def _market_regime(timestamp: Any) -> str:
-    return "WEEKEND_UTC" if _as_utc(timestamp).weekday() >= 5 else "WEEKDAY_UTC"
+def _session_composition_label(active_ratio: float) -> str:
+    if active_ratio >= 1.0 - 1e-9:
+        return "ACTIVE_ONLY"
+    if active_ratio <= 1e-9:
+        return "WEEKEND_ONLY"
+    return "MIXED"
 
 
-def _percentile_rank(value: Any, population: Sequence[float]) -> Optional[float]:
+def _weighted_percentile_rank(
+    value: Any, population: Sequence[tuple[float, float]]
+) -> Optional[float]:
     number = _float(value)
-    values = [float(item) for item in population if _float(item) is not None]
-    if number is None or not values:
+    cleaned = [
+        (float(item), float(weight))
+        for item, weight in population
+        if _float(item) is not None
+        and _float(weight) is not None
+        and float(weight) > 0.0
+    ]
+    if number is None or not cleaned:
         return None
-    below = sum(1 for item in values if item < number)
-    equal = sum(1 for item in values if item == number)
-    return round((below + 0.5 * equal) / len(values) * 100.0, 4)
+    total = sum(weight for _, weight in cleaned)
+    if total <= 0.0:
+        return None
+    below = sum(weight for item, weight in cleaned if item < number)
+    equal = sum(weight for item, weight in cleaned if item == number)
+    return round((below + 0.5 * equal) / total * 100.0, 4)
 
 
 def _historical_window_index(
@@ -518,7 +552,7 @@ def _historical_window_index(
     futures_series: Mapping[str, _Series],
     spot_series: Mapping[str, _Series],
     windows_minutes: Sequence[int],
-) -> Dict[tuple[str, int, str], _HistoricalWindowSeries]:
+) -> Dict[tuple[str, int], _HistoricalWindowSeries]:
     """Precompute raw window changes at archived points without outcomes.
 
     Each point is derived only from the point timestamp and older raw market
@@ -526,9 +560,9 @@ def _historical_window_index(
     Price/OI observation, which keeps historical percentile features free of
     lookahead and excludes the alert's own observation from its baseline.
     """
-    grouped: Dict[tuple[str, int, str], list[tuple[datetime, Dict[str, float]]]] = (
-        defaultdict(list)
-    )
+    grouped: Dict[
+        tuple[str, int], list[tuple[datetime, Dict[str, float], float]]
+    ] = defaultdict(list)
     for symbol, prices in price_series.items():
         for minutes in windows_minutes:
             for anchor_time in prices.times:
@@ -545,13 +579,18 @@ def _historical_window_index(
                     if (number := _float(window.get(feature))) is not None
                 }
                 if values:
-                    grouped[(symbol, int(minutes), _market_regime(anchor_time))].append(
-                        (anchor_time, values)
+                    grouped[(symbol, int(minutes))].append(
+                        (
+                            anchor_time,
+                            values,
+                            float(window["session_active_ratio"]),
+                        )
                     )
     return {
         key: _HistoricalWindowSeries(
             times=tuple(item[0] for item in points),
             values=tuple(item[1] for item in points),
+            active_ratios=tuple(item[2] for item in points),
         )
         for key, points in grouped.items()
     }
@@ -563,9 +602,8 @@ def _historical_context(
     event_time: datetime,
     current_price_row: Optional[Mapping[str, Any]],
     windows: Mapping[str, Mapping[str, Any]],
-    historical_index: Mapping[tuple[str, int, str], _HistoricalWindowSeries],
+    historical_index: Mapping[tuple[str, int], _HistoricalWindowSeries],
 ) -> Dict[str, Any]:
-    regime = _market_regime(event_time)
     cutoff = (
         _as_utc(current_price_row["candle_time"])
         if current_price_row and current_price_row.get("candle_time") is not None
@@ -575,53 +613,93 @@ def _historical_context(
     window_context: Dict[str, Any] = {}
     for window_name, current in windows.items():
         minutes = int(str(window_name).removesuffix("m"))
-        historical = historical_index.get((symbol, minutes, regime))
+        historical = historical_index.get((symbol, minutes))
+        current_active_ratio = float(current.get("session_active_ratio") or 0.0)
         if historical is None:
             points: Sequence[Mapping[str, float]] = ()
+            point_active_ratios: Sequence[float] = ()
         else:
             left = bisect_left(historical.times, start)
             right = bisect_left(historical.times, cutoff)
             points = historical.values[left:right]
+            point_active_ratios = historical.active_ratios[left:right]
 
         stats: Dict[str, Any] = {
-            "regime": regime,
+            "session_active_ratio": round(current_active_ratio, 6),
+            "session_weekend_ratio": round(1.0 - current_active_ratio, 6),
+            "session_composition": _session_composition_label(
+                current_active_ratio
+            ),
             "prior_points": len(points),
         }
-        available_counts: list[int] = []
+        effective_counts: list[float] = []
         for feature in HISTORICAL_BASELINE_FEATURES:
             population = [
-                float(point[feature]) for point in points if feature in point
+                (float(point[feature]), float(active_ratio))
+                for point, active_ratio in zip(points, point_active_ratios)
+                if feature in point
             ]
-            available_counts.append(len(population))
-            current_value = _float(current.get(feature))
-            enough = len(population) >= HISTORICAL_BASELINE_MIN_SAMPLES
-            stats[f"{feature}_history_samples"] = len(population)
-            stats[f"{feature}_percentile_same_regime"] = (
-                _percentile_rank(current_value, population) if enough else None
+            weighted = market_session_baseline.composition_weighted_values(
+                population,
+                current_active_ratio,
+                HISTORICAL_BASELINE_COMPOSITION_TOLERANCE,
             )
-            stats[f"{feature}_abs_percentile_same_regime"] = (
-                _percentile_rank(
+            effective_samples = sum(weight for _, weight in weighted)
+            effective_counts.append(effective_samples)
+            current_value = _float(current.get(feature))
+            enough = effective_samples >= HISTORICAL_BASELINE_MIN_SAMPLES
+            stats[f"{feature}_history_samples"] = len(population)
+            stats[f"{feature}_session_matched_samples"] = len(weighted)
+            stats[f"{feature}_session_matched_effective_samples"] = round(
+                effective_samples, 4
+            )
+            stats[f"{feature}_percentile_session_matched"] = (
+                _weighted_percentile_rank(current_value, weighted)
+                if enough
+                else None
+            )
+            stats[f"{feature}_abs_percentile_session_matched"] = (
+                _weighted_percentile_rank(
                     abs(current_value) if current_value is not None else None,
-                    [abs(value) for value in population],
+                    [(abs(value), weight) for value, weight in weighted],
                 )
                 if enough
                 else None
             )
-            stats[f"{feature}_median_same_regime"] = (
-                _round(median(population), 6) if enough else None
-            )
-            stats[f"{feature}_abs_median_same_regime"] = (
-                _round(median(abs(value) for value in population), 6)
+            stats[f"{feature}_median_session_matched"] = (
+                _round(
+                    market_session_baseline.weighted_percentile(weighted, 0.5),
+                    6,
+                )
                 if enough
                 else None
             )
-        stats["sufficient_history"] = bool(available_counts) and all(
-            count >= HISTORICAL_BASELINE_MIN_SAMPLES for count in available_counts
+            stats[f"{feature}_abs_median_session_matched"] = (
+                _round(
+                    market_session_baseline.weighted_percentile(
+                        [(abs(value), weight) for value, weight in weighted],
+                        0.5,
+                    ),
+                    6,
+                )
+                if enough
+                else None
+            )
+        stats["sufficient_history"] = bool(effective_counts) and all(
+            count >= HISTORICAL_BASELINE_MIN_SAMPLES
+            for count in effective_counts
         )
         window_context[window_name] = stats
     return {
-        "regime": regime,
-        "policy": "same-symbol same-UTC-weekend-regime prior-only",
+        "event_market_session": (
+            "ACTIVE"
+            if market_session_baseline.is_active_market(event_time)
+            else "WEEKEND"
+        ),
+        "policy": "same-symbol exact ACTIVE/WEEKEND composition matched prior-only",
+        "session_timezone": "America/New_York",
+        "session_definition": "SUN_18_ET__FRI_20_ET_ACTIVE",
+        "composition_tolerance": HISTORICAL_BASELINE_COMPOSITION_TOLERANCE,
         "lookback_days": HISTORICAL_BASELINE_DAYS,
         "minimum_samples": HISTORICAL_BASELINE_MIN_SAMPLES,
         "cutoff_time_utc": cutoff,
@@ -676,9 +754,130 @@ def _sequence_features(
     return result
 
 
-def _outcome_label(event: Mapping[str, Any]) -> Dict[str, Any]:
+def _movement_width_reference(
+    *,
+    event: Mapping[str, Any],
+    symbol: str,
+    event_time: datetime,
+    current_price_row: Optional[Mapping[str, Any]],
+    historical_index: Mapping[tuple[str, int], _HistoricalWindowSeries],
+) -> Dict[str, Any]:
+    """Return a prior-only weekend width scale for the outcome horizon.
+
+    The ratio is a conservative volatility calibration, not a success or risk
+    gate.  It can only lower the absolute MFE floor (never probability, Wilson,
+    improvement, MAE, efficiency or percentile requirements), and only when
+    both the composition-matched and ACTIVE reference samples are sufficient.
+    """
+    horizon = int(event.get("horizon_minutes") or 0)
+    outcome_end = event_time + timedelta(minutes=max(0, horizon))
+    active_ratio, weekend_ratio, segments = market_session_baseline.session_ratios(
+        event_time, outcome_end
+    )
+    result: Dict[str, Any] = {
+        "policy": "prior raw price width; same-symbol session-composition matched",
+        "horizon_minutes": horizon,
+        "session_active_ratio": round(active_ratio, 6),
+        "session_weekend_ratio": round(weekend_ratio, 6),
+        "session_segments": segments,
+        "session_composition": _session_composition_label(active_ratio),
+        "minimum_effective_samples": HISTORICAL_BASELINE_MIN_SAMPLES,
+        "floor_scale_factor": 1.0,
+        "applied": False,
+    }
+    historical = historical_index.get((symbol, horizon))
+    if horizon <= 0 or historical is None:
+        result["reason"] = "historical horizon unavailable"
+        return result
+
+    cutoff = (
+        _as_utc(current_price_row["candle_time"])
+        if current_price_row and current_price_row.get("candle_time") is not None
+        else event_time
+    )
+    start = cutoff - timedelta(days=HISTORICAL_BASELINE_DAYS)
+    left = bisect_left(historical.times, start)
+    right = bisect_left(historical.times, cutoff)
+    samples = [
+        (abs(float(point["price_change_pct"])), float(point_active_ratio))
+        for point, point_active_ratio in zip(
+            historical.values[left:right], historical.active_ratios[left:right]
+        )
+        if "price_change_pct" in point
+    ]
+    matched = market_session_baseline.composition_weighted_values(
+        samples,
+        active_ratio,
+        HISTORICAL_BASELINE_COMPOSITION_TOLERANCE,
+    )
+    active_reference = market_session_baseline.composition_weighted_values(
+        samples,
+        1.0,
+        HISTORICAL_BASELINE_COMPOSITION_TOLERANCE,
+    )
+    matched_effective = sum(weight for _, weight in matched)
+    active_effective = sum(weight for _, weight in active_reference)
+    matched_p90 = market_session_baseline.weighted_percentile(matched, 0.90)
+    active_p90 = market_session_baseline.weighted_percentile(
+        active_reference, 0.90
+    )
+    result.update(
+        {
+            "prior_points": len(samples),
+            "session_matched_samples": len(matched),
+            "session_matched_effective_samples": round(matched_effective, 4),
+            "active_reference_samples": len(active_reference),
+            "active_reference_effective_samples": round(active_effective, 4),
+            "session_matched_abs_return_p90_pct": _round(matched_p90, 6),
+            "active_reference_abs_return_p90_pct": _round(active_p90, 6),
+        }
+    )
+    if (
+        matched_effective < HISTORICAL_BASELINE_MIN_SAMPLES
+        or active_effective < HISTORICAL_BASELINE_MIN_SAMPLES
+        or matched_p90 is None
+        or active_p90 in (None, 0.0)
+    ):
+        result["reason"] = "insufficient prior-only width calibration evidence"
+        return result
+
+    scale = min(1.0, max(0.50, float(matched_p90) / float(active_p90)))
+    result["floor_scale_factor"] = round(scale, 6)
+    result["applied"] = scale < 1.0 - 1e-9
+    result["reason"] = (
+        "weekend/mixed width floor calibrated from prior raw price history"
+        if result["applied"]
+        else "session width was not below the ACTIVE reference"
+    )
+    return result
+
+
+def _outcome_label(
+    event: Mapping[str, Any],
+    *,
+    symbol: str,
+    event_time: datetime,
+    current_price_row: Optional[Mapping[str, Any]],
+    historical_index: Mapping[tuple[str, int], _HistoricalWindowSeries],
+) -> Dict[str, Any]:
+    horizon = int(event.get("horizon_minutes") or 0)
+    active_ratio, weekend_ratio, segments = market_session_baseline.session_ratios(
+        event_time,
+        event_time + timedelta(minutes=max(0, horizon)),
+    )
     return {
-        "horizon_minutes": event.get("horizon_minutes"),
+        "horizon_minutes": horizon,
+        "session_active_ratio": round(active_ratio, 6),
+        "session_weekend_ratio": round(weekend_ratio, 6),
+        "session_segments": segments,
+        "session_composition": _session_composition_label(active_ratio),
+        "movement_width_reference": _movement_width_reference(
+            event=event,
+            symbol=symbol,
+            event_time=event_time,
+            current_price_row=current_price_row,
+            historical_index=historical_index,
+        ),
         "measured_at_utc": event.get("measured_at_utc"),
         "reference_price": _round(event.get("reference_price")),
         "price_at_horizon": _round(event.get("price_at_horizon")),
@@ -771,7 +970,13 @@ def build_feature_rows(
                 "historical_context": historical_context,
                 "model_features": _model_features(event),
                 "sequence_features": _sequence_features(event, prior_events),
-                "outcome_label": _outcome_label(event),
+                "outcome_label": _outcome_label(
+                    event,
+                    symbol=symbol,
+                    event_time=event_time,
+                    current_price_row=current_price,
+                    historical_index=historical_index,
+                ),
             }
         )
     return _json_safe(rows)
@@ -1145,9 +1350,9 @@ def research_feature_matrix(
             "research_contract": [
                 "Every raw feature uses the newest stored point at or before alert_time_utc; future points are never eligible.",
                 f"A raw point more than {MAX_POINT_AGE_MINUTES} minutes old is returned as missing instead of being silently joined.",
-                "historical_context compares each Price/OI/CVD change only with older observations for the same symbol and the same UTC weekend/weekday regime.",
+                "Every input window carries its own exact America/New_York ACTIVE/WEEKEND composition; historical_context matches older same-symbol Price/OI/CVD observations by that composition.",
                 "model_features come only from the immutable decision-time Research Event snapshot.",
-                "outcome_label is later canonical spot evidence and must never be used as an input feature.",
+                "outcome_label is later canonical spot evidence with a separately calculated future-session composition and must never be used as an input feature.",
                 "Rows expose raw and existing-model features side by side; current bot scores are candidates for comparison, not assumed truth.",
                 "The matrix is a discovery sample. Candidate formulas still require chronological holdout and out-of-sample validation.",
             ],
@@ -1265,7 +1470,10 @@ def load_formula_dataset(
             "historical_baseline": {
                 "lookback_days": HISTORICAL_BASELINE_DAYS,
                 "minimum_samples": HISTORICAL_BASELINE_MIN_SAMPLES,
-                "regime_policy": "same-symbol same-UTC-weekend-regime prior-only",
+                "session_policy": "same-symbol exact ACTIVE/WEEKEND composition matched prior-only",
+                "session_timezone": "America/New_York",
+                "session_definition": "SUN_18_ET__FRI_20_ET_ACTIVE",
+                "composition_tolerance": HISTORICAL_BASELINE_COMPOSITION_TOLERANCE,
             },
             "coverage": coverage,
             "rows": rows,

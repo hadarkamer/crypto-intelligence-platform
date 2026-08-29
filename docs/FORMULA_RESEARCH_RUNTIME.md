@@ -1,4 +1,4 @@
-# Formula Research Runtime v1
+# Formula Research Runtime v2
 
 ## Objective
 
@@ -21,6 +21,10 @@ adverse excursion, fast favorable progress and useful MFE/MAE efficiency.
 - Complete Research Events begin on 2026-08-28. Older Telegram exports may be
   imported only into the isolated legacy-message table and are not training
   rows by default.
+- The shared production session definition is ACTIVE from Sunday 18:00 ET
+  through Friday 20:00 ET and WEEKEND otherwise. It is evaluated in
+  `America/New_York`, including DST. Every input window and future outcome
+  horizon carries its own exact ACTIVE/WEEKEND composition.
 
 ## Discovery
 
@@ -30,12 +34,16 @@ For each horizon and direction, the engine:
 2. freezes the earliest 70% as discovery and latest 30% as holdout;
 3. derives numeric thresholds from discovery quantiles only;
 4. evaluates single, pair and triple conditions in a bounded search;
-5. compares each candidate with its same-direction complement;
+5. compares each candidate with its same-direction complement after matching
+   the outcome horizon's ACTIVE/WEEKEND composition with triangular weights;
 6. applies Benjamini-Hochberg correction across all unique candidates;
 7. ranks candidates with material priority for movement width: median MFE,
    MFE percentile in the same direction/horizon universe, movement beyond p90
    MAE and a horizon-specific minimum; probability, speed, sample reliability
-   and stability remain required.
+   and stability remain required. The absolute movement floor may be scaled
+   down for weekend/mixed horizons only from sufficient prior raw-price
+   evidence; probability, Wilson, control improvement, MAE, efficiency and
+   movement-percentile gates are never relaxed.
 
 Small samples remain visible but cannot pass the strict Holdout gate.
 In addition, automatic Shadow promotion requires at least 72 hours across
@@ -68,3 +76,7 @@ high percentage from a single day therefore remains `BACKTESTED` at most.
 The Candidate service keeps formula workers disabled. Production uses
 migrations `002_formula_research_v1.sql` and
 `003_formula_autonomous_alerts_v1.sql` before enabling the workers.
+
+Formula schema v4 retires earlier non-LIVE candidates on its first persisted
+discovery run. Discovery and holdout are then regenerated from the corrected
+session-composition feature matrix before any new formula can enter Shadow.

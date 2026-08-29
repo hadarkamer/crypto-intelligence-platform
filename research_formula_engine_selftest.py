@@ -7,12 +7,23 @@ import research_formula_engine as engine
 
 def _row(index: int):
     event_time = datetime(2026, 8, 1, tzinfo=timezone.utc) + timedelta(minutes=index * 30)
+    input_active, input_weekend, _ = engine.market_session_baseline.session_ratios(
+        event_time - timedelta(minutes=60), event_time
+    )
+    outcome_active, outcome_weekend, _ = engine.market_session_baseline.session_ratios(
+        event_time, event_time + timedelta(minutes=240)
+    )
+    market_session = (
+        "ACTIVE"
+        if engine.market_session_baseline.is_active_market(event_time)
+        else "WEEKEND"
+    )
     direction = "LONG" if index % 2 == 0 else "SHORT"
     signal = 2.0 if index % 5 in {0, 1, 2} else -2.0
     directional_return = 1.0 if signal > 0 else -0.4
     snapshot = {f"snapshot.synthetic.feature_{feature}": float((index + feature) % 11) for feature in range(24)}
     return {
-        "feature_schema_version": "selftest-matrix-v1",
+        "feature_schema_version": "selftest-matrix-v2",
         "event": {
             "event_id": index + 1,
             "alert_time_utc": event_time,
@@ -28,27 +39,32 @@ def _row(index: int):
             "utc_hour": event_time.hour,
             "utc_weekday": event_time.weekday(),
             "utc_weekday_name": event_time.strftime("%A").upper(),
-            "is_weekend_utc": event_time.weekday() >= 5,
+            "is_calendar_weekend_utc": event_time.weekday() >= 5,
+            "is_market_weekend": market_session == "WEEKEND",
+            "market_session": market_session,
+            "market_regime": market_session,
             "fixed_utc_session_bucket": "SELFTEST",
         },
         "historical_context": {
-            "regime": (
-                "WEEKEND_UTC" if event_time.weekday() >= 5 else "WEEKDAY_UTC"
-            ),
+            "event_market_session": market_session,
             "windows": {
                 "60m": {
-                    "regime": (
-                        "WEEKEND_UTC"
-                        if event_time.weekday() >= 5
-                        else "WEEKDAY_UTC"
+                    "session_active_ratio": input_active,
+                    "session_weekend_ratio": input_weekend,
+                    "session_composition": (
+                        "ACTIVE_ONLY"
+                        if input_active == 1.0
+                        else "WEEKEND_ONLY"
+                        if input_active == 0.0
+                        else "MIXED"
                     ),
                     "prior_points": 120,
                     "sufficient_history": True,
-                    "price_change_pct_percentile_same_regime": (
+                    "price_change_pct_percentile_session_matched": (
                         85.0 if signal > 0 else 15.0
                     ),
-                    "price_change_pct_abs_percentile_same_regime": 80.0,
-                    "oi_change_pct_percentile_same_regime": float(index % 100),
+                    "price_change_pct_abs_percentile_session_matched": 80.0,
+                    "oi_change_pct_percentile_session_matched": float(index % 100),
                 }
             },
         },
@@ -64,6 +80,15 @@ def _row(index: int):
             },
             "windows": {
                 "60m": {
+                    "session_active_ratio": input_active,
+                    "session_weekend_ratio": input_weekend,
+                    "session_composition": (
+                        "ACTIVE_ONLY"
+                        if input_active == 1.0
+                        else "WEEKEND_ONLY"
+                        if input_active == 0.0
+                        else "MIXED"
+                    ),
                     "price_change_pct": signal if direction == "LONG" else -signal,
                     "oi_change_pct": float(index % 7) - 3.0,
                     "futures_continuous_cvd_change_usd": signal * 1_000_000,
@@ -100,6 +125,16 @@ def _row(index: int):
         },
         "outcome_label": {
             "horizon_minutes": 240,
+            "session_active_ratio": outcome_active,
+            "session_weekend_ratio": outcome_weekend,
+            "session_composition": (
+                "ACTIVE_ONLY"
+                if outcome_active == 1.0
+                else "WEEKEND_ONLY"
+                if outcome_active == 0.0
+                else "MIXED"
+            ),
+            "movement_width_reference": {"floor_scale_factor": 1.0},
             "directional_return_pct": directional_return,
             "mfe_pct": 1.8 if directional_return > 0 else 0.4,
             "mae_pct": 0.2 if directional_return > 0 else 1.1,
@@ -116,7 +151,7 @@ def run() -> None:
     result = engine.discover_formulas(
         rows,
         horizon_minutes=240,
-        feature_schema_version="selftest-matrix-v1",
+        feature_schema_version="selftest-matrix-v2",
     )
     assert result["available"] is True
     assert result["discovery_sample_size"] == 98
@@ -135,8 +170,9 @@ def run() -> None:
     assert "sample_size" in formula["discovery_metrics"]
     assert "mae_p95_pct" in formula["holdout_metrics"]
     assert "median_mfe_percentile_pct" in formula["holdout_metrics"]
-    assert "regime_adjusted_mfe_percentile_pct" in formula["holdout_metrics"]
-    assert "market_regime_counts" in formula["holdout_metrics"]
+    assert "session_adjusted_mfe_percentile_pct" in formula["holdout_metrics"]
+    assert "outcome_session_composition_counts" in formula["holdout_metrics"]
+    assert "movement_width_floor_effective_pct" in formula["holdout_metrics"]
     assert "favorable_minus_p90_adverse_pct" in formula["holdout_metrics"]
     assert "q_value" in formula["multiple_testing"]
     assert all(
@@ -147,11 +183,12 @@ def run() -> None:
     features = engine.extract_decision_features(rows[0])
     assert all(not key.startswith("outcome") for key in features)
     assert "aligned.60m.price_change_pct" in features
-    assert "historical.60m.price_change_pct_percentile_same_regime" in features
+    assert "raw.60m.session_active_ratio" in features
+    assert "historical.60m.price_change_pct_percentile_session_matched" in features
     assert engine.formula_key(
         direction=formula["direction"],
         horizon_minutes=240,
-        feature_schema_version="selftest-matrix-v1",
+        feature_schema_version="selftest-matrix-v2",
         conditions=list(reversed(formula["conditions"])),
     ) == formula["formula_key"]
 
@@ -211,6 +248,12 @@ def run() -> None:
     )
     assert narrow_stage == "BACKTESTED"
     assert "wide favorable movement floor" in narrow_reasons
+
+    # Weekend calibration changes only the absolute width floor. The hit,
+    # Wilson, improvement, risk and percentile gates remain unchanged.
+    assert engine.minimum_wide_move_pct(
+        240, {"movement_width_floor_scale_factor": 0.60}
+    ) == 0.60
 
     print("research formula engine self-test: PASS")
 

@@ -31,6 +31,53 @@ def _flow(symbol, timestamp, continuous, api, buy=60.0, sell=40.0):
 
 
 def run() -> None:
+    # The production session contract is New York local time, including DST.
+    # Summer: Friday 20:00 ET = Saturday 00:00 UTC; Sunday 18:00 ET = 22:00 UTC.
+    assert matrix.market_session_baseline.is_active_market(
+        datetime(2026, 8, 28, 23, 59, tzinfo=timezone.utc)
+    )
+    assert not matrix.market_session_baseline.is_active_market(
+        datetime(2026, 8, 29, 0, 0, tzinfo=timezone.utc)
+    )
+    assert not matrix.market_session_baseline.is_active_market(
+        datetime(2026, 8, 30, 21, 59, tzinfo=timezone.utc)
+    )
+    assert matrix.market_session_baseline.is_active_market(
+        datetime(2026, 8, 30, 22, 0, tzinfo=timezone.utc)
+    )
+    active_ratio, weekend_ratio, _ = matrix.market_session_baseline.session_ratios(
+        datetime(2026, 8, 28, 23, 30, tzinfo=timezone.utc),
+        datetime(2026, 8, 29, 0, 30, tzinfo=timezone.utc),
+    )
+    assert active_ratio == 0.5 and weekend_ratio == 0.5
+    boundary_event = datetime(2026, 8, 29, 0, 30, tzinfo=timezone.utc)
+    boundary_windows = {
+        minutes: matrix._window_features(
+            event_time=boundary_event,
+            minutes=minutes,
+            price_series=None,
+            futures_series=None,
+            spot_series=None,
+        )
+        for minutes in matrix.CORE_WINDOWS_MINUTES
+    }
+    assert boundary_windows[30]["session_active_ratio"] == 0.0
+    assert boundary_windows[60]["session_active_ratio"] == 0.5
+    assert boundary_windows[240]["session_active_ratio"] == 0.875
+    assert boundary_windows[720]["session_active_ratio"] == 0.958333
+    assert boundary_windows[1440]["session_active_ratio"] == 0.979167
+
+    # Winter boundaries move one UTC hour later and must remain exact.
+    assert matrix.market_session_baseline.is_active_market(
+        datetime(2026, 12, 5, 0, 59, tzinfo=timezone.utc)
+    )
+    assert not matrix.market_session_baseline.is_active_market(
+        datetime(2026, 12, 5, 1, 0, tzinfo=timezone.utc)
+    )
+    assert matrix.market_session_baseline.is_active_market(
+        datetime(2026, 12, 6, 23, 0, tzinfo=timezone.utc)
+    )
+
     class _Fetched:
         def fetchall(self):
             return [{"event_id": 1, "symbol": "BTC"}]
@@ -109,7 +156,10 @@ def run() -> None:
     historical_futures_rows = []
     historical_spot_rows = []
     for index in range(1, matrix.HISTORICAL_BASELINE_MIN_SAMPLES + 1):
-        anchor = event_time - timedelta(days=7 * index)
+        week = (index + 1) // 2
+        anchor = event_time - timedelta(days=7 * week) + timedelta(
+            hours=2 * (index % 2)
+        )
         prior = anchor - timedelta(minutes=60)
         historical_price_rows.extend(
             [
@@ -212,6 +262,9 @@ def run() -> None:
     assert one_hour["spot_continuous_cvd_change_usd"] == 40.0
     assert one_hour["spot_futures_alignment"] == "ALIGNED"
     assert one_hour["price_oi_state"] == "PRICE_UP__OI_UP"
+    assert one_hour["session_active_ratio"] == 0.0
+    assert one_hour["session_weekend_ratio"] == 1.0
+    assert one_hour["session_composition"] == "WEEKEND_ONLY"
     assert one_hour["complete"] is True
     assert row["raw_features"]["windows"]["240m"]["complete"] is False
 
@@ -244,14 +297,26 @@ def run() -> None:
     assert sequence["market_direction_balance_pct"] == 0.0
 
     assert row["time_features"]["utc_hour"] == 12
-    assert row["time_features"]["market_regime"] == "WEEKEND_UTC"
+    assert row["time_features"]["market_session"] == "WEEKEND"
+    assert row["time_features"]["market_regime"] == "WEEKEND"
     historical_60m = row["historical_context"]["windows"]["60m"]
-    assert historical_60m["regime"] == "WEEKEND_UTC"
-    assert historical_60m["price_change_pct_history_samples"] >= 24
-    assert historical_60m["price_change_pct_percentile_same_regime"] is not None
+    assert historical_60m["session_composition"] == "WEEKEND_ONLY"
+    assert historical_60m["price_change_pct_history_samples"] >= 30
+    assert historical_60m["price_change_pct_percentile_session_matched"] is not None
+    assert (
+        historical_60m["price_change_pct_session_matched_effective_samples"]
+        >= 30
+    )
     assert historical_60m["sufficient_history"] is True
     assert row["outcome_label"]["mfe_pct"] == 4.0
     assert row["outcome_label"]["mae_pct"] == 0.4
+    assert row["outcome_label"]["session_active_ratio"] == 0.0
+    assert row["outcome_label"]["session_weekend_ratio"] == 1.0
+    assert row["outcome_label"]["session_composition"] == "WEEKEND_ONLY"
+    assert (
+        row["outcome_label"]["movement_width_reference"]["floor_scale_factor"]
+        == 1.0
+    )
     assert "outcome_label" not in row["model_features"]
 
     prepared = matrix._prepare_series(price_rows, time_column="candle_time")
