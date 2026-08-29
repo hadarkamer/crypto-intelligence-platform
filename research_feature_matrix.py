@@ -62,6 +62,10 @@ HISTORICAL_BASELINE_FEATURES: tuple[str, ...] = (
     "futures_continuous_cvd_change_usd",
     "spot_continuous_cvd_change_usd",
 )
+REPLAY_MIN_ANCHORS_PER_SYMBOL = 250
+REPLAY_MIN_UTC_DATES_PER_SYMBOL = 14
+REPLAY_MIN_SPAN_HOURS_PER_SYMBOL = 336.0
+REPLAY_MIN_ELIGIBLE_SYMBOLS = 4
 _TRUE = {"1", "true", "yes", "on"}
 
 
@@ -1171,69 +1175,105 @@ def _historical_replay_coverage(
             list(VERIFIED_OUTCOME_QUALITIES),
         ),
     ).fetchall()
-    by_symbol = {
-        str(row["symbol"]).upper(): {
-            "anchors": int(row["anchors"] or 0),
-            "directional_rows": int(row["anchors"] or 0) * 2,
-            "first_observation_utc": row["first_observation_utc"],
-            "last_observation_utc": row["last_observation_utc"],
-            "utc_dates": int(row["utc_dates"] or 0),
+    by_symbol: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        symbol = str(row["symbol"]).upper()
+        first_observation = row["first_observation_utc"]
+        last_observation = row["last_observation_utc"]
+        span_hours = (
+            (last_observation - first_observation).total_seconds() / 3600.0
+            if first_observation and last_observation
+            else 0.0
+        )
+        anchors = int(row["anchors"] or 0)
+        utc_dates = int(row["utc_dates"] or 0)
+        failures = []
+        if anchors < REPLAY_MIN_ANCHORS_PER_SYMBOL:
+            failures.append("minimum_anchors")
+        if utc_dates < REPLAY_MIN_UTC_DATES_PER_SYMBOL:
+            failures.append("minimum_utc_dates")
+        if span_hours < REPLAY_MIN_SPAN_HOURS_PER_SYMBOL:
+            failures.append("minimum_span_hours")
+        by_symbol[symbol] = {
+            "anchors": anchors,
+            "directional_rows": anchors * 2,
+            "first_observation_utc": first_observation,
+            "last_observation_utc": last_observation,
+            "utc_dates": utc_dates,
+            "span_hours": round(span_hours, 3),
+            "eligible": not failures,
+            "failed_gates": failures,
         }
-        for row in rows
+    eligible_symbols = sorted(
+        symbol for symbol, item in by_symbol.items() if item["eligible"]
+    )
+    excluded_symbols = {
+        symbol: list(item["failed_gates"])
+        for symbol, item in by_symbol.items()
+        if not item["eligible"]
     }
-    total_anchors = sum(item["anchors"] for item in by_symbol.values())
+    eligible_items = [by_symbol[symbol] for symbol in eligible_symbols]
+    total_anchors = sum(item["anchors"] for item in eligible_items)
+    stored_anchors = sum(item["anchors"] for item in by_symbol.values())
     first = min(
-        (item["first_observation_utc"] for item in by_symbol.values()),
+        (item["first_observation_utc"] for item in eligible_items),
         default=None,
     )
     last = max(
-        (item["last_observation_utc"] for item in by_symbol.values()),
+        (item["last_observation_utc"] for item in eligible_items),
         default=None,
     )
-    distinct_dates = len(
-        {
-            row["date"]
-            for row in conn.execute(
-                """
-                SELECT DISTINCT observation_time_utc::date AS date
-                FROM research_historical_opportunity_outcomes
-                WHERE horizon_minutes=%s
-                  AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
-                  AND outcome_method_version=%s
-                  AND replay_version=%s
-                  AND data_quality_status=ANY(%s)
-                """,
-                (
-                    horizon_minutes,
-                    lookback_days,
-                    VERIFIED_OUTCOME_METHOD,
-                    research_historical_replay.REPLAY_VERSION,
-                    list(VERIFIED_OUTCOME_QUALITIES),
-                ),
-            ).fetchall()
-        }
-    )
+    distinct_dates = 0
+    if eligible_symbols:
+        distinct_dates = len(
+            {
+                row["date"]
+                for row in conn.execute(
+                    """
+                    SELECT DISTINCT observation_time_utc::date AS date
+                    FROM research_historical_opportunity_outcomes
+                    WHERE horizon_minutes=%s
+                      AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
+                      AND outcome_method_version=%s
+                      AND replay_version=%s
+                      AND data_quality_status=ANY(%s)
+                      AND symbol=ANY(%s)
+                    """,
+                    (
+                        horizon_minutes,
+                        lookback_days,
+                        VERIFIED_OUTCOME_METHOD,
+                        research_historical_replay.REPLAY_VERSION,
+                        list(VERIFIED_OUTCOME_QUALITIES),
+                        eligible_symbols,
+                    ),
+                ).fetchall()
+            }
+        )
     span_hours = (
         (last - first).total_seconds() / 3600.0 if first and last else 0.0
     )
     replacement_ready = (
-        total_anchors >= 250
-        and len(by_symbol) >= 4
-        and distinct_dates >= 14
-        and span_hours >= 336.0
+        len(eligible_symbols) >= REPLAY_MIN_ELIGIBLE_SYMBOLS
+        and distinct_dates >= REPLAY_MIN_UTC_DATES_PER_SYMBOL
+        and span_hours >= REPLAY_MIN_SPAN_HOURS_PER_SYMBOL
     )
     return {
         "dataset_kind": "historical_raw_opportunity_replay",
         "replacement_ready": replacement_ready,
         "readiness_policy": {
-            "minimum_anchors": 250,
-            "minimum_symbols": 4,
-            "minimum_utc_dates": 14,
-            "minimum_span_hours": 336,
+            "minimum_anchors_per_symbol": REPLAY_MIN_ANCHORS_PER_SYMBOL,
+            "minimum_eligible_symbols": REPLAY_MIN_ELIGIBLE_SYMBOLS,
+            "minimum_utc_dates_per_symbol": REPLAY_MIN_UTC_DATES_PER_SYMBOL,
+            "minimum_span_hours_per_symbol": REPLAY_MIN_SPAN_HOURS_PER_SYMBOL,
         },
         "anchors": total_anchors,
         "directional_rows": total_anchors * 2,
-        "symbols": len(by_symbol),
+        "symbols": len(eligible_symbols),
+        "eligible_symbols": eligible_symbols,
+        "excluded_symbols": excluded_symbols,
+        "stored_anchors": stored_anchors,
+        "stored_symbols": len(by_symbol),
         "distinct_utc_dates": distinct_dates,
         "span_hours": round(span_hours, 3),
         "first_observation_utc": first,
@@ -1262,30 +1302,14 @@ def _even_sample(values: Sequence[Mapping[str, Any]], size: int) -> list[Dict[st
 
 
 def _load_historical_opportunities(
-    conn, *, lookback_days: int, horizon_minutes: int, anchor_limit: int
+    conn,
+    *,
+    lookback_days: int,
+    horizon_minutes: int,
+    anchor_limit: int,
+    symbols: Sequence[str],
 ) -> list[Dict[str, Any]]:
-    symbols = [
-        str(row["symbol"]).upper()
-        for row in conn.execute(
-            """
-            SELECT DISTINCT symbol
-            FROM research_historical_opportunity_outcomes
-            WHERE horizon_minutes=%s
-              AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
-              AND outcome_method_version=%s
-              AND replay_version=%s
-              AND data_quality_status=ANY(%s)
-            ORDER BY symbol
-            """,
-            (
-                horizon_minutes,
-                lookback_days,
-                VERIFIED_OUTCOME_METHOD,
-                research_historical_replay.REPLAY_VERSION,
-                list(VERIFIED_OUTCOME_QUALITIES),
-            ),
-        ).fetchall()
-    ]
+    symbols = sorted({str(symbol).upper() for symbol in symbols if symbol})
     if not symbols:
         return []
     quota = max(1, (anchor_limit + len(symbols) - 1) // len(symbols))
@@ -1307,6 +1331,7 @@ def _load_historical_opportunities(
               AND outcome_method_version=%s
               AND replay_version=%s
               AND data_quality_status=ANY(%s)
+              AND symbol=ANY(%s)
         )
         SELECT *
         FROM eligible
@@ -1324,6 +1349,7 @@ def _load_historical_opportunities(
             VERIFIED_OUTCOME_METHOD,
             research_historical_replay.REPLAY_VERSION,
             list(VERIFIED_OUTCOME_QUALITIES),
+            symbols,
             quota,
             quota,
         ),
@@ -1684,6 +1710,7 @@ def load_historical_replay_dataset(
             lookback_days=days,
             horizon_minutes=horizon,
             anchor_limit=anchor_limit,
+            symbols=coverage.get("eligible_symbols") or [],
         )
     if not opportunities:
         return {

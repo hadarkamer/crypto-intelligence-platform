@@ -95,11 +95,13 @@ movement gates are unchanged.
 The neutral replay removes the alert-only selection bias for raw Price/OI/CVD:
 each eligible 30-minute observation is evaluated in both LONG and SHORT from
 canonical one-minute spot paths. It stores compact outcomes rather than candle
-history and samples evenly across symbols and time for formula search. Existing
-model/score features remain available in the delivered-alert matrix. Remaining
-extensions include explicit strengthening/weakening deltas, BTC-to-alt context,
-range position and full decision-time reconstruction of model scores where
-their historical source inputs are complete.
+history and samples evenly across independently coverage-ready symbols and time
+for formula search. A sparse symbol cannot borrow the history of other symbols
+to pass the gate. Existing model/score features remain available in the
+delivered-alert matrix. Remaining extensions include explicit
+strengthening/weakening deltas, BTC-to-alt context, range position and full
+decision-time reconstruction of model scores where their historical source
+inputs are complete.
 
 ### 3. Candidate search
 

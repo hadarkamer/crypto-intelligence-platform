@@ -20,6 +20,9 @@ def _candle(open_time: datetime, close: float = 100.0) -> SpotCandle:
 
 def run() -> None:
     observation = datetime(2026, 8, 29, 12, 32, tzinfo=timezone.utc)
+    assert replay._hype_one_minute_observation_floor(
+        datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    ) == datetime(2026, 8, 26, 0, 42, tzinfo=timezone.utc)
     candles = [
         _candle(observation + timedelta(minutes=index), 100.0 + index / 10)
         for index in range(-2, 61)

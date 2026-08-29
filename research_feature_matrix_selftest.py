@@ -122,6 +122,78 @@ def run() -> None:
     )
     assert loaded == [{"event_id": 1, "symbol": "BTC"}]
 
+    coverage_time = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+
+    class _CoverageRows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _CoverageConnection:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, query, params):
+            assert query.count("%s") == len(params)
+            self.calls += 1
+            if self.calls == 1:
+                return _CoverageRows(
+                    [
+                        {
+                            "symbol": symbol,
+                            "anchors": 300,
+                            "first_observation_utc": coverage_time - timedelta(days=20),
+                            "last_observation_utc": coverage_time,
+                            "utc_dates": 21,
+                        }
+                        for symbol in ("BTC", "ETH", "SOL", "DOGE")
+                    ]
+                    + [
+                        {
+                            "symbol": "HYPE",
+                            "anchors": 100,
+                            "first_observation_utc": coverage_time - timedelta(days=3),
+                            "last_observation_utc": coverage_time,
+                            "utc_dates": 4,
+                        }
+                    ]
+                )
+            assert "symbol=ANY(%s)" in query
+            assert params[-1] == ["BTC", "DOGE", "ETH", "SOL"]
+            return _CoverageRows(
+                [{"date": (coverage_time - timedelta(days=offset)).date()} for offset in range(21)]
+            )
+
+    coverage = matrix._historical_replay_coverage(
+        _CoverageConnection(), lookback_days=3650, horizon_minutes=240
+    )
+    assert coverage["replacement_ready"] is True
+    assert coverage["symbols"] == 4
+    assert coverage["stored_symbols"] == 5
+    assert coverage["eligible_symbols"] == ["BTC", "DOGE", "ETH", "SOL"]
+    assert coverage["excluded_symbols"]["HYPE"] == [
+        "minimum_anchors",
+        "minimum_utc_dates",
+        "minimum_span_hours",
+    ]
+
+    class _OpportunityConnection:
+        def execute(self, query, params):
+            assert query.count("%s") == len(params)
+            assert "symbol=ANY(%s)" in query
+            assert params[-3] == ["BTC", "ETH"]
+            return _CoverageRows([])
+
+    assert matrix._load_historical_opportunities(
+        _OpportunityConnection(),
+        lookback_days=3650,
+        horizon_minutes=240,
+        anchor_limit=100,
+        symbols=["ETH", "BTC"],
+    ) == []
+
     event_time = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
     reference_time = event_time - timedelta(minutes=61)
     current_time = event_time - timedelta(minutes=1)

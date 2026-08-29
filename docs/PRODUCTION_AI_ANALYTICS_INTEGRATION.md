@@ -92,9 +92,11 @@ without copying the underlying time series into the Research Event archive.
 waits until each 30-minute source candle has closed plus two minutes, uses
 Binance Spot one-minute paths (Hyperliquid HYPE/USDT for HYPE), and persists
 only compact LONG/SHORT outcome summaries. Formula discovery switches to this
-dataset only after chronological and cross-symbol coverage gates pass. Archive
-row counts, ages, completeness flags, UTC hour and DST offsets cannot become
-formula conditions.
+dataset only after chronological and cross-symbol coverage gates pass for each
+included symbol independently. Hyperliquid's 5000-candle retention means older
+HYPE anchors are excluded until HYPE itself has sufficient exact one-minute
+coverage. Archive row counts, ages, completeness flags, UTC hour and DST offsets
+cannot become formula conditions.
 
 ## Formula objective and remaining stages
 

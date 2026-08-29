@@ -97,7 +97,13 @@ migrations `002_formula_research_v1.sql`,
 `003_formula_autonomous_alerts_v1.sql` and
 `004_historical_opportunity_replay_v1.sql` before enabling the workers.
 
-Formula schema v5 retires an earlier non-LIVE cohort only after the replacement
-replay has at least 250 anchors, four symbols, 14 UTC dates and 336 hours of
-span for that horizon. Before that gate, a result is capped at `BACKTESTED` and
-the earlier cohort remains auditable and active.
+Formula schema v5 retires an earlier non-LIVE cohort only after at least four
+symbols independently have 250 anchors, 14 UTC dates and 336 hours of span for
+that horizon. Sparse symbols are reported but excluded from discovery until
+they pass the same per-symbol gate. Before that gate, a result is capped at
+`BACKTESTED` and the earlier cohort remains auditable and active.
+
+Hyperliquid's official candle endpoint exposes only its most recent 5000
+candles. HYPE replay therefore uses only exact one-minute observations still
+inside that window; older HYPE anchors are excluded rather than approximated or
+labeled from another venue.

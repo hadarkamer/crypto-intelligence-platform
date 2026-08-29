@@ -36,6 +36,7 @@ _TRUE = {"1", "true", "yes", "on"}
 _HORIZONS = (60, 240, 720, 1440)
 _LOCK_ID = 94837243
 _FETCH_SEGMENT_MINUTES = 1900
+_HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES = 5000
 
 
 def _utc(value: Any) -> datetime:
@@ -50,6 +51,19 @@ def _utc(value: Any) -> datetime:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+
+
+def _hype_one_minute_observation_floor(
+    now: Optional[datetime] = None,
+) -> datetime:
+    """Earliest HYPE anchor whose reference minute remains in official history."""
+    current = _floor_minute(now or datetime.now(timezone.utc))
+    # The replay asks for two minutes before an anchor so it can prove that the
+    # reference candle closed before the decision time. Hyperliquid exposes
+    # only its most recent 5000 candles, so reserve those two minutes here.
+    return current - timedelta(
+        minutes=_HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES - 2
+    )
 
 
 def _research_database_url() -> str:
@@ -184,6 +198,8 @@ def _load_anchors(
         if symbols:
             live_filters.append("live.symbol=ANY(%s)")
             live_params.append(list(symbols))
+        live_filters.append("(live.symbol<>'HYPE' OR live.collected_at >= %s)")
+        live_params.append(_hype_one_minute_observation_floor())
         live_filters.extend(
             (
                 "(live.symbol<>'HYPE' OR live.price_source='hyperliquid')",
@@ -484,6 +500,11 @@ def status() -> Dict[str, Any]:
         "replay_version": REPLAY_VERSION,
         "outcome_method_version": canonical_price_path.METHOD_VERSION,
         "canonical_source": canonical_price_path.canonical_source_description(),
+        "hype_one_minute_history_policy": {
+            "provider_limit_candles": _HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES,
+            "eligible_observation_floor_utc": _hype_one_minute_observation_floor(),
+            "older_hype_anchors": "excluded rather than approximated or mislabeled",
+        },
         "stores_one_minute_candles": False,
         "storage_contract": "compact per-anchor MFE/MAE/return summaries only",
     }
