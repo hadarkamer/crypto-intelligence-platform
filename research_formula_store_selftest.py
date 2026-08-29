@@ -20,6 +20,7 @@ def _shadow_row(
         "event_id": event_id,
         "alert_time_utc": at,
         "symbol": symbol,
+        "direction": "LONG",
         "event_type": "SELFTEST_ALERT",
         "evaluation_status": status,
         "first_touch_available": True,
@@ -42,7 +43,108 @@ def _shadow_row(
     }
 
 
+def _max_pain_snapshot(*, decision_time: datetime, tampered_hash: bool = False) -> dict:
+    archive = store.research_max_pain_archive
+    available = decision_time - timedelta(minutes=5)
+    record = {
+        "snapshot_set_id": int(decision_time.timestamp()),
+        "snapshot_key": "1" * 64,
+        "set_payload_sha256": "2" * 64,
+        "symbol": "BTC",
+        "symbol_manifest_payload_sha256": "3" * 64,
+        "row_payload_sha256": [
+            {"timeframe": timeframe, "payload_sha256": "4" * 63 + suffix}
+            for timeframe, suffix in zip(
+                archive.REQUIRED_TIMEFRAMES, "56789ab"
+            )
+        ],
+        "archive_schema_version": archive.ARCHIVE_SCHEMA_VERSION,
+        "method_version": archive.METHOD_VERSION,
+        "cutover_marker": archive.CUTOVER_MARKER,
+        "cutover_time_utc": archive.CUTOVER_TIME_UTC.isoformat(),
+        "available_at_utc": available.isoformat(),
+        "cycle_id": f"selftest:{int(decision_time.timestamp())}",
+        "cycle_time_utc": (available - timedelta(minutes=5)).isoformat(),
+        "source": "WATCH_SHARED",
+        "collector_version": "selftest-v1",
+    }
+    provenance = {
+        "policy_version": archive.SHADOW_PROVENANCE_POLICY_VERSION,
+        "symbol": "BTC",
+        "current": record,
+        "previous": None,
+        "used_for_delta": False,
+        "previous_gap_minutes": None,
+        "previous_gap_policy_minutes": archive.DEFAULT_MAX_PREVIOUS_GAP_MINUTES,
+    }
+    provenance_hash = archive.canonical_provenance_sha256(provenance)
+    return {
+        "snapshot_policy_version": store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
+        "decision_cohort_policy_version": store._DECISION_COHORT_POLICY_VERSION,
+        "max_pain_provenance": {
+            "condition_features": [
+                "max_pain.aggregate.short_long_liquidity_ratio"
+            ],
+            "requires_previous": False,
+            "evaluation_status": "EVALUABLE",
+            "evaluation_reason": "current snapshot is coherent",
+            "change_evaluation_status": "UNEVALUABLE",
+            "change_reason": "previous snapshot is not required",
+            "provenance": provenance,
+            "provenance_sha256": "0" * 64 if tampered_hash else provenance_hash,
+        },
+    }
+
+
+def _bind_max_pain_check(
+    formula: dict, row: dict, snapshot: dict
+) -> dict:
+    frozen = {
+        **snapshot,
+        "formula_key": formula["formula_key"],
+        "formula_version": formula["formula_version"],
+        "horizon_minutes": formula["horizon_minutes"],
+        "feature_schema_version": formula["feature_schema_version"],
+        "event": {
+            "event_id": row["event_id"],
+            "alert_time_utc": row["alert_time_utc"],
+            "symbol": row["symbol"],
+            "direction": row["direction"],
+            "event_type": row["event_type"],
+        },
+        "formula_key_features": {
+            "max_pain.aggregate.short_long_liquidity_ratio": 2.0
+        },
+        "source_inputs": {
+            family: {
+                "timestamp_utc": (
+                    row["alert_time_utc"] - timedelta(minutes=10)
+                ).isoformat()
+            }
+            for family in ("price_oi", "futures_cvd", "spot_cvd")
+        },
+    }
+    cohort_key, cohort_anchor = store._decision_cohort_identity(
+        formula=formula,
+        event=row,
+        snapshot=frozen,
+    )
+    return {
+        **row,
+        "input_snapshot": frozen,
+        "decision_cohort_key": cohort_key,
+        "decision_anchor_time_utc": cohort_anchor,
+    }
+
+
 def run() -> None:
+    rebound_policy = store._bind_max_pain_policy("legacy-render-override")
+    for max_pain_policy_binding in (
+        store.research_max_pain_archive.SHADOW_PROVENANCE_POLICY_VERSION,
+        store._DECISION_COHORT_POLICY_VERSION,
+    ):
+        assert max_pain_policy_binding in store._SHADOW_MONITORING_POLICY_VERSION
+        assert max_pain_policy_binding in rebound_policy
     compatible_shadow_schemas = set(
         store._SHADOW_COMPATIBLE_FORMULA_SCHEMAS
     )
@@ -197,12 +299,24 @@ def run() -> None:
             if "FROM research_formulas" in normalized:
                 assert "current_stage='SHADOW'" in normalized
                 assert "formula_schema_version=ANY(%s)" in dense
+                assert "formula_schema_version" in normalized
+                assert "formula_key" in normalized
+                assert "feature_schema_version" in normalized
+                assert "conditions" in normalized
                 assert set(params[0]) == compatible_shadow_schemas
                 return _Rows(
                     [
                         {
                             "formula_id": 3153,
+                            "formula_key": "legacy-v5-shadow",
                             "formula_version": 1,
+                            "formula_schema_version": (
+                                "research-formula-v5-safe-replay"
+                            ),
+                            "feature_schema_version": (
+                                "research-feature-matrix-v5"
+                            ),
+                            "conditions": [],
                             "horizon_minutes": 720,
                             "latest_evaluation_run_id": 29,
                             "shadow_started_at_utc": start,
@@ -399,6 +513,76 @@ def run() -> None:
     assert guarded_validation["evidence"][
         "threshold_policy_mismatch_event_ids"
     ] == [30]
+
+    # v6 Max-Pain proof/cohort is checked before independence selection. A
+    # malformed historical check remains listed for audit but cannot overlap-exclude, or
+    # permanently poison, sufficient later valid evidence.
+    max_pain_formula = {
+        "formula_id": 42,
+        "formula_key": "f" * 64,
+        "formula_version": 1,
+        "formula_schema_version": store.research_formula_engine.FORMULA_SCHEMA_VERSION,
+        "feature_schema_version": store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+        "direction": "LONG",
+        "horizon_minutes": 60,
+        "conditions": [
+            {
+                "feature": "max_pain.aggregate.short_long_liquidity_ratio",
+                "operator": ">=",
+                "value": 1.0,
+            }
+        ],
+    }
+    malformed_at = start + timedelta(minutes=10)
+    valid_at = start + timedelta(minutes=40)
+    malformed = _bind_max_pain_check(
+        max_pain_formula,
+        {**_shadow_row(40, at=malformed_at), "outcome_due": True},
+        _max_pain_snapshot(decision_time=malformed_at),
+    )
+    malformed["decision_cohort_key"] = "0" * 64
+    valid_max_pain = _bind_max_pain_check(
+        max_pain_formula,
+        {**_shadow_row(41, at=valid_at), "outcome_due": True},
+        _max_pain_snapshot(decision_time=valid_at),
+    )
+    max_pain_validation = store._build_shadow_validation(
+        max_pain_formula,
+        [malformed, valid_max_pain],
+        evaluated_at_utc=valid_at + timedelta(hours=1),
+    )
+    max_pain_evidence = max_pain_validation["evidence"][
+        "max_pain_provenance"
+    ]
+    assert max_pain_evidence["required"] is True
+    assert max_pain_evidence["incompatible_event_ids"] == [40]
+    assert [
+        item["event_id"] for item in max_pain_evidence["event_provenance_refs"]
+    ] == [41]
+    assert max_pain_validation["gates"][
+        "complete Max-Pain provenance chain"
+    ] is True
+    assert max_pain_validation["metrics"]["sample_size"] == 1
+    assert max_pain_validation["evidence"]["raw_evaluation_status"] == {
+        "MATCHED": 1,
+        "UNMATCHED": 0,
+        "UNEVALUABLE": 1,
+    }
+    reordered_validation = store._build_shadow_validation(
+        max_pain_formula,
+        [valid_max_pain, malformed],
+        evaluated_at_utc=valid_at + timedelta(hours=1),
+    )
+    assert reordered_validation["evidence"]["max_pain_provenance"][
+        "canonical_evidence_sha256"
+    ] == max_pain_evidence["canonical_evidence_sha256"]
+    canonical = store.research_max_pain_archive.canonical_provenance_sha256
+    provenance = _max_pain_snapshot(decision_time=valid_at)[
+        "max_pain_provenance"
+    ]["provenance"]
+    assert canonical(provenance) == canonical(
+        {key: provenance[key] for key in reversed(list(provenance))}
+    )
 
     print("research formula store self-test: PASS")
 

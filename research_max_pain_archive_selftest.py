@@ -160,6 +160,22 @@ def run() -> None:
     assert features["max_pain.12h.long_target_signed_distance_pct"] == -5.0
     assert features["max_pain.aggregate.short_long_liquidity_ratio"] == 2.0
     assert features["max_pain.aggregate.closer_downside_count"] == 7
+    provenance = result["provenance"]
+    assert provenance["policy_version"] == archive.SHADOW_PROVENANCE_POLICY_VERSION
+    assert provenance["current"]["snapshot_set_id"] == 2
+    assert provenance["previous"] is None
+    assert provenance["used_for_delta"] is False
+    assert [
+        item["timeframe"]
+        for item in provenance["current"]["row_payload_sha256"]
+    ] == list(archive.REQUIRED_TIMEFRAMES)
+    assert archive.validate_shadow_provenance(
+        provenance,
+        result["provenance_sha256"],
+        decision_time_utc=BASE + timedelta(minutes=10),
+        expected_symbol="BTC",
+        require_previous=False,
+    )[0] is True
 
     mixed = _payload(symbols=("BTC", "HYPE"), generic_hype=True)
     mixed_set, mixed_manifests = _db_shape(mixed, 3)
@@ -379,10 +395,60 @@ def run() -> None:
         previous_symbol_manifest=previous_manifests["BTC"],
     )
     assert delta["change_evaluation_status"] == "EVALUABLE"
+    assert delta["provenance"]["used_for_delta"] is True
+    assert delta["provenance"]["previous"]["snapshot_set_id"] == 1
+    assert delta["provenance"]["previous_gap_minutes"] == 30.0
+    assert archive.validate_shadow_provenance(
+        delta["provenance"],
+        delta["provenance_sha256"],
+        decision_time_utc=BASE + timedelta(minutes=10),
+        expected_symbol="BTC",
+        require_previous=True,
+    )[0] is True
     assert (
         delta["features"]["max_pain.delta.upside_liquidity_usd_trend"]
         == "STRENGTHENING"
     )
+    reordered = {
+        key: delta["provenance"][key]
+        for key in reversed(list(delta["provenance"]))
+    }
+    assert archive.canonical_provenance_sha256(reordered) == delta[
+        "provenance_sha256"
+    ]
+    wrong_row_order = dict(delta["provenance"])
+    wrong_current = dict(wrong_row_order["current"])
+    wrong_current["row_payload_sha256"] = list(
+        reversed(wrong_current["row_payload_sha256"])
+    )
+    wrong_row_order["current"] = wrong_current
+    wrong_hash = archive.canonical_provenance_sha256(wrong_row_order)
+    valid_order, reason = archive.validate_shadow_provenance(
+        wrong_row_order,
+        wrong_hash,
+        decision_time_utc=BASE + timedelta(minutes=10),
+        expected_symbol="BTC",
+        require_previous=True,
+    )
+    assert valid_order is False and "timeframes" in reason
+
+    oversized_numeric = {
+        **delta["provenance"],
+        "current": {
+            **delta["provenance"]["current"],
+            "snapshot_set_id": 10**10000,
+        },
+    }
+    oversized_valid, oversized_reason = archive.validate_shadow_provenance(
+        oversized_numeric,
+        "0" * 64,
+        decision_time_utc=BASE + timedelta(minutes=10),
+        expected_symbol="BTC",
+        require_previous=True,
+    )
+    assert oversized_valid is False
+    assert "invalid scalar" in oversized_reason
+    assert archive._float(10**10000) is None
 
     identical = _payload()
     changed = _payload(short_amount=201.0)

@@ -49,6 +49,7 @@ REQUIRED_TIMEFRAMES: tuple[str, ...] = (
 DEFAULT_MAX_CAPTURE_SOURCE_AGE_MINUTES = 45
 DEFAULT_MAX_DECISION_AGE_MINUTES = 45
 DEFAULT_MAX_PREVIOUS_GAP_MINUTES = 90
+SHADOW_PROVENANCE_POLICY_VERSION = "max-pain-shadow-provenance-v1"
 _TRUE = {"1", "true", "yes", "on"}
 
 
@@ -83,7 +84,7 @@ def _float(value: Any) -> Optional[float]:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
 
@@ -145,6 +146,330 @@ def _canonical(value: Any) -> str:
 
 def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def canonical_provenance_sha256(value: Any) -> str:
+    """Return the stable hash used to bind Max-Pain evidence to approval.
+
+    This intentionally hashes only compact archive identities and never turns
+    an identifier or payload hash into a Formula candidate feature.
+    """
+    payload = json.dumps(
+        _json_safe(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _compact_snapshot_provenance(
+    set_record: Optional[Mapping[str, Any]],
+    symbol_manifest: Optional[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    symbol: str,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(set_record, Mapping):
+        return None
+    manifest = dict(symbol_manifest or {})
+    rows_by_timeframe = {
+        str(row.get("timeframe") or ""): dict(row)
+        for row in rows
+        if str(row.get("symbol") or "").upper() == symbol
+    }
+    return {
+        "snapshot_set_id": _positive_int(set_record.get("snapshot_set_id")),
+        "snapshot_key": str(set_record.get("snapshot_key") or "").strip() or None,
+        "set_payload_sha256": (
+            str(set_record.get("payload_sha256") or "").strip() or None
+        ),
+        "symbol": symbol,
+        "symbol_manifest_payload_sha256": (
+            str(manifest.get("payload_sha256") or "").strip() or None
+        ),
+        "row_payload_sha256": [
+            {
+                "timeframe": timeframe,
+                "payload_sha256": (
+                    str(
+                        rows_by_timeframe.get(timeframe, {}).get("payload_sha256")
+                        or ""
+                    ).strip()
+                    or None
+                ),
+            }
+            for timeframe in REQUIRED_TIMEFRAMES
+        ],
+        "archive_schema_version": set_record.get("archive_schema_version"),
+        "method_version": set_record.get("method_version"),
+        "cutover_marker": set_record.get("cutover_marker"),
+        "cutover_time_utc": _iso_or_none(set_record.get("cutover_time_utc")),
+        "available_at_utc": _iso_or_none(set_record.get("available_at_utc")),
+        "cycle_id": set_record.get("cycle_id"),
+        "cycle_time_utc": _iso_or_none(set_record.get("cycle_time_utc")),
+        "source": set_record.get("source"),
+        "collector_version": set_record.get("collector_version"),
+    }
+
+
+def _provenance_bundle(
+    *,
+    symbol: str,
+    current_set: Optional[Mapping[str, Any]],
+    current_symbol_manifest: Optional[Mapping[str, Any]],
+    current_rows: Sequence[Mapping[str, Any]],
+    previous_set: Optional[Mapping[str, Any]],
+    previous_symbol_manifest: Optional[Mapping[str, Any]],
+    previous_rows: Sequence[Mapping[str, Any]],
+    used_for_delta: bool,
+    max_previous_gap_minutes: int,
+) -> Dict[str, Any]:
+    previous_gap_minutes = None
+    if (
+        used_for_delta
+        and isinstance(current_set, Mapping)
+        and isinstance(previous_set, Mapping)
+    ):
+        try:
+            previous_gap_minutes = round(
+                (
+                    _utc(current_set.get("available_at_utc"))
+                    - _utc(previous_set.get("available_at_utc"))
+                ).total_seconds()
+                / 60.0,
+                6,
+            )
+        except (TypeError, ValueError):
+            previous_gap_minutes = None
+    provenance = {
+        "policy_version": SHADOW_PROVENANCE_POLICY_VERSION,
+        "symbol": symbol,
+        "current": _compact_snapshot_provenance(
+            current_set,
+            current_symbol_manifest,
+            current_rows,
+            symbol=symbol,
+        ),
+        "previous": (
+            _compact_snapshot_provenance(
+                previous_set,
+                previous_symbol_manifest,
+                previous_rows,
+                symbol=symbol,
+            )
+            if used_for_delta
+            else None
+        ),
+        "used_for_delta": bool(used_for_delta),
+        "previous_gap_minutes": previous_gap_minutes,
+        "previous_gap_policy_minutes": max(1, int(max_previous_gap_minutes)),
+    }
+    return {
+        "provenance": provenance,
+        "provenance_sha256": canonical_provenance_sha256(provenance),
+    }
+
+
+def _sha256_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    return len(text) == 64 and all(character in "0123456789abcdef" for character in text)
+
+
+def _snapshot_provenance_errors(
+    value: Any,
+    *,
+    expected_symbol: str,
+) -> list[str]:
+    record = dict(value) if isinstance(value, Mapping) else {}
+    errors: list[str] = []
+    if not record:
+        return ["snapshot provenance record is missing"]
+    if _positive_int(record.get("snapshot_set_id")) is None:
+        errors.append("snapshot_set_id is missing or invalid")
+    for field in (
+        "snapshot_key",
+        "set_payload_sha256",
+        "symbol_manifest_payload_sha256",
+    ):
+        if not _sha256_text(record.get(field)):
+            errors.append(f"{field} is missing or invalid")
+    if str(record.get("symbol") or "").upper() != expected_symbol:
+        errors.append("snapshot provenance symbol does not match the decision")
+    if record.get("archive_schema_version") != ARCHIVE_SCHEMA_VERSION:
+        errors.append("archive schema version is incompatible")
+    if record.get("method_version") != METHOD_VERSION:
+        errors.append("method version is incompatible")
+    if record.get("cutover_marker") != CUTOVER_MARKER:
+        errors.append("cutover marker is incompatible")
+    try:
+        if _utc(record.get("cutover_time_utc")) != CUTOVER_TIME_UTC:
+            errors.append("cutover timestamp is incompatible")
+    except (TypeError, ValueError):
+        errors.append("cutover timestamp is missing or invalid")
+    if str(record.get("source") or "") not in {"WATCH_SHARED", "RESEARCH_PASSIVE"}:
+        errors.append("snapshot provenance source is not research eligible")
+    for field in ("cycle_id", "collector_version"):
+        if not str(record.get(field) or "").strip():
+            errors.append(f"{field} is missing")
+    for field in ("available_at_utc", "cycle_time_utc"):
+        try:
+            timestamp = _utc(record.get(field))
+        except (TypeError, ValueError):
+            errors.append(f"{field} is missing or invalid")
+            continue
+        if timestamp < CUTOVER_TIME_UTC:
+            errors.append(f"{field} predates the archive cutover")
+    try:
+        if _utc(record.get("cycle_time_utc")) > _utc(
+            record.get("available_at_utc")
+        ):
+            errors.append("cycle timestamp is after snapshot availability")
+    except (TypeError, ValueError):
+        pass
+    row_hashes = record.get("row_payload_sha256")
+    if not isinstance(row_hashes, Sequence) or isinstance(row_hashes, (str, bytes)):
+        errors.append("seven row payload hashes are missing")
+    else:
+        entries = [dict(item) for item in row_hashes if isinstance(item, Mapping)]
+        if len(row_hashes) != len(REQUIRED_TIMEFRAMES) or len(entries) != len(
+            REQUIRED_TIMEFRAMES
+        ):
+            errors.append("snapshot provenance does not contain seven row hashes")
+        by_timeframe = {
+            str(item.get("timeframe") or ""): item.get("payload_sha256")
+            for item in entries
+        }
+        ordered_timeframes = [str(item.get("timeframe") or "") for item in entries]
+        if ordered_timeframes != list(REQUIRED_TIMEFRAMES):
+            errors.append("snapshot provenance row timeframes are incomplete")
+        ordered_hashes = [by_timeframe.get(timeframe) for timeframe in REQUIRED_TIMEFRAMES]
+        if any(not _sha256_text(value) for value in ordered_hashes):
+            errors.append("one or more row payload hashes are invalid")
+        elif len(set(ordered_hashes)) != len(REQUIRED_TIMEFRAMES):
+            errors.append("seven row payload hashes are not unique")
+    return list(dict.fromkeys(errors))
+
+
+def _validate_shadow_provenance(
+    provenance: Any,
+    provenance_sha256: Any,
+    *,
+    decision_time_utc: Any,
+    expected_symbol: Any,
+    require_previous: bool,
+) -> tuple[bool, str]:
+    """Validate a compact decision-time chain without reading archive tables."""
+    normalized_symbol = _symbol(expected_symbol)
+    value = dict(provenance) if isinstance(provenance, Mapping) else {}
+    errors: list[str] = []
+    if normalized_symbol is None:
+        errors.append("decision symbol is invalid")
+    if value.get("policy_version") != SHADOW_PROVENANCE_POLICY_VERSION:
+        errors.append("Max-Pain provenance policy version is incompatible")
+    if normalized_symbol and str(value.get("symbol") or "").upper() != normalized_symbol:
+        errors.append("Max-Pain provenance symbol does not match the decision")
+    expected_hash = str(provenance_sha256 or "").strip()
+    if not _sha256_text(expected_hash):
+        errors.append("canonical Max-Pain provenance hash is missing or invalid")
+    elif canonical_provenance_sha256(value) != expected_hash:
+        errors.append("canonical Max-Pain provenance hash does not match its payload")
+    current = value.get("current")
+    if normalized_symbol:
+        errors.extend(
+            _snapshot_provenance_errors(current, expected_symbol=normalized_symbol)
+        )
+    used_for_delta = value.get("used_for_delta")
+    if not isinstance(used_for_delta, bool):
+        errors.append("used_for_delta is not a boolean")
+    previous = value.get("previous")
+    policy_gap = _positive_int(value.get("previous_gap_policy_minutes"))
+    if policy_gap != DEFAULT_MAX_PREVIOUS_GAP_MINUTES:
+        errors.append("previous snapshot gap policy is missing or invalid")
+    if not require_previous:
+        if bool(used_for_delta):
+            errors.append("current-only condition unexpectedly used a previous snapshot")
+        if previous is not None:
+            errors.append("current-only condition carries unexpected previous provenance")
+        if value.get("previous_gap_minutes") is not None:
+            errors.append("current-only condition carries an unexpected previous gap")
+    if require_previous and not bool(used_for_delta):
+        errors.append("delta/trend condition lacks a frozen previous snapshot")
+    if require_previous or bool(used_for_delta):
+        if normalized_symbol:
+            errors.extend(
+                _snapshot_provenance_errors(previous, expected_symbol=normalized_symbol)
+            )
+        recomputed_gap = None
+        if isinstance(current, Mapping) and isinstance(previous, Mapping):
+            if _positive_int(current.get("snapshot_set_id")) == _positive_int(
+                previous.get("snapshot_set_id")
+            ):
+                errors.append("current and previous snapshot_set_id are identical")
+            if str(current.get("snapshot_key") or "") == str(
+                previous.get("snapshot_key") or ""
+            ):
+                errors.append("current and previous snapshot_key are identical")
+            try:
+                current_available = _utc(current.get("available_at_utc"))
+                previous_available = _utc(previous.get("available_at_utc"))
+                recomputed_gap = (
+                    current_available - previous_available
+                ).total_seconds() / 60.0
+                if previous_available >= current_available:
+                    errors.append("previous snapshot is not strictly earlier than current")
+            except (TypeError, ValueError):
+                pass
+        gap = _float(value.get("previous_gap_minutes"))
+        if gap is None or gap <= 0:
+            errors.append("previous snapshot gap is missing or invalid")
+        elif recomputed_gap is not None and not math.isclose(
+            gap, recomputed_gap, rel_tol=0.0, abs_tol=1e-6
+        ):
+            errors.append("previous snapshot gap does not match availability timestamps")
+        if policy_gap is not None and recomputed_gap is not None and recomputed_gap > policy_gap:
+            errors.append("previous snapshot gap exceeds the frozen policy")
+    try:
+        decision_time = _utc(decision_time_utc)
+        if isinstance(current, Mapping):
+            current_available = _utc(current.get("available_at_utc"))
+            current_age_minutes = (
+                decision_time - current_available
+            ).total_seconds() / 60.0
+            if current_age_minutes < -1e-6:
+                errors.append("current snapshot was not available at decision time")
+            elif current_age_minutes > DEFAULT_MAX_DECISION_AGE_MINUTES:
+                errors.append("current snapshot was stale at decision time")
+    except (TypeError, ValueError):
+        errors.append("decision timestamp is missing or invalid")
+    if errors:
+        return False, "; ".join(list(dict.fromkeys(errors)))
+    return True, "complete Max-Pain provenance chain is bound to the decision"
+
+
+def validate_shadow_provenance(
+    provenance: Any,
+    provenance_sha256: Any,
+    *,
+    decision_time_utc: Any,
+    expected_symbol: Any,
+    require_previous: bool,
+) -> tuple[bool, str]:
+    """Fail closed for every malformed scalar in persisted JSON evidence."""
+    try:
+        return _validate_shadow_provenance(
+            provenance,
+            provenance_sha256,
+            decision_time_utc=decision_time_utc,
+            expected_symbol=expected_symbol,
+            require_previous=require_previous,
+        )
+    except (TypeError, ValueError, OverflowError):
+        # JSONB normally constrains this input, but defensive readiness checks
+        # must not let an oversized or otherwise hostile scalar abort the
+        # entire formula scan before the incompatible event can be excluded.
+        return False, "Max-Pain provenance payload contains an invalid scalar"
 
 
 def _mapping(value: Any) -> Dict[str, Any]:
@@ -1353,11 +1678,25 @@ def derive_prior_only_features(
     decision_time = _utc(decision_time_utc)
     if normalized_symbol is None:
         raise ValueError("invalid symbol")
+    provenance_inputs = {
+        "symbol": normalized_symbol,
+        "current_set": current_set,
+        "current_symbol_manifest": current_symbol_manifest,
+        "current_rows": current_rows,
+        "previous_set": previous_set,
+        "previous_symbol_manifest": previous_symbol_manifest,
+        "previous_rows": previous_rows,
+    }
     if not isinstance(current_set, Mapping):
         return {
             "evaluation_status": "UNEVALUABLE",
             "reason": "no prior coherent Max-Pain snapshot is available",
             "features": {},
+            **_provenance_bundle(
+                **provenance_inputs,
+                used_for_delta=False,
+                max_previous_gap_minutes=max_previous_gap_minutes,
+            ),
         }
     selected_rows = [
         dict(row)
@@ -1378,6 +1717,11 @@ def derive_prior_only_features(
             "reason": "; ".join(errors),
             "features": {},
             "snapshot_set_id": current_set.get("snapshot_set_id"),
+            **_provenance_bundle(
+                **provenance_inputs,
+                used_for_delta=False,
+                max_previous_gap_minutes=max_previous_gap_minutes,
+            ),
         }
 
     features = _current_features(selected_rows)
@@ -1494,6 +1838,11 @@ def derive_prior_only_features(
         "method_version": METHOD_VERSION,
         "cutover_marker": CUTOVER_MARKER,
         "features": features,
+        **_provenance_bundle(
+            **provenance_inputs,
+            used_for_delta=change_status == "EVALUABLE",
+            max_previous_gap_minutes=max_previous_gap_minutes,
+        ),
         "lookahead_contract": (
             "current and previous snapshot sets were complete, fresh and available "
             "at or before the decision timestamp; the legacy table was never read"

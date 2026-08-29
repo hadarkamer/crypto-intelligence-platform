@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from typing import Any, Dict, Mapping, Optional
@@ -13,6 +12,7 @@ from typing import Any, Dict, Mapping, Optional
 import research_feature_matrix
 import research_formula_engine
 import research_formula_store
+import research_max_pain_archive
 import research_mfe_mae_efficiency
 
 
@@ -35,6 +35,9 @@ if _DATASET_MODE not in {"auto", "alerts", "historical_replay"}:
 _HIERARCHICAL_SEARCH_ENABLED = (
     os.getenv("FORMULA_DISCOVERY_HIERARCHICAL_ENABLED", "").strip().lower()
     in _TRUE
+)
+_DECISION_COHORT_POLICY_VERSION = (
+    research_formula_store._DECISION_COHORT_POLICY_VERSION
 )
 
 
@@ -69,6 +72,59 @@ def _as_utc(value: Any) -> datetime:
     return timestamp.astimezone(timezone.utc)
 
 
+def _max_pain_snapshot_evidence(
+    *,
+    formula: Mapping[str, Any],
+    row: Optional[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    condition_features = research_formula_store._v6_max_pain_condition_features(
+        formula
+    )
+    if not condition_features:
+        return None
+    wrapper = row.get("max_pain_features") if isinstance(row, Mapping) else {}
+    if not isinstance(wrapper, Mapping):
+        wrapper = {}
+    requires_previous = research_formula_store._max_pain_previous_required(
+        condition_features
+    )
+    provenance = (
+        dict(wrapper.get("provenance"))
+        if isinstance(wrapper.get("provenance"), Mapping)
+        else {}
+    )
+    if provenance and not requires_previous:
+        # The feature builder may have derived deltas for other formulas in the
+        # same event batch. A current-only formula must bind only the snapshot it
+        # actually consumed, not an unused previous set.
+        provenance.update(
+            {
+                "previous": None,
+                "used_for_delta": False,
+                "previous_gap_minutes": None,
+            }
+        )
+    provenance_sha256 = (
+        research_max_pain_archive.canonical_provenance_sha256(provenance)
+        if provenance
+        else wrapper.get("provenance_sha256")
+    )
+    return {
+        "condition_features": list(condition_features),
+        "requires_previous": requires_previous,
+        "evaluation_status": str(
+            wrapper.get("evaluation_status") or "UNEVALUABLE"
+        ).upper(),
+        "evaluation_reason": wrapper.get("reason"),
+        "change_evaluation_status": str(
+            wrapper.get("change_evaluation_status") or "UNEVALUABLE"
+        ).upper(),
+        "change_reason": wrapper.get("change_reason"),
+        "provenance": provenance,
+        "provenance_sha256": provenance_sha256,
+    }
+
+
 def _shadow_snapshot(
     *,
     formula: Mapping[str, Any],
@@ -98,7 +154,11 @@ def _shadow_snapshot(
             "session_composition",
         )
     }
-    return {
+    snapshot = {
+        "snapshot_policy_version": (
+            research_formula_store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
+        ),
+        "decision_cohort_policy_version": _DECISION_COHORT_POLICY_VERSION,
         "formula_key": formula.get("formula_key"),
         "formula_version": int(formula.get("formula_version") or 0),
         "horizon_minutes": int(formula.get("horizon_minutes") or 0),
@@ -134,6 +194,13 @@ def _shadow_snapshot(
             "return, MFE or MAE"
         ),
     }
+    max_pain_evidence = _max_pain_snapshot_evidence(formula=formula, row=row)
+    if max_pain_evidence is not None:
+        # Audit identities are stored only for formulas that actually consume
+        # Max-Pain. Formula candidate extraction continues to see only the
+        # condition values in ``formula_key_features``.
+        snapshot["max_pain_provenance"] = max_pain_evidence
+    return snapshot
 
 
 def _decision_cohort(
@@ -142,47 +209,11 @@ def _decision_cohort(
     event: Mapping[str, Any],
     snapshot: Mapping[str, Any],
 ) -> tuple[str, datetime]:
-    source_inputs = snapshot.get("source_inputs")
-    if not isinstance(source_inputs, Mapping):
-        source_inputs = {}
-    timestamps: list[datetime] = []
-    canonical_timestamps: list[str] = []
-    for family in ("price_oi", "futures_cvd", "spot_cvd"):
-        values = source_inputs.get(family)
-        value = values.get("timestamp_utc") if isinstance(values, Mapping) else None
-        if value in (None, ""):
-            canonical_timestamps.append(f"{family}:missing")
-            continue
-        timestamp = _as_utc(value)
-        timestamps.append(timestamp)
-        canonical_timestamps.append(f"{family}:{timestamp.isoformat()}")
-    alert_time = _as_utc(event["alert_time_utc"])
-    if timestamps:
-        anchor = max(timestamps)
-    else:
-        anchor = alert_time.replace(
-            minute=(alert_time.minute // 30) * 30,
-            second=0,
-            microsecond=0,
-        )
-        canonical_timestamps.append(f"fallback_30m:{anchor.isoformat()}")
-    payload = "|".join(
-        [
-            str(formula.get("formula_id") or ""),
-            str(event.get("symbol") or "").upper(),
-            str(event.get("direction") or "").upper(),
-            str(int(formula.get("horizon_minutes") or 0)),
-            *canonical_timestamps,
-            json.dumps(
-                snapshot.get("formula_key_features") or {},
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-                separators=(",", ":"),
-            ),
-        ]
+    return research_formula_store._decision_cohort_identity(
+        formula=formula,
+        event=event,
+        snapshot=snapshot,
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest(), anchor
 
 
 @dataclass
@@ -441,6 +472,30 @@ class FormulaResearchWorker:
                     row=row,
                     evaluation=evaluation,
                 )
+                provenance_compatible, provenance_reason = (
+                    research_formula_store._max_pain_snapshot_contract(
+                        formula,
+                        snapshot,
+                        decision_time_utc=event.get("alert_time_utc"),
+                        symbol=event.get("symbol"),
+                    )
+                )
+                if not provenance_compatible:
+                    evaluation = {
+                        **dict(evaluation),
+                        "status": "UNEVALUABLE",
+                        "matched": False,
+                        "reason": (
+                            "Max-Pain provenance rejected: "
+                            + provenance_reason
+                        )[:1000],
+                    }
+                    snapshot = _shadow_snapshot(
+                        formula=formula,
+                        event=event,
+                        row=row,
+                        evaluation=evaluation,
+                    )
                 cohort_key, cohort_anchor = _decision_cohort(
                     formula=formula,
                     event=event,

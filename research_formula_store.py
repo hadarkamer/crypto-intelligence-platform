@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import os
@@ -18,6 +19,7 @@ except Exception:  # pragma: no cover
 import canonical_price_path
 import research_feature_matrix
 import research_formula_engine
+import research_max_pain_archive
 import research_mfe_mae_efficiency
 import research_no_dwell_outcome
 
@@ -40,6 +42,12 @@ _SHADOW_COMPATIBLE_FORMULA_SCHEMAS = (
     "research-formula-v5-safe-replay",
     research_formula_engine.FORMULA_SCHEMA_VERSION,
 )
+_SHADOW_INPUT_SNAPSHOT_POLICY_VERSION = (
+    "formula-shadow-input-snapshot-v3-max-pain-provenance"
+)
+_DECISION_COHORT_POLICY_VERSION = (
+    "formula-shadow-decision-cohort-v2-max-pain-anchor"
+)
 
 
 def _bind_efficiency_policy(policy_version: str) -> str:
@@ -49,12 +57,23 @@ def _bind_efficiency_policy(policy_version: str) -> str:
     return f"{base}+{research_mfe_mae_efficiency.POLICY_VERSION}"
 
 
+def _bind_max_pain_policy(policy_version: str) -> str:
+    base = str(policy_version or "").strip()
+    for binding in (
+        research_max_pain_archive.SHADOW_PROVENANCE_POLICY_VERSION,
+        _DECISION_COHORT_POLICY_VERSION,
+    ):
+        if binding not in base:
+            base = f"{base}+{binding}"
+    return base
+
+
 _SHADOW_MONITORING_POLICY_BASE = (
     os.getenv("FORMULA_SHADOW_MONITORING_POLICY_VERSION", "").strip()
-    or "shadow-monitoring-v2-independent-alert-episodes-2026-08-29"
+    or "shadow-monitoring-v3-max-pain-provenance-2026-08-29"
 )
-_SHADOW_MONITORING_POLICY_VERSION = _bind_efficiency_policy(
-    _SHADOW_MONITORING_POLICY_BASE
+_SHADOW_MONITORING_POLICY_VERSION = _bind_max_pain_policy(
+    _bind_efficiency_policy(_SHADOW_MONITORING_POLICY_BASE)
 )
 _SHADOW_MIN_MATCHES = max(
     12, int(os.getenv("FORMULA_SHADOW_MIN_VALIDATED_MATCHES", "12"))
@@ -1153,6 +1172,20 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
             row["first_touch_available"] = False
             row["first_touch_hit"] = False
             row["outcome_available"] = False
+        provenance_compatible, provenance_reason = _max_pain_shadow_check_contract(
+            formula, row
+        )
+        row["max_pain_provenance_compatible"] = provenance_compatible
+        row["max_pain_provenance_reason"] = provenance_reason
+        if not provenance_compatible:
+            # Keep the immutable check and all outcome rows auditable, but make
+            # the proof UNEVALUABLE before independence selection so a malformed
+            # Max-Pain check cannot overlap-exclude a later valid observation.
+            row["matched"] = False
+            row["evaluation_status"] = "UNEVALUABLE"
+            row["evaluation_reason"] = (
+                "Max-Pain provenance rejected: " + provenance_reason
+            )[:1000]
     return result
 
 
@@ -1166,6 +1199,350 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
             return {}
         return parsed if isinstance(parsed, Mapping) else {}
     return {}
+
+
+def _formula_conditions(formula: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    value = formula.get("conditions")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = []
+    return [dict(item) for item in value or [] if isinstance(item, Mapping)]
+
+
+def _decision_cohort_identity(
+    *,
+    formula: Mapping[str, Any],
+    event: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+) -> tuple[str, datetime]:
+    """Compute the versioned identity used by both writer and verifier."""
+    source_inputs = snapshot.get("source_inputs")
+    if not isinstance(source_inputs, Mapping):
+        source_inputs = {}
+    timestamps: list[datetime] = []
+    canonical_timestamps: list[str] = []
+    for family in ("price_oi", "futures_cvd", "spot_cvd"):
+        values = source_inputs.get(family)
+        value = values.get("timestamp_utc") if isinstance(values, Mapping) else None
+        if value in (None, ""):
+            canonical_timestamps.append(f"{family}:missing")
+            continue
+        timestamp = _as_utc(value)
+        timestamps.append(timestamp)
+        canonical_timestamps.append(f"{family}:{timestamp.isoformat()}")
+    max_pain = snapshot.get("max_pain_provenance")
+    if isinstance(max_pain, Mapping):
+        provenance = max_pain.get("provenance")
+        current = (
+            provenance.get("current")
+            if isinstance(provenance, Mapping)
+            else None
+        )
+        available = (
+            current.get("available_at_utc")
+            if isinstance(current, Mapping)
+            else None
+        )
+        if available in (None, ""):
+            canonical_timestamps.append("max_pain:missing")
+        else:
+            try:
+                max_pain_timestamp = _as_utc(available)
+            except (TypeError, ValueError, OverflowError):
+                # The writer still has to persist a fail-closed UNEVALUABLE
+                # check when malformed Max-Pain evidence is encountered.  Its
+                # contract is rejected before readiness selection; this stable
+                # marker prevents the bad timestamp from aborting the entire
+                # Shadow cycle while ensuring it cannot masquerade as a valid
+                # availability anchor.
+                canonical_timestamps.append("max_pain:invalid")
+            else:
+                timestamps.append(max_pain_timestamp)
+                canonical_timestamps.append(
+                    f"max_pain:{max_pain_timestamp.isoformat()}"
+                )
+        canonical_timestamps.append(
+            "max_pain_provenance_sha256:"
+            + str(max_pain.get("provenance_sha256") or "missing")
+        )
+    alert_time = _as_utc(event["alert_time_utc"])
+    if timestamps:
+        anchor = max(timestamps)
+    else:
+        anchor = alert_time.replace(
+            minute=(alert_time.minute // 30) * 30,
+            second=0,
+            microsecond=0,
+        )
+        canonical_timestamps.append(f"fallback_30m:{anchor.isoformat()}")
+    payload = "|".join(
+        [
+            _DECISION_COHORT_POLICY_VERSION,
+            str(formula.get("formula_id") or ""),
+            str(event.get("symbol") or "").upper(),
+            str(event.get("direction") or "").upper(),
+            str(int(formula.get("horizon_minutes") or 0)),
+            *canonical_timestamps,
+            json.dumps(
+                snapshot.get("formula_key_features") or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest(), anchor
+
+
+def _v6_max_pain_condition_features(
+    formula: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return only v6 Max-Pain inputs; legacy v5 Shadow stays untouched."""
+    if str(formula.get("formula_schema_version") or "") != str(
+        research_formula_engine.FORMULA_SCHEMA_VERSION
+    ):
+        return ()
+    return tuple(
+        sorted(
+            {
+                str(condition.get("feature") or "")
+                for condition in _formula_conditions(formula)
+                if str(condition.get("feature") or "").startswith("max_pain.")
+            }
+        )
+    )
+
+
+def _max_pain_previous_required(features: Sequence[str]) -> bool:
+    return any(
+        feature.startswith("max_pain.delta.")
+        or feature.endswith("_trend")
+        or ".trend" in feature
+        for feature in features
+    )
+
+
+def _max_pain_snapshot_contract(
+    formula: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    *,
+    decision_time_utc: Any,
+    symbol: Any,
+) -> tuple[bool, str]:
+    features = _v6_max_pain_condition_features(formula)
+    if not features:
+        return True, "Max-Pain provenance is not required for this formula"
+    if str(formula.get("feature_schema_version") or "") != str(
+        research_feature_matrix.FEATURE_SCHEMA_VERSION
+    ):
+        return False, "v6 Max-Pain formula feature schema is incompatible"
+    if snapshot.get("snapshot_policy_version") != _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION:
+        return False, "Shadow input snapshot policy version is incompatible"
+    if snapshot.get("decision_cohort_policy_version") != (
+        _DECISION_COHORT_POLICY_VERSION
+    ):
+        return False, "Shadow decision cohort policy version is incompatible"
+    evidence = _as_mapping(snapshot.get("max_pain_provenance"))
+    if not evidence:
+        return False, "Max-Pain provenance evidence is missing"
+    raw_recorded_features = evidence.get("condition_features")
+    if not isinstance(raw_recorded_features, Sequence) or isinstance(
+        raw_recorded_features, (str, bytes)
+    ):
+        return False, "Max-Pain provenance condition feature list is invalid"
+    recorded_features = tuple(sorted(str(value) for value in raw_recorded_features))
+    if recorded_features != features:
+        return False, "Max-Pain provenance condition features do not match the formula"
+    if str(evidence.get("evaluation_status") or "").upper() != "EVALUABLE":
+        return False, str(evidence.get("evaluation_reason") or "current snapshot is unevaluable")
+    require_previous = _max_pain_previous_required(features)
+    if require_previous and str(
+        evidence.get("change_evaluation_status") or ""
+    ).upper() != "EVALUABLE":
+        return False, str(
+            evidence.get("change_reason")
+            or "delta/trend condition has no eligible earlier snapshot"
+        )
+    if bool(evidence.get("requires_previous")) != require_previous:
+        return False, "Max-Pain previous-snapshot requirement is inconsistent"
+    return research_max_pain_archive.validate_shadow_provenance(
+        evidence.get("provenance"),
+        evidence.get("provenance_sha256"),
+        decision_time_utc=decision_time_utc,
+        expected_symbol=symbol,
+        require_previous=require_previous,
+    )
+
+
+def _max_pain_shadow_check_contract(
+    formula: Mapping[str, Any], row: Mapping[str, Any]
+) -> tuple[bool, str]:
+    features = _v6_max_pain_condition_features(formula)
+    if not features:
+        return True, "Max-Pain provenance is not required for this formula"
+    snapshot = _as_mapping(row.get("input_snapshot"))
+    compatible, reason = _max_pain_snapshot_contract(
+        formula,
+        snapshot,
+        decision_time_utc=row.get("alert_time_utc"),
+        symbol=row.get("symbol"),
+    )
+    if not compatible:
+        return False, reason
+
+    frozen_event = _as_mapping(snapshot.get("event"))
+    try:
+        if int(frozen_event.get("event_id") or 0) != int(row.get("event_id") or 0):
+            return False, "frozen Shadow event_id does not match the check"
+    except (TypeError, ValueError):
+        return False, "frozen Shadow event_id is invalid"
+    if str(frozen_event.get("symbol") or "").upper() != str(
+        row.get("symbol") or ""
+    ).upper():
+        return False, "frozen Shadow symbol does not match the check"
+    if str(frozen_event.get("direction") or "").upper() != str(
+        row.get("direction") or ""
+    ).upper():
+        return False, "frozen Shadow direction does not match the check"
+    try:
+        if _as_utc(frozen_event.get("alert_time_utc")) != _as_utc(
+            row.get("alert_time_utc")
+        ):
+            return False, "frozen Shadow decision time does not match the check"
+    except (TypeError, ValueError):
+        return False, "frozen Shadow decision time is invalid"
+    if str(snapshot.get("formula_key") or "") != str(
+        formula.get("formula_key") or ""
+    ):
+        return False, "frozen formula_key does not match the Shadow formula"
+    try:
+        frozen_formula_version = int(snapshot.get("formula_version") or 0)
+        formula_version = int(formula.get("formula_version") or 0)
+        frozen_horizon = int(snapshot.get("horizon_minutes") or 0)
+        formula_horizon = int(formula.get("horizon_minutes") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False, "frozen Formula identity contains invalid numerics"
+    if frozen_formula_version != formula_version:
+        return False, "frozen formula_version does not match the Shadow formula"
+    if frozen_horizon != formula_horizon:
+        return False, "frozen horizon does not match the Shadow formula"
+    if str(snapshot.get("feature_schema_version") or "") != str(
+        formula.get("feature_schema_version") or ""
+    ):
+        return False, "frozen feature schema does not match the Shadow formula"
+    event = {
+        "event_id": row.get("event_id"),
+        "alert_time_utc": row.get("alert_time_utc"),
+        "symbol": row.get("symbol"),
+        "direction": row.get("direction"),
+    }
+    try:
+        expected_key, expected_anchor = _decision_cohort_identity(
+            formula=formula,
+            event=event,
+            snapshot=snapshot,
+        )
+        recorded_anchor = _as_utc(row.get("decision_anchor_time_utc"))
+        decision_time = _as_utc(row.get("alert_time_utc"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        return False, f"Shadow decision cohort evidence is invalid: {exc}"
+    if recorded_anchor != expected_anchor:
+        return False, "decision_anchor_time_utc does not match frozen inputs"
+    if expected_anchor > decision_time:
+        return False, "decision anchor contains an input unavailable at decision time"
+    if str(row.get("decision_cohort_key") or "") != expected_key:
+        return False, "decision_cohort_key does not match frozen inputs"
+    return True, "complete Max-Pain provenance and decision cohort are bound"
+
+
+def _max_pain_validation_evidence(
+    formula: Mapping[str, Any],
+    *,
+    source_rows: Sequence[Mapping[str, Any]],
+    completed_independent_rows: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    features = _v6_max_pain_condition_features(formula)
+    if not features:
+        return {
+            "required": False,
+            "condition_features": [],
+            "event_provenance_refs": [],
+            "incompatible_event_ids": [],
+            "max_pain_provenance_excluded_event_ids": [],
+            "incompatible_reasons": {},
+            "canonical_evidence_sha256": None,
+        }
+
+    incompatible: Dict[int, str] = {}
+    for row in source_rows:
+        compatible, reason = _max_pain_shadow_check_contract(
+            formula, row
+        )
+        if not compatible:
+            incompatible[int(row["event_id"])] = reason
+
+    refs: list[Dict[str, Any]] = []
+    completed_incompatible_event_ids: list[int] = []
+    for row in completed_independent_rows:
+        snapshot = _as_mapping(row.get("input_snapshot"))
+        evidence = _as_mapping(snapshot.get("max_pain_provenance"))
+        compatible, _ = _max_pain_shadow_check_contract(
+            formula, row
+        )
+        if not compatible:
+            completed_incompatible_event_ids.append(int(row["event_id"]))
+        refs.append(
+            {
+                "event_id": int(row["event_id"]),
+                "evaluation_status": str(
+                    row.get("evaluation_status") or ""
+                ).upper(),
+                "decision_cohort_key": row.get("decision_cohort_key"),
+                "max_pain_provenance_sha256": evidence.get(
+                    "provenance_sha256"
+                ),
+            }
+        )
+    refs.sort(key=lambda item: (item["event_id"], item["evaluation_status"]))
+    canonical = {
+        "snapshot_policy_version": _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
+        "provenance_policy_version": (
+            research_max_pain_archive.SHADOW_PROVENANCE_POLICY_VERSION
+        ),
+        "formula_id": int(formula.get("formula_id") or 0),
+        "formula_version": int(formula.get("formula_version") or 0),
+        "condition_features": list(features),
+        "event_provenance_refs": refs,
+    }
+    return {
+        "required": True,
+        "snapshot_policy_version": _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
+        "provenance_policy_version": (
+            research_max_pain_archive.SHADOW_PROVENANCE_POLICY_VERSION
+        ),
+        "condition_features": list(features),
+        "requires_previous": _max_pain_previous_required(features),
+        "event_provenance_refs": refs,
+        "completed_independent_provenance_complete": (
+            len(refs) == len(completed_independent_rows)
+            and not completed_incompatible_event_ids
+        ),
+        "completed_independent_incompatible_event_ids": sorted(
+            completed_incompatible_event_ids
+        ),
+        "incompatible_event_ids": sorted(incompatible),
+        "max_pain_provenance_excluded_event_ids": sorted(incompatible),
+        "incompatible_reasons": {
+            str(event_id): incompatible[event_id] for event_id in sorted(incompatible)
+        },
+        "canonical_evidence_sha256": (
+            research_max_pain_archive.canonical_provenance_sha256(canonical)
+        ),
+    }
 
 
 def _terminal_threshold_matches_snapshot(
@@ -1404,6 +1781,22 @@ def _build_shadow_validation(
     authoritative migration-008 view admitted them upstream.
     """
     horizon_minutes = int(formula["horizon_minutes"])
+    guarded_source_rows: list[Dict[str, Any]] = []
+    for source in source_rows:
+        row = dict(source)
+        compatible, reason = _max_pain_shadow_check_contract(
+            formula, row
+        )
+        row["max_pain_provenance_compatible"] = compatible
+        row["max_pain_provenance_reason"] = reason
+        if not compatible:
+            row["matched"] = False
+            row["evaluation_status"] = "UNEVALUABLE"
+            row["evaluation_reason"] = (
+                "Max-Pain provenance rejected: " + reason
+            )[:1000]
+        guarded_source_rows.append(row)
+    source_rows = guarded_source_rows
     independent = _select_independent_shadow_rows(
         source_rows, horizon_minutes=horizon_minutes
     )
@@ -1431,6 +1824,11 @@ def _build_shadow_validation(
     if movement_percentile is None:
         movement_percentile = metrics.get("median_mfe_percentile_pct")
     efficiency = research_mfe_mae_efficiency.from_metrics(metrics)
+    max_pain_evidence = _max_pain_validation_evidence(
+        formula,
+        source_rows=source_rows,
+        completed_independent_rows=complete_rows,
+    )
     raw_status_counts = {
         status: sum(
             1
@@ -1507,9 +1905,18 @@ def _build_shadow_validation(
             metrics.get("favorable_minus_p90_adverse_pct") or -999.0
         )
         > 0.0,
+        "complete Max-Pain provenance chain": (
+            not bool(max_pain_evidence["required"])
+            or bool(
+                max_pain_evidence[
+                    "completed_independent_provenance_complete"
+                ]
+            )
+        ),
     }
     return {
         "policy_version": _SHADOW_MONITORING_POLICY_VERSION,
+        "input_snapshot_policy_version": _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
         "mfe_mae_efficiency_policy_version": (
             research_mfe_mae_efficiency.POLICY_VERSION
         ),
@@ -1561,6 +1968,7 @@ def _build_shadow_validation(
                     "reversal cannot cancel it"
                 ),
             },
+            "max_pain_provenance": max_pain_evidence,
             "independence_policy": (
                 "exact decision cohorts collapse first; same-symbol frozen "
                 "decision-anchor windows must not overlap"
@@ -1590,7 +1998,8 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
     with _connect(read_only=False) as conn:
         formulas = conn.execute(
             """
-            SELECT formula_id, formula_version, horizon_minutes,
+            SELECT formula_id, formula_key, formula_version, formula_schema_version,
+                   feature_schema_version, conditions, horizon_minutes,
                    latest_evaluation_run_id, shadow_started_at_utc,
                    last_shadow_event_id
             FROM research_formulas

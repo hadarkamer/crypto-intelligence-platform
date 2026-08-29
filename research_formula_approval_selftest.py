@@ -169,6 +169,75 @@ def run() -> None:
         },
     }
 
+    # The explicit approval fingerprint binds the canonical Max-Pain evidence
+    # hash carried by the frozen validation snapshot.
+    proof_source = [
+        {
+            "event_id": 501,
+            "alert_time_utc": now - timedelta(minutes=1),
+            "outcome_due": True,
+            "outcome_available": True,
+            "evaluation_status": "MATCHED",
+        }
+    ]
+    proof_hash = ["a" * 64]
+    reverse_validation_mapping = [False]
+    original_outcomes = research_formula_store._shadow_outcome_rows
+    original_validation = research_formula_store._build_shadow_validation
+    original_independence = research_formula_store._select_independent_shadow_rows
+    try:
+        research_formula_store._shadow_outcome_rows = (
+            lambda conn, row: proof_source
+        )
+
+        def proof_validation(row, rows, *, evaluated_at_utc):
+            result = {
+                **validation,
+                "evidence": {
+                    "max_pain_provenance": {
+                        "canonical_evidence_sha256": proof_hash[0]
+                    }
+                },
+            }
+            if reverse_validation_mapping[0]:
+                return {key: result[key] for key in reversed(list(result))}
+            return result
+
+        research_formula_store._build_shadow_validation = proof_validation
+        research_formula_store._select_independent_shadow_rows = (
+            lambda rows, *, horizon_minutes: {
+                "rows": proof_source,
+                "matches": proof_source,
+                "controls": [],
+                "excluded_match_event_ids": [],
+                "excluded_control_event_ids": [],
+                "exact_cohort_excluded_event_ids": [],
+            }
+        )
+        first_frozen = approval._frozen_validation(
+            None, formula, transaction_time=now
+        )
+        reverse_validation_mapping[0] = True
+        reordered_frozen = approval._frozen_validation(
+            None, formula, transaction_time=now
+        )
+        proof_hash[0] = "b" * 64
+        second_frozen = approval._frozen_validation(
+            None, formula, transaction_time=now
+        )
+    finally:
+        research_formula_store._shadow_outcome_rows = original_outcomes
+        research_formula_store._build_shadow_validation = original_validation
+        research_formula_store._select_independent_shadow_rows = original_independence
+    assert first_frozen[3] != second_frozen[3]
+    assert first_frozen[3] == reordered_frozen[3]
+    assert first_frozen[0]["frozen_review"][
+        "max_pain_provenance_evidence_sha256"
+    ] == "a" * 64
+    assert second_frozen[0]["frozen_review"][
+        "max_pain_provenance_evidence_sha256"
+    ] == "b" * 64
+
     originals = {
         "connect": research_formula_store._connect,
         "schema": approval._approval_schema_present,

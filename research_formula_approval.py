@@ -217,8 +217,15 @@ def _frozen_validation(
         raise ApprovalRefused("readiness produced no completed independent evidence")
     cutoff_event_id = max(int(row["event_id"]) for row in source_rows)
     cutoff_time = max(_as_utc(row["alert_time_utc"]) for row in source_rows)
+    validation_evidence = _as_mapping(validation.get("evidence"))
+    max_pain_evidence = _as_mapping(
+        validation_evidence.get("max_pain_provenance")
+    )
     frozen_review = {
         "operation_version": OPERATION_VERSION,
+        "max_pain_provenance_evidence_sha256": max_pain_evidence.get(
+            "canonical_evidence_sha256"
+        ),
         "formula": {
             "formula_id": int(formula["formula_id"]),
             "formula_key": str(formula["formula_key"]),
