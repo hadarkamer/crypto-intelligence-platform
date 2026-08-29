@@ -372,6 +372,8 @@ class ResearchOutcomeWorker:
         partial_paths = 0
         now = datetime.now(timezone.utc)
         prepared: list[Dict[str, Any]] = []
+        unavailable_symbols: Dict[str, str] = {}
+        unavailable_event_counts: Dict[str, int] = {}
 
         with psycopg.connect(
             url,
@@ -384,23 +386,35 @@ class ResearchOutcomeWorker:
         # Binance. This keeps outcome research isolated from the live bot load.
         for event in events:
             checked += 1
+            symbol = str(event["symbol"]).strip().upper()
             event_time = _utc(event["alert_time_utc"])
             versions = _versions(event.get("outcome_versions"))
             horizons = _due_horizons(event_time, versions, now=now)
             if not horizons:
                 continue
 
+            # A symbol that Binance Spot rejected earlier in this run will be
+            # retried on the next scheduled run, but never once per event in
+            # the same batch.  Missing metrics still count every affected
+            # event so health reporting remains honest.
+            if symbol in unavailable_symbols:
+                path_failures += 1
+                unavailable_event_counts[symbol] += 1
+                continue
+
             max_horizon = max(horizons)
             horizon_time = event_time + timedelta(minutes=max_horizon)
             try:
                 path_result = binance_spot_price_path.fetch_closed_candles(
-                    str(event["symbol"]), event_time, horizon_time
+                    symbol, event_time, horizon_time
                 )
             except Exception as exc:
                 path_failures += 1
+                unavailable_symbols[symbol] = repr(exc)
+                unavailable_event_counts[symbol] = 1
                 print(
                     f"[research-outcomes] Binance Spot path unavailable "
-                    f"event={event['event_id']} symbol={event['symbol']}: {exc!r}",
+                    f"event={event['event_id']} symbol={symbol}: {exc!r}",
                     flush=True,
                 )
                 continue
@@ -408,6 +422,8 @@ class ResearchOutcomeWorker:
             full_path = list(path_result.get("candles") or [])
             if not full_path:
                 path_failures += 1
+                unavailable_symbols[symbol] = "empty closed-candle path"
+                unavailable_event_counts[symbol] = 1
                 continue
 
             reference_value = event.get("current_price")
@@ -453,6 +469,16 @@ class ResearchOutcomeWorker:
                     }
                 )
 
+        if unavailable_symbols:
+            summary = ", ".join(
+                f"{symbol} events={unavailable_event_counts[symbol]}"
+                for symbol in sorted(unavailable_symbols)
+            )
+            print(
+                f"[research-outcomes] unavailable Binance Spot symbols this run: {summary}",
+                flush=True,
+            )
+
         if prepared:
             with psycopg.connect(
                 url,
@@ -493,6 +519,10 @@ class ResearchOutcomeWorker:
             "upgraded": upgraded,
             "missing_price_paths": path_failures,
             "partial_price_paths": partial_paths,
+            "unavailable_symbols": {
+                symbol: unavailable_event_counts[symbol]
+                for symbol in sorted(unavailable_symbols)
+            },
         }
 
 

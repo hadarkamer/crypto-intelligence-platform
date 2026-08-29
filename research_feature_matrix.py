@@ -700,6 +700,39 @@ def _load_raw_rows(
             (list(symbols), start, end),
         ).fetchall()
     ]
+    # ``oi_price_history`` is the historical/backfill archive.  The running
+    # bot persists newer Price/OI observations in ``oi_regime_snapshots``.
+    # Treat the live table as an additive source so research remains complete
+    # after the backfill endpoint, while _prior_point continues to enforce a
+    # strict at-or-before-alert join (no future leakage).
+    if _table_exists(conn, "oi_regime_snapshots"):
+        price_rows.extend(
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT symbol, collected_at AS candle_time,
+                       price AS price_close,
+                       open_interest_usd AS oi_close_usd,
+                       price_source AS price_exchange,
+                       (symbol || 'USDT') AS price_pair,
+                       ('oi_regime_snapshots:' || COALESCE(oi_source, 'unknown')) AS source
+                FROM oi_regime_snapshots
+                WHERE symbol=ANY(%s)
+                  AND collected_at >= %s AND collected_at <= %s
+                  AND data_quality_status IN ('PASS', 'WARNING')
+                ORDER BY symbol, collected_at
+                """,
+                (list(symbols), start, end),
+            ).fetchall()
+        )
+        # Stable sorting means a live snapshot wins an exact-timestamp tie
+        # with the older backfill row that was appended first.
+        price_rows.sort(
+            key=lambda row: (
+                str(row.get("symbol") or ""),
+                _as_utc(row["candle_time"]),
+            )
+        )
     flow_rows: list[list[Dict[str, Any]]] = []
     for table in ("futures_taker_history", "spot_taker_history"):
         flow_rows.append(

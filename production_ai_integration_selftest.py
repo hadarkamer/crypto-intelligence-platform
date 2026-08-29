@@ -251,6 +251,33 @@ def run() -> None:
         assert worker_result["inserted"] == 2
         assert worker_result["upgraded"] == 1
 
+        # An unavailable Binance Spot symbol is requested only once per run,
+        # even when several archived alerts need outcomes.  It remains
+        # eligible for a retry on the next worker cycle.
+        unavailable_fetch_calls = []
+        hype_events = [
+            {**due_event, "event_id": 100, "symbol": "HYPE"},
+            {**due_event, "event_id": 101, "symbol": "HYPE"},
+        ]
+
+        def _fake_path_with_unavailable_symbol(symbol, start, end):
+            unavailable_fetch_calls.append(symbol)
+            if symbol == "HYPE":
+                raise RuntimeError("symbol is unavailable on Binance Spot")
+            return _fake_path(symbol, start, end)
+
+        binance_spot_price_path.fetch_closed_candles = _fake_path_with_unavailable_symbol
+        unavailable_worker = research_outcome_worker.ResearchOutcomeWorker()
+        unavailable_worker._load_due_events = lambda conn, limit: [
+            *hype_events,
+            due_event,
+        ]
+        unavailable_worker._write_outcome = _fake_write
+        unavailable_result = unavailable_worker.run_once()
+        assert unavailable_fetch_calls.count("HYPE") == 1
+        assert unavailable_result["missing_price_paths"] == 2
+        assert unavailable_result["unavailable_symbols"] == {"HYPE": 2}
+
         class _EventRows:
             def fetchone(self):
                 return due_event

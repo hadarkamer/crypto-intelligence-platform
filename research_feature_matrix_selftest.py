@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import research_feature_matrix as matrix
 
 
-def _price(symbol, timestamp, price, oi):
+def _price(symbol, timestamp, price, oi, source="selftest"):
     return {
         "symbol": symbol,
         "candle_time": timestamp,
@@ -13,7 +13,7 @@ def _price(symbol, timestamp, price, oi):
         "oi_close_usd": oi,
         "price_exchange": "Binance",
         "price_pair": f"{symbol}USDT",
-        "source": "selftest",
+        "source": source,
     }
 
 
@@ -83,8 +83,14 @@ def run() -> None:
     }
 
     price_rows = [
-        _price("BTC", reference_time, 100.0, 1000.0),
-        _price("BTC", current_time, 102.0, 1100.0),
+        _price("BTC", reference_time, 100.0, 1000.0, "oi_price_history"),
+        _price(
+            "BTC",
+            current_time,
+            102.0,
+            1100.0,
+            "oi_regime_snapshots:coinglass",
+        ),
         _price("BTC", future_time, 999.0, 9999.0),
     ]
     futures_rows = [
@@ -147,6 +153,7 @@ def run() -> None:
     latest = row["raw_features"]["latest_at_or_before_alert"]
     assert latest["price_oi"]["price_close"] == 102.0
     assert latest["price_oi"]["oi_close_usd"] == 1100.0
+    assert latest["price_oi"]["source"] == "oi_regime_snapshots:coinglass"
     assert latest["futures_cvd"]["continuous_cvd_usd"] == 200.0
     assert latest["spot_cvd"]["continuous_cvd_usd"] == 90.0
 
@@ -205,4 +212,3 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
-
