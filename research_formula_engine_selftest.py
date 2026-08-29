@@ -103,7 +103,7 @@ def run() -> None:
     assert result["candidates_evaluated"] >= 1000
     assert result["formulas"]
     assert result["automatic_stage_ceiling"] == "SHADOW"
-    assert result["live_activation"] == "never automatic"
+    assert "future-Shadow validation" in result["live_activation"]
 
     formula = result["formulas"][0]
     assert formula["conditions"]
@@ -113,6 +113,8 @@ def run() -> None:
     assert formula["live_alert_approved"] is False
     assert "sample_size" in formula["discovery_metrics"]
     assert "mae_p95_pct" in formula["holdout_metrics"]
+    assert "median_mfe_percentile_pct" in formula["holdout_metrics"]
+    assert "favorable_minus_p90_adverse_pct" in formula["holdout_metrics"]
     assert "q_value" in formula["multiple_testing"]
     assert all(
         candidate["recommended_stage"] != "SHADOW"
@@ -128,6 +130,63 @@ def run() -> None:
         feature_schema_version="selftest-matrix-v1",
         conditions=list(reversed(formula["conditions"])),
     ) == formula["formula_key"]
+
+    # A tiny 100%-hit move must not outrank a materially wider, still reliable
+    # move. This guards the production issue observed in formula v1.
+    common = {
+        "sample_size": 20,
+        "sample_share_pct": 10.0,
+        "median_time_to_first_progress_seconds": 300,
+        "avg_target_progress_ratio": 0.5,
+    }
+    narrow = {
+        **common,
+        "hit_rate_pct": 100.0,
+        "wilson_95_lower_pct": 83.0,
+        "hit_rate_improvement_pct_points": 30.0,
+        "median_mfe_pct": 0.385,
+        "universe_p90_mfe_pct": 3.0,
+        "median_mfe_percentile_pct": 30.0,
+        "median_mae_pct": 0.10,
+        "mae_p90_pct": 0.25,
+        "median_mfe_mae_ratio": 3.85,
+    }
+    wide = {
+        **common,
+        "hit_rate_pct": 75.0,
+        "wilson_95_lower_pct": 55.0,
+        "hit_rate_improvement_pct_points": 15.0,
+        "median_mfe_pct": 2.50,
+        "universe_p90_mfe_pct": 3.0,
+        "median_mfe_percentile_pct": 85.0,
+        "median_mae_pct": 0.40,
+        "mae_p90_pct": 0.80,
+        "median_mfe_mae_ratio": 6.25,
+    }
+    narrow_score = engine._final_score(
+        narrow, narrow, horizon_minutes=240, q_value=0.01, complexity=2
+    )
+    wide_score = engine._final_score(
+        wide, wide, horizon_minutes=240, q_value=0.01, complexity=2
+    )
+    assert wide_score > narrow_score
+    narrow_stage, narrow_reasons = engine._recommended_stage(
+        {
+            **narrow,
+            "time_span_hours": 96,
+            "distinct_utc_dates": 4,
+        },
+        {
+            **narrow,
+            "time_span_hours": 48,
+            "distinct_utc_dates": 3,
+        },
+        horizon_minutes=240,
+        q_value=0.01,
+        config=engine.DiscoveryConfig(),
+    )
+    assert narrow_stage == "BACKTESTED"
+    assert "wide favorable movement floor" in narrow_reasons
 
     print("research formula engine self-test: PASS")
 

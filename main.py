@@ -6266,6 +6266,7 @@ async def main():
 
     await bot_app.initialize()
     await bot_app.start()
+    research_formula_worker.WORKER.bind_telegram(bot_app.bot)
 
     try:
         writer_started = await research_event_store.WRITER.start()

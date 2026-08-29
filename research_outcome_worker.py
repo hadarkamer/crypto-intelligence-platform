@@ -1,10 +1,14 @@
-"""Fail-open Binance Spot path enrichment for delivered Research Events.
+"""Fail-open canonical spot-path enrichment for delivered Research Events.
 
 The worker is observational: it never changes alert logic. Once an alert has
-aged into a configured horizon, one canonical Binance Spot one-minute path is
+aged into a configured horizon, one canonical spot one-minute path is
 fetched and converted into fixed-horizon return, MFE, MAE, speed and optional
 target-progress measurements. Existing 30-minute v1 rows are upgraded in
 place, preserving the ``(event_id, horizon_minutes)`` identity.
+
+Binance Spot USDT is the default route. HYPE is explicitly routed to the
+Hyperliquid HYPE/USDT spot market. Historical candles may be imported from
+those exchange APIs as long as their provenance and quality remain attached.
 """
 
 from __future__ import annotations
@@ -24,15 +28,14 @@ except Exception:  # pragma: no cover
     dict_row = None
 
 import binance_spot_price_path
+import canonical_price_path
 
 
 _TRUE = {"1", "true", "yes", "on"}
 _ENABLED = os.getenv("RESEARCH_OUTCOME_ENRICHMENT_ENABLED", "").strip().lower() in _TRUE
 _HORIZONS = (60, 240, 720, 1440)
 _POLL_SECONDS = max(60, int(os.getenv("RESEARCH_OUTCOME_POLL_SECONDS", "900")))
-_METHOD_VERSION = "binance-spot-1m-ohlc-path-v2"
-_QUALITY_COMPLETE = "VERIFIED_BINANCE_SPOT_1M_CLOSED_CANDLES"
-_QUALITY_PARTIAL = "PARTIAL_BINANCE_SPOT_1M_CLOSED_CANDLES"
+_METHOD_VERSION = canonical_price_path.METHOD_VERSION
 
 
 def _database_url() -> str:
@@ -142,7 +145,7 @@ def _candles_for_horizon(
 def _expected_candles(event_time: datetime, horizon_time: datetime) -> int:
     start_ms = int(_utc(event_time).timestamp() * 1000)
     end_ms = int(_utc(horizon_time).timestamp() * 1000)
-    interval_ms = binance_spot_price_path.INTERVAL_MS
+    interval_ms = canonical_price_path.INTERVAL_MS
     first_open = ((start_ms + interval_ms - 1) // interval_ms) * interval_ms
     last_open = ((end_ms - (interval_ms - 1)) // interval_ms) * interval_ms
     if last_open < first_open:
@@ -181,13 +184,15 @@ class ResearchOutcomeWorker:
             "horizons_minutes": list(_HORIZONS),
             "poll_seconds": _POLL_SECONDS,
             "method": _METHOD_VERSION,
-            "price_path": {
-                "exchange": "binance",
+            "price_paths": {
+                "default": "Binance Spot USDT",
+                "HYPE": "Hyperliquid HYPE/USDT spot (@107)",
                 "market": "spot",
-                "interval": binance_spot_price_path.INTERVAL,
+                "interval": canonical_price_path.INTERVAL,
                 "first_partial_minute": "excluded_to_prevent_pre_alert_leakage",
+                "historical_imports": "allowed_with_source_and_quality_provenance",
             },
-            "precision": _QUALITY_COMPLETE,
+            "complete_quality_statuses": list(canonical_price_path.COMPLETE_QUALITIES),
             "metrics": self.metrics.__dict__.copy(),
         }
 
@@ -231,7 +236,7 @@ class ResearchOutcomeWorker:
     @staticmethod
     def _load_due_events(conn, limit: int) -> list[Dict[str, Any]]:
         clauses = []
-        params: list[Any] = []
+        condition_params: list[Any] = []
         for horizon in _HORIZONS:
             clauses.append(
                 """
@@ -242,16 +247,32 @@ class ResearchOutcomeWorker:
                         WHERE current_o.event_id=e.event_id
                           AND current_o.horizon_minutes=%s
                           AND current_o.outcome_method_version=%s
+                          AND current_o.data_quality_status=ANY(%s)
                     )
                 )
                 """
             )
-            params.extend((horizon, horizon, _METHOD_VERSION))
+            condition_params.extend(
+                (
+                    horizon,
+                    horizon,
+                    _METHOD_VERSION,
+                    list(canonical_price_path.COMPLETE_QUALITIES),
+                )
+            )
         query = f"""
             SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
                    e.current_price, e.target_price, e.engine_snapshot,
                    COALESCE(
-                       jsonb_object_agg(o.horizon_minutes, o.outcome_method_version)
+                       jsonb_object_agg(
+                           o.horizon_minutes,
+                           CASE
+                               WHEN o.outcome_method_version=%s
+                                AND o.data_quality_status=ANY(%s)
+                               THEN o.outcome_method_version
+                               ELSE COALESCE(o.outcome_method_version, '') || ':incomplete'
+                           END
+                       )
                            FILTER (WHERE o.event_id IS NOT NULL),
                        '{{}}'::jsonb
                    ) AS outcome_versions
@@ -264,7 +285,12 @@ class ResearchOutcomeWorker:
             ORDER BY e.alert_time_utc ASC
             LIMIT %s
         """
-        params.append(max(1, min(int(limit), 1000)))
+        params: list[Any] = [
+            _METHOD_VERSION,
+            list(canonical_price_path.COMPLETE_QUALITIES),
+            *condition_params,
+            max(1, min(int(limit), 1000)),
+        ]
         return conn.execute(query, params).fetchall()
 
     @staticmethod
@@ -279,11 +305,14 @@ class ResearchOutcomeWorker:
         path_metrics: Dict[str, Any],
         complete: bool,
     ) -> bool:
+        exchange = str(path_result.get("exchange") or "unknown").lower()
+        market = str(path_result.get("market") or "spot").lower()
         source = (
-            f"reference={reference_source}|path=binance_spot:"
-            f"{path_result['pair']}:{path_result['interval']}"
+            f"reference={reference_source}|path={exchange}_{market}:"
+            f"{path_result['pair']}:{path_result['interval']}|"
+            f"provenance={path_result.get('provenance') or 'exchange_api'}"
         )
-        quality = _QUALITY_COMPLETE if complete else _QUALITY_PARTIAL
+        quality = canonical_price_path.quality_status(path_result, complete=complete)
         row = conn.execute(
             """
             INSERT INTO research_alert_outcomes (
@@ -327,6 +356,9 @@ class ResearchOutcomeWorker:
                 created_at=NOW()
             WHERE research_alert_outcomes.outcome_method_version
                   IS DISTINCT FROM EXCLUDED.outcome_method_version
+               OR research_alert_outcomes.data_quality_status
+                  IS DISTINCT FROM EXCLUDED.data_quality_status
+               OR research_alert_outcomes.path_samples < EXCLUDED.path_samples
             RETURNING event_id
             """,
             (
@@ -349,7 +381,7 @@ class ResearchOutcomeWorker:
                 path_metrics["closest_target_distance_pct"],
                 path_metrics["target_progress_ratio"],
                 path_metrics["target_reached"],
-                binance_spot_price_path.INTERVAL_SECONDS,
+                canonical_price_path.INTERVAL_SECONDS,
                 len(path_result["candles"]),
                 _METHOD_VERSION,
                 source,
@@ -393,7 +425,7 @@ class ResearchOutcomeWorker:
             if not horizons:
                 continue
 
-            # A symbol that Binance Spot rejected earlier in this run will be
+            # A symbol whose canonical provider rejected it earlier in this run will be
             # retried on the next scheduled run, but never once per event in
             # the same batch.  Missing metrics still count every affected
             # event so health reporting remains honest.
@@ -405,7 +437,7 @@ class ResearchOutcomeWorker:
             max_horizon = max(horizons)
             horizon_time = event_time + timedelta(minutes=max_horizon)
             try:
-                path_result = binance_spot_price_path.fetch_closed_candles(
+                path_result = canonical_price_path.fetch_closed_candles(
                     symbol, event_time, horizon_time
                 )
             except Exception as exc:
@@ -413,8 +445,9 @@ class ResearchOutcomeWorker:
                 unavailable_symbols[symbol] = repr(exc)
                 unavailable_event_counts[symbol] = 1
                 print(
-                    f"[research-outcomes] Binance Spot path unavailable "
-                    f"event={event['event_id']} symbol={symbol}: {exc!r}",
+                    f"[research-outcomes] canonical {canonical_price_path.provider_for_symbol(symbol)} "
+                    f"spot path unavailable event={event['event_id']} "
+                    f"symbol={symbol}: {exc!r}",
                     flush=True,
                 )
                 continue
@@ -435,7 +468,8 @@ class ResearchOutcomeWorker:
             except (TypeError, ValueError):
                 reference_price = float(full_path[0].open)
                 reference_source = (
-                    f"binance_spot:{path_result['pair']}:first_full_minute_open"
+                    f"{path_result['exchange']}_spot:"
+                    f"{path_result['pair']}:first_full_minute_open"
                 )
 
             for horizon in horizons:
@@ -475,7 +509,7 @@ class ResearchOutcomeWorker:
                 for symbol in sorted(unavailable_symbols)
             )
             print(
-                f"[research-outcomes] unavailable Binance Spot symbols this run: {summary}",
+                f"[research-outcomes] unavailable canonical spot symbols this run: {summary}",
                 flush=True,
             )
 

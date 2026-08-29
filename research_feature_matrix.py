@@ -4,7 +4,7 @@ The matrix keeps three different kinds of information separate:
 
 * raw market measurements that existed at or before the alert;
 * compact model/score state captured inside the immutable Research Event;
-* verified post-alert Binance Spot outcomes used only as labels.
+* verified post-alert canonical spot outcomes used only as labels.
 
 Nothing in this module writes to PostgreSQL or changes a live alert rule.  Raw
 time-series rows remain in their existing archive tables and are joined in
@@ -21,6 +21,8 @@ import json
 import os
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
+import canonical_price_path
+
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -30,8 +32,10 @@ except Exception:  # pragma: no cover - validated at runtime
 
 
 FEATURE_SCHEMA_VERSION = "research-feature-matrix-v1"
-VERIFIED_OUTCOME_METHOD = "binance-spot-1m-ohlc-path-v2"
-VERIFIED_OUTCOME_QUALITY = "VERIFIED_BINANCE_SPOT_1M_CLOSED_CANDLES"
+VERIFIED_OUTCOME_METHOD = canonical_price_path.METHOD_VERSION
+VERIFIED_OUTCOME_QUALITIES = canonical_price_path.COMPLETE_QUALITIES
+# Compatibility alias for callers that persist one textual dataset contract.
+VERIFIED_OUTCOME_QUALITY = ",".join(VERIFIED_OUTCOME_QUALITIES)
 
 CORE_WINDOWS_MINUTES: tuple[int, ...] = (30, 60, 240, 720, 1440)
 EXTENDED_WINDOWS_MINUTES: tuple[int, ...] = CORE_WINDOWS_MINUTES + (2880, 4320, 10080)
@@ -622,7 +626,7 @@ def _load_verified_events(
         lookback_days,
         horizon_minutes,
         VERIFIED_OUTCOME_METHOD,
-        VERIFIED_OUTCOME_QUALITY,
+        list(VERIFIED_OUTCOME_QUALITIES),
     ]
     if symbol:
         clauses.append("AND e.symbol=%s")
@@ -658,7 +662,7 @@ def _load_verified_events(
               AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
               AND o.horizon_minutes=%s
               AND o.outcome_method_version=%s
-              AND o.data_quality_status=%s
+              AND o.data_quality_status=ANY(%s)
               {filters}
             ORDER BY e.alert_time_utc DESC, e.event_id DESC
             LIMIT %s
@@ -707,7 +711,7 @@ def _verified_coverage(
           ON o.event_id=e.event_id
          AND o.horizon_minutes=%s
          AND o.outcome_method_version=%s
-         AND o.data_quality_status=%s
+         AND o.data_quality_status=ANY(%s)
         WHERE e.event_kind='ALERT' AND e.delivery_status='DELIVERED'
           AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
         GROUP BY e.symbol
@@ -716,7 +720,7 @@ def _verified_coverage(
         (
             horizon_minutes,
             VERIFIED_OUTCOME_METHOD,
-            VERIFIED_OUTCOME_QUALITY,
+            list(VERIFIED_OUTCOME_QUALITIES),
             lookback_days,
         ),
     ).fetchall()
@@ -733,14 +737,13 @@ def _verified_coverage(
             "missing_verified_outcomes": missing,
         }
         if missing:
-            reason = (
-                "BINANCE_SPOT_UNAVAILABLE_CANONICAL_SOURCE"
-                if symbol == "HYPE"
-                else "VERIFIED_BINANCE_SPOT_OUTCOME_NOT_AVAILABLE"
-            )
+            reason = "VERIFIED_CANONICAL_SPOT_OUTCOME_NOT_AVAILABLE"
             excluded[symbol] = {"count": missing, "reason": reason}
     return {
-        "canonical_outcome_source": "Binance Spot USDT 1m closed candles",
+        "canonical_outcome_source": canonical_price_path.canonical_source_description(),
+        "historical_price_import_policy": (
+            "allowed when exchange, market, pair, resolution, retrieval method and quality are retained"
+        ),
         "by_symbol": by_symbol,
         "excluded": excluded,
     }

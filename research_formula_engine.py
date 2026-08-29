@@ -1,6 +1,6 @@
 """Deterministic automatic formula discovery for archived bot alerts.
 
-The engine searches decision-time features only.  Binance Spot path outcomes
+The engine searches decision-time features only. Canonical spot path outcomes
 are labels and are never exposed to a condition.  Thresholds are learned from
 the earlier chronological discovery partition, frozen, and then evaluated on
 the later holdout partition.
@@ -20,9 +20,15 @@ from statistics import mean, median
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 
-ENGINE_VERSION = "formula-discovery-v1"
-FORMULA_SCHEMA_VERSION = "research-formula-v1"
+ENGINE_VERSION = "formula-discovery-v2-wide-move"
+FORMULA_SCHEMA_VERSION = "research-formula-v2-wide-move"
 ALLOWED_OPERATORS = {">=", "<=", "=="}
+MIN_MEDIAN_MFE_BY_HORIZON = {
+    60: 0.50,
+    240: 1.00,
+    720: 1.50,
+    1440: 2.00,
+}
 
 
 @dataclass(frozen=True)
@@ -343,6 +349,15 @@ def _outcome_values(rows: Sequence[Mapping[str, Any]], key: str) -> list[float]:
     return values
 
 
+def _empirical_percentile(value: Optional[float], population: Sequence[float]) -> Optional[float]:
+    if value is None or not population:
+        return None
+    ordered = [float(item) for item in population if math.isfinite(float(item))]
+    if not ordered:
+        return None
+    return sum(1 for item in ordered if item <= value) / len(ordered) * 100.0
+
+
 def _metrics(
     selected: Sequence[Mapping[str, Any]],
     universe: Sequence[Mapping[str, Any]],
@@ -361,6 +376,7 @@ def _metrics(
     control_directional = _outcome_values(controls, "directional_return_pct")
     mfe = _outcome_values(selected, "mfe_pct")
     mae = _outcome_values(selected, "mae_pct")
+    universe_mfe = _outcome_values(universe, "mfe_pct")
     first_progress = _outcome_values(selected, "time_to_first_progress_seconds")
     time_to_mfe = _outcome_values(selected, "time_to_mfe_seconds")
     target_progress = _outcome_values(selected, "target_progress_ratio")
@@ -391,6 +407,8 @@ def _metrics(
     )
     median_mae = median(mae) if mae else None
     median_mfe = median(mfe) if mfe else None
+    universe_median_mfe = median(universe_mfe) if universe_mfe else None
+    universe_p90_mfe = _quantile(universe_mfe, 0.90)
     efficiency = (
         median_mfe / median_mae
         if median_mfe is not None and median_mae not in (None, 0.0)
@@ -398,6 +416,23 @@ def _metrics(
     )
     sample_share = len(selected) / len(universe) * 100.0 if universe else 0.0
     rarity_class = "RARE" if sample_share <= 5.0 else "UNCOMMON" if sample_share <= 15.0 else "COMMON"
+    median_mfe_percentile = _empirical_percentile(median_mfe, universe_mfe)
+    mfe_uplift = (
+        (median_mfe / universe_median_mfe - 1.0) * 100.0
+        if median_mfe is not None and universe_median_mfe not in (None, 0.0)
+        else None
+    )
+    mae_p90 = _quantile(mae, 0.90)
+    favorable_minus_p90_adverse = (
+        median_mfe - mae_p90
+        if median_mfe is not None and mae_p90 is not None
+        else None
+    )
+    expected_favorable = (
+        median_mfe * hit_rate / 100.0
+        if median_mfe is not None and hit_rate is not None
+        else None
+    )
     return {
         "sample_size": len(selected),
         "universe_size": len(universe),
@@ -429,9 +464,17 @@ def _metrics(
         "avg_directional_return_pct": _round(mean(directional), 6) if directional else None,
         "median_directional_return_pct": _round(median(directional), 6) if directional else None,
         "median_mfe_pct": _round(median_mfe, 6),
+        "universe_median_mfe_pct": _round(universe_median_mfe, 6),
+        "universe_p90_mfe_pct": _round(universe_p90_mfe, 6),
+        "median_mfe_percentile_pct": _round(median_mfe_percentile, 4),
+        "median_mfe_uplift_vs_universe_pct": _round(mfe_uplift, 4),
+        "expected_favorable_excursion_pct": _round(expected_favorable, 6),
+        "favorable_minus_p90_adverse_pct": _round(
+            favorable_minus_p90_adverse, 6
+        ),
         "median_mae_pct": _round(median_mae, 6),
         "mae_p75_pct": _round(_quantile(mae, 0.75), 6),
-        "mae_p90_pct": _round(_quantile(mae, 0.90), 6),
+        "mae_p90_pct": _round(mae_p90, 6),
         "mae_p95_pct": _round(_quantile(mae, 0.95), 6),
         "median_mfe_mae_ratio": _round(efficiency, 6),
         "median_time_to_first_progress_seconds": _round(median(first_progress), 2) if first_progress else None,
@@ -455,6 +498,18 @@ def _metrics(
         ),
         "sample_event_ids": sorted(selected_ids)[:20],
     }
+
+
+def summarize_outcomes(
+    selected: Sequence[Mapping[str, Any]],
+    universe: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Public deterministic metric surface used by future Shadow validation."""
+    return _metrics(selected, universe)
+
+
+def minimum_wide_move_pct(horizon_minutes: int) -> float:
+    return float(MIN_MEDIAN_MFE_BY_HORIZON.get(int(horizon_minutes), 0.0))
 
 
 def _predicate_catalog(
@@ -502,14 +557,18 @@ def _preliminary_score(metrics: Mapping[str, Any], complexity: int) -> float:
     improvement = _number(metrics.get("hit_rate_improvement_pct_points")) or 0.0
     mfe = _number(metrics.get("median_mfe_pct")) or 0.0
     mae = _number(metrics.get("median_mae_pct")) or 0.0
+    movement_percentile = _number(metrics.get("median_mfe_percentile_pct")) or 0.0
+    favorable_edge = _number(metrics.get("favorable_minus_p90_adverse_pct")) or 0.0
     efficiency = mfe / max(0.05, mae)
     sample = int(metrics.get("sample_size") or 0)
     return (
-        0.30 * lower
-        + 0.20 * hit
-        + 0.20 * max(-20.0, improvement)
+        0.22 * lower
+        + 0.10 * hit
+        + 0.12 * max(-20.0, improvement)
+        + 0.32 * movement_percentile
         + 8.0 * min(4.0, efficiency)
-        + 4.0 * math.log1p(sample)
+        + 5.0 * max(-1.0, min(3.0, favorable_edge))
+        + 3.0 * math.log1p(sample)
         - 2.0 * max(0, complexity - 1)
     )
 
@@ -531,6 +590,15 @@ def _final_score(
     mae_quality = 1.0 / (1.0 + mae)
     efficiency = max(0.0, _number(evidence.get("median_mfe_mae_ratio")) or 0.0)
     efficiency_quality = min(1.0, efficiency / 3.0)
+    movement_percentile = max(
+        0.0, min(100.0, _number(evidence.get("median_mfe_percentile_pct")) or 0.0)
+    )
+    movement_quality = movement_percentile / 100.0
+    median_mfe = max(0.0, _number(evidence.get("median_mfe_pct")) or 0.0)
+    universe_p90_mfe = max(
+        0.01, _number(evidence.get("universe_p90_mfe_pct")) or 0.01
+    )
+    absolute_movement_quality = min(1.0, median_mfe / universe_p90_mfe)
     progress_seconds = _number(evidence.get("median_time_to_first_progress_seconds"))
     horizon_seconds = max(60.0, float(horizon_minutes) * 60.0)
     speed_quality = (
@@ -550,17 +618,24 @@ def _final_score(
         else 0.0
     )
     significance = 0.0 if q_value is None else max(0.0, 1.0 - q_value)
+    target_progress = _number(evidence.get("avg_target_progress_ratio"))
+    target_quality = (
+        max(0.0, min(1.0, target_progress)) if target_progress is not None else 0.5
+    )
     score = 100.0 * (
-        0.24 * lower
-        + 0.13 * hit
-        + 0.12 * improvement_quality
-        + 0.14 * mae_quality
-        + 0.12 * efficiency_quality
-        + 0.08 * speed_quality
-        + 0.08 * sample_quality
-        + 0.05 * stability
-        + 0.02 * significance
-        + 0.02 * rarity_quality
+        0.17 * lower
+        + 0.08 * hit
+        + 0.09 * improvement_quality
+        + 0.23 * movement_quality
+        + 0.09 * absolute_movement_quality
+        + 0.11 * mae_quality
+        + 0.08 * efficiency_quality
+        + 0.05 * speed_quality
+        + 0.04 * sample_quality
+        + 0.025 * stability
+        + 0.01 * significance
+        + 0.005 * rarity_quality
+        + 0.02 * target_quality
     )
     score -= 1.5 * max(0, complexity - 1)
     return round(max(0.0, min(100.0, score)), 4)
@@ -570,6 +645,7 @@ def _recommended_stage(
     discovery: Mapping[str, Any],
     holdout: Mapping[str, Any],
     *,
+    horizon_minutes: int,
     q_value: Optional[float],
     config: DiscoveryConfig,
 ) -> tuple[str, list[str]]:
@@ -583,6 +659,11 @@ def _recommended_stage(
     holdout_lower = _number(holdout.get("wilson_95_lower_pct")) or 0.0
     improvement = _number(holdout.get("hit_rate_improvement_pct_points")) or -100.0
     efficiency = _number(holdout.get("median_mfe_mae_ratio")) or 0.0
+    median_mfe = _number(holdout.get("median_mfe_pct")) or 0.0
+    mae_p90 = _number(holdout.get("mae_p90_pct")) or 0.0
+    movement_percentile = _number(
+        holdout.get("median_mfe_percentile_pct")
+    ) or 0.0
     discovery_hit = _number(discovery.get("hit_rate_pct")) or 0.0
     strict_checks = {
         "discovery sample": discovery_n >= config.strict_discovery_samples,
@@ -599,12 +680,17 @@ def _recommended_stage(
         "holdout Wilson lower bound": holdout_lower >= 45.0,
         "holdout improvement": improvement >= 5.0,
         "MFE/MAE efficiency": efficiency >= 1.25,
+        "wide favorable movement floor": median_mfe
+        >= MIN_MEDIAN_MFE_BY_HORIZON.get(int(horizon_minutes), 0.0),
+        "wide movement percentile": movement_percentile >= 65.0,
+        "favorable excursion exceeds p90 adverse excursion": median_mfe > mae_p90,
         "discovery/holdout stability": abs(discovery_hit - holdout_hit) <= 20.0,
         "multiple-testing q-value": q_value is not None and q_value <= 0.20,
     }
     reasons.extend(name for name, passed in strict_checks.items() if not passed)
     if not reasons:
-        # SHADOW is observational only. APPROVED and LIVE are never automatic.
+        # Discovery itself stops at SHADOW. A separate future-observation
+        # validator may later promote under the owner-approved live policy.
         return "SHADOW", ["strict chronological holdout gates passed"]
     return stage, reasons
 
@@ -728,6 +814,7 @@ def _search_direction(
         stage, gate_reasons = _recommended_stage(
             discovery,
             holdout,
+            horizon_minutes=horizon_minutes,
             q_value=q_value,
             config=config,
         )
@@ -883,6 +970,9 @@ def discover_formulas(
             ),
             "formulas": formulas,
             "automatic_stage_ceiling": "SHADOW",
-            "live_activation": "never automatic",
+            "live_activation": (
+                "only after separate deterministic future-Shadow validation "
+                "under the owner-approved policy"
+            ),
         }
     )

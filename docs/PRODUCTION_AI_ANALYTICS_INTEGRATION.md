@@ -12,7 +12,7 @@ Research Archive. The release intentionally excludes all lab collection tools:
 - no tool that changes Watch, scores, thresholds or strategy logic.
 
 The production AI tools are limited to current OI/CVD/market state, historical
-market context, delivered-alert history, one-alert context, Binance Spot outcome
+market context, delivered-alert history, one-alert context, canonical spot outcome
 paths, bounded formula-candidate aggregates, a no-lookahead raw/model research
 matrix and capability status.
 
@@ -45,10 +45,11 @@ waiting for PostgreSQL. Manual `/alert` and `/alerts*` scans are stored only as
 failure cannot block Telegram or change trading logic. Shadow Replay and self-tests
 use `persist=False` and can never contaminate the production archive.
 
-## Outcome v2 — canonical price path
+## Outcome v3 — canonical price path
 
 The background outcome worker enriches delivered alerts after 1h, 4h, 12h and
-24h. Version 2 fetches closed one-minute `USDT` candles from Binance Spot and
+24h. Version 3 fetches closed one-minute `USDT` candles from Binance Spot and
+uses the explicit Hyperliquid HYPE/USDT spot (`@107`) route for HYPE. It
 records:
 
 - fixed-horizon raw and direction-adjusted return;
@@ -61,7 +62,7 @@ The partial candle containing the alert timestamp is excluded because its full
 OHLC could contain movement from before the alert. The immutable decision price
 is used as the reference, and only subsequently closed candles enter MFE/MAE.
 Existing 30-minute v1 rows are upgraded in place when the worker next sees them.
-Unsupported Binance Spot pairs fail open and are never silently replaced by a
+Unsupported canonical pairs fail open and are never silently replaced by a
 futures or third-party path.
 
 The AI now has a `research_formula_groups` discovery tool. It compares verified
@@ -70,7 +71,7 @@ sample size, baseline, MFE/MAE distributions, speed, target progress and rarity.
 This is a Candidate discovery surface; it does not activate formulas.
 
 For event-level inspection, `get_alert_price_path` fetches one completed
-Binance Spot path on demand, computes metrics from the full one-minute series
+canonical spot path on demand, computes metrics from the full one-minute series
 and returns only a bounded candle sample to GPT. This gives the engine direct
 path access without copying every candle into every Research Event.
 
@@ -78,7 +79,7 @@ path access without copying every candle into every Research Event.
 histories in bounded batches. For each delivered alert it selects only rows at
 or before the decision time, derives fixed-window changes, time/repetition and
 market-breadth features, and places them beside compact captured model features.
-Verified later Binance Spot path metrics appear only under `outcome_label`.
+Verified later canonical spot path metrics appear only under `outcome_label`.
 This enables direct comparison of pure data and the bot's current scoring logic
 without copying the underlying time series into the Research Event archive.
 
@@ -98,8 +99,8 @@ After the price path and core feature matrix, the implementation order is:
    sample coverage rather than hit rate alone;
 4. run chronological holdout/out-of-sample validation and retain failures;
 5. register approved Candidate formulas with versions and monitor them in shadow;
-6. only after explicit approval, expose a validated formula as a live alert
-   condition.
+6. validate the frozen formula on genuinely future Shadow outcomes under the
+   owner policy, then expose it as a live alert condition for opted-in chats.
 
 ## Explicit activation gates
 

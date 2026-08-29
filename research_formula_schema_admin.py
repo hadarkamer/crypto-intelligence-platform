@@ -1,4 +1,4 @@
-"""Explicit one-shot installer for Formula Research v1 tables."""
+"""Explicit one-shot installer for all Formula Research migrations."""
 
 from __future__ import annotations
 
@@ -12,7 +12,10 @@ except Exception:  # pragma: no cover
 
 
 _TRUE = {"1", "true", "yes", "on"}
-MIGRATION_PATH = Path(__file__).resolve().parent / "migrations" / "002_formula_research_v1.sql"
+MIGRATION_PATHS = (
+    Path(__file__).resolve().parent / "migrations" / "002_formula_research_v1.sql",
+    Path(__file__).resolve().parent / "migrations" / "003_formula_autonomous_alerts_v1.sql",
+)
 SCHEMA_LOCK_ID = 94837242
 
 
@@ -37,7 +40,7 @@ def status() -> dict:
         "schema_apply_enabled": _enabled(),
         "database_configured": bool(database_url),
         "database_source": source,
-        "migration_path": str(MIGRATION_PATH),
+        "migration_paths": [str(path) for path in MIGRATION_PATHS],
         "runtime_imported_by_watch": False,
     }
 
@@ -53,14 +56,15 @@ def apply_schema() -> None:
         )
     if psycopg is None:
         raise RuntimeError("psycopg is unavailable")
-    if not MIGRATION_PATH.exists():
-        raise RuntimeError(f"Migration file not found: {MIGRATION_PATH}")
-    sql = MIGRATION_PATH.read_text(encoding="utf-8")
+    missing = [str(path) for path in MIGRATION_PATHS if not path.exists()]
+    if missing:
+        raise RuntimeError(f"Migration files not found: {missing}")
     with psycopg.connect(database_url, connect_timeout=5) as conn:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_ID,))
-        conn.execute(sql)
+        for path in MIGRATION_PATHS:
+            conn.execute(path.read_text(encoding="utf-8"))
         conn.commit()
-    print(f"Formula Research v1 schema applied successfully via {source}.", flush=True)
+    print(f"Formula Research schema applied successfully via {source}.", flush=True)
 
 
 if __name__ == "__main__":

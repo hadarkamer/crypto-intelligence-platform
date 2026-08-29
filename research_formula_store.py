@@ -29,6 +29,23 @@ _STAGE_ORDER = {
     "RETIRED": 6,
 }
 _AUTOMATIC_STAGE_PATH = ("DISCOVERED", "BACKTESTED", "HOLDOUT_PASSED", "SHADOW")
+_AUTONOMOUS_POLICY_VERSION = (
+    os.getenv("FORMULA_AUTONOMOUS_ALERT_POLICY_VERSION", "").strip()
+    or "owner-policy-v1-2026-08-29"
+)
+_SHADOW_MIN_MATCHES = max(
+    12, int(os.getenv("FORMULA_SHADOW_MIN_VALIDATED_MATCHES", "12"))
+)
+_SHADOW_MIN_CONTROLS = max(
+    12, int(os.getenv("FORMULA_SHADOW_MIN_VALIDATED_CONTROLS", "12"))
+)
+_SHADOW_MIN_SPAN_HOURS = max(
+    72, int(os.getenv("FORMULA_SHADOW_MIN_SPAN_HOURS", "72"))
+)
+_SHADOW_MIN_DATES = max(3, int(os.getenv("FORMULA_SHADOW_MIN_UTC_DATES", "3")))
+_DELIVERY_MAX_ATTEMPTS = max(
+    1, int(os.getenv("FORMULA_LIVE_DELIVERY_MAX_ATTEMPTS", "5"))
+)
 
 
 def _database_url() -> str:
@@ -82,6 +99,8 @@ def schema_status() -> Dict[str, Any]:
         "research_formula_shadow_checks",
         "research_formula_shadow_hits",
         "research_legacy_alert_messages",
+        "research_formula_alert_subscriptions",
+        "research_formula_live_deliveries",
     )
     base = {
         "configured": bool(_database_url()),
@@ -102,8 +121,11 @@ def schema_status() -> Dict[str, Any]:
               (SELECT COUNT(*) FROM research_formula_runs) AS runs,
               (SELECT COUNT(*) FROM research_formulas) AS formulas,
               (SELECT COUNT(*) FROM research_formulas WHERE current_stage='SHADOW' AND active) AS shadow_formulas,
+              (SELECT COUNT(*) FROM research_formulas WHERE current_stage='LIVE' AND active) AS live_formulas,
               (SELECT COUNT(*) FROM research_formula_shadow_hits) AS shadow_hits,
-              (SELECT COUNT(*) FROM research_legacy_alert_messages) AS legacy_messages
+              (SELECT COUNT(*) FROM research_legacy_alert_messages) AS legacy_messages,
+              (SELECT COUNT(*) FROM research_formula_alert_subscriptions WHERE active) AS active_subscriptions,
+              (SELECT COUNT(*) FROM research_formula_live_deliveries WHERE status='PENDING') AS pending_live_deliveries
             """
         ).fetchone()
         base.update({key: int(counts[key] or 0) for key in counts})
@@ -220,6 +242,46 @@ def persist_discovery_run(
             ),
         ).fetchone()
         run_id = int(run["run_id"])
+        # v2 intentionally changes the objective toward wide favorable moves.
+        # Retire older non-live research formulas without deleting their audit
+        # history, so a v1 small-move candidate cannot later enter live checks.
+        superseded = conn.execute(
+            """
+            SELECT formula_id, current_stage
+            FROM research_formulas
+            WHERE active=TRUE
+              AND formula_schema_version<>%s
+              AND current_stage NOT IN ('LIVE', 'RETIRED')
+            FOR UPDATE
+            """,
+            (research_formula_engine.FORMULA_SCHEMA_VERSION,),
+        ).fetchall()
+        for old_formula in superseded:
+            conn.execute(
+                """
+                INSERT INTO research_formula_stage_history (
+                    formula_id, run_id, from_stage, to_stage, reason, actor
+                ) VALUES (%s, %s, %s, 'RETIRED', %s, 'automatic-research-engine')
+                ON CONFLICT (formula_id, run_id, to_stage) DO NOTHING
+                """,
+                (
+                    int(old_formula["formula_id"]),
+                    run_id,
+                    str(old_formula["current_stage"]),
+                    "superseded by wide-move formula schema v2",
+                ),
+            )
+        if superseded:
+            conn.execute(
+                """
+                UPDATE research_formulas
+                SET current_stage='RETIRED', active=FALSE, updated_at_utc=NOW()
+                WHERE active=TRUE
+                  AND formula_schema_version<>%s
+                  AND current_stage NOT IN ('LIVE', 'RETIRED')
+                """,
+                (research_formula_engine.FORMULA_SCHEMA_VERSION,),
+            )
         persisted = 0
         stage_counts: Dict[str, int] = {}
         for global_rank, formula in enumerate(formulas, start=1):
@@ -399,11 +461,12 @@ def formula_registry(
     return _json_safe(
         {
             "available": True,
-            "automatic_stage_ceiling": "SHADOW",
+            "automatic_stage_ceiling": "LIVE_AFTER_FUTURE_SHADOW_POLICY",
             "live_alerts_require": [
-                "explicit human approval stored on the formula",
+                f"owner-approved policy {_AUTONOMOUS_POLICY_VERSION}",
+                "strict chronological holdout plus future Shadow validation",
                 "FORMULA_LIVE_ALERTS_ENABLED=1",
-                "a separately approved Telegram delivery integration",
+                "an explicit Telegram chat subscription",
             ],
             "filters": {
                 "stage": normalized_stage,
@@ -442,30 +505,60 @@ def shadow_status(limit: int = 20) -> Dict[str, Any]:
             """,
             (row_limit,),
         ).fetchall()
+        delivery_counts = conn.execute(
+            """
+            SELECT status, COUNT(*)::bigint AS count
+            FROM research_formula_live_deliveries
+            GROUP BY status ORDER BY status
+            """
+        ).fetchall()
+        subscriptions = conn.execute(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM research_formula_alert_subscriptions WHERE active=TRUE
+            """
+        ).fetchone()
     return _json_safe(
         {
             "available": True,
             "stages": {row["current_stage"]: int(row["count"] or 0) for row in stages},
             "recent_shadow_hits": [dict(row) for row in recent],
-            "delivery": "NOT_SENT",
+            "live_delivery": {
+                "active_subscriptions": int(subscriptions["count"] or 0),
+                "by_status": {
+                    row["status"]: int(row["count"] or 0)
+                    for row in delivery_counts
+                },
+            },
         }
     )
 
 
 def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
-    """Load formula/event pairs that occurred strictly after Shadow activation."""
+    """Load future event pairs for active Shadow and validated Live formulas."""
     limit = max(1, min(int(max_events_per_formula), 250))
     work: list[Dict[str, Any]] = []
     with _connect(read_only=True) as conn:
         formulas = conn.execute(
             """
-            SELECT formula_id, direction, horizon_minutes, conditions,
-                   feature_schema_version, last_shadow_event_id,
-                   shadow_started_at_utc
-            FROM research_formulas
-            WHERE active=TRUE AND current_stage='SHADOW'
-            ORDER BY formula_id
-            """
+            SELECT f.formula_id, f.formula_version, f.formula_text,
+                   f.formula_schema_version, f.direction, f.horizon_minutes,
+                   f.conditions, f.feature_schema_version,
+                   f.last_shadow_event_id, f.shadow_started_at_utc,
+                   f.current_stage, f.live_alert_approved,
+                   e.ranking_score, e.holdout_metrics
+            FROM research_formulas f
+            LEFT JOIN research_formula_evaluations e
+              ON e.run_id=f.latest_evaluation_run_id AND e.formula_id=f.formula_id
+            WHERE f.active=TRUE
+              AND f.current_stage IN ('SHADOW', 'LIVE')
+              AND f.formula_schema_version=%s
+            ORDER BY
+              CASE WHEN f.current_stage='LIVE' THEN 1 ELSE 0 END DESC,
+              e.ranking_score DESC NULLS LAST,
+              f.formula_id
+            """,
+            (research_formula_engine.FORMULA_SCHEMA_VERSION,),
         ).fetchall()
         for formula in formulas:
             events = conn.execute(
@@ -500,12 +593,14 @@ def record_shadow_results(
     *,
     formula: Mapping[str, Any],
     results: Sequence[Mapping[str, Any]],
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     if not results:
-        return {"checked": 0, "matched": 0}
+        return {"checked": 0, "matched": 0, "queued": 0, "new_hit_event_ids": []}
     formula_id = int(formula["formula_id"])
     checked = 0
     matched = 0
+    queued = 0
+    new_hit_event_ids: list[int] = []
     max_event_id = 0
     with _connect(read_only=False) as conn:
         current = conn.execute(
@@ -515,8 +610,17 @@ def record_shadow_results(
             """,
             (formula_id,),
         ).fetchone()
-        if not current or current["current_stage"] != "SHADOW" or not current["active"]:
-            return {"checked": 0, "matched": 0}
+        if (
+            not current
+            or current["current_stage"] not in {"SHADOW", "LIVE"}
+            or not current["active"]
+        ):
+            return {
+                "checked": 0,
+                "matched": 0,
+                "queued": 0,
+                "new_hit_event_ids": [],
+            }
         for result in results:
             event_id = int(result["event_id"])
             max_event_id = max(max_event_id, event_id)
@@ -541,6 +645,7 @@ def record_shadow_results(
             checked += 1
             if is_match:
                 matched += 1
+                new_hit_event_ids.append(event_id)
                 conn.execute(
                     """
                     INSERT INTO research_formula_shadow_hits (
@@ -556,6 +661,24 @@ def record_shadow_results(
                         _json(result.get("input_snapshot") or {}),
                     ),
                 )
+                if (
+                    current["current_stage"] == "LIVE"
+                    and bool(current["live_alert_approved"])
+                ):
+                    inserted_deliveries = conn.execute(
+                        """
+                        INSERT INTO research_formula_live_deliveries (
+                            formula_id, event_id, chat_id, status
+                        )
+                        SELECT %s, %s, s.chat_id, 'PENDING'
+                        FROM research_formula_alert_subscriptions s
+                        WHERE s.active=TRUE
+                        ON CONFLICT (event_id, chat_id) DO NOTHING
+                        RETURNING delivery_id
+                        """,
+                        (formula_id, event_id),
+                    ).fetchall()
+                    queued += len(inserted_deliveries)
         if max_event_id:
             conn.execute(
                 """
@@ -567,4 +690,321 @@ def record_shadow_results(
                 (max_event_id, formula_id),
             )
         conn.commit()
-    return {"checked": checked, "matched": matched}
+    return {
+        "checked": checked,
+        "matched": matched,
+        "queued": queued,
+        "new_hit_event_ids": new_hit_event_ids,
+    }
+
+
+def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT c.matched,
+               e.event_id, e.alert_time_utc, e.symbol, e.event_type,
+               o.directional_return_pct, o.mfe_pct, o.mae_pct,
+               o.time_to_first_progress_seconds, o.time_to_mfe_seconds,
+               o.target_progress_ratio, o.target_reached
+        FROM research_formula_shadow_checks c
+        JOIN research_events e ON e.event_id=c.event_id
+        JOIN research_alert_outcomes o
+          ON o.event_id=e.event_id
+         AND o.horizon_minutes=%s
+         AND o.outcome_method_version=%s
+         AND o.data_quality_status=ANY(%s)
+        WHERE c.formula_id=%s
+        ORDER BY e.alert_time_utc, e.event_id
+        """,
+        (
+            int(formula["horizon_minutes"]),
+            research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+            list(research_feature_matrix.VERIFIED_OUTCOME_QUALITIES),
+            int(formula["formula_id"]),
+        ),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _metric_row(source: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "event": {
+            "event_id": int(source["event_id"]),
+            "alert_time_utc": source["alert_time_utc"],
+            "symbol": source.get("symbol"),
+            "event_type": source.get("event_type"),
+        },
+        "outcome_label": {
+            "directional_return_pct": source.get("directional_return_pct"),
+            "mfe_pct": source.get("mfe_pct"),
+            "mae_pct": source.get("mae_pct"),
+            "time_to_first_progress_seconds": source.get(
+                "time_to_first_progress_seconds"
+            ),
+            "time_to_mfe_seconds": source.get("time_to_mfe_seconds"),
+            "target_progress_ratio": source.get("target_progress_ratio"),
+            "target_reached": source.get("target_reached"),
+        },
+    }
+
+
+def promote_eligible_shadow_formulas() -> Dict[str, Any]:
+    """Apply the owner-approved deterministic future-Shadow live policy."""
+    evaluated = 0
+    promoted: list[int] = []
+    with _connect(read_only=False) as conn:
+        formulas = conn.execute(
+            """
+            SELECT formula_id, horizon_minutes, latest_evaluation_run_id
+            FROM research_formulas
+            WHERE active=TRUE
+              AND current_stage='SHADOW'
+              AND formula_schema_version=%s
+            ORDER BY formula_id
+            FOR UPDATE
+            """,
+            (research_formula_engine.FORMULA_SCHEMA_VERSION,),
+        ).fetchall()
+        for formula in formulas:
+            source_rows = _shadow_outcome_rows(conn, formula)
+            universe = [_metric_row(row) for row in source_rows]
+            selected = [
+                _metric_row(row) for row in source_rows if bool(row.get("matched"))
+            ]
+            metrics = research_formula_engine.summarize_outcomes(selected, universe)
+            evaluated += 1
+            improvement = metrics.get("hit_rate_improvement_pct_points")
+            gate_results = {
+                "matched future outcomes": int(metrics.get("sample_size") or 0)
+                >= _SHADOW_MIN_MATCHES,
+                "unmatched future controls": int(metrics.get("control_sample_size") or 0)
+                >= _SHADOW_MIN_CONTROLS,
+                "future temporal span": float(metrics.get("time_span_hours") or 0.0)
+                >= float(_SHADOW_MIN_SPAN_HOURS),
+                "future UTC dates": int(metrics.get("distinct_utc_dates") or 0)
+                >= _SHADOW_MIN_DATES,
+                "future hit rate": float(metrics.get("hit_rate_pct") or 0.0) >= 65.0,
+                "future Wilson lower bound": float(
+                    metrics.get("wilson_95_lower_pct") or 0.0
+                )
+                >= 50.0,
+                "future improvement over controls": improvement is not None
+                and float(improvement) >= 5.0,
+                "wide favorable movement floor": float(
+                    metrics.get("median_mfe_pct") or 0.0
+                )
+                >= research_formula_engine.minimum_wide_move_pct(
+                    int(formula["horizon_minutes"])
+                ),
+                "future wide movement percentile": float(
+                    metrics.get("median_mfe_percentile_pct") or 0.0
+                )
+                >= 70.0,
+                "future MFE/MAE efficiency": float(
+                    metrics.get("median_mfe_mae_ratio") or 0.0
+                )
+                >= 1.50,
+                "future favorable exceeds p90 adverse": float(
+                    metrics.get("favorable_minus_p90_adverse_pct") or -999.0
+                )
+                > 0.0,
+            }
+            validation = {
+                "policy_version": _AUTONOMOUS_POLICY_VERSION,
+                "evaluated_at_utc": datetime.now(timezone.utc),
+                "metrics": metrics,
+                "gates": gate_results,
+                "failed_gates": [
+                    name for name, passed in gate_results.items() if not passed
+                ],
+            }
+            formula_id = int(formula["formula_id"])
+            conn.execute(
+                """
+                UPDATE research_formulas
+                SET shadow_validation_metrics=%s::jsonb, updated_at_utc=NOW()
+                WHERE formula_id=%s
+                """,
+                (_json(validation), formula_id),
+            )
+            if not all(gate_results.values()):
+                continue
+            run_id = formula.get("latest_evaluation_run_id")
+            conn.execute(
+                """
+                INSERT INTO research_formula_stage_history (
+                    formula_id, run_id, from_stage, to_stage, reason, actor
+                ) VALUES (%s, %s, 'SHADOW', 'APPROVED', %s, %s)
+                ON CONFLICT (formula_id, run_id, to_stage) DO NOTHING
+                """,
+                (
+                    formula_id,
+                    run_id,
+                    "owner policy plus deterministic future Shadow gates passed",
+                    "automatic-shadow-validator",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO research_formula_stage_history (
+                    formula_id, run_id, from_stage, to_stage, reason, actor
+                ) VALUES (%s, %s, 'APPROVED', 'LIVE', %s, %s)
+                ON CONFLICT (formula_id, run_id, to_stage) DO NOTHING
+                """,
+                (
+                    formula_id,
+                    run_id,
+                    f"autonomous alert policy {_AUTONOMOUS_POLICY_VERSION}",
+                    "automatic-shadow-validator",
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE research_formulas
+                SET current_stage='LIVE',
+                    live_alert_approved=TRUE,
+                    live_alert_approved_at_utc=NOW(),
+                    live_alert_approved_by=%s,
+                    shadow_validated_at_utc=NOW(),
+                    live_alert_policy_version=%s,
+                    shadow_validation_metrics=%s::jsonb,
+                    updated_at_utc=NOW()
+                WHERE formula_id=%s AND current_stage='SHADOW'
+                """,
+                (
+                    _AUTONOMOUS_POLICY_VERSION,
+                    _AUTONOMOUS_POLICY_VERSION,
+                    _json(validation),
+                    formula_id,
+                ),
+            )
+            promoted.append(formula_id)
+        conn.commit()
+    return {
+        "policy_version": _AUTONOMOUS_POLICY_VERSION,
+        "evaluated": evaluated,
+        "promoted": promoted,
+    }
+
+
+def set_alert_subscription(
+    chat_id: int,
+    *,
+    active: bool,
+    requested_by_user_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    identifier = int(chat_id)
+    with _connect(read_only=False) as conn:
+        row = conn.execute(
+            """
+            INSERT INTO research_formula_alert_subscriptions (
+                chat_id, active, requested_by_user_id,
+                subscribed_at_utc, updated_at_utc
+            ) VALUES (%s, %s, %s, NOW(), NOW())
+            ON CONFLICT (chat_id) DO UPDATE SET
+                active=EXCLUDED.active,
+                requested_by_user_id=EXCLUDED.requested_by_user_id,
+                subscribed_at_utc=CASE
+                    WHEN EXCLUDED.active THEN NOW()
+                    ELSE research_formula_alert_subscriptions.subscribed_at_utc
+                END,
+                updated_at_utc=NOW()
+            RETURNING chat_id, active, requested_by_user_id,
+                      subscribed_at_utc, updated_at_utc
+            """,
+            (identifier, bool(active), requested_by_user_id),
+        ).fetchone()
+        conn.commit()
+    return _json_safe(dict(row))
+
+
+def alert_subscription_status(chat_id: int) -> Dict[str, Any]:
+    with _connect(read_only=True) as conn:
+        row = conn.execute(
+            """
+            SELECT chat_id, active, requested_by_user_id,
+                   subscribed_at_utc, updated_at_utc
+            FROM research_formula_alert_subscriptions
+            WHERE chat_id=%s
+            """,
+            (int(chat_id),),
+        ).fetchone()
+        active_count = conn.execute(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM research_formula_alert_subscriptions WHERE active=TRUE
+            """
+        ).fetchone()
+    return _json_safe(
+        {
+            "configured": bool(row),
+            "active": bool(row and row["active"]),
+            "subscription": dict(row) if row else None,
+            "active_subscriptions": int(active_count["count"] or 0),
+        }
+    )
+
+
+def load_pending_live_deliveries(limit: int = 50) -> list[Dict[str, Any]]:
+    row_limit = max(1, min(int(limit), 200))
+    with _connect(read_only=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT d.delivery_id, d.chat_id, d.attempts,
+                   f.formula_id, f.formula_version, f.formula_text,
+                   f.direction, f.horizon_minutes,
+                   f.shadow_validation_metrics,
+                   e.event_id, e.alert_time_utc, e.symbol, e.event_type,
+                   e.current_price, e.target_price,
+                   ev.ranking_score, ev.holdout_metrics
+            FROM research_formula_live_deliveries d
+            JOIN research_formulas f ON f.formula_id=d.formula_id
+            JOIN research_events e ON e.event_id=d.event_id
+            LEFT JOIN research_formula_evaluations ev
+              ON ev.run_id=f.latest_evaluation_run_id
+             AND ev.formula_id=f.formula_id
+            JOIN research_formula_alert_subscriptions s
+              ON s.chat_id=d.chat_id AND s.active=TRUE
+            WHERE f.active=TRUE AND f.current_stage='LIVE'
+              AND d.attempts<%s
+              AND (
+                  d.status='PENDING'
+                  OR (
+                      d.status='FAILED'
+                      AND d.last_attempt_at_utc < NOW() - INTERVAL '15 minutes'
+                  )
+              )
+            ORDER BY d.created_at_utc, d.delivery_id
+            LIMIT %s
+            """,
+            (_DELIVERY_MAX_ATTEMPTS, row_limit),
+        ).fetchall()
+    return _json_safe([dict(row) for row in rows])
+
+
+def mark_live_delivery(
+    delivery_id: int,
+    *,
+    sent: bool,
+    error: Optional[str] = None,
+) -> None:
+    status = "SENT" if sent else "FAILED"
+    with _connect(read_only=False) as conn:
+        conn.execute(
+            """
+            UPDATE research_formula_live_deliveries
+            SET status=%s,
+                attempts=attempts+1,
+                last_attempt_at_utc=NOW(),
+                sent_at_utc=CASE WHEN %s THEN NOW() ELSE sent_at_utc END,
+                last_error=%s
+            WHERE delivery_id=%s
+            """,
+            (
+                status,
+                bool(sent),
+                None if sent else str(error or "unknown delivery failure")[:1000],
+                int(delivery_id),
+            ),
+        )
+        conn.commit()

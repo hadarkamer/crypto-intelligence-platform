@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import research_feature_matrix
 import research_formula_engine
@@ -59,6 +59,10 @@ class FormulaWorkerMetrics:
     shadow_cycles: int = 0
     shadow_checks: int = 0
     shadow_hits: int = 0
+    live_candidates_queued: int = 0
+    live_deliveries_sent: int = 0
+    live_deliveries_failed: int = 0
+    formulas_promoted_live: int = 0
     failures: int = 0
     last_discovery_utc: Optional[str] = None
     last_shadow_utc: Optional[str] = None
@@ -72,6 +76,11 @@ class FormulaResearchWorker:
         self._shadow_task: Optional[asyncio.Task] = None
         self._stopping = False
         self._schema_ready = False
+        self._telegram_bot: Any = None
+
+    def bind_telegram(self, bot: Any) -> None:
+        """Bind the initialized Telegram bot used for durable live delivery."""
+        self._telegram_bot = bot
 
     def status(self) -> Dict[str, Any]:
         return {
@@ -92,14 +101,20 @@ class FormulaResearchWorker:
             "dataset_limit": _DATASET_LIMIT,
             "discovery_interval_seconds": _DISCOVERY_INTERVAL_SECONDS,
             "shadow_poll_seconds": _SHADOW_POLL_SECONDS,
-            "automatic_stage_ceiling": "SHADOW",
+            "automatic_stage_ceiling": "LIVE_AFTER_FUTURE_SHADOW_POLICY",
             "live_delivery_gate": {
                 "environment_enabled": _LIVE_ALERTS_ENABLED,
-                "formula_approval_required": True,
-                "telegram_delivery_connected": False,
-                "reason": "live delivery remains locked pending a separate explicit approval and destination",
+                "formula_validation_required": True,
+                "telegram_delivery_connected": self._telegram_bot is not None,
+                "chat_subscription_required": True,
+                "reason": (
+                    "delivery requires owner-policy validation, runtime enablement "
+                    "and /ai_alerts_on in the destination chat"
+                ),
             },
-            "canonical_outcomes": "Binance Spot USDT 1m closed candles",
+            "canonical_outcomes": (
+                "Binance Spot USDT 1m; HYPE via Hyperliquid HYPE/USDT spot (@107) 1m"
+            ),
             "metrics": self.metrics.__dict__.copy(),
         }
 
@@ -157,6 +172,7 @@ class FormulaResearchWorker:
         while not self._stopping:
             try:
                 await asyncio.to_thread(self.run_shadow_once)
+                await self._deliver_pending_live_alerts()
             except Exception as exc:
                 self.metrics.failures += 1
                 self.metrics.last_error = f"{type(exc).__name__}: {exc}"
@@ -239,6 +255,7 @@ class FormulaResearchWorker:
         feature_rows = research_feature_matrix.load_shadow_feature_rows(event_ids)
         checked = 0
         matched = 0
+        queued = 0
         for formula in work:
             conditions = _conditions(formula.get("conditions"))
             results = []
@@ -274,14 +291,20 @@ class FormulaResearchWorker:
             )
             checked += persisted["checked"]
             matched += persisted["matched"]
+            queued += int(persisted.get("queued") or 0)
+        promotion = research_formula_store.promote_eligible_shadow_formulas()
+        promoted = len(promotion.get("promoted") or [])
         self.metrics.shadow_checks += checked
         self.metrics.shadow_hits += matched
+        self.metrics.live_candidates_queued += queued
+        self.metrics.formulas_promoted_live += promoted
         now = datetime.now(timezone.utc).isoformat()
         self.metrics.last_shadow_utc = now
         self.metrics.last_error = None
         if checked or matched:
             print(
-                f"[formula-shadow] checked={checked}; matched={matched}; delivery=NOT_SENT",
+                f"[formula-shadow] checked={checked}; matched={matched}; "
+                f"queued={queued}; promoted_live={promoted}",
                 flush=True,
             )
         return {
@@ -290,8 +313,100 @@ class FormulaResearchWorker:
             "events_loaded": len(event_ids),
             "checked": checked,
             "matched": matched,
-            "delivery": "NOT_SENT",
+            "queued_live_deliveries": queued,
+            "promotion": promotion,
+            "delivery": (
+                "ENABLED_FOR_SUBSCRIBED_CHATS"
+                if _LIVE_ALERTS_ENABLED
+                else "DISABLED_BY_ENVIRONMENT"
+            ),
         }
+
+    @staticmethod
+    def _as_mapping(value: Any) -> Mapping[str, Any]:
+        if isinstance(value, Mapping):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, Mapping) else {}
+        return {}
+
+    @classmethod
+    def _live_alert_text(cls, delivery: Mapping[str, Any]) -> str:
+        validation = cls._as_mapping(delivery.get("shadow_validation_metrics"))
+        metrics = cls._as_mapping(validation.get("metrics"))
+        holdout = cls._as_mapping(delivery.get("holdout_metrics"))
+
+        def number(source: Mapping[str, Any], key: str, digits: int = 2) -> str:
+            try:
+                return f"{float(source.get(key)):.{digits}f}"
+            except (TypeError, ValueError):
+                return "-"
+
+        horizon = int(delivery.get("horizon_minutes") or 0)
+        horizon_label = {60: "1h", 240: "4h", 720: "12h", 1440: "24h"}.get(
+            horizon, f"{horizon}m"
+        )
+        direction = str(delivery.get("direction") or "-").upper()
+        direction_icon = "🟢" if direction == "LONG" else "🔴"
+        target = delivery.get("target_price")
+        target_text = f"{float(target):,.6g}" if target not in (None, "") else "לא הוגדר"
+        current = delivery.get("current_price")
+        current_text = f"{float(current):,.6g}" if current not in (None, "") else "-"
+        rarity = str(holdout.get("rarity_class") or "-")
+        return (
+            "🧠 התראת טרייד AI — נוסחה מאומתת\n"
+            f"{direction_icon} {delivery.get('symbol')} {direction} | אופק {horizon_label}\n"
+            f"אירוע #{delivery.get('event_id')} | {delivery.get('event_type')}\n"
+            f"מחיר בעת ההתראה: {current_text} | יעד הבוט: {target_text}\n\n"
+            f"נוסחה #{delivery.get('formula_id')} v{delivery.get('formula_version')}\n"
+            f"{delivery.get('formula_text')}\n\n"
+            "אימות עתידי ב-Shadow:\n"
+            f"דגימות: {int(metrics.get('sample_size') or 0)} | נדירות Holdout: {rarity}\n"
+            f"שיעור כיוון נכון: {number(metrics, 'hit_rate_pct')}% "
+            f"(Wilson תחתון {number(metrics, 'wilson_95_lower_pct')}%)\n"
+            f"מהלך חיובי חציוני MFE: {number(metrics, 'median_mfe_pct', 3)}% | "
+            f"תנועה נגדית p90 MAE: {number(metrics, 'mae_p90_pct', 3)}%\n"
+            f"אחוזון רוחב מהלך: {number(metrics, 'median_mfe_percentile_pct')} | "
+            f"MFE/MAE: {number(metrics, 'median_mfe_mae_ratio')}\n\n"
+            "התראה מחקרית אוטונומית בלבד — הבוט לא ביצע עסקה."
+        )
+
+    async def _deliver_pending_live_alerts(self) -> Dict[str, int]:
+        if not _LIVE_ALERTS_ENABLED or self._telegram_bot is None:
+            return {"sent": 0, "failed": 0}
+        pending = await asyncio.to_thread(
+            research_formula_store.load_pending_live_deliveries
+        )
+        sent = 0
+        failed = 0
+        for delivery in pending:
+            try:
+                await self._telegram_bot.send_message(
+                    chat_id=int(delivery["chat_id"]),
+                    text=self._live_alert_text(delivery),
+                )
+            except Exception as exc:
+                failed += 1
+                await asyncio.to_thread(
+                    research_formula_store.mark_live_delivery,
+                    int(delivery["delivery_id"]),
+                    sent=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            else:
+                sent += 1
+                await asyncio.to_thread(
+                    research_formula_store.mark_live_delivery,
+                    int(delivery["delivery_id"]),
+                    sent=True,
+                )
+        self.metrics.live_deliveries_sent += sent
+        self.metrics.live_deliveries_failed += failed
+        return {"sent": sent, "failed": failed}
 
 
 WORKER = FormulaResearchWorker()

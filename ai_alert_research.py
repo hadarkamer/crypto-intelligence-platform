@@ -20,11 +20,12 @@ except Exception:  # pragma: no cover - validated at runtime
 
 import ai_history_research
 import binance_spot_price_path
+import canonical_price_path
 
 _TRUE = {"1", "true", "yes", "on"}
 _SUPPORTED_HORIZONS = {60, 240, 720, 1440}
-_PATH_V2_METHOD = "binance-spot-1m-ohlc-path-v2"
-_PATH_V2_COMPLETE = "VERIFIED_BINANCE_SPOT_1M_CLOSED_CANDLES"
+_PATH_V3_METHOD = canonical_price_path.METHOD_VERSION
+_PATH_V3_COMPLETE = canonical_price_path.COMPLETE_QUALITIES
 
 
 def _database_url() -> str:
@@ -214,7 +215,7 @@ def research_alert_history(
                    )::numeric, 6) AS median_target_progress_ratio,
                    COUNT(*) FILTER (
                        WHERE o.outcome_method_version=%s
-                         AND o.data_quality_status=%s
+                         AND o.data_quality_status=ANY(%s)
                    )::bigint AS verified_path_samples
             FROM research_events e
             JOIN research_alert_outcomes o ON o.event_id=e.event_id
@@ -227,7 +228,7 @@ def research_alert_history(
             ORDER BY sample_size DESC, e.event_type, e.direction
             LIMIT 100
             """,
-            [_PATH_V2_METHOD, _PATH_V2_COMPLETE, days, horizon, *symbol_params],
+            [_PATH_V3_METHOD, list(_PATH_V3_COMPLETE), days, horizon, *symbol_params],
         ).fetchall()
 
         recent = conn.execute(
@@ -275,7 +276,7 @@ def research_alert_history(
             "interpretation_rules": [
                 "Always report sample_size; small samples are descriptive, not proof.",
                 "Positive rate means direction-adjusted return above zero at the selected horizon.",
-                "Verified v2 outcomes use closed Binance Spot 1-minute candles; the first partial minute after an alert is excluded to avoid pre-alert leakage.",
+                "Verified v3 outcomes use closed canonical spot 1-minute candles: Binance Spot USDT by default and Hyperliquid HYPE/USDT spot for HYPE; the first partial minute after an alert is excluded to avoid pre-alert leakage.",
                 "MFE is favorable excursion, MAE is adverse excursion, and p90/p95 MAE help estimate stop distances that historically survived 90%/95% of the sampled paths; they are research evidence, not a live stop recommendation.",
                 "Compare verified_path_samples with sample_size before using path-quality metrics; legacy v1 rows may still be awaiting upgrade.",
                 "Historical market reconstructions are not delivered Telegram alerts.",
@@ -362,7 +363,7 @@ def research_formula_groups(
                   AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
                   AND o.horizon_minutes=%s
                   AND o.outcome_method_version=%s
-                  AND o.data_quality_status=%s
+                  AND o.data_quality_status=ANY(%s)
                   {symbol_clause}
             ),
             baseline AS (
@@ -445,8 +446,8 @@ def research_formula_groups(
             [
                 days,
                 horizon,
-                _PATH_V2_METHOD,
-                _PATH_V2_COMPLETE,
+                _PATH_V3_METHOD,
+                list(_PATH_V3_COMPLETE),
                 *symbol_params,
                 minimum,
                 row_limit,
@@ -462,7 +463,7 @@ def research_formula_groups(
                 "horizon_minutes": horizon,
                 "group_by": grouping,
                 "minimum_samples": minimum,
-                "outcome_method": _PATH_V2_METHOD,
+                "outcome_method": _PATH_V3_METHOD,
                 "verified_paths_only": True,
             },
             "groups": rows,
@@ -483,7 +484,7 @@ def alert_price_path(
     horizon_minutes: int = 240,
     max_points: int = 80,
 ) -> Dict[str, Any]:
-    """Fetch one bounded canonical Binance Spot path for an archived alert."""
+    """Fetch one bounded canonical spot path for an archived alert."""
     identifier = int(event_id)
     if identifier < 1:
         raise ValueError("event_id must be positive")
@@ -528,13 +529,13 @@ def alert_price_path(
         )
 
     try:
-        path_result = binance_spot_price_path.fetch_closed_candles(
+        path_result = canonical_price_path.fetch_closed_candles(
             str(event["symbol"]), event_time, horizon_time
         )
     except Exception as exc:
         return {
             "available": False,
-            "reason": f"Binance Spot path unavailable: {type(exc).__name__}: {exc}",
+            "reason": f"Canonical spot path unavailable: {type(exc).__name__}: {exc}",
             "event_id": identifier,
             "fallback_used": False,
         }
@@ -542,7 +543,7 @@ def alert_price_path(
     if not candles:
         return {
             "available": False,
-            "reason": "Binance Spot returned no closed post-alert candles",
+            "reason": "Canonical spot provider returned no closed post-alert candles",
             "event_id": identifier,
             "fallback_used": False,
         }
@@ -572,7 +573,7 @@ def alert_price_path(
             reference_source = f"{reference_source}:{reference_pair}"
     except (TypeError, ValueError):
         reference_price = float(candles[0].open)
-        reference_source = "first_full_binance_spot_minute_open"
+        reference_source = f"first_full_{path_result['exchange']}_spot_minute_open"
     metrics = binance_spot_price_path.calculate_path_metrics(
         reference_price=reference_price,
         direction=str(event.get("direction") or "NEUTRAL"),
@@ -599,8 +600,8 @@ def alert_price_path(
                 "code_version": event.get("code_version"),
             },
             "path": {
-                "exchange": "binance",
-                "market": "spot",
+                "exchange": path_result["exchange"],
+                "market": path_result["market"],
                 "pair": path_result["pair"],
                 "interval": path_result["interval"],
                 "horizon_minutes": horizon,
@@ -611,6 +612,8 @@ def alert_price_path(
                 "returned_points": len(selected),
                 "downsample_stride": stride,
                 "first_partial_minute_excluded": True,
+                "provenance": path_result.get("provenance"),
+                "retrieved_at_utc": path_result.get("retrieved_at_utc"),
             },
             "metrics": metrics,
             "sampled_candles": [candle.to_dict() for candle in selected],

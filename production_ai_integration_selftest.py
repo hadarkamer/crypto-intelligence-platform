@@ -20,6 +20,7 @@ import ai_alert_research
 import ai_telegram
 import ai_tools
 import binance_spot_price_path
+import canonical_price_path
 import research_event_capture
 import research_event_runtime
 import research_event_store
@@ -164,14 +165,19 @@ def run() -> None:
     assert round(raw_short, 8) == -5.0 and round(adjusted_short or 0.0, 8) == 5.0
     assert research_outcome_worker.WORKER.enabled is False
     assert research_formula_worker.WORKER.status()["live_alerts_enabled"] is False
-    assert research_formula_worker.WORKER.status()["automatic_stage_ceiling"] == "SHADOW"
+    assert (
+        research_formula_worker.WORKER.status()["automatic_stage_ceiling"]
+        == "LIVE_AFTER_FUTURE_SHADOW_POLICY"
+    )
     outcome_status = research_outcome_worker.WORKER.status()
-    assert outcome_status["method"] == "binance-spot-1m-ohlc-path-v2"
-    assert outcome_status["price_path"] == {
-        "exchange": "binance",
+    assert outcome_status["method"] == "canonical-spot-1m-ohlc-path-v3"
+    assert outcome_status["price_paths"] == {
+        "default": "Binance Spot USDT",
+        "HYPE": "Hyperliquid HYPE/USDT spot (@107)",
         "market": "spot",
         "interval": "1m",
         "first_partial_minute": "excluded_to_prevent_pre_alert_leakage",
+        "historical_imports": "allowed_with_source_and_quality_provenance",
     }
 
     # One Binance fetch covers the maximum due horizon. Existing v1 rows are
@@ -222,7 +228,7 @@ def run() -> None:
     original_enabled = research_outcome_worker._ENABLED
     original_database_url = research_outcome_worker._database_url
     original_psycopg = research_outcome_worker.psycopg
-    original_fetch_path = binance_spot_price_path.fetch_closed_candles
+    original_fetch_path = canonical_price_path.fetch_closed_candles
     try:
         research_outcome_worker._ENABLED = True
         research_outcome_worker._database_url = lambda: "postgresql://selftest"
@@ -242,9 +248,10 @@ def run() -> None:
                 "candles": selected_candles,
                 "expected_candles": count,
                 "complete": True,
+                "provenance": "EXCHANGE_API_HISTORICAL_CANDLES_IMPORTED",
             }
 
-        binance_spot_price_path.fetch_closed_candles = _fake_path
+        canonical_price_path.fetch_closed_candles = _fake_path
         worker = research_outcome_worker.ResearchOutcomeWorker()
         worker._load_due_events = lambda conn, limit: [due_event]
 
@@ -255,36 +262,36 @@ def run() -> None:
         worker._write_outcome = _fake_write
         worker_result = worker.run_once()
         assert len(fetch_calls) == 1
-        assert [row["horizon"] for row in writes] == [60, 720, 1440]
+        assert [row["horizon"] for row in writes] == [60, 240, 720, 1440]
         assert worker_result["inserted"] == 2
-        assert worker_result["upgraded"] == 1
+        assert worker_result["upgraded"] == 2
 
-        # An unavailable Binance Spot symbol is requested only once per run,
+        # An unavailable canonical symbol is requested only once per run,
         # even when several archived alerts need outcomes.  It remains
         # eligible for a retry on the next worker cycle.
         unavailable_fetch_calls = []
-        hype_events = [
-            {**due_event, "event_id": 100, "symbol": "HYPE"},
-            {**due_event, "event_id": 101, "symbol": "HYPE"},
+        unavailable_events = [
+            {**due_event, "event_id": 100, "symbol": "NOPE"},
+            {**due_event, "event_id": 101, "symbol": "NOPE"},
         ]
 
         def _fake_path_with_unavailable_symbol(symbol, start, end):
             unavailable_fetch_calls.append(symbol)
-            if symbol == "HYPE":
-                raise RuntimeError("symbol is unavailable on Binance Spot")
+            if symbol == "NOPE":
+                raise RuntimeError("symbol is unavailable on its canonical route")
             return _fake_path(symbol, start, end)
 
-        binance_spot_price_path.fetch_closed_candles = _fake_path_with_unavailable_symbol
+        canonical_price_path.fetch_closed_candles = _fake_path_with_unavailable_symbol
         unavailable_worker = research_outcome_worker.ResearchOutcomeWorker()
         unavailable_worker._load_due_events = lambda conn, limit: [
-            *hype_events,
+            *unavailable_events,
             due_event,
         ]
         unavailable_worker._write_outcome = _fake_write
         unavailable_result = unavailable_worker.run_once()
-        assert unavailable_fetch_calls.count("HYPE") == 1
+        assert unavailable_fetch_calls.count("NOPE") == 1
         assert unavailable_result["missing_price_paths"] == 2
-        assert unavailable_result["unavailable_symbols"] == {"HYPE": 2}
+        assert unavailable_result["unavailable_symbols"] == {"NOPE": 2}
 
         class _EventRows:
             def fetchone(self):
@@ -313,12 +320,16 @@ def run() -> None:
         research_outcome_worker._ENABLED = original_enabled
         research_outcome_worker._database_url = original_database_url
         research_outcome_worker.psycopg = original_psycopg
-        binance_spot_price_path.fetch_closed_candles = original_fetch_path
+        canonical_price_path.fetch_closed_candles = original_fetch_path
         ai_alert_research.archive_status = original_archive_status
         ai_alert_research._connect = original_connect
 
     cleaned = ai_telegram._plain_telegram_text("## כותרת\n**מודגש** ו-`קוד`")
     assert cleaned == "כותרת\nמודגש ו-קוד"
+    table = ai_telegram._plain_telegram_text(
+        "| מדד | ערך |\n|---|---|\n| MFE | 2.5% |"
+    )
+    assert "|---|" not in table and "• מדד: MFE" in table
 
     root = Path(__file__).resolve().parent
     main_text = (root / "main.py").read_text(encoding="utf-8")
@@ -326,6 +337,7 @@ def run() -> None:
     assert "research_event_store.WRITER.start()" in main_text
     assert "research_outcome_worker.WORKER.start()" in main_text
     assert "research_formula_worker.WORKER.start()" in main_text
+    assert "research_formula_worker.WORKER.bind_telegram(bot_app.bot)" in main_text
     assert "special_transitions_precomputed=True" in main_text
     assert "scan_coinglass_market" not in main_text
     manual_helper = main_text.split("async def _reply_alert_with_archive", 1)[1].split(
@@ -349,6 +361,11 @@ def run() -> None:
     assert "CREATE TABLE IF NOT EXISTS research_formula_shadow_hits" in formula_migration
     assert "delivery_status = 'NOT_SENT'" in formula_migration
     assert "current_stage NOT IN ('APPROVED', 'LIVE') OR live_alert_approved = TRUE" in formula_migration
+    autonomous_migration = (
+        root / "migrations" / "003_formula_autonomous_alerts_v1.sql"
+    ).read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS research_formula_alert_subscriptions" in autonomous_migration
+    assert "CREATE TABLE IF NOT EXISTS research_formula_live_deliveries" in autonomous_migration
 
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS

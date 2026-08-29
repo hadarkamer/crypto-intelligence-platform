@@ -6,10 +6,12 @@ The production AI Research layer exists to discover reproducible conditions
 that precede movement in a defined direction with:
 
 1. high out-of-sample probability;
-2. low adverse movement before the favorable move;
-3. fast favorable progress where possible;
-4. attractive reward relative to the adverse path;
-5. enough observations to distinguish a repeatable edge from an anecdote.
+2. movement as wide as practical, measured absolutely and relative to the
+   same direction/horizon universe;
+3. low adverse movement before the favorable move;
+4. fast favorable progress where possible;
+5. attractive reward relative to the adverse path;
+6. enough observations to distinguish a repeatable edge from an anecdote.
 
 Ideas supplied by operators are hypothesis seeds, never mandatory assumptions.
 The search may use raw measurements, the bot's current models/scores, alternative
@@ -21,16 +23,18 @@ independently.
 `DISCOVERED -> BACKTESTED -> HOLDOUT_PASSED -> SHADOW -> APPROVED -> LIVE`
 
 Runtime status (2026-08-29): automatic discovery, chronological holdout,
-multiple-testing correction, versioned registry and post-activation Shadow
-evaluation are implemented.  The automatic ceiling is `SHADOW`; neither the
-worker nor GPT can create an `APPROVED` or `LIVE` formula.
+multiple-testing correction, wide-move ranking, versioned registry and future
+Shadow evaluation are implemented. GPT cannot approve a formula. A separate
+deterministic owner-policy validator may promote a frozen formula to `LIVE`
+only after enough future outcomes pass every gate.
 
 - `DISCOVERED`: reproducible conditions and discovery-set metrics exist.
 - `BACKTESTED`: full path metrics, counterexamples and baseline comparisons exist.
 - `HOLDOUT_PASSED`: the frozen formula passes a later chronological sample.
 - `SHADOW`: evaluated on new live events without sending a trading alert.
-- `APPROVED`: a human explicitly approves production alert eligibility.
-- `LIVE`: the versioned formula may emit an alert when its conditions occur.
+- `APPROVED`: the stored owner policy and future Shadow gates approve alert
+  eligibility.
+- `LIVE`: the versioned formula may emit an alert to explicitly opted-in chats.
 
 No stage transition is inferred from GPT prose. Each transition must be stored
 and auditable.
@@ -39,14 +43,16 @@ and auditable.
 
 ### 1. Canonical outcome path — implemented
 
-- Binance Spot `USDT`, closed 1-minute candles.
+- Binance Spot `USDT`, closed 1-minute candles by default.
+- HYPE uses explicit Hyperliquid HYPE/USDT spot (`@107`) candles.
 - One fetch per alert up to the maximum due horizon, then internal slices for
   1h / 4h / 12h / 24h.
 - Fixed return, MFE, MAE, time to first progress, time to MFE, target progress,
   target hit and timing.
 - Source, pair, resolution, samples, quality and method version retained.
 - First partial minute excluded to avoid movement from before the alert.
-- No exchange fallback may be labelled as Binance Spot.
+- No source may be silently relabelled. Historical candle imports are allowed
+  only with complete provenance and quality fields.
 
 ### 2. Research feature matrix — core implemented
 
@@ -59,7 +65,7 @@ with separate feature and label sections:
 - captured event inputs: decision price/target plus available Max Pain distance,
   liquidity, gap, cluster and Magnet inputs frozen into the event;
 - model: existing scores, families, confirmations and Magnet/Combined state;
-- label: verified later Binance Spot return, MFE, MAE, speed and target result,
+- label: verified later canonical spot return, MFE, MAE, speed and target result,
   kept structurally separate from every input feature.
 
 It also derives without look-ahead:
@@ -113,18 +119,18 @@ For every candidate report:
 
 ### 5. Shadow and live gates
 
-Holdout-passed candidates run in shadow against future events. Shadow records
-every occurrence, including rejected/failed paths. Only an explicitly approved,
-versioned formula may become a live alert condition. Its alert must state the
-formula version, direction, expected target/exit logic, risk evidence, rarity,
-sample count and validation state.
+Holdout-passed candidates run in Shadow against future events. Shadow records
+every occurrence, including failures. The owner-approved deterministic policy
+requires future sample, control, temporal, probability, width and risk gates.
+Only then may the versioned formula become LIVE. A chat must separately opt in,
+and every message states formula version, direction, horizon, risk evidence,
+rarity, sample count and validation state. It never executes a trade.
 
 ## Current boundary
 
-The production AI can now explore verified path aggregates by exact signal
-combination, event type, symbol and score band, fetch a bounded direct Binance
-Spot path for an individual archived alert, and inspect versioned raw/model
-feature rows with strict prior-only joins. It cannot yet autonomously enumerate
-the full candidate space, create matched controls, correct for multiple
-hypothesis testing or promote a formula through the lifecycle. Those are stages
-3–5 plus the listed matrix extensions above.
+The production AI can explore verified path aggregates, fetch canonical paths,
+inspect raw/model feature rows, enumerate bounded single/pair/triple formulas,
+correct for multiple testing, rank wide movements, validate chronologically,
+observe formulas in Shadow and deliver validated LIVE matches to opted-in
+Telegram chats. Remaining work is accumulation of materially longer future
+history and the optional matrix extensions listed above.

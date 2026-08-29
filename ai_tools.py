@@ -218,7 +218,7 @@ TOOL_SPECS = [
         "type": "function",
         "name": "research_formula_groups",
         "description": (
-            "Search verified Binance Spot one-minute alert outcomes for candidate formula groups. "
+            "Search verified canonical spot one-minute alert outcomes for candidate formula groups. "
             "Groups by exact signal combination, alert type, symbol, or score band and returns sample size, "
             "baseline comparison, hit rate, MFE, MAE percentiles, speed, target progress, rarity share and sample event IDs. "
             "Use it to discover high-probability, low-adverse-movement, fast candidate setups. "
@@ -276,9 +276,10 @@ TOOL_SPECS = [
         "type": "function",
         "name": "get_alert_price_path",
         "description": (
-            "Fetch the canonical Binance Spot one-minute path for one archived delivered alert after a completed horizon. "
+            "Fetch the canonical spot one-minute path for one archived delivered alert after a completed horizon. "
             "Returns full-path MFE, MAE, speed and target metrics plus a bounded candle sample. "
-            "Use it to inspect the exact post-alert path or a formula counterexample. No futures or third-party fallback is allowed."
+            "Use it to inspect the exact post-alert path or a formula counterexample. Binance Spot USDT is default; "
+            "HYPE uses Hyperliquid HYPE/USDT spot. No futures path or silent fallback is allowed."
         ),
         "parameters": {
             "type": "object",
@@ -310,7 +311,7 @@ TOOL_SPECS = [
         "name": "research_feature_matrix",
         "description": (
             "Build bounded, versioned research rows that place decision-time raw Price/OI, Futures CVD and Spot CVD "
-            "features beside the bot's captured model/score features and verified later Binance Spot outcome labels. "
+            "features beside the bot's captured model/score features and verified later canonical spot outcome labels. "
             "Includes prior-alert repetition/breadth and UTC time features. Every input feature is timestamped at or "
             "before the alert; later outcomes are kept in a separate label object. Use this to search for formulas "
             "that may outperform the bot's existing score construction without assuming those scores are optimal."
@@ -341,7 +342,7 @@ TOOL_SPECS = [
                 "horizon_minutes": {
                     "type": "integer",
                     "enum": [60, 240, 720, 1440],
-                    "description": "Verified Binance Spot outcome horizon used as the label.",
+                    "description": "Verified canonical spot outcome horizon used as the label.",
                 },
                 "window_profile": {
                     "type": "string",
@@ -397,7 +398,7 @@ TOOL_SPECS = [
                 "horizon_minutes": {
                     "type": ["integer", "null"],
                     "enum": [60, 240, 720, 1440, None],
-                    "description": "Optional Binance Spot outcome horizon; use null for all.",
+                    "description": "Optional canonical spot outcome horizon; use null for all.",
                 },
                 "limit": {
                     "type": "integer",
@@ -415,7 +416,7 @@ TOOL_SPECS = [
         "name": "research_formula_shadow",
         "description": (
             "Read formula lifecycle counts and recent matches observed after a formula entered Shadow. "
-            "Shadow matches are observational and are explicitly not sent as Telegram alerts."
+            "Shadow matches are observational. A formula may emit Telegram alerts only after deterministic future-Shadow validation, owner-policy promotion to LIVE, runtime enablement and chat opt-in."
         ),
         "parameters": {
             "type": "object",
@@ -614,9 +615,10 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
     return {
         "mode": "production_analysis_read_only",
         "primary_analytical_objective": (
-            "Discover reproducible candidate formulas for high directional probability, "
-            "low adverse excursion, fast favorable progress and strong risk/reward; "
-            "validated formulas require a separate approval before live alerts."
+            "Discover reproducible candidate formulas for the widest practical directional "
+            "movement with high probability, low adverse excursion, fast favorable progress "
+            "and strong risk/reward. Live alerts require deterministic future-Shadow validation "
+            "under the owner policy plus an opted-in Telegram destination."
         ),
         "approved_tools": [
             "get_oi_state",
@@ -635,8 +637,14 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
         ],
         "alert_archive": archive,
         "outcome_path": {
-            "source": "Binance Spot USDT",
+            "sources": {
+                "default": "Binance Spot USDT",
+                "HYPE": "Hyperliquid HYPE/USDT spot (@107)",
+            },
             "resolution": "1m closed candles",
+            "historical_imports": (
+                "allowed when source, pair, market, resolution and quality provenance are retained"
+            ),
             "metrics": [
                 "fixed-horizon return",
                 "MFE",
@@ -659,14 +667,15 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "UTC hour and weekend features",
                 "automatic single/pair/triple condition search over thousands of candidates",
                 "frozen chronological discovery/holdout validation",
-                "probability, MFE, MAE, speed, rarity, sample-size and q-value ranking",
+                "wide-movement percentile, probability, MFE, MAE, speed, sample-size and q-value ranking",
                 "versioned formula lifecycle registry",
-                "live Shadow matching without Telegram delivery",
+                "future Shadow validation and owner-policy promotion",
+                "autonomous Telegram alerts for validated LIVE formulas in opted-in chats",
             ],
             "next_required_stages": [
                 "accumulate a materially longer out-of-sample alert history",
-                "human review of formulas that pass strict holdout gates",
-                "separate explicit approval and destination before any formula alert is delivered",
+                "allow future Shadow observations to satisfy every validation gate",
+                "enable the destination chat with /ai_alerts_on",
             ],
         },
         "historical_limitations": {
@@ -675,10 +684,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "importable only from a Telegram Desktop JSON export into an isolated legacy-message table; "
                 "they are not silently treated as complete Research Events"
             ),
-            "HYPE": (
-                "not available on the canonical Binance Spot path; excluded from verified outcome training "
-                "without inventing a fallback"
-            ),
+            "HYPE": "verified through the explicit Hyperliquid HYPE/USDT spot route",
         },
         "lab_only_not_connected": [
             "external exchange/index context archive",
