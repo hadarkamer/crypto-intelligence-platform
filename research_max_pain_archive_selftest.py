@@ -185,6 +185,116 @@ def run() -> None:
     assert btc_mixed["evaluation_status"] == "EVALUABLE"
     assert hype_mixed["evaluation_status"] == "UNEVALUABLE"
 
+    # Invalid source numerics remain auditable without violating the typed
+    # row constraints and rolling back an otherwise coherent snapshot set.
+    invalid_numeric_rows = _enriched_rows(("BTC", "GOOGL"))
+    bad = next(
+        row
+        for row in invalid_numeric_rows
+        if row["symbol"] == "GOOGL" and row["timeframe"] == "2w"
+    )
+    bad.update(
+        {
+            "rank": 0,
+            "current_price": 0,
+            "coinglass_price": 0,
+            "short_max_pain": 0,
+            "long_max_pain": -1,
+            "short_liquidation_amount": 0,
+            "long_liquidation_amount": -1,
+        }
+    )
+    invalid_numeric = archive.build_snapshot_payload(
+        cycle_id="selftest:invalid-numeric-audit-row",
+        cycle_time_utc=BASE,
+        collection_started_at_utc=BASE,
+        collection_completed_at_utc=BASE + timedelta(minutes=5),
+        source="WATCH_SHARED",
+        collector_version="selftest-v1",
+        snapshot={
+            "ok": True,
+            "rows": _raw_rows(("BTC", "GOOGL")),
+            "missing_timeframes": [],
+            "duplicate_pairs": [],
+        },
+        enriched_rows=invalid_numeric_rows,
+    )
+    invalid_manifests = {
+        item["symbol"]: item for item in invalid_numeric["symbols"]
+    }
+    assert invalid_numeric["set"]["validation_status"] == "PARTIAL"
+    assert invalid_numeric["set"]["research_eligible"] is True
+    assert invalid_manifests["BTC"]["research_eligible"] is True
+    assert invalid_manifests["GOOGL"]["research_eligible"] is False
+    normalized_bad = next(
+        row
+        for row in invalid_numeric["rows"]
+        if row["symbol"] == "GOOGL" and row["timeframe"] == "2w"
+    )
+    assert normalized_bad["row_valid"] is False
+    assert normalized_bad["rank"] is None
+    for column in (
+        "current_price",
+        "coinglass_current_price",
+        "short_max_pain",
+        "long_max_pain",
+        "long_liquidation_amount",
+        "short_target_signed_distance_pct",
+        "long_target_signed_distance_pct",
+        "short_target_abs_distance_pct",
+        "long_target_abs_distance_pct",
+    ):
+        assert normalized_bad[column] is None
+    assert normalized_bad["short_liquidation_amount"] == 0
+    assert "current price is missing or invalid" in normalized_bad[
+        "validation_errors"
+    ]
+    assert "long liquidation amount is missing or invalid" in normalized_bad[
+        "validation_errors"
+    ]
+    assert normalized_bad["raw_provenance"]["raw_numeric_values"] == {
+        "rank": 0,
+        "current_price": 0,
+        "coinglass_current_price": 0,
+        "short_max_pain": 0,
+        "long_max_pain": -1,
+        "short_liquidation_amount": 0,
+        "long_liquidation_amount": -1,
+    }
+
+    tiny_rows = _enriched_rows(("TINY",))
+    for row in tiny_rows:
+        row.update(
+            {
+                "current_price": 1e-12,
+                "coinglass_price": 1e-12,
+                "short_max_pain": 2e-12,
+                "long_max_pain": 0.5e-12,
+            }
+        )
+    tiny = archive.build_snapshot_payload(
+        cycle_id="selftest:positive-below-rounding-precision",
+        cycle_time_utc=BASE,
+        collection_started_at_utc=BASE,
+        collection_completed_at_utc=BASE + timedelta(minutes=5),
+        source="WATCH_SHARED",
+        collector_version="selftest-v1",
+        snapshot={
+            "ok": True,
+            "rows": _raw_rows(("TINY",)),
+            "missing_timeframes": [],
+            "duplicate_pairs": [],
+        },
+        enriched_rows=tiny_rows,
+    )
+    assert tiny["set"]["research_eligible"] is True
+    assert all(row["row_valid"] for row in tiny["rows"])
+    for row in tiny["rows"]:
+        assert row["current_price"] > 0
+        assert row["coinglass_current_price"] > 0
+        assert row["short_max_pain"] > 0
+        assert row["long_max_pain"] > 0
+
     exact_hype = _payload(symbols=("HYPE",))
     assert exact_hype["symbols"][0]["research_eligible"] is True
     assert all(

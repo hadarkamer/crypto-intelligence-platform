@@ -93,13 +93,45 @@ def _int(value: Any) -> Optional[int]:
     return int(number) if number is not None and number.is_integer() else None
 
 
+def _positive_float(value: Any) -> Optional[float]:
+    number = _float(value)
+    return number if number is not None and number > 0 else None
+
+
+def _nonnegative_float(value: Any) -> Optional[float]:
+    number = _float(value)
+    return number if number is not None and number >= 0 else None
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    number = _int(value)
+    return number if number is not None and number > 0 else None
+
+
 def _round(value: Any, digits: int = 8) -> Optional[float]:
     number = _float(value)
     return round(number, digits) if number is not None else None
 
 
+def _round_positive(value: Any, digits: int = 8) -> Optional[float]:
+    number = _positive_float(value)
+    if number is None:
+        return None
+    rounded = round(number, digits)
+    # Preserve sub-rounding positive values instead of converting a valid
+    # scalar into 0.0, which the archive's typed price constraints reject.
+    return rounded if rounded > 0 else number
+
+
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+
+
+def _audit_scalar(value: Any) -> Any:
+    safe = _json_safe(value)
+    if isinstance(safe, float) and not math.isfinite(safe):
+        return str(safe)
+    return safe
 
 
 def _canonical(value: Any) -> str:
@@ -251,14 +283,14 @@ def _normalized_row(
     row = _source_aliases(source)
     symbol = _symbol(row.get("symbol")) or "INVALID"
     timeframe = str(row.get("timeframe") or "")
-    current_price = _float(row.get("current_price"))
-    coinglass_price = _float(row.get("coinglass_price"))
+    current_price = _positive_float(row.get("current_price"))
+    coinglass_price = _positive_float(row.get("coinglass_price"))
     if coinglass_price is None and not row.get("price_source"):
         coinglass_price = current_price
-    short_target = _float(row.get("short_max_pain"))
-    long_target = _float(row.get("long_max_pain"))
-    short_amount = _float(row.get("short_liquidation_amount"))
-    long_amount = _float(row.get("long_liquidation_amount"))
+    short_target = _positive_float(row.get("short_max_pain"))
+    long_target = _positive_float(row.get("long_max_pain"))
+    short_amount = _nonnegative_float(row.get("short_liquidation_amount"))
+    long_amount = _nonnegative_float(row.get("long_liquidation_amount"))
     price_source = str(row.get("price_source") or "").strip().lower()
     price_exchange = str(row.get("price_exchange") or "").strip().lower()
     price_market = str(row.get("price_market") or "").strip().lower()
@@ -333,10 +365,10 @@ def _normalized_row(
     normalized = {
         "symbol": symbol,
         "timeframe": timeframe,
-        "rank": _int(row.get("rank")),
+        "rank": _positive_int(row.get("rank")),
         "source_observed_at_utc": _iso_or_none(observed_at),
-        "current_price": _round(current_price),
-        "coinglass_current_price": _round(coinglass_price),
+        "current_price": _round_positive(current_price),
+        "coinglass_current_price": _round_positive(coinglass_price),
         "price_source": price_source or None,
         "price_exchange": price_exchange or None,
         "price_market": price_market or None,
@@ -344,8 +376,8 @@ def _normalized_row(
         "price_instrument": price_instrument or None,
         "price_fetched_at_utc": _iso_or_none(price_fetched_at),
         "price_source_policy_status": price_policy,
-        "short_max_pain": _round(short_target),
-        "long_max_pain": _round(long_target),
+        "short_max_pain": _round_positive(short_target),
+        "long_max_pain": _round_positive(long_target),
         "short_liquidation_amount": _round(short_amount, 2),
         "long_liquidation_amount": _round(long_amount, 2),
         "short_target_signed_distance_pct": _round(short_signed),
@@ -373,6 +405,24 @@ def _normalized_row(
             ),
             "raw_collected_at_utc": row.get("collected_at_utc"),
             "closest_side": row.get("closest_side"),
+            # Typed audit columns obey the database's scalar constraints even
+            # when a source row is invalid. Preserve the exact rejected
+            # numerics here so normalization never erases source evidence.
+            "raw_numeric_values": {
+                "rank": _audit_scalar(row.get("rank")),
+                "current_price": _audit_scalar(row.get("current_price")),
+                "coinglass_current_price": _audit_scalar(
+                    row.get("coinglass_price")
+                ),
+                "short_max_pain": _audit_scalar(row.get("short_max_pain")),
+                "long_max_pain": _audit_scalar(row.get("long_max_pain")),
+                "short_liquidation_amount": _audit_scalar(
+                    row.get("short_liquidation_amount")
+                ),
+                "long_liquidation_amount": _audit_scalar(
+                    row.get("long_liquidation_amount")
+                ),
+            },
         },
     }
     normalized["payload_sha256"] = _sha256(normalized)
