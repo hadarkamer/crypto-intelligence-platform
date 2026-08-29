@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
+
+import canonical_price_path
 
 
 BINANCE_FUTURES_BASE_URL = os.getenv(
@@ -60,6 +62,149 @@ SYMBOL_ALIASES: Dict[str, Tuple[str, float]] = {
 
 def _normalize_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
+
+
+def _utc(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso(value: Any) -> str:
+    return _utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _candle_value(candle: Any, name: str) -> Any:
+    if isinstance(candle, dict):
+        return candle.get(name)
+    return getattr(candle, name, None)
+
+
+def fetch_research_spot_1m_prices(
+    symbols: Iterable[str],
+    *,
+    observed_at_utc: Any = None,
+    candle_fetcher: Optional[Callable[[str, Any, Any], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Return an official, closed-1m Research price for each symbol.
+
+    This is deliberately separate from the bot's operational live-price
+    fallback chain.  Research accepts only Binance Spot USDT closed one-minute
+    candles, except HYPE which accepts only Hyperliquid HYPE/USDT Spot ``@107``
+    closed one-minute candles.  A failed official route stays missing; it is
+    never replaced by futures, Bybit, CoinGlass DOM or an aggregator price.
+    """
+    requested = sorted(
+        {_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)}
+    )
+    observed_at = _utc(observed_at_utc or datetime.now(timezone.utc))
+    # End on the current UTC minute boundary so the latest selected candle is
+    # fully closed.  Fetch two candles to reject a broken/gapped canonical path.
+    window_end = observed_at.replace(second=0, microsecond=0)
+    window_start = window_end - timedelta(minutes=2)
+    fetcher = candle_fetcher or canonical_price_path.fetch_closed_candles
+    prices: Dict[str, Dict[str, Any]] = {}
+    errors: Dict[str, str] = {}
+
+    for symbol in requested:
+        try:
+            result = dict(fetcher(symbol, window_start, window_end))
+            candles = list(result.get("candles") or [])
+            exchange = str(result.get("exchange") or "").strip().lower()
+            market = str(result.get("market") or "").strip().lower()
+            interval = str(result.get("interval") or "").strip().lower()
+            pair = str(result.get("pair") or "").strip().upper()
+            instrument = str(result.get("api_coin") or "").strip()
+            expected_pair = (
+                "HYPE/USDT"
+                if symbol == "HYPE"
+                else f"{SYMBOL_ALIASES.get(symbol, (symbol, 1.0))[0]}USDT"
+            )
+            route_ok = bool(
+                market == "spot"
+                and interval == "1m"
+                and pair == expected_pair
+                and (
+                    (
+                        symbol == "HYPE"
+                        and exchange == "hyperliquid"
+                        and instrument == "@107"
+                    )
+                    or (symbol != "HYPE" and exchange == "binance")
+                )
+            )
+            if not route_ok:
+                raise ValueError(
+                    f"non-canonical Research price route: "
+                    f"exchange={exchange!r} market={market!r} "
+                    f"pair={pair!r} instrument={instrument!r} "
+                    f"interval={interval!r}"
+                )
+            if result.get("complete") is not True or len(candles) != 2:
+                raise ValueError(
+                    "official Research 1m price path is incomplete "
+                    f"(expected=2, received={len(candles)})"
+                )
+            expected_opens = [window_start, window_start + timedelta(minutes=1)]
+            actual_opens = [
+                _utc(_candle_value(candle, "open_time_utc"))
+                for candle in candles
+            ]
+            if actual_opens != expected_opens:
+                raise ValueError(
+                    "official Research 1m candles are not aligned to the "
+                    "requested closed-minute window"
+                )
+            latest = candles[-1]
+            price = float(_candle_value(latest, "close"))
+            if price <= 0:
+                raise ValueError("official Research 1m close is non-positive")
+            candle_open = _candle_value(latest, "open_time_utc")
+            candle_close = _candle_value(latest, "close_time_utc")
+            if candle_open is None or candle_close is None:
+                raise ValueError("official Research candle timestamps are missing")
+            if not (_utc(candle_open) < _utc(candle_close) < window_end):
+                raise ValueError("official Research latest candle is not fully closed")
+            fetched_at = datetime.now(timezone.utc)
+            prices[symbol] = {
+                "symbol": symbol,
+                "pair": pair,
+                "price": price,
+                "source": "hyperliquid" if symbol == "HYPE" else "binance_spot",
+                "exchange": exchange,
+                "market": market,
+                "instrument": "@107" if symbol == "HYPE" else pair,
+                "interval": "1m",
+                "candle_open_time_utc": _iso(candle_open),
+                "candle_close_time_utc": _iso(candle_close),
+                "fetched_at_utc": _iso(fetched_at),
+            }
+        except Exception as exc:
+            errors[symbol] = f"{type(exc).__name__}: {exc}"
+
+    completed_at = datetime.now(timezone.utc)
+    missing = sorted(set(requested) - set(prices))
+    return {
+        "ok": bool(prices),
+        "source": "official_closed_spot_1m_no_fallback",
+        "price_policy": (
+            "Binance Spot USDT 1m; HYPE Hyperliquid HYPE/USDT Spot @107 1m"
+        ),
+        "window_start_utc": _iso(window_start),
+        "window_end_utc": _iso(window_end),
+        "fetched_at_utc": _iso(completed_at),
+        "requested_count": len(requested),
+        "found_count": len(prices),
+        "missing_count": len(missing),
+        "prices": prices,
+        "missing_symbols": missing,
+        "errors": errors,
+        "fallback_used": False,
+    }
 
 
 def _fetch_futures_mark_prices() -> Dict[str, float]:
@@ -408,6 +553,71 @@ def recalculate_distances(
         "short_abs_usd": short_abs_usd,
         "long_abs_usd": long_abs_usd,
         "closest_side": closest,
+    }
+
+
+def enrich_research_snapshot_rows(
+    rows: Iterable[Any], excluded_symbols: Iterable[str] = ()
+) -> Dict[str, Any]:
+    """Overlay only canonical closed-1m spot prices for Research archiving.
+
+    Unlike :func:`enrich_snapshot_rows`, this function has no fallback chain.
+    Missing official price evidence excludes only that symbol from Research;
+    the source Max-Pain rows remain available to the archive as audit evidence.
+    """
+    excluded = {str(value).upper() for value in excluded_symbols}
+    raw_rows = [dict(row) for row in rows]
+    symbols = sorted(
+        {
+            str(row.get("symbol") or "").strip().upper()
+            for row in raw_rows
+            if str(row.get("symbol") or "").strip().upper() not in excluded
+        }
+        - {""}
+    )
+    price_result = fetch_research_spot_1m_prices(symbols)
+    enriched: List[Dict[str, Any]] = []
+    skipped: set[str] = set(price_result.get("missing_symbols") or [])
+
+    for source_row in raw_rows:
+        row = dict(source_row)
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol or symbol in excluded:
+            continue
+        official = price_result["prices"].get(symbol)
+        if not official:
+            skipped.add(symbol)
+            continue
+        calculation = recalculate_distances(
+            official["price"],
+            row.get("short_max_pain"),
+            row.get("long_max_pain"),
+        )
+        row["coinglass_price"] = row.get("current_price")
+        row["current_price"] = official["price"]
+        row["price_source"] = official["source"]
+        row["price_exchange"] = official["exchange"]
+        row["price_market"] = official["market"]
+        row["price_pair"] = official["pair"]
+        row["price_instrument"] = official["instrument"]
+        row["price_interval"] = official["interval"]
+        row["price_candle_open_time_utc"] = official["candle_open_time_utc"]
+        row["price_candle_close_time_utc"] = official["candle_close_time_utc"]
+        row["price_observed_at_utc"] = official["candle_close_time_utc"]
+        row["price_fetched_at_utc"] = official["fetched_at_utc"]
+        row["distance_short_pct"] = calculation["short_signed_pct"]
+        row["distance_long_pct"] = calculation["long_signed_pct"]
+        row["distance_short_abs"] = calculation["short_abs_usd"]
+        row["distance_long_abs"] = calculation["long_abs_usd"]
+        row["closest_side"] = calculation["closest_side"]
+        enriched.append(row)
+
+    return {
+        "rows": enriched,
+        "price_result": price_result,
+        "skipped_symbols": sorted(skipped),
+        "official_price_policy": price_result["price_policy"],
+        "fallback_used": False,
     }
 
 

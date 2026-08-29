@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from binance_spot_price_path import SpotCandle
 import research_historical_replay as replay
+import research_no_dwell_outcome as no_dwell
 
 
 def _candle(open_time: datetime, close: float = 100.0) -> SpotCandle:
@@ -55,6 +56,22 @@ def run() -> None:
     assert long_metrics["mfe_pct"] > short_metrics["mfe_pct"]
     assert long_metrics["mae_pct"] < short_metrics["mae_pct"]
     assert long_metrics["raw_return_pct"] == short_metrics["raw_return_pct"]
+    policy = no_dwell.freeze_threshold_policy(
+        horizon_minutes=60,
+        decision_time=observation,
+    )
+    first_touch = no_dwell.calculate_first_touch_outcome(
+        reference_price=float(reference.close),
+        direction="LONG",
+        event_time=observation,
+        candles=future,
+        horizon_minutes=60,
+        horizon_closed=True,
+        threshold_policy=policy,
+    )
+    assert first_touch["status"] == "HIT"
+    assert first_touch["method_version"] == "no-dwell-first-touch-v6"
+    assert first_touch["threshold_scale_factor"] == 1.0
     print("historical replay self-test: OK")
 
 

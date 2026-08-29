@@ -3,8 +3,9 @@
 The worker is observational: it never changes alert logic. Once an alert has
 aged into a configured horizon, one canonical spot one-minute path is
 fetched and converted into fixed-horizon return, MFE, MAE, speed and optional
-target-progress measurements. Existing 30-minute v1 rows are upgraded in
-place, preserving the ``(event_id, horizon_minutes)`` identity.
+target-progress measurements.  A separate additive v6 label records the first
+touch of a frozen favorable width with zero dwell and conservative pre-touch
+MAE. Existing legacy rows and method versions remain available for audit.
 
 Binance Spot USDT is the default route. HYPE is explicitly routed to the
 Hyperliquid HYPE/USDT spot market. Historical candles may be imported from
@@ -29,6 +30,7 @@ except Exception:  # pragma: no cover
 
 import binance_spot_price_path
 import canonical_price_path
+import research_no_dwell_outcome
 
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -36,6 +38,7 @@ _ENABLED = os.getenv("RESEARCH_OUTCOME_ENRICHMENT_ENABLED", "").strip().lower() 
 _HORIZONS = (60, 240, 720, 1440)
 _POLL_SECONDS = max(60, int(os.getenv("RESEARCH_OUTCOME_POLL_SECONDS", "900")))
 _METHOD_VERSION = canonical_price_path.METHOD_VERSION
+_FIRST_TOUCH_METHOD_VERSION = research_no_dwell_outcome.METHOD_VERSION
 
 
 def _database_url() -> str:
@@ -101,19 +104,46 @@ def _snapshot_price_source(value: Any) -> str:
     return ":".join(part for part in (source, pair) if part)
 
 
+def _path_source(reference_source: str, path_result: Dict[str, Any]) -> str:
+    exchange = str(path_result.get("exchange") or "unknown").lower()
+    market = str(path_result.get("market") or "spot").lower()
+    return (
+        f"reference={reference_source}|path={exchange}_{market}:"
+        f"{path_result['pair']}:{path_result['interval']}|"
+        f"provenance={path_result.get('provenance') or 'exchange_api'}"
+    )
+
+
 def _due_horizons(
     event_time: datetime,
     existing_versions: Dict[int, str],
+    existing_first_touch_versions: Optional[Dict[int, str]] = None,
     *,
     now: datetime,
+    first_touch_enabled: bool = True,
 ) -> list[int]:
+    """Return closed horizons missing legacy or first-touch enrichment.
+
+    The production worker intentionally does not poll open horizons.  This
+    bounds canonical API load; the pure first-touch calculator still exposes
+    PENDING semantics for callers that already possess a partial path.
+    """
+    first_touch_versions = existing_first_touch_versions or {}
     due = []
     for horizon in _HORIZONS:
-        if event_time > now - timedelta(minutes=horizon):
+        horizon_end = event_time + timedelta(minutes=horizon)
+        if horizon_end > now:
             continue
-        if existing_versions.get(horizon) == _METHOD_VERSION:
-            continue
-        due.append(horizon)
+        legacy_due = (
+            horizon_end <= now
+            and existing_versions.get(horizon) != _METHOD_VERSION
+        )
+        first_touch_due = (
+            first_touch_enabled
+            and first_touch_versions.get(horizon) != _FIRST_TOUCH_METHOD_VERSION
+        )
+        if legacy_due or first_touch_due:
+            due.append(horizon)
     return due
 
 
@@ -161,6 +191,9 @@ class OutcomeMetrics:
     outcomes_upgraded: int = 0
     missing_price_paths: int = 0
     partial_price_paths: int = 0
+    first_touch_rows_written: int = 0
+    first_touch_hits: int = 0
+    first_touch_pending: int = 0
     failures: int = 0
     last_run_utc: Optional[str] = None
     last_error: Optional[str] = None
@@ -184,6 +217,13 @@ class ResearchOutcomeWorker:
             "horizons_minutes": list(_HORIZONS),
             "poll_seconds": _POLL_SECONDS,
             "method": _METHOD_VERSION,
+            "first_touch_method": _FIRST_TOUCH_METHOD_VERSION,
+            "first_touch_policy": {
+                "success": "first favorable width touch; zero dwell",
+                "failure": "pending until the full horizon closes",
+                "post_hit_reversal": "does not cancel success",
+                "worker_evaluation": "once when each horizon closes",
+            },
             "price_paths": {
                 "default": "Binance Spot USDT",
                 "HYPE": "Hyperliquid HYPE/USDT spot (@107)",
@@ -242,12 +282,25 @@ class ResearchOutcomeWorker:
                 """
                 (
                     e.alert_time_utc <= NOW() - (%s * INTERVAL '1 minute')
-                    AND NOT EXISTS (
-                        SELECT 1 FROM research_alert_outcomes current_o
-                        WHERE current_o.event_id=e.event_id
-                          AND current_o.horizon_minutes=%s
-                          AND current_o.outcome_method_version=%s
-                          AND current_o.data_quality_status=ANY(%s)
+                    AND (
+                        NOT EXISTS (
+                            SELECT 1 FROM research_alert_outcomes current_o
+                            WHERE current_o.event_id=e.event_id
+                              AND current_o.horizon_minutes=%s
+                              AND current_o.outcome_method_version=%s
+                              AND current_o.data_quality_status=ANY(%s)
+                        )
+                        OR (
+                            e.direction IN ('LONG', 'SHORT')
+                            AND NOT EXISTS (
+                                SELECT 1 FROM research_first_touch_outcomes current_ft
+                                WHERE current_ft.event_id=e.event_id
+                                  AND current_ft.horizon_minutes=%s
+                                  AND current_ft.method_version=%s
+                                  AND current_ft.status IN ('HIT', 'MISS')
+                                  AND current_ft.data_quality_status=ANY(%s)
+                            )
+                        )
                     )
                 )
                 """
@@ -257,6 +310,9 @@ class ResearchOutcomeWorker:
                     horizon,
                     horizon,
                     _METHOD_VERSION,
+                    list(canonical_price_path.COMPLETE_QUALITIES),
+                    horizon,
+                    _FIRST_TOUCH_METHOD_VERSION,
                     list(canonical_price_path.COMPLETE_QUALITIES),
                 )
             )
@@ -275,11 +331,38 @@ class ResearchOutcomeWorker:
                        )
                            FILTER (WHERE o.event_id IS NOT NULL),
                        '{{}}'::jsonb
-                   ) AS outcome_versions
+                   ) AS outcome_versions,
+                   COALESCE(
+                       (
+                           SELECT jsonb_object_agg(
+                               ft.horizon_minutes,
+                               CASE
+                                   WHEN ft.status IN ('HIT', 'MISS')
+                                    AND ft.data_quality_status=ANY(%s)
+                                   THEN ft.method_version
+                                   ELSE COALESCE(ft.method_version, '') || ':' || ft.status
+                               END
+                           )
+                           FROM research_first_touch_outcomes ft
+                           WHERE ft.event_id=e.event_id
+                             AND ft.method_version=%s
+                       ),
+                       '{{}}'::jsonb
+                   ) AS first_touch_versions
             FROM research_events e
             LEFT JOIN research_alert_outcomes o ON o.event_id=e.event_id
-            WHERE e.event_kind='ALERT'
-              AND e.delivery_status='DELIVERED'
+            WHERE (
+                (e.event_kind='ALERT' AND e.delivery_status='DELIVERED')
+                OR (
+                    e.event_kind='DECISION_SAMPLE'
+                    AND e.delivery_status='NOT_APPLICABLE'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM research_prospective_shadow_events authorized
+                        WHERE authorized.event_id=e.event_id
+                    )
+                )
+              )
               AND ({' OR '.join(clauses)})
             GROUP BY e.event_id
             ORDER BY e.alert_time_utc ASC
@@ -288,6 +371,8 @@ class ResearchOutcomeWorker:
         params: list[Any] = [
             _METHOD_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),
+            list(canonical_price_path.COMPLETE_QUALITIES),
+            _FIRST_TOUCH_METHOD_VERSION,
             *condition_params,
             max(1, min(int(limit), 1000)),
         ]
@@ -305,13 +390,7 @@ class ResearchOutcomeWorker:
         path_metrics: Dict[str, Any],
         complete: bool,
     ) -> bool:
-        exchange = str(path_result.get("exchange") or "unknown").lower()
-        market = str(path_result.get("market") or "spot").lower()
-        source = (
-            f"reference={reference_source}|path={exchange}_{market}:"
-            f"{path_result['pair']}:{path_result['interval']}|"
-            f"provenance={path_result.get('provenance') or 'exchange_api'}"
-        )
+        source = _path_source(reference_source, path_result)
         quality = canonical_price_path.quality_status(path_result, complete=complete)
         row = conn.execute(
             """
@@ -390,6 +469,177 @@ class ResearchOutcomeWorker:
         ).fetchone()
         return bool(row)
 
+    @staticmethod
+    def _write_first_touch_outcome(
+        conn,
+        *,
+        event: Dict[str, Any],
+        horizon: int,
+        reference_price: float,
+        reference_source: str,
+        path_result: Dict[str, Any],
+        first_touch: Dict[str, Any],
+        complete: bool,
+    ) -> bool:
+        quality = canonical_price_path.quality_status(path_result, complete=complete)
+        source = _path_source(reference_source, path_result)
+        row = conn.execute(
+            """
+            INSERT INTO research_first_touch_outcomes (
+                event_id, horizon_minutes, method_version, direction,
+                status, success, failure_final, observed_through_utc,
+                reference_price, qualifying_move_price,
+                qualifying_move_threshold_pct, threshold_scale_factor,
+                threshold_source_kind, threshold_source, threshold_policy,
+                first_qualifying_move_time_utc,
+                time_to_first_qualifying_move_seconds,
+                pre_qualifying_mae_pct,
+                qualifying_candle_adverse_excursion_pct,
+                qualifying_candle_order_ambiguous, dwell_required_seconds,
+                path_resolution_seconds, path_samples, price_source,
+                data_quality_status
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s::jsonb,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (event_id, horizon_minutes, method_version) DO UPDATE SET
+                direction=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.direction
+                    ELSE EXCLUDED.direction
+                END,
+                status=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.status
+                    ELSE EXCLUDED.status
+                END,
+                success=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.success
+                    ELSE EXCLUDED.success
+                END,
+                failure_final=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.failure_final
+                    ELSE EXCLUDED.failure_final
+                END,
+                observed_through_utc=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.observed_through_utc
+                    ELSE EXCLUDED.observed_through_utc
+                END,
+                reference_price=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.reference_price
+                    ELSE EXCLUDED.reference_price
+                END,
+                qualifying_move_price=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.qualifying_move_price
+                    ELSE EXCLUDED.qualifying_move_price
+                END,
+                qualifying_move_threshold_pct=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.qualifying_move_threshold_pct
+                    ELSE EXCLUDED.qualifying_move_threshold_pct
+                END,
+                threshold_scale_factor=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.threshold_scale_factor
+                    ELSE EXCLUDED.threshold_scale_factor
+                END,
+                threshold_source_kind=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.threshold_source_kind
+                    ELSE EXCLUDED.threshold_source_kind
+                END,
+                threshold_source=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.threshold_source
+                    ELSE EXCLUDED.threshold_source
+                END,
+                threshold_policy=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.threshold_policy
+                    ELSE EXCLUDED.threshold_policy
+                END,
+                first_qualifying_move_time_utc=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.first_qualifying_move_time_utc
+                    ELSE EXCLUDED.first_qualifying_move_time_utc
+                END,
+                time_to_first_qualifying_move_seconds=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.time_to_first_qualifying_move_seconds
+                    ELSE EXCLUDED.time_to_first_qualifying_move_seconds
+                END,
+                pre_qualifying_mae_pct=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.pre_qualifying_mae_pct
+                    ELSE EXCLUDED.pre_qualifying_mae_pct
+                END,
+                qualifying_candle_adverse_excursion_pct=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.qualifying_candle_adverse_excursion_pct
+                    ELSE EXCLUDED.qualifying_candle_adverse_excursion_pct
+                END,
+                qualifying_candle_order_ambiguous=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.qualifying_candle_order_ambiguous
+                    ELSE EXCLUDED.qualifying_candle_order_ambiguous
+                END,
+                dwell_required_seconds=0,
+                path_resolution_seconds=EXCLUDED.path_resolution_seconds,
+                path_samples=EXCLUDED.path_samples,
+                price_source=CASE
+                    WHEN research_first_touch_outcomes.status='HIT'
+                    THEN research_first_touch_outcomes.price_source
+                    ELSE EXCLUDED.price_source
+                END,
+                data_quality_status=EXCLUDED.data_quality_status,
+                updated_at_utc=NOW()
+            WHERE research_first_touch_outcomes.status<>'HIT'
+               OR research_first_touch_outcomes.data_quality_status
+                  IS DISTINCT FROM EXCLUDED.data_quality_status
+               OR research_first_touch_outcomes.path_samples < EXCLUDED.path_samples
+            RETURNING event_id
+            """,
+            (
+                event["event_id"],
+                horizon,
+                _FIRST_TOUCH_METHOD_VERSION,
+                first_touch["direction"],
+                first_touch["status"],
+                first_touch["success"],
+                first_touch["failure_final"],
+                first_touch["observed_through_utc"],
+                reference_price,
+                first_touch["qualifying_move_price"],
+                first_touch["qualifying_move_threshold_pct"],
+                first_touch["threshold_scale_factor"],
+                first_touch["threshold_source_kind"],
+                first_touch["threshold_source"],
+                json.dumps(
+                    first_touch["threshold_policy"],
+                    ensure_ascii=False,
+                    default=str,
+                    separators=(",", ":"),
+                ),
+                first_touch["first_qualifying_move_time_utc"],
+                first_touch["time_to_first_qualifying_move_seconds"],
+                first_touch["pre_qualifying_mae_pct"],
+                first_touch["qualifying_candle_adverse_excursion_pct"],
+                first_touch["qualifying_candle_order_ambiguous"],
+                first_touch["dwell_required_seconds"],
+                canonical_price_path.INTERVAL_SECONDS,
+                len(path_result["candles"]),
+                source,
+                quality,
+            ),
+        ).fetchone()
+        return bool(row)
+
     def run_once(self, *, limit_per_horizon: int = 200) -> Dict[str, Any]:
         url = _database_url()
         if not _ENABLED:
@@ -402,6 +652,9 @@ class ResearchOutcomeWorker:
         checked = 0
         path_failures = 0
         partial_paths = 0
+        first_touch_written = 0
+        first_touch_hits = 0
+        first_touch_pending = 0
         now = datetime.now(timezone.utc)
         prepared: list[Dict[str, Any]] = []
         unavailable_symbols: Dict[str, str] = {}
@@ -421,7 +674,15 @@ class ResearchOutcomeWorker:
             symbol = str(event["symbol"]).strip().upper()
             event_time = _utc(event["alert_time_utc"])
             versions = _versions(event.get("outcome_versions"))
-            horizons = _due_horizons(event_time, versions, now=now)
+            first_touch_versions = _versions(event.get("first_touch_versions"))
+            horizons = _due_horizons(
+                event_time,
+                versions,
+                first_touch_versions,
+                now=now,
+                first_touch_enabled=str(event.get("direction") or "").upper()
+                in {"LONG", "SHORT"},
+            )
             if not horizons:
                 continue
 
@@ -435,7 +696,10 @@ class ResearchOutcomeWorker:
                 continue
 
             max_horizon = max(horizons)
-            horizon_time = event_time + timedelta(minutes=max_horizon)
+            horizon_time = min(
+                event_time + timedelta(minutes=max_horizon),
+                now - timedelta(seconds=1),
+            )
             try:
                 path_result = canonical_price_path.fetch_closed_candles(
                     symbol, event_time, horizon_time
@@ -466,27 +730,63 @@ class ResearchOutcomeWorker:
                 if reference_price <= 0:
                     raise ValueError
             except (TypeError, ValueError):
-                reference_price = float(full_path[0].open)
-                reference_source = (
-                    f"{path_result['exchange']}_spot:"
-                    f"{path_result['pair']}:first_full_minute_open"
+                # The first full candle opens after the decision and therefore
+                # cannot replace a missing immutable decision-time price.
+                # Skipping is the only look-ahead-safe behavior; a later retry
+                # may succeed only if the archived event itself is complete.
+                path_failures += 1
+                print(
+                    "[research-outcomes] immutable decision price unavailable "
+                    f"event={event['event_id']} symbol={symbol}; skipped",
+                    flush=True,
                 )
+                continue
 
             for horizon in horizons:
-                cutoff = event_time + timedelta(minutes=horizon)
-                candles = _candles_for_horizon(full_path, cutoff)
+                horizon_cutoff = event_time + timedelta(minutes=horizon)
+                observed_cutoff = min(horizon_cutoff, now - timedelta(seconds=1))
+                candles = _candles_for_horizon(full_path, observed_cutoff)
                 if not candles:
                     path_failures += 1
                     continue
-                expected = _expected_candles(event_time, cutoff)
-                complete = len(candles) == expected
-                partial_paths += int(not complete)
-                metrics = binance_spot_price_path.calculate_path_metrics(
-                    reference_price=reference_price,
-                    direction=str(event.get("direction") or "NEUTRAL"),
-                    event_time=event_time,
-                    candles=candles,
-                    target_price=event.get("target_price"),
+                expected_observed = _expected_candles(event_time, observed_cutoff)
+                observed_complete = len(candles) == expected_observed
+                horizon_closed = now >= horizon_cutoff
+                full_complete = (
+                    horizon_closed
+                    and len(candles) == _expected_candles(event_time, horizon_cutoff)
+                )
+                partial_paths += int(not observed_complete)
+                legacy_needed = (
+                    horizon_closed and versions.get(horizon) != _METHOD_VERSION
+                )
+                metrics = (
+                    binance_spot_price_path.calculate_path_metrics(
+                        reference_price=reference_price,
+                        direction=str(event.get("direction") or "NEUTRAL"),
+                        event_time=event_time,
+                        candles=candles,
+                        target_price=event.get("target_price"),
+                    )
+                    if legacy_needed
+                    else None
+                )
+                first_touch_needed = (
+                    str(event.get("direction") or "").upper() in {"LONG", "SHORT"}
+                    and first_touch_versions.get(horizon)
+                    != _FIRST_TOUCH_METHOD_VERSION
+                )
+                first_touch = (
+                    research_no_dwell_outcome.calculate_first_touch_outcome(
+                        reference_price=reference_price,
+                        direction=str(event.get("direction") or "NEUTRAL"),
+                        event_time=event_time,
+                        candles=candles,
+                        horizon_minutes=horizon,
+                        horizon_closed=full_complete,
+                    )
+                    if first_touch_needed
+                    else None
                 )
                 outcome_path = dict(path_result)
                 outcome_path["candles"] = candles
@@ -498,7 +798,11 @@ class ResearchOutcomeWorker:
                         "reference_source": reference_source,
                         "path_result": outcome_path,
                         "path_metrics": metrics,
-                        "complete": complete,
+                        "first_touch": first_touch,
+                        "complete": observed_complete,
+                        "full_complete": full_complete,
+                        "legacy_needed": legacy_needed,
+                        "first_touch_needed": first_touch_needed,
                         "upgrade": horizon in versions,
                     }
                 )
@@ -521,22 +825,42 @@ class ResearchOutcomeWorker:
                 options="-c statement_timeout=15000 -c lock_timeout=1000",
             ) as conn:
                 for outcome in prepared:
-                    written = self._write_outcome(
-                        conn,
-                        event=outcome["event"],
-                        horizon=outcome["horizon"],
-                        reference_price=outcome["reference_price"],
-                        reference_source=outcome["reference_source"],
-                        path_result=outcome["path_result"],
-                        path_metrics=outcome["path_metrics"],
-                        complete=outcome["complete"],
-                    )
-                    if not written:
-                        continue
-                    if outcome["upgrade"]:
-                        upgraded += 1
-                    else:
-                        inserted += 1
+                    if outcome["first_touch_needed"]:
+                        touch_written = self._write_first_touch_outcome(
+                            conn,
+                            event=outcome["event"],
+                            horizon=outcome["horizon"],
+                            reference_price=outcome["reference_price"],
+                            reference_source=outcome["reference_source"],
+                            path_result=outcome["path_result"],
+                            first_touch=outcome["first_touch"],
+                            complete=outcome["complete"],
+                        )
+                        if touch_written:
+                            first_touch_written += 1
+                            first_touch_hits += int(
+                                outcome["first_touch"]["status"] == "HIT"
+                            )
+                            first_touch_pending += int(
+                                outcome["first_touch"]["status"] == "PENDING"
+                            )
+                    if outcome["legacy_needed"]:
+                        written = self._write_outcome(
+                            conn,
+                            event=outcome["event"],
+                            horizon=outcome["horizon"],
+                            reference_price=outcome["reference_price"],
+                            reference_source=outcome["reference_source"],
+                            path_result=outcome["path_result"],
+                            path_metrics=outcome["path_metrics"],
+                            complete=outcome["full_complete"],
+                        )
+                        if not written:
+                            continue
+                        if outcome["upgrade"]:
+                            upgraded += 1
+                        else:
+                            inserted += 1
 
         self.metrics.runs += 1
         self.metrics.events_checked += checked
@@ -544,6 +868,9 @@ class ResearchOutcomeWorker:
         self.metrics.outcomes_upgraded += upgraded
         self.metrics.missing_price_paths += path_failures
         self.metrics.partial_price_paths += partial_paths
+        self.metrics.first_touch_rows_written += first_touch_written
+        self.metrics.first_touch_hits += first_touch_hits
+        self.metrics.first_touch_pending += first_touch_pending
         self.metrics.last_run_utc = datetime.now(timezone.utc).isoformat()
         self.metrics.last_error = None
         return {
@@ -553,6 +880,9 @@ class ResearchOutcomeWorker:
             "upgraded": upgraded,
             "missing_price_paths": path_failures,
             "partial_price_paths": partial_paths,
+            "first_touch_rows_written": first_touch_written,
+            "first_touch_hits": first_touch_hits,
+            "first_touch_pending": first_touch_pending,
             "unavailable_symbols": {
                 symbol: unavailable_event_counts[symbol]
                 for symbol in sorted(unavailable_symbols)

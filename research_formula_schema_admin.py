@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover
 
 _TRUE = {"1", "true", "yes", "on"}
 MIGRATION_PATHS = (
+    Path(__file__).resolve().parent / "migrations" / "001_research_archive_v1.sql",
     Path(__file__).resolve().parent / "migrations" / "002_formula_research_v1.sql",
     Path(__file__).resolve().parent / "migrations" / "003_formula_autonomous_alerts_v1.sql",
     Path(__file__).resolve().parent
@@ -21,6 +22,18 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "005_formula_shadow_safety_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "006_no_dwell_first_touch_outcomes_v6.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "007_max_pain_watch_archive_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "008_prospective_neutral_anchors_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "009_formula_owner_live_approval_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

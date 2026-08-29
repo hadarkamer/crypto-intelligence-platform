@@ -31,6 +31,7 @@ def _flow(symbol, timestamp, continuous, api, buy=60.0, sell=40.0):
 
 
 def run() -> None:
+    assert matrix.VERIFIED_OUTCOME_METHOD == "no-dwell-first-touch-v6"
     # The production session contract is New York local time, including DST.
     # Summer: Friday 20:00 ET = Saturday 00:00 UTC; Sunday 18:00 ET = 22:00 UTC.
     assert matrix.market_session_baseline.is_active_market(
@@ -109,6 +110,13 @@ def run() -> None:
             assert "e.symbol=%s" in query
             assert "e.event_type=%s" in query
             assert "e.direction=%s" in query
+            assert "JOIN research_first_touch_outcomes ft" in query
+            assert "ft.success AS path_success" in query
+            assert "ft.pre_qualifying_mae_pct" in query
+            assert "ft.method_version=%s" in query
+            assert "ft.status IN ('HIT', 'MISS')" in query
+            assert matrix.VERIFIED_OUTCOME_METHOD in params
+            assert matrix.canonical_price_path.METHOD_VERSION in params
             return _Fetched()
 
     loaded = matrix._load_verified_events(
@@ -121,6 +129,54 @@ def run() -> None:
         limit=100,
     )
     assert loaded == [{"event_id": 1, "symbol": "BTC"}]
+
+    # Max-Pain features are loaded only from coherent migration-007 sets that
+    # were available no later than each decision.  Exercise the query boundary
+    # directly and audit every executed statement against the legacy table.
+    class _BatchResult:
+        def __init__(self, *, one=None, many=()):
+            self._one = one
+            self._many = list(many)
+
+        def fetchone(self):
+            return self._one
+
+        def fetchall(self):
+            return self._many
+
+    class _BatchConnection:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, params):
+            assert query.count("%s") == len(params)
+            normalized = " ".join(query.split())
+            self.queries.append(normalized)
+            if "to_regclass" in normalized:
+                return _BatchResult(one={"relation": "installed"})
+            return _BatchResult(many=[])
+
+    batch_conn = _BatchConnection()
+    batch_result = matrix._load_max_pain_features_batch(
+        batch_conn,
+        [
+            {
+                "event_id": 999,
+                "symbol": "BTC",
+                "alert_time_utc": datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc),
+            }
+        ],
+    )
+    assert batch_result[999]["evaluation_status"] == "UNEVALUABLE"
+    assert all("max_pain_snapshots" not in query for query in batch_conn.queries)
+    candidate_query = next(
+        query
+        for query in batch_conn.queries
+        if "research_max_pain_snapshot_sets" in query
+        and "requested" in query
+    )
+    assert "available_at_utc<=requested.decision_time_utc" in candidate_query
+    assert "LIMIT 2" in candidate_query
 
     coverage_time = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
@@ -139,6 +195,9 @@ def run() -> None:
             assert query.count("%s") == len(params)
             self.calls += 1
             if self.calls == 1:
+                assert "first_touch_method_version=%s" in query
+                assert "first_touch_data_quality_status=ANY(%s)" in query
+                assert matrix.VERIFIED_OUTCOME_METHOD in params
                 return _CoverageRows(
                     [
                         {
@@ -179,11 +238,31 @@ def run() -> None:
         "minimum_span_hours",
     ]
 
+    class _DeliveredCoverageConnection:
+        def execute(self, query, params):
+            assert query.count("%s") == len(params)
+            assert "LEFT JOIN research_first_touch_outcomes ft" in query
+            assert "ft.method_version=%s" in query
+            assert "ft.status IN ('HIT', 'MISS')" in query
+            assert "ft.data_quality_status=ANY(%s)" in query
+            assert matrix.VERIFIED_OUTCOME_METHOD in params
+            return _CoverageRows([])
+
+    delivered_coverage = matrix._verified_coverage(
+        _DeliveredCoverageConnection(), lookback_days=30, horizon_minutes=240
+    )
+    assert delivered_coverage["by_symbol"] == {}
+
     class _OpportunityConnection:
         def execute(self, query, params):
             assert query.count("%s") == len(params)
             assert "symbol=ANY(%s)" in query
             assert params[-3] == ["BTC", "ETH"]
+            assert "long_first_touch_metrics" in query
+            assert "short_first_touch_metrics" in query
+            assert "first_touch_method_version=%s" in query
+            assert "first_touch_data_quality_status=ANY(%s)" in query
+            assert matrix.VERIFIED_OUTCOME_METHOD in params
             return _CoverageRows([])
 
     assert matrix._load_historical_opportunities(
@@ -193,6 +272,63 @@ def run() -> None:
         anchor_limit=100,
         symbols=["ETH", "BTC"],
     ) == []
+
+    replay_events = matrix._opportunity_events(
+        [
+            {
+                "opportunity_id": 42,
+                "symbol": "BTC",
+                "observation_time_utc": coverage_time,
+                "source_observation_time_utc": coverage_time,
+                "horizon_minutes": 240,
+                "reference_price": 100.0,
+                "path_samples": 240,
+                "long_metrics": {
+                    "directional_return_pct": 8.0,
+                    "mfe_pct": 9.0,
+                    "mae_pct": 4.0,
+                },
+                "short_metrics": {
+                    "directional_return_pct": -8.0,
+                    "mfe_pct": 7.0,
+                    "mae_pct": 5.0,
+                },
+                "long_first_touch_metrics": {
+                    "success": False,
+                    "status": "MISS",
+                    "pre_qualifying_mae_pct": 1.25,
+                    "qualifying_candle_order_ambiguous": False,
+                },
+                "short_first_touch_metrics": {
+                    "success": True,
+                    "status": "HIT",
+                    "pre_qualifying_mae_pct": 0.40,
+                    "qualifying_candle_order_ambiguous": True,
+                },
+                "first_touch_method_version": matrix.VERIFIED_OUTCOME_METHOD,
+                "first_touch_data_quality_status": "COMPLETE",
+                "legacy_outcome_method_version": "canonical-spot-path-v1",
+                "legacy_data_quality_status": "COMPLETE",
+            }
+        ]
+    )
+    replay_long = next(
+        item for item in replay_events if item["direction"] == "LONG"
+    )
+    replay_short = next(
+        item for item in replay_events if item["direction"] == "SHORT"
+    )
+    assert replay_long["directional_return_pct"] == 8.0
+    assert replay_long["path_success"] is False
+    assert replay_long["first_touch_status"] == "MISS"
+    assert replay_long["pre_qualifying_mae_pct"] == 1.25
+    assert replay_short["directional_return_pct"] == -8.0
+    assert replay_short["path_success"] is True
+    assert replay_short["first_touch_status"] == "HIT"
+    assert replay_short["pre_qualifying_mae_pct"] == 0.40
+    assert replay_short["qualifying_candle_order_ambiguous"] is True
+    assert replay_short["outcome_method_version"] == matrix.VERIFIED_OUTCOME_METHOD
+    assert replay_short["legacy_outcome_method_version"] == "canonical-spot-path-v1"
 
     event_time = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
     reference_time = event_time - timedelta(minutes=61)
@@ -233,7 +369,17 @@ def run() -> None:
         "raw_return_pct": 2.941176,
         "directional_return_pct": 2.941176,
         "mfe_pct": 4.0,
-        "mae_pct": 0.4,
+        # Full-horizon reversal remains diagnostic. Formula risk must use the
+        # adverse excursion only through the qualifying first touch.
+        "mae_pct": 9.5,
+        "path_success": True,
+        "first_touch_status": "HIT",
+        "first_qualifying_move_time_utc": event_time + timedelta(seconds=75),
+        "time_to_first_qualifying_move_seconds": 75,
+        "qualifying_move_threshold_pct": 1.0,
+        "threshold_scale_factor": 1.0,
+        "pre_qualifying_mae_pct": 0.3,
+        "qualifying_candle_order_ambiguous": True,
         "time_to_first_progress_seconds": 120,
         "time_to_mfe_seconds": 1800,
         "time_to_closest_target_seconds": 900,
@@ -242,6 +388,7 @@ def run() -> None:
         "target_reached": True,
         "path_samples": 240,
         "outcome_method_version": matrix.VERIFIED_OUTCOME_METHOD,
+        "legacy_outcome_method_version": "canonical-spot-path-v1",
         "data_quality_status": matrix.VERIFIED_OUTCOME_QUALITY,
     }
 
@@ -336,6 +483,16 @@ def run() -> None:
         spot_rows=spot_rows,
         prior_events=prior_events,
         windows_minutes=(60, 240),
+        max_pain_by_event_id={
+            77: {
+                "evaluation_status": "EVALUABLE",
+                "available_at_utc": event_time - timedelta(minutes=5),
+                "features": {
+                    "max_pain.12h.short_target_signed_distance_pct": 2.5,
+                    "max_pain.aggregate.short_long_liquidity_ratio": 1.8,
+                },
+            }
+        },
     )
     assert len(rows) == 1
     row = rows[0]
@@ -404,7 +561,13 @@ def run() -> None:
     )
     assert historical_60m["sufficient_history"] is True
     assert row["outcome_label"]["mfe_pct"] == 4.0
-    assert row["outcome_label"]["mae_pct"] == 0.4
+    assert row["outcome_label"]["path_success"] is True
+    assert row["outcome_label"]["first_touch_status"] == "HIT"
+    assert row["outcome_label"]["mae_pct"] == 0.3
+    assert row["outcome_label"]["pre_qualifying_mae_pct"] == 0.3
+    assert row["outcome_label"]["full_horizon_mae_pct"] == 9.5
+    assert row["outcome_label"]["time_to_first_progress_seconds"] == 75
+    assert row["outcome_label"]["qualifying_candle_order_ambiguous"] is True
     assert row["outcome_label"]["session_active_ratio"] == 0.0
     assert row["outcome_label"]["session_weekend_ratio"] == 1.0
     assert row["outcome_label"]["session_composition"] == "WEEKEND_ONLY"
@@ -413,6 +576,13 @@ def run() -> None:
         == 1.0
     )
     assert "outcome_label" not in row["model_features"]
+    assert row["max_pain_features"]["evaluation_status"] == "EVALUABLE"
+    assert (
+        row["max_pain_features"]["features"][
+            "max_pain.12h.short_target_signed_distance_pct"
+        ]
+        == 2.5
+    )
 
     prepared = matrix._prepare_series(price_rows, time_column="candle_time")
     prior, age = matrix._prior_point(prepared["BTC"], event_time)

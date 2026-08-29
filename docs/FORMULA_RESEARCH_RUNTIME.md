@@ -42,11 +42,20 @@ For each horizon and direction, the engine:
 2. freezes the earliest approximately 70% as discovery and latest 30% as
    holdout without ever splitting rows that share the same timestamp;
 3. derives numeric thresholds from discovery quantiles only;
-4. evaluates single, pair and triple conditions in a bounded search;
-5. compares each candidate with its same-direction complement after matching
+4. evaluates single, pair and triple conditions in a bounded search by default;
+5. only when `FORMULA_DISCOVERY_HIERARCHICAL_ENABLED=1`, expands a bounded
+   beam of stable triple parents to four and then five conditions, requiring
+   incremental score gain in both discovery and chronological holdout;
+6. prevents correlated-family stacking without a frozen written exception and
+   always forbids combining composite Max Pain evidence with its components;
+7. corrects every statistically tested candidate with one Benjamini-Hochberg
+   family, including hierarchical children that fail the later gain screen;
+8. collapses exact/overlapping evidence fingerprints into deterministic formula
+   families and persists one champion per family. Single-coin effects remain
+   eligible; cross-symbol breadth is not a family-grouping requirement;
+9. compares each candidate with its same-direction complement after matching
    the outcome horizon's ACTIVE/WEEKEND composition with triangular weights;
-6. applies Benjamini-Hochberg correction across all unique candidates;
-7. ranks candidates with material priority for movement width: median MFE,
+10. ranks candidates with material priority for movement width: median MFE,
    MFE percentile in the same direction/horizon universe, movement beyond p90
    MAE and a horizon-specific minimum; probability, speed, sample reliability
    and stability remain required. The absolute movement floor may be scaled
@@ -85,7 +94,16 @@ high percentage from a single day therefore remains `BACKTESTED` at most.
   promotes a Shadow formula or bypasses the frozen prospective review.
 - `FORMULA_DISCOVERY_HORIZONS=60,240,720,1440`
 - `FORMULA_DISCOVERY_INTERVAL_SECONDS=21600`
+- `FORMULA_DISCOVERY_HIERARCHICAL_ENABLED=1` explicitly enables the bounded
+  stable-parent four/five-condition beam; absent/false preserves the default
+  single/pair/triple search.
 - `FORMULA_SHADOW_POLL_SECONDS=60`
+- `PROSPECTIVE_ANCHORS_ENABLED=1` opts the production service into the silent,
+  UTC-minute-aligned prospective sampler. Each eligible 30-minute slot is
+  idempotent and persists an atomic LONG/SHORT `DECISION_SAMPLE` pair only when
+  the Research schema and all required decision-time sources are valid.
+  Missing official prices remain missing per symbol; this flag never enables
+  Telegram delivery or LIVE promotion.
 - `FORMULA_DISCOVERY_DATASET_MODE=auto` prefers the neutral historical replay
   only after its minimum coverage gate; `alerts` and `historical_replay` are
   explicit bounded operator overrides.
@@ -105,7 +123,13 @@ migrations `002_formula_research_v1.sql`,
 `004_historical_opportunity_replay_v1.sql`, followed by
 `005_formula_shadow_safety_v1.sql`, before enabling the workers.
 
-Formula schema v5 retires an earlier non-LIVE cohort only after at least four
+Prospective sampling additionally requires the additive first-touch and neutral
+anchor migrations (`006` and `008`). Its worker starts only after startup schema
+verification succeeds. `/health` exposes its last official-price coverage,
+missing symbols, persistence summary and next aligned minute without exposing
+any delivery action.
+
+Formula schema v6 retires an earlier non-LIVE cohort only after at least four
 symbols independently have 250 anchors, 14 UTC dates and 336 hours of span for
 that horizon. Sparse symbols are reported but excluded from discovery until
 they pass the same per-symbol gate. Before that gate, a result is capped at

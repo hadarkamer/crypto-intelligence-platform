@@ -21,9 +21,11 @@ from statistics import mean, median
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 import market_session_baseline
+import research_formula_families
+import research_no_dwell_outcome
 
-ENGINE_VERSION = "formula-discovery-v5-safe-replay"
-FORMULA_SCHEMA_VERSION = "research-formula-v5-safe-replay"
+ENGINE_VERSION = "formula-discovery-v6-first-touch-maxpain-hierarchical"
+FORMULA_SCHEMA_VERSION = "research-formula-v6-first-touch-maxpain"
 ALLOWED_OPERATORS = {">=", "<=", "=="}
 
 # These values describe archive/runtime mechanics rather than market state.
@@ -59,12 +61,11 @@ def candidate_feature_allowed(feature: str) -> bool:
     if name.endswith(".complete"):
         return False
     return True
-MIN_MEDIAN_MFE_BY_HORIZON = {
-    60: 0.50,
-    240: 1.00,
-    720: 1.50,
-    1440: 2.00,
-}
+
+
+MIN_MEDIAN_MFE_BY_HORIZON = (
+    research_no_dwell_outcome.BASE_FAVORABLE_WIDTH_PCT_BY_HORIZON
+)
 SESSION_BASELINE_MIN_EFFECTIVE_SAMPLES = 30.0
 
 
@@ -81,6 +82,26 @@ class DiscoveryConfig:
     max_triple_candidates: int = 2200
     max_candidates_evaluated: int = 8000
     max_formulas_returned: int = 80
+    # Four/five-condition discovery is intentionally opt-in. It extends only a
+    # bounded beam of stable chronological triple parents; default v5-depth
+    # single/pair/triple search remains unchanged when this flag is false.
+    hierarchical_search_enabled: bool = False
+    hierarchical_max_conditions: int = 5
+    hierarchical_beam_width: int = 24
+    hierarchical_extension_predicates: int = 30
+    max_quad_candidates: int = 400
+    max_quint_candidates: int = 160
+    hierarchical_min_discovery_samples: int = 24
+    hierarchical_min_holdout_samples: int = 12
+    hierarchical_discovery_sample_increment: int = 4
+    hierarchical_holdout_sample_increment: int = 2
+    hierarchical_min_parent_gain: float = 1.0
+    hierarchical_max_parent_hit_rate_gap: float = 20.0
+    hierarchical_max_parent_score_drop: float = 12.0
+    # Entries use ``family: written justification``. Max Pain composite/component
+    # conflicts remain forbidden even when a family exception is supplied.
+    hierarchical_family_exceptions: tuple[str, ...] = ()
+    evidence_family_overlap_threshold: float = 0.75
 
 
 def _utc(value: Any) -> datetime:
@@ -166,11 +187,14 @@ def _bh_q_values(p_values: Sequence[Optional[float]]) -> list[Optional[float]]:
     if not indexed:
         return [None] * len(p_values)
     indexed.sort(key=lambda item: float(item[1]))
-    total = len(indexed)
+    # The correction family is every distinct hypothesis whose discovery
+    # metrics were calculated. A hypothesis with an unavailable p-value still
+    # occupies one conservative slot instead of silently shrinking ``m``.
+    total = len(p_values)
     adjusted: Dict[int, float] = {}
     running = 1.0
     for reverse_rank, (index, value) in enumerate(reversed(indexed), start=1):
-        rank = total - reverse_rank + 1
+        rank = len(indexed) - reverse_rank + 1
         candidate = min(1.0, float(value) * total / rank)
         running = min(running, candidate)
         adjusted[index] = running
@@ -227,6 +251,17 @@ def extract_decision_features(row: Mapping[str, Any]) -> Dict[str, Any]:
                     continue
                 for key, value in values.items():
                     _put_feature(output, f"historical.{window}.{key}", value)
+
+    max_pain = row.get("max_pain_features")
+    if isinstance(max_pain, Mapping) and str(
+        max_pain.get("evaluation_status") or ""
+    ).upper() == "EVALUABLE":
+        features = max_pain.get("features")
+        if isinstance(features, Mapping):
+            for key, value in features.items():
+                name = str(key)
+                if name.startswith("max_pain."):
+                    _put_feature(output, name, value)
 
     raw = row.get("raw_features") if isinstance(row.get("raw_features"), Mapping) else {}
     captured = raw.get("captured_event_inputs")
@@ -474,6 +509,34 @@ def _outcome_values(rows: Sequence[Mapping[str, Any]], key: str) -> list[float]:
     return values
 
 
+def _final_path_success(row: Mapping[str, Any]) -> Optional[bool]:
+    label = row.get("outcome_label")
+    if not isinstance(label, Mapping):
+        return None
+    value = label.get("path_success")
+    status = str(label.get("first_touch_status") or "").upper()
+    if status == "HIT" and value is True:
+        return True
+    if status == "MISS" and value is False:
+        return False
+    return None
+
+
+def _outcome_success_flags(rows: Sequence[Mapping[str, Any]]) -> list[bool]:
+    """Return only explicit final first-touch labels.
+
+    Directional endpoint return is deliberately not a compatibility fallback:
+    a later reversal must not erase an earlier qualifying touch, and a positive
+    close must not fabricate a touch whose frozen width was never reached.
+    """
+    flags: list[bool] = []
+    for row in rows:
+        value = _final_path_success(row)
+        if value is not None:
+            flags.append(value)
+    return flags
+
+
 def _empirical_percentile(value: Optional[float], population: Sequence[float]) -> Optional[float]:
     if value is None or not population:
         return None
@@ -562,6 +625,17 @@ def _weighted_outcomes(
     return result
 
 
+def _weighted_successes(
+    profile: Sequence[tuple[Mapping[str, Any], float]],
+) -> list[tuple[bool, float]]:
+    result: list[tuple[bool, float]] = []
+    for row, weight in profile:
+        value = _final_path_success(row)
+        if value is not None:
+            result.append((value, weight))
+    return result
+
+
 def _weighted_percentile_rank(
     value: Optional[float], population: Sequence[tuple[float, float]]
 ) -> Optional[float]:
@@ -600,6 +674,11 @@ def _metrics(
     selected: Sequence[Mapping[str, Any]],
     universe: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
+    # Keep every denominator and every descriptive risk/movement metric on the
+    # same terminal first-touch cohort.  PENDING, malformed and legacy-only
+    # labels are unavailable evidence rather than implicit failures/successes.
+    selected = [row for row in selected if _final_path_success(row) is not None]
+    universe = [row for row in universe if _final_path_success(row) is not None]
     selected_ids = {
         int(row.get("event", {}).get("event_id"))
         for row in selected
@@ -620,7 +699,8 @@ def _metrics(
         for label in ("ACTIVE_ONLY", "MIXED", "WEEKEND_ONLY")
     }
     directional = _outcome_values(selected, "directional_return_pct")
-    control_directional = _outcome_values(controls, "directional_return_pct")
+    success_flags = _outcome_success_flags(selected)
+    control_success_flags = _outcome_success_flags(controls)
     mfe = _outcome_values(selected, "mfe_pct")
     mae = _outcome_values(selected, "mae_pct")
     universe_mfe = _outcome_values(universe, "mfe_pct")
@@ -631,6 +711,15 @@ def _metrics(
         bool(row.get("outcome_label", {}).get("target_reached"))
         for row in selected
         if row.get("outcome_label", {}).get("target_reached") is not None
+    ]
+    ambiguity_flags = [
+        bool(row.get("outcome_label", {}).get("qualifying_candle_order_ambiguous"))
+        for row in selected
+        if isinstance(row.get("outcome_label"), Mapping)
+        and isinstance(
+            row.get("outcome_label", {}).get("qualifying_candle_order_ambiguous"),
+            bool,
+        )
     ]
     event_times = sorted(
         _utc(row["event"]["alert_time_utc"])
@@ -644,29 +733,25 @@ def _metrics(
         if len(event_times) >= 2
         else 0.0
     )
-    successes = sum(1 for value in directional if value > 0)
-    control_successes = sum(1 for value in control_directional if value > 0)
-    hit_rate = successes / len(directional) * 100.0 if directional else None
+    successes = sum(success_flags)
+    control_successes = sum(control_success_flags)
+    hit_rate = successes / len(success_flags) * 100.0 if success_flags else None
     control_hit_rate = (
-        control_successes / len(control_directional) * 100.0
-        if control_directional
+        control_successes / len(control_success_flags) * 100.0
+        if control_success_flags
         else None
     )
     control_session_profile = _composition_profile_weights(
         controls, selected_active_ratios
     )
-    session_control_directional = _weighted_outcomes(
-        control_session_profile, "directional_return_pct"
-    )
+    session_control_successes = _weighted_successes(control_session_profile)
     session_control_mfe = _weighted_outcomes(control_session_profile, "mfe_pct")
     session_control_mae = _weighted_outcomes(control_session_profile, "mae_pct")
-    session_control_effective = sum(
-        weight for _, weight in session_control_directional
-    )
+    session_control_effective = sum(weight for _, weight in session_control_successes)
     session_mfe_effective = sum(weight for _, weight in session_control_mfe)
     session_mae_effective = sum(weight for _, weight in session_control_mae)
     weighted_successes = sum(
-        weight for value, weight in session_control_directional if value > 0.0
+        weight for value, weight in session_control_successes if value
     )
     session_hit_baseline = (
         weighted_successes / session_control_effective * 100.0
@@ -793,8 +878,8 @@ def _metrics(
         "successes": successes,
         "hit_rate_pct": _round(hit_rate, 4),
         "wilson_95_lower_pct": _round(
-            (_wilson_lower(successes, len(directional)) or 0.0) * 100.0, 4
-        ) if directional else None,
+            (_wilson_lower(successes, len(success_flags)) or 0.0) * 100.0, 4
+        ) if success_flags else None,
         "avg_directional_return_pct": _round(mean(directional), 6) if directional else None,
         "median_directional_return_pct": _round(median(directional), 6) if directional else None,
         "median_mfe_pct": _round(median_mfe, 6),
@@ -847,13 +932,16 @@ def _metrics(
         "median_time_to_mfe_seconds": _round(median(time_to_mfe), 2) if time_to_mfe else None,
         "avg_target_progress_ratio": _round(mean(target_progress), 6) if target_progress else None,
         "target_reached_rate_pct": _round(sum(target_flags) / len(target_flags) * 100.0, 4) if target_flags else None,
-        "control_sample_size": len(controls),
+        "qualifying_candle_ambiguity_rate_pct": _round(
+            sum(ambiguity_flags) / len(ambiguity_flags) * 100.0, 4
+        ) if ambiguity_flags else None,
+        "control_sample_size": len(control_success_flags),
         "control_hit_rate_pct": _round(control_hit_rate, 4),
         "hit_rate_improvement_pct_points": _round(
             hit_rate - control_hit_rate,
             4,
         ) if hit_rate is not None and control_hit_rate is not None else None,
-        "session_matched_control_sample_size": len(session_control_directional),
+        "session_matched_control_sample_size": len(session_control_successes),
         "session_matched_control_effective_samples": _round(
             session_control_effective, 4
         ),
@@ -886,16 +974,16 @@ def _metrics(
         "unadjusted_one_sided_p_value": _round(
             _one_sided_two_proportion_p(
                 successes,
-                len(directional),
+                len(success_flags),
                 control_successes,
-                len(control_directional),
+                len(control_success_flags),
             ),
             8,
         ),
         "one_sided_p_value": _round(
             _one_sided_two_proportion_p(
                 successes,
-                len(directional),
+                len(success_flags),
                 weighted_successes,
                 session_control_effective,
             ),
@@ -911,6 +999,72 @@ def summarize_outcomes(
 ) -> Dict[str, Any]:
     """Public deterministic metric surface used by future Shadow validation."""
     return _metrics(selected, universe)
+
+
+def rank_prospective_metrics(
+    metrics: Mapping[str, Any], *, horizon_minutes: int
+) -> Dict[str, Any]:
+    """Transparent prospective priority score; never an activation gate.
+
+    The score orders Shadow candidates by the eight dimensions requested by
+    the research policy.  It cannot promote a formula and it never weakens a
+    probability or risk requirement on weekends.  A prior-only weekend scale
+    affects only the absolute favorable-width reference.
+    """
+    horizon = max(1, int(horizon_minutes))
+    hit = max(0.0, min(100.0, _number(metrics.get("hit_rate_pct")) or 0.0))
+    wilson = max(
+        0.0,
+        min(100.0, _number(metrics.get("wilson_95_lower_pct")) or 0.0),
+    )
+    mfe = max(0.0, _number(metrics.get("median_mfe_pct")) or 0.0)
+    mae_p90 = max(0.0, _number(metrics.get("mae_p90_pct")) or 0.0)
+    ratio = max(0.0, _number(metrics.get("median_mfe_mae_ratio")) or 0.0)
+    width_percentile = _number(
+        metrics.get("session_adjusted_mfe_percentile_pct")
+    )
+    if width_percentile is None:
+        width_percentile = _number(metrics.get("median_mfe_percentile_pct"))
+    width_percentile = max(0.0, min(100.0, width_percentile or 0.0))
+    effective_floor = max(
+        0.01, minimum_wide_move_pct(horizon, metrics)
+    )
+    speed_seconds = _number(metrics.get("median_time_to_first_progress_seconds"))
+    horizon_seconds = float(horizon * 60)
+    speed_quality = (
+        max(0.0, 1.0 - min(horizon_seconds, max(0.0, speed_seconds)) / horizon_seconds)
+        if speed_seconds is not None
+        else 0.0
+    )
+    sample_size = max(0, int(metrics.get("sample_size") or 0))
+    rarity_quality = {
+        "RARE": 1.0,
+        "UNCOMMON": 0.65,
+        "COMMON": 0.25,
+    }.get(str(metrics.get("rarity_class") or "").upper(), 0.0)
+    components = {
+        "probability": 0.10 * (hit / 100.0) + 0.18 * (wilson / 100.0),
+        "favorable_movement": 0.12 * min(1.0, mfe / effective_floor),
+        "movement_width": 0.16 * (width_percentile / 100.0),
+        "low_adverse_movement": 0.15 * max(
+            0.0, min(1.0, 1.0 - mae_p90 / max(mfe, 0.01))
+        ),
+        "mfe_mae_ratio": 0.10 * min(1.0, ratio / 5.0),
+        "speed": 0.06 * speed_quality,
+        "rarity": 0.03 * rarity_quality,
+        "sample_size": 0.10 * min(
+            1.0, math.log1p(sample_size) / math.log(51.0)
+        ),
+    }
+    return {
+        "policy_version": "prospective-shadow-priority-v1",
+        "score": round(100.0 * sum(components.values()), 4),
+        "components": {
+            key: round(100.0 * value, 4) for key, value in components.items()
+        },
+        "weekend_adjustment_scope": "absolute favorable width only",
+        "activation_effect": "none; ranking is descriptive",
+    }
 
 
 def minimum_wide_move_pct(
@@ -1002,6 +1156,7 @@ def _preliminary_score(metrics: Mapping[str, Any], complexity: int) -> float:
         + 5.0 * max(-1.0, min(3.0, favorable_edge))
         + 3.0 * math.log1p(sample)
         - 2.0 * max(0, complexity - 1)
+        - 3.0 * max(0, complexity - 3) ** 2
     )
 
 
@@ -1083,6 +1238,7 @@ def _final_score(
         + 0.02 * target_quality
     )
     score -= 1.5 * max(0, complexity - 1)
+    score -= 2.5 * max(0, complexity - 3) ** 2
     return round(max(0.0, min(100.0, score)), 4)
 
 
@@ -1093,6 +1249,7 @@ def _recommended_stage(
     horizon_minutes: int,
     q_value: Optional[float],
     config: DiscoveryConfig,
+    complexity: int = 1,
 ) -> tuple[str, list[str]]:
     reasons: list[str] = []
     discovery_n = int(discovery.get("sample_size") or 0)
@@ -1144,6 +1301,18 @@ def _recommended_stage(
         "discovery/holdout stability": abs(discovery_hit - holdout_hit) <= 20.0,
         "multiple-testing q-value": q_value is not None and q_value <= 0.20,
     }
+    if int(complexity) >= 4:
+        depth = int(complexity)
+        strict_checks["hierarchical discovery sample"] = discovery_n >= max(
+            config.strict_discovery_samples,
+            config.hierarchical_min_discovery_samples
+            + (depth - 4) * config.hierarchical_discovery_sample_increment,
+        )
+        strict_checks["hierarchical holdout sample"] = holdout_n >= max(
+            config.strict_holdout_samples,
+            config.hierarchical_min_holdout_samples
+            + (depth - 4) * config.hierarchical_holdout_sample_increment,
+        )
     reasons.extend(name for name, passed in strict_checks.items() if not passed)
     if not reasons:
         # Discovery itself stops at SHADOW. A separate future-observation
@@ -1177,34 +1346,220 @@ def _search_direction(
             predicate_matches.append(matched)
 
     evaluated = 0
-    dedup_observations: set[tuple[int, ...]] = set()
+    tested_condition_sets: set[tuple[int, ...]] = set()
+    dedup_observations: Dict[tuple[int, ...], tuple[int, ...]] = {}
     candidates: list[Dict[str, Any]] = []
+    family_policy_rejections = 0
+    insufficient_sample_rejections = 0
 
-    def add_candidate(condition_indexes: Sequence[int]) -> Optional[Dict[str, Any]]:
-        nonlocal evaluated
+    def evidence_key(
+        row: Mapping[str, Any], *, partition: str, fallback_index: int
+    ) -> str:
+        event = row.get("event") if isinstance(row.get("event"), Mapping) else {}
+        event_id = event.get("event_id")
+        if event_id is not None:
+            return f"{partition}:event:{event_id}"
+        payload = {
+            "partition": partition,
+            "index": int(fallback_index),
+            "symbol": event.get("symbol"),
+            "time": event.get("alert_time_utc"),
+        }
+        encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+        return f"{partition}:row:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
+
+    def condition_policy(
+        condition_indexes: Sequence[int], *, hierarchical: bool
+    ) -> Dict[str, Any]:
+        conditions = [usable_predicates[index] for index in condition_indexes]
+        return research_formula_families.condition_family_policy(
+            conditions,
+            justified_exceptions=config.hierarchical_family_exceptions,
+            enforce_correlated_families=hierarchical,
+        )
+
+    def add_candidate(
+        condition_indexes: Sequence[int],
+        *,
+        minimum_discovery_samples: Optional[int] = None,
+        hierarchical: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        nonlocal evaluated, family_policy_rejections, insufficient_sample_rejections
+        normalized_indexes = tuple(sorted({int(index) for index in condition_indexes}))
+        if len(normalized_indexes) != len(condition_indexes):
+            return None
+        if normalized_indexes in tested_condition_sets:
+            return None
+        tested_condition_sets.add(normalized_indexes)
+        policy = condition_policy(normalized_indexes, hierarchical=hierarchical)
+        if not policy["valid"]:
+            family_policy_rejections += 1
+            return None
         if evaluated >= config.max_candidates_evaluated:
             return None
         evaluated += 1
         matched = set(range(len(discovery_rows)))
-        for index in condition_indexes:
+        for index in normalized_indexes:
             matched &= predicate_matches[index]
-        if len(matched) < config.min_discovery_samples:
+        required_sample = max(
+            config.min_discovery_samples,
+            int(minimum_discovery_samples or config.min_discovery_samples),
+        )
+        if len(matched) < required_sample:
+            insufficient_sample_rejections += 1
             return None
         observation_key = tuple(sorted(matched))
         if observation_key in dedup_observations:
             return None
-        dedup_observations.add(observation_key)
-        conditions = _canonical_conditions([usable_predicates[index] for index in condition_indexes])
-        selected = [discovery_rows[index] for index in sorted(matched)]
+        dedup_observations[observation_key] = normalized_indexes
+        conditions = _canonical_conditions(
+            [usable_predicates[index] for index in normalized_indexes]
+        )
+        selected = [discovery_rows[index] for index in observation_key]
         metrics = _metrics(selected, discovery_rows)
         candidate = {
-            "condition_indexes": tuple(condition_indexes),
+            "condition_indexes": normalized_indexes,
             "conditions": conditions,
+            "condition_families": list(policy["families"]),
+            "discovery_indices": observation_key,
+            "discovery_evidence_keys": tuple(
+                evidence_key(
+                    discovery_rows[index],
+                    partition="discovery",
+                    fallback_index=index,
+                )
+                for index in observation_key
+            ),
             "discovery_metrics": metrics,
             "preliminary_score": _preliminary_score(metrics, len(conditions)),
+            "eligible_for_output": not hierarchical,
+            "hierarchical": hierarchical,
         }
         candidates.append(candidate)
         return candidate
+
+    def attach_holdout(candidate: Dict[str, Any]) -> None:
+        if "holdout_metrics" in candidate:
+            return
+        matched_indexes = tuple(
+            index
+            for index, features in enumerate(holdout_features)
+            if all(
+                condition_matches(features, condition)
+                for condition in candidate["conditions"]
+            )
+        )
+        selected = [holdout_rows[index] for index in matched_indexes]
+        metrics = _metrics(selected, holdout_rows)
+        candidate["holdout_indices"] = matched_indexes
+        candidate["holdout_evidence_keys"] = tuple(
+            evidence_key(
+                holdout_rows[index], partition="holdout", fallback_index=index
+            )
+            for index in matched_indexes
+        )
+        candidate["holdout_metrics"] = metrics
+        candidate["holdout_preliminary_score"] = _preliminary_score(
+            metrics, len(candidate["conditions"])
+        )
+
+    def improvement(metrics: Mapping[str, Any]) -> Optional[float]:
+        value = _number(metrics.get("session_hit_rate_improvement_pct_points"))
+        if value is None:
+            value = _number(metrics.get("hit_rate_improvement_pct_points"))
+        return value
+
+    def stable_parent(candidate: Dict[str, Any]) -> bool:
+        attach_holdout(candidate)
+        depth = len(candidate["conditions"])
+        if depth <= 3:
+            required_discovery = config.strict_discovery_samples
+            required_holdout = config.strict_holdout_samples
+        else:
+            required_discovery = max(
+                config.strict_discovery_samples,
+                config.hierarchical_min_discovery_samples
+                + (depth - 4) * config.hierarchical_discovery_sample_increment,
+            )
+            required_holdout = max(
+                config.strict_holdout_samples,
+                config.hierarchical_min_holdout_samples
+                + (depth - 4) * config.hierarchical_holdout_sample_increment,
+            )
+        discovery_metrics = candidate["discovery_metrics"]
+        holdout_metrics = candidate["holdout_metrics"]
+        discovery_hit = _number(discovery_metrics.get("hit_rate_pct"))
+        holdout_hit = _number(holdout_metrics.get("hit_rate_pct"))
+        discovery_improvement = improvement(discovery_metrics)
+        holdout_improvement = improvement(holdout_metrics)
+        stable = bool(
+            int(discovery_metrics.get("sample_size") or 0) >= required_discovery
+            and int(holdout_metrics.get("sample_size") or 0) >= required_holdout
+            and discovery_hit is not None
+            and holdout_hit is not None
+            and abs(discovery_hit - holdout_hit)
+            <= float(config.hierarchical_max_parent_hit_rate_gap)
+            and candidate["holdout_preliminary_score"]
+            >= candidate["preliminary_score"]
+            - float(config.hierarchical_max_parent_score_drop)
+            and discovery_improvement is not None
+            and discovery_improvement >= 0.0
+            and holdout_improvement is not None
+            and holdout_improvement >= 0.0
+        )
+        candidate["hierarchical_parent_stable"] = stable
+        return stable
+
+    def hierarchical_samples(depth: int) -> tuple[int, int]:
+        return (
+            max(
+                config.min_discovery_samples,
+                config.hierarchical_min_discovery_samples
+                + (depth - 4) * config.hierarchical_discovery_sample_increment,
+            ),
+            max(
+                config.min_holdout_samples,
+                config.hierarchical_min_holdout_samples
+                + (depth - 4) * config.hierarchical_holdout_sample_increment,
+            ),
+        )
+
+    def finish_hierarchical_child(
+        child: Dict[str, Any], parent: Dict[str, Any]
+    ) -> bool:
+        attach_holdout(parent)
+        attach_holdout(child)
+        depth = len(child["conditions"])
+        required_discovery, required_holdout = hierarchical_samples(depth)
+        discovery_gain = child["preliminary_score"] - parent["preliminary_score"]
+        holdout_gain = (
+            child["holdout_preliminary_score"]
+            - parent["holdout_preliminary_score"]
+        )
+        passed = bool(
+            int(child["discovery_metrics"].get("sample_size") or 0)
+            >= required_discovery
+            and int(child["holdout_metrics"].get("sample_size") or 0)
+            >= required_holdout
+            and discovery_gain >= float(config.hierarchical_min_parent_gain)
+            and holdout_gain >= float(config.hierarchical_min_parent_gain)
+        )
+        child["eligible_for_output"] = passed
+        child["hierarchical_validation"] = {
+            "parent_condition_count": len(parent["conditions"]),
+            "parent_conditions": list(parent["conditions"]),
+            "discovery_incremental_score_gain": round(discovery_gain, 6),
+            "holdout_incremental_score_gain": round(holdout_gain, 6),
+            "minimum_incremental_gain": float(config.hierarchical_min_parent_gain),
+            "required_discovery_samples": required_discovery,
+            "required_holdout_samples": required_holdout,
+            "passed": passed,
+            "selection_note": (
+                "chronological holdout is used as a hierarchical stability/gain "
+                "screen and remains reported separately"
+            ),
+        }
+        return passed
 
     singles: list[Dict[str, Any]] = []
     for index in range(len(usable_predicates)):
@@ -1245,22 +1600,149 @@ def _search_direction(
         if triple_count >= config.max_triple_candidates or evaluated >= config.max_candidates_evaluated:
             break
 
-    candidates.sort(key=lambda item: item["preliminary_score"], reverse=True)
+    hierarchical_diagnostics: Dict[str, Any] = {
+        "enabled": bool(config.hierarchical_search_enabled),
+        "stable_triple_parents": 0,
+        "quad_candidates_attempted": 0,
+        "quad_candidates_tested": 0,
+        "quad_candidates_passed_gain": 0,
+        "stable_quad_parents": 0,
+        "quint_candidates_attempted": 0,
+        "quint_candidates_tested": 0,
+        "quint_candidates_passed_gain": 0,
+        "beam_width": int(config.hierarchical_beam_width),
+        "family_exceptions": list(config.hierarchical_family_exceptions),
+    }
+    if config.hierarchical_search_enabled and int(config.hierarchical_max_conditions) >= 4:
+        beam_width = max(1, int(config.hierarchical_beam_width))
+        parent_pool_limit = max(beam_width, beam_width * 4)
+        triples = sorted(
+            (
+                candidate
+                for candidate in candidates
+                if len(candidate["conditions"]) == 3
+                and research_formula_families.condition_family_policy(
+                    candidate["conditions"],
+                    justified_exceptions=config.hierarchical_family_exceptions,
+                    enforce_correlated_families=True,
+                )["valid"]
+            ),
+            key=lambda item: item["preliminary_score"],
+            reverse=True,
+        )
+        stable_triples = [
+            candidate
+            for candidate in triples[:parent_pool_limit]
+            if stable_parent(candidate)
+        ]
+        stable_triples.sort(
+            key=lambda item: min(
+                item["preliminary_score"], item["holdout_preliminary_score"]
+            ),
+            reverse=True,
+        )
+        stable_triples = stable_triples[:beam_width]
+        hierarchical_diagnostics["stable_triple_parents"] = len(stable_triples)
+        extension_singles = top_singles[
+            : max(1, int(config.hierarchical_extension_predicates))
+        ]
+        quads: list[Dict[str, Any]] = []
+        quad_attempts = 0
+        for parent in stable_triples:
+            used = set(parent["condition_indexes"])
+            used_features = {
+                usable_predicates[index]["feature"] for index in used
+            }
+            for single in extension_singles:
+                if (
+                    quad_attempts >= max(0, int(config.max_quad_candidates))
+                    or evaluated >= config.max_candidates_evaluated
+                ):
+                    break
+                index = int(single["condition_indexes"][0])
+                if index in used or usable_predicates[index]["feature"] in used_features:
+                    continue
+                quad_attempts += 1
+                required_discovery, _ = hierarchical_samples(4)
+                child = add_candidate(
+                    (*parent["condition_indexes"], index),
+                    minimum_discovery_samples=required_discovery,
+                    hierarchical=True,
+                )
+                if child is None:
+                    continue
+                hierarchical_diagnostics["quad_candidates_tested"] += 1
+                if finish_hierarchical_child(child, parent):
+                    quads.append(child)
+                    hierarchical_diagnostics["quad_candidates_passed_gain"] += 1
+            if (
+                quad_attempts >= max(0, int(config.max_quad_candidates))
+                or evaluated >= config.max_candidates_evaluated
+            ):
+                break
+        hierarchical_diagnostics["quad_candidates_attempted"] = quad_attempts
+
+        if int(config.hierarchical_max_conditions) >= 5 and quads:
+            stable_quads = [candidate for candidate in quads if stable_parent(candidate)]
+            stable_quads.sort(
+                key=lambda item: min(
+                    item["preliminary_score"], item["holdout_preliminary_score"]
+                ),
+                reverse=True,
+            )
+            stable_quads = stable_quads[: max(1, beam_width // 2)]
+            hierarchical_diagnostics["stable_quad_parents"] = len(stable_quads)
+            quint_attempts = 0
+            for parent in stable_quads:
+                used = set(parent["condition_indexes"])
+                used_features = {
+                    usable_predicates[index]["feature"] for index in used
+                }
+                for single in extension_singles:
+                    if (
+                        quint_attempts >= max(0, int(config.max_quint_candidates))
+                        or evaluated >= config.max_candidates_evaluated
+                    ):
+                        break
+                    index = int(single["condition_indexes"][0])
+                    if index in used or usable_predicates[index]["feature"] in used_features:
+                        continue
+                    quint_attempts += 1
+                    required_discovery, _ = hierarchical_samples(5)
+                    child = add_candidate(
+                        (*parent["condition_indexes"], index),
+                        minimum_discovery_samples=required_discovery,
+                        hierarchical=True,
+                    )
+                    if child is None:
+                        continue
+                    hierarchical_diagnostics["quint_candidates_tested"] += 1
+                    if finish_hierarchical_child(child, parent):
+                        hierarchical_diagnostics["quint_candidates_passed_gain"] += 1
+                if (
+                    quint_attempts >= max(0, int(config.max_quint_candidates))
+                    or evaluated >= config.max_candidates_evaluated
+                ):
+                    break
+            hierarchical_diagnostics["quint_candidates_attempted"] = quint_attempts
+
     # Correct across every unique candidate inspected, not only the shortlist
-    # later persisted in the registry.
+    # later persisted in the registry. Hierarchical children that fail their
+    # holdout gain gate remain in this correction family because their discovery
+    # hypothesis was actually tested.
     all_q_values = _bh_q_values(
         [candidate["discovery_metrics"].get("one_sided_p_value") for candidate in candidates]
     )
     for candidate, q_value in zip(candidates, all_q_values):
         candidate["discovery_q_value"] = q_value
-    finalists = candidates[: max(config.max_formulas_returned * 4, 120)]
+    eligible_candidates = sorted(
+        (candidate for candidate in candidates if candidate["eligible_for_output"]),
+        key=lambda item: item["preliminary_score"],
+        reverse=True,
+    )
+    finalists = eligible_candidates[: max(config.max_formulas_returned * 4, 120)]
     for candidate in finalists:
-        selected_holdout = [
-            row
-            for row, features in zip(holdout_rows, holdout_features)
-            if all(condition_matches(features, condition) for condition in candidate["conditions"])
-        ]
-        candidate["holdout_metrics"] = _metrics(selected_holdout, holdout_rows)
+        attach_holdout(candidate)
 
     results: list[Dict[str, Any]] = []
     for candidate in finalists:
@@ -1274,6 +1756,7 @@ def _search_direction(
             horizon_minutes=horizon_minutes,
             q_value=q_value,
             config=config,
+            complexity=len(conditions),
         )
         score = _final_score(
             discovery,
@@ -1306,11 +1789,24 @@ def _search_direction(
                     "method": "Benjamini-Hochberg",
                     "discovery_one_sided_p_value": discovery.get("one_sided_p_value"),
                     "q_value": _round(q_value, 8),
+                    "hypotheses_tested": len(candidates),
+                    "candidate_combinations_evaluated": evaluated,
+                    "condition_families": list(candidate["condition_families"]),
+                    "hierarchical_validation": candidate.get(
+                        "hierarchical_validation"
+                    ),
                 },
                 "ranking_score": score,
                 "recommended_stage": stage,
                 "gate_notes": gate_reasons,
                 "live_alert_approved": False,
+                "hierarchical_validation": candidate.get("hierarchical_validation"),
+                "_evidence_keys": tuple(
+                    sorted(
+                        set(candidate.get("discovery_evidence_keys") or ())
+                        | set(candidate.get("holdout_evidence_keys") or ())
+                    )
+                ),
             }
         )
     results.sort(
@@ -1321,7 +1817,11 @@ def _search_direction(
         ),
         reverse=True,
     )
-    results = results[: config.max_formulas_returned]
+    grouped = research_formula_families.group_formula_evidence(
+        results,
+        overlap_threshold=config.evidence_family_overlap_threshold,
+    )
+    results = grouped["champions"][: config.max_formulas_returned]
     for rank, result in enumerate(results, start=1):
         result["rank"] = rank
     return {
@@ -1330,7 +1830,16 @@ def _search_direction(
         "holdout_rows": len(holdout_rows),
         "predicate_count": len(usable_predicates),
         "candidates_evaluated": evaluated,
+        "statistical_hypotheses_tested": len(candidates),
         "unique_candidate_observation_sets": len(dedup_observations),
+        "family_policy_rejections": family_policy_rejections,
+        "insufficient_sample_rejections": insufficient_sample_rejections,
+        "hierarchical_search": hierarchical_diagnostics,
+        "evidence_family_grouping": {
+            key: value
+            for key, value in grouped.items()
+            if key not in {"champions"}
+        },
         "formulas": results,
     }
 
@@ -1350,8 +1859,11 @@ def discover_formulas(
             for row in rows
             if str(row.get("event", {}).get("direction") or "").upper()
             in {"LONG", "SHORT"}
-            and _number(row.get("outcome_label", {}).get("directional_return_pct"))
-            is not None
+            # Discovery is defined by the frozen no-dwell first-touch label.
+            # Endpoint return remains a diagnostic only: it must neither add a
+            # row to the statistical denominator nor stand in for a missing
+            # path-success label after a later reversal.
+            and _final_path_success(row) is not None
         ],
         key=lambda row: (
             _utc(row["event"]["alert_time_utc"]),

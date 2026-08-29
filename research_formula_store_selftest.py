@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import inspect
 import json
 
 import research_formula_store as store
@@ -23,9 +24,15 @@ def _shadow_row(
         "evaluation_status": status,
         "outcome_available": True,
         "directional_return_pct": 1.0,
+        "path_success": True,
+        "first_touch_status": "HIT",
         "mfe_pct": 2.0,
         "mae_pct": 0.25,
+        "full_horizon_mae_pct": 7.5,
         "time_to_first_progress_seconds": 60,
+        "time_to_first_qualifying_move_seconds": 60,
+        "qualifying_move_threshold_pct": 0.5,
+        "qualifying_candle_order_ambiguous": False,
         "time_to_mfe_seconds": 600,
         "target_progress_ratio": 1.0,
         "target_reached": True,
@@ -33,6 +40,21 @@ def _shadow_row(
 
 
 def run() -> None:
+    compatible_shadow_schemas = set(
+        store._SHADOW_COMPATIBLE_FORMULA_SCHEMAS
+    )
+    assert compatible_shadow_schemas == {
+        "research-formula-v5-safe-replay",
+        store.research_formula_engine.FORMULA_SCHEMA_VERSION,
+    }
+    persist_source = " ".join(
+        inspect.getsource(store.persist_discovery_run).split()
+    )
+    assert (
+        "current_stage NOT IN ('SHADOW', 'APPROVED', 'LIVE', 'RETIRED')"
+        in persist_source
+    )
+
     start = datetime(2026, 8, 29, 0, 0, tzinfo=timezone.utc)
     rows = [
         _shadow_row(1, at=start),
@@ -72,6 +94,145 @@ def run() -> None:
     assert selected["excluded_control_event_ids"] == [5, 7]
     assert selected["exact_cohort_excluded_event_ids"] == []
     assert 8 not in {row["event_id"] for row in selected["rows"]}
+
+    # Formula schema v6 changes how outcomes are evaluated, but it must not
+    # make the 19 already-active v5 Shadow formulas disappear. LIVE work,
+    # unlike Shadow monitoring, remains restricted to the current schema.
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = list(rows)
+
+        def fetchall(self):
+            return self._rows
+
+    class _ShadowConnection:
+        def __init__(self):
+            self.queries = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params=()):
+            assert query.count("%s") == len(params)
+            normalized = " ".join(query.split())
+            dense = normalized.replace(" ", "")
+            self.queries.append(normalized)
+            if "FROM research_formulas" in normalized:
+                assert "f.current_stage='SHADOW'" in normalized
+                assert "f.formula_schema_version=ANY(%s)" in dense
+                assert "f.current_stage='LIVE'" in normalized
+                assert set(params[0]) == compatible_shadow_schemas
+                assert params[1] == store.research_formula_engine.FORMULA_SCHEMA_VERSION
+                return _Rows(
+                    [
+                        {
+                            "formula_id": 3153,
+                            "formula_key": "legacy-v5-shadow",
+                            "formula_version": 1,
+                            "formula_text": "legacy formula",
+                            "formula_schema_version": "research-formula-v5-safe-replay",
+                            "direction": "SHORT",
+                            "horizon_minutes": 720,
+                            "conditions": [],
+                            "feature_schema_version": "research-feature-matrix-v5",
+                            "last_shadow_event_id": 0,
+                            "shadow_started_at_utc": start,
+                            "current_stage": "SHADOW",
+                            "live_alert_approved": False,
+                            "ranking_score": 1.0,
+                            "holdout_metrics": {},
+                        }
+                    ]
+                )
+            assert "FROM research_events candidate" in normalized
+            assert "research_prospective_shadow_events" in normalized
+            return _Rows(
+                [
+                    {
+                        "event_id": 9001,
+                        "alert_time_utc": start + timedelta(hours=1),
+                        "symbol": "BTC",
+                        "direction": "SHORT",
+                        "event_type": "SELFTEST_ALERT",
+                        "setup_key": "selftest",
+                        "event_kind": "ALERT",
+                        "delivery_status": "DELIVERED",
+                    }
+                ]
+            )
+
+    shadow_connection = _ShadowConnection()
+    original_connect = store._connect
+    store._connect = lambda *, read_only: shadow_connection
+    try:
+        legacy_work = store.load_shadow_work(max_events_per_formula=5)
+    finally:
+        store._connect = original_connect
+    assert len(legacy_work) == 1
+    assert legacy_work[0]["formula_schema_version"].startswith(
+        "research-formula-v5"
+    )
+    assert legacy_work[0]["events"][0]["event_id"] == 9001
+
+    class _ReadinessConnection:
+        def __init__(self):
+            self.updated = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params=()):
+            assert query.count("%s") == len(params)
+            normalized = " ".join(query.split())
+            dense = normalized.replace(" ", "")
+            if "FROM research_formulas" in normalized:
+                assert "current_stage='SHADOW'" in normalized
+                assert "formula_schema_version=ANY(%s)" in dense
+                assert set(params[0]) == compatible_shadow_schemas
+                return _Rows(
+                    [
+                        {
+                            "formula_id": 3153,
+                            "formula_version": 1,
+                            "horizon_minutes": 720,
+                            "latest_evaluation_run_id": 29,
+                            "shadow_started_at_utc": start,
+                            "last_shadow_event_id": 0,
+                        }
+                    ]
+                )
+            if "FROM research_formula_shadow_checks" in normalized:
+                assert "research_first_touch_outcomes" in normalized
+                assert "ft.success AS path_success" in normalized
+                assert "ft.pre_qualifying_mae_pct AS mae_pct" in normalized
+                assert "ft.status IN ('HIT', 'MISS')" in normalized
+                assert "ft.method_version=%s" in normalized
+                assert "ft.data_quality_status=ANY(%s)" in normalized
+                assert store.research_feature_matrix.VERIFIED_OUTCOME_METHOD in params
+                assert list(store.research_feature_matrix.VERIFIED_OUTCOME_QUALITIES) in params
+                return _Rows([])
+            if "UPDATE research_formulas" in normalized:
+                self.updated = True
+                return _Rows([])
+            raise AssertionError(f"unexpected readiness query: {normalized}")
+
+        def commit(self):
+            return None
+
+    readiness_connection = _ReadinessConnection()
+    store._connect = lambda *, read_only: readiness_connection
+    try:
+        readiness = store.evaluate_shadow_readiness()
+    finally:
+        store._connect = original_connect
+    assert readiness["evaluated"] == 1
+    assert readiness_connection.updated is True
 
     # Exact decision cohorts collapse before non-overlap selection. If an
     # unexpected mixed-status duplicate exists, the matched observation is the
@@ -131,6 +292,21 @@ def run() -> None:
     assert label["session_composition"] == "MIXED"
     assert label["movement_width_reference"] == frozen_width
     assert label["mfe_pct"] == 99.0 and label["mae_pct"] == 88.0
+    assert label["path_success"] is True
+    assert label["first_touch_status"] == "HIT"
+    assert label["full_horizon_mae_pct"] == 7.5
+
+    unlabeled_source = {
+        **source,
+        "directional_return_pct": 99.0,
+        "path_success": None,
+        "first_touch_status": None,
+    }
+    unlabeled = store._metric_row(
+        unlabeled_source, horizon_minutes=240
+    )["outcome_label"]
+    assert unlabeled["path_success"] is None
+    assert unlabeled["first_touch_status"] is None
 
     changed_outcome = {**source, "mfe_pct": 0.01, "mae_pct": 500.0}
     changed_label = store._metric_row(

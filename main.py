@@ -11,7 +11,7 @@ import zlib
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Mapping, Sequence
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -41,7 +41,10 @@ import research_event_runtime
 import research_event_store
 import research_outcome_worker
 import research_formula_schema_admin
+import research_formula_store
 import research_formula_worker
+import research_max_pain_archive
+import research_prospective_anchor_worker
 from collections import defaultdict
 
 try:
@@ -96,6 +99,8 @@ FLOW_REFRESH_TASK = None
 OI_REGIME_TASK = None
 HISTORY_BACKFILL_TASK = None
 FLOW_COLLECTION_TASK = None
+MAX_PAIN_ARCHIVE_TASK = None
+FIRST_TOUCH_BACKFILL_TASK = None
 HISTORY_BACKFILL_LOCK = None
 FLOW_BACKFILL_LOCK = None
 SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
@@ -133,6 +138,10 @@ WATCH_SYNC_GRACE_SECONDS = max(
         )
     ),
 )
+MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS = max(
+    0,
+    min(900, int(os.getenv("MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS", "180"))),
+)
 WATCH_DERIVATIVES_TIMEOUT_SECONDS = max(
     30, int(os.getenv("WATCH_DERIVATIVES_TIMEOUT_SECONDS", "240"))
 )
@@ -169,6 +178,39 @@ WATCH_RUNTIME = {
     "oi_ready": 0,
     "cvd_ready": 0,
     "spot_ready": 0,
+}
+RESEARCH_SCHEMA_RUNTIME: Dict[str, Any] = {
+    "ready": False,
+    "status": "not_checked",
+    "checked_at_utc": None,
+    "apply_attempted": False,
+    "apply_error": None,
+    "verification": None,
+}
+MAX_PAIN_ARCHIVE_RUNTIME: Dict[str, Any] = {
+    "enabled": False,
+    "running": False,
+    "status": "off",
+    "next_slot_utc": None,
+    "next_run_utc": None,
+    "last_slot_utc": None,
+    "last_started_at_utc": None,
+    "last_completed_at_utc": None,
+    "last_error": None,
+    "cycles_started": 0,
+    "cycles_completed": 0,
+}
+FIRST_TOUCH_BACKFILL_RUNTIME: Dict[str, Any] = {
+    "enabled": False,
+    "running": False,
+    "status": "off",
+    "started_at_utc": None,
+    "completed_at_utc": None,
+    "frozen_end_at_utc": None,
+    "symbols": [],
+    "max_anchors": None,
+    "result": None,
+    "error": None,
 }
 
 SQLITE_SCHEMA = """
@@ -1029,83 +1071,268 @@ def _assert_complete_live_scan(rows: List[Dict[str, Any]], source: str) -> Dict[
     return integrity
 
 
-async def collect_live_rows_for_watch():
-    """Collect one complete seven-timeframe live snapshot without DB writes."""
+async def _archive_max_pain_collection_attempt(
+    *,
+    archive_context: Mapping[str, Any],
+    collection_started_at_utc: datetime,
+    collection_completed_at_utc: datetime,
+    snapshot: Mapping[str, Any],
+    enriched_rows: Sequence[Mapping[str, Any]],
+    live_result: Mapping[str, Any],
+    failure_reason: Optional[str] = None,
+) -> None:
+    """Best-effort archive write; collection and alerts remain fail-open."""
+    try:
+        payload = research_max_pain_archive.build_snapshot_payload(
+            cycle_id=str(archive_context["cycle_id"]),
+            cycle_time_utc=archive_context["cycle_time_utc"],
+            collection_started_at_utc=collection_started_at_utc,
+            collection_completed_at_utc=collection_completed_at_utc,
+            source=str(archive_context.get("source") or "WATCH_SHARED"),
+            collector_version=COLLECTOR_VERSION,
+            snapshot=snapshot,
+            enriched_rows=enriched_rows,
+            live_result=live_result,
+            capture_metadata=dict(archive_context.get("metadata") or {}),
+            failure_reason=failure_reason,
+        )
+        result = await asyncio.to_thread(
+            research_max_pain_archive.persist_snapshot_payload, payload
+        )
+        set_record = payload["set"]
+        print(
+            "[maxpain-archive] "
+            f"cycle={archive_context['cycle_id']} "
+            f"status={set_record['collection_status']} "
+            f"eligible={set_record['research_eligible']} "
+            f"rows={set_record['row_count']} persistence={result}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[maxpain-archive] failed open: {exc!r}", flush=True)
+
+
+async def collect_live_rows_for_watch(
+    *,
+    archive_context: Optional[Mapping[str, Any]] = None,
+    archive_only: bool = False,
+):
+    """Collect one complete seven-timeframe live snapshot.
+
+    A caller supplying ``archive_context`` gets one immutable migration-007
+    audit set for the attempt.  Manual command scans remain outside the
+    continuous Watch research cohort.  ``archive_only`` is reserved for the
+    silent passive scheduler and bypasses the bot's operational price fallback
+    chain entirely.
+    """
+    if archive_only and archive_context is None:
+        raise ValueError("archive_only collection requires archive_context")
+    collection_started_at = datetime.now(timezone.utc)
+    snapshot: Dict[str, Any] = {}
+    live_result: Dict[str, Any] = {}
+    archive_live_result: Dict[str, Any] = {}
+    archive_rows: List[Dict[str, Any]] = []
+    archive_attempted = False
+    archive_requested = bool(
+        archive_context is not None and research_max_pain_archive.archive_enabled()
+    )
     print("[scan] opening fresh CoinGlass snapshot", flush=True)
+    try:
+        snapshot = await collect_coinglass_dom_snapshot(
+            timeframes=TIMEFRAMES,
+            headless=True,
+            url=COINGLASS_MAX_PAIN_URL,
+        )
+        missing_from_reader = list(snapshot.get("missing_timeframes", []))
+        if missing_from_reader:
+            raise RuntimeError(
+                "CoinGlass scan incomplete after retries. Missing: "
+                + ", ".join(missing_from_reader)
+            )
 
-    snapshot = await collect_coinglass_dom_snapshot(
-        timeframes=TIMEFRAMES,
-        headless=True,
-        url=COINGLASS_MAX_PAIN_URL,
-    )
+        raw_rows = []
+        for item in snapshot.get("rows", []):
+            short_mp = item.get("max_short_price")
+            long_mp = item.get("max_long_price")
+            if short_mp is None or long_mp is None:
+                continue
 
-    missing_from_reader = list(snapshot.get("missing_timeframes", []))
-    if missing_from_reader:
-        raise RuntimeError(
-            "CoinGlass scan incomplete after retries. Missing: "
-            + ", ".join(missing_from_reader)
+            symbol = str(item.get("symbol", "")).upper()
+            if not symbol or symbol in NON_CRYPTO_SYMBOLS:
+                continue
+
+            raw_rows.append({
+                "symbol": symbol,
+                "rank": item.get("rank"),
+                "timeframe": item.get("timeframe"),
+                "current_price": item.get("price"),
+                "source_observed_at_utc": item.get("collected_at_utc"),
+                "short_max_pain": short_mp,
+                "long_max_pain": long_mp,
+                "short_liquidation_amount": item.get("short_amount_usd"),
+                "long_liquidation_amount": item.get("long_amount_usd"),
+                "distance_short_abs": None,
+                "distance_short_pct": None,
+                "distance_long_abs": None,
+                "distance_long_pct": None,
+                "alert_level": None,
+            })
+
+        if archive_only:
+            if not archive_requested:
+                raise RuntimeError(
+                    "passive Max-Pain archive collection is explicitly disabled"
+                )
+            try:
+                archive_live_result = await asyncio.to_thread(
+                    live_price_provider.enrich_research_snapshot_rows,
+                    raw_rows,
+                    NON_CRYPTO_SYMBOLS,
+                )
+                archive_rows = [
+                    dict(row) for row in archive_live_result.get("rows", [])
+                ]
+                archive_attempted = True
+                await _archive_max_pain_collection_attempt(
+                    archive_context=archive_context,
+                    collection_started_at_utc=collection_started_at,
+                    collection_completed_at_utc=datetime.now(timezone.utc),
+                    snapshot=snapshot,
+                    enriched_rows=archive_rows,
+                    live_result=archive_live_result,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as archive_exc:
+                archive_live_result = {
+                    "rows": [],
+                    "skipped_symbols": sorted(
+                        {
+                            str(row.get("symbol") or "").upper()
+                            for row in raw_rows
+                            if row.get("symbol")
+                        }
+                    ),
+                    "price_result": {
+                        "source": "official_closed_spot_1m_no_fallback",
+                        "error": repr(archive_exc),
+                    },
+                }
+                archive_attempted = True
+                await _archive_max_pain_collection_attempt(
+                    archive_context=archive_context,
+                    collection_started_at_utc=collection_started_at,
+                    collection_completed_at_utc=datetime.now(timezone.utc),
+                    snapshot=snapshot,
+                    enriched_rows=[],
+                    live_result=archive_live_result,
+                    failure_reason=(
+                        "OfficialResearchPriceError: " f"{archive_exc!r}"
+                    ),
+                )
+            archive_live_result["timeframe_integrity"] = _timeframe_integrity(
+                archive_rows
+            )
+            return archive_rows, archive_live_result
+
+        live_result = live_price_provider.enrich_snapshot_rows(
+            raw_rows,
+            excluded_symbols=NON_CRYPTO_SYMBOLS,
+        )
+        rows = live_result.get("rows", [])
+        integrity = _assert_complete_live_scan(rows, "Live scan")
+        symbol_audit = _complete_symbol_audit(rows)
+
+        if not symbol_audit["complete_symbols"]:
+            raise RuntimeError(
+                "Live scan has no symbol with all seven timeframes"
+            )
+
+        rows = symbol_audit["complete_rows"]
+        integrity = _assert_complete_live_scan(
+            rows,
+            "Complete-symbol live scan",
         )
 
-    raw_rows = []
-    for item in snapshot.get("rows", []):
-        short_mp = item.get("max_short_price")
-        long_mp = item.get("max_long_price")
-        if short_mp is None or long_mp is None:
-            continue
+        live_result["rows"] = rows
+        live_result["timeframe_integrity"] = integrity
+        live_result["symbol_integrity"] = symbol_audit
+        if archive_requested:
+            # Research gets a separate no-fallback price overlay.  Bot/Watch
+            # rows above retain their operational fallback behavior, while the
+            # archive accepts only official closed Spot 1m evidence.
+            try:
+                archive_live_result = await asyncio.to_thread(
+                    live_price_provider.enrich_research_snapshot_rows,
+                    raw_rows,
+                    NON_CRYPTO_SYMBOLS,
+                )
+                archive_rows = [
+                    dict(row) for row in archive_live_result.get("rows", [])
+                ]
+                archive_attempted = True
+                await _archive_max_pain_collection_attempt(
+                    archive_context=archive_context,
+                    collection_started_at_utc=collection_started_at,
+                    collection_completed_at_utc=datetime.now(timezone.utc),
+                    snapshot=snapshot,
+                    enriched_rows=archive_rows,
+                    live_result=archive_live_result,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as archive_exc:
+                archive_live_result = {
+                    "rows": [],
+                    "skipped_symbols": sorted(
+                        {
+                            str(row.get("symbol") or "").upper()
+                            for row in raw_rows
+                            if row.get("symbol")
+                        }
+                    ),
+                    "price_result": {
+                        "source": "official_closed_spot_1m_no_fallback",
+                        "error": repr(archive_exc),
+                    },
+                }
+                archive_attempted = True
+                await _archive_max_pain_collection_attempt(
+                    archive_context=archive_context,
+                    collection_started_at_utc=collection_started_at,
+                    collection_completed_at_utc=datetime.now(timezone.utc),
+                    snapshot=snapshot,
+                    enriched_rows=[],
+                    live_result=archive_live_result,
+                    failure_reason=(
+                        "OfficialResearchPriceError: " f"{archive_exc!r}"
+                    ),
+                )
 
-        symbol = str(item.get("symbol", "")).upper()
-        if not symbol or symbol in NON_CRYPTO_SYMBOLS:
-            continue
-
-        raw_rows.append({
-            "symbol": symbol,
-            "rank": item.get("rank"),
-            "timeframe": item.get("timeframe"),
-            "current_price": item.get("price"),
-            "short_max_pain": short_mp,
-            "long_max_pain": long_mp,
-            "short_liquidation_amount": item.get("short_amount_usd"),
-            "long_liquidation_amount": item.get("long_amount_usd"),
-            "distance_short_abs": None,
-            "distance_short_pct": None,
-            "distance_long_abs": None,
-            "distance_long_pct": None,
-            "alert_level": None,
-        })
-
-    live_result = live_price_provider.enrich_snapshot_rows(
-        raw_rows,
-        excluded_symbols=NON_CRYPTO_SYMBOLS,
-    )
-    rows = live_result.get("rows", [])
-    integrity = _assert_complete_live_scan(rows, "Live scan")
-    symbol_audit = _complete_symbol_audit(rows)
-
-    if not symbol_audit["complete_symbols"]:
-        raise RuntimeError(
-            "Live scan has no symbol with all seven timeframes"
+        print(
+            f"[scan] complete rows={len(rows)}; "
+            f"complete_symbols={len(symbol_audit['complete_symbols'])}; "
+            f"incomplete_symbols={symbol_audit['incomplete_symbols']}; "
+            f"duplicates={symbol_audit['duplicate_pairs']}; "
+            f"counts={integrity['counts']}; "
+            f"skipped={live_result.get('skipped_symbols', [])}",
+            flush=True,
         )
-
-    rows = symbol_audit["complete_rows"]
-    integrity = _assert_complete_live_scan(
-        rows,
-        "Complete-symbol live scan",
-    )
-
-    live_result["rows"] = rows
-    live_result["timeframe_integrity"] = integrity
-    live_result["symbol_integrity"] = symbol_audit
-
-    print(
-        f"[scan] complete rows={len(rows)}; "
-        f"complete_symbols={len(symbol_audit['complete_symbols'])}; "
-        f"incomplete_symbols={symbol_audit['incomplete_symbols']}; "
-        f"duplicates={symbol_audit['duplicate_pairs']}; "
-        f"counts={integrity['counts']}; "
-        f"skipped={live_result.get('skipped_symbols', [])}",
-        flush=True,
-    )
-    return rows, live_result
+        return rows, live_result
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if archive_requested and not archive_attempted:
+            await _archive_max_pain_collection_attempt(
+                archive_context=archive_context,
+                collection_started_at_utc=collection_started_at,
+                collection_completed_at_utc=datetime.now(timezone.utc),
+                snapshot=snapshot,
+                enriched_rows=archive_rows,
+                live_result=archive_live_result or live_result,
+                failure_reason=f"{type(exc).__name__}: {exc}",
+            )
+        raise
 
 
 
@@ -1248,6 +1475,64 @@ def _get_scrape_lock():
         import asyncio
         SCRAPE_LOCK = asyncio.Lock()
     return SCRAPE_LOCK
+
+
+def _env_enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _prepare_research_schema() -> Dict[str, Any]:
+    """Apply (when opted in) and verify Research schema before workers run."""
+    RESEARCH_SCHEMA_RUNTIME.update(
+        {
+            "ready": False,
+            "status": "checking",
+            "checked_at_utc": None,
+            "apply_attempted": False,
+            "apply_error": None,
+            "verification": None,
+        }
+    )
+    admin_status = research_formula_schema_admin.status()
+    if admin_status.get("schema_apply_enabled"):
+        RESEARCH_SCHEMA_RUNTIME["apply_attempted"] = True
+        try:
+            await asyncio.to_thread(research_formula_schema_admin.apply_schema)
+        except Exception as exc:
+            RESEARCH_SCHEMA_RUNTIME["apply_error"] = repr(exc)
+            print(f"[research-schema] apply failed: {exc!r}", flush=True)
+
+    try:
+        verification = await asyncio.to_thread(research_formula_store.schema_status)
+    except Exception as exc:
+        verification = {
+            "configured": bool(admin_status.get("database_configured")),
+            "schema_present": False,
+            "verification_error": repr(exc),
+        }
+    ready = bool(verification.get("schema_present"))
+    status = "ready" if ready else "unavailable"
+    RESEARCH_SCHEMA_RUNTIME.update(
+        {
+            "ready": ready,
+            "status": status,
+            "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+            "verification": verification,
+            "admin": admin_status,
+        }
+    )
+    print(
+        f"[research-schema] status={status}; "
+        f"apply_attempted={RESEARCH_SCHEMA_RUNTIME['apply_attempted']}; "
+        f"apply_error={RESEARCH_SCHEMA_RUNTIME['apply_error']}; "
+        f"verification={verification}",
+        flush=True,
+    )
+    return dict(RESEARCH_SCHEMA_RUNTIME)
+
+
+def research_schema_status() -> Dict[str, Any]:
+    return json.loads(json.dumps(RESEARCH_SCHEMA_RUNTIME, default=str))
 
 async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run one manual collection and save it. Never starts Watch."""
@@ -4035,7 +4320,8 @@ async def run_watch_cycle(
     general_enabled: bool = True,
 ) -> Dict[str, Any]:
     """Run one shared DOM + derivatives generation for all Watch consumers."""
-    WATCH_RUNTIME["last_scan_utc"] = datetime.now(timezone.utc).isoformat()
+    cycle_started_at = datetime.now(timezone.utc)
+    WATCH_RUNTIME["last_scan_utc"] = cycle_started_at.isoformat()
     WATCH_RUNTIME["scan_in_progress"] = True
     WATCH_RUNTIME["scan_owner"] = "Watch"
     WATCH_RUNTIME["last_cycle_status"] = "running"
@@ -4048,7 +4334,18 @@ async def run_watch_cycle(
         async def _collect_dom():
             async with scrape_lock:
                 WATCH_RUNTIME["scan_owner"] = "Watch משותף"
-                return await collect_live_rows_for_watch()
+                return await collect_live_rows_for_watch(
+                    archive_context={
+                        "cycle_id": f"shared-watch:{cycle_started_at.isoformat()}",
+                        "cycle_time_utc": cycle_started_at,
+                        "source": "WATCH_SHARED",
+                        "metadata": {
+                            "watch_cycle_number": cycle_number,
+                            "top8_only": bool(top8_only),
+                            "general_enabled": bool(general_enabled),
+                        },
+                    }
+                )
 
         dom_result, derivatives_status = await asyncio.gather(
             _collect_dom(),
@@ -4282,6 +4579,312 @@ def _next_aligned_watch_time(now: Optional[datetime] = None) -> datetime:
     if candidate <= current:
         candidate += timedelta(seconds=interval_seconds)
     return candidate
+
+
+def _next_max_pain_archive_schedule(
+    now: Optional[datetime] = None,
+) -> tuple[datetime, datetime]:
+    """Return the next UTC 30m observation slot and its grace-adjusted run time."""
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    slot = current.replace(
+        minute=0 if current.minute < 30 else 30,
+        second=0,
+        microsecond=0,
+    )
+    run_at = slot + timedelta(seconds=MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS)
+    if run_at <= current:
+        slot += timedelta(minutes=30)
+        run_at = slot + timedelta(seconds=MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS)
+    return slot, run_at
+
+
+def max_pain_archive_status() -> Dict[str, Any]:
+    task = MAX_PAIN_ARCHIVE_TASK
+    value = dict(MAX_PAIN_ARCHIVE_RUNTIME)
+    value.update(
+        {
+            "enabled": research_max_pain_archive.archive_enabled(),
+            "task_running": bool(task is not None and not task.done()),
+            "cadence_minutes": 30,
+            "sync_grace_seconds": MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS,
+            "telegram_delivery_path": False,
+            "price_policy": (
+                "Binance Spot USDT closed 1m; HYPE Hyperliquid "
+                "HYPE/USDT Spot @107 closed 1m; no fallback"
+            ),
+            "persistence": research_max_pain_archive.persistence_status(),
+        }
+    )
+    return json.loads(json.dumps(value, default=str))
+
+
+async def _max_pain_archive_loop() -> None:
+    """Archive a silent coherent Max-Pain snapshot on each aligned half hour."""
+    MAX_PAIN_ARCHIVE_RUNTIME.update(
+        {"running": True, "status": "starting", "last_error": None}
+    )
+    try:
+        while research_max_pain_archive.archive_enabled():
+            slot, run_at = _next_max_pain_archive_schedule()
+            MAX_PAIN_ARCHIVE_RUNTIME.update(
+                {
+                    "status": "waiting",
+                    "next_slot_utc": slot.isoformat(),
+                    "next_run_utc": run_at.isoformat(),
+                }
+            )
+            delay = max(
+                0.0,
+                (run_at - datetime.now(timezone.utc)).total_seconds(),
+            )
+            await asyncio.sleep(delay)
+            if not research_max_pain_archive.archive_enabled():
+                break
+
+            MAX_PAIN_ARCHIVE_RUNTIME.update(
+                {
+                    "status": "collecting",
+                    "last_slot_utc": slot.isoformat(),
+                    "last_started_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "last_error": None,
+                    "cycles_started": int(
+                        MAX_PAIN_ARCHIVE_RUNTIME.get("cycles_started") or 0
+                    )
+                    + 1,
+                }
+            )
+            try:
+                scrape_lock = _get_scrape_lock()
+                async with scrape_lock:
+                    owner = "Research Max-Pain archive"
+                    WATCH_RUNTIME["scan_owner"] = owner
+                    try:
+                        await collect_live_rows_for_watch(
+                            archive_context={
+                                "cycle_id": f"research-passive:{slot.isoformat()}",
+                                "cycle_time_utc": slot,
+                                "source": "RESEARCH_PASSIVE",
+                                "metadata": {
+                                    "scheduler": "aligned-30m-passive-v1",
+                                    "scheduled_run_at_utc": run_at.isoformat(),
+                                    "telegram_delivery_path": False,
+                                    "price_policy": (
+                                        "official-closed-spot-1m-no-fallback"
+                                    ),
+                                },
+                            },
+                            archive_only=True,
+                        )
+                    finally:
+                        if WATCH_RUNTIME.get("scan_owner") == owner:
+                            WATCH_RUNTIME["scan_owner"] = None
+                MAX_PAIN_ARCHIVE_RUNTIME.update(
+                    {
+                        "status": "completed",
+                        "last_completed_at_utc": datetime.now(
+                            timezone.utc
+                        ).isoformat(),
+                        "cycles_completed": int(
+                            MAX_PAIN_ARCHIVE_RUNTIME.get("cycles_completed") or 0
+                        )
+                        + 1,
+                    }
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                MAX_PAIN_ARCHIVE_RUNTIME.update(
+                    {
+                        "status": "failed",
+                        "last_completed_at_utc": datetime.now(
+                            timezone.utc
+                        ).isoformat(),
+                        "last_error": repr(exc),
+                    }
+                )
+                print(f"[maxpain-archive] passive cycle failed: {exc!r}", flush=True)
+    except asyncio.CancelledError:
+        MAX_PAIN_ARCHIVE_RUNTIME["status"] = "cancelled"
+        raise
+    finally:
+        MAX_PAIN_ARCHIVE_RUNTIME.update(
+            {
+                "running": False,
+                "next_slot_utc": None,
+                "next_run_utc": None,
+            }
+        )
+        if MAX_PAIN_ARCHIVE_RUNTIME.get("status") not in {
+            "cancelled",
+            "failed",
+        }:
+            MAX_PAIN_ARCHIVE_RUNTIME["status"] = "stopped"
+
+
+def _start_max_pain_archive_task(*, schema_ready: bool) -> bool:
+    global MAX_PAIN_ARCHIVE_TASK
+    enabled = research_max_pain_archive.archive_enabled()
+    MAX_PAIN_ARCHIVE_RUNTIME["enabled"] = enabled
+    if not enabled:
+        MAX_PAIN_ARCHIVE_RUNTIME["status"] = "off"
+        return False
+    if not schema_ready:
+        MAX_PAIN_ARCHIVE_RUNTIME["status"] = "blocked_schema"
+        return False
+    if MAX_PAIN_ARCHIVE_TASK is not None and not MAX_PAIN_ARCHIVE_TASK.done():
+        return True
+    MAX_PAIN_ARCHIVE_TASK = asyncio.create_task(
+        _max_pain_archive_loop(), name="research-max-pain-archive"
+    )
+    return True
+
+
+async def _stop_max_pain_archive_task() -> None:
+    global MAX_PAIN_ARCHIVE_TASK
+    task = MAX_PAIN_ARCHIVE_TASK
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    MAX_PAIN_ARCHIVE_TASK = None
+
+
+def _first_touch_backfill_config() -> tuple[tuple[str, ...], int]:
+    symbols = tuple(
+        sorted(
+            {
+                value.strip().upper()
+                for value in os.getenv(
+                    "FIRST_TOUCH_BACKFILL_SYMBOLS", "BTC"
+                ).split(",")
+                if value.strip()
+            }
+        )
+    ) or ("BTC",)
+    max_anchors = max(
+        1,
+        min(2000, int(os.getenv("FIRST_TOUCH_BACKFILL_MAX_ANCHORS", "250"))),
+    )
+    return symbols, max_anchors
+
+
+def first_touch_backfill_status() -> Dict[str, Any]:
+    task = FIRST_TOUCH_BACKFILL_TASK
+    value = dict(FIRST_TOUCH_BACKFILL_RUNTIME)
+    value.update(
+        {
+            "enabled": _env_enabled("FIRST_TOUCH_BACKFILL_ENABLED"),
+            "historical_replay_write_enabled": _env_enabled(
+                "HISTORICAL_REPLAY_BACKFILL"
+            ),
+            "task_running": bool(task is not None and not task.done()),
+            "telegram_delivery_path": False,
+            "one_shot": True,
+        }
+    )
+    return json.loads(json.dumps(value, default=str))
+
+
+async def _first_touch_backfill_once(
+    *, frozen_end_at_utc: datetime, symbols: tuple[str, ...], max_anchors: int
+) -> None:
+    FIRST_TOUCH_BACKFILL_RUNTIME.update(
+        {
+            "running": True,
+            "status": "running",
+            "started_at_utc": datetime.now(timezone.utc).isoformat(),
+            "completed_at_utc": None,
+            "frozen_end_at_utc": frozen_end_at_utc.isoformat(),
+            "symbols": list(symbols),
+            "max_anchors": max_anchors,
+            "result": None,
+            "error": None,
+        }
+    )
+    try:
+        # Lazy import keeps the offline replay module out of normal production
+        # startup unless both explicit write guards are set.
+        import research_historical_replay
+
+        result = await asyncio.to_thread(
+            research_historical_replay.run_backfill,
+            end=frozen_end_at_utc,
+            symbols=symbols,
+            horizons=(60, 240, 720, 1440),
+            max_anchors=max_anchors,
+            pause_seconds=float(
+                os.getenv("FIRST_TOUCH_BACKFILL_API_PAUSE_SECONDS", "0.05")
+            ),
+        )
+        FIRST_TOUCH_BACKFILL_RUNTIME.update(
+            {
+                "status": "completed",
+                "result": result,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except asyncio.CancelledError:
+        FIRST_TOUCH_BACKFILL_RUNTIME.update(
+            {
+                "status": "cancelled",
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        raise
+    except Exception as exc:
+        FIRST_TOUCH_BACKFILL_RUNTIME.update(
+            {
+                "status": "failed",
+                "error": repr(exc),
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        print(f"[first-touch-backfill] failed: {exc!r}", flush=True)
+    finally:
+        FIRST_TOUCH_BACKFILL_RUNTIME["running"] = False
+
+
+def _start_first_touch_backfill_task(*, schema_ready: bool) -> bool:
+    global FIRST_TOUCH_BACKFILL_TASK
+    first_touch_enabled = _env_enabled("FIRST_TOUCH_BACKFILL_ENABLED")
+    replay_write_enabled = _env_enabled("HISTORICAL_REPLAY_BACKFILL")
+    FIRST_TOUCH_BACKFILL_RUNTIME["enabled"] = first_touch_enabled
+    if not first_touch_enabled:
+        FIRST_TOUCH_BACKFILL_RUNTIME["status"] = "off"
+        return False
+    if not replay_write_enabled:
+        FIRST_TOUCH_BACKFILL_RUNTIME["status"] = "blocked_replay_write_guard"
+        return False
+    if not schema_ready:
+        FIRST_TOUCH_BACKFILL_RUNTIME["status"] = "blocked_schema"
+        return False
+    if FIRST_TOUCH_BACKFILL_TASK is not None and not FIRST_TOUCH_BACKFILL_TASK.done():
+        return True
+    symbols, max_anchors = _first_touch_backfill_config()
+    frozen_end = datetime.now(timezone.utc)
+    FIRST_TOUCH_BACKFILL_TASK = asyncio.create_task(
+        _first_touch_backfill_once(
+            frozen_end_at_utc=frozen_end,
+            symbols=symbols,
+            max_anchors=max_anchors,
+        ),
+        name="research-first-touch-backfill-canary",
+    )
+    return True
+
+
+async def _stop_first_touch_backfill_task() -> None:
+    global FIRST_TOUCH_BACKFILL_TASK
+    task = FIRST_TOUCH_BACKFILL_TASK
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    FIRST_TOUCH_BACKFILL_TASK = None
 
 
 def _watch_chat_id(fallback: int) -> int:
@@ -5175,6 +5778,10 @@ async def health(request):
         "research_capture": research_event_runtime.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "formula_research": research_formula_worker.WORKER.status(),
+        "research_schema": research_schema_status(),
+        "max_pain_archive": max_pain_archive_status(),
+        "first_touch_backfill": first_touch_backfill_status(),
+        "prospective_anchors": research_prospective_anchor_worker.WORKER.status(),
     })
 
 async def telegram_webhook(request):
@@ -6196,11 +6803,14 @@ async def main():
     global WATCH_TASK, WATCH_SCAN_TASK, WATCH_GENERAL_ENABLED
     global OI_REFRESH_TASK, FLOW_REFRESH_TASK
     global OI_REGIME_TASK, HISTORY_BACKFILL_TASK, FLOW_COLLECTION_TASK
+    global MAX_PAIN_ARCHIVE_TASK, FIRST_TOUCH_BACKFILL_TASK
     WATCH_TASK = None
     WATCH_SCAN_TASK = None
     WATCH_GENERAL_ENABLED = False
     OI_REFRESH_TASK = None
     FLOW_REFRESH_TASK = None
+    MAX_PAIN_ARCHIVE_TASK = None
+    FIRST_TOUCH_BACKFILL_TASK = None
     MAGNET_V1_WATCHES.clear()
     SPECIFIC_WATCHES.clear()
     WATCH_RUNTIME.update({
@@ -6224,6 +6834,35 @@ async def main():
         "cvd_ready": 0,
         "spot_ready": 0,
     })
+    MAX_PAIN_ARCHIVE_RUNTIME.update(
+        {
+            "enabled": research_max_pain_archive.archive_enabled(),
+            "running": False,
+            "status": "off",
+            "next_slot_utc": None,
+            "next_run_utc": None,
+            "last_slot_utc": None,
+            "last_started_at_utc": None,
+            "last_completed_at_utc": None,
+            "last_error": None,
+            "cycles_started": 0,
+            "cycles_completed": 0,
+        }
+    )
+    FIRST_TOUCH_BACKFILL_RUNTIME.update(
+        {
+            "enabled": _env_enabled("FIRST_TOUCH_BACKFILL_ENABLED"),
+            "running": False,
+            "status": "off",
+            "started_at_utc": None,
+            "completed_at_utc": None,
+            "frozen_end_at_utc": None,
+            "symbols": [],
+            "max_anchors": None,
+            "result": None,
+            "error": None,
+        }
+    )
 
     # Remove legacy activation flags. Startup never launches a scan.
     try:
@@ -6266,43 +6905,78 @@ async def main():
     bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()
+    schema_runtime = await _prepare_research_schema()
+    research_schema_ready = bool(schema_runtime.get("ready"))
     await bot_app.start()
     research_formula_worker.WORKER.bind_telegram(bot_app.bot)
 
-    try:
-        writer_started = await research_event_store.WRITER.start()
-        print(
-            f"[research-store] {'started' if writer_started else 'disabled'}; "
-            f"status={research_event_store.WRITER.status()}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(f"[research-store] startup failed open: {exc!r}", flush=True)
+    if research_schema_ready:
+        try:
+            writer_started = await research_event_store.WRITER.start()
+            print(
+                f"[research-store] {'started' if writer_started else 'disabled'}; "
+                f"status={research_event_store.WRITER.status()}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[research-store] startup failed open: {exc!r}", flush=True)
 
-    try:
-        outcomes_started = await research_outcome_worker.WORKER.start()
-        print(
-            f"[research-outcomes] {'started' if outcomes_started else 'disabled'}; "
-            f"status={research_outcome_worker.WORKER.status()}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(f"[research-outcomes] startup failed open: {exc!r}", flush=True)
+        try:
+            outcomes_started = await research_outcome_worker.WORKER.start()
+            print(
+                f"[research-outcomes] {'started' if outcomes_started else 'disabled'}; "
+                f"status={research_outcome_worker.WORKER.status()}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[research-outcomes] startup failed open: {exc!r}", flush=True)
 
-    try:
-        if research_formula_schema_admin.status()["schema_apply_enabled"]:
-            await asyncio.to_thread(research_formula_schema_admin.apply_schema)
-        formulas_started = await research_formula_worker.WORKER.start()
+        try:
+            formulas_started = await research_formula_worker.WORKER.start()
+            print(
+                f"[formula-research] {'started' if formulas_started else 'disabled'}; "
+                f"status={research_formula_worker.WORKER.status()}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[formula-research] startup failed open: {exc!r}", flush=True)
+    else:
         print(
-            f"[formula-research] {'started' if formulas_started else 'disabled'}; "
-            f"status={research_formula_worker.WORKER.status()}",
+            "[research] all writer/outcome/formula workers skipped: "
+            "schema verification is not ready",
             flush=True,
         )
-    except Exception as exc:
-        print(f"[formula-research] startup failed open: {exc!r}", flush=True)
+
+    max_pain_started = _start_max_pain_archive_task(
+        schema_ready=research_schema_ready
+    )
+    print(
+        f"[maxpain-archive] {'started' if max_pain_started else 'not started'}; "
+        f"status={max_pain_archive_status()}",
+        flush=True,
+    )
+    first_touch_started = _start_first_touch_backfill_task(
+        schema_ready=research_schema_ready
+    )
+    print(
+        f"[first-touch-backfill] "
+        f"{'started' if first_touch_started else 'not started'}; "
+        f"status={first_touch_backfill_status()}",
+        flush=True,
+    )
+    prospective_anchors_started = await research_prospective_anchor_worker.WORKER.start(
+        schema_ready=research_schema_ready
+    )
+    print(
+        f"[prospective-anchors] "
+        f"{'started' if prospective_anchors_started else 'not started'}; "
+        f"status={research_prospective_anchor_worker.WORKER.status()}",
+        flush=True,
+    )
 
     print(
-        "[startup] manual-only trading mode; no Max-Pain alert or Watch scan started automatically",
+        "[startup] manual-only trading mode; no Max-Pain alert or trading Watch "
+        "scan started automatically (silent Research archive is independently guarded)",
         flush=True,
     )
 
@@ -6387,6 +7061,9 @@ async def main():
                 except asyncio.CancelledError:
                     pass
 
+        await _stop_max_pain_archive_task()
+        await _stop_first_touch_backfill_task()
+        await research_prospective_anchor_worker.WORKER.stop()
         await research_formula_worker.WORKER.stop()
         await research_outcome_worker.WORKER.stop()
         await research_event_store.WRITER.stop()

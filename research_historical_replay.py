@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - validated at runtime
 import binance_spot_price_path
 import canonical_price_path
 import market_session_baseline
+import research_no_dwell_outcome
 
 
 REPLAY_VERSION = "historical-raw-opportunity-replay-v1"
@@ -343,6 +344,11 @@ def _metric_payload(metrics: Dict[str, Any]) -> Dict[str, Any]:
     return {key: metrics.get(key) for key in keys}
 
 
+def _first_touch_payload(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact no-dwell label; legacy full-horizon metrics stay separate."""
+    return dict(metrics)
+
+
 def _existing_keys(
     conn,
     *,
@@ -358,16 +364,16 @@ def _existing_keys(
         WHERE symbol=%s
           AND observation_time_utc >= %s AND observation_time_utc < %s
           AND horizon_minutes=ANY(%s)
-          AND outcome_method_version=%s
+          AND first_touch_method_version=%s
           AND replay_version=%s
-          AND data_quality_status=ANY(%s)
+          AND first_touch_data_quality_status=ANY(%s)
         """,
         (
             symbol,
             start,
             end,
             list(horizons),
-            canonical_price_path.METHOD_VERSION,
+            research_no_dwell_outcome.METHOD_VERSION,
             REPLAY_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),
         ),
@@ -401,6 +407,28 @@ def _write_outcome(
         event_time=anchor.observation_time_utc,
         candles=future_candles,
     )
+    threshold_policy = research_no_dwell_outcome.freeze_threshold_policy(
+        horizon_minutes=horizon,
+        decision_time=anchor.observation_time_utc,
+    )
+    long_first_touch = research_no_dwell_outcome.calculate_first_touch_outcome(
+        reference_price=reference_price,
+        direction="LONG",
+        event_time=anchor.observation_time_utc,
+        candles=future_candles,
+        horizon_minutes=horizon,
+        horizon_closed=True,
+        threshold_policy=threshold_policy,
+    )
+    short_first_touch = research_no_dwell_outcome.calculate_first_touch_outcome(
+        reference_price=reference_price,
+        direction="SHORT",
+        event_time=anchor.observation_time_utc,
+        candles=future_candles,
+        horizon_minutes=horizon,
+        horizon_closed=True,
+        threshold_policy=threshold_policy,
+    )
     quality = canonical_price_path.quality_status(path_result, complete=True)
     conn.execute(
         """
@@ -408,31 +436,24 @@ def _write_outcome(
             symbol, observation_time_utc, source_observation_time_utc,
             horizon_minutes, reference_time_utc, reference_price,
             price_at_horizon, raw_return_pct, long_metrics, short_metrics,
+            long_first_touch_metrics, short_first_touch_metrics,
+            first_touch_method_version, first_touch_path_samples,
+            first_touch_data_quality_status, first_touch_replay_run_id,
             path_samples, outcome_method_version, exchange, market, pair,
             interval_seconds, provenance, data_quality_status, replay_version,
             replay_run_id
         ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s::jsonb, %s::jsonb, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (symbol, observation_time_utc, horizon_minutes) DO UPDATE SET
-            source_observation_time_utc=EXCLUDED.source_observation_time_utc,
-            reference_time_utc=EXCLUDED.reference_time_utc,
-            reference_price=EXCLUDED.reference_price,
-            price_at_horizon=EXCLUDED.price_at_horizon,
-            raw_return_pct=EXCLUDED.raw_return_pct,
-            long_metrics=EXCLUDED.long_metrics,
-            short_metrics=EXCLUDED.short_metrics,
-            path_samples=EXCLUDED.path_samples,
-            outcome_method_version=EXCLUDED.outcome_method_version,
-            exchange=EXCLUDED.exchange,
-            market=EXCLUDED.market,
-            pair=EXCLUDED.pair,
-            interval_seconds=EXCLUDED.interval_seconds,
-            provenance=EXCLUDED.provenance,
-            data_quality_status=EXCLUDED.data_quality_status,
-            replay_version=EXCLUDED.replay_version,
-            replay_run_id=EXCLUDED.replay_run_id,
+            long_first_touch_metrics=EXCLUDED.long_first_touch_metrics,
+            short_first_touch_metrics=EXCLUDED.short_first_touch_metrics,
+            first_touch_method_version=EXCLUDED.first_touch_method_version,
+            first_touch_path_samples=EXCLUDED.first_touch_path_samples,
+            first_touch_data_quality_status=EXCLUDED.first_touch_data_quality_status,
+            first_touch_replay_run_id=EXCLUDED.first_touch_replay_run_id,
             updated_at_utc=NOW()
         """,
         (
@@ -446,6 +467,12 @@ def _write_outcome(
             float(long_metrics["raw_return_pct"]),
             _json(_metric_payload(long_metrics)),
             _json(_metric_payload(short_metrics)),
+            _json(_first_touch_payload(long_first_touch)),
+            _json(_first_touch_payload(short_first_touch)),
+            research_no_dwell_outcome.METHOD_VERSION,
+            len(future_candles),
+            quality,
+            run_id,
             len(future_candles),
             canonical_price_path.METHOD_VERSION,
             path_result["exchange"],
@@ -469,13 +496,14 @@ def _coverage(conn) -> Dict[str, Any]:
                MAX(observation_time_utc) AS last_observation_utc,
                COUNT(DISTINCT observation_time_utc::date)::bigint AS utc_dates
         FROM research_historical_opportunity_outcomes
-        WHERE outcome_method_version=%s AND replay_version=%s
-          AND data_quality_status=ANY(%s)
+        WHERE first_touch_method_version=%s
+          AND replay_version=%s
+          AND first_touch_data_quality_status=ANY(%s)
         GROUP BY symbol, horizon_minutes
         ORDER BY symbol, horizon_minutes
         """,
         (
-            canonical_price_path.METHOD_VERSION,
+            research_no_dwell_outcome.METHOD_VERSION,
             REPLAY_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),
         ),
@@ -499,6 +527,7 @@ def status() -> Dict[str, Any]:
         "schema_present": False,
         "replay_version": REPLAY_VERSION,
         "outcome_method_version": canonical_price_path.METHOD_VERSION,
+        "first_touch_method_version": research_no_dwell_outcome.METHOD_VERSION,
         "canonical_source": canonical_price_path.canonical_source_description(),
         "hype_one_minute_history_policy": {
             "provider_limit_candles": _HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES,
@@ -506,7 +535,10 @@ def status() -> Dict[str, Any]:
             "older_hype_anchors": "excluded rather than approximated or mislabeled",
         },
         "stores_one_minute_candles": False,
-        "storage_contract": "compact per-anchor MFE/MAE/return summaries only",
+        "storage_contract": (
+            "legacy endpoint/MFE/MAE diagnostics plus compact no-dwell "
+            "first-touch labels; no candle storage"
+        ),
     }
     if not url or psycopg is None:
         return base
@@ -612,6 +644,9 @@ def run_backfill(
                         "horizons_minutes": list(normalized_horizons),
                         "chunk_days": int(chunk_span.total_seconds() // 86400),
                         "max_anchors": max_anchors,
+                        "first_touch_method_version": (
+                            research_no_dwell_outcome.METHOD_VERSION
+                        ),
                     }
                 ),
             ),

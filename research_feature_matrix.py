@@ -24,6 +24,8 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 import canonical_price_path
 import market_session_baseline
 import research_historical_replay
+import research_max_pain_archive
+import research_no_dwell_outcome
 
 try:
     import psycopg
@@ -33,8 +35,8 @@ except Exception:  # pragma: no cover - validated at runtime
     dict_row = None
 
 
-FEATURE_SCHEMA_VERSION = "research-feature-matrix-v4-safe-replay"
-VERIFIED_OUTCOME_METHOD = canonical_price_path.METHOD_VERSION
+FEATURE_SCHEMA_VERSION = "research-feature-matrix-v6-first-touch-maxpain"
+VERIFIED_OUTCOME_METHOD = research_no_dwell_outcome.METHOD_VERSION
 VERIFIED_OUTCOME_QUALITIES = canonical_price_path.COMPLETE_QUALITIES
 # Compatibility alias for callers that persist one textual dataset contract.
 VERIFIED_OUTCOME_QUALITY = ",".join(VERIFIED_OUTCOME_QUALITIES)
@@ -910,9 +912,34 @@ def _outcome_label(
         "price_at_horizon": _round(event.get("price_at_horizon")),
         "raw_return_pct": _round(event.get("raw_return_pct")),
         "directional_return_pct": _round(event.get("directional_return_pct")),
+        "path_success": event.get("path_success"),
+        "first_touch_status": event.get("first_touch_status"),
+        "first_qualifying_move_time_utc": event.get(
+            "first_qualifying_move_time_utc"
+        ),
+        "time_to_first_qualifying_move_seconds": event.get(
+            "time_to_first_qualifying_move_seconds"
+        ),
+        "qualifying_move_threshold_pct": _round(
+            event.get("qualifying_move_threshold_pct")
+        ),
+        "threshold_scale_factor": _round(event.get("threshold_scale_factor")),
+        "pre_qualifying_mae_pct": _round(event.get("pre_qualifying_mae_pct")),
+        "qualifying_candle_order_ambiguous": event.get(
+            "qualifying_candle_order_ambiguous"
+        ),
         "mfe_pct": _round(event.get("mfe_pct")),
-        "mae_pct": _round(event.get("mae_pct")),
-        "time_to_first_progress_seconds": event.get("time_to_first_progress_seconds"),
+        # Formula risk uses adverse movement only through the qualifying first
+        # touch (or through horizon close for a MISS).  The full-horizon value
+        # remains visible as a diagnostic and never cancels a prior HIT.
+        "mae_pct": _round(
+            event.get("pre_qualifying_mae_pct", event.get("mae_pct"))
+        ),
+        "full_horizon_mae_pct": _round(event.get("mae_pct")),
+        "time_to_first_progress_seconds": event.get(
+            "time_to_first_qualifying_move_seconds",
+            event.get("time_to_first_progress_seconds"),
+        ),
         "time_to_mfe_seconds": event.get("time_to_mfe_seconds"),
         "time_to_closest_target_seconds": event.get("time_to_closest_target_seconds"),
         "time_to_target_seconds": event.get("time_to_target_seconds"),
@@ -920,6 +947,9 @@ def _outcome_label(
         "target_reached": event.get("target_reached"),
         "path_samples": event.get("path_samples"),
         "outcome_method_version": event.get("outcome_method_version"),
+        "legacy_outcome_method_version": event.get(
+            "legacy_outcome_method_version"
+        ),
         "data_quality_status": event.get("data_quality_status"),
     }
 
@@ -932,6 +962,7 @@ def build_feature_rows(
     spot_rows: Iterable[Mapping[str, Any]],
     prior_events: Sequence[Mapping[str, Any]],
     windows_minutes: Sequence[int] = CORE_WINDOWS_MINUTES,
+    max_pain_by_event_id: Optional[Mapping[int, Mapping[str, Any]]] = None,
 ) -> list[Dict[str, Any]]:
     """Pure deterministic builder used by the DB wrapper and self-tests."""
     price_series = _prepare_series(price_oi_rows, time_column="candle_time")
@@ -970,6 +1001,12 @@ def build_feature_rows(
             windows=windows,
             historical_index=historical_index,
         )
+        event_id = int(event.get("event_id") or 0)
+        max_pain = (
+            dict((max_pain_by_event_id or {}).get(event_id) or {})
+            if event_id
+            else {}
+        )
         rows.append(
             {
                 "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -997,6 +1034,7 @@ def build_feature_rows(
                 "historical_context": historical_context,
                 "model_features": _model_features(event),
                 "sequence_features": _sequence_features(event, prior_events),
+                "max_pain_features": max_pain,
                 "outcome_label": _outcome_label(
                     event,
                     symbol=symbol,
@@ -1025,6 +1063,8 @@ def _load_verified_events(
         horizon_minutes,
         VERIFIED_OUTCOME_METHOD,
         list(VERIFIED_OUTCOME_QUALITIES),
+        canonical_price_path.METHOD_VERSION,
+        list(VERIFIED_OUTCOME_QUALITIES),
     ]
     if symbol:
         clauses.append("AND e.symbol=%s")
@@ -1046,19 +1086,37 @@ def _load_verified_events(
                    e.current_price, e.target_price,
                    e.initial_target_distance_pct, e.categories, e.setup_key,
                    e.strategy_version, e.code_version, e.engine_snapshot,
-                   o.horizon_minutes, o.measured_at_utc, o.reference_price,
+                   ft.horizon_minutes, o.measured_at_utc, o.reference_price,
                    o.price_at_horizon, o.raw_return_pct,
                    o.directional_return_pct, o.mfe_pct, o.mae_pct,
-                   o.time_to_first_progress_seconds, o.time_to_mfe_seconds,
+                   ft.success AS path_success,
+                   ft.status AS first_touch_status,
+                   ft.first_qualifying_move_time_utc,
+                   ft.time_to_first_qualifying_move_seconds,
+                   ft.qualifying_move_threshold_pct,
+                   ft.threshold_scale_factor,
+                   ft.pre_qualifying_mae_pct,
+                   ft.qualifying_candle_order_ambiguous,
+                   ft.time_to_first_qualifying_move_seconds
+                     AS time_to_first_progress_seconds,
+                   o.time_to_mfe_seconds,
                    o.time_to_closest_target_seconds, o.time_to_target_seconds,
                    o.target_progress_ratio, o.target_reached, o.path_samples,
-                   o.outcome_method_version, o.data_quality_status
+                   ft.method_version AS outcome_method_version,
+                   o.outcome_method_version AS legacy_outcome_method_version,
+                   ft.data_quality_status
             FROM research_events e
-            JOIN research_alert_outcomes o ON o.event_id=e.event_id
+            JOIN research_first_touch_outcomes ft ON ft.event_id=e.event_id
+            JOIN research_alert_outcomes o
+              ON o.event_id=e.event_id
+             AND o.horizon_minutes=ft.horizon_minutes
             WHERE e.event_kind='ALERT'
               AND e.delivery_status='DELIVERED'
               AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
-              AND o.horizon_minutes=%s
+              AND ft.horizon_minutes=%s
+              AND ft.method_version=%s
+              AND ft.status IN ('HIT', 'MISS')
+              AND ft.data_quality_status=ANY(%s)
               AND o.outcome_method_version=%s
               AND o.data_quality_status=ANY(%s)
               {filters}
@@ -1073,7 +1131,11 @@ def _load_verified_events(
 def _load_delivered_events_by_id(
     conn, event_ids: Sequence[int]
 ) -> list[Dict[str, Any]]:
-    """Load immutable decision-time rows without joining any later outcome."""
+    """Load immutable eligible decision rows without joining a later outcome.
+
+    Silent samples are accepted only through the migration-008 authority view;
+    an arbitrary ``DECISION_SAMPLE`` row is never enough.
+    """
     normalized = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
     if not normalized:
         return []
@@ -1087,13 +1149,166 @@ def _load_delivered_events_by_id(
                    categories, setup_key, strategy_version, code_version,
                    engine_snapshot
             FROM research_events
-            WHERE event_kind='ALERT' AND delivery_status='DELIVERED'
-              AND event_id=ANY(%s)
+            WHERE event_id=ANY(%s)
+              AND (
+                (event_kind='ALERT' AND delivery_status='DELIVERED')
+                OR (
+                  event_kind='DECISION_SAMPLE'
+                  AND delivery_status='NOT_APPLICABLE'
+                  AND EXISTS (
+                    SELECT 1 FROM research_prospective_shadow_events authorized
+                    WHERE authorized.event_id=research_events.event_id
+                  )
+                )
+              )
             ORDER BY alert_time_utc ASC, event_id ASC
             """,
             (normalized,),
         ).fetchall()
     ]
+
+
+def _load_max_pain_features_batch(
+    conn, events: Sequence[Mapping[str, Any]]
+) -> Dict[int, Dict[str, Any]]:
+    """Load at most two prior eligible Max-Pain sets per decision in batches.
+
+    The migration-007 archive is the only source.  The legacy
+    ``max_pain_snapshots`` table is intentionally never named or queried here.
+    """
+    event_requests: Dict[int, tuple[str, datetime]] = {}
+    for event in events:
+        event_id = int(event.get("event_id") or 0)
+        symbol = str(event.get("symbol") or "").strip().upper()
+        decision = event.get("alert_time_utc")
+        if event_id and symbol and decision is not None:
+            event_requests[event_id] = (symbol, _as_utc(decision))
+    if not event_requests:
+        return {}
+    required = (
+        "research_max_pain_snapshot_sets",
+        "research_max_pain_snapshot_symbols",
+        "research_max_pain_snapshot_rows",
+    )
+    if any(not _table_exists(conn, table) for table in required):
+        return {
+            event_id: {
+                "evaluation_status": "UNEVALUABLE",
+                "reason": "migration 007 Max-Pain archive schema is unavailable",
+                "features": {},
+            }
+            for event_id in event_requests
+        }
+
+    unique_requests = sorted(set(event_requests.values()), key=lambda item: (item[1], item[0]))
+    request_index = {request: index + 1 for index, request in enumerate(unique_requests)}
+    symbols = [request[0] for request in unique_requests]
+    decision_times = [request[1] for request in unique_requests]
+    candidate_rows = conn.execute(
+        """
+        WITH requested AS (
+          SELECT symbol, decision_time_utc, request_id
+          FROM UNNEST(%s::text[], %s::timestamptz[])
+               WITH ORDINALITY AS item(symbol, decision_time_utc, request_id)
+        )
+        SELECT requested.request_id, requested.symbol AS requested_symbol,
+               requested.decision_time_utc, chosen.*
+        FROM requested
+        CROSS JOIN LATERAL (
+          SELECT snapshot.*, ROW_NUMBER() OVER (
+                   ORDER BY snapshot.available_at_utc DESC,
+                            snapshot.snapshot_set_id DESC
+                 ) AS candidate_rank
+          FROM research_max_pain_snapshot_sets snapshot
+          JOIN research_max_pain_snapshot_symbols manifest
+            ON manifest.snapshot_set_id=snapshot.snapshot_set_id
+           AND manifest.symbol=requested.symbol
+           AND manifest.research_eligible=TRUE
+          WHERE snapshot.research_eligible=TRUE
+            AND snapshot.method_version=%s
+            AND snapshot.cutover_marker=%s
+            AND snapshot.available_at_utc<=requested.decision_time_utc
+          ORDER BY snapshot.available_at_utc DESC, snapshot.snapshot_set_id DESC
+          LIMIT 2
+        ) chosen
+        ORDER BY requested.request_id, chosen.candidate_rank
+        """,
+        (
+            symbols,
+            decision_times,
+            research_max_pain_archive.METHOD_VERSION,
+            research_max_pain_archive.CUTOVER_MARKER,
+        ),
+    ).fetchall()
+    candidates_by_request: Dict[int, list[Dict[str, Any]]] = defaultdict(list)
+    set_symbol_pairs: set[tuple[int, str]] = set()
+    for source in candidate_rows:
+        row = dict(source)
+        request_id = int(row.pop("request_id"))
+        requested_symbol = str(row.pop("requested_symbol"))
+        row.pop("decision_time_utc", None)
+        row.pop("candidate_rank", None)
+        candidates_by_request[request_id].append(row)
+        set_symbol_pairs.add((int(row["snapshot_set_id"]), requested_symbol))
+
+    manifests: Dict[tuple[int, str], Dict[str, Any]] = {}
+    rows_by_pair: Dict[tuple[int, str], list[Dict[str, Any]]] = defaultdict(list)
+    if set_symbol_pairs:
+        set_ids = sorted({pair[0] for pair in set_symbol_pairs})
+        requested_symbols = sorted({pair[1] for pair in set_symbol_pairs})
+        for source in conn.execute(
+            """
+            SELECT * FROM research_max_pain_snapshot_symbols
+            WHERE snapshot_set_id=ANY(%s) AND symbol=ANY(%s)
+            """,
+            (set_ids, requested_symbols),
+        ).fetchall():
+            row = dict(source)
+            key = (int(row["snapshot_set_id"]), str(row["symbol"]).upper())
+            if key in set_symbol_pairs:
+                manifests[key] = row
+        for source in conn.execute(
+            """
+            SELECT * FROM research_max_pain_snapshot_rows
+            WHERE snapshot_set_id=ANY(%s) AND symbol=ANY(%s)
+            ORDER BY snapshot_set_id, symbol, CASE timeframe
+              WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3
+              WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6
+              WHEN '1m' THEN 7 ELSE 99 END
+            """,
+            (set_ids, requested_symbols),
+        ).fetchall():
+            row = dict(source)
+            key = (int(row["snapshot_set_id"]), str(row["symbol"]).upper())
+            if key in set_symbol_pairs:
+                rows_by_pair[key].append(row)
+
+    results_by_request: Dict[int, Dict[str, Any]] = {}
+    for request, request_id in request_index.items():
+        symbol, decision_time = request
+        candidates = candidates_by_request.get(request_id, [])
+        current = candidates[0] if candidates else None
+        previous = candidates[1] if len(candidates) > 1 else None
+        current_key = (
+            (int(current["snapshot_set_id"]), symbol) if current else None
+        )
+        previous_key = (
+            (int(previous["snapshot_set_id"]), symbol) if previous else None
+        )
+        results_by_request[request_id] = research_max_pain_archive.derive_prior_only_features(
+            symbol=symbol,
+            decision_time_utc=decision_time,
+            current_set=current,
+            current_rows=rows_by_pair.get(current_key, []) if current_key else (),
+            current_symbol_manifest=manifests.get(current_key) if current_key else None,
+            previous_set=previous,
+            previous_rows=rows_by_pair.get(previous_key, []) if previous_key else (),
+            previous_symbol_manifest=manifests.get(previous_key) if previous_key else None,
+        )
+    return {
+        event_id: dict(results_by_request[request_index[request]])
+        for event_id, request in event_requests.items()
+    }
 
 
 def _verified_coverage(
@@ -1103,13 +1318,14 @@ def _verified_coverage(
         """
         SELECT e.symbol,
                COUNT(*)::bigint AS delivered_alerts,
-               COUNT(o.event_id)::bigint AS verified_outcomes
+               COUNT(ft.event_id)::bigint AS verified_outcomes
         FROM research_events e
-        LEFT JOIN research_alert_outcomes o
-          ON o.event_id=e.event_id
-         AND o.horizon_minutes=%s
-         AND o.outcome_method_version=%s
-         AND o.data_quality_status=ANY(%s)
+        LEFT JOIN research_first_touch_outcomes ft
+          ON ft.event_id=e.event_id
+         AND ft.horizon_minutes=%s
+         AND ft.method_version=%s
+         AND ft.status IN ('HIT', 'MISS')
+         AND ft.data_quality_status=ANY(%s)
         WHERE e.event_kind='ALERT' AND e.delivery_status='DELIVERED'
           AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
         GROUP BY e.symbol
@@ -1161,9 +1377,9 @@ def _historical_replay_coverage(
         FROM research_historical_opportunity_outcomes
         WHERE horizon_minutes=%s
           AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
-          AND outcome_method_version=%s
+          AND first_touch_method_version=%s
           AND replay_version=%s
-          AND data_quality_status=ANY(%s)
+          AND first_touch_data_quality_status=ANY(%s)
         GROUP BY symbol
         ORDER BY symbol
         """,
@@ -1234,9 +1450,9 @@ def _historical_replay_coverage(
                     FROM research_historical_opportunity_outcomes
                     WHERE horizon_minutes=%s
                       AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
-                      AND outcome_method_version=%s
+                      AND first_touch_method_version=%s
                       AND replay_version=%s
-                      AND data_quality_status=ANY(%s)
+                      AND first_touch_data_quality_status=ANY(%s)
                       AND symbol=ANY(%s)
                     """,
                     (
@@ -1320,7 +1536,11 @@ def _load_historical_opportunities(
                    source_observation_time_utc, horizon_minutes,
                    reference_price, price_at_horizon, raw_return_pct,
                    long_metrics, short_metrics, path_samples,
-                   outcome_method_version, data_quality_status,
+                   long_first_touch_metrics, short_first_touch_metrics,
+                   first_touch_method_version,
+                   first_touch_data_quality_status,
+                   outcome_method_version AS legacy_outcome_method_version,
+                   data_quality_status AS legacy_data_quality_status,
                    ROW_NUMBER() OVER (
                        PARTITION BY symbol ORDER BY observation_time_utc, opportunity_id
                    ) AS sequence_number,
@@ -1328,9 +1548,9 @@ def _load_historical_opportunities(
             FROM research_historical_opportunity_outcomes
             WHERE horizon_minutes=%s
               AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
-              AND outcome_method_version=%s
+              AND first_touch_method_version=%s
               AND replay_version=%s
-              AND data_quality_status=ANY(%s)
+              AND first_touch_data_quality_status=ANY(%s)
               AND symbol=ANY(%s)
         )
         SELECT *
@@ -1379,13 +1599,16 @@ def _opportunity_events(
     events: list[Dict[str, Any]] = []
     for source in opportunities:
         row = dict(source)
-        for direction, metrics_key, offset in (
-            ("LONG", "long_metrics", 1),
-            ("SHORT", "short_metrics", 2),
+        for direction, metrics_key, first_touch_key, offset in (
+            ("LONG", "long_metrics", "long_first_touch_metrics", 1),
+            ("SHORT", "short_metrics", "short_first_touch_metrics", 2),
         ):
             metrics = row.get(metrics_key) or {}
             if isinstance(metrics, str):
                 metrics = json.loads(metrics)
+            first_touch = row.get(first_touch_key) or {}
+            if isinstance(first_touch, str):
+                first_touch = json.loads(first_touch)
             opportunity_id = int(row["opportunity_id"])
             events.append(
                 {
@@ -1413,6 +1636,26 @@ def _opportunity_events(
                     "directional_return_pct": metrics.get(
                         "directional_return_pct"
                     ),
+                    "path_success": first_touch.get("success"),
+                    "first_touch_status": first_touch.get("status"),
+                    "first_qualifying_move_time_utc": first_touch.get(
+                        "first_qualifying_move_time_utc"
+                    ),
+                    "time_to_first_qualifying_move_seconds": first_touch.get(
+                        "time_to_first_qualifying_move_seconds"
+                    ),
+                    "qualifying_move_threshold_pct": first_touch.get(
+                        "qualifying_move_threshold_pct"
+                    ),
+                    "threshold_scale_factor": first_touch.get(
+                        "threshold_scale_factor"
+                    ),
+                    "pre_qualifying_mae_pct": first_touch.get(
+                        "pre_qualifying_mae_pct"
+                    ),
+                    "qualifying_candle_order_ambiguous": first_touch.get(
+                        "qualifying_candle_order_ambiguous"
+                    ),
                     "mfe_pct": metrics.get("mfe_pct"),
                     "mae_pct": metrics.get("mae_pct"),
                     "time_to_first_progress_seconds": metrics.get(
@@ -1424,8 +1667,13 @@ def _opportunity_events(
                     "target_progress_ratio": None,
                     "target_reached": None,
                     "path_samples": row["path_samples"],
-                    "outcome_method_version": row["outcome_method_version"],
-                    "data_quality_status": row["data_quality_status"],
+                    "outcome_method_version": row["first_touch_method_version"],
+                    "legacy_outcome_method_version": row[
+                        "legacy_outcome_method_version"
+                    ],
+                    "data_quality_status": row[
+                        "first_touch_data_quality_status"
+                    ],
                 }
             )
     return events
@@ -1562,7 +1810,11 @@ def research_feature_matrix(
         return {"available": False, "reason": "raw market archive DATABASE_URL is not configured"}
 
     with _connect(research_url) as research_conn:
-        required_research = ("research_events", "research_alert_outcomes")
+        required_research = (
+            "research_events",
+            "research_alert_outcomes",
+            "research_first_touch_outcomes",
+        )
         missing_research = [
             table for table in required_research if not _table_exists(research_conn, table)
         ]
@@ -1602,6 +1854,9 @@ def research_feature_matrix(
             minimum_event_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
             maximum_event_time,
         )
+        max_pain_by_event_id = _load_max_pain_features_batch(
+            research_conn, events
+        )
 
     symbols = sorted({str(row["symbol"]).upper() for row in events})
     raw_start = minimum_event_time - timedelta(
@@ -1631,6 +1886,7 @@ def research_feature_matrix(
         spot_rows=spot_rows,
         prior_events=prior_events,
         windows_minutes=windows,
+        max_pain_by_event_id=max_pain_by_event_id,
     )
     complete_counts = {
         f"{minutes}m": sum(
@@ -1725,6 +1981,10 @@ def load_historical_replay_dataset(
         }
 
     events = _opportunity_events(opportunities)
+    with _connect(research_url) as research_conn:
+        max_pain_by_event_id = _load_max_pain_features_batch(
+            research_conn, events
+        )
     first_time = min(_as_utc(row["alert_time_utc"]) for row in events)
     last_time = max(_as_utc(row["alert_time_utc"]) for row in events)
     symbols = sorted({str(row["symbol"]).upper() for row in events})
@@ -1763,6 +2023,7 @@ def load_historical_replay_dataset(
         # replay.  They remain available in the delivered-alert dataset.
         prior_events=[],
         windows_minutes=CORE_WINDOWS_MINUTES,
+        max_pain_by_event_id=max_pain_by_event_id,
     )
     return _json_safe(
         {
@@ -1821,7 +2082,11 @@ def _load_alert_formula_dataset(
         }
 
     with _connect(research_url) as research_conn:
-        required = ("research_events", "research_alert_outcomes")
+        required = (
+            "research_events",
+            "research_alert_outcomes",
+            "research_first_touch_outcomes",
+        )
         missing = [table for table in required if not _table_exists(research_conn, table)]
         if missing:
             return {
@@ -1860,6 +2125,9 @@ def _load_alert_formula_dataset(
             first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
             last_time,
         )
+        max_pain_by_event_id = _load_max_pain_features_batch(
+            research_conn, events
+        )
 
     symbols = sorted({str(row["symbol"] or "").upper() for row in events})
     raw_start = first_time - timedelta(
@@ -1889,6 +2157,7 @@ def _load_alert_formula_dataset(
         spot_rows=spot_rows,
         prior_events=prior_events,
         windows_minutes=CORE_WINDOWS_MINUTES,
+        max_pain_by_event_id=max_pain_by_event_id,
     )
     return _json_safe(
         {
@@ -2011,6 +2280,9 @@ def load_shadow_feature_rows_by_horizon(
             first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
             last_time,
         )
+        max_pain_by_event_id = _load_max_pain_features_batch(
+            research_conn, events
+        )
 
     symbols = sorted({str(row["symbol"] or "").upper() for row in events})
     raw_start = first_time - timedelta(
@@ -2041,6 +2313,7 @@ def load_shadow_feature_rows_by_horizon(
         spot_rows=spot_rows,
         prior_events=prior_events,
         windows_minutes=CORE_WINDOWS_MINUTES,
+        max_pain_by_event_id=max_pain_by_event_id,
     )
     result: Dict[tuple[int, int], Dict[str, Any]] = {}
     for row in rows:
@@ -2078,6 +2351,9 @@ def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, An
             first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
             last_time,
         )
+        max_pain_by_event_id = _load_max_pain_features_batch(
+            research_conn, events
+        )
     symbols = sorted({str(row["symbol"] or "").upper() for row in events})
     raw_start = first_time - timedelta(
         days=HISTORICAL_BASELINE_DAYS,
@@ -2094,6 +2370,7 @@ def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, An
         spot_rows=spot_rows,
         prior_events=prior_events,
         windows_minutes=CORE_WINDOWS_MINUTES,
+        max_pain_by_event_id=max_pain_by_event_id,
     )
     return {
         int(row["event"]["event_id"]): row

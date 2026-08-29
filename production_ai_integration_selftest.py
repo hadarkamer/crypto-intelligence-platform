@@ -185,6 +185,22 @@ def run() -> None:
     assert ready_notes == ["strict gates passed"]
     outcome_status = research_outcome_worker.WORKER.status()
     assert outcome_status["method"] == "canonical-spot-1m-ohlc-path-v3"
+    assert outcome_status["first_touch_method"] == "no-dwell-first-touch-v6"
+    assert outcome_status["first_touch_policy"]["post_hit_reversal"] == (
+        "does not cancel success"
+    )
+    closed_event_time = datetime.now(timezone.utc) - timedelta(days=2)
+    all_legacy_current = {
+        horizon: canonical_price_path.METHOD_VERSION
+        for horizon in (60, 240, 720, 1440)
+    }
+    assert research_outcome_worker._due_horizons(
+        closed_event_time,
+        all_legacy_current,
+        {},
+        now=datetime.now(timezone.utc),
+        first_touch_enabled=False,
+    ) == [], "NEUTRAL alerts must retain legacy enrichment without FT retries"
     assert outcome_status["price_paths"] == {
         "default": "Binance Spot USDT",
         "HYPE": "Hyperliquid HYPE/USDT spot (@107)",
@@ -226,6 +242,7 @@ def run() -> None:
     }
     fetch_calls = []
     writes = []
+    first_touch_writes = []
 
     class _DbContext:
         def __enter__(self):
@@ -274,11 +291,22 @@ def run() -> None:
             return True
 
         worker._write_outcome = _fake_write
+        worker._write_first_touch_outcome = lambda conn, **kwargs: (
+            first_touch_writes.append(kwargs) or True
+        )
         worker_result = worker.run_once()
         assert len(fetch_calls) == 1
         assert [row["horizon"] for row in writes] == [60, 240, 720, 1440]
+        assert [row["horizon"] for row in first_touch_writes] == [
+            60,
+            240,
+            720,
+            1440,
+        ]
+        assert all(row["first_touch"]["dwell_required_seconds"] == 0 for row in first_touch_writes)
         assert worker_result["inserted"] == 2
         assert worker_result["upgraded"] == 2
+        assert worker_result["first_touch_rows_written"] == 4
 
         # An unavailable canonical symbol is requested only once per run,
         # even when several archived alerts need outcomes.  It remains
@@ -302,6 +330,7 @@ def run() -> None:
             due_event,
         ]
         unavailable_worker._write_outcome = _fake_write
+        unavailable_worker._write_first_touch_outcome = lambda conn, **kwargs: True
         unavailable_result = unavailable_worker.run_once()
         assert unavailable_fetch_calls.count("NOPE") == 1
         assert unavailable_result["missing_price_paths"] == 2
@@ -409,6 +438,15 @@ def run() -> None:
     assert "UNIQUE (formula_id, formula_version)" in shadow_safety_migration
     assert "BEFORE UPDATE OR DELETE ON research_formula_live_approvals" in shadow_safety_migration
     assert "research_formula_live_approvals is append-only" in shadow_safety_migration
+    first_touch_migration = (
+        root / "migrations" / "006_no_dwell_first_touch_outcomes_v6.sql"
+    ).read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS research_first_touch_outcomes" in first_touch_migration
+    assert "dwell_required_seconds = 0" in first_touch_migration
+    assert "status IN ('PENDING', 'HIT', 'MISS')" in first_touch_migration
+    assert "ADD COLUMN IF NOT EXISTS long_first_touch_metrics" in first_touch_migration
+    assert "ADD COLUMN IF NOT EXISTS first_touch_replay_run_id" in first_touch_migration
+    assert "ADD COLUMN IF NOT EXISTS first_touch_method_version" in first_touch_migration
 
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS
@@ -417,7 +455,7 @@ def run() -> None:
     assert "MAE p75, p90 and p95 on three separate" in ai_agent.SYSTEM_INSTRUCTIONS
     formula_store_text = (root / "research_formula_store.py").read_text(encoding="utf-8")
     assert "superseded by newer same-horizon discovery cohort" in formula_store_text
-    assert "safe historical-replay formula schema v5" in formula_store_text
+    assert "hierarchical evidence-family formula schema v6" in formula_store_text
     assert "replacement_ready" in formula_store_text
     assert "latest_evaluation_run_id IS DISTINCT FROM %s" in formula_store_text
     readiness_body = formula_store_text.split(

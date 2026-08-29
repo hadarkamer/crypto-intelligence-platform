@@ -693,7 +693,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "neutral historical raw Price/OI/CVD opportunity replay with canonical spot labels",
                 "prior-alert repetition and cross-symbol breadth features",
                 "UTC hour plus exact per-window ACTIVE/WEEKEND session composition",
-                "automatic single/pair/triple condition search over thousands of candidates",
+                "automatic bounded single/pair/triple search, with opt-in stable-parent hierarchical expansion to four/five conditions",
                 "frozen chronological discovery/holdout validation",
                 "wide-movement percentile, probability, MFE, MAE, speed, sample-size and q-value ranking",
                 "versioned formula lifecycle registry",

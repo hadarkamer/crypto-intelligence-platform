@@ -161,7 +161,9 @@ rarity, sample count and validation state. It never executes a trade.
 
 The production AI can inspect replay coverage, explore verified path
 aggregates, fetch alert paths, inspect raw/model feature rows, enumerate bounded
-single/pair/triple formulas, correct for multiple testing, rank wide movements,
+single/pair/triple formulas plus opt-in bounded stable-parent four/five-condition
+expansion, correct every tested hypothesis for multiple testing, group
+overlapping evidence into deterministic champion families, rank wide movements,
 validate chronologically and observe formulas in Shadow. The runtime can deliver
 only separately reviewed and explicitly human-approved LIVE matches to opted-in
 Telegram chats. Remaining operational work is accumulating genuinely future

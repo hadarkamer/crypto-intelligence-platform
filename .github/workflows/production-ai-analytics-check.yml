@@ -26,11 +26,18 @@ jobs:
             main.py ai_candidate_main.py ai_agent.py ai_tools.py ai_telegram.py \
             ai_history_research.py ai_alert_research.py \
             research_feature_matrix.py \
-            research_formula_engine.py research_formula_store.py \
+            research_formula_engine.py research_formula_families.py \
+            research_formula_store.py \
             research_formula_worker.py research_formula_schema_admin.py \
             research_event_capture.py research_event_runtime.py \
             research_event_store.py research_outcome_worker.py \
-            binance_spot_price_path.py
+            research_no_dwell_outcome.py canonical_price_path.py \
+            binance_spot_price_path.py hyperliquid_spot_price_path.py \
+            live_price_provider.py research_historical_replay.py \
+            research_first_touch_backfill_worker.py \
+            research_max_pain_archive.py research_prospective_anchors.py \
+            research_prospective_anchor_store.py \
+            research_prospective_anchor_worker.py research_formula_approval.py
       - name: Production analytical boundary
         run: python production_ai_integration_selftest.py
       - name: Research Event normalization
@@ -41,12 +48,36 @@ jobs:
         run: python research_event_store_selftest.py
       - name: Binance Spot outcome path
         run: python binance_spot_price_path_selftest.py
+      - name: Hyperliquid HYPE Spot outcome path
+        run: python hyperliquid_spot_price_path_selftest.py
+      - name: Official Research price routes
+        run: python live_price_provider_research_selftest.py
+      - name: No-dwell first-touch outcome
+        run: python research_no_dwell_outcome_selftest.py
+      - name: Historical first-touch replay
+        run: python research_historical_replay_selftest.py
+      - name: Guarded first-touch replay worker
+        run: python research_first_touch_backfill_worker_selftest.py
       - name: No-lookahead research feature matrix
         run: python research_feature_matrix_selftest.py
+      - name: Coherent Max-Pain archive
+        run: python research_max_pain_archive_selftest.py
+      - name: Neutral prospective anchors
+        run: python research_prospective_anchors_selftest.py
+      - name: Atomic prospective anchor store
+        run: python research_prospective_anchor_store_selftest.py
+      - name: Prospective anchor production worker
+        run: python research_prospective_anchor_worker_selftest.py
       - name: Formula engine safety
         run: python research_formula_engine_selftest.py
+      - name: Formula evidence families
+        run: python research_formula_families_selftest.py
       - name: Prospective Formula Shadow evidence
         run: python research_formula_store_selftest.py
+      - name: Explicit Formula owner approval
+        run: python research_formula_approval_selftest.py
+      - name: Research runtime scheduling
+        run: python research_runtime_scheduler_selftest.py
       - name: Source integrity
         run: |
           ! grep -R "scan_coinglass_market\|AI_WEB_SEARCH_ENABLED\|web_search" \

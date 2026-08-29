@@ -31,6 +31,10 @@ _DATASET_LIMIT = max(100, min(5000, int(os.getenv("FORMULA_DISCOVERY_DATASET_LIM
 _DATASET_MODE = os.getenv("FORMULA_DISCOVERY_DATASET_MODE", "auto").strip().lower()
 if _DATASET_MODE not in {"auto", "alerts", "historical_replay"}:
     _DATASET_MODE = "auto"
+_HIERARCHICAL_SEARCH_ENABLED = (
+    os.getenv("FORMULA_DISCOVERY_HIERARCHICAL_ENABLED", "").strip().lower()
+    in _TRUE
+)
 
 
 def _horizons() -> tuple[int, ...]:
@@ -231,6 +235,7 @@ class FormulaResearchWorker:
             "lookback_days": _LOOKBACK_DAYS,
             "dataset_limit": _DATASET_LIMIT,
             "dataset_mode": _DATASET_MODE,
+            "hierarchical_search_enabled": _HIERARCHICAL_SEARCH_ENABLED,
             "discovery_interval_seconds": _DISCOVERY_INTERVAL_SECONDS,
             "shadow_poll_seconds": _SHADOW_POLL_SECONDS,
             "automatic_stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
@@ -335,6 +340,9 @@ class FormulaResearchWorker:
                 dataset["rows"],
                 horizon_minutes=horizon,
                 feature_schema_version=dataset["feature_schema_version"],
+                config=research_formula_engine.DiscoveryConfig(
+                    hierarchical_search_enabled=_HIERARCHICAL_SEARCH_ENABLED
+                ),
             )
             if not discovery.get("available"):
                 results.append(
