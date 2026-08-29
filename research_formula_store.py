@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -17,6 +18,7 @@ except Exception:  # pragma: no cover
 import canonical_price_path
 import research_feature_matrix
 import research_formula_engine
+import research_no_dwell_outcome
 
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -1044,6 +1046,8 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
                  AS time_to_first_progress_seconds,
                ft.time_to_first_qualifying_move_seconds,
                ft.qualifying_move_threshold_pct,
+               ft.threshold_scale_factor AS first_touch_threshold_scale_factor,
+               ft.threshold_source_kind AS first_touch_threshold_source_kind,
                ft.qualifying_candle_order_ambiguous,
                o.time_to_mfe_seconds,
                o.target_progress_ratio, o.target_reached
@@ -1074,7 +1078,20 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
             int(formula["formula_id"]),
         ),
     ).fetchall()
-    return [dict(row) for row in rows]
+    result = [dict(row) for row in rows]
+    for row in result:
+        compatible, reason = _terminal_threshold_matches_snapshot(
+            row, horizon_minutes=horizon_minutes
+        )
+        row["first_touch_threshold_policy_compatible"] = compatible
+        row["first_touch_threshold_policy_reason"] = reason
+        if bool(row.get("first_touch_available")) and not compatible:
+            # Preserve the terminal row in PostgreSQL for audit, but never let
+            # a label computed with a different width enter prospective gates.
+            row["first_touch_available"] = False
+            row["first_touch_hit"] = False
+            row["outcome_available"] = False
+    return result
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
@@ -1087,6 +1104,54 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
             return {}
         return parsed if isinstance(parsed, Mapping) else {}
     return {}
+
+
+def _terminal_threshold_matches_snapshot(
+    source: Mapping[str, Any], *, horizon_minutes: int
+) -> tuple[bool, str]:
+    """Require terminal first-touch semantics to match frozen Shadow width."""
+    if not bool(source.get("first_touch_available")):
+        return True, "no terminal first-touch row"
+    snapshot = _as_mapping(source.get("input_snapshot"))
+    reference = _as_mapping(snapshot.get("movement_width_reference"))
+    raw_scale = (
+        reference.get("threshold_scale_factor")
+        if reference.get("threshold_scale_factor") is not None
+        else reference.get("floor_scale_factor")
+    )
+    try:
+        expected_scale = float(raw_scale) if raw_scale is not None else 1.0
+        actual_scale = float(source["first_touch_threshold_scale_factor"])
+        actual_threshold = float(source["qualifying_move_threshold_pct"])
+    except (KeyError, TypeError, ValueError):
+        return False, "terminal threshold metadata is incomplete"
+    if not all(math.isfinite(value) for value in (expected_scale, actual_scale, actual_threshold)):
+        return False, "terminal threshold metadata is non-finite"
+    relaxed = expected_scale < 1.0 - 1e-9
+    if relaxed and reference.get("applied") is not True:
+        return False, "frozen relaxed width was not marked applied"
+    if not 0.50 <= expected_scale <= 1.00:
+        return False, "frozen threshold scale is outside 0.50-1.00"
+    if not math.isclose(
+        actual_scale, expected_scale, rel_tol=0.0, abs_tol=1e-8
+    ):
+        return False, "terminal threshold scale differs from frozen width"
+    expected_kind = (
+        "PRIOR_ONLY_SESSION_CALIBRATION"
+        if relaxed
+        else "STATIC_HORIZON_FLOOR"
+    )
+    if str(source.get("first_touch_threshold_source_kind") or "").upper() != expected_kind:
+        return False, "terminal threshold source differs from frozen width"
+    expected_threshold = (
+        research_no_dwell_outcome.base_favorable_width_pct(horizon_minutes)
+        * expected_scale
+    )
+    if not math.isclose(
+        actual_threshold, expected_threshold, rel_tol=0.0, abs_tol=1e-8
+    ):
+        return False, "terminal qualifying width differs from frozen width"
+    return True, "terminal threshold matches frozen Shadow width"
 
 
 def _as_utc(value: Any) -> datetime:
@@ -1323,6 +1388,11 @@ def _build_shadow_validation(
         if not bool(row.get("outcome_available"))
         and bool(row.get("outcome_due"))
     ]
+    threshold_policy_mismatch_event_ids = [
+        int(row["event_id"])
+        for row in independent_rows
+        if row.get("first_touch_threshold_policy_compatible") is False
+    ]
     early_first_touch_terminal_event_ids = [
         int(row["event_id"])
         for row in independent_rows
@@ -1410,6 +1480,9 @@ def _build_shadow_validation(
             ),
             "pending_outcome_event_ids": pending_outcome_event_ids,
             "overdue_outcome_event_ids": overdue_outcome_event_ids,
+            "threshold_policy_mismatch_event_ids": (
+                threshold_policy_mismatch_event_ids
+            ),
             "early_first_touch": {
                 "terminal_event_ids": early_first_touch_terminal_event_ids,
                 "hit_event_ids": early_first_touch_hit_event_ids,

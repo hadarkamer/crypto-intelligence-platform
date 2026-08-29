@@ -286,6 +286,7 @@ def run() -> None:
         worker = research_outcome_worker.ResearchOutcomeWorker()
         worker._load_open_first_touch_events = lambda conn, limit: []
         worker._load_due_events = lambda conn, limit: [due_event]
+        worker._load_frozen_threshold_references = lambda conn, event_ids: []
 
         def _fake_write(conn, **kwargs):
             writes.append(kwargs)
@@ -331,6 +332,9 @@ def run() -> None:
             *unavailable_events,
             due_event,
         ]
+        unavailable_worker._load_frozen_threshold_references = (
+            lambda conn, event_ids: []
+        )
         unavailable_worker._write_outcome = _fake_write
         unavailable_worker._write_first_touch_outcome = lambda conn, **kwargs: True
         unavailable_result = unavailable_worker.run_once()

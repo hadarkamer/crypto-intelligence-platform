@@ -56,7 +56,13 @@ def _candle(open_time, *, high=100.0, low=100.0, close=100.0):
     )
 
 
-def _run_once_with_path(candles):
+def _run_once_with_path(
+    candles,
+    *,
+    horizon=60,
+    frozen_scales=(),
+    first_touch_versions=None,
+):
     now = datetime.now(timezone.utc)
     event_time = now.replace(second=0, microsecond=0) - timedelta(minutes=3)
     event = {
@@ -68,13 +74,38 @@ def _run_once_with_path(candles):
         "target_price": None,
         "engine_snapshot": {},
         "outcome_versions": {},
-        "first_touch_versions": {},
-        "open_first_touch_horizons": [60],
+        "first_touch_versions": first_touch_versions or {},
+        "open_first_touch_horizons": [horizon],
     }
     captured_writes = []
     service = worker.ResearchOutcomeWorker()
     service._load_open_first_touch_events = lambda conn, limit: [event]
     service._load_due_events = lambda conn, limit: []
+    service._load_frozen_threshold_references = lambda conn, event_ids: [
+        {
+            "event_id": event["event_id"],
+            "horizon_minutes": horizon,
+            "formula_id": index + 1,
+            "input_snapshot": {
+                "movement_width_reference": {
+                    "policy": (
+                        "prior raw price width; same-symbol "
+                        "session-composition matched"
+                    ),
+                    "horizon_minutes": horizon,
+                    "session_weekend_ratio": 1.0,
+                    "floor_scale_factor": scale,
+                    "applied": scale < 1.0,
+                },
+                "source_inputs": {
+                    "price_oi": {
+                        "timestamp_utc": event_time - timedelta(minutes=1)
+                    }
+                },
+            },
+        }
+        for index, scale in enumerate(frozen_scales)
+    ]
     service._write_first_touch_outcome = (
         lambda conn, **kwargs: captured_writes.append(kwargs) or True
     )
@@ -190,6 +221,99 @@ def run() -> None:
         assert required in captured.query
     assert "research_formula_live_deliveries" not in captured.query
 
+    reference_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._load_frozen_threshold_references(
+        reference_capture, [7, 8, 7]
+    ) == []
+    assert reference_capture.query.count("%s") == len(reference_capture.params)
+    assert "c.evaluation_status IN ('MATCHED', 'UNMATCHED')" in (
+        reference_capture.query
+    )
+    assert "f.horizon_minutes" in reference_capture.query
+    assert reference_capture.params == [[7, 8]]
+
+    legacy_snapshot = {
+        "movement_width_reference": {
+            "policy": (
+                "prior raw price width; same-symbol session-composition matched"
+            ),
+            "horizon_minutes": 240,
+            "session_weekend_ratio": 1.0,
+            "floor_scale_factor": 0.60,
+            "applied": True,
+        },
+        "source_inputs": {
+            "price_oi": {"timestamp_utc": START - timedelta(minutes=1)}
+        },
+    }
+    legacy_record = {
+        "event_id": 1,
+        "horizon_minutes": 240,
+        "formula_id": 1,
+        "input_snapshot": legacy_snapshot,
+    }
+    frozen_policy = worker._frozen_threshold_policy(
+        event={"alert_time_utc": START},
+        horizon_minutes=240,
+        snapshot_records=[legacy_record, {**legacy_record, "formula_id": 2}],
+    )
+    assert frozen_policy["threshold_source_kind"] == (
+        "PRIOR_ONLY_SESSION_CALIBRATION"
+    )
+    assert frozen_policy["threshold_scale_factor"] == 0.60
+    assert frozen_policy["qualifying_move_threshold_pct"] == 0.60
+
+    conflicting_record = {
+        **legacy_record,
+        "formula_id": 3,
+        "input_snapshot": {
+            **legacy_snapshot,
+            "movement_width_reference": {
+                **legacy_snapshot["movement_width_reference"],
+                "floor_scale_factor": 0.55,
+            },
+        },
+    }
+    try:
+        worker._frozen_threshold_policy(
+            event={"alert_time_utc": START},
+            horizon_minutes=240,
+            snapshot_records=[legacy_record, conflicting_record],
+        )
+    except worker.FrozenThresholdPolicyConflict as exc:
+        assert "disagree" in str(exc)
+    else:
+        raise AssertionError("conflicting formula width references were accepted")
+
+    for bad_horizon in (None, 60):
+        bad_reference = {
+            **legacy_snapshot["movement_width_reference"],
+        }
+        if bad_horizon is None:
+            bad_reference.pop("horizon_minutes")
+        else:
+            bad_reference["horizon_minutes"] = bad_horizon
+        try:
+            worker._frozen_threshold_policy(
+                event={"alert_time_utc": START},
+                horizon_minutes=240,
+                snapshot_records=[
+                    {
+                        **legacy_record,
+                        "input_snapshot": {
+                            **legacy_snapshot,
+                            "movement_width_reference": bad_reference,
+                        },
+                    }
+                ],
+            )
+        except worker.FrozenThresholdPolicyConflict as exc:
+            assert "horizon" in str(exc)
+        else:
+            raise AssertionError(
+                "relaxed reference with a missing/mismatched horizon was accepted"
+            )
+
     # A favorable wick on a gapped prefix is not allowed to freeze a terminal
     # HIT.  Once the complete prefix is available, the same wick qualifies
     # immediately even though a later candle reverses deeply and closes down.
@@ -230,6 +354,48 @@ def run() -> None:
         + timedelta(seconds=59, milliseconds=999)
     )
 
+    # A legacy PENDING row is due again.  The worker rebuilds the whole closed
+    # prefix with the frozen weekend width and can discover an earlier touch;
+    # no manual database mutation or future candle is needed.
+    recalculated, recalculated_writes = _run_once_with_path(
+        lambda event_time: [
+            _candle(event_time, high=100.7, low=100.0, close=100.1),
+            _candle(event_time + timedelta(minutes=1)),
+            _candle(event_time + timedelta(minutes=2)),
+        ],
+        horizon=240,
+        frozen_scales=(0.60, 0.60),
+        first_touch_versions={
+            240: f"{research_no_dwell_outcome.METHOD_VERSION}:PENDING"
+        },
+    )
+    assert recalculated["first_touch_hits"] == 1
+    assert recalculated["first_touch_threshold_policy_conflicts"] == 0
+    recalculated_touch = recalculated_writes[0]["first_touch"]
+    assert recalculated_touch["status"] == "HIT"
+    assert recalculated_touch["threshold_scale_factor"] == 0.60
+    assert recalculated_touch["qualifying_move_threshold_pct"] == 0.60
+    assert recalculated_touch["first_qualifying_move_time_utc"] == (
+        recalculated_writes[0]["event"]["alert_time_utc"]
+        + timedelta(seconds=59, milliseconds=999)
+    )
+    assert recalculated_touch["observed_through_utc"] == (
+        recalculated_writes[0]["event"]["alert_time_utc"]
+        + timedelta(minutes=2, seconds=59, milliseconds=999)
+    )
+
+    rejected, rejected_writes = _run_once_with_path(
+        lambda event_time: [
+            _candle(event_time, high=101.5),
+            _candle(event_time + timedelta(minutes=1)),
+            _candle(event_time + timedelta(minutes=2)),
+        ],
+        horizon=240,
+        frozen_scales=(0.60, 0.55),
+    )
+    assert rejected_writes == []
+    assert rejected["first_touch_threshold_policy_conflicts"] == 1
+
     # A verified terminal row is absorbing at the application upsert.  A
     # legacy partial terminal row, if one ever existed, is deliberately not
     # protected and can be replaced by a later complete recalculation instead
@@ -249,9 +415,16 @@ def run() -> None:
     assert conflict_capture.query.count("%s") == len(conflict_capture.params)
     assert "status IN ('HIT', 'MISS')" in conflict_capture.query
     assert "data_quality_status=ANY(%s)" in conflict_capture.query
-    assert conflict_capture.params[-1] == list(
-        canonical_price_path.COMPLETE_QUALITIES
+    assert "EXCLUDED.observed_through_utc >=" in conflict_capture.query
+    assert "research_first_touch_outcomes.status<>'PENDING'" in (
+        conflict_capture.query
     )
+    assert "EXCLUDED.data_quality_status=ANY(%s)" in conflict_capture.query
+    assert conflict_capture.params[-3:] == [
+        list(canonical_price_path.COMPLETE_QUALITIES),
+        list(canonical_price_path.COMPLETE_QUALITIES),
+        list(canonical_price_path.COMPLETE_QUALITIES),
+    ]
     assert "direction=EXCLUDED.direction" in conflict_capture.query
     assert "WHEN research_first_touch_outcomes.status='HIT'" not in (
         conflict_capture.query

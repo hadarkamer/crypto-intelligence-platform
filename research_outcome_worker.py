@@ -21,8 +21,9 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 try:
     import psycopg
@@ -46,6 +47,10 @@ _OPEN_FIRST_TOUCH_EVENT_LIMIT = max(
 )
 _METHOD_VERSION = canonical_price_path.METHOD_VERSION
 _FIRST_TOUCH_METHOD_VERSION = research_no_dwell_outcome.METHOD_VERSION
+
+
+class FrozenThresholdPolicyConflict(ValueError):
+    """A frozen event/horizon has incompatible decision-time width evidence."""
 
 
 def _database_url() -> str:
@@ -87,6 +92,168 @@ def _first_touch_write_is_safe(
     if status in {"HIT", "MISS"}:
         return bool(observed_prefix_complete)
     return False
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _frozen_threshold_policy(
+    *,
+    event: Mapping[str, Any],
+    horizon_minutes: int,
+    snapshot_records: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Build one deterministic threshold from immutable Shadow snapshots.
+
+    Multiple formulas can evaluate the same event and horizon, while the
+    canonical first-touch table has one row for that event/horizon.  Any
+    relaxed references must therefore agree exactly.  Ambiguity is rejected
+    instead of silently falling back to a static threshold and mislabelling a
+    weekend outcome.
+    """
+    horizon = int(horizon_minutes)
+    decision_time = _utc(event["alert_time_utc"])
+    relevant = [
+        record
+        for record in snapshot_records
+        if int(record.get("horizon_minutes") or 0) == horizon
+    ]
+    if not relevant:
+        return research_no_dwell_outcome.freeze_threshold_policy(
+            horizon_minutes=horizon,
+            decision_time=decision_time,
+        )
+
+    normalized_relaxed: list[tuple[tuple[Any, ...], Dict[str, Any]]] = []
+    static_records = 0
+    for record in relevant:
+        snapshot = _mapping(record.get("input_snapshot"))
+        reference = _mapping(snapshot.get("movement_width_reference"))
+        if not reference:
+            static_records += 1
+            continue
+        scale = _finite_number(
+            reference.get("threshold_scale_factor")
+            if reference.get("threshold_scale_factor") is not None
+            else reference.get("floor_scale_factor")
+        )
+        if scale is None or not 0.50 <= scale <= 1.00:
+            raise FrozenThresholdPolicyConflict(
+                "frozen movement-width scale is missing or outside 0.50-1.00"
+            )
+        applied = reference.get("applied") is True
+        if math.isclose(scale, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            if applied:
+                raise FrozenThresholdPolicyConflict(
+                    "frozen movement-width reference marks scale 1.0 as applied"
+                )
+            static_records += 1
+            continue
+        if not applied:
+            raise FrozenThresholdPolicyConflict(
+                "relaxed movement-width scale was not frozen as applied"
+            )
+        reference_horizon = _finite_number(reference.get("horizon_minutes"))
+        if (
+            reference_horizon is None
+            or not float(reference_horizon).is_integer()
+            or int(reference_horizon) != horizon
+        ):
+            raise FrozenThresholdPolicyConflict(
+                "relaxed reference horizon is missing or differs from formula horizon"
+            )
+
+        source_kind = str(reference.get("source_kind") or "").upper()
+        policy_source = str(reference.get("policy") or "").strip()
+        if not source_kind:
+            # Compatibility for already-frozen snapshots created before the
+            # explicit provenance fields were added.  Only the exact known
+            # prior-only policy is eligible for this bridge.
+            if policy_source != (
+                "prior raw price width; same-symbol session-composition matched"
+            ):
+                raise FrozenThresholdPolicyConflict(
+                    "legacy relaxed reference lacks recognized prior-only provenance"
+                )
+            source_kind = "PRIOR_ONLY_SESSION_CALIBRATION"
+        if source_kind != "PRIOR_ONLY_SESSION_CALIBRATION":
+            raise FrozenThresholdPolicyConflict(
+                "relaxed reference is not prior-only session calibration"
+            )
+
+        as_of = reference.get("as_of_utc")
+        if as_of is None:
+            source_inputs = _mapping(snapshot.get("source_inputs"))
+            price_oi = _mapping(source_inputs.get("price_oi"))
+            as_of = price_oi.get("timestamp_utc")
+        if as_of is None:
+            raise FrozenThresholdPolicyConflict(
+                "relaxed reference has no frozen prior-only as-of timestamp"
+            )
+        try:
+            as_of_utc = _utc(as_of)
+        except (TypeError, ValueError) as exc:
+            raise FrozenThresholdPolicyConflict(
+                "relaxed reference has an invalid prior-only as-of timestamp"
+            ) from exc
+
+        weekend_ratio = _finite_number(reference.get("session_weekend_ratio"))
+        if weekend_ratio is None:
+            session = _mapping(snapshot.get("outcome_window_session"))
+            weekend_ratio = _finite_number(session.get("session_weekend_ratio"))
+        prior_reference = {
+            "source_kind": source_kind,
+            "as_of_utc": as_of_utc,
+            "threshold_scale_factor": scale,
+            "session_weekend_ratio": weekend_ratio,
+            "source": policy_source or "prior-only session calibration",
+        }
+        try:
+            threshold_policy = research_no_dwell_outcome.freeze_threshold_policy(
+                horizon_minutes=horizon,
+                decision_time=decision_time,
+                prior_only_reference=prior_reference,
+            )
+        except (TypeError, ValueError) as exc:
+            raise FrozenThresholdPolicyConflict(str(exc)) from exc
+        fingerprint = (
+            round(float(threshold_policy["threshold_scale_factor"]), 8),
+            round(float(threshold_policy["session_weekend_ratio"]), 8),
+            _utc(threshold_policy["threshold_as_of_utc"]).isoformat(),
+            str(threshold_policy["threshold_source_kind"]),
+            str(threshold_policy["threshold_source"]),
+        )
+        normalized_relaxed.append((fingerprint, threshold_policy))
+
+    if not normalized_relaxed:
+        return research_no_dwell_outcome.freeze_threshold_policy(
+            horizon_minutes=horizon,
+            decision_time=decision_time,
+        )
+    if static_records or len({item[0] for item in normalized_relaxed}) != 1:
+        raise FrozenThresholdPolicyConflict(
+            "formula snapshots disagree on the event/horizon width policy"
+        )
+    return normalized_relaxed[0][1]
 
 
 def calculate_returns(
@@ -229,6 +396,7 @@ class OutcomeMetrics:
     first_touch_rows_written: int = 0
     first_touch_hits: int = 0
     first_touch_pending: int = 0
+    first_touch_threshold_policy_conflicts: int = 0
     first_touch_terminal_rows_deferred_for_incomplete_prefix: int = 0
     failures: int = 0
     last_run_utc: Optional[str] = None
@@ -316,6 +484,30 @@ class ResearchOutcomeWorker:
                 self.metrics.last_error = f"{type(exc).__name__}: {exc}"
                 print(f"[research-outcomes] run failed: {exc!r}", flush=True)
             await asyncio.sleep(_POLL_SECONDS)
+
+    @staticmethod
+    def _load_frozen_threshold_references(
+        conn, event_ids: Sequence[int]
+    ) -> list[Dict[str, Any]]:
+        """Load immutable width evidence for matches and prospective controls."""
+        normalized = sorted(
+            {int(event_id) for event_id in event_ids if int(event_id) > 0}
+        )
+        if not normalized:
+            return []
+        rows = conn.execute(
+            """
+            SELECT c.event_id, f.horizon_minutes, c.formula_id,
+                   c.input_snapshot
+            FROM research_formula_shadow_checks c
+            JOIN research_formulas f ON f.formula_id=c.formula_id
+            WHERE c.event_id=ANY(%s)
+              AND c.evaluation_status IN ('MATCHED', 'UNMATCHED')
+            ORDER BY c.event_id, f.horizon_minutes, c.formula_id
+            """,
+            (normalized,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _load_due_events(conn, limit: int) -> list[Dict[str, Any]]:
@@ -686,6 +878,15 @@ class ResearchOutcomeWorker:
                 research_first_touch_outcomes.status IN ('HIT', 'MISS')
                 AND research_first_touch_outcomes.data_quality_status=ANY(%s)
             )
+              AND EXCLUDED.observed_through_utc >=
+                  research_first_touch_outcomes.observed_through_utc
+              AND (
+                  research_first_touch_outcomes.status<>'PENDING'
+                  OR NOT (
+                      research_first_touch_outcomes.data_quality_status=ANY(%s)
+                  )
+                  OR EXCLUDED.data_quality_status=ANY(%s)
+              )
             RETURNING event_id
             """,
             (
@@ -720,6 +921,8 @@ class ResearchOutcomeWorker:
                 source,
                 quality,
                 list(canonical_price_path.COMPLETE_QUALITIES),
+                list(canonical_price_path.COMPLETE_QUALITIES),
+                list(canonical_price_path.COMPLETE_QUALITIES),
             ),
         ).fetchone()
         return bool(row)
@@ -739,6 +942,7 @@ class ResearchOutcomeWorker:
         first_touch_written = 0
         first_touch_hits = 0
         first_touch_pending = 0
+        first_touch_policy_conflicts = 0
         first_touch_terminal_deferred = 0
         now = datetime.now(timezone.utc)
         latest_closed_cutoff = _latest_closed_candle_cutoff(now)
@@ -790,6 +994,18 @@ class ResearchOutcomeWorker:
                     }
                 )
             events = [events_by_id[event_id] for event_id in event_order]
+            frozen_references = self._load_frozen_threshold_references(
+                conn, event_order
+            )
+            references_by_event: Dict[int, list[Dict[str, Any]]] = {}
+            for reference in frozen_references:
+                references_by_event.setdefault(
+                    int(reference["event_id"]), []
+                ).append(reference)
+            for event in events:
+                event["frozen_threshold_references"] = references_by_event.get(
+                    int(event["event_id"]), []
+                )
         # Do not hold a PostgreSQL connection or transaction while waiting for
         # Binance. This keeps outcome research isolated from the live bot load.
         for event in events:
@@ -902,22 +1118,50 @@ class ResearchOutcomeWorker:
                     and first_touch_versions.get(horizon)
                     != _FIRST_TOUCH_METHOD_VERSION
                 )
-                first_touch = (
-                    research_no_dwell_outcome.calculate_first_touch_outcome(
-                        reference_price=reference_price,
-                        direction=str(event.get("direction") or "NEUTRAL"),
-                        event_time=event_time,
-                        candles=candles,
-                        horizon_minutes=horizon,
-                        horizon_closed=full_complete,
-                    )
-                    if first_touch_needed
-                    else None
-                )
-                first_touch_write_safe = _first_touch_write_is_safe(
-                    first_touch,
-                    observed_prefix_complete=observed_complete,
-                )
+                first_touch = None
+                first_touch_write_safe = False
+                if first_touch_needed:
+                    try:
+                        threshold_policy = _frozen_threshold_policy(
+                            event=event,
+                            horizon_minutes=horizon,
+                            snapshot_records=(
+                                event.get("frozen_threshold_references") or ()
+                            ),
+                        )
+                    except FrozenThresholdPolicyConflict as exc:
+                        first_touch_policy_conflicts += 1
+                        print(
+                            "[research-outcomes] frozen first-touch threshold "
+                            f"conflict event={event['event_id']} horizon={horizon}: "
+                            f"{exc}",
+                            flush=True,
+                        )
+                    else:
+                        first_touch = (
+                            research_no_dwell_outcome.calculate_first_touch_outcome(
+                                reference_price=reference_price,
+                                direction=str(
+                                    event.get("direction") or "NEUTRAL"
+                                ),
+                                event_time=event_time,
+                                candles=candles,
+                                horizon_minutes=horizon,
+                                horizon_closed=full_complete,
+                                threshold_policy=threshold_policy,
+                            )
+                        )
+                        # ``first_qualifying_move_time_utc`` preserves the
+                        # exact earlier touch.  ``observed_through_utc`` tracks
+                        # the complete prefix used for this recalculation so a
+                        # corrected PENDING -> HIT write remains monotonic.
+                        first_touch["observed_through_utc"] = _utc(
+                            candles[-1].close_time_utc
+                        )
+                        first_touch_write_safe = _first_touch_write_is_safe(
+                            first_touch,
+                            observed_prefix_complete=observed_complete,
+                        )
                 if (
                     first_touch is not None
                     and first_touch.get("status") in {"HIT", "MISS"}
@@ -1011,6 +1255,9 @@ class ResearchOutcomeWorker:
         self.metrics.first_touch_rows_written += first_touch_written
         self.metrics.first_touch_hits += first_touch_hits
         self.metrics.first_touch_pending += first_touch_pending
+        self.metrics.first_touch_threshold_policy_conflicts += (
+            first_touch_policy_conflicts
+        )
         self.metrics.first_touch_terminal_rows_deferred_for_incomplete_prefix += (
             first_touch_terminal_deferred
         )
@@ -1026,6 +1273,9 @@ class ResearchOutcomeWorker:
             "first_touch_rows_written": first_touch_written,
             "first_touch_hits": first_touch_hits,
             "first_touch_pending": first_touch_pending,
+            "first_touch_threshold_policy_conflicts": (
+                first_touch_policy_conflicts
+            ),
             "first_touch_terminal_rows_deferred_for_incomplete_prefix": (
                 first_touch_terminal_deferred
             ),

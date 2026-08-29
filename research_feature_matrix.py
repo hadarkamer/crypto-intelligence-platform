@@ -803,8 +803,15 @@ def _movement_width_reference(
     active_ratio, weekend_ratio, segments = market_session_baseline.session_ratios(
         event_time, outcome_end
     )
+    cutoff = (
+        _as_utc(current_price_row["candle_time"])
+        if current_price_row and current_price_row.get("candle_time") is not None
+        else event_time
+    )
     result: Dict[str, Any] = {
         "policy": "prior raw price width; same-symbol session-composition matched",
+        "source_kind": "PRIOR_ONLY_SESSION_CALIBRATION",
+        "as_of_utc": cutoff,
         "horizon_minutes": horizon,
         "session_active_ratio": round(active_ratio, 6),
         "session_weekend_ratio": round(weekend_ratio, 6),
@@ -812,6 +819,7 @@ def _movement_width_reference(
         "session_composition": _session_composition_label(active_ratio),
         "minimum_effective_samples": HISTORICAL_BASELINE_MIN_SAMPLES,
         "floor_scale_factor": 1.0,
+        "threshold_scale_factor": 1.0,
         "applied": False,
     }
     historical = historical_index.get((symbol, horizon))
@@ -819,11 +827,6 @@ def _movement_width_reference(
         result["reason"] = "historical horizon unavailable"
         return result
 
-    cutoff = (
-        _as_utc(current_price_row["candle_time"])
-        if current_price_row and current_price_row.get("candle_time") is not None
-        else event_time
-    )
     start = cutoff - timedelta(days=HISTORICAL_BASELINE_DAYS)
     left = bisect_left(historical.times, start)
     right = bisect_left(historical.times, cutoff)
@@ -872,6 +875,7 @@ def _movement_width_reference(
 
     scale = min(1.0, max(0.50, float(matched_p90) / float(active_p90)))
     result["floor_scale_factor"] = round(scale, 6)
+    result["threshold_scale_factor"] = round(scale, 6)
     result["applied"] = scale < 1.0 - 1e-9
     result["reason"] = (
         "weekend/mixed width floor calibrated from prior raw price history"

@@ -217,6 +217,8 @@ def run() -> None:
                 assert "AS first_touch_hit" in normalized
                 assert "AS full_horizon_outcome_available" in normalized
                 assert "ft.pre_qualifying_mae_pct AS mae_pct" in normalized
+                assert "first_touch_threshold_scale_factor" in normalized
+                assert "first_touch_threshold_source_kind" in normalized
                 assert "ft.status IN ('HIT', 'MISS')" in normalized
                 assert "ft.method_version=%s" in normalized
                 assert "ft.data_quality_status=ANY(%s)" in normalized
@@ -345,6 +347,58 @@ def run() -> None:
     assert store._metric_row(
         missing_reference, horizon_minutes=240
     )["outcome_label"]["movement_width_reference"] == {}
+
+    relaxed_snapshot = {
+        "movement_width_reference": {
+            "floor_scale_factor": 0.60,
+            "threshold_scale_factor": 0.60,
+            "session_weekend_ratio": 1.0,
+            "applied": True,
+        }
+    }
+    compatible, reason = store._terminal_threshold_matches_snapshot(
+        {
+            "first_touch_available": True,
+            "input_snapshot": relaxed_snapshot,
+            "first_touch_threshold_scale_factor": 0.60,
+            "first_touch_threshold_source_kind": (
+                "PRIOR_ONLY_SESSION_CALIBRATION"
+            ),
+            "qualifying_move_threshold_pct": 0.60,
+        },
+        horizon_minutes=240,
+    )
+    assert compatible is True and "matches" in reason
+
+    mismatched_terminal = {
+        **_shadow_row(30, at=start + timedelta(hours=8)),
+        "input_snapshot": relaxed_snapshot,
+        "outcome_due": True,
+        "first_touch_threshold_scale_factor": 1.0,
+        "first_touch_threshold_source_kind": "STATIC_HORIZON_FLOOR",
+        "qualifying_move_threshold_pct": 1.0,
+    }
+
+    class _TerminalConnection:
+        def execute(self, query, params=()):
+            assert query.count("%s") == len(params)
+            assert "first_touch_threshold_scale_factor" in query
+            return _Rows([mismatched_terminal])
+
+    guarded_rows = store._shadow_outcome_rows(
+        _TerminalConnection(), {"formula_id": 1, "horizon_minutes": 240}
+    )
+    guarded = guarded_rows[0]
+    assert guarded["first_touch_threshold_policy_compatible"] is False
+    assert guarded["first_touch_available"] is False
+    assert guarded["outcome_available"] is False
+    guarded_validation = store._build_shadow_validation(
+        {"horizon_minutes": 240}, guarded_rows, evaluated_at_utc=start
+    )
+    assert guarded_validation["metrics"]["sample_size"] == 0
+    assert guarded_validation["evidence"][
+        "threshold_policy_mismatch_event_ids"
+    ] == [30]
 
     print("research formula store self-test: PASS")
 

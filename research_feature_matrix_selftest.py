@@ -571,10 +571,13 @@ def run() -> None:
     assert row["outcome_label"]["session_active_ratio"] == 0.0
     assert row["outcome_label"]["session_weekend_ratio"] == 1.0
     assert row["outcome_label"]["session_composition"] == "WEEKEND_ONLY"
-    assert (
-        row["outcome_label"]["movement_width_reference"]["floor_scale_factor"]
-        == 1.0
-    )
+    width_reference = row["outcome_label"]["movement_width_reference"]
+    assert width_reference["floor_scale_factor"] == 1.0
+    assert width_reference["threshold_scale_factor"] == 1.0
+    assert width_reference["source_kind"] == "PRIOR_ONLY_SESSION_CALIBRATION"
+    assert datetime.fromisoformat(
+        str(width_reference["as_of_utc"]).replace("Z", "+00:00")
+    ) == event_time - timedelta(minutes=1)
     assert "outcome_label" not in row["model_features"]
     assert row["max_pain_features"]["evaluation_status"] == "EVALUABLE"
     assert (
