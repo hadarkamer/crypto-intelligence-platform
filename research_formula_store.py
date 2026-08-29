@@ -242,21 +242,24 @@ def persist_discovery_run(
             ),
         ).fetchone()
         run_id = int(run["run_id"])
-        # v3 adds prior-only weekend/weekday baselines while preserving the
-        # wide-move objective.  Older schemas cannot be evaluated under the
-        # same feature contract and therefore remain audit-only.
-        # Retire older non-live research formulas without deleting their audit
-        # history, so a v1 small-move candidate cannot later enter live checks.
+        # v4 uses exact session composition while preserving the wide-move
+        # objective. Older schemas cannot be evaluated under the same feature
+        # contract and therefore remain audit-only. Retire them horizon by
+        # horizon only after that horizon's replacement cohort is ready.
         superseded = conn.execute(
             """
             SELECT formula_id, current_stage
             FROM research_formulas
             WHERE active=TRUE
               AND formula_schema_version<>%s
+              AND horizon_minutes=%s
               AND current_stage NOT IN ('LIVE', 'RETIRED')
             FOR UPDATE
             """,
-            (research_formula_engine.FORMULA_SCHEMA_VERSION,),
+            (
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                int(discovery["horizon_minutes"]),
+            ),
         ).fetchall()
         for old_formula in superseded:
             conn.execute(
@@ -280,9 +283,13 @@ def persist_discovery_run(
                 SET current_stage='RETIRED', active=FALSE, updated_at_utc=NOW()
                 WHERE active=TRUE
                   AND formula_schema_version<>%s
+                  AND horizon_minutes=%s
                   AND current_stage NOT IN ('LIVE', 'RETIRED')
                 """,
-                (research_formula_engine.FORMULA_SCHEMA_VERSION,),
+                (
+                    research_formula_engine.FORMULA_SCHEMA_VERSION,
+                    int(discovery["horizon_minutes"]),
+                ),
             )
         persisted = 0
         stage_counts: Dict[str, int] = {}

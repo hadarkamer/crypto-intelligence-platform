@@ -1,6 +1,7 @@
 """Deterministic checks for automatic formula discovery and holdout safety."""
 
 from datetime import datetime, timedelta, timezone
+from statistics import mean
 
 import research_formula_engine as engine
 
@@ -148,6 +149,25 @@ def _row(index: int):
 
 def run() -> None:
     rows = [_row(index) for index in range(140)]
+    selected_ratios = [0.0, 0.2, 0.5, 0.8, 1.0]
+    optimized_profile = engine._composition_profile_weights(
+        rows[:12], selected_ratios
+    )
+    optimized_by_id = {
+        int(row["event"]["event_id"]): weight
+        for row, weight in optimized_profile
+    }
+    for row in rows[:12]:
+        historical_ratio = engine._row_outcome_active_ratio(row)
+        brute = mean(
+            engine.market_session_baseline.composition_weight(
+                selected_ratio, historical_ratio
+            )
+            for selected_ratio in selected_ratios
+        )
+        optimized = optimized_by_id.get(int(row["event"]["event_id"]), 0.0)
+        assert abs(brute - optimized) < 1e-12
+
     result = engine.discover_formulas(
         rows,
         horizon_minutes=240,

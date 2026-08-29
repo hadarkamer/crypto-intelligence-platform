@@ -11,6 +11,7 @@ messages, or alter any production score/threshold.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -406,31 +407,55 @@ def _session_composition_label(active_ratio: float) -> str:
     return "MIXED"
 
 
-def _profile_weighted_outcomes(
+def _composition_profile_weights(
     rows: Sequence[Mapping[str, Any]],
     selected_active_ratios: Sequence[float],
-    outcome_key: str,
-) -> list[tuple[float, float]]:
+) -> list[tuple[Mapping[str, Any], float]]:
+    """Calculate exact mean triangular similarity in O(n log n).
+
+    This is algebraically identical to averaging ``composition_weight`` for
+    every selected/control pair, but avoids quadratic CPU work inside the
+    thousands of formula candidates evaluated on the production bot.
+    """
     if not selected_active_ratios:
         return []
-    weighted: list[tuple[float, float]] = []
+    selected = sorted(float(value) for value in selected_active_ratios)
+    prefix = [0.0]
+    for value in selected:
+        prefix.append(prefix[-1] + value)
+    tolerance = market_session_baseline.DEFAULT_COMPOSITION_TOLERANCE
+    profile: list[tuple[Mapping[str, Any], float]] = []
     for row in rows:
+        historical = _row_outcome_active_ratio(row)
+        left = bisect_left(selected, historical - tolerance)
+        middle = bisect_right(selected, historical)
+        right = bisect_right(selected, historical + tolerance)
+        left_count = middle - left
+        right_count = right - middle
+        left_sum = prefix[middle] - prefix[left]
+        right_sum = prefix[right] - prefix[middle]
+        similarity_sum = (
+            left_count * (1.0 - historical / tolerance)
+            + left_sum / tolerance
+            + right_count * (1.0 + historical / tolerance)
+            - right_sum / tolerance
+        )
+        weight = max(0.0, similarity_sum / len(selected))
+        if weight > 0.0:
+            profile.append((row, weight))
+    return profile
+
+
+def _weighted_outcomes(
+    profile: Sequence[tuple[Mapping[str, Any], float]], outcome_key: str
+) -> list[tuple[float, float]]:
+    result: list[tuple[float, float]] = []
+    for row, weight in profile:
         label = row.get("outcome_label")
         value = _number(label.get(outcome_key)) if isinstance(label, Mapping) else None
-        if value is None:
-            continue
-        historical_ratio = _row_outcome_active_ratio(row)
-        weight = mean(
-            market_session_baseline.composition_weight(
-                current_ratio,
-                historical_ratio,
-                market_session_baseline.DEFAULT_COMPOSITION_TOLERANCE,
-            )
-            for current_ratio in selected_active_ratios
-        )
-        if weight > 0.0:
-            weighted.append((value, weight))
-    return weighted
+        if value is not None:
+            result.append((value, weight))
+    return result
 
 
 def _weighted_percentile_rank(
@@ -523,12 +548,13 @@ def _metrics(
         if control_directional
         else None
     )
-    session_control_directional = _profile_weighted_outcomes(
-        controls, selected_active_ratios, "directional_return_pct"
+    control_session_profile = _composition_profile_weights(
+        controls, selected_active_ratios
     )
-    session_control_mfe = _profile_weighted_outcomes(
-        controls, selected_active_ratios, "mfe_pct"
+    session_control_directional = _weighted_outcomes(
+        control_session_profile, "directional_return_pct"
     )
+    session_control_mfe = _weighted_outcomes(control_session_profile, "mfe_pct")
     session_control_effective = sum(
         weight for _, weight in session_control_directional
     )
@@ -567,29 +593,6 @@ def _metrics(
     active_control_mfe_p90 = market_session_baseline.weighted_percentile(
         active_control_mfe, 0.90
     )
-    session_mfe_percentiles: list[float] = []
-    for row, active_ratio in zip(selected, selected_active_ratios):
-        label = row.get("outcome_label")
-        row_mfe = _number(label.get("mfe_pct")) if isinstance(label, Mapping) else None
-        per_row_population = market_session_baseline.composition_weighted_values(
-            [
-                (value, _row_outcome_active_ratio(control))
-                for control in controls
-                for value in [
-                    _number(
-                        (control.get("outcome_label") or {}).get("mfe_pct")
-                        if isinstance(control.get("outcome_label"), Mapping)
-                        else None
-                    )
-                ]
-                if value is not None
-            ],
-            active_ratio,
-            market_session_baseline.DEFAULT_COMPOSITION_TOLERANCE,
-        )
-        percentile = _weighted_percentile_rank(row_mfe, per_row_population)
-        if percentile is not None:
-            session_mfe_percentiles.append(percentile)
     median_mae = median(mae) if mae else None
     median_mfe = median(mfe) if mfe else None
     universe_median_mfe = median(universe_mfe) if universe_mfe else None
@@ -607,8 +610,8 @@ def _metrics(
         if median_mfe is not None and universe_median_mfe not in (None, 0.0)
         else None
     )
-    session_mfe_percentile = (
-        median(session_mfe_percentiles) if session_mfe_percentiles else None
+    session_mfe_percentile = _weighted_percentile_rank(
+        median_mfe, session_control_mfe
     )
     session_mfe_uplift = (
         (median_mfe / session_mfe_median - 1.0) * 100.0
