@@ -31,6 +31,27 @@ def _row(index: int):
             "is_weekend_utc": event_time.weekday() >= 5,
             "fixed_utc_session_bucket": "SELFTEST",
         },
+        "historical_context": {
+            "regime": (
+                "WEEKEND_UTC" if event_time.weekday() >= 5 else "WEEKDAY_UTC"
+            ),
+            "windows": {
+                "60m": {
+                    "regime": (
+                        "WEEKEND_UTC"
+                        if event_time.weekday() >= 5
+                        else "WEEKDAY_UTC"
+                    ),
+                    "prior_points": 120,
+                    "sufficient_history": True,
+                    "price_change_pct_percentile_same_regime": (
+                        85.0 if signal > 0 else 15.0
+                    ),
+                    "price_change_pct_abs_percentile_same_regime": 80.0,
+                    "oi_change_pct_percentile_same_regime": float(index % 100),
+                }
+            },
+        },
         "raw_features": {
             "captured_event_inputs": {
                 "event_initial_target_distance_pct": 1.0 + (index % 4) / 10.0,
@@ -114,6 +135,8 @@ def run() -> None:
     assert "sample_size" in formula["discovery_metrics"]
     assert "mae_p95_pct" in formula["holdout_metrics"]
     assert "median_mfe_percentile_pct" in formula["holdout_metrics"]
+    assert "regime_adjusted_mfe_percentile_pct" in formula["holdout_metrics"]
+    assert "market_regime_counts" in formula["holdout_metrics"]
     assert "favorable_minus_p90_adverse_pct" in formula["holdout_metrics"]
     assert "q_value" in formula["multiple_testing"]
     assert all(
@@ -124,6 +147,7 @@ def run() -> None:
     features = engine.extract_decision_features(rows[0])
     assert all(not key.startswith("outcome") for key in features)
     assert "aligned.60m.price_change_pct" in features
+    assert "historical.60m.price_change_pct_percentile_same_regime" in features
     assert engine.formula_key(
         direction=formula["direction"],
         horizon_minutes=240,

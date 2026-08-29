@@ -7,6 +7,7 @@ the /ai command and the existing bot commands keep their current behavior.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import re
 from typing import Iterable
 
@@ -68,6 +69,17 @@ def _plain_telegram_text(text: str) -> str:
     value = re.sub(r"__(.*?)__", r"\1", value, flags=re.DOTALL)
     value = re.sub(r"`([^`]+)`", r"\1", value)
     value = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1\n\2", value)
+    # A slash-separated p75/p90/p95 sequence is visually reordered by
+    # Telegram's RTL layout.  One percentile per line preserves the numerical
+    # mapping in both Hebrew and English clients.
+    value = re.sub(
+        r"(?i)MAE\s+p75\s*/\s*p90\s*/\s*p95\s*[:：-]?\s*"
+        r"([+-]?\d+(?:\.\d+)?%?)\s*/\s*"
+        r"([+-]?\d+(?:\.\d+)?%?)\s*/\s*"
+        r"([+-]?\d+(?:\.\d+)?%?)",
+        r"MAE p75: \1\nMAE p90: \2\nMAE p95: \3",
+        value,
+    )
     return value.strip()
 
 
@@ -140,6 +152,11 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     key_status = "מחובר" if state.get("configured") else "לא מוגדר"
     tools = ", ".join(state.get("tools") or []) or "אין"
+    current_regime = (
+        "סוף שבוע (UTC)"
+        if datetime.now(timezone.utc).weekday() >= 5
+        else "אמצע שבוע (UTC)"
+    )
     await update.message.reply_text(
         "🧠 AI — הבוט הקיים\n"
         f"OpenAI API: {key_status}\n"
@@ -156,7 +173,10 @@ async def ai_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"מנוע נוסחאות: {'פעיל' if formulas.get('discovery_enabled') else 'כבוי'} | "
         f"Shadow: {'פעיל' if formulas.get('shadow_enabled') else 'כבוי'} | "
         f"מאגר: {'מותקן' if formula_schema.get('schema_present') else 'לא הותקן'}\n"
-        f"התראות נוסחה חיות: {'פעילות' if formulas.get('live_alerts_enabled') else 'כבויות'} | "
+        f"משטר ניתוח: {current_regime}; השוואה היסטורית מול אותו משטר\n"
+        f"מנוע מסירת נוסחאות: {'פעיל' if formulas.get('live_alerts_enabled') else 'כבוי'} | "
+        f"נוסחאות Shadow פעילות: {formula_schema.get('shadow_formulas', 0)} | "
+        f"נוסחאות LIVE פעילות: {formula_schema.get('live_formulas', 0)}\n"
         f"הצ'אט הזה: {'רשום' if subscription.get('active') else 'לא רשום'}\n"
         "Web/CoinGlass Vision: מעבדה בלבד, לא מחוברים לייצור\n"
         "זיכרון שיחה: זמני ומוגבל; יתאפס בעת restart."
@@ -231,6 +251,8 @@ async def ai_alerts_status_cmd(
         "🔔 מצב התראות AI\n"
         f"הצ'אט הזה: {'פעיל' if subscription.get('active') else 'כבוי'}\n"
         f"מנוע מסירה: {'פעיל' if formulas.get('live_alerts_enabled') else 'כבוי'}\n"
+        f"נוסחאות Shadow פעילות: {schema.get('shadow_formulas', 0)}\n"
+        f"נוסחאות LIVE פעילות: {schema.get('live_formulas', 0)}\n"
         f"Telegram מחובר: {'כן' if (formulas.get('live_delivery_gate') or {}).get('telegram_delivery_connected') else 'לא'}\n"
         "נוסחאות נדרשות לעבור Holdout ואימות עתידי ב-Shadow לפני מסירה."
     )

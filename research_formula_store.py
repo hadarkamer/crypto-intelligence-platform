@@ -31,7 +31,7 @@ _STAGE_ORDER = {
 _AUTOMATIC_STAGE_PATH = ("DISCOVERED", "BACKTESTED", "HOLDOUT_PASSED", "SHADOW")
 _AUTONOMOUS_POLICY_VERSION = (
     os.getenv("FORMULA_AUTONOMOUS_ALERT_POLICY_VERSION", "").strip()
-    or "owner-policy-v1-2026-08-29"
+    or "owner-policy-v2-weekend-regime-2026-08-29"
 )
 _SHADOW_MIN_MATCHES = max(
     12, int(os.getenv("FORMULA_SHADOW_MIN_VALIDATED_MATCHES", "12"))
@@ -242,7 +242,9 @@ def persist_discovery_run(
             ),
         ).fetchone()
         run_id = int(run["run_id"])
-        # v2 intentionally changes the objective toward wide favorable moves.
+        # v3 adds prior-only weekend/weekday baselines while preserving the
+        # wide-move objective.  Older schemas cannot be evaluated under the
+        # same feature contract and therefore remain audit-only.
         # Retire older non-live research formulas without deleting their audit
         # history, so a v1 small-move candidate cannot later enter live checks.
         superseded = conn.execute(
@@ -268,7 +270,7 @@ def persist_discovery_run(
                     int(old_formula["formula_id"]),
                     run_id,
                     str(old_formula["current_stage"]),
-                    "superseded by wide-move formula schema v2",
+                    "superseded by weekend-regime formula schema v3",
                 ),
             )
         if superseded:
@@ -828,7 +830,14 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
             ]
             metrics = research_formula_engine.summarize_outcomes(selected, universe)
             evaluated += 1
-            improvement = metrics.get("hit_rate_improvement_pct_points")
+            improvement = metrics.get("regime_hit_rate_improvement_pct_points")
+            if improvement is None:
+                improvement = metrics.get("hit_rate_improvement_pct_points")
+            movement_percentile = metrics.get(
+                "regime_adjusted_mfe_percentile_pct"
+            )
+            if movement_percentile is None:
+                movement_percentile = metrics.get("median_mfe_percentile_pct")
             gate_results = {
                 "matched future outcomes": int(metrics.get("sample_size") or 0)
                 >= _SHADOW_MIN_MATCHES,
@@ -838,6 +847,9 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
                 >= float(_SHADOW_MIN_SPAN_HOURS),
                 "future UTC dates": int(metrics.get("distinct_utc_dates") or 0)
                 >= _SHADOW_MIN_DATES,
+                "future regime-matched baseline coverage": bool(
+                    metrics.get("regime_baseline_complete")
+                ),
                 "future hit rate": float(metrics.get("hit_rate_pct") or 0.0) >= 65.0,
                 "future Wilson lower bound": float(
                     metrics.get("wilson_95_lower_pct") or 0.0
@@ -852,7 +864,7 @@ def promote_eligible_shadow_formulas() -> Dict[str, Any]:
                     int(formula["horizon_minutes"])
                 ),
                 "future wide movement percentile": float(
-                    metrics.get("median_mfe_percentile_pct") or 0.0
+                    movement_percentile or 0.0
                 )
                 >= 70.0,
                 "future MFE/MAE efficiency": float(

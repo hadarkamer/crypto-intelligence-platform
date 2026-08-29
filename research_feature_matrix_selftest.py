@@ -105,7 +105,32 @@ def run() -> None:
         "data_quality_status": matrix.VERIFIED_OUTCOME_QUALITY,
     }
 
-    price_rows = [
+    historical_price_rows = []
+    historical_futures_rows = []
+    historical_spot_rows = []
+    for index in range(1, matrix.HISTORICAL_BASELINE_MIN_SAMPLES + 1):
+        anchor = event_time - timedelta(days=7 * index)
+        prior = anchor - timedelta(minutes=60)
+        historical_price_rows.extend(
+            [
+                _price("BTC", prior, 100.0 + index, 1000.0 + index),
+                _price("BTC", anchor, 101.0 + index, 1010.0 + index),
+            ]
+        )
+        historical_futures_rows.extend(
+            [
+                _flow("BTC", prior, 10.0 * index, 5.0 * index),
+                _flow("BTC", anchor, 10.0 * index + 5.0, 5.0 * index + 2.0),
+            ]
+        )
+        historical_spot_rows.extend(
+            [
+                _flow("BTC", prior, 8.0 * index, 4.0 * index),
+                _flow("BTC", anchor, 8.0 * index + 3.0, 4.0 * index + 1.0),
+            ]
+        )
+
+    price_rows = historical_price_rows + [
         _price("BTC", reference_time, 100.0, 1000.0, "oi_price_history"),
         _price(
             "BTC",
@@ -116,12 +141,12 @@ def run() -> None:
         ),
         _price("BTC", future_time, 999.0, 9999.0),
     ]
-    futures_rows = [
+    futures_rows = historical_futures_rows + [
         _flow("BTC", reference_time, 100.0, 10.0),
         _flow("BTC", current_time, 200.0, 30.0),
         _flow("BTC", future_time, 9999.0, 9999.0),
     ]
-    spot_rows = [
+    spot_rows = historical_spot_rows + [
         _flow("BTC", reference_time, 50.0, 5.0),
         _flow("BTC", current_time, 90.0, 15.0),
         _flow("BTC", future_time, -9999.0, -9999.0),
@@ -195,6 +220,7 @@ def run() -> None:
     serialized_inputs = str(
         {
             "raw": row["raw_features"],
+            "historical": row["historical_context"],
             "model": row["model_features"],
             "sequence": row["sequence_features"],
         }
@@ -218,6 +244,12 @@ def run() -> None:
     assert sequence["market_direction_balance_pct"] == 0.0
 
     assert row["time_features"]["utc_hour"] == 12
+    assert row["time_features"]["market_regime"] == "WEEKEND_UTC"
+    historical_60m = row["historical_context"]["windows"]["60m"]
+    assert historical_60m["regime"] == "WEEKEND_UTC"
+    assert historical_60m["price_change_pct_history_samples"] >= 24
+    assert historical_60m["price_change_pct_percentile_same_regime"] is not None
+    assert historical_60m["sufficient_history"] is True
     assert row["outcome_label"]["mfe_pct"] == 4.0
     assert row["outcome_label"]["mae_pct"] == 0.4
     assert "outcome_label" not in row["model_features"]

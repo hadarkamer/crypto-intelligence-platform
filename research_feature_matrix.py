@@ -13,12 +13,13 @@ bounded batches when a research request is made.
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import os
+from statistics import median
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 import canonical_price_path
@@ -31,7 +32,7 @@ except Exception:  # pragma: no cover - validated at runtime
     dict_row = None
 
 
-FEATURE_SCHEMA_VERSION = "research-feature-matrix-v1"
+FEATURE_SCHEMA_VERSION = "research-feature-matrix-v2-weekend-baseline"
 VERIFIED_OUTCOME_METHOD = canonical_price_path.METHOD_VERSION
 VERIFIED_OUTCOME_QUALITIES = canonical_price_path.COMPLETE_QUALITIES
 # Compatibility alias for callers that persist one textual dataset contract.
@@ -45,6 +46,18 @@ SEQUENCE_WINDOWS_MINUTES: tuple[int, ...] = (30, 120, 360)
 # than this hard ceiling is reported missing instead of silently joining stale
 # evidence to an alert.
 MAX_POINT_AGE_MINUTES = 45
+# Historical comparisons use only observations that existed before the alert,
+# from the same symbol and the same UTC weekend/weekday regime.  The archive is
+# currently smaller than this ceiling, so this loads all available history
+# while keeping the query and computation explicitly bounded.
+HISTORICAL_BASELINE_DAYS = 180
+HISTORICAL_BASELINE_MIN_SAMPLES = 24
+HISTORICAL_BASELINE_FEATURES: tuple[str, ...] = (
+    "price_change_pct",
+    "oi_change_pct",
+    "futures_continuous_cvd_change_usd",
+    "spot_continuous_cvd_change_usd",
+)
 _TRUE = {"1", "true", "yes", "on"}
 
 
@@ -468,12 +481,151 @@ def _time_features(event_time: datetime) -> Dict[str, Any]:
         bucket = "UTC_13_20"
     else:
         bucket = "UTC_21_23"
+    regime = "WEEKEND_UTC" if timestamp.weekday() >= 5 else "WEEKDAY_UTC"
     return {
         "utc_hour": hour,
         "utc_weekday": timestamp.weekday(),
         "utc_weekday_name": timestamp.strftime("%A").upper(),
         "is_weekend_utc": timestamp.weekday() >= 5,
+        "market_regime": regime,
         "fixed_utc_session_bucket": bucket,
+    }
+
+
+@dataclass(frozen=True)
+class _HistoricalWindowSeries:
+    times: tuple[datetime, ...]
+    values: tuple[Dict[str, float], ...]
+
+
+def _market_regime(timestamp: Any) -> str:
+    return "WEEKEND_UTC" if _as_utc(timestamp).weekday() >= 5 else "WEEKDAY_UTC"
+
+
+def _percentile_rank(value: Any, population: Sequence[float]) -> Optional[float]:
+    number = _float(value)
+    values = [float(item) for item in population if _float(item) is not None]
+    if number is None or not values:
+        return None
+    below = sum(1 for item in values if item < number)
+    equal = sum(1 for item in values if item == number)
+    return round((below + 0.5 * equal) / len(values) * 100.0, 4)
+
+
+def _historical_window_index(
+    *,
+    price_series: Mapping[str, _Series],
+    futures_series: Mapping[str, _Series],
+    spot_series: Mapping[str, _Series],
+    windows_minutes: Sequence[int],
+) -> Dict[tuple[str, int, str], _HistoricalWindowSeries]:
+    """Precompute raw window changes at archived points without outcomes.
+
+    Each point is derived only from the point timestamp and older raw market
+    rows.  Later, an alert receives only the prefix strictly before its current
+    Price/OI observation, which keeps historical percentile features free of
+    lookahead and excludes the alert's own observation from its baseline.
+    """
+    grouped: Dict[tuple[str, int, str], list[tuple[datetime, Dict[str, float]]]] = (
+        defaultdict(list)
+    )
+    for symbol, prices in price_series.items():
+        for minutes in windows_minutes:
+            for anchor_time in prices.times:
+                window = _window_features(
+                    event_time=anchor_time,
+                    minutes=int(minutes),
+                    price_series=prices,
+                    futures_series=futures_series.get(symbol),
+                    spot_series=spot_series.get(symbol),
+                )
+                values = {
+                    feature: number
+                    for feature in HISTORICAL_BASELINE_FEATURES
+                    if (number := _float(window.get(feature))) is not None
+                }
+                if values:
+                    grouped[(symbol, int(minutes), _market_regime(anchor_time))].append(
+                        (anchor_time, values)
+                    )
+    return {
+        key: _HistoricalWindowSeries(
+            times=tuple(item[0] for item in points),
+            values=tuple(item[1] for item in points),
+        )
+        for key, points in grouped.items()
+    }
+
+
+def _historical_context(
+    *,
+    symbol: str,
+    event_time: datetime,
+    current_price_row: Optional[Mapping[str, Any]],
+    windows: Mapping[str, Mapping[str, Any]],
+    historical_index: Mapping[tuple[str, int, str], _HistoricalWindowSeries],
+) -> Dict[str, Any]:
+    regime = _market_regime(event_time)
+    cutoff = (
+        _as_utc(current_price_row["candle_time"])
+        if current_price_row and current_price_row.get("candle_time") is not None
+        else _as_utc(event_time)
+    )
+    start = cutoff - timedelta(days=HISTORICAL_BASELINE_DAYS)
+    window_context: Dict[str, Any] = {}
+    for window_name, current in windows.items():
+        minutes = int(str(window_name).removesuffix("m"))
+        historical = historical_index.get((symbol, minutes, regime))
+        if historical is None:
+            points: Sequence[Mapping[str, float]] = ()
+        else:
+            left = bisect_left(historical.times, start)
+            right = bisect_left(historical.times, cutoff)
+            points = historical.values[left:right]
+
+        stats: Dict[str, Any] = {
+            "regime": regime,
+            "prior_points": len(points),
+        }
+        available_counts: list[int] = []
+        for feature in HISTORICAL_BASELINE_FEATURES:
+            population = [
+                float(point[feature]) for point in points if feature in point
+            ]
+            available_counts.append(len(population))
+            current_value = _float(current.get(feature))
+            enough = len(population) >= HISTORICAL_BASELINE_MIN_SAMPLES
+            stats[f"{feature}_history_samples"] = len(population)
+            stats[f"{feature}_percentile_same_regime"] = (
+                _percentile_rank(current_value, population) if enough else None
+            )
+            stats[f"{feature}_abs_percentile_same_regime"] = (
+                _percentile_rank(
+                    abs(current_value) if current_value is not None else None,
+                    [abs(value) for value in population],
+                )
+                if enough
+                else None
+            )
+            stats[f"{feature}_median_same_regime"] = (
+                _round(median(population), 6) if enough else None
+            )
+            stats[f"{feature}_abs_median_same_regime"] = (
+                _round(median(abs(value) for value in population), 6)
+                if enough
+                else None
+            )
+        stats["sufficient_history"] = bool(available_counts) and all(
+            count >= HISTORICAL_BASELINE_MIN_SAMPLES for count in available_counts
+        )
+        window_context[window_name] = stats
+    return {
+        "regime": regime,
+        "policy": "same-symbol same-UTC-weekend-regime prior-only",
+        "lookback_days": HISTORICAL_BASELINE_DAYS,
+        "minimum_samples": HISTORICAL_BASELINE_MIN_SAMPLES,
+        "cutoff_time_utc": cutoff,
+        "windows": window_context,
     }
 
 
@@ -559,6 +711,12 @@ def build_feature_rows(
     price_series = _prepare_series(price_oi_rows, time_column="candle_time")
     futures_series = _prepare_series(futures_rows, time_column="candle_time")
     spot_series = _prepare_series(spot_rows, time_column="candle_time")
+    historical_index = _historical_window_index(
+        price_series=price_series,
+        futures_series=futures_series,
+        spot_series=spot_series,
+        windows_minutes=windows_minutes,
+    )
     rows: list[Dict[str, Any]] = []
 
     for source_event in events:
@@ -579,6 +737,13 @@ def build_feature_rows(
             )
             for minutes in windows_minutes
         }
+        historical_context = _historical_context(
+            symbol=symbol,
+            event_time=event_time,
+            current_price_row=current_price,
+            windows=windows,
+            historical_index=historical_index,
+        )
         rows.append(
             {
                 "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -603,6 +768,7 @@ def build_feature_rows(
                     },
                     "windows": windows,
                 },
+                "historical_context": historical_context,
                 "model_features": _model_features(event),
                 "sequence_features": _sequence_features(event, prior_events),
                 "outcome_label": _outcome_label(event),
@@ -773,7 +939,9 @@ def _load_raw_rows(
             SELECT symbol, candle_time, price_close, oi_close_usd,
                    price_exchange, price_pair, source
             FROM oi_price_history
-            WHERE symbol=ANY(%s) AND candle_time >= %s AND candle_time <= %s
+            WHERE symbol=ANY(%s)
+              AND symbol<>'HYPE'
+              AND candle_time >= %s AND candle_time <= %s
             ORDER BY symbol, candle_time
             """,
             (list(symbols), start, end),
@@ -781,9 +949,11 @@ def _load_raw_rows(
     ]
     # ``oi_price_history`` is the historical/backfill archive.  The running
     # bot persists newer Price/OI observations in ``oi_regime_snapshots``.
-    # Treat the live table as an additive source so research remains complete
-    # after the backfill endpoint, while _prior_point continues to enforce a
-    # strict at-or-before-alert join (no future leakage).
+    # Use the live table only after each non-HYPE symbol's backfill endpoint so
+    # the overlapping archives do not double-weight historical distributions.
+    # HYPE is intentionally sourced only from the live archive because its
+    # price provenance is Hyperliquid; the older backfill labels HYPE as
+    # Binance and is therefore not eligible for canonical HYPE research.
     if _table_exists(conn, "oi_regime_snapshots"):
         price_rows.extend(
             dict(row)
@@ -793,19 +963,27 @@ def _load_raw_rows(
                        price AS price_close,
                        open_interest_usd AS oi_close_usd,
                        price_source AS price_exchange,
-                       (symbol || 'USDT') AS price_pair,
+                       CASE WHEN symbol='HYPE' THEN 'HYPE/USDT'
+                            ELSE (symbol || 'USDT') END AS price_pair,
                        ('oi_regime_snapshots:' || COALESCE(oi_source, 'unknown')) AS source
-                FROM oi_regime_snapshots
-                WHERE symbol=ANY(%s)
-                  AND collected_at >= %s AND collected_at <= %s
-                  AND data_quality_status IN ('PASS', 'WARNING')
-                ORDER BY symbol, collected_at
+                FROM oi_regime_snapshots live
+                WHERE live.symbol=ANY(%s)
+                  AND live.collected_at >= %s AND live.collected_at <= %s
+                  AND live.data_quality_status='PASS'
+                  AND (
+                    live.symbol='HYPE'
+                    OR live.collected_at > COALESCE(
+                      (SELECT MAX(backfill.candle_time)
+                       FROM oi_price_history backfill
+                       WHERE backfill.symbol=live.symbol),
+                      '-infinity'::timestamptz
+                    )
+                  )
+                ORDER BY live.symbol, live.collected_at
                 """,
                 (list(symbols), start, end),
             ).fetchall()
         )
-        # Stable sorting means a live snapshot wins an exact-timestamp tie
-        # with the older backfill row that was appended first.
         price_rows.sort(
             key=lambda row: (
                 str(row.get("symbol") or ""),
@@ -910,7 +1088,8 @@ def research_feature_matrix(
 
     symbols = sorted({str(row["symbol"]).upper() for row in events})
     raw_start = minimum_event_time - timedelta(
-        minutes=max(windows) + MAX_POINT_AGE_MINUTES
+        days=HISTORICAL_BASELINE_DAYS,
+        minutes=max(windows) + MAX_POINT_AGE_MINUTES,
     )
     with _connect(raw_url) as raw_conn:
         required_raw = ("oi_price_history", "futures_taker_history", "spot_taker_history")
@@ -965,8 +1144,9 @@ def research_feature_matrix(
             "research_contract": [
                 "Every raw feature uses the newest stored point at or before alert_time_utc; future points are never eligible.",
                 f"A raw point more than {MAX_POINT_AGE_MINUTES} minutes old is returned as missing instead of being silently joined.",
+                "historical_context compares each Price/OI/CVD change only with older observations for the same symbol and the same UTC weekend/weekday regime.",
                 "model_features come only from the immutable decision-time Research Event snapshot.",
-                "outcome_label is later Binance Spot evidence and must never be used as an input feature.",
+                "outcome_label is later canonical spot evidence and must never be used as an input feature.",
                 "Rows expose raw and existing-model features side by side; current bot scores are candidates for comparison, not assumed truth.",
                 "The matrix is a discovery sample. Candidate formulas still require chronological holdout and out-of-sample validation.",
             ],
@@ -1042,7 +1222,8 @@ def load_formula_dataset(
 
     symbols = sorted({str(row["symbol"] or "").upper() for row in events})
     raw_start = first_time - timedelta(
-        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES
+        days=HISTORICAL_BASELINE_DAYS,
+        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES,
     )
     with _connect(raw_url) as raw_conn:
         required_raw = ("oi_price_history", "futures_taker_history", "spot_taker_history")
@@ -1080,6 +1261,11 @@ def load_formula_dataset(
             "first_alert_time_utc": first_time,
             "last_alert_time_utc": last_time,
             "chronological_order": "ascending",
+            "historical_baseline": {
+                "lookback_days": HISTORICAL_BASELINE_DAYS,
+                "minimum_samples": HISTORICAL_BASELINE_MIN_SAMPLES,
+                "regime_policy": "same-symbol same-UTC-weekend-regime prior-only",
+            },
             "coverage": coverage,
             "rows": rows,
         }
@@ -1112,7 +1298,8 @@ def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, An
 
     symbols = sorted({str(row["symbol"] or "").upper() for row in events})
     raw_start = first_time - timedelta(
-        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES
+        days=HISTORICAL_BASELINE_DAYS,
+        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES,
     )
     with _connect(raw_url) as raw_conn:
         price_rows, futures_rows, spot_rows = _load_raw_rows(
