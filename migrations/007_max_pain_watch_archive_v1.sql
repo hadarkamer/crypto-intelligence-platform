@@ -317,6 +317,7 @@ DECLARE
     actual_timeframes INTEGER;
     actual_fresh_symbols INTEGER;
     actual_stale_symbols INTEGER;
+    actual_freshness TEXT;
 BEGIN
     target_set_id := COALESCE(NEW.snapshot_set_id, NULL);
     SELECT row_count, observed_symbol_count, eligible_symbol_count,
@@ -362,12 +363,14 @@ BEGIN
             actual_eligible_symbols;
     END IF;
 
-    IF declared_freshness IS DISTINCT FROM CASE
+    actual_freshness := CASE
         WHEN actual_manifests > 0 AND actual_fresh_symbols=actual_manifests THEN 'FRESH'
         WHEN actual_fresh_symbols > 0 THEN 'PARTIAL'
         WHEN actual_stale_symbols > 0 THEN 'STALE'
         ELSE 'UNKNOWN'
-    END THEN
+    END;
+
+    IF declared_freshness IS DISTINCT FROM actual_freshness THEN
         RAISE EXCEPTION
             'Max-Pain snapshot set % has an invalid aggregate freshness claim',
             target_set_id;

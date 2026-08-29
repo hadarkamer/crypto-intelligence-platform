@@ -218,6 +218,9 @@ RETURNS TRIGGER AS $$
 DECLARE
     long_event research_events%ROWTYPE;
     short_event research_events%ROWTYPE;
+    long_frozen_price_invalid BOOLEAN;
+    short_frozen_price_invalid BOOLEAN;
+    official_price_provenance_invalid BOOLEAN;
 BEGIN
     SELECT * INTO STRICT long_event
       FROM research_events
@@ -225,6 +228,61 @@ BEGIN
     SELECT * INTO STRICT short_event
       FROM research_events
      WHERE event_id = NEW.short_event_id;
+
+    long_frozen_price_invalid := CASE
+        WHEN JSONB_TYPEOF(long_event.engine_snapshot #>
+            '{prospective_anchor,frozen_inputs,official_price,price}'
+        ) = 'number'
+        THEN (long_event.engine_snapshot #>>
+            '{prospective_anchor,frozen_inputs,official_price,price}'
+        )::double precision IS DISTINCT FROM long_event.current_price
+        ELSE TRUE
+    END;
+    short_frozen_price_invalid := CASE
+        WHEN JSONB_TYPEOF(short_event.engine_snapshot #>
+            '{prospective_anchor,frozen_inputs,official_price,price}'
+        ) = 'number'
+        THEN (short_event.engine_snapshot #>>
+            '{prospective_anchor,frozen_inputs,official_price,price}'
+        )::double precision IS DISTINCT FROM short_event.current_price
+        ELSE TRUE
+    END;
+    official_price_provenance_invalid := CASE
+        WHEN NEW.symbol = 'HYPE' THEN
+            LOWER(NEW.source_provenance #>>
+                '{official_price,source}') IS DISTINCT FROM
+                'hyperliquid_spot_@107'
+            OR UPPER(NEW.source_provenance #>>
+                '{official_price,price_exchange}') IS DISTINCT FROM
+                'HYPERLIQUID'
+            OR UPPER(NEW.source_provenance #>>
+                '{official_price,price_market}') IS DISTINCT FROM 'SPOT'
+            OR REGEXP_REPLACE(
+                UPPER(COALESCE(NEW.source_provenance #>>
+                    '{official_price,price_pair}', '')),
+                '[^A-Z0-9]', '', 'g'
+            ) IS DISTINCT FROM 'HYPEUSDT'
+            OR UPPER(NEW.source_provenance #>>
+                '{official_price,price_instrument_id}') IS DISTINCT FROM
+                '@107'
+            OR LOWER(NEW.source_provenance #>>
+                '{official_price,price_timeframe}') IS DISTINCT FROM '1m'
+        ELSE
+            LOWER(NEW.source_provenance #>>
+                '{official_price,source}') IS DISTINCT FROM 'binance_spot'
+            OR UPPER(NEW.source_provenance #>>
+                '{official_price,price_exchange}') IS DISTINCT FROM
+                'BINANCE'
+            OR UPPER(NEW.source_provenance #>>
+                '{official_price,price_market}') IS DISTINCT FROM 'SPOT'
+            OR REGEXP_REPLACE(
+                UPPER(COALESCE(NEW.source_provenance #>>
+                    '{official_price,price_pair}', '')),
+                '[^A-Z0-9]', '', 'g'
+            ) IS DISTINCT FROM (NEW.symbol || 'USDT')
+            OR LOWER(NEW.source_provenance #>>
+                '{official_price,price_timeframe}') IS DISTINCT FROM '1m'
+    END;
 
     IF long_event.event_kind IS DISTINCT FROM 'DECISION_SAMPLE'
        OR short_event.event_kind IS DISTINCT FROM 'DECISION_SAMPLE'
@@ -326,60 +384,9 @@ BEGIN
             '{prospective_anchor,frozen_inputs}' IS DISTINCT FROM
             short_event.engine_snapshot #>
             '{prospective_anchor,frozen_inputs}'
-       OR CASE
-            WHEN JSONB_TYPEOF(long_event.engine_snapshot #>
-                '{prospective_anchor,frozen_inputs,official_price,price}'
-            ) = 'number'
-            THEN (long_event.engine_snapshot #>>
-                '{prospective_anchor,frozen_inputs,official_price,price}'
-            )::double precision IS DISTINCT FROM long_event.current_price
-            ELSE TRUE
-          END
-       OR CASE
-            WHEN JSONB_TYPEOF(short_event.engine_snapshot #>
-                '{prospective_anchor,frozen_inputs,official_price,price}'
-            ) = 'number'
-            THEN (short_event.engine_snapshot #>>
-                '{prospective_anchor,frozen_inputs,official_price,price}'
-            )::double precision IS DISTINCT FROM short_event.current_price
-            ELSE TRUE
-          END
-       OR CASE
-            WHEN NEW.symbol = 'HYPE' THEN
-                LOWER(NEW.source_provenance #>>
-                    '{official_price,source}') IS DISTINCT FROM
-                    'hyperliquid_spot_@107'
-                OR UPPER(NEW.source_provenance #>>
-                    '{official_price,price_exchange}') IS DISTINCT FROM
-                    'HYPERLIQUID'
-                OR UPPER(NEW.source_provenance #>>
-                    '{official_price,price_market}') IS DISTINCT FROM 'SPOT'
-                OR REGEXP_REPLACE(
-                    UPPER(COALESCE(NEW.source_provenance #>>
-                        '{official_price,price_pair}', '')),
-                    '[^A-Z0-9]', '', 'g'
-                ) IS DISTINCT FROM 'HYPEUSDT'
-                OR UPPER(NEW.source_provenance #>>
-                    '{official_price,price_instrument_id}') IS DISTINCT FROM
-                    '@107'
-                OR LOWER(NEW.source_provenance #>>
-                    '{official_price,price_timeframe}') IS DISTINCT FROM '1m'
-            ELSE
-                LOWER(NEW.source_provenance #>>
-                    '{official_price,source}') IS DISTINCT FROM 'binance_spot'
-                OR UPPER(NEW.source_provenance #>>
-                    '{official_price,price_exchange}') IS DISTINCT FROM
-                    'BINANCE'
-                OR UPPER(NEW.source_provenance #>>
-                    '{official_price,price_market}') IS DISTINCT FROM 'SPOT'
-                OR REGEXP_REPLACE(
-                    UPPER(COALESCE(NEW.source_provenance #>>
-                        '{official_price,price_pair}', '')),
-                    '[^A-Z0-9]', '', 'g'
-                ) IS DISTINCT FROM (NEW.symbol || 'USDT')
-                OR LOWER(NEW.source_provenance #>>
-                    '{official_price,price_timeframe}') IS DISTINCT FROM '1m'
-          END
+       OR long_frozen_price_invalid
+       OR short_frozen_price_invalid
+       OR official_price_provenance_invalid
        OR long_event.engine_snapshot #>>
             '{prospective_anchor,telegram_delivery_allowed}'
             IS DISTINCT FROM 'false'
