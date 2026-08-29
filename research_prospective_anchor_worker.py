@@ -149,7 +149,13 @@ def official_anchor_rows(
             errors.setdefault(symbol, "official closed Spot 1m price missing")
             continue
         try:
-            rows[symbol] = _official_anchor_row(symbol, raw)
+            rows[symbol] = {
+                **_official_anchor_row(symbol, raw),
+                # ``fallback_used`` is accepted only after the provider-level
+                # assertion above has proved that no route was substituted.
+                "fallback_used": False,
+                "fallback_policy": "PROVIDER_ATTESTED_NO_FALLBACK",
+            }
             errors.pop(symbol, None)
         except Exception as exc:
             errors[symbol] = f"{type(exc).__name__}: {exc}"

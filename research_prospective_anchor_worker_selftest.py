@@ -121,12 +121,18 @@ async def _exercise_worker() -> None:
     assert official["BTC"]["price_instrument_id"] == "BTCUSDT"
     assert official["BTC"]["price_timeframe"] == "1m"
     assert official["BTC"]["quality_status"] == "PASS"
+    assert official["BTC"]["fallback_used"] is False
+    assert (
+        official["BTC"]["fallback_policy"]
+        == "PROVIDER_ATTESTED_NO_FALLBACK"
+    )
     assert official["BTC"]["observed_at_utc"].endswith("12:33:59.999000Z")
     assert official["BTC"]["refresh_completed_at_utc"].endswith(
         "12:34:01.000000Z"
     )
     assert official["HYPE"]["source"] == "hyperliquid_spot_@107"
     assert official["HYPE"]["price_instrument_id"] == "@107"
+    assert official["HYPE"]["fallback_used"] is False
     assert worker._service.calls[0]["now"] == fixed_now
     status = worker.status()
     assert status["task_running"] is True

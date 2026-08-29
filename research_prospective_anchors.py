@@ -250,6 +250,8 @@ def _provenance(row: Mapping[str, Any]) -> Dict[str, Any]:
         "source_record_id",
         "price_source",
         "oi_source",
+        "fallback_used",
+        "fallback_policy",
         "candle_timestamp_mode",
         "refresh_time_semantics",
         "quality_status_basis",
@@ -276,10 +278,18 @@ def _official_price_problem(symbol: str, row: Mapping[str, Any]) -> Optional[str
     pair = _normalized_pair(provenance.get("price_pair"))
     instrument = str(provenance.get("price_instrument_id") or "").strip().upper()
     timeframe = str(provenance.get("price_timeframe") or "").strip().lower()
+    fallback_policy = str(
+        provenance.get("fallback_policy") or ""
+    ).strip().upper()
     if not exchange or not market or not pair or not timeframe:
         return "MISSING_OFFICIAL_CURRENT_PRICE_PROVENANCE:official_price"
     if timeframe != "1m":
         return "UNOFFICIAL_CURRENT_PRICE_TIMEFRAME:official_price"
+    if (
+        provenance.get("fallback_used") is not False
+        or fallback_policy != "PROVIDER_ATTESTED_NO_FALLBACK"
+    ):
+        return "OFFICIAL_CURRENT_PRICE_FALLBACK_NOT_EXCLUDED:official_price"
     if symbol == "HYPE":
         if (
             str(provenance.get("source") or "").strip().lower()
@@ -318,6 +328,32 @@ def _formula_visible_values(family: str, row: Any) -> Dict[str, Any]:
         for key in _FAMILY_FORMULA_VISIBLE_VALUES[family]
         if key in values
     }
+
+
+def _source_timestamp_evidence(
+    family: str, row: Any
+) -> Dict[str, Any]:
+    """Freeze supplied source times even when coverage blocks evaluation."""
+    if not isinstance(row, Mapping):
+        return {}
+    source_key = (
+        "observed_at_utc"
+        if family == "official_price"
+        else "observation_time_utc"
+        if family == "price_oi"
+        else "source_candle_time_utc"
+    )
+    result: Dict[str, Any] = {}
+    for key in (source_key, "refresh_completed_at_utc"):
+        value = row.get(key)
+        if value not in (None, ""):
+            result[key] = _iso(value)
+    if family == "price_oi":
+        for key in ("price_fetched_at_utc", "oi_fetched_at_utc"):
+            value = row.get(key)
+            if value not in (None, ""):
+                result[key] = _iso(value)
+    return result
 
 
 def _family_problem(
@@ -613,6 +649,17 @@ def _decision(
     missing: list[str] = []
     refresh_times: list[datetime] = []
 
+    # Audit evidence is independent of formula eligibility.  A coverage gate
+    # may suppress the neutral event pair, but must not erase which exact
+    # decision-time sources and timestamps were supplied for the attempt.
+    for family in REQUIRED_FAMILIES:
+        row = source_rows.get(family)
+        if isinstance(row, Mapping):
+            provenance[family] = _provenance(row)
+            evidence = _source_timestamp_evidence(family, row)
+            if evidence:
+                timestamps[family] = evidence
+
     if checked_at < base_eligible_at:
         status = NOT_DUE
         problems.append("SOURCE_CANDLE_CLOSE_PLUS_GRACE_NOT_REACHED")
@@ -641,29 +688,6 @@ def _decision(
                 base_eligible_at=base_eligible_at,
                 now=checked_at,
             )
-            if isinstance(row, Mapping):
-                provenance[family] = _provenance(row)
-            if source_time is not None or refresh_time is not None:
-                source_time_key = (
-                    "observed_at_utc"
-                    if family == "official_price"
-                    else "observation_time_utc"
-                    if family == "price_oi"
-                    else "source_candle_time_utc"
-                )
-                timestamps[family] = {
-                    source_time_key: _iso(source_time) if source_time else None,
-                    "refresh_completed_at_utc": _iso(refresh_time) if refresh_time else None,
-                }
-                if family == "price_oi" and isinstance(row, Mapping):
-                    for timestamp_key in (
-                        "price_fetched_at_utc",
-                        "oi_fetched_at_utc",
-                    ):
-                        if row.get(timestamp_key) not in (None, ""):
-                            timestamps[family][timestamp_key] = _iso(
-                                row[timestamp_key]
-                            )
             if problem:
                 status = UNEVALUABLE
                 problems.append(problem)

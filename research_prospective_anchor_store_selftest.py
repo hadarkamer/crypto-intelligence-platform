@@ -204,6 +204,8 @@ def _official(symbol, observed):
         "price_market": "spot",
         "price_pair": f"{symbol}USDT",
         "price_timeframe": "1m",
+        "fallback_used": False,
+        "fallback_policy": "PROVIDER_ATTESTED_NO_FALLBACK",
         "price": 100.25,
     }
 

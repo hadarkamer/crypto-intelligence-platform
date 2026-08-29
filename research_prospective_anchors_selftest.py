@@ -28,6 +28,8 @@ def _source_rows(slot: datetime, *, symbol: str = "BTC", refresh_minute: int = 3
             "price_pair": f"{symbol}/USDT" if is_hype else f"{symbol}USDT",
             "price_instrument_id": "@107" if is_hype else None,
             "price_timeframe": "1m",
+            "fallback_used": False,
+            "fallback_policy": "PROVIDER_ATTESTED_NO_FALLBACK",
             "price": 100.25,
         },
         "price_oi": {
@@ -134,6 +136,27 @@ def run() -> None:
     assert decisions["HYPE"].evaluation_status == anchors.COVERAGE_EXCLUDED
     assert not decisions["HYPE"].events
     assert hype == hype_before  # Exclusion never mutates preserved HYPE inputs.
+    excluded = decisions["HYPE"]
+    assert set(excluded.source_provenance) == set(anchors.REQUIRED_FAMILIES)
+    assert set(excluded.source_timestamps) == set(anchors.REQUIRED_FAMILIES)
+    official_audit = excluded.source_provenance["official_price"]
+    assert official_audit["source"] == "hyperliquid_spot_@107"
+    assert official_audit["price_exchange"] == "Hyperliquid"
+    assert official_audit["price_market"] == "spot"
+    assert official_audit["price_pair"] == "HYPE/USDT"
+    assert official_audit["price_instrument_id"] == "@107"
+    assert official_audit["price_timeframe"] == "1m"
+    assert official_audit["fallback_used"] is False
+    assert official_audit["fallback_policy"] == "PROVIDER_ATTESTED_NO_FALLBACK"
+    assert excluded.source_timestamps["official_price"] == {
+        "observed_at_utc": "2026-08-29T12:34:00.000000Z",
+        "refresh_completed_at_utc": "2026-08-29T12:34:00.000000Z",
+    }
+    excluded_bundle = excluded.atomic_persistence_bundle()
+    assert excluded_bundle["attempt"]["source_provenance"] == excluded.source_provenance
+    assert excluded_bundle["attempt"]["source_timestamps"] == excluded.source_timestamps
+    assert excluded_bundle["event_persistence"] == ()
+    assert excluded_bundle["slot"] is None
 
     assert len(batch.events) == 2
     assert batch.summary()["telegram_alerts"] == 0
@@ -348,6 +371,13 @@ def run() -> None:
     )
     assert coverage_rejected.decisions[0].evaluation_status == anchors.COVERAGE_EXCLUDED
     assert "720m_anchors" in coverage_rejected.decisions[0].evaluation_reason
+    btc_excluded = coverage_rejected.decisions[0]
+    btc_official_audit = btc_excluded.source_provenance["official_price"]
+    assert btc_official_audit["source"] == "binance_spot"
+    assert btc_official_audit["price_exchange"] == "Binance"
+    assert btc_official_audit["price_pair"] == "BTCUSDT"
+    assert btc_official_audit["fallback_used"] is False
+    assert not btc_excluded.events
 
     migration = Path("migrations/008_prospective_neutral_anchors_v1.sql").read_text()
     assert "CREATE TABLE IF NOT EXISTS research_prospective_anchor_attempts" in migration
