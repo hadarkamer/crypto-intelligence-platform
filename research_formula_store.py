@@ -380,6 +380,61 @@ def persist_discovery_run(
             stage_counts[final_stage] = stage_counts.get(final_stage, 0) + 1
             persisted += 1
 
+        # Keep the active discovery surface tied to the newest chronological
+        # cohort for this horizon.  Earlier candidates remain in the audit
+        # archive, but a stale BACKTESTED formula must not outrank a formula
+        # evaluated against the newer/larger dataset.  Frozen SHADOW/LIVE
+        # formulas are intentionally preserved for genuine future validation.
+        stale_candidates = conn.execute(
+            """
+            SELECT formula_id, current_stage
+            FROM research_formulas
+            WHERE active=TRUE
+              AND formula_schema_version=%s
+              AND horizon_minutes=%s
+              AND current_stage IN ('DISCOVERED', 'BACKTESTED', 'HOLDOUT_PASSED')
+              AND latest_evaluation_run_id IS DISTINCT FROM %s
+            FOR UPDATE
+            """,
+            (
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                int(discovery["horizon_minutes"]),
+                run_id,
+            ),
+        ).fetchall()
+        for stale_formula in stale_candidates:
+            conn.execute(
+                """
+                INSERT INTO research_formula_stage_history (
+                    formula_id, run_id, from_stage, to_stage, reason, actor
+                ) VALUES (%s, %s, %s, 'RETIRED', %s, 'automatic-research-engine')
+                ON CONFLICT (formula_id, run_id, to_stage) DO NOTHING
+                """,
+                (
+                    int(stale_formula["formula_id"]),
+                    run_id,
+                    str(stale_formula["current_stage"]),
+                    "superseded by newer same-horizon discovery cohort",
+                ),
+            )
+        if stale_candidates:
+            conn.execute(
+                """
+                UPDATE research_formulas
+                SET current_stage='RETIRED', active=FALSE, updated_at_utc=NOW()
+                WHERE active=TRUE
+                  AND formula_schema_version=%s
+                  AND horizon_minutes=%s
+                  AND current_stage IN ('DISCOVERED', 'BACKTESTED', 'HOLDOUT_PASSED')
+                  AND latest_evaluation_run_id IS DISTINCT FROM %s
+                """,
+                (
+                    research_formula_engine.FORMULA_SCHEMA_VERSION,
+                    int(discovery["horizon_minutes"]),
+                    run_id,
+                ),
+            )
+
         conn.execute(
             """
             UPDATE research_formula_runs

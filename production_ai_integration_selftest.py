@@ -370,6 +370,9 @@ def run() -> None:
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_registry" in ai_agent.SYSTEM_INSTRUCTIONS
+    formula_store_text = (root / "research_formula_store.py").read_text(encoding="utf-8")
+    assert "superseded by newer same-horizon discovery cohort" in formula_store_text
+    assert "latest_evaluation_run_id IS DISTINCT FROM %s" in formula_store_text
 
     print("Production AI analytical integration self-test: PASS")
 
