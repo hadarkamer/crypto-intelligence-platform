@@ -970,6 +970,7 @@ def _load_raw_rows(
                 WHERE live.symbol=ANY(%s)
                   AND live.collected_at >= %s AND live.collected_at <= %s
                   AND live.data_quality_status='PASS'
+                  AND (live.symbol<>'HYPE' OR live.price_source='hyperliquid')
                   AND (
                     live.symbol='HYPE'
                     OR live.collected_at > COALESCE(

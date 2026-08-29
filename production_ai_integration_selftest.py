@@ -379,6 +379,8 @@ def run() -> None:
     telegram_text = (root / "ai_telegram.py").read_text(encoding="utf-8")
     assert "נוסחאות LIVE פעילות" in telegram_text
     assert "MAE p75: \\1" in telegram_text
+    matrix_text = (root / "research_feature_matrix.py").read_text(encoding="utf-8")
+    assert "live.symbol<>'HYPE' OR live.price_source='hyperliquid'" in matrix_text
 
     print("Production AI analytical integration self-test: PASS")
 
