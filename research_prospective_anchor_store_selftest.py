@@ -503,10 +503,11 @@ def run() -> None:
             )
 
     sampling = store_module.ProspectiveAnchorService(
-        _ServiceStore(), symbols=("BTC",)
+        _ServiceStore(), symbols=("BTC", "ETH")
     ).run_once(
         now=now,
         slot_open_utc=slot,
+        symbols=("BTC",),
         official_prices_by_symbol={"BTC": _official("BTC", now)},
     )
     assert sampling.checked_at_utc == source_batch.read_completed_at_utc

@@ -1349,23 +1349,37 @@ class ProspectiveAnchorService:
         now: Any,
         official_prices_by_symbol: Mapping[str, Mapping[str, Any]],
         slot_open_utc: Any = None,
+        symbols: Optional[Sequence[str]] = None,
     ) -> SamplingRun:
         checked = _utc(now)
+        active_symbols = (
+            self.symbols
+            if symbols is None
+            else tuple(dict.fromkeys(_symbol(item) for item in symbols))
+        )
+        if not active_symbols:
+            raise ValueError("prospective sampling symbols are required")
+        unknown_symbols = sorted(set(active_symbols) - set(self.symbols))
+        if unknown_symbols:
+            raise ValueError(
+                "prospective sampling symbols exceed the configured scope: "
+                + ",".join(unknown_symbols)
+            )
         opened = (
             _utc(slot_open_utc)
             if slot_open_utc is not None
             else anchors.latest_due_slot_open(checked)
         )
         coverage = self.store.load_coverage(
-            symbols=self.symbols,
+            symbols=active_symbols,
             as_of_utc=checked,
         )
         existing = self.store.existing_captured_symbols(
-            symbols=self.symbols,
+            symbols=active_symbols,
             slot_open_utc=opened,
         )
         pending_symbols = tuple(
-            symbol for symbol in self.symbols if symbol not in existing
+            symbol for symbol in active_symbols if symbol not in existing
         )
         pending_coverage = {
             symbol: coverage[symbol] for symbol in pending_symbols

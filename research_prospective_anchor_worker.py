@@ -24,7 +24,7 @@ import research_prospective_anchors
 
 
 ENV_ENABLED = "PROSPECTIVE_ANCHORS_ENABLED"
-SCHEDULER_VERSION = "prospective-anchor-minute-scheduler-v1"
+SCHEDULER_VERSION = "prospective-anchor-minute-scheduler-v2"
 _TRUE = {"1", "true", "yes", "on"}
 
 
@@ -162,6 +162,71 @@ def official_anchor_rows(
     return rows, errors
 
 
+def _retry_pending_symbols(
+    sampling: Any, *, expected_symbols: Sequence[str]
+) -> list[str]:
+    """Return slot decisions that may still become authoritatively capturable."""
+    expected = {
+        str(symbol or "").strip().upper()
+        for symbol in expected_symbols
+        if str(symbol or "").strip()
+    }
+    batch = getattr(sampling, "batch", None)
+    decisions = tuple(getattr(batch, "decisions", ()) or ())
+    decisions_by_symbol = {
+        str(getattr(item, "symbol", "") or "").strip().upper(): item
+        for item in decisions
+        if str(getattr(item, "symbol", "") or "").strip()
+    }
+    existing_symbols = {
+        str(symbol or "").strip().upper()
+        for symbol in (getattr(sampling, "existing_symbols", ()) or ())
+        if str(symbol or "").strip()
+    }
+    persisted_symbols = {
+        str(getattr(item, "symbol", "") or "").strip().upper()
+        for item in (getattr(sampling, "persisted", ()) or ())
+        if str(getattr(item, "symbol", "") or "").strip()
+    }
+    persisted_slots = {
+        str(getattr(item, "symbol", "") or "").strip().upper()
+        for item in (getattr(sampling, "persisted", ()) or ())
+        if getattr(item, "anchor_slot_id", None) is not None
+    }
+    conflict_symbols = {
+        str(item).split(":", 1)[0].strip().upper()
+        for item in (getattr(sampling, "conflicts", ()) or ())
+        if str(item).strip()
+    }
+    pending: set[str] = set(conflict_symbols)
+    for symbol in expected:
+        if symbol in existing_symbols:
+            continue
+        decision = decisions_by_symbol.get(symbol)
+        if decision is None:
+            pending.add(symbol)
+            continue
+        status = str(
+            getattr(decision, "evaluation_status", "") or ""
+        ).strip().upper()
+        if symbol in conflict_symbols:
+            continue
+        if symbol in persisted_slots:
+            continue
+        if (
+            status == research_prospective_anchors.COVERAGE_EXCLUDED
+            and symbol in persisted_symbols
+        ):
+            continue
+        if status == research_prospective_anchors.UNEVALUABLE:
+            checked_at = _utc(getattr(decision, "checked_at_utc"))
+            expires_at = _utc(getattr(decision, "expires_at_utc"))
+            if checked_at >= expires_at and symbol in persisted_symbols:
+                continue
+        pending.add(symbol)
+    return sorted(pending)
+
+
 class ProspectiveAnchorWorker:
     def __init__(
         self,
@@ -203,7 +268,12 @@ class ProspectiveAnchorWorker:
             "next_run_utc": None,
             "last_started_at_utc": None,
             "last_completed_at_utc": None,
+            "last_attempted_slot_utc": None,
             "last_completed_slot_utc": None,
+            "last_blocked_slot_utc": None,
+            "retry_pending_symbols": [],
+            "last_run_symbols": [],
+            "last_conflicts": [],
             "last_error": None,
             "cycles_started": 0,
             "cycles_completed": 0,
@@ -236,6 +306,19 @@ class ProspectiveAnchorWorker:
             }
         )
         return json.loads(json.dumps(value, default=str))
+
+    def _symbols_for_slot(self, slot_open_utc: Any) -> tuple[str, ...]:
+        slot_key = _iso(slot_open_utc)
+        if self._runtime.get("last_attempted_slot_utc") != slot_key:
+            return self.symbols
+        pending = {
+            str(symbol or "").strip().upper()
+            for symbol in self._runtime.get("retry_pending_symbols", ())
+            if str(symbol or "").strip()
+        }
+        if not pending:
+            return self.symbols
+        return tuple(symbol for symbol in self.symbols if symbol in pending)
 
     async def start(self, *, schema_ready: bool) -> bool:
         self._schema_ready = bool(schema_ready)
@@ -291,6 +374,12 @@ class ProspectiveAnchorWorker:
         if self._service is None:
             raise RuntimeError("prospective anchor service is not initialized")
         scheduled = _utc(scheduled_at_utc or self._now())
+        scheduled_slot = research_prospective_anchors.latest_due_slot_open(
+            scheduled
+        )
+        run_symbols = self._symbols_for_slot(scheduled_slot)
+        if not run_symbols:
+            raise RuntimeError("prospective retry scope is empty")
         self._runtime.update(
             {
                 "status": "fetching_official_prices",
@@ -301,11 +390,11 @@ class ProspectiveAnchorWorker:
         )
         result = await asyncio.to_thread(
             self._price_fetcher,
-            self.symbols,
+            run_symbols,
             observed_at_utc=scheduled,
         )
         official_rows, official_errors = official_anchor_rows(
-            result, symbols=self.symbols
+            result, symbols=run_symbols
         )
         checked_at = self._now()
         self._runtime.update(
@@ -313,32 +402,83 @@ class ProspectiveAnchorWorker:
                 "status": "persisting",
                 "last_official_found_symbols": sorted(official_rows),
                 "last_official_missing_symbols": sorted(
-                    set(self.symbols) - set(official_rows)
+                    set(run_symbols) - set(official_rows)
                 ),
                 "last_official_errors": official_errors,
+                "last_run_symbols": list(run_symbols),
             }
         )
         sampling = await self._service.run_once_async(
             now=checked_at,
             official_prices_by_symbol=official_rows,
+            slot_open_utc=scheduled_slot,
+            symbols=run_symbols,
         )
-        summary = sampling.summary()
+        summary = dict(sampling.summary())
         completed_slot = getattr(sampling, "slot_open_utc", None)
         if completed_slot is None:
             completed_slot = summary.get("slot_open_utc")
+        if completed_slot is None or _utc(completed_slot) != scheduled_slot:
+            raise RuntimeError(
+                "prospective anchor service returned an unexpected slot"
+            )
+        conflicts = list(getattr(sampling, "conflicts", ()) or ())
+        summary["run_symbols"] = list(run_symbols)
+        if conflicts:
+            summary["retry_pending_symbols"] = []
+            conflict_error = "prospective anchor conflict: " + "; ".join(
+                str(item) for item in conflicts
+            )
+            self._runtime.update(
+                {
+                    "status": "blocked_conflict",
+                    "last_completed_at_utc": _iso(self._now()),
+                    "last_attempted_slot_utc": _iso(completed_slot),
+                    "last_blocked_slot_utc": _iso(completed_slot),
+                    "retry_pending_symbols": [],
+                    "last_conflicts": conflicts,
+                    "cycles_failed": int(self._runtime["cycles_failed"]) + 1,
+                    "last_sampling_summary": summary,
+                    "last_error": conflict_error,
+                }
+            )
+            print(f"[prospective-anchors] {conflict_error}", flush=True)
+            return summary
+        retry_pending_symbols = _retry_pending_symbols(
+            sampling,
+            expected_symbols=run_symbols,
+        )
+        summary["retry_pending_symbols"] = retry_pending_symbols
+        completed_slot_value = self._runtime.get("last_completed_slot_utc")
+        if not retry_pending_symbols:
+            completed_slot_value = _iso(completed_slot)
         self._runtime.update(
             {
-                "status": "completed",
-                "last_completed_at_utc": _iso(self._now()),
-                "last_completed_slot_utc": (
-                    _iso(completed_slot) if completed_slot is not None else None
+                "status": (
+                    "retry_pending" if retry_pending_symbols else "completed"
                 ),
+                "last_completed_at_utc": _iso(self._now()),
+                "last_attempted_slot_utc": _iso(completed_slot),
+                "last_completed_slot_utc": completed_slot_value,
+                "retry_pending_symbols": retry_pending_symbols,
                 "cycles_completed": int(self._runtime["cycles_completed"]) + 1,
                 "last_sampling_summary": summary,
                 "last_error": None,
             }
         )
         return summary
+
+    async def _run_due_slot(self, run_at_utc: Any) -> bool:
+        run_at = _utc(run_at_utc)
+        due_slot = research_prospective_anchors.latest_due_slot_open(run_at)
+        due_key = _iso(due_slot)
+        if due_key == self._runtime.get("last_blocked_slot_utc"):
+            self._runtime["status"] = "blocked_conflict"
+            return False
+        if due_key == self._runtime.get("last_completed_slot_utc"):
+            return False
+        await self.run_once(scheduled_at_utc=run_at)
+        return True
 
     async def _run_loop(self) -> None:
         try:
@@ -349,14 +489,8 @@ class ProspectiveAnchorWorker:
                 )
                 delay = max(0.0, (run_at - self._now()).total_seconds())
                 await asyncio.sleep(delay)
-                due_slot = research_prospective_anchors.latest_due_slot_open(run_at)
-                if self._runtime.get("last_completed_slot_utc") == _iso(due_slot):
-                    # One completed audit pass per 30m slot is enough.  The
-                    # minute loop exists to retry an exceptional failed pass,
-                    # not to append a fresh ineligible attempt every minute.
-                    continue
                 try:
-                    await self.run_once(scheduled_at_utc=run_at)
+                    await self._run_due_slot(run_at)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
