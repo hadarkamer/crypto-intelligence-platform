@@ -79,6 +79,7 @@ REPLAY_MIN_UTC_DATES_PER_SYMBOL = 14
 REPLAY_MIN_SPAN_HOURS_PER_SYMBOL = 336.0
 REPLAY_MIN_ELIGIBLE_SYMBOLS = 4
 REPLAY_COVERAGE_STREAM_BATCH_SIZE = 500
+REPLAY_OPPORTUNITY_STREAM_BATCH_SIZE = 500
 _TRUE = {"1", "true", "yes", "on"}
 
 
@@ -1731,8 +1732,7 @@ def _load_historical_opportunities(
         )
     )
     completed_owner = _completed_replay_owner_sql("historical")
-    rows = conn.execute(
-        f"""
+    query = f"""
         WITH eligible AS (
             SELECT opportunity_id, symbol, observation_time_utc,
                    source_observation_time_utc, horizon_minutes,
@@ -1798,23 +1798,30 @@ def _load_historical_opportunities(
               ) = 0
            OR sequence_number = symbol_total
         ORDER BY symbol, observation_time_utc, opportunity_id
-        """,
-        (
-            horizon_minutes,
-            lookback_days,
-            VERIFIED_OUTCOME_METHOD,
-            research_historical_replay.REPLAY_VERSION,
-            list(VERIFIED_OUTCOME_QUALITIES),
-            canonical_price_path.METHOD_VERSION,
-            list(VERIFIED_OUTCOME_QUALITIES),
-            VERIFIED_OUTCOME_METHOD,
-            VERIFIED_OUTCOME_METHOD,
-            research_session_width.CALIBRATION_VERSION,
-            symbols,
-            quota,
-            quota,
-        ),
-    ).fetchall()
+        """
+    params = (
+        horizon_minutes,
+        lookback_days,
+        VERIFIED_OUTCOME_METHOD,
+        research_historical_replay.REPLAY_VERSION,
+        list(VERIFIED_OUTCOME_QUALITIES),
+        canonical_price_path.METHOD_VERSION,
+        list(VERIFIED_OUTCOME_QUALITIES),
+        VERIFIED_OUTCOME_METHOD,
+        VERIFIED_OUTCOME_METHOD,
+        research_session_width.CALIBRATION_VERSION,
+        symbols,
+        quota,
+        quota,
+    )
+    rows = list(
+        research_historical_replay.iter_query_rows(
+            conn,
+            query,
+            params,
+            batch_size=REPLAY_OPPORTUNITY_STREAM_BATCH_SIZE,
+        )
+    )
     grouped: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[str(row["symbol"]).upper()].append(dict(row))

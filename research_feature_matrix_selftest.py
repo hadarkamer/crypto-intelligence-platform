@@ -577,6 +577,30 @@ def run() -> None:
     )
     assert delivered_coverage["by_symbol"] == {}
 
+    class _OpportunityStreamCursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.offset = 0
+
+        def execute(self, query, params):
+            self.connection.assert_query(query, params)
+            return self
+
+        def fetchmany(self, size):
+            assert size == matrix.REPLAY_OPPORTUNITY_STREAM_BATCH_SIZE
+            self.connection.fetchmany_calls += 1
+            rows = [self.connection.completed]
+            start = self.offset
+            self.offset += size
+            return rows[start : self.offset]
+
+        def fetchall(self):
+            self.connection.fetchall_calls += 1
+            raise AssertionError("Discovery opportunities must never use fetchall")
+
+        def close(self):
+            self.connection.closed_cursors += 1
+
     class _OpportunityConnection:
         def __init__(self):
             self.completed = {
@@ -613,8 +637,12 @@ def run() -> None:
                     "coherent": True,
                 },
             ]
+            self.cursor_names = []
+            self.fetchmany_calls = 0
+            self.fetchall_calls = 0
+            self.closed_cursors = 0
 
-        def execute(self, query, params):
+        def assert_query(self, query, params):
             assert query.count("%s") == len(params)
             normalized = " ".join(query.split())
             assert "symbol=ANY(%s)" in query
@@ -648,7 +676,14 @@ def run() -> None:
             # Model PostgreSQL applying the owner predicate: all three rows
             # below are structurally coherent but are not returned.
             assert all(row["coherent"] for row in self.owner_rejected)
-            return _CoverageRows([self.completed])
+
+        def cursor(self, *, name):
+            assert name.startswith("research_replay_stream_")
+            self.cursor_names.append(name)
+            return _OpportunityStreamCursor(self)
+
+        def execute(self, query, params):
+            raise AssertionError("Discovery opportunities must use a server cursor")
 
     opportunity_conn = _OpportunityConnection()
     owner_bound_opportunities = matrix._load_historical_opportunities(
@@ -659,6 +694,10 @@ def run() -> None:
         symbols=["ETH", "BTC"],
     )
     assert [row["opportunity_id"] for row in owner_bound_opportunities] == [901]
+    assert opportunity_conn.fetchall_calls == 0
+    assert opportunity_conn.fetchmany_calls == 2
+    assert opportunity_conn.closed_cursors == 1
+    assert len(opportunity_conn.cursor_names) == 1
     assert not {
         row["opportunity_id"] for row in opportunity_conn.owner_rejected
     }.intersection(
