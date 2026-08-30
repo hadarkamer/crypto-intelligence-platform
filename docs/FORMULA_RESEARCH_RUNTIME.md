@@ -85,6 +85,44 @@ high percentage from a single day therefore remains `BACKTESTED` at most.
   with `/ai_alerts_on`. One AI trade alert is queued per event per chat.
 - Alerts are informational; there is no automatic trade execution.
 
+## Operational change protocol
+
+Every change is handled as one explicitly approved stage with a fixed scope and
+exit criteria. GitHub, Render and PostgreSQL baselines are collected once and
+in parallel before that stage. If no external fingerprint changes, later
+preflight checks verify only the branch SHA/tree, active deploy and critical
+schema/watermark instead of repeating the full baseline.
+
+- Classify findings as a live fault, expected warning, historical error or
+  evidence that is still maturing. A live fault interrupts the planned stage:
+  apply the smallest isolated correction, verify it, report it and stop for
+  approval before continuing.
+- Keep one writer and one coherent commit per stage. Do not mix a fault fix,
+  cleanup, refactor and capability expansion. Prefer an existing file or
+  function; add a boundary only when ownership or an independent self-test
+  requires it.
+- Run targeted checks while editing, then compile every tracked Python module
+  and run every tracked `*_selftest.py` exactly once after the patch stabilizes.
+  Do not repeat the full suite unless the code changes again.
+- Move the same verified commit to both production branches, allow their
+  deploys to proceed in parallel and perform one bounded post-deploy check:
+  exact SHA, no new current-deploy error, preserved database invariants and one
+  startup for every required worker. Documentation-only checkpoints do not
+  justify a deploy.
+- When future evidence is required, close the stage as `WAITING_DATA` with the
+  earliest UTC recheck, required horizons, missing eligible sample count and
+  exact database watermark. Do not poll repeatedly before that condition.
+- Every stage report states what was checked, what changed, commit/deploy/schema,
+  tests passed, what deliberately did not change, data still maturing and the
+  single next step requiring explicit approval. LIVE or Telegram delivery
+  remains forbidden without frozen prospective review and explicit approval.
+
+A chat handoff uses the same compact checkpoint: verified UTC, common branch
+SHA/tree, live deploy IDs, database/schema watermarks, current stage and gate,
+known expected warnings, unfinished work and the one approval required next.
+Live values belong in that timestamped handoff, not as mutable status in this
+runtime contract.
+
 ## Runtime flags
 
 - `FORMULA_DISCOVERY_ENABLED=1`
