@@ -79,7 +79,10 @@ REPLAY_MIN_UTC_DATES_PER_SYMBOL = 14
 REPLAY_MIN_SPAN_HOURS_PER_SYMBOL = 336.0
 REPLAY_MIN_ELIGIBLE_SYMBOLS = 4
 REPLAY_COVERAGE_STREAM_BATCH_SIZE = 500
-REPLAY_OPPORTUNITY_STREAM_BATCH_SIZE = 500
+# The opportunity query includes a per-symbol WindowAgg.  Keep each FETCH
+# below one symbol partition so the 12-second read-only statement timeout is
+# applied to bounded work rather than several partitions at once.
+REPLAY_OPPORTUNITY_STREAM_BATCH_SIZE = 50
 _TRUE = {"1", "true", "yes", "on"}
 
 
