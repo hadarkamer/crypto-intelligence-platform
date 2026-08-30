@@ -18,15 +18,18 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 import canonical_price_path
 import market_session_baseline
+import research_formula_engine
 import research_historical_replay
 import research_max_pain_archive
 import research_no_dwell_outcome
 import research_prospective_anchors
+import research_prospective_feature_freeze
 import research_session_width
 
 try:
@@ -41,10 +44,14 @@ FEATURE_SCHEMA_VERSION = (
     "research-feature-matrix-v8-prospective-max-pain-frozen"
 )
 PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION = (
-    "prospective-frozen-anchor-slot-series-v2-max-pain"
+    "prospective-shadow-frozen-decision-features-v1"
 )
 PROSPECTIVE_ANCHOR_SAMPLER_VERSION = (
     research_prospective_anchors.SAMPLER_VERSION
+)
+PROSPECTIVE_PRIOR_SOURCE_SAMPLER_VERSIONS: tuple[str, ...] = (
+    "prospective-neutral-anchor-v3-max-pain-frozen",
+    PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
 )
 VERIFIED_OUTCOME_METHOD = research_no_dwell_outcome.METHOD_VERSION
 VERIFIED_OUTCOME_QUALITIES = canonical_price_path.COMPLETE_QUALITIES
@@ -1956,12 +1963,42 @@ def _mapping_value(value: Any) -> Mapping[str, Any]:
     return {}
 
 
+def _frozen_max_pain_is_valid(
+    value: Any, *, symbol: str, decision_time_utc: Any
+) -> bool:
+    wrapper = _mapping_value(value)
+    features = _mapping_value(wrapper.get("features"))
+    if not wrapper or not isinstance(wrapper.get("features"), Mapping):
+        return False
+    status = str(wrapper.get("evaluation_status") or "").strip().upper()
+    if status == "UNEVALUABLE":
+        return not features
+    if status != "EVALUABLE":
+        return False
+    requires_previous = any(
+        name.startswith("max_pain.delta.")
+        or name.endswith("_trend")
+        or ".trend" in name
+        for name in features
+    )
+    compatible, _reason = research_max_pain_archive.validate_shadow_provenance(
+        wrapper.get("provenance"),
+        wrapper.get("provenance_sha256"),
+        decision_time_utc=decision_time_utc,
+        expected_symbol=symbol,
+        require_previous=requires_previous,
+    )
+    return compatible
+
+
 def _load_prospective_frozen_rows(
     conn,
     *,
     symbols: Sequence[str],
     start: datetime,
     end: datetime,
+    sampler_versions: Optional[Sequence[str]] = None,
+    as_of_created_utc: Any = None,
 ) -> tuple[
     list[Dict[str, Any]],
     list[Dict[str, Any]],
@@ -1969,30 +2006,88 @@ def _load_prospective_frozen_rows(
     list[Dict[str, Any]],
     Dict[int, Dict[str, Any]],
 ]:
-    """Rebuild decision series only from immutable prospective slot inputs.
+    """Rebuild base source series only from immutable prospective slot inputs.
 
-    ``created_at_utc`` must be within five minutes of the recorded decision.
-    This admits the normal atomic event/slot transaction while preventing a
-    later insert with a backdated decision time from changing an old feature
-    row. No mutable raw archive or candle-time-only fallback is consulted.
+    This helper is for prospective *capture* only: it lets sampler v4 derive a
+    new decision bundle from validated earlier immutable slots.  Formula
+    Shadow never calls it; Shadow consumes the already-frozen decision bundle
+    directly.  ``sampler_versions`` is always an explicit allow-list at the
+    SQL boundary and ``as_of_created_utc`` can freeze the database view seen by
+    one capture attempt.
+
+    ``created_at_utc`` must be between the recorded decision and five minutes
+    after it.  The complete source-time and provenance contract is replayed
+    below, so a payload with a freshly recomputed fingerprint still fails when
+    it contains a future source, a fallback route, or incoherent timestamps.
+    No mutable raw archive or candle-time-only fallback is consulted.
     """
+    normalized_symbols = sorted(
+        {
+            str(symbol or "").strip().upper()
+            for symbol in symbols
+            if str(symbol or "").strip()
+        }
+    )
+    accepted_versions = tuple(
+        sorted(
+            {
+                str(version or "").strip()
+                for version in (
+                    sampler_versions
+                    if sampler_versions is not None
+                    else (PROSPECTIVE_ANCHOR_SAMPLER_VERSION,)
+                )
+                if str(version or "").strip()
+            }
+        )
+    )
+    unsupported_versions = sorted(
+        set(accepted_versions) - set(PROSPECTIVE_PRIOR_SOURCE_SAMPLER_VERSIONS)
+    )
+    if unsupported_versions:
+        raise ValueError(
+            "unsupported prospective source sampler versions: "
+            + ", ".join(unsupported_versions)
+        )
+    if not normalized_symbols or not accepted_versions:
+        return ([], [], [], [], {})
+    created_cutoff = (
+        _as_utc(as_of_created_utc)
+        if as_of_created_utc not in (None, "")
+        else None
+    )
+    cutoff_clause = (
+        "AND created_at_utc <= %s" if created_cutoff is not None else ""
+    )
+    params: list[Any] = [
+        list(accepted_versions),
+        normalized_symbols,
+        _as_utc(start),
+        _as_utc(end),
+    ]
+    if created_cutoff is not None:
+        params.append(created_cutoff)
     rows = conn.execute(
-        """
+        f"""
         SELECT anchor_slot_id, sampler_version, coverage_policy_version,
                coverage_snapshot, symbol, source_candle_open_utc,
                source_candle_close_utc, base_eligible_at_utc, expires_at_utc,
                decision_time_utc, input_fingerprint, source_timestamps,
                source_provenance, frozen_inputs,
+               feature_bundle_policy_version, feature_bundle_sha256,
+               decision_feature_bundle,
                long_event_id, short_event_id, created_at_utc
         FROM research_prospective_anchor_slots
-        WHERE sampler_version=%s
+        WHERE sampler_version=ANY(%s)
           AND symbol=ANY(%s)
           AND decision_time_utc >= %s
           AND decision_time_utc <= %s
+          AND created_at_utc >= decision_time_utc
           AND created_at_utc <= decision_time_utc + INTERVAL '5 minutes'
+          {cutoff_clause}
         ORDER BY symbol, decision_time_utc, anchor_slot_id
         """,
-        (PROSPECTIVE_ANCHOR_SAMPLER_VERSION, list(symbols), start, end),
+        tuple(params),
     ).fetchall()
     price_rows: list[Dict[str, Any]] = []
     oi_rows: list[Dict[str, Any]] = []
@@ -2001,12 +2096,78 @@ def _load_prospective_frozen_rows(
     max_pain_by_event_id: Dict[int, Dict[str, Any]] = {}
     for source in rows:
         row = dict(source)
-        symbol = str(row.get("symbol") or "").strip().upper()
-        decision_time = _as_utc(row["decision_time_utc"])
         frozen = _mapping_value(row.get("frozen_inputs"))
         provenance = _mapping_value(row.get("source_provenance"))
         timestamps = _mapping_value(row.get("source_timestamps"))
         coverage = _mapping_value(row.get("coverage_snapshot"))
+        try:
+            symbol = _symbol(row.get("symbol"))
+            if symbol is None:
+                raise ValueError("prospective source symbol is missing")
+            decision_time = _as_utc(row["decision_time_utc"])
+            slot_open = _as_utc(row["source_candle_open_utc"])
+            slot_close = _as_utc(row["source_candle_close_utc"])
+            base_eligible = _as_utc(row["base_eligible_at_utc"])
+            expires_at = _as_utc(row["expires_at_utc"])
+            created_at = _as_utc(row["created_at_utc"])
+        except (TypeError, ValueError, OverflowError, KeyError):
+            continue
+        try:
+            coverage_eligible, _coverage_failures = (
+                research_prospective_anchors._coverage_status(
+                    coverage,
+                    expected_symbol=symbol,
+                    checked_at_utc=decision_time,
+                    coverage_policy_version=row.get(
+                        "coverage_policy_version"
+                    ),
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            coverage_eligible = False
+        if (
+            slot_close != slot_open + timedelta(minutes=30)
+            or base_eligible != slot_close + timedelta(minutes=2)
+            or expires_at != base_eligible + timedelta(minutes=30)
+            or decision_time < base_eligible
+            or decision_time >= expires_at
+            or created_at < decision_time
+            or created_at > decision_time + timedelta(minutes=5)
+            or (created_cutoff is not None and created_at > created_cutoff)
+            or not coverage_eligible
+        ):
+            continue
+        sampler_version = str(row.get("sampler_version") or "").strip()
+        feature_bundle_policy = row.get("feature_bundle_policy_version")
+        feature_bundle_sha256 = row.get("feature_bundle_sha256")
+        decision_feature_bundle = row.get("decision_feature_bundle")
+        if sampler_version == PROSPECTIVE_ANCHOR_SAMPLER_VERSION:
+            bundle_valid, _bundle_reason = (
+                research_prospective_feature_freeze.validate_feature_bundle(
+                    decision_feature_bundle,
+                    expected_sha256=feature_bundle_sha256,
+                    expected_symbol=symbol,
+                    expected_decision_time_utc=decision_time,
+                )
+            )
+            if (
+                feature_bundle_policy
+                != research_prospective_feature_freeze.FEATURE_POLICY_VERSION
+                or not bundle_valid
+                or _mapping_value(decision_feature_bundle).get(
+                    "feature_schema_version"
+                )
+                != FEATURE_SCHEMA_VERSION
+            ):
+                continue
+        elif (
+            feature_bundle_policy not in (None, "")
+            or feature_bundle_sha256 not in (None, "")
+            or decision_feature_bundle is not None
+        ):
+            # Sampler v3 predates bundle storage.  A legacy row that carries
+            # v4-looking bundle references is not a coherent v3 source.
+            continue
         try:
             expected_fingerprint = (
                 research_prospective_anchors.compute_input_fingerprint(
@@ -2023,119 +2184,67 @@ def _load_prospective_frozen_rows(
                     source_timestamps=timestamps,
                     source_provenance=provenance,
                     frozen_inputs=frozen,
+                    feature_bundle_policy_version=row.get(
+                        "feature_bundle_policy_version"
+                    ),
+                    feature_bundle_sha256=row.get("feature_bundle_sha256"),
                 )
             )
         except (TypeError, ValueError, OverflowError):
             continue
         if expected_fingerprint != str(row.get("input_fingerprint") or "").strip():
             continue
-        official = _mapping_value(frozen.get("official_price"))
-        price_oi = _mapping_value(frozen.get("price_oi"))
-        futures = _mapping_value(frozen.get("futures_cvd"))
-        spot = _mapping_value(frozen.get("spot_cvd"))
-        max_pain = _mapping_value(frozen.get("max_pain"))
-        if not max_pain or not isinstance(max_pain.get("features"), Mapping):
-            # Sampler v3 requires an explicit frozen Max-Pain result, including
-            # the empty feature map of an UNEVALUABLE decision-time lookup.
-            continue
-        official_provenance = _mapping_value(provenance.get("official_price"))
-        shared = {
-            "symbol": symbol,
-            "candle_time": decision_time,
-            "prospective_anchor_slot_id": int(row["anchor_slot_id"]),
-            "prospective_input_fingerprint": str(row["input_fingerprint"]),
-            "prospective_slot_created_at_utc": row["created_at_utc"],
-        }
-        instrument = official_provenance.get("price_instrument_id")
-        canonical_route = {
-            "provenance_version": canonical_price_path.PRICE_PROVENANCE_VERSION,
-            "method_version": canonical_price_path.METHOD_VERSION,
-            "symbol": symbol,
-            "exchange": str(
-                official_provenance.get("price_exchange") or ""
-            ).strip().lower(),
-            "market": str(
-                official_provenance.get("price_market") or ""
-            ).strip().lower(),
-            "pair": str(
-                official_provenance.get("price_pair") or ""
-            ).strip().upper(),
-            "instrument": str(instrument).strip() if instrument else None,
-            "interval": str(
-                official_provenance.get("price_timeframe") or ""
-            ).strip().lower(),
-            "interval_seconds": 60,
-            "provider_provenance": str(
-                official_provenance.get("source") or ""
-            ),
-        }
+        source_rows = prospective_frozen_source_rows(
+            symbol=symbol,
+            frozen_inputs=frozen,
+            source_timestamps=timestamps,
+            source_provenance=provenance,
+        )
         try:
-            canonical_route = canonical_price_path.validated_route(
-                symbol,
-                {
-                    "exchange": canonical_route["exchange"],
-                    "market": canonical_route["market"],
-                    "pair": canonical_route["pair"],
-                    "interval": canonical_route["interval"],
-                    "interval_seconds": canonical_route["interval_seconds"],
-                    "api_coin": canonical_route["instrument"],
-                    "complete": True,
-                    "provenance": canonical_route["provider_provenance"],
-                },
+            source_problems = [
+                research_prospective_anchors._family_problem(
+                    family,
+                    source_rows.get(family),
+                    symbol=symbol,
+                    slot_open=slot_open,
+                    slot_close=slot_close,
+                    base_eligible_at=base_eligible,
+                    now=decision_time,
+                )[0]
+                for family in research_prospective_anchors.REQUIRED_FAMILIES
+            ]
+        except (TypeError, ValueError, OverflowError, KeyError):
+            continue
+        if any(source_problems):
+            continue
+        max_pain = _mapping_value(frozen.get("max_pain"))
+        if not _frozen_max_pain_is_valid(
+            max_pain, symbol=symbol, decision_time_utc=decision_time
+        ):
+            # Samplers v3/v4 require an explicit frozen Max-Pain result,
+            # including the empty feature map of an UNEVALUABLE lookup.
+            continue
+        try:
+            price_row, oi_row, futures_row, spot_row = (
+                prospective_feature_series_rows(
+                    symbol=symbol,
+                    decision_time_utc=decision_time,
+                    frozen_inputs=frozen,
+                    source_provenance=provenance,
+                    anchor_slot_id=int(row["anchor_slot_id"]),
+                    input_fingerprint=str(row["input_fingerprint"]),
+                    created_at_utc=row["created_at_utc"],
+                    sampler_version=row.get("sampler_version"),
+                )
             )
         except (TypeError, ValueError, OverflowError):
             # One malformed immutable slot cannot be allowed to contaminate
             # later windows; omitting it makes affected features unavailable.
             continue
-        price_rows.append(
-            {
-                **shared,
-                "price_close": official.get("price"),
-                "price_exchange": canonical_route["exchange"],
-                "price_market": canonical_route["market"],
-                "price_pair": canonical_route["pair"],
-                "price_instrument_id": canonical_route["instrument"],
-                "price_timeframe": canonical_route["interval"],
-                "price_interval_seconds": 60,
-                "source": official_provenance.get("source"),
-                "canonical_price_method_version": (
-                    canonical_price_path.METHOD_VERSION
-                ),
-                "canonical_price_provenance_version": (
-                    canonical_price_path.PRICE_PROVENANCE_VERSION
-                ),
-                "canonical_price_provenance": canonical_route,
-            }
-        )
-        oi_rows.append(
-            {
-                **shared,
-                "oi_close_usd": price_oi.get("oi_close_usd"),
-                "source": _mapping_value(provenance.get("price_oi")).get(
-                    "source"
-                ),
-            }
-        )
-        for values, family_provenance, target in (
-            (futures, provenance.get("futures_cvd"), futures_rows),
-            (spot, provenance.get("spot_cvd"), spot_rows),
-        ):
-            flow_provenance = _mapping_value(family_provenance)
-            target.append(
-                {
-                    **shared,
-                    "buy_volume_usd": values.get("buy_volume_usd"),
-                    "sell_volume_usd": values.get("sell_volume_usd"),
-                    "api_cum_vol_delta_usd": values.get(
-                        "api_cum_vol_delta_usd"
-                    ),
-                    "continuous_cum_vol_delta_usd": values.get(
-                        "continuous_cum_vol_delta_usd"
-                    ),
-                    "exchange_list": flow_provenance.get("exchange_list"),
-                    "source": flow_provenance.get("source"),
-                }
-            )
+        price_rows.append(price_row)
+        oi_rows.append(oi_row)
+        futures_rows.append(futures_row)
+        spot_rows.append(spot_row)
         for event_column in ("long_event_id", "short_event_id"):
             event_id = row.get(event_column)
             if event_id is not None:
@@ -2146,6 +2255,210 @@ def _load_prospective_frozen_rows(
         futures_rows,
         spot_rows,
         max_pain_by_event_id,
+    )
+
+
+def prospective_frozen_source_rows(
+    *,
+    symbol: Any,
+    frozen_inputs: Mapping[str, Any],
+    source_timestamps: Mapping[str, Any],
+    source_provenance: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Convert one frozen base payload back to strict source-row envelopes.
+
+    This is deliberately pure.  It does not infer timestamps, provenance, or
+    fallback policy and therefore cannot make a malformed archive row appear
+    complete.  The sampler's own family validator can consume the result.
+    """
+    normalized_symbol = _symbol(symbol)
+    frozen = _mapping_value(frozen_inputs)
+    timestamps = _mapping_value(source_timestamps)
+    provenance = _mapping_value(source_provenance)
+    timestamp_fields = {
+        "official_price": {
+            "observed_at_utc",
+            "refresh_completed_at_utc",
+        },
+        "price_oi": {
+            "observation_time_utc",
+            "refresh_completed_at_utc",
+            "price_fetched_at_utc",
+            "oi_fetched_at_utc",
+        },
+        "futures_cvd": {
+            "source_candle_time_utc",
+            "refresh_completed_at_utc",
+        },
+        "spot_cvd": {
+            "source_candle_time_utc",
+            "refresh_completed_at_utc",
+        },
+    }
+    provenance_fields = {
+        "source",
+        "quality_status",
+        "price_exchange",
+        "price_market",
+        "price_pair",
+        "price_instrument_id",
+        "price_timeframe",
+        "exchange_list",
+        "upstream_source",
+        "source_table",
+        "source_record_id",
+        "price_source",
+        "oi_source",
+        "fallback_used",
+        "fallback_policy",
+        "candle_timestamp_mode",
+        "refresh_time_semantics",
+        "quality_status_basis",
+    }
+    rows: Dict[str, Dict[str, Any]] = {}
+    for family in research_prospective_anchors.REQUIRED_FAMILIES:
+        values = frozen.get(family)
+        family_timestamps = timestamps.get(family)
+        family_provenance = provenance.get(family)
+        if not isinstance(values, Mapping):
+            continue
+        if not isinstance(family_timestamps, Mapping):
+            continue
+        if not isinstance(family_provenance, Mapping):
+            continue
+        if set(family_timestamps) != timestamp_fields[family]:
+            continue
+        if not set(family_provenance).issubset(provenance_fields):
+            continue
+        rows[family] = {
+            **dict(family_provenance),
+            **dict(family_timestamps),
+            "symbol": normalized_symbol,
+            "available": True,
+            "complete": True,
+            "values": dict(values),
+        }
+    return rows
+
+
+def prospective_feature_series_rows(
+    *,
+    symbol: Any,
+    decision_time_utc: Any,
+    frozen_inputs: Mapping[str, Any],
+    source_provenance: Mapping[str, Any],
+    anchor_slot_id: Any = None,
+    input_fingerprint: Any = None,
+    created_at_utc: Any = None,
+    sampler_version: Any = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Convert frozen base inputs into the four feature-series rows.
+
+    The conversion is pure and shared by v4 capture and the immutable prior
+    slot loader.  It validates the official price route but never substitutes
+    a provider.  A persisted Binance pair code such as ``BTCUSDT`` remains
+    provenance only; only HYPE passes the provider instrument ``@107`` to the
+    canonical route validator.
+    """
+    normalized_symbol = _symbol(symbol)
+    decision_time = _as_utc(decision_time_utc)
+    frozen = _mapping_value(frozen_inputs)
+    provenance = _mapping_value(source_provenance)
+    official = _mapping_value(frozen.get("official_price"))
+    price_oi = _mapping_value(frozen.get("price_oi"))
+    futures = _mapping_value(frozen.get("futures_cvd"))
+    spot = _mapping_value(frozen.get("spot_cvd"))
+    if any(not values for values in (official, price_oi, futures, spot)):
+        raise ValueError("frozen prospective base inputs are incomplete")
+    official_provenance = _mapping_value(provenance.get("official_price"))
+    stored_instrument = str(
+        official_provenance.get("price_instrument_id") or ""
+    ).strip()
+    canonical_route = canonical_price_path.validated_route(
+        normalized_symbol,
+        {
+            "exchange": str(
+                official_provenance.get("price_exchange") or ""
+            ).strip().lower(),
+            "market": str(
+                official_provenance.get("price_market") or ""
+            ).strip().lower(),
+            "pair": str(
+                official_provenance.get("price_pair") or ""
+            ).strip().upper(),
+            "interval": str(
+                official_provenance.get("price_timeframe") or ""
+            ).strip().lower(),
+            "interval_seconds": 60,
+            "api_coin": stored_instrument if normalized_symbol == "HYPE" else "",
+            "complete": True,
+            "provenance": str(official_provenance.get("source") or ""),
+        },
+    )
+    shared: Dict[str, Any] = {
+        "symbol": normalized_symbol,
+        "candle_time": decision_time,
+    }
+    if anchor_slot_id not in (None, ""):
+        if isinstance(anchor_slot_id, bool) or int(anchor_slot_id) <= 0:
+            raise ValueError("prospective anchor slot id is invalid")
+        shared["prospective_anchor_slot_id"] = int(anchor_slot_id)
+    if input_fingerprint not in (None, ""):
+        fingerprint = str(input_fingerprint).strip().lower()
+        if len(fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in fingerprint
+        ):
+            raise ValueError("prospective input fingerprint is invalid")
+        shared["prospective_input_fingerprint"] = fingerprint
+    if created_at_utc not in (None, ""):
+        shared["prospective_slot_created_at_utc"] = _as_utc(created_at_utc)
+    if sampler_version not in (None, ""):
+        version = str(sampler_version).strip()
+        if not version:
+            raise ValueError("prospective sampler version is invalid")
+        shared["prospective_sampler_version"] = version
+        shared["prospective_decision_time_utc"] = decision_time
+    price_row = {
+        **shared,
+        "price_close": official.get("price"),
+        "price_exchange": canonical_route["exchange"],
+        "price_market": canonical_route["market"],
+        "price_pair": canonical_route["pair"],
+        "price_instrument_id": canonical_route["instrument"],
+        "price_timeframe": canonical_route["interval"],
+        "price_interval_seconds": canonical_route["interval_seconds"],
+        "source": official_provenance.get("source"),
+        "canonical_price_method_version": canonical_price_path.METHOD_VERSION,
+        "canonical_price_provenance_version": (
+            canonical_price_path.PRICE_PROVENANCE_VERSION
+        ),
+        "canonical_price_provenance": canonical_route,
+    }
+    oi_row = {
+        **shared,
+        "oi_close_usd": price_oi.get("oi_close_usd"),
+        "source": _mapping_value(provenance.get("price_oi")).get("source"),
+    }
+
+    def flow_row(family: str, values: Mapping[str, Any]) -> Dict[str, Any]:
+        family_provenance = _mapping_value(provenance.get(family))
+        return {
+            **shared,
+            "buy_volume_usd": values.get("buy_volume_usd"),
+            "sell_volume_usd": values.get("sell_volume_usd"),
+            "api_cum_vol_delta_usd": values.get("api_cum_vol_delta_usd"),
+            "continuous_cum_vol_delta_usd": values.get(
+                "continuous_cum_vol_delta_usd"
+            ),
+            "exchange_list": family_provenance.get("exchange_list"),
+            "source": family_provenance.get("source"),
+        }
+
+    return (
+        price_row,
+        oi_row,
+        flow_row("futures_cvd", futures),
+        flow_row("spot_cvd", spot),
     )
 
 
@@ -2887,15 +3200,732 @@ def load_formula_dataset(
     return alerts
 
 
+def _load_authoritative_shadow_events(
+    conn: Any, event_ids: Sequence[int]
+) -> list[Dict[str, Any]]:
+    """Load only migration-013-authorized sampler-v4 decision events."""
+    normalized = sorted(
+        {int(event_id) for event_id in event_ids if int(event_id) > 0}
+    )
+    if not normalized:
+        return []
+    return [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT anchor_slot_id, sampler_version,
+                   coverage_policy_version, coverage_snapshot,
+                   source_candle_open_utc, source_candle_close_utc,
+                   base_eligible_at_utc, expires_at_utc,
+                   decision_time_utc, input_fingerprint,
+                   event_id, alert_time_utc, symbol, direction,
+                   event_type, source_side, timeframe, setup_key,
+                   strategy_version, code_version, event_fingerprint,
+                   current_price, engine_snapshot, frozen_inputs,
+                   source_timestamps, source_provenance, created_at_utc,
+                   interval_minutes, long_event_id, short_event_id,
+                   feature_bundle_policy_version, feature_bundle_sha256,
+                   decision_feature_bundle
+            FROM research_prospective_shadow_events
+            WHERE event_id=ANY(%s)
+            ORDER BY alert_time_utc, event_id
+            """,
+            (normalized,),
+        ).fetchall()
+    ]
+
+
+def _canonical_json_identity(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _frozen_bundle_feature_intrinsics_valid(
+    features_by_direction: Mapping[str, Any],
+    *,
+    decision_time_utc: datetime,
+) -> bool:
+    """Bind formula-visible derived fields to one coherent decision state.
+
+    A bundle hash proves immutability, but not that a newly re-hashed bundle
+    still represents values the feature builder could have produced.  These
+    checks cover the deterministic cross-direction, session and directional
+    alignment relationships without rebuilding from a mutable archive.
+    """
+    long_features = _mapping_value(features_by_direction.get("LONG"))
+    short_features = _mapping_value(features_by_direction.get("SHORT"))
+    if not long_features or not short_features:
+        return False
+
+    direction_specific_prefixes = (
+        "aligned.",
+        "aligned_log.",
+        "model.",
+        "category.",
+    )
+    nondirectional_names = {
+        str(name)
+        for name in set(long_features) | set(short_features)
+        if not str(name).startswith(direction_specific_prefixes)
+    }
+    for name in nondirectional_names:
+        if name not in long_features or name not in short_features:
+            return False
+        if _canonical_json_identity(
+            long_features[name]
+        ) != _canonical_json_identity(short_features[name]):
+            return False
+
+    decision_time = _as_utc(decision_time_utc)
+    expected_session_features: Dict[str, Any] = {
+        "historical.event_market_session": (
+            "ACTIVE"
+            if market_session_baseline.is_active_market(decision_time)
+            else "WEEKEND"
+        )
+    }
+    for minutes in CORE_WINDOWS_MINUTES:
+        active, weekend, _segments = (
+            market_session_baseline.session_ratios(
+                decision_time - timedelta(minutes=minutes), decision_time
+            )
+        )
+        window = f"{minutes}m"
+        for prefix in ("raw", "historical"):
+            expected_session_features[
+                f"{prefix}.{window}.session_active_ratio"
+            ] = round(active, 6)
+            expected_session_features[
+                f"{prefix}.{window}.session_weekend_ratio"
+            ] = round(weekend, 6)
+            expected_session_features[
+                f"{prefix}.{window}.session_composition"
+            ] = _session_composition_label(active)
+    if any(
+        _canonical_json_identity(long_features.get(name))
+        != _canonical_json_identity(expected)
+        for name, expected in expected_session_features.items()
+    ):
+        return False
+
+    raw_base_fields = (
+        "price_change_pct",
+        "oi_change_pct",
+        "futures_continuous_cvd_change_usd",
+        "spot_continuous_cvd_change_usd",
+    )
+    for minutes in CORE_WINDOWS_MINUTES:
+        window = f"{minutes}m"
+        raw_values: Dict[str, Optional[float]] = {}
+        for field in raw_base_fields:
+            name = f"raw.{window}.{field}"
+            value = long_features.get(name)
+            if name in long_features:
+                if type(value) not in (int, float):
+                    return False
+                number = float(value)
+                if not math.isfinite(number):
+                    return False
+                raw_values[field] = number
+            else:
+                raw_values[field] = None
+        price_change = raw_values["price_change_pct"]
+        oi_change = raw_values["oi_change_pct"]
+        futures_change = raw_values[
+            "futures_continuous_cvd_change_usd"
+        ]
+        spot_change = raw_values["spot_continuous_cvd_change_usd"]
+        expected_derived = {
+            f"raw.{window}.price_oi_state": _price_oi_state(
+                price_change, oi_change
+            ),
+            f"raw.{window}.spot_futures_alignment": _alignment(
+                spot_change, futures_change
+            ),
+            f"raw.{window}.price_spot_alignment": _alignment(
+                price_change, spot_change
+            ),
+            f"raw.{window}.price_futures_alignment": _alignment(
+                price_change, futures_change
+            ),
+        }
+        if any(
+            long_features.get(name) != expected
+            for name, expected in expected_derived.items()
+        ):
+            return False
+        ratio_name = f"raw.{window}.spot_to_futures_abs_cvd_ratio"
+        expected_ratio = None
+        if futures_change not in (None, 0.0) and spot_change is not None:
+            expected_ratio = round(
+                abs(spot_change) / abs(futures_change), 6
+            )
+        if expected_ratio is None:
+            if ratio_name in long_features:
+                return False
+        elif long_features.get(ratio_name) != expected_ratio:
+            return False
+
+    aligned_fields = (
+        "price_change_pct",
+        "futures_continuous_cvd_change_usd",
+        "spot_continuous_cvd_change_usd",
+        "futures_api_cvd_change_usd",
+        "spot_api_cvd_change_usd",
+    )
+    for direction, features, sign in (
+        ("LONG", long_features, 1.0),
+        ("SHORT", short_features, -1.0),
+    ):
+        expected_aligned: Dict[str, float] = {}
+        for minutes in CORE_WINDOWS_MINUTES:
+            window = f"{minutes}m"
+            for field in aligned_fields:
+                raw_name = f"raw.{window}.{field}"
+                raw_value = features.get(raw_name)
+                if type(raw_value) not in (int, float):
+                    continue
+                raw_number = float(raw_value)
+                if not math.isfinite(raw_number):
+                    return False
+                aligned = sign * raw_number
+                expected_aligned[f"aligned.{window}.{field}"] = aligned
+                expected_aligned[f"aligned_log.{window}.{field}"] = (
+                    math.copysign(
+                        math.log10(1.0 + abs(aligned)), aligned
+                    )
+                )
+        recorded_aligned = {
+            str(name): value
+            for name, value in features.items()
+            if str(name).startswith(("aligned.", "aligned_log."))
+        }
+        # JSONB may normalize ``-0.0`` to ``0.0``.  Both are the same numeric
+        # feature value, so compare this flat numeric map arithmetically rather
+        # than through its textual JSON spelling.
+        if recorded_aligned != expected_aligned:
+            return False
+    return True
+
+
+def _validated_shadow_authority(
+    source: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Validate one view row without consulting any later/mutable source."""
+    row = dict(source)
+    try:
+        if any(
+            isinstance(row.get(key), bool)
+            for key in (
+                "anchor_slot_id",
+                "event_id",
+                "long_event_id",
+                "short_event_id",
+                "interval_minutes",
+            )
+        ):
+            raise ValueError("boolean identifier")
+        slot_id = int(row["anchor_slot_id"])
+        event_id = int(row["event_id"])
+        long_event_id = int(row["long_event_id"])
+        short_event_id = int(row["short_event_id"])
+        interval_minutes = int(row["interval_minutes"])
+        symbol = _symbol(row["symbol"])
+        direction = str(row.get("direction") or "").strip().upper()
+        slot_open = _as_utc(row["source_candle_open_utc"])
+        slot_close = _as_utc(row["source_candle_close_utc"])
+        base_eligible = _as_utc(row["base_eligible_at_utc"])
+        expires_at = _as_utc(row["expires_at_utc"])
+        decision_time = _as_utc(row["decision_time_utc"])
+        alert_time = _as_utc(row["alert_time_utc"])
+        created_at = _as_utc(row["created_at_utc"])
+    except (TypeError, ValueError, OverflowError, KeyError):
+        return None
+    if (
+        slot_id <= 0
+        or event_id <= 0
+        or interval_minutes != 30
+        or direction not in research_prospective_anchors.DIRECTIONS
+        or (direction == "LONG" and event_id != long_event_id)
+        or (direction == "SHORT" and event_id != short_event_id)
+        or long_event_id == short_event_id
+        or row.get("sampler_version") != PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+        or row.get("coverage_policy_version")
+        != research_prospective_anchors.COVERAGE_POLICY_VERSION
+        or row.get("event_type") != research_prospective_anchors.EVENT_TYPE
+        or row.get("source_side") != "RAW_NEUTRAL"
+        or row.get("timeframe") != research_prospective_anchors.TIMEFRAME
+        or slot_close != slot_open + timedelta(minutes=30)
+        or base_eligible != slot_close + timedelta(minutes=2)
+        or expires_at != base_eligible + timedelta(minutes=30)
+        or decision_time < base_eligible
+        or decision_time >= expires_at
+        or alert_time != decision_time
+        or created_at < decision_time
+        or created_at > decision_time + timedelta(minutes=5)
+    ):
+        return None
+    input_fingerprint = str(row.get("input_fingerprint") or "").strip().lower()
+    event_fingerprint = str(row.get("event_fingerprint") or "").strip().lower()
+    expected_event_fingerprint = research_prospective_anchors._sha256(
+        {
+            "sampler_version": PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+            "event_type": research_prospective_anchors.EVENT_TYPE,
+            "symbol": symbol,
+            "direction": direction,
+            "source_candle_open_utc": (
+                research_prospective_anchors._iso(slot_open)
+            ),
+        }
+    )
+    feature_bundle_sha256 = str(
+        row.get("feature_bundle_sha256") or ""
+    ).strip().lower()
+    feature_bundle_policy = str(
+        row.get("feature_bundle_policy_version") or ""
+    ).strip()
+    if (
+        len(input_fingerprint) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in input_fingerprint
+        )
+        or len(event_fingerprint) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in event_fingerprint
+        )
+        or event_fingerprint != expected_event_fingerprint
+        or feature_bundle_policy
+        != research_prospective_feature_freeze.FEATURE_POLICY_VERSION
+    ):
+        return None
+    frozen = _mapping_value(row.get("frozen_inputs"))
+    timestamps = _mapping_value(row.get("source_timestamps"))
+    provenance = _mapping_value(row.get("source_provenance"))
+    coverage = _mapping_value(row.get("coverage_snapshot"))
+    bundle = _mapping_value(row.get("decision_feature_bundle"))
+    try:
+        coverage_valid, _coverage_reason = (
+            research_prospective_anchors._coverage_status(
+                coverage,
+                expected_symbol=symbol,
+                checked_at_utc=decision_time,
+                coverage_policy_version=row.get(
+                    "coverage_policy_version"
+                ),
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        coverage_valid = False
+    if (
+        not frozen
+        or not coverage_valid
+        or "decision_feature_bundle" in frozen
+        or "feature_bundle_sha256" in frozen
+    ):
+        return None
+    bundle_valid, _bundle_reason = (
+        research_prospective_feature_freeze.validate_feature_bundle(
+            bundle,
+            expected_sha256=feature_bundle_sha256,
+            expected_symbol=symbol,
+            expected_decision_time_utc=decision_time,
+        )
+    )
+    if (
+        not bundle_valid
+        or bundle.get("feature_schema_version") != FEATURE_SCHEMA_VERSION
+    ):
+        return None
+    max_pain = _mapping_value(frozen.get("max_pain"))
+    if not _frozen_max_pain_is_valid(
+        max_pain, symbol=symbol, decision_time_utc=decision_time
+    ):
+        return None
+    expected_max_pain_features: Dict[str, Any] = {}
+    if str(max_pain.get("evaluation_status") or "").upper() == "EVALUABLE":
+        for name, value in _mapping_value(max_pain.get("features")).items():
+            feature_name = str(name)
+            if (
+                feature_name.startswith("max_pain.")
+                and research_formula_engine.candidate_feature_allowed(
+                    feature_name
+                )
+            ):
+                research_formula_engine._put_feature(
+                    expected_max_pain_features, feature_name, value
+                )
+    features_by_direction = _mapping_value(
+        bundle.get("features_by_direction")
+    )
+    if not _frozen_bundle_feature_intrinsics_valid(
+        features_by_direction,
+        decision_time_utc=decision_time,
+    ):
+        return None
+    expected_event_features = {
+        "event.symbol": symbol,
+        "event.event_type": research_prospective_anchors.EVENT_TYPE,
+        "event.source_side": row.get("source_side"),
+        "event.timeframe": row.get("timeframe"),
+    }
+    for candidate_direction in research_prospective_anchors.DIRECTIONS:
+        direction_features = _mapping_value(
+            features_by_direction.get(candidate_direction)
+        )
+        if any(
+            direction_features.get(name) != expected
+            for name, expected in expected_event_features.items()
+        ):
+            return None
+        for flat_name, event_column in (
+            ("event.strategy_version", "strategy_version"),
+            ("event.code_version", "code_version"),
+        ):
+            if (
+                flat_name in direction_features
+                and direction_features.get(flat_name) != row.get(event_column)
+            ):
+                return None
+        recorded_max_pain = {
+            name: value
+            for name, value in direction_features.items()
+            if str(name).startswith("max_pain.")
+        }
+        if _canonical_json_identity(
+            recorded_max_pain
+        ) != _canonical_json_identity(expected_max_pain_features):
+            return None
+    try:
+        expected_fingerprint = (
+            research_prospective_anchors.compute_input_fingerprint(
+                sampler_version=row.get("sampler_version"),
+                coverage_policy_version=row.get("coverage_policy_version"),
+                coverage_snapshot=coverage,
+                symbol=symbol,
+                source_candle_open_utc=slot_open,
+                source_candle_close_utc=slot_close,
+                base_eligible_at_utc=base_eligible,
+                expires_at_utc=expires_at,
+                evaluation_status=research_prospective_anchors.EVALUABLE,
+                decision_time_utc=decision_time,
+                source_timestamps=timestamps,
+                source_provenance=provenance,
+                frozen_inputs=frozen,
+                feature_bundle_policy_version=feature_bundle_policy,
+                feature_bundle_sha256=feature_bundle_sha256,
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if expected_fingerprint != input_fingerprint:
+        return None
+
+    source_rows = prospective_frozen_source_rows(
+        symbol=symbol,
+        frozen_inputs=frozen,
+        source_timestamps=timestamps,
+        source_provenance=provenance,
+    )
+    try:
+        for family in research_prospective_anchors.REQUIRED_FAMILIES:
+            problem, _source_time, _refresh_time = (
+                research_prospective_anchors._family_problem(
+                    family,
+                    source_rows.get(family),
+                    symbol=symbol,
+                    slot_open=slot_open,
+                    slot_close=slot_close,
+                    base_eligible_at=base_eligible,
+                    now=decision_time,
+                )
+            )
+            if problem:
+                return None
+    except (TypeError, ValueError, OverflowError, KeyError):
+        return None
+
+    snapshot = _mapping_value(row.get("engine_snapshot"))
+    anchor = _mapping_value(snapshot.get("prospective_anchor"))
+    try:
+        anchor_times_match = (
+            _as_utc(anchor.get("source_candle_open_utc")) == slot_open
+            and _as_utc(anchor.get("source_candle_close_utc")) == slot_close
+            and _as_utc(anchor.get("base_eligible_at_utc")) == base_eligible
+            and _as_utc(anchor.get("expires_at_utc")) == expires_at
+            and _as_utc(anchor.get("decision_time_utc")) == decision_time
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        anchor.get("sampler_version") != PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+        or anchor.get("coverage_policy_version")
+        != research_prospective_anchors.COVERAGE_POLICY_VERSION
+        or str(anchor.get("input_fingerprint") or "").strip().lower()
+        != input_fingerprint
+        or anchor.get("feature_bundle_policy_version")
+        != feature_bundle_policy
+        or str(anchor.get("feature_bundle_sha256") or "").strip().lower()
+        != feature_bundle_sha256
+        or not anchor_times_match
+        or _canonical_json_identity(anchor.get("coverage_snapshot"))
+        != _canonical_json_identity(coverage)
+        or _canonical_json_identity(anchor.get("source_timestamps"))
+        != _canonical_json_identity(timestamps)
+        or _canonical_json_identity(anchor.get("source_provenance"))
+        != _canonical_json_identity(provenance)
+        or _canonical_json_identity(anchor.get("frozen_inputs"))
+        != _canonical_json_identity(frozen)
+        or "decision_feature_bundle" in anchor
+    ):
+        return None
+    official = _mapping_value(frozen.get("official_price"))
+    current_price = _float(row.get("current_price"))
+    official_price = _float(official.get("price"))
+    if (
+        current_price is None
+        or official_price is None
+        or current_price <= 0.0
+        or official_price <= 0.0
+        or current_price != official_price
+    ):
+        return None
+    try:
+        price_row, oi_row, futures_row, spot_row = (
+            prospective_feature_series_rows(
+                symbol=symbol,
+                decision_time_utc=decision_time,
+                frozen_inputs=frozen,
+                source_provenance=provenance,
+                anchor_slot_id=slot_id,
+                input_fingerprint=input_fingerprint,
+                created_at_utc=created_at,
+                sampler_version=PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    source_inputs = {
+        "price_oi": _latest_price_oi(price_row, 0.0, oi_row, 0.0),
+        "futures_cvd": _latest_flow(futures_row, 0.0),
+        "spot_cvd": _latest_flow(spot_row, 0.0),
+    }
+    for values in source_inputs.values():
+        values["prospective_sampler_version"] = (
+            PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+        )
+        values["prospective_decision_time_utc"] = decision_time
+        values["feature_bundle_policy_version"] = feature_bundle_policy
+        values["feature_bundle_sha256"] = feature_bundle_sha256
+    expected_latest_features: Dict[str, Any] = {}
+    for family, values in source_inputs.items():
+        for key in ("available", "age_minutes", "buy_sell_ratio"):
+            feature_name = f"latest.{family}.{key}"
+            if research_formula_engine.candidate_feature_allowed(feature_name):
+                research_formula_engine._put_feature(
+                    expected_latest_features,
+                    feature_name,
+                    values.get(key),
+                )
+    for candidate_direction in research_prospective_anchors.DIRECTIONS:
+        direction_features = _mapping_value(
+            features_by_direction.get(candidate_direction)
+        )
+        recorded_latest = {
+            name: value
+            for name, value in direction_features.items()
+            if str(name).startswith("latest.")
+        }
+        if _canonical_json_identity(
+            recorded_latest
+        ) != _canonical_json_identity(expected_latest_features):
+            return None
+    return {
+        "slot_id": slot_id,
+        "event_id": event_id,
+        "symbol": symbol,
+        "direction": direction,
+        "decision_time": decision_time,
+        "created_at": created_at,
+        "input_fingerprint": input_fingerprint,
+        "feature_bundle_policy_version": feature_bundle_policy,
+        "feature_bundle_sha256": feature_bundle_sha256,
+        "bundle": dict(bundle),
+        "source_inputs": source_inputs,
+        "max_pain": dict(max_pain),
+        "source_timestamps": dict(timestamps),
+        "source_provenance": dict(provenance),
+        "event": row,
+    }
+
+
+def _direct_shadow_feature_row(
+    authority: Mapping[str, Any], *, horizon_minutes: int
+) -> Optional[Dict[str, Any]]:
+    bundle = _mapping_value(authority.get("bundle"))
+    direction = str(authority.get("direction") or "").upper()
+    by_direction = _mapping_value(bundle.get("features_by_direction"))
+    features = by_direction.get(direction)
+    contexts = _mapping_value(bundle.get("horizon_context"))
+    context = contexts.get(str(int(horizon_minutes)))
+    if not isinstance(features, Mapping) or not isinstance(context, Mapping):
+        return None
+    session = _mapping_value(context.get("session"))
+    width = _mapping_value(context.get("movement_width_reference"))
+    decision_time = _as_utc(authority["decision_time"])
+    symbol = str(authority["symbol"])
+    active, weekend, segments = market_session_baseline.session_ratios(
+        decision_time,
+        decision_time + timedelta(minutes=int(horizon_minutes)),
+    )
+    expected_session = {
+        "active_ratio": round(active, 6),
+        "weekend_ratio": round(weekend, 6),
+        "composition": _session_composition_label(active),
+        "segments": _json_safe(segments),
+    }
+    if _canonical_json_identity(session) != _canonical_json_identity(
+        expected_session
+    ):
+        return None
+    width_valid, _width_reason = (
+        research_session_width.validate_movement_width_reference(
+            width,
+            expected_symbol=symbol,
+            event_time=decision_time,
+            horizon_minutes=int(horizon_minutes),
+        )
+    )
+    if not width_valid:
+        return None
+    expected_time = _time_features(decision_time)
+    for key, value in expected_time.items():
+        feature_name = f"time.{key}"
+        if (
+            research_formula_engine.candidate_feature_allowed(feature_name)
+            and isinstance(value, (str, int, float, bool))
+            and features.get(feature_name) != value
+        ):
+            return None
+    if (
+        features.get("event.symbol") != symbol
+        or features.get("event.event_type")
+        != research_prospective_anchors.EVENT_TYPE
+    ):
+        return None
+    event_source = _mapping_value(authority.get("event"))
+    source_inputs = {
+        family: dict(values)
+        for family, values in _mapping_value(
+            authority.get("source_inputs")
+        ).items()
+        if isinstance(values, Mapping)
+    }
+    feature_bundle_sha256 = str(authority["feature_bundle_sha256"])
+    input_fingerprint = str(authority["input_fingerprint"])
+    slot_id = int(authority["slot_id"])
+    return _json_safe(
+        {
+            "feature_schema_version": bundle["feature_schema_version"],
+            "decision_input_policy_version": (
+                PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+            ),
+            "event": {
+                "event_id": int(authority["event_id"]),
+                "alert_time_utc": decision_time,
+                "symbol": symbol,
+                "direction": direction,
+                "source_side": event_source.get("source_side"),
+                "timeframe": event_source.get("timeframe"),
+                "event_type": event_source.get("event_type"),
+                "strategy_version": event_source.get("strategy_version"),
+                "code_version": event_source.get("code_version"),
+                "setup_key": event_source.get("setup_key"),
+            },
+            # Formula evaluation consumes this exact flat map.  It must never
+            # be regenerated from raw archives or a later code/schema version.
+            "frozen_decision_features": dict(features),
+            "frozen_horizon_context": dict(context),
+            "frozen_source_inputs": source_inputs,
+            "raw_features": {
+                "captured_event_inputs": {},
+                "latest_at_or_before_alert": source_inputs,
+                "windows": {},
+            },
+            "time_features": {},
+            "historical_context": {},
+            "model_features": {
+                "frozen_status": bundle.get("model_score_status")
+            },
+            "sequence_features": {},
+            "max_pain_features": dict(authority.get("max_pain") or {}),
+            "outcome_label": {
+                "horizon_minutes": int(horizon_minutes),
+                "session_active_ratio": session.get("active_ratio"),
+                "session_weekend_ratio": session.get("weekend_ratio"),
+                "session_segments": session.get("segments"),
+                "session_composition": session.get("composition"),
+                "movement_width_reference": width,
+            },
+            "prospective_anchor_slot_id": slot_id,
+            "prospective_input_fingerprint": input_fingerprint,
+            "prospective_sampler_version": (
+                PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+            ),
+            "prospective_decision_time_utc": decision_time,
+            "feature_bundle_policy_version": authority[
+                "feature_bundle_policy_version"
+            ],
+            "feature_bundle_sha256": feature_bundle_sha256,
+            "decision_feature_bundle": dict(bundle),
+            "authoritative_verified": True,
+            "prospective_evidence": {
+                "sampler_version": PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+                "feature_bundle_policy_version": authority[
+                    "feature_bundle_policy_version"
+                ],
+                "anchor_slot_id": slot_id,
+                "input_fingerprint": input_fingerprint,
+                "feature_bundle_sha256": feature_bundle_sha256,
+                "source_timestamps": dict(
+                    authority.get("source_timestamps") or {}
+                ),
+                "source_provenance": dict(
+                    authority.get("source_provenance") or {}
+                ),
+            },
+            "prospective_authority": {
+                "anchor_slot_id": slot_id,
+                "input_fingerprint": input_fingerprint,
+                "sampler_version": PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+                "decision_time_utc": decision_time,
+                "feature_bundle_policy_version": authority[
+                    "feature_bundle_policy_version"
+                ],
+                "feature_bundle_sha256": feature_bundle_sha256,
+                "authoritative_verified": True,
+            },
+        }
+    )
+
+
 def load_shadow_feature_rows_by_horizon(
     event_ids_by_horizon: Mapping[int, Sequence[int]],
 ) -> Dict[tuple[int, int], Dict[str, Any]]:
-    """Build prior-only Shadow rows keyed by ``(event_id, horizon)``.
+    """Load exact decision-time Shadow rows keyed by ``(event_id, horizon)``.
 
-    The formula horizon is injected before the feature row is built so the
-    decision-time weekend width reference uses the correct future window.  The
-    reference itself is calculated exclusively from raw history that predates
-    the event; realized return/MFE/MAE are never loaded here.
+    Only the migration-013 authority view is accepted.  The flat Formula
+    inputs and horizon context come directly from the slot-owned, hashed v4
+    bundle.  This function never opens the mutable raw archive, never loads a
+    later Max-Pain snapshot or prior alert, and never calls
+    :func:`build_feature_rows`.
     """
     unsupported = sorted(
         {
@@ -2926,192 +3956,45 @@ def load_shadow_feature_rows_by_horizon(
     if len(normalized) > 250:
         raise ValueError("shadow feature batch is limited to 250 distinct events")
     research_url = _research_database_url()
-    raw_url = _raw_database_url()
-    if not research_url or not raw_url:
-        raise RuntimeError("research and raw market archives must both be configured")
+    if not research_url:
+        raise RuntimeError("research archive must be configured")
 
     with _connect(research_url) as research_conn:
-        events = _load_delivered_events_by_id(research_conn, normalized)
-        if not events:
-            return {}
-        first_time = min(_as_utc(row["alert_time_utc"]) for row in events)
-        last_time = max(_as_utc(row["alert_time_utc"]) for row in events)
-        symbols = sorted({str(row["symbol"] or "").upper() for row in events})
-        raw_start = first_time - timedelta(
-            days=HISTORICAL_BASELINE_DAYS,
-            minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES,
+        view_rows = _load_authoritative_shadow_events(
+            research_conn, normalized
         )
-        prior_events = _load_prior_events(
-            research_conn,
-            first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
-            last_time,
-        )
-        prospective_events = [
-            row for row in events if str(row.get("event_kind") or "") == "DECISION_SAMPLE"
-        ]
-        alert_events = [
-            row for row in events if str(row.get("event_kind") or "") == "ALERT"
-        ]
-        # Delivered ALERT compatibility keeps its old prior-only archive
-        # reconstruction. Prospective v6 samples never consult Max-Pain here;
-        # they consume only the wrapper frozen in their authoritative slot.
-        max_pain_by_event_id = _load_max_pain_features_batch(
-            research_conn, alert_events
-        )
-        if prospective_events:
-            (
-                frozen_price_rows,
-                frozen_oi_rows,
-                frozen_futures_rows,
-                frozen_spot_rows,
-                frozen_max_pain_by_event_id,
-            ) = _load_prospective_frozen_rows(
-                research_conn,
-                symbols=sorted(
-                    {str(row["symbol"] or "").upper() for row in prospective_events}
-                ),
-                start=raw_start,
-                end=last_time,
-            )
-            max_pain_by_event_id.update(frozen_max_pain_by_event_id)
-        else:
-            frozen_price_rows = []
-            frozen_oi_rows = []
-            frozen_futures_rows = []
-            frozen_spot_rows = []
-            frozen_max_pain_by_event_id = {}
-
-    if alert_events:
-        with _connect(raw_url) as raw_conn:
-            price_rows, futures_rows, spot_rows = _load_raw_rows(
-                raw_conn,
-                symbols=sorted(
-                    {str(row["symbol"] or "").upper() for row in alert_events}
-                ),
-                start=raw_start,
-                end=last_time,
-            )
-    else:
-        price_rows = []
-        futures_rows = []
-        spot_rows = []
-    events_by_id = {int(row["event_id"]): dict(row) for row in events}
-    horizon_events = []
+    authorities = {
+        int(validated["event_id"]): validated
+        for source in view_rows
+        if (validated := _validated_shadow_authority(source)) is not None
+    }
+    result: Dict[tuple[int, int], Dict[str, Any]] = {}
     for horizon, event_ids in sorted(normalized_by_horizon.items()):
         for event_id in event_ids:
-            source = events_by_id.get(event_id)
-            if source is None:
+            authority = authorities.get(event_id)
+            if authority is None:
                 continue
-            event = dict(source)
-            event["horizon_minutes"] = horizon
-            horizon_events.append(event)
-    prospective_horizon_events = [
-        event
-        for event in horizon_events
-        if str(event.get("event_kind") or "") == "DECISION_SAMPLE"
-    ]
-    alert_horizon_events = [
-        event
-        for event in horizon_events
-        if str(event.get("event_kind") or "") == "ALERT"
-    ]
-    rows: list[Dict[str, Any]] = []
-    if prospective_horizon_events:
-        frozen_rows = build_feature_rows(
-            prospective_horizon_events,
-            price_oi_rows=frozen_price_rows,
-            oi_rows=frozen_oi_rows,
-            futures_rows=frozen_futures_rows,
-            spot_rows=frozen_spot_rows,
-            prior_events=prior_events,
-            windows_minutes=CORE_WINDOWS_MINUTES,
-            max_pain_by_event_id=max_pain_by_event_id,
-        )
-        for row in frozen_rows:
-            row["decision_input_policy_version"] = (
-                PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+            row = _direct_shadow_feature_row(
+                authority, horizon_minutes=horizon
             )
-        rows.extend(frozen_rows)
-    if alert_horizon_events:
-        legacy_rows = build_feature_rows(
-            alert_horizon_events,
-            price_oi_rows=price_rows,
-            futures_rows=futures_rows,
-            spot_rows=spot_rows,
-            prior_events=prior_events,
-            windows_minutes=CORE_WINDOWS_MINUTES,
-            max_pain_by_event_id=max_pain_by_event_id,
-        )
-        for row in legacy_rows:
-            row["decision_input_policy_version"] = (
-                "legacy-mutable-raw-archive-reconstruction"
-            )
-        rows.extend(legacy_rows)
-    result: Dict[tuple[int, int], Dict[str, Any]] = {}
-    for row in rows:
-        event_id = row.get("event", {}).get("event_id")
-        horizon = row.get("outcome_label", {}).get("horizon_minutes")
-        if event_id is not None and horizon is not None:
-            result[(int(event_id), int(horizon))] = row
+            if row is not None:
+                result[(event_id, horizon)] = row
     return result
 
 
 def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
-    """Backward-compatible decision-time rows without a formula horizon.
+    """Fail closed when a Shadow caller omits its formula horizon.
 
-    Formula Shadow validation must call ``load_shadow_feature_rows_by_horizon``.
-    This wrapper remains for read-only callers that do not need weekend width
-    calibration and therefore receives no relaxation.
+    A horizon is part of the frozen v4 authority because it selects the exact
+    decision-time session/width context.  There is no raw-archive compatibility
+    fallback; callers must use :func:`load_shadow_feature_rows_by_horizon`.
     """
     normalized = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
     if not normalized:
         return {}
     if len(normalized) > 250:
         raise ValueError("shadow feature batch is limited to 250 events")
-    research_url = _research_database_url()
-    raw_url = _raw_database_url()
-    if not research_url or not raw_url:
-        raise RuntimeError("research and raw market archives must both be configured")
-    with _connect(research_url) as research_conn:
-        events = _load_delivered_events_by_id(research_conn, normalized)
-        # Prospective samples require an explicit formula horizon so they can
-        # be rebuilt exclusively from immutable slot series. This legacy
-        # wrapper fails closed for them instead of touching mutable archives.
-        events = [
-            row for row in events if str(row.get("event_kind") or "") == "ALERT"
-        ]
-        if not events:
-            return {}
-        first_time = min(_as_utc(row["alert_time_utc"]) for row in events)
-        last_time = max(_as_utc(row["alert_time_utc"]) for row in events)
-        prior_events = _load_prior_events(
-            research_conn,
-            first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
-            last_time,
-        )
-        max_pain_by_event_id = _load_max_pain_features_batch(
-            research_conn, events
-        )
-    symbols = sorted({str(row["symbol"] or "").upper() for row in events})
-    raw_start = first_time - timedelta(
-        days=HISTORICAL_BASELINE_DAYS,
-        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES,
+    raise ValueError(
+        "Shadow feature loading requires an explicit formula horizon and "
+        "sampler-v4 frozen decision evidence"
     )
-    with _connect(raw_url) as raw_conn:
-        price_rows, futures_rows, spot_rows = _load_raw_rows(
-            raw_conn, symbols=symbols, start=raw_start, end=last_time
-        )
-    rows = build_feature_rows(
-        events,
-        price_oi_rows=price_rows,
-        futures_rows=futures_rows,
-        spot_rows=spot_rows,
-        prior_events=prior_events,
-        windows_minutes=CORE_WINDOWS_MINUTES,
-        max_pain_by_event_id=max_pain_by_event_id,
-    )
-    return {
-        int(row["event"]["event_id"]): row
-        for row in rows
-        if row.get("event", {}).get("event_id") is not None
-    }

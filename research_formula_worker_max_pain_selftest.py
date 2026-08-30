@@ -116,6 +116,19 @@ def _row(*, delta: bool) -> dict:
         "decision_input_policy_version": (
             research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
         ),
+        "prospective_evidence": {
+            "sampler_version": (
+                research_formula_store._PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+            ),
+            "feature_bundle_policy_version": (
+                research_formula_store._FEATURE_BUNDLE_POLICY_VERSION
+            ),
+            "anchor_slot_id": 7,
+            "input_fingerprint": "c" * 64,
+            "feature_bundle_sha256": "d" * 64,
+            "source_timestamps": {},
+            "source_provenance": {},
+        },
         "raw_features": {
             "latest_at_or_before_alert": {
                 "price_oi": {
@@ -213,6 +226,36 @@ def _evaluation(feature: str) -> dict:
 
 def run() -> None:
     current_feature = "max_pain.aggregate.short_long_liquidity_ratio"
+    original_extractor = research_formula_engine.extract_decision_features
+    research_formula_engine.extract_decision_features = (
+        lambda _row: (_ for _ in ()).throw(
+            AssertionError(
+                "frozen Shadow evaluation must not extract/rebuild features"
+            )
+        )
+    )
+    try:
+        direct = research_formula_engine.evaluate_frozen_feature_values(
+            {current_feature: 2.0},
+            direction="LONG",
+            event_direction="LONG",
+            conditions=[
+                {"feature": current_feature, "operator": ">=", "value": 1.0}
+            ],
+        )
+    finally:
+        research_formula_engine.extract_decision_features = original_extractor
+    assert direct["status"] == "MATCHED"
+    assert research_formula_engine.evaluate_frozen_feature_values(
+        None,
+        direction="LONG",
+        event_direction="LONG",
+        conditions=[],
+    )["status"] == "UNEVALUABLE"
+    assert not research_formula_engine.condition_matches(
+        {"numeric": True},
+        {"feature": "numeric", "operator": "==", "value": 1.0},
+    )
     formula = _formula(current_feature)
     event = _event()
     row = _row(delta=False)
@@ -228,6 +271,11 @@ def run() -> None:
     assert snapshot["decision_cohort_policy_version"] == (
         research_formula_worker._DECISION_COHORT_POLICY_VERSION
     )
+    assert snapshot["evidence_policy_version"] == (
+        research_formula_store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
+    )
+    assert snapshot["formula_id"] == formula["formula_id"]
+    assert snapshot["prospective_evidence"] == row["prospective_evidence"]
     assert snapshot["formula_key_features"] == {current_feature: 2.0}
     assert "snapshot_set_id" not in snapshot["formula_key_features"]
     audit = snapshot["max_pain_provenance"]
@@ -363,7 +411,9 @@ def run() -> None:
         row=row,
         evaluation=_evaluation(current_feature),
     )
-    assert "max_pain_provenance" not in legacy_snapshot
+    assert legacy_snapshot["max_pain_provenance"]["condition_features"] == [
+        current_feature
+    ]
     assert research_formula_store._max_pain_snapshot_contract(
         legacy,
         legacy_snapshot,

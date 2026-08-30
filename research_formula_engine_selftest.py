@@ -206,6 +206,18 @@ def _hierarchy_row(index: int) -> dict:
 
 
 def run() -> None:
+    assert engine.condition_matches(
+        {"x": 1.0}, {"feature": "x", "operator": "==", "value": 1}
+    )
+    assert not engine.condition_matches(
+        {"x": "1"}, {"feature": "x", "operator": "==", "value": 1}
+    )
+    assert not engine.condition_matches(
+        {"x": "0.8"}, {"feature": "x", "operator": ">=", "value": 0.8}
+    )
+    assert not engine.condition_matches(
+        {"x": True}, {"feature": "x", "operator": "==", "value": 1}
+    )
     assert engine.MIN_MEDIAN_MFE_BY_HORIZON == dict(
         engine.research_no_dwell_outcome.BASE_FAVORABLE_WIDTH_PCT_BY_HORIZON
     )

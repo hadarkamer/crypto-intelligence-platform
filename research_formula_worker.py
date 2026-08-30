@@ -111,6 +111,9 @@ def _shadow_snapshot(
             "session_composition",
         )
     }
+    prospective = row.get("prospective_evidence") if isinstance(row, Mapping) else {}
+    if not isinstance(prospective, Mapping):
+        prospective = {}
     snapshot = {
         "snapshot_policy_version": (
             research_formula_store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
@@ -121,6 +124,31 @@ def _shadow_snapshot(
             if isinstance(row, Mapping)
             else None
         ),
+        "evidence_policy_version": (
+            research_formula_store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
+        ),
+        "prospective_evidence": {
+            "sampler_version": prospective.get("sampler_version"),
+            "feature_bundle_policy_version": prospective.get(
+                "feature_bundle_policy_version"
+            ),
+            "anchor_slot_id": prospective.get("anchor_slot_id"),
+            "input_fingerprint": prospective.get("input_fingerprint"),
+            "feature_bundle_sha256": prospective.get(
+                "feature_bundle_sha256"
+            ),
+            "source_timestamps": (
+                dict(prospective.get("source_timestamps"))
+                if isinstance(prospective.get("source_timestamps"), Mapping)
+                else {}
+            ),
+            "source_provenance": (
+                dict(prospective.get("source_provenance"))
+                if isinstance(prospective.get("source_provenance"), Mapping)
+                else {}
+            ),
+        },
+        "formula_id": int(formula.get("formula_id") or 0),
         "formula_key": formula.get("formula_key"),
         "formula_version": int(formula.get("formula_version") or 0),
         "formula_schema_version": formula.get("formula_schema_version"),
@@ -134,6 +162,10 @@ def _shadow_snapshot(
             "direction": event.get("direction"),
             "event_type": event.get("event_type"),
             "setup_key": event.get("setup_key"),
+            "source_side": event.get("source_side"),
+            "timeframe": event.get("timeframe"),
+            "strategy_version": event.get("strategy_version"),
+            "code_version": event.get("code_version"),
         },
         "formula_key_features": {
             condition["feature"]: features.get(condition["feature"])
@@ -142,6 +174,10 @@ def _shadow_snapshot(
         },
         "conditions": conditions,
         "condition_results": list(evaluation.get("condition_results") or []),
+        "evaluation_status": str(
+            evaluation.get("status") or "UNEVALUABLE"
+        ).upper(),
+        "evaluation_reason": evaluation.get("reason"),
         "feature_schema_version": formula.get("feature_schema_version"),
         "source_inputs": {
             family: dict(values) if isinstance(values, Mapping) else {}
@@ -235,6 +271,12 @@ class FormulaResearchWorker:
             "hierarchical_search_enabled": _HIERARCHICAL_SEARCH_ENABLED,
             "discovery_interval_seconds": _DISCOVERY_INTERVAL_SECONDS,
             "shadow_poll_seconds": _SHADOW_POLL_SECONDS,
+            "shadow_evidence_policy_version": (
+                research_formula_store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
+            ),
+            "shadow_snapshot_policy_version": (
+                research_formula_store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
+            ),
             "automatic_stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
             "live_delivery_gate": {
                 "environment_enabled": _LIVE_ALERTS_ENABLED,
@@ -426,9 +468,20 @@ class FormulaResearchWorker:
                     continue
                 horizon = int(formula["horizon_minutes"])
                 row = feature_rows.get((event_id, horizon))
-                evaluation = research_formula_engine.evaluate_formula(
-                    row,
+                frozen_features = (
+                    row.get("frozen_decision_features")
+                    if isinstance(row, Mapping)
+                    else None
+                )
+                evaluation = research_formula_engine.evaluate_frozen_feature_values(
+                    frozen_features,
                     direction=formula["direction"],
+                    event_direction=(
+                        row.get("event", {}).get("direction")
+                        if isinstance(row, Mapping)
+                        and isinstance(row.get("event"), Mapping)
+                        else event.get("direction")
+                    ),
                     conditions=conditions,
                 )
                 snapshot = _shadow_snapshot(

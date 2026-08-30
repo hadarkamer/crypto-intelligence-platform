@@ -15,6 +15,7 @@ eligible and becomes eligible only if that same gate later passes.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -27,10 +28,11 @@ import canonical_price_path
 import research_event_capture
 import research_historical_replay
 import research_no_dwell_outcome
+import research_prospective_feature_freeze
 import research_session_width
 
 
-SAMPLER_VERSION = "prospective-neutral-anchor-v3-max-pain-frozen"
+SAMPLER_VERSION = "prospective-neutral-anchor-v4-decision-features-frozen"
 COVERAGE_POLICY_VERSION = (
     "prospective-coverage-v3-completed-fully-validated-replay-run:"
     + research_no_dwell_outcome.METHOD_VERSION
@@ -149,29 +151,38 @@ def compute_input_fingerprint(
     source_timestamps: Mapping[str, Any],
     source_provenance: Mapping[str, Any],
     frozen_inputs: Mapping[str, Any],
+    feature_bundle_policy_version: Any = None,
+    feature_bundle_sha256: Any = None,
 ) -> str:
     """Canonical identity for one frozen prospective decision payload."""
-    return _sha256(
-        {
-            "sampler_version": str(sampler_version),
-            "coverage_policy_version": str(coverage_policy_version),
-            "coverage_snapshot": dict(coverage_snapshot),
-            "symbol": _symbol(symbol),
-            "source_candle_open_utc": _iso(source_candle_open_utc),
-            "source_candle_close_utc": _iso(source_candle_close_utc),
-            "base_eligible_at_utc": _iso(base_eligible_at_utc),
-            "expires_at_utc": _iso(expires_at_utc),
-            "evaluation_status": str(evaluation_status),
-            "decision_time_utc": (
-                _iso(decision_time_utc)
-                if decision_time_utc not in (None, "")
-                else None
-            ),
-            "source_timestamps": dict(source_timestamps),
-            "source_provenance": dict(source_provenance),
-            "frozen_formula_visible_inputs": dict(frozen_inputs),
-        }
-    )
+    payload = {
+        "sampler_version": str(sampler_version),
+        "coverage_policy_version": str(coverage_policy_version),
+        "coverage_snapshot": dict(coverage_snapshot),
+        "symbol": _symbol(symbol),
+        "source_candle_open_utc": _iso(source_candle_open_utc),
+        "source_candle_close_utc": _iso(source_candle_close_utc),
+        "base_eligible_at_utc": _iso(base_eligible_at_utc),
+        "expires_at_utc": _iso(expires_at_utc),
+        "evaluation_status": str(evaluation_status),
+        "decision_time_utc": (
+            _iso(decision_time_utc)
+            if decision_time_utc not in (None, "")
+            else None
+        ),
+        "source_timestamps": dict(source_timestamps),
+        "source_provenance": dict(source_provenance),
+        "frozen_formula_visible_inputs": dict(frozen_inputs),
+    }
+    # Preserve the byte-for-byte v2/v3 fingerprint contract while binding all
+    # v4 evaluable inputs to the separate, slot-owned feature bundle.
+    if feature_bundle_policy_version not in (None, ""):
+        payload["feature_bundle_policy_version"] = str(
+            feature_bundle_policy_version
+        )
+    if feature_bundle_sha256 not in (None, ""):
+        payload["feature_bundle_sha256"] = str(feature_bundle_sha256)
+    return _sha256(payload)
 
 
 def _symbol(value: Any) -> str:
@@ -474,6 +485,24 @@ def _formula_visible_values(family: str, row: Any) -> Dict[str, Any]:
     }
 
 
+def freeze_source_inputs(source_rows: Any) -> Dict[str, Any]:
+    """Deep-copy the exact source subset Formula may see at decision time.
+
+    This public, pure helper lets the store prepare feature rows before the
+    final anchor batch without duplicating this module's private whitelist.
+    Max Pain keeps its complete already-derived wrapper and remains optional.
+    """
+    supplied = deepcopy(source_rows) if isinstance(source_rows, Mapping) else {}
+    frozen = {
+        family: deepcopy(_formula_visible_values(family, supplied.get(family)))
+        for family in REQUIRED_FAMILIES
+        if isinstance(supplied.get(family), Mapping)
+    }
+    if isinstance(supplied.get("max_pain"), Mapping):
+        frozen["max_pain"] = deepcopy(supplied["max_pain"])
+    return frozen
+
+
 def _source_timestamp_evidence(
     family: str, row: Any
 ) -> Dict[str, Any]:
@@ -631,6 +660,9 @@ class AnchorDecision:
     source_timestamps: Mapping[str, Any]
     source_provenance: Mapping[str, Any]
     frozen_inputs: Mapping[str, Any]
+    feature_bundle_policy_version: str
+    feature_bundle_sha256: Optional[str]
+    decision_feature_bundle: Mapping[str, Any]
     input_fingerprint: str
     attempt_fingerprint: str
     events: tuple[research_event_capture.ResearchEvent, ...] = ()
@@ -642,7 +674,7 @@ class AnchorDecision:
         return {
             "sampler_version": self.sampler_version,
             "coverage_policy_version": self.coverage_policy_version,
-            "coverage_snapshot": dict(self.coverage_snapshot),
+            "coverage_snapshot": deepcopy(self.coverage_snapshot),
             "symbol": self.symbol,
             "interval_minutes": INTERVAL_MINUTES,
             "source_candle_open_utc": self.source_candle_open_utc,
@@ -654,9 +686,13 @@ class AnchorDecision:
             "evaluation_status": self.evaluation_status,
             "evaluation_reason": self.evaluation_reason,
             "missing_sources": list(self.missing_sources),
-            "source_timestamps": dict(self.source_timestamps),
-            "source_provenance": dict(self.source_provenance),
-            "frozen_inputs": dict(self.frozen_inputs),
+            "source_timestamps": deepcopy(self.source_timestamps),
+            "source_provenance": deepcopy(self.source_provenance),
+            "frozen_inputs": deepcopy(self.frozen_inputs),
+            "feature_bundle_policy_version": (
+                self.feature_bundle_policy_version
+            ),
+            "feature_bundle_sha256": self.feature_bundle_sha256,
             "input_fingerprint": self.input_fingerprint,
             "attempt_fingerprint": self.attempt_fingerprint,
         }
@@ -674,6 +710,47 @@ class AnchorDecision:
         envelopes independently because that could expose a one-sided pair.
         Non-evaluable decisions contain only their auditable attempt.
         """
+        canonical_feature_bundle: Mapping[str, Any] = {}
+        if self.evaluation_status == EVALUABLE:
+            canonical_feature_bundle = (
+                research_prospective_feature_freeze.canonicalize_feature_bundle(
+                    self.decision_feature_bundle
+                )
+            )
+            bundle_valid, bundle_reason = (
+                research_prospective_feature_freeze.validate_feature_bundle(
+                    canonical_feature_bundle,
+                    expected_sha256=self.feature_bundle_sha256,
+                    expected_symbol=self.symbol,
+                    expected_decision_time_utc=self.decision_time_utc,
+                )
+            )
+            if not bundle_valid:
+                raise ValueError(
+                    "evaluable anchor decision feature bundle changed: "
+                    + bundle_reason
+                )
+        current_input_fingerprint = compute_input_fingerprint(
+            sampler_version=self.sampler_version,
+            coverage_policy_version=self.coverage_policy_version,
+            coverage_snapshot=self.coverage_snapshot,
+            symbol=self.symbol,
+            source_candle_open_utc=self.source_candle_open_utc,
+            source_candle_close_utc=self.source_candle_close_utc,
+            base_eligible_at_utc=self.base_eligible_at_utc,
+            expires_at_utc=self.expires_at_utc,
+            evaluation_status=self.evaluation_status,
+            decision_time_utc=self.decision_time_utc,
+            source_timestamps=self.source_timestamps,
+            source_provenance=self.source_provenance,
+            frozen_inputs=self.frozen_inputs,
+            feature_bundle_policy_version=(
+                self.feature_bundle_policy_version
+            ),
+            feature_bundle_sha256=self.feature_bundle_sha256,
+        )
+        if current_input_fingerprint != self.input_fingerprint:
+            raise ValueError("prospective anchor frozen inputs changed")
         attempt = self.attempt_record()
         if attempt is None:
             return None
@@ -686,7 +763,7 @@ class AnchorDecision:
             slot = {
                 "sampler_version": self.sampler_version,
                 "coverage_policy_version": self.coverage_policy_version,
-                "coverage_snapshot": dict(self.coverage_snapshot),
+                "coverage_snapshot": deepcopy(self.coverage_snapshot),
                 "symbol": self.symbol,
                 "interval_minutes": INTERVAL_MINUTES,
                 "source_candle_open_utc": self.source_candle_open_utc,
@@ -695,9 +772,16 @@ class AnchorDecision:
                 "expires_at_utc": self.expires_at_utc,
                 "decision_time_utc": self.decision_time_utc,
                 "input_fingerprint": self.input_fingerprint,
-                "source_timestamps": dict(self.source_timestamps),
-                "source_provenance": dict(self.source_provenance),
-                "frozen_inputs": dict(self.frozen_inputs),
+                "source_timestamps": deepcopy(self.source_timestamps),
+                "source_provenance": deepcopy(self.source_provenance),
+                "frozen_inputs": deepcopy(self.frozen_inputs),
+                "feature_bundle_policy_version": (
+                    self.feature_bundle_policy_version
+                ),
+                "feature_bundle_sha256": self.feature_bundle_sha256,
+                "decision_feature_bundle": deepcopy(
+                    canonical_feature_bundle
+                ),
                 # The transaction adapter resolves these stable fingerprints
                 # to event IDs before inserting the captured-slot row.
                 "long_event_fingerprint": event_by_direction[
@@ -769,12 +853,52 @@ class AnchorBatch:
         }
 
 
+def _validated_feature_bundle(
+    entry: Any,
+    *,
+    symbol: str,
+    decision_time_utc: datetime,
+) -> tuple[Optional[Dict[str, Any]], Optional[str], Optional[str]]:
+    """Return a detached v4 bundle/hash or one fail-closed reason."""
+    if not isinstance(entry, Mapping):
+        return None, None, "DECISION_FEATURE_BUNDLE_MISSING"
+    bundle = entry.get("decision_feature_bundle", entry.get("bundle"))
+    digest = entry.get("feature_bundle_sha256", entry.get("sha256"))
+    policy = entry.get("feature_bundle_policy_version")
+    if not isinstance(bundle, Mapping) or digest in (None, ""):
+        return None, None, "DECISION_FEATURE_BUNDLE_MISSING"
+    if policy not in (
+        None,
+        research_prospective_feature_freeze.FEATURE_POLICY_VERSION,
+    ):
+        return None, None, "DECISION_FEATURE_BUNDLE_POLICY_INCOMPATIBLE"
+    detached = (
+        research_prospective_feature_freeze.canonicalize_feature_bundle(
+            deepcopy(bundle)
+        )
+    )
+    normalized_digest = str(digest or "").strip().lower()
+    valid, reason = research_prospective_feature_freeze.validate_feature_bundle(
+        detached,
+        expected_sha256=normalized_digest,
+        expected_symbol=symbol,
+        expected_decision_time_utc=decision_time_utc,
+    )
+    if not valid:
+        normalized_reason = "_".join(
+            part for part in str(reason or "invalid").upper().split() if part
+        )
+        return None, None, f"DECISION_FEATURE_BUNDLE_INVALID:{normalized_reason}"
+    return detached, normalized_digest, None
+
+
 def _decision(
     *,
     symbol: str,
     coverage: Any,
     coverage_policy_version: str,
     family_rows: Any,
+    feature_bundle_entry: Any,
     slot_open: datetime,
     slot_close: datetime,
     base_eligible_at: datetime,
@@ -790,8 +914,12 @@ def _decision(
         checked_at_utc=checked_at,
         coverage_policy_version=coverage_policy_version,
     )
-    coverage_snapshot = dict(coverage) if isinstance(coverage, Mapping) else {}
-    source_rows = family_rows if isinstance(family_rows, Mapping) else {}
+    coverage_snapshot = (
+        deepcopy(coverage) if isinstance(coverage, Mapping) else {}
+    )
+    source_rows = (
+        deepcopy(family_rows) if isinstance(family_rows, Mapping) else {}
+    )
     timestamps: Dict[str, Any] = {}
     provenance: Dict[str, Any] = {}
     problems: list[str] = []
@@ -844,17 +972,44 @@ def _decision(
             elif refresh_time is not None:
                 refresh_times.append(refresh_time)
 
-    frozen_inputs = {
-        family: _formula_visible_values(family, source_rows.get(family))
-        for family in REQUIRED_FAMILIES
-        if isinstance(source_rows.get(family), Mapping)
-    }
-    if isinstance(source_rows.get("max_pain"), Mapping):
-        # Preserve the complete derived feature/provenance wrapper exactly as
-        # selected during the decision-time read. Max Pain remains optional:
-        # formulas that do not use it are evaluable even when this wrapper says
-        # UNEVALUABLE, while formulas that do use it fail closed later.
-        frozen_inputs["max_pain"] = dict(source_rows["max_pain"])
+    feature_bundle_policy_version = (
+        research_prospective_feature_freeze.FEATURE_POLICY_VERSION
+    )
+    decision_feature_bundle: Dict[str, Any] = {}
+    feature_bundle_sha256: Optional[str] = None
+    if status == EVALUABLE:
+        max_pain = source_rows.get("max_pain")
+        if (
+            not isinstance(max_pain, Mapping)
+            or not isinstance(max_pain.get("features"), Mapping)
+            or str(max_pain.get("evaluation_status") or "").upper()
+            not in {"EVALUABLE", "UNEVALUABLE"}
+        ):
+            status = UNEVALUABLE
+            problems.append("DECISION_TIME_MAX_PAIN_WRAPPER_MISSING")
+            missing.append("max_pain")
+    if status == EVALUABLE:
+        bundle, bundle_sha256, bundle_problem = _validated_feature_bundle(
+            feature_bundle_entry,
+            symbol=normalized_symbol,
+            decision_time_utc=checked_at,
+        )
+        if bundle_problem:
+            status = UNEVALUABLE
+            problems.append(bundle_problem)
+            missing.append("decision_feature_bundle")
+        else:
+            decision_feature_bundle = deepcopy(bundle or {})
+            feature_bundle_sha256 = bundle_sha256
+
+    # Keep the compact raw-source evidence separate from the much larger
+    # derived feature bundle. The latter is stored exactly once on the slot.
+    frozen_inputs = freeze_source_inputs(source_rows)
+    decision_time = (
+        checked_at
+        if status == EVALUABLE and len(refresh_times) == len(REQUIRED_FAMILIES)
+        else None
+    )
     input_fingerprint = compute_input_fingerprint(
         sampler_version=SAMPLER_VERSION,
         coverage_policy_version=coverage_policy_version,
@@ -865,19 +1020,16 @@ def _decision(
         base_eligible_at_utc=base_eligible_at,
         expires_at_utc=expires_at,
         evaluation_status=status,
-        decision_time_utc=checked_at if status == EVALUABLE else None,
+        decision_time_utc=decision_time,
         source_timestamps=timestamps,
         source_provenance=provenance,
         frozen_inputs=frozen_inputs,
+        feature_bundle_policy_version=feature_bundle_policy_version,
+        feature_bundle_sha256=feature_bundle_sha256,
     )
     # Never backdate a prospective event to a source-refresh time. The actual
     # successful check/persistence attempt is the earliest knowable decision
     # time; source refreshes remain provenance only.
-    decision_time = (
-        checked_at
-        if status == EVALUABLE and len(refresh_times) == len(REQUIRED_FAMILIES)
-        else None
-    )
     events: tuple[research_event_capture.ResearchEvent, ...] = ()
     if status == EVALUABLE and decision_time is not None:
         anchor_key = _sha256(
@@ -898,11 +1050,15 @@ def _decision(
                 "expires_at_utc": _iso(expires_at),
                 "decision_time_utc": _iso(decision_time),
                 "coverage_policy_version": coverage_policy_version,
-                "coverage_snapshot": coverage_snapshot,
+                "coverage_snapshot": deepcopy(coverage_snapshot),
                 "coverage_eligible": True,
-                "source_timestamps": timestamps,
-                "source_provenance": provenance,
-                "frozen_inputs": frozen_inputs,
+                "source_timestamps": deepcopy(timestamps),
+                "source_provenance": deepcopy(provenance),
+                "frozen_inputs": deepcopy(frozen_inputs),
+                "feature_bundle_policy_version": (
+                    feature_bundle_policy_version
+                ),
+                "feature_bundle_sha256": feature_bundle_sha256,
                 "required_families": list(REQUIRED_FAMILIES),
                 "sampling_frame": "NEUTRAL_30M_BOTH_DIRECTIONS",
                 "delivery_status": "NOT_APPLICABLE",
@@ -928,13 +1084,13 @@ def _decision(
                     "NEUTRAL_PROSPECTIVE",
                     "SILENT",
                 ),
-                engine_snapshot=snapshot,
+                engine_snapshot=deepcopy(snapshot),
                 setup_identity={
                     "sampler_version": SAMPLER_VERSION,
                     "sampling_frame": "NEUTRAL_30M_BOTH_DIRECTIONS",
                 },
                 strategy_version=strategy_version
-                or "formula-prospective-neutral-v3",
+                or "formula-prospective-neutral-v4",
                 code_version=code_version,
             )
             # The generic builder hashes the whole snapshot. Raw source rows
@@ -966,7 +1122,7 @@ def _decision(
     return AnchorDecision(
         sampler_version=SAMPLER_VERSION,
         coverage_policy_version=coverage_policy_version,
-        coverage_snapshot=coverage_snapshot,
+        coverage_snapshot=deepcopy(coverage_snapshot),
         symbol=normalized_symbol,
         source_candle_open_utc=slot_open,
         source_candle_close_utc=slot_close,
@@ -977,9 +1133,12 @@ def _decision(
         evaluation_reason=reason,
         missing_sources=tuple(sorted(set(missing))),
         decision_time_utc=decision_time,
-        source_timestamps=timestamps,
-        source_provenance=provenance,
-        frozen_inputs=frozen_inputs,
+        source_timestamps=deepcopy(timestamps),
+        source_provenance=deepcopy(provenance),
+        frozen_inputs=deepcopy(frozen_inputs),
+        feature_bundle_policy_version=feature_bundle_policy_version,
+        feature_bundle_sha256=feature_bundle_sha256,
+        decision_feature_bundle=deepcopy(decision_feature_bundle),
         input_fingerprint=input_fingerprint,
         attempt_fingerprint=_sha256(attempt_payload),
         events=events,
@@ -991,6 +1150,7 @@ def build_anchor_batch(
     now: Any,
     coverage_by_symbol: Mapping[str, Any],
     source_inputs_by_symbol: Mapping[str, Mapping[str, Any]],
+    feature_bundles_by_symbol: Optional[Mapping[str, Mapping[str, Any]]] = None,
     coverage_policy_version: str,
     slot_open_utc: Any = None,
     strategy_version: Optional[str] = None,
@@ -1018,12 +1178,17 @@ def build_anchor_batch(
         _symbol(symbol): values
         for symbol, values in source_inputs_by_symbol.items()
     }
+    normalized_bundles = {
+        _symbol(symbol): deepcopy(values)
+        for symbol, values in (feature_bundles_by_symbol or {}).items()
+    }
     decisions = tuple(
         _decision(
             symbol=_symbol(symbol),
             coverage=value,
             coverage_policy_version=str(coverage_policy_version),
             family_rows=normalized_sources.get(_symbol(symbol), {}),
+            feature_bundle_entry=normalized_bundles.get(_symbol(symbol)),
             slot_open=opened,
             slot_close=closed,
             base_eligible_at=eligible_at,

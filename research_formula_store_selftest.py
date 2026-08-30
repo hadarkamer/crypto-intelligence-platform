@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import inspect
 import json
 
+import market_session_baseline
 import research_formula_store as store
 
 
@@ -121,9 +122,13 @@ def _bind_max_pain_check(
     ]
     frozen = {
         **snapshot,
-        "decision_input_policy_version": (
-            store.research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+        "evidence_policy_version": (
+            store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
         ),
+        "decision_input_policy_version": (
+            store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
+        ),
+        "formula_id": formula["formula_id"],
         "formula_key": formula["formula_key"],
         "formula_version": formula["formula_version"],
         "formula_schema_version": formula.get("formula_schema_version"),
@@ -141,6 +146,8 @@ def _bind_max_pain_check(
         "formula_key_features": feature_values,
         "conditions": conditions,
         "condition_results": condition_results,
+        "evaluation_status": "MATCHED",
+        "evaluation_reason": "all formula conditions passed",
         "source_inputs": {},
         "movement_width_reference": (
             store.research_session_width.movement_width_reference(
@@ -156,6 +163,15 @@ def _bind_max_pain_check(
         "prospective_anchor_slot_id": 17,
         "prospective_input_fingerprint": "d" * 64,
         "prospective_slot_created_at_utc": row["alert_time_utc"].isoformat(),
+    }
+    frozen["prospective_evidence"] = {
+        "sampler_version": store._PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+        "feature_bundle_policy_version": store._FEATURE_BUNDLE_POLICY_VERSION,
+        "anchor_slot_id": 17,
+        "input_fingerprint": "d" * 64,
+        "feature_bundle_sha256": "b" * 64,
+        "source_timestamps": {},
+        "source_provenance": {},
     }
     source_time = (row["alert_time_utc"] - timedelta(minutes=10)).isoformat()
     frozen["source_inputs"] = {
@@ -214,15 +230,166 @@ def _bind_max_pain_check(
         "condition_results": condition_results,
         "matched": True,
         "evaluation_status": "MATCHED",
+        "evaluation_reason": "all formula conditions passed",
         "decision_cohort_key": cohort_key,
         "decision_anchor_time_utc": cohort_anchor,
     }
 
 
-def _authoritative_row_from_check(check: dict) -> dict:
-    """Build the immutable row independently reloaded by the v6 writer."""
+def _authoritative_bundle_fixture(
+    check: dict, formula: dict
+) -> tuple[dict, dict, dict]:
+    """Bind a check to one independently hashed sampler-v4 slot fixture."""
+    check = deepcopy(check)
     snapshot = check["input_snapshot"]
     max_pain = snapshot.get("max_pain_provenance")
+    decision_time = check["alert_time_utc"]
+    features = deepcopy(snapshot["formula_key_features"])
+    features.update(
+        {
+            "event.symbol": check["symbol"],
+            "event.event_type": check["event_type"],
+        }
+    )
+    contexts = {}
+    for horizon in (60, 240, 720, 1440):
+        active, weekend, segments = (
+            market_session_baseline.session_ratios(
+                decision_time,
+                decision_time + timedelta(minutes=horizon),
+            )
+        )
+        contexts[str(horizon)] = {
+            "session": {
+                "active_ratio": round(active, 6),
+                "weekend_ratio": round(weekend, 6),
+                "composition": (
+                    "ACTIVE_ONLY"
+                    if active >= 1.0 - 1e-9
+                    else "WEEKEND_ONLY"
+                    if active <= 1e-9
+                    else "MIXED"
+                ),
+                "segments": segments,
+            },
+            "movement_width_reference": (
+                store.research_session_width.movement_width_reference(
+                    symbol=check["symbol"],
+                    event_time=decision_time,
+                    horizon_minutes=horizon,
+                    as_of_utc=decision_time - timedelta(minutes=10),
+                    historical_index={},
+                )
+            ),
+        }
+    bundle = {
+        "bundle_schema_version": (
+            store.research_prospective_feature_freeze.BUNDLE_SCHEMA_VERSION
+        ),
+        "feature_policy_version": store._FEATURE_BUNDLE_POLICY_VERSION,
+        "feature_schema_version": store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+        "decision_time_utc": decision_time.isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z"),
+        "symbol": check["symbol"],
+        "source_series_manifest": {
+            "count": 0,
+            "first_decision_time_utc": None,
+            "last_decision_time_utc": None,
+            "sha256": "0" * 64,
+            "sampler_versions": [],
+        },
+        "features_by_direction": {
+            "LONG": deepcopy(features),
+            "SHORT": deepcopy(features),
+        },
+        "horizon_context": contexts,
+        "model_score_status": "ABSENT",
+    }
+    bundle_hash = (
+        store.research_prospective_feature_freeze.compute_feature_bundle_sha256(
+            bundle
+        )
+    )
+    slot_id = 17
+    slot_open = decision_time.replace(minute=0, second=0, microsecond=0)
+    slot_close = slot_open + timedelta(minutes=30)
+    base_eligible = slot_close + timedelta(minutes=2)
+    expires = base_eligible + timedelta(minutes=30)
+    frozen_inputs = {}
+    authorized = {
+        "anchor_slot_id": slot_id,
+        "sampler_version": store._PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+        "coverage_policy_version": "selftest-coverage-v1",
+        "coverage_snapshot": {},
+        "symbol": check["symbol"],
+        "source_candle_open_utc": slot_open,
+        "source_candle_close_utc": slot_close,
+        "base_eligible_at_utc": base_eligible,
+        "expires_at_utc": expires,
+        "decision_time_utc": decision_time,
+        "source_timestamps": {},
+        "source_provenance": {},
+        "frozen_inputs": frozen_inputs,
+        "feature_bundle_policy_version": store._FEATURE_BUNDLE_POLICY_VERSION,
+        "feature_bundle_sha256": bundle_hash,
+        "decision_feature_bundle": bundle,
+    }
+    input_fingerprint = store.research_prospective_anchors.compute_input_fingerprint(
+        sampler_version=authorized["sampler_version"],
+        coverage_policy_version=authorized["coverage_policy_version"],
+        coverage_snapshot=authorized["coverage_snapshot"],
+        symbol=authorized["symbol"],
+        source_candle_open_utc=slot_open,
+        source_candle_close_utc=slot_close,
+        base_eligible_at_utc=base_eligible,
+        expires_at_utc=expires,
+        evaluation_status=store.research_prospective_anchors.EVALUABLE,
+        decision_time_utc=decision_time,
+        source_timestamps={},
+        source_provenance={},
+        frozen_inputs=frozen_inputs,
+        feature_bundle_policy_version=store._FEATURE_BUNDLE_POLICY_VERSION,
+        feature_bundle_sha256=bundle_hash,
+    )
+    authorized["input_fingerprint"] = input_fingerprint
+    prospective = {
+        "sampler_version": store._PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+        "feature_bundle_policy_version": store._FEATURE_BUNDLE_POLICY_VERSION,
+        "anchor_slot_id": slot_id,
+        "input_fingerprint": input_fingerprint,
+        "feature_bundle_sha256": bundle_hash,
+        "source_timestamps": {},
+        "source_provenance": {},
+    }
+    snapshot["prospective_evidence"] = deepcopy(prospective)
+    snapshot["outcome_window_session"] = {
+        "session_active_ratio": contexts[str(formula["horizon_minutes"])][
+            "session"
+        ]["active_ratio"],
+        "session_weekend_ratio": contexts[str(formula["horizon_minutes"])][
+            "session"
+        ]["weekend_ratio"],
+        "session_segments": contexts[str(formula["horizon_minutes"])][
+            "session"
+        ]["segments"],
+        "session_composition": contexts[str(formula["horizon_minutes"])][
+            "session"
+        ]["composition"],
+    }
+    snapshot["movement_width_reference"] = deepcopy(
+        contexts[str(formula["horizon_minutes"])]["movement_width_reference"]
+    )
+    for source in snapshot["source_inputs"].values():
+        source["prospective_anchor_slot_id"] = slot_id
+        source["prospective_input_fingerprint"] = input_fingerprint
+    cohort_key, cohort_anchor = store._decision_cohort_identity(
+        formula=formula,
+        event=check,
+        snapshot=snapshot,
+    )
+    check["decision_cohort_key"] = cohort_key
+    check["decision_anchor_time_utc"] = cohort_anchor
     row = {
         "feature_schema_version": (
             store.research_feature_matrix.FEATURE_SCHEMA_VERSION
@@ -231,10 +398,13 @@ def _authoritative_row_from_check(check: dict) -> dict:
             store.research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
         ),
         "event": deepcopy(snapshot["event"]),
+        "frozen_decision_features": deepcopy(features),
+        "prospective_evidence": deepcopy(prospective),
         "raw_features": {
             "latest_at_or_before_alert": deepcopy(snapshot["source_inputs"]),
         },
         "outcome_label": {
+            **deepcopy(snapshot["outcome_window_session"]),
             "movement_width_reference": deepcopy(
                 snapshot["movement_width_reference"]
             ),
@@ -252,7 +422,7 @@ def _authoritative_row_from_check(check: dict) -> dict:
             "provenance": deepcopy(max_pain["provenance"]),
             "provenance_sha256": max_pain["provenance_sha256"],
         }
-    return row
+    return check, row, authorized
 
 
 def _replacement_contract() -> tuple[dict, dict, list[dict]]:
@@ -891,9 +1061,9 @@ def run() -> None:
     assert selected["exact_cohort_excluded_event_ids"] == []
     assert 8 not in {row["event_id"] for row in selected["rows"]}
 
-    # Formula schema v6 changes how outcomes are evaluated, but it must not
-    # make the 19 already-active v5 Shadow formulas disappear. LIVE work,
-    # unlike Shadow monitoring, remains restricted to the current schema.
+    # Active v5 formulas stay in SHADOW, but all new work now comes only from
+    # the exact sampler-v4 authority view. Delivered ALERTs and older sampler
+    # rows are never loaded, and v5 can never enter LIVE execution.
     class _Rows:
         def __init__(self, rows):
             self._rows = list(rows)
@@ -965,8 +1135,15 @@ def run() -> None:
                         }
                     ]
                 )
-            assert "FROM research_events candidate" in normalized
-            assert "research_prospective_shadow_events" in normalized
+            assert "FROM research_prospective_shadow_events candidate" in normalized
+            assert "research_events candidate" not in normalized
+            assert "candidate.sampler_version=%s" in normalized
+            assert "candidate.feature_bundle_policy_version=%s" in normalized
+            assert params[-3:] == (
+                store._PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+                store._FEATURE_BUNDLE_POLICY_VERSION,
+                5,
+            )
             return _Rows(
                 [
                     {
@@ -974,10 +1151,17 @@ def run() -> None:
                         "alert_time_utc": start + timedelta(hours=1),
                         "symbol": "BTC",
                         "direction": "SHORT",
-                        "event_type": "SELFTEST_ALERT",
+                        "event_type": "PROSPECTIVE_NEUTRAL_30M",
                         "setup_key": "selftest",
-                        "event_kind": "ALERT",
-                        "delivery_status": "DELIVERED",
+                        "event_kind": "DECISION_SAMPLE",
+                        "delivery_status": "NOT_APPLICABLE",
+                        "prospective_anchor_slot_id": 17,
+                        "prospective_input_fingerprint": "d" * 64,
+                        "feature_bundle_policy_version": (
+                            store._FEATURE_BUNDLE_POLICY_VERSION
+                        ),
+                        "feature_bundle_sha256": "b" * 64,
+                        "decision_feature_bundle": {},
                     }
                 ]
             )
@@ -1055,6 +1239,14 @@ def run() -> None:
                     ]
                 )
             if "FROM research_formula_shadow_checks" in normalized:
+                assert "JOIN research_prospective_shadow_events authorized" in normalized
+                assert "c.evidence_policy_version=%s" in normalized
+                assert "c.authoritative_verified IS TRUE" in normalized
+                assert "authorized.sampler_version=%s" in normalized
+                assert "authorized.feature_bundle_policy_version=%s" in normalized
+                assert "c.input_snapshot->>'evidence_policy_version'=%s" in normalized
+                assert "prospective_evidence,feature_bundle_sha256" in normalized
+                assert "c.condition_results IS NOT DISTINCT FROM" in normalized
                 assert "research_first_touch_outcomes" in normalized
                 assert "ft.success AS path_success" in normalized
                 assert "AS first_touch_available" in normalized
@@ -1247,6 +1439,9 @@ def run() -> None:
             "decision_cohort_policy_version": (
                 store._DECISION_COHORT_POLICY_VERSION
             ),
+            "evidence_policy_version": (
+                store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
+            ),
             "movement_width_reference": strict_reference,
         },
         "first_touch_threshold_scale_factor": 0.60,
@@ -1413,7 +1608,7 @@ def run() -> None:
         decision_time_utc=start + timedelta(minutes=5),
         symbol="BTC",
     )
-    assert compatible is False and "conditions" in reason
+    assert compatible is False
     malformed_at = start + timedelta(minutes=10)
     valid_at = start + timedelta(minutes=40)
     malformed = _bind_max_pain_check(
@@ -1445,17 +1640,63 @@ def run() -> None:
         )
         assert compatible is False
 
-    # The v6 write boundary does not trust a caller merely because all of its
-    # submitted fields agree with one another. It independently rebuilds the
-    # formula-visible row from immutable slots and compares every bound input.
-    authoritative_row = _authoritative_row_from_check(valid_max_pain)
+    # The write boundary does not trust a caller merely because all submitted
+    # fields agree. It reloads the slot-only bundle, verifies its hash, and
+    # repeats only the formula operators over its frozen flat values.
+    valid_max_pain, authoritative_row, authorized_slot = (
+        _authoritative_bundle_fixture(valid_max_pain, max_pain_formula)
+    )
     compatible, reason = store._authoritative_v6_row_contract(
         max_pain_formula,
         valid_max_pain,
         valid_max_pain,
         authoritative_row,
+        authorized_slot,
     )
-    assert compatible is True and "authoritative" in reason
+    assert compatible is True and "authoritative" in reason, reason
+
+    # The exact same authoritative write contract applies to the retained v5
+    # Shadow cohort.  Its historical formula versions stay intact; only the
+    # new sampler-v4 evidence is executable.
+    legacy_formula = {
+        **max_pain_formula,
+        "formula_schema_version": "research-formula-v5-safe-replay",
+        "engine_version": "formula-discovery-v5-safe-replay",
+        "feature_schema_version": "research-feature-matrix-v5",
+    }
+    legacy_check = deepcopy(valid_max_pain)
+    for key in (
+        "formula_schema_version",
+        "engine_version",
+        "feature_schema_version",
+    ):
+        legacy_check["input_snapshot"][key] = legacy_formula[key]
+    legacy_key, legacy_anchor = store._decision_cohort_identity(
+        formula=legacy_formula,
+        event=legacy_check,
+        snapshot=legacy_check["input_snapshot"],
+    )
+    legacy_check["decision_cohort_key"] = legacy_key
+    legacy_check["decision_anchor_time_utc"] = legacy_anchor
+    compatible, reason = store._authoritative_frozen_row_contract(
+        legacy_formula,
+        legacy_check,
+        legacy_check,
+        authoritative_row,
+        authorized_slot,
+    )
+    assert compatible is True, reason
+
+    tampered_authority = deepcopy(authorized_slot)
+    tampered_authority["feature_bundle_sha256"] = "0" * 64
+    compatible, reason = store._authoritative_frozen_row_contract(
+        max_pain_formula,
+        valid_max_pain,
+        valid_max_pain,
+        authoritative_row,
+        tampered_authority,
+    )
+    assert compatible is False and "bundle" in reason
 
     max_pain_feature = (
         "max_pain.aggregate.short_long_liquidity_ratio"
@@ -1495,6 +1736,7 @@ def run() -> None:
         boolean_feature,
         boolean_feature,
         boolean_authoritative,
+        authorized_slot,
     )
     assert compatible is False and "feature values" in reason
 
@@ -1519,6 +1761,7 @@ def run() -> None:
         consistent_forgery,
         consistent_forgery,
         authoritative_row,
+        authorized_slot,
     )
     assert compatible is False and "feature values" in reason
 
@@ -1531,6 +1774,7 @@ def run() -> None:
         forged_sources,
         forged_sources,
         authoritative_row,
+        authorized_slot,
     )
     assert compatible is False and "source inputs" in reason
 
@@ -1543,6 +1787,7 @@ def run() -> None:
         forged_width,
         forged_width,
         authoritative_row,
+        authorized_slot,
     )
     assert compatible is False and "movement-width" in reason
 
@@ -1555,6 +1800,7 @@ def run() -> None:
         forged_max_pain,
         forged_max_pain,
         authoritative_row,
+        authorized_slot,
     )
     assert compatible is False and "Max-Pain" in reason
 
@@ -1564,6 +1810,7 @@ def run() -> None:
             valid_max_pain,
             valid_max_pain,
             None,
+            authorized_slot,
         )
     )
     assert missing_row_compatible is False
@@ -1580,10 +1827,11 @@ def run() -> None:
             return self._rows
 
     class _AuthoritativeWriteConnection:
-        def __init__(self):
+        def __init__(self, *, authorized=True):
             self.queries = []
             self.inserted_check = None
             self.committed = False
+            self.authorized = authorized
 
         def __enter__(self):
             return self
@@ -1610,7 +1858,27 @@ def run() -> None:
                         }
                     ]
                 )
-            if "FROM research_events candidate" in normalized:
+            if "FROM research_prospective_shadow_events authorized" in normalized:
+                if not self.authorized:
+                    return _WriteRows([])
+                return _WriteRows(
+                    [
+                        {
+                            **authorized_slot,
+                            "event_id": valid_max_pain["event_id"],
+                            "alert_time_utc": valid_at,
+                            "symbol": "BTC",
+                            "direction": "LONG",
+                            "event_type": "SELFTEST_ALERT",
+                            "setup_key": None,
+                            "event_kind": "DECISION_SAMPLE",
+                            "delivery_status": "NOT_APPLICABLE",
+                            "shadow_eligible": True,
+                        }
+                    ]
+                )
+            if "FROM research_events" in normalized:
+                assert "event_kind='DECISION_SAMPLE'" in normalized
                 return _WriteRows(
                     [
                         {
@@ -1620,15 +1888,21 @@ def run() -> None:
                             "direction": "LONG",
                             "event_type": "SELFTEST_ALERT",
                             "setup_key": None,
-                            "event_kind": "ALERT",
-                            "delivery_status": "DELIVERED",
-                            "shadow_eligible": True,
+                            "source_side": None,
+                            "timeframe": None,
+                            "strategy_version": None,
+                            "code_version": None,
+                            "event_kind": "DECISION_SAMPLE",
+                            "delivery_status": "NOT_APPLICABLE",
+                            "shadow_eligible": False,
                         }
                     ]
                 )
             if "INSERT INTO research_formula_shadow_checks" in normalized:
                 self.inserted_check = params
                 return _WriteRows([{"formula_id": max_pain_formula["formula_id"]}])
+            if "INSERT INTO research_formula_shadow_hits" in normalized:
+                return _WriteRows([])
             if "UPDATE research_formulas" in normalized:
                 return _WriteRows([])
             raise AssertionError(f"unexpected authoritative write query: {normalized}")
@@ -1669,13 +1943,109 @@ def run() -> None:
     assert write_connection.inserted_check is not None
     assert write_connection.inserted_check[2] is False
     assert write_connection.inserted_check[4] == "UNEVALUABLE"
-    assert "authoritative frozen-row rebuild failed" in str(
+    assert "authoritative frozen-bundle load failed" in str(
         write_connection.inserted_check[5]
     )
+    assert write_connection.inserted_check[10] == (
+        store._REJECTED_PROSPECTIVE_EVIDENCE_POLICY_VERSION
+    )
+    assert write_connection.inserted_check[11] == 17
+    assert write_connection.inserted_check[12] == authorized_slot[
+        "input_fingerprint"
+    ]
+    assert write_connection.inserted_check[13] == authorized_slot[
+        "feature_bundle_sha256"
+    ]
+    assert write_connection.inserted_check[14] is False
     assert not any(
         "INSERT INTO research_formula_shadow_hits" in query
         or "INSERT INTO research_formula_live_deliveries" in query
         for query in write_connection.queries
+    )
+
+    # A fully matching DB formula/event/slot/bundle payload writes the exact
+    # current evidence policy and authoritative_verified=true.  The silent
+    # DECISION_SAMPLE may create a Shadow hit, but never a LIVE delivery.
+    successful_connection = _AuthoritativeWriteConnection()
+    store.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+        lambda _requested: {
+            (
+                int(valid_max_pain["event_id"]),
+                int(max_pain_formula["horizon_minutes"]),
+            ): authoritative_row
+        }
+    )
+    store._connect = lambda *, read_only: successful_connection
+    try:
+        successful_write = store.record_shadow_results(
+            formula=max_pain_formula,
+            results=[valid_max_pain],
+        )
+    finally:
+        store._connect = original_write_connect
+        store.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+            original_authoritative_loader
+        )
+    assert successful_write == {
+        "checked": 1,
+        "matched": 1,
+        "queued": 0,
+        "new_hit_event_ids": [int(valid_max_pain["event_id"])],
+    }
+    assert successful_connection.inserted_check[10] == (
+        store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
+    )
+    assert successful_connection.inserted_check[14] is True
+    assert any(
+        "INSERT INTO research_formula_shadow_hits" in query
+        for query in successful_connection.queries
+    )
+    assert not any(
+        "INSERT INTO research_formula_live_deliveries" in query
+        for query in successful_connection.queries
+    )
+
+    # If the exact v4 authority view no longer authorizes the event, preserve
+    # a rejected UNEVALUABLE audit row with nullable evidence refs.  It must
+    # not silently disappear or produce a hit/queue, and ALERT fallback rows
+    # are excluded directly by the read query.
+    missing_authority_connection = _AuthoritativeWriteConnection(
+        authorized=False
+    )
+    store.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+        lambda _requested: {}
+    )
+    store._connect = lambda *, read_only: missing_authority_connection
+    try:
+        missing_authority_write = store.record_shadow_results(
+            formula=max_pain_formula,
+            results=[valid_max_pain],
+        )
+    finally:
+        store._connect = original_write_connect
+        store.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+            original_authoritative_loader
+        )
+    assert missing_authority_write == {
+        "checked": 1,
+        "matched": 0,
+        "queued": 0,
+        "new_hit_event_ids": [],
+    }
+    assert missing_authority_connection.inserted_check[4] == "UNEVALUABLE"
+    assert missing_authority_connection.inserted_check[10] == (
+        store._REJECTED_PROSPECTIVE_EVIDENCE_POLICY_VERSION
+    )
+    assert missing_authority_connection.inserted_check[11:14] == (
+        None,
+        None,
+        None,
+    )
+    assert missing_authority_connection.inserted_check[14] is False
+    assert not any(
+        "INSERT INTO research_formula_shadow_hits" in query
+        or "INSERT INTO research_formula_live_deliveries" in query
+        for query in missing_authority_connection.queries
     )
 
     max_pain_validation = store._build_shadow_validation(

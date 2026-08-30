@@ -482,37 +482,49 @@ CREATE TRIGGER trg_prospective_anchor_events_immutable
 BEFORE UPDATE OR DELETE ON research_events
 FOR EACH ROW EXECUTE FUNCTION prevent_prospective_anchor_event_mutation();
 
-CREATE OR REPLACE VIEW research_prospective_shadow_events AS
-SELECT
-    slot.anchor_slot_id,
-    slot.sampler_version,
-    slot.coverage_policy_version,
-    slot.coverage_snapshot,
-    slot.source_candle_open_utc,
-    slot.source_candle_close_utc,
-    slot.base_eligible_at_utc,
-    slot.expires_at_utc,
-    slot.decision_time_utc,
-    slot.input_fingerprint,
-    event.event_id,
-    event.alert_time_utc,
-    event.symbol,
-    event.direction,
-    event.event_type,
-    event.setup_key,
-    event.event_fingerprint,
-    event.current_price,
-    event.engine_snapshot,
-    slot.frozen_inputs
-FROM research_prospective_anchor_slots slot
-CROSS JOIN LATERAL (
-    VALUES (slot.long_event_id), (slot.short_event_id)
-) expected(event_id)
-JOIN research_events event ON event.event_id = expected.event_id
-WHERE event.event_kind = 'DECISION_SAMPLE'
-  AND event.event_type = 'PROSPECTIVE_NEUTRAL_30M'
-  AND event.capture_stage = 'SILENT_NEUTRAL_ANCHOR'
-  AND event.delivery_status = 'NOT_APPLICABLE';
+-- Every startup replays all additive migrations.  Once a later migration has
+-- appended authority columns, PostgreSQL cannot CREATE OR REPLACE this view
+-- with the older, shorter signature.  Create the legacy base shape only on a
+-- fresh schema; migration 013 owns the expanded authoritative definition.
+DO $migration$
+BEGIN
+    IF TO_REGCLASS('public.research_prospective_shadow_events') IS NULL THEN
+        EXECUTE $view$
+            CREATE VIEW research_prospective_shadow_events AS
+            SELECT
+                slot.anchor_slot_id,
+                slot.sampler_version,
+                slot.coverage_policy_version,
+                slot.coverage_snapshot,
+                slot.source_candle_open_utc,
+                slot.source_candle_close_utc,
+                slot.base_eligible_at_utc,
+                slot.expires_at_utc,
+                slot.decision_time_utc,
+                slot.input_fingerprint,
+                event.event_id,
+                event.alert_time_utc,
+                event.symbol,
+                event.direction,
+                event.event_type,
+                event.setup_key,
+                event.event_fingerprint,
+                event.current_price,
+                event.engine_snapshot,
+                slot.frozen_inputs
+            FROM research_prospective_anchor_slots slot
+            CROSS JOIN LATERAL (
+                VALUES (slot.long_event_id), (slot.short_event_id)
+            ) expected(event_id)
+            JOIN research_events event ON event.event_id = expected.event_id
+            WHERE event.event_kind = 'DECISION_SAMPLE'
+              AND event.event_type = 'PROSPECTIVE_NEUTRAL_30M'
+              AND event.capture_stage = 'SILENT_NEUTRAL_ANCHOR'
+              AND event.delivery_status = 'NOT_APPLICABLE'
+        $view$;
+    END IF;
+END;
+$migration$;
 
 COMMENT ON VIEW research_prospective_shadow_events IS
     'Silent neutral 30m DECISION_SAMPLE events eligible only for prospective Shadow evaluation; never Telegram alerts.';

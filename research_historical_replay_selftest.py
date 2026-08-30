@@ -683,7 +683,11 @@ def run() -> None:
             replay.os.environ.pop("HISTORICAL_REPLAY_MAX_ANCHORS", None)
         else:
             replay.os.environ["HISTORICAL_REPLAY_MAX_ANCHORS"] = old_max_env
-    replay_index = schema_admin.MIGRATION_PATHS[-1]
+    replay_index = next(
+        path
+        for path in schema_admin.MIGRATION_PATHS
+        if path.name == "012_historical_replay_v2_streaming_index.sql"
+    )
     assert replay_index.name == "012_historical_replay_v2_streaming_index.sql"
     replay_index_sql = replay_index.read_text(encoding="utf-8")
     indexed_expression = replay_index_sql.split(

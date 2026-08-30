@@ -112,6 +112,10 @@ async def _exercise_worker() -> None:
         )
     ]
     assert len(worker._service.calls) == 1
+    assert (
+        worker._service.kwargs["strategy_version"]
+        == "formula-prospective-neutral-v4"
+    )
     official = worker._service.calls[0]["official_prices_by_symbol"]
     assert set(official) == {"BTC", "HYPE"}
     assert official["BTC"]["source"] == "binance_spot"

@@ -21,9 +21,25 @@ ALTER TABLE research_formula_shadow_checks
 ALTER TABLE research_formula_shadow_checks
     ADD COLUMN IF NOT EXISTS decision_anchor_time_utc TIMESTAMPTZ;
 
-UPDATE research_formula_shadow_checks
-SET evaluation_status = CASE WHEN matched THEN 'MATCHED' ELSE 'UNMATCHED' END
-WHERE evaluation_status='UNMATCHED';
+-- This migration is replayed on every startup.  Normalize the one legacy
+-- mismatch only on the first upgrade, before migration 013 installs the
+-- append-only evidence guard.  Every later replay skips UPDATE altogether.
+DO $migration$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_trigger
+         WHERE tgrelid = 'public.research_formula_shadow_checks'::regclass
+           AND tgname = 'trg_formula_shadow_checks_append_only'
+           AND tgisinternal = FALSE
+    ) THEN
+        UPDATE research_formula_shadow_checks
+           SET evaluation_status = 'MATCHED'
+         WHERE evaluation_status = 'UNMATCHED'
+           AND matched IS TRUE;
+    END IF;
+END;
+$migration$;
 
 DO $$
 BEGIN

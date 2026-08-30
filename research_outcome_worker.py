@@ -1,4 +1,4 @@
-"""Fail-open canonical spot-path enrichment for delivered Research Events.
+"""Canonical spot-path enrichment with fail-closed prospective evidence.
 
 The worker is observational: it never changes alert logic. Once an alert has
 aged into a configured horizon, one canonical spot one-minute path is
@@ -8,7 +8,10 @@ touch of a frozen favorable width with zero dwell and conservative pre-touch
 MAE.  Eligible delivered Alerts and authorized prospective Decision Samples
 that match a Shadow formula are polled while their relevant horizon is still
 open, so a verified first touch can be frozen without waiting for the horizon
-to close. Existing legacy rows and method versions remain available for audit.
+to close. Current prospective Shadow labels require the exact decision-time
+per-horizon session and movement-width bundle; no static fallback or later
+reconstruction is allowed. Existing legacy rows and method versions remain
+available for audit only.
 
 Binance Spot USDT is the default route. HYPE is explicitly routed to the
 Hyperliquid HYPE/USDT spot market. Historical candles may be imported from
@@ -23,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import math
 import os
+import re
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 try:
@@ -34,8 +38,6 @@ except Exception:  # pragma: no cover
 
 import binance_spot_price_path
 import canonical_price_path
-import research_formula_engine
-import research_formula_store
 import research_no_dwell_outcome
 import research_session_width
 
@@ -50,6 +52,19 @@ _OPEN_FIRST_TOUCH_EVENT_LIMIT = max(
 )
 _METHOD_VERSION = canonical_price_path.METHOD_VERSION
 _FIRST_TOUCH_METHOD_VERSION = research_no_dwell_outcome.METHOD_VERSION
+_STRICT_FROZEN_EVIDENCE_POLICY_VERSION = (
+    "prospective-shadow-frozen-decision-features-v1"
+)
+_STRICT_FROZEN_SNAPSHOT_POLICY_VERSION = (
+    "formula-shadow-input-snapshot-v5-frozen-decision-features"
+)
+_STRICT_FEATURE_BUNDLE_POLICY_VERSION = (
+    "prospective-decision-feature-bundle-v1"
+)
+_STRICT_PROSPECTIVE_SAMPLER_VERSION = (
+    "prospective-neutral-anchor-v4-decision-features-frozen"
+)
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class FrozenThresholdPolicyConflict(ValueError):
@@ -119,6 +134,286 @@ def _finite_number(value: Any) -> Optional[float]:
     return number if math.isfinite(number) else None
 
 
+def _strict_json_number(value: Any) -> Optional[float]:
+    """Accept only a finite JSON number, never a string or boolean."""
+    if type(value) not in (int, float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _strict_positive_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return int(value)
+
+
+def _strict_sha256(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        return None
+    return value
+
+
+def _prospective_anchor_evidence(event: Mapping[str, Any]) -> Mapping[str, Any]:
+    engine_snapshot = _mapping(event.get("engine_snapshot"))
+    return _mapping(engine_snapshot.get("prospective_anchor"))
+
+
+def _prospective_sampler_version(event: Mapping[str, Any]) -> str:
+    anchor = _prospective_anchor_evidence(event)
+    return str(anchor.get("sampler_version") or "").strip()
+
+
+def _is_current_frozen_evidence_record(record: Mapping[str, Any]) -> bool:
+    """Recognize every marker that makes a row subject to the v4 contract.
+
+    A partially forged row must not evade strict validation by omitting one of
+    the duplicate policy fields. If *any* current marker is present, the full
+    exact contract is required below.
+    """
+    snapshot = _mapping(record.get("input_snapshot"))
+    evidence = _mapping(snapshot.get("prospective_evidence"))
+    return (
+        str(record.get("evidence_policy_version") or "").strip()
+        == _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+        or str(snapshot.get("evidence_policy_version") or "").strip()
+        == _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+        or str(evidence.get("sampler_version") or "").strip()
+        == _STRICT_PROSPECTIVE_SAMPLER_VERSION
+    )
+
+
+def _strict_frozen_threshold_policy(
+    *,
+    event: Mapping[str, Any],
+    horizon_minutes: int,
+    record: Mapping[str, Any],
+) -> tuple[tuple[Any, ...], Dict[str, Any]]:
+    """Validate and consume one exact decision-time v4 width/session bundle."""
+    horizon = int(horizon_minutes)
+    decision_time = _utc(event["alert_time_utc"])
+    snapshot = _mapping(record.get("input_snapshot"))
+    evidence = _mapping(snapshot.get("prospective_evidence"))
+
+    if str(record.get("evidence_policy_version") or "").strip() != (
+        _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current Shadow check evidence policy is missing or incompatible"
+        )
+    if str(snapshot.get("evidence_policy_version") or "").strip() != (
+        _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current frozen snapshot evidence policy is missing or incompatible"
+        )
+    if str(snapshot.get("snapshot_policy_version") or "").strip() != (
+        _STRICT_FROZEN_SNAPSHOT_POLICY_VERSION
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current frozen snapshot policy is missing or incompatible"
+        )
+    if str(snapshot.get("decision_input_policy_version") or "").strip() != (
+        _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current frozen decision-input policy is missing or incompatible"
+        )
+    if record.get("authoritative_verified") is not True:
+        raise FrozenThresholdPolicyConflict(
+            "current Shadow evidence was not authoritatively verified"
+        )
+    if str(evidence.get("sampler_version") or "").strip() != (
+        _STRICT_PROSPECTIVE_SAMPLER_VERSION
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current Shadow evidence is not bound to the exact sampler v4"
+        )
+    event_anchor = _prospective_anchor_evidence(event)
+    event_sampler = str(event_anchor.get("sampler_version") or "").strip()
+    if event_sampler != _STRICT_PROSPECTIVE_SAMPLER_VERSION:
+        raise FrozenThresholdPolicyConflict(
+            "outcome event is not bound to the exact current sampler v4"
+        )
+    if str(evidence.get("feature_bundle_policy_version") or "").strip() != (
+        _STRICT_FEATURE_BUNDLE_POLICY_VERSION
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current decision feature-bundle policy is missing or incompatible"
+        )
+
+    slot_id = _strict_positive_int(evidence.get("anchor_slot_id"))
+    stored_slot_id = _strict_positive_int(
+        record.get("prospective_anchor_slot_id")
+    )
+    input_fingerprint = _strict_sha256(evidence.get("input_fingerprint"))
+    stored_input_fingerprint = _strict_sha256(
+        record.get("prospective_input_fingerprint")
+    )
+    bundle_sha256 = _strict_sha256(evidence.get("feature_bundle_sha256"))
+    stored_bundle_sha256 = _strict_sha256(record.get("feature_bundle_sha256"))
+    if slot_id is None or stored_slot_id != slot_id:
+        raise FrozenThresholdPolicyConflict(
+            "current frozen anchor-slot identity is missing or inconsistent"
+        )
+    if input_fingerprint is None or stored_input_fingerprint != input_fingerprint:
+        raise FrozenThresholdPolicyConflict(
+            "current frozen input fingerprint is missing or inconsistent"
+        )
+    if bundle_sha256 is None or stored_bundle_sha256 != bundle_sha256:
+        raise FrozenThresholdPolicyConflict(
+            "current frozen decision feature-bundle hash is missing or inconsistent"
+        )
+    if _strict_sha256(event_anchor.get("input_fingerprint")) != input_fingerprint:
+        raise FrozenThresholdPolicyConflict(
+            "outcome event input fingerprint differs from frozen Shadow evidence"
+        )
+    if str(
+        event_anchor.get("feature_bundle_policy_version") or ""
+    ).strip() != _STRICT_FEATURE_BUNDLE_POLICY_VERSION:
+        raise FrozenThresholdPolicyConflict(
+            "outcome event feature-bundle policy is missing or incompatible"
+        )
+    if _strict_sha256(
+        event_anchor.get("feature_bundle_sha256")
+    ) != bundle_sha256:
+        raise FrozenThresholdPolicyConflict(
+            "outcome event feature-bundle hash differs from frozen Shadow evidence"
+        )
+    if not isinstance(evidence.get("source_timestamps"), Mapping):
+        raise FrozenThresholdPolicyConflict(
+            "current frozen source timestamps are missing or malformed"
+        )
+    if not isinstance(evidence.get("source_provenance"), Mapping):
+        raise FrozenThresholdPolicyConflict(
+            "current frozen source provenance is missing or malformed"
+        )
+
+    record_horizon = _strict_positive_int(record.get("horizon_minutes"))
+    snapshot_horizon = _strict_positive_int(snapshot.get("horizon_minutes"))
+    if record_horizon != horizon or snapshot_horizon != horizon:
+        raise FrozenThresholdPolicyConflict(
+            "current frozen horizon differs from the requested outcome horizon"
+        )
+
+    frozen_event = _mapping(snapshot.get("event"))
+    event_id = _strict_positive_int(event.get("event_id"))
+    frozen_event_id = _strict_positive_int(frozen_event.get("event_id"))
+    if event_id is not None and frozen_event_id != event_id:
+        raise FrozenThresholdPolicyConflict(
+            "current frozen event identity differs from the outcome event"
+        )
+    if str(frozen_event.get("symbol") or "").strip().upper() != str(
+        event.get("symbol") or ""
+    ).strip().upper():
+        raise FrozenThresholdPolicyConflict(
+            "current frozen symbol differs from the outcome event"
+        )
+    try:
+        if _utc(frozen_event.get("alert_time_utc")) != decision_time:
+            raise FrozenThresholdPolicyConflict(
+                "current frozen decision time differs from the outcome event"
+            )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise FrozenThresholdPolicyConflict(
+            "current frozen decision time is missing or malformed"
+        ) from exc
+
+    session = snapshot.get("outcome_window_session")
+    if not isinstance(session, Mapping):
+        raise FrozenThresholdPolicyConflict(
+            "current frozen outcome-window session is missing or malformed"
+        )
+    active_ratio = _strict_json_number(session.get("session_active_ratio"))
+    weekend_ratio = _strict_json_number(session.get("session_weekend_ratio"))
+    segments = session.get("session_segments")
+    composition = str(session.get("session_composition") or "")
+    if (
+        active_ratio is None
+        or weekend_ratio is None
+        or not 0.0 <= active_ratio <= 1.0
+        or not 0.0 <= weekend_ratio <= 1.0
+        or not math.isclose(
+            active_ratio + weekend_ratio,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+        or isinstance(segments, bool)
+        or not isinstance(segments, int)
+        or segments <= 0
+        or composition not in {"ACTIVE_ONLY", "WEEKEND_ONLY", "MIXED"}
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current frozen outcome-window session is incomplete or inconsistent"
+        )
+    expected_composition = research_session_width.session_composition_label(
+        active_ratio
+    )
+    if composition != expected_composition:
+        raise FrozenThresholdPolicyConflict(
+            "current frozen outcome-window session composition is inconsistent"
+        )
+
+    reference = snapshot.get("movement_width_reference")
+    if not isinstance(reference, Mapping) or not reference:
+        raise FrozenThresholdPolicyConflict(
+            "current frozen per-horizon movement-width reference is missing"
+        )
+    compatible, reason = research_session_width.validate_movement_width_reference(
+        reference,
+        expected_symbol=event.get("symbol"),
+        event_time=decision_time,
+        horizon_minutes=horizon,
+    )
+    if not compatible:
+        raise FrozenThresholdPolicyConflict(reason)
+    reference_active = _strict_json_number(
+        reference.get("session_active_ratio")
+    )
+    reference_weekend = _strict_json_number(
+        reference.get("session_weekend_ratio")
+    )
+    reference_segments = reference.get("session_segments")
+    reference_composition = str(reference.get("session_composition") or "")
+    if not (
+        reference_active is not None
+        and reference_weekend is not None
+        and math.isclose(
+            reference_active, active_ratio, rel_tol=0.0, abs_tol=1e-6
+        )
+        and math.isclose(
+            reference_weekend, weekend_ratio, rel_tol=0.0, abs_tol=1e-6
+        )
+        and reference_segments == segments
+        and reference_composition == composition
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current frozen width and outcome-window session bundles disagree"
+        )
+
+    try:
+        threshold_policy = research_no_dwell_outcome.freeze_threshold_policy(
+            horizon_minutes=horizon,
+            decision_time=decision_time,
+            prior_only_reference=dict(reference),
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise FrozenThresholdPolicyConflict(str(exc)) from exc
+    fingerprint = (
+        slot_id,
+        input_fingerprint,
+        bundle_sha256,
+        round(active_ratio, 8),
+        round(weekend_ratio, 8),
+        segments,
+        composition,
+        str(threshold_policy.get("threshold_reference_hash") or ""),
+        round(float(threshold_policy["threshold_scale_factor"]), 8),
+    )
+    return fingerprint, threshold_policy
+
+
 def _frozen_threshold_policy(
     *,
     event: Mapping[str, Any],
@@ -140,71 +435,57 @@ def _frozen_threshold_policy(
         for record in snapshot_records
         if int(record.get("horizon_minutes") or 0) == horizon
     ]
+    current_event = (
+        _prospective_sampler_version(event)
+        == _STRICT_PROSPECTIVE_SAMPLER_VERSION
+    )
     if not raw_relevant:
+        if current_event:
+            raise FrozenThresholdPolicyConflict(
+                "sampler-v4 event has no current frozen threshold evidence"
+            )
         return research_no_dwell_outcome.freeze_threshold_policy(
             horizon_minutes=horizon,
             decision_time=decision_time,
         )
 
-    relevant: list[Mapping[str, Any]] = []
-    rejected_v6: list[str] = []
-    for record in raw_relevant:
-        strict_v6 = str(record.get("formula_schema_version") or "") == str(
-            research_formula_engine.FORMULA_SCHEMA_VERSION
-        )
-        if not strict_v6:
-            relevant.append(record)
-            continue
-        formula = {
-            key: record.get(key)
-            for key in (
-                "formula_id",
-                "formula_key",
-                "formula_version",
-                "formula_schema_version",
-                "engine_version",
-                "feature_schema_version",
-                "outcome_method_version",
-                "direction",
-                "horizon_minutes",
-                "conditions",
-            )
-        }
-        check_row = {
-            **dict(event),
-            "input_snapshot": record.get("input_snapshot"),
-            "condition_results": record.get("condition_results"),
-            "decision_cohort_key": record.get("decision_cohort_key"),
-            "decision_anchor_time_utc": record.get("decision_anchor_time_utc"),
-            "evaluation_status": record.get("evaluation_status"),
-            "matched": record.get("matched"),
-        }
-        compatible, reason = research_formula_store._max_pain_shadow_check_contract(
-            formula, check_row
-        )
-        if compatible:
-            relevant.append(record)
-        else:
-            rejected_v6.append(reason)
-    if not relevant:
+    current_records = [
+        record
+        for record in raw_relevant
+        if _is_current_frozen_evidence_record(record)
+    ]
+    if current_event and not current_records:
         raise FrozenThresholdPolicyConflict(
-            "all v6 frozen threshold snapshots were rejected: "
-            + "; ".join(sorted(set(rejected_v6)))
+            "sampler-v4 event has no current frozen threshold evidence"
         )
+    if current_records:
+        normalized_current = [
+            _strict_frozen_threshold_policy(
+                event=event,
+                horizon_minutes=horizon,
+                record=record,
+            )
+            for record in current_records
+        ]
+        if len({item[0] for item in normalized_current}) != 1:
+            raise FrozenThresholdPolicyConflict(
+                "current formula snapshots disagree on the frozen "
+                "event/horizon feature bundle"
+            )
+        return normalized_current[0][1]
+
+    # Earlier formula/sampler snapshots remain readable for historical audit,
+    # but they are never treated as current frozen Shadow evidence. Their
+    # compatibility bridge below cannot authorize readiness or replace a
+    # missing v4 decision bundle.
+    relevant = raw_relevant
 
     normalized_relaxed: list[tuple[tuple[Any, ...], Dict[str, Any]]] = []
     static_records = 0
     for record in relevant:
         snapshot = _mapping(record.get("input_snapshot"))
         reference = _mapping(snapshot.get("movement_width_reference"))
-        strict_v6 = str(record.get("formula_schema_version") or "") == str(
-            research_formula_engine.FORMULA_SCHEMA_VERSION
-        )
         if not reference:
-            if strict_v6:
-                raise FrozenThresholdPolicyConflict(
-                    "v6 frozen movement-width reference is missing"
-                )
             static_records += 1
             continue
         scale = _finite_number(
@@ -217,17 +498,6 @@ def _frozen_threshold_policy(
                 "frozen movement-width scale is missing or outside 0.50-1.00"
             )
         applied = reference.get("applied") is True
-        if strict_v6:
-            compatible, reason = (
-                research_session_width.validate_movement_width_reference(
-                    reference,
-                    expected_symbol=event.get("symbol"),
-                    event_time=decision_time,
-                    horizon_minutes=horizon,
-                )
-            )
-            if not compatible:
-                raise FrozenThresholdPolicyConflict(reason)
         if math.isclose(scale, 1.0, rel_tol=0.0, abs_tol=1e-9):
             if applied:
                 raise FrozenThresholdPolicyConflict(
@@ -287,17 +557,13 @@ def _frozen_threshold_policy(
         if weekend_ratio is None:
             session = _mapping(snapshot.get("outcome_window_session"))
             weekend_ratio = _finite_number(session.get("session_weekend_ratio"))
-        prior_reference = (
-            dict(reference)
-            if strict_v6
-            else {
-                "source_kind": source_kind,
-                "as_of_utc": as_of_utc,
-                "threshold_scale_factor": scale,
-                "session_weekend_ratio": weekend_ratio,
-                "source": policy_source or "prior-only session calibration",
-            }
-        )
+        prior_reference = {
+            "source_kind": source_kind,
+            "as_of_utc": as_of_utc,
+            "threshold_scale_factor": scale,
+            "session_weekend_ratio": weekend_ratio,
+            "source": policy_source or "prior-only session calibration",
+        }
         try:
             threshold_policy = research_no_dwell_outcome.freeze_threshold_policy(
                 horizon_minutes=horizon,
@@ -651,6 +917,15 @@ class ResearchOutcomeWorker:
                     "Alerts and authorized prospective Shadow matches; otherwise "
                     "at horizon close"
                 ),
+                "current_evidence_policy": (
+                    _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+                ),
+                "current_sampler": _STRICT_PROSPECTIVE_SAMPLER_VERSION,
+                "current_threshold_input": (
+                    "exact frozen per-horizon movement-width and session bundle; "
+                    "missing or malformed evidence fails closed"
+                ),
+                "legacy_evidence": "audit_only",
             },
             "price_paths": {
                 "default": "Binance Spot USDT",
@@ -723,7 +998,12 @@ class ResearchOutcomeWorker:
                    f.feature_schema_version, f.outcome_method_version,
                    f.direction, f.conditions, c.input_snapshot,
                    c.condition_results, c.decision_cohort_key,
-                   c.decision_anchor_time_utc, c.evaluation_status, c.matched
+                   c.decision_anchor_time_utc, c.evaluation_status, c.matched,
+                   c.evidence_policy_version,
+                   c.prospective_anchor_slot_id,
+                   c.prospective_input_fingerprint,
+                   c.feature_bundle_sha256,
+                   c.authoritative_verified
             FROM research_formula_shadow_checks c
             JOIN research_formulas f ON f.formula_id=c.formula_id
             WHERE c.event_id=ANY(%s)
@@ -890,6 +1170,13 @@ class ResearchOutcomeWorker:
               ON open_check.event_id=e.event_id
              AND open_check.matched=TRUE
              AND open_check.evaluation_status='MATCHED'
+             AND open_check.evidence_policy_version=%s
+             AND open_check.authoritative_verified=TRUE
+             AND open_check.prospective_anchor_slot_id IS NOT NULL
+             AND BTRIM(open_check.prospective_input_fingerprint)
+                    ~ '^[0-9a-f]{{64}}$'
+             AND BTRIM(open_check.feature_bundle_sha256)
+                    ~ '^[0-9a-f]{{64}}$'
             JOIN research_formulas open_formula
               ON open_formula.formula_id=open_check.formula_id
              AND open_formula.active=TRUE
@@ -912,6 +1199,13 @@ class ResearchOutcomeWorker:
                             SELECT 1
                             FROM research_prospective_shadow_events authorized
                             WHERE authorized.event_id=e.event_id
+                              AND authorized.anchor_slot_id=
+                                  open_check.prospective_anchor_slot_id
+                              AND BTRIM(authorized.input_fingerprint)=
+                                  BTRIM(open_check.prospective_input_fingerprint)
+                              AND BTRIM(
+                                  authorized.feature_bundle_sha256
+                              )=BTRIM(open_check.feature_bundle_sha256)
                         )
                     )
                   )
@@ -959,6 +1253,7 @@ class ResearchOutcomeWorker:
         params = [
             list(canonical_price_path.COMPLETE_QUALITIES),
             _FIRST_TOUCH_METHOD_VERSION,
+            _STRICT_FROZEN_EVIDENCE_POLICY_VERSION,
             _FIRST_TOUCH_METHOD_VERSION,
             _FIRST_TOUCH_METHOD_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),

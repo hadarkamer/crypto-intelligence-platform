@@ -127,6 +127,14 @@ def _number(value: Any) -> Optional[float]:
     return number if math.isfinite(number) else None
 
 
+def _strict_json_number(value: Any) -> Optional[float]:
+    """Accept only an actual finite JSON number, never bool or text."""
+    if type(value) not in (int, float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def _round(value: Any, digits: int = 6) -> Optional[float]:
     number = _number(value)
     return round(number, digits) if number is not None else None
@@ -376,9 +384,27 @@ def condition_matches(features: Mapping[str, Any], condition: Mapping[str, Any])
         return False
     actual = features[feature]
     if operator == "==":
-        return actual == expected
-    actual_number = _number(actual)
-    expected_number = _number(expected)
+        # ``bool`` is a subclass of ``int`` in Python.  Formula evidence must
+        # never let a forged ``true`` satisfy a numeric ``1`` predicate (or
+        # vice versa), while ordinary int/float numeric equality remains
+        # useful for thresholds materialized by PostgreSQL JSON.
+        if isinstance(actual, bool) or isinstance(expected, bool):
+            return (
+                isinstance(actual, bool)
+                and isinstance(expected, bool)
+                and actual is expected
+            )
+        actual_number = _strict_json_number(actual)
+        expected_number = _strict_json_number(expected)
+        if actual_number is not None or expected_number is not None:
+            return (
+                actual_number is not None
+                and expected_number is not None
+                and actual_number == expected_number
+            )
+        return type(actual) is type(expected) and actual == expected
+    actual_number = _strict_json_number(actual)
+    expected_number = _strict_json_number(expected)
     if actual_number is None or expected_number is None:
         return False
     return actual_number >= expected_number if operator == ">=" else actual_number <= expected_number
@@ -408,7 +434,6 @@ def evaluate_formula(
     distinction prevents archive gaps from improving a formula's apparent
     performance.  No outcome field is read by this function.
     """
-    normalized_direction = str(direction or "").upper()
     if not isinstance(row, Mapping):
         return {
             "status": "UNEVALUABLE",
@@ -418,17 +443,68 @@ def evaluate_formula(
             "condition_results": [],
         }
     event = row.get("event") if isinstance(row.get("event"), Mapping) else {}
-    event_direction = str(event.get("direction") or "").upper()
-    features = extract_decision_features(row)
+    return evaluate_frozen_feature_values(
+        extract_decision_features(row),
+        direction=direction,
+        event_direction=event.get("direction"),
+        conditions=conditions,
+    )
+
+
+def evaluate_frozen_feature_values(
+    frozen_features: Optional[Mapping[str, Any]],
+    *,
+    direction: str,
+    event_direction: Any,
+    conditions: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Evaluate operators directly against one immutable flat feature map.
+
+    This is the prospective Shadow execution boundary.  It deliberately does
+    not accept a research row and cannot call ``extract_decision_features``;
+    callers must provide the exact decision-time values already frozen in the
+    authoritative sampler-v4 feature bundle.  Missing or malformed values are
+    UNEVALUABLE, never negative controls.
+    """
     condition_results: list[Dict[str, Any]] = []
+    if not isinstance(frozen_features, Mapping):
+        return {
+            "status": "UNEVALUABLE",
+            "matched": False,
+            "reason": "frozen decision feature map unavailable",
+            "features": {},
+            "condition_results": [],
+        }
+    features = dict(frozen_features)
+    normalized_direction = str(direction or "").upper()
+    frozen_event_direction = str(event_direction or "").upper()
     unavailable = False
     for condition in conditions:
         feature = str(condition.get("feature") or "")
         operator = str(condition.get("operator") or "")
         expected = condition.get("value")
+        actual = features.get(feature)
         available = bool(
             feature and operator in ALLOWED_OPERATORS and feature in features
         )
+        if available:
+            if operator in {">=", "<="}:
+                available = (
+                    _strict_json_number(actual) is not None
+                    and _strict_json_number(expected) is not None
+                )
+            else:
+                available = (
+                    isinstance(actual, (bool, int, float, str))
+                    and isinstance(expected, (bool, int, float, str))
+                    and not (
+                        isinstance(actual, float) and not math.isfinite(actual)
+                    )
+                    and not (
+                        isinstance(expected, float)
+                        and not math.isfinite(expected)
+                    )
+                )
         passed = available and condition_matches(features, condition)
         if not available:
             unavailable = True
@@ -437,7 +513,7 @@ def evaluate_formula(
                 "feature": feature,
                 "operator": operator,
                 "expected": expected,
-                "actual": features.get(feature),
+                "actual": actual,
                 "available": available,
                 "passed": bool(passed),
             }
@@ -445,7 +521,7 @@ def evaluate_formula(
     if not conditions:
         status = "UNEVALUABLE"
         reason = "formula has no conditions"
-    elif event_direction != normalized_direction:
+    elif frozen_event_direction != normalized_direction:
         status = "UNEVALUABLE"
         reason = "event direction does not match formula direction"
     elif unavailable:

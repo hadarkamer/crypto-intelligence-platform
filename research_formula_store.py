@@ -23,6 +23,8 @@ import research_historical_replay
 import research_max_pain_archive
 import research_mfe_mae_efficiency
 import research_no_dwell_outcome
+import research_prospective_anchors
+import research_prospective_feature_freeze
 import research_session_width
 
 
@@ -52,10 +54,20 @@ _SHADOW_COMPATIBLE_FORMULA_SCHEMAS = (
     research_formula_engine.FORMULA_SCHEMA_VERSION,
 )
 _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION = (
-    "formula-shadow-input-snapshot-v4-authoritative-frozen-recompute"
+    "formula-shadow-input-snapshot-v5-frozen-decision-features"
 )
 _DECISION_COHORT_POLICY_VERSION = (
-    "formula-shadow-decision-cohort-v4-frozen-max-pain-all-source-timestamps"
+    "formula-shadow-decision-cohort-v5-frozen-feature-bundle"
+)
+_PROSPECTIVE_EVIDENCE_POLICY_VERSION = (
+    "prospective-shadow-frozen-decision-features-v1"
+)
+_REJECTED_PROSPECTIVE_EVIDENCE_POLICY_VERSION = (
+    _PROSPECTIVE_EVIDENCE_POLICY_VERSION + "-rejected"
+)
+_FEATURE_BUNDLE_POLICY_VERSION = "prospective-decision-feature-bundle-v1"
+_PROSPECTIVE_ANCHOR_SAMPLER_VERSION = (
+    "prospective-neutral-anchor-v4-decision-features-frozen"
 )
 _LIVE_APPROVAL_OPERATION_VERSION = (
     "formula-owner-live-approval-v2-engine-bound"
@@ -140,7 +152,7 @@ def _bind_max_pain_policy(policy_version: str) -> str:
 
 _SHADOW_MONITORING_POLICY_BASE = (
     os.getenv("FORMULA_SHADOW_MONITORING_POLICY_VERSION", "").strip()
-    or "shadow-monitoring-v3-max-pain-provenance-2026-08-29"
+    or "shadow-monitoring-v4-frozen-decision-features-2026-08-30"
 )
 _SHADOW_MONITORING_POLICY_VERSION = _bind_max_pain_policy(
     _bind_efficiency_policy(_SHADOW_MONITORING_POLICY_BASE)
@@ -696,6 +708,11 @@ def schema_status() -> Dict[str, Any]:
             "condition_results",
             "decision_cohort_key",
             "decision_anchor_time_utc",
+            "evidence_policy_version",
+            "prospective_anchor_slot_id",
+            "prospective_input_fingerprint",
+            "feature_bundle_sha256",
+            "authoritative_verified",
         ),
         "research_formula_live_approvals": (
             "formula_version",
@@ -746,6 +763,8 @@ def schema_status() -> Dict[str, Any]:
             "frozen_inputs",
             "input_fingerprint",
             "attempt_fingerprint",
+            "feature_bundle_policy_version",
+            "feature_bundle_sha256",
         ),
         "research_prospective_anchor_slots": (
             "long_event_id",
@@ -754,6 +773,23 @@ def schema_status() -> Dict[str, Any]:
             "source_provenance",
             "frozen_inputs",
             "input_fingerprint",
+            "feature_bundle_policy_version",
+            "feature_bundle_sha256",
+            "decision_feature_bundle",
+        ),
+        "research_prospective_shadow_events": (
+            "anchor_slot_id",
+            "sampler_version",
+            "input_fingerprint",
+            "source_side",
+            "timeframe",
+            "strategy_version",
+            "code_version",
+            "source_timestamps",
+            "source_provenance",
+            "feature_bundle_policy_version",
+            "feature_bundle_sha256",
+            "decision_feature_bundle",
         ),
     }
     base = {
@@ -1486,7 +1522,12 @@ def shadow_status(limit: int = 20) -> Dict[str, Any]:
 
 
 def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
-    """Load future event pairs for active Shadow and validated Live formulas."""
+    """Load only authoritative sampler-v4 prospective decision samples.
+
+    Delivered alerts and older sampler rows are intentionally absent.  The
+    authorization view is the database boundary that binds each event to its
+    immutable slot and hashed decision feature bundle.
+    """
     limit = max(1, min(int(max_events_per_formula), 250))
     work: list[Dict[str, Any]] = []
     with _connect(read_only=True) as conn:
@@ -1546,24 +1587,26 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
         for formula in formulas:
             events = conn.execute(
                 """
-                SELECT event_id, alert_time_utc, symbol, direction,
-                       event_type, setup_key, event_kind, delivery_status
-                FROM research_events candidate
-                WHERE direction=%s
-                  AND event_id>%s
-                  AND alert_time_utc>=COALESCE(%s, '-infinity'::timestamptz)
-                  AND (
-                    (event_kind='ALERT' AND delivery_status='DELIVERED')
-                    OR (
-                      event_kind='DECISION_SAMPLE'
-                      AND delivery_status='NOT_APPLICABLE'
-                      AND EXISTS (
-                        SELECT 1
-                        FROM research_prospective_shadow_events authorized
-                        WHERE authorized.event_id=candidate.event_id
+                SELECT candidate.event_id, candidate.alert_time_utc,
+                       candidate.symbol, candidate.direction,
+                       candidate.event_type, candidate.setup_key,
+                       candidate.source_side, candidate.timeframe,
+                       candidate.strategy_version, candidate.code_version,
+                       'DECISION_SAMPLE'::text AS event_kind,
+                       'NOT_APPLICABLE'::text AS delivery_status,
+                       candidate.anchor_slot_id AS prospective_anchor_slot_id,
+                       candidate.input_fingerprint
+                         AS prospective_input_fingerprint,
+                       candidate.feature_bundle_policy_version,
+                       candidate.feature_bundle_sha256
+                FROM research_prospective_shadow_events candidate
+                WHERE candidate.direction=%s
+                  AND candidate.event_id>%s
+                  AND candidate.alert_time_utc>=COALESCE(
+                        %s, '-infinity'::timestamptz
                       )
-                    )
-                  )
+                  AND candidate.sampler_version=%s
+                  AND candidate.feature_bundle_policy_version=%s
                 ORDER BY event_id ASC
                 LIMIT %s
                 """,
@@ -1571,6 +1614,8 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
                     formula["direction"],
                     int(formula["last_shadow_event_id"] or 0),
                     formula["shadow_started_at_utc"],
+                    _PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+                    _FEATURE_BUNDLE_POLICY_VERSION,
                     limit,
                 ),
             ).fetchall()
@@ -1599,21 +1644,17 @@ def record_shadow_results(
     max_event_id = 0
     authoritative_rows: Dict[tuple[int, int], Dict[str, Any]] = {}
     authoritative_error: Optional[str] = None
-    if str(formula.get("formula_schema_version") or "") == str(
-        research_formula_engine.FORMULA_SCHEMA_VERSION
-    ):
-        requested_ids = sorted({int(result["event_id"]) for result in results})
-        try:
-            authoritative_rows = (
-                research_feature_matrix.load_shadow_feature_rows_by_horizon(
-                    {int(formula.get("horizon_minutes") or 0): requested_ids}
-                )
+    requested_ids = sorted({int(result["event_id"]) for result in results})
+    try:
+        authoritative_rows = (
+            research_feature_matrix.load_shadow_feature_rows_by_horizon(
+                {int(formula.get("horizon_minutes") or 0): requested_ids}
             )
-        except Exception as exc:
-            # A missing archive/configuration or malformed frozen slot is a
-            # fail-closed UNEVALUABLE check, never permission to trust the
-            # caller's materialized feature values.
-            authoritative_error = f"{type(exc).__name__}: {exc}"[:800]
+        )
+    except Exception as exc:
+        # A missing configuration or malformed frozen bundle is a fail-closed
+        # UNEVALUABLE check, never permission to trust submitted values.
+        authoritative_error = f"{type(exc).__name__}: {exc}"[:800]
     with _connect(read_only=False) as conn:
         current = conn.execute(
             """
@@ -1644,34 +1685,70 @@ def record_shadow_results(
         )
         event_rows = conn.execute(
             """
-            SELECT candidate.event_id, candidate.alert_time_utc,
-                   candidate.symbol, candidate.direction,
-                   candidate.event_type, candidate.setup_key,
-                   candidate.event_kind, candidate.delivery_status,
-                   (
-                     (candidate.event_kind='ALERT'
-                      AND candidate.delivery_status='DELIVERED')
-                     OR (
-                       candidate.event_kind='DECISION_SAMPLE'
-                       AND candidate.delivery_status='NOT_APPLICABLE'
-                       AND EXISTS (
-                         SELECT 1
-                         FROM research_prospective_shadow_events authorized
-                         WHERE authorized.event_id=candidate.event_id
-                       )
-                     )
-                   ) AS shadow_eligible
-            FROM research_events candidate
-            WHERE event_id=ANY(%s)
+            SELECT authorized.event_id, authorized.alert_time_utc,
+                   authorized.symbol, authorized.direction,
+                   authorized.event_type, authorized.setup_key,
+                   authorized.source_side, authorized.timeframe,
+                   authorized.strategy_version, authorized.code_version,
+                   'DECISION_SAMPLE'::text AS event_kind,
+                   'NOT_APPLICABLE'::text AS delivery_status,
+                   TRUE AS shadow_eligible,
+                   slot.anchor_slot_id, slot.sampler_version,
+                   slot.coverage_policy_version, slot.coverage_snapshot,
+                   slot.source_candle_open_utc, slot.source_candle_close_utc,
+                   slot.base_eligible_at_utc, slot.expires_at_utc,
+                   slot.decision_time_utc, slot.input_fingerprint,
+                   slot.source_timestamps, slot.source_provenance,
+                   slot.frozen_inputs, slot.feature_bundle_policy_version,
+                   slot.feature_bundle_sha256, slot.decision_feature_bundle,
+                   slot.created_at_utc
+            FROM research_prospective_shadow_events authorized
+            JOIN research_prospective_anchor_slots slot
+              ON slot.anchor_slot_id=authorized.anchor_slot_id
+            WHERE authorized.event_id=ANY(%s)
+              AND authorized.sampler_version=%s
+              AND authorized.feature_bundle_policy_version=%s
             """,
-            (requested_event_ids,),
+            (
+                requested_event_ids,
+                _PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+                _FEATURE_BUNDLE_POLICY_VERSION,
+            ),
         ).fetchall()
         events_by_id = {int(row["event_id"]): dict(row) for row in event_rows}
+        # The authorization view is deliberately fail-closed.  If a row that
+        # was handed to the worker stops satisfying that view before the
+        # write, retain an immutable rejected audit check instead of silently
+        # losing the attempted observation.  The fallback never authorizes an
+        # ALERT (or any other event kind), and it carries no slot evidence;
+        # therefore the strict verifier below can only make it UNEVALUABLE.
+        missing_authorized_ids = sorted(
+            set(requested_event_ids).difference(events_by_id)
+        )
+        if missing_authorized_ids:
+            rejected_event_rows = conn.execute(
+                """
+                SELECT event_id, alert_time_utc, symbol, direction,
+                       event_type, setup_key, source_side, timeframe,
+                       strategy_version, code_version, event_kind,
+                       delivery_status, FALSE AS shadow_eligible
+                FROM research_events
+                WHERE event_id=ANY(%s)
+                  AND event_kind='DECISION_SAMPLE'
+                """,
+                (missing_authorized_ids,),
+            ).fetchall()
+            events_by_id.update(
+                {
+                    int(row["event_id"]): dict(row)
+                    for row in rejected_event_rows
+                }
+            )
         authoritative_formula = dict(current)
         for result in results:
             event_id = int(result["event_id"])
             event = events_by_id.get(event_id)
-            if not event or not bool(event.get("shadow_eligible")):
+            if not event:
                 continue
             if str(event.get("direction") or "").upper() != str(
                 authoritative_formula.get("direction") or ""
@@ -1697,53 +1774,75 @@ def record_shadow_results(
                 evaluation_status = "UNEVALUABLE"
             evaluation_reason = str(result.get("evaluation_reason") or "")
             submitted_matched = result.get("matched")
-            if str(
-                authoritative_formula.get("formula_schema_version") or ""
-            ) == str(research_formula_engine.FORMULA_SCHEMA_VERSION):
-                bound_row = {
-                    **event,
-                    "input_snapshot": result.get("input_snapshot"),
-                    "condition_results": result.get("condition_results"),
-                    "decision_cohort_key": result.get("decision_cohort_key"),
-                    "decision_anchor_time_utc": result.get(
-                        "decision_anchor_time_utc"
-                    ),
-                    "evaluation_status": evaluation_status,
-                    "matched": submitted_matched,
-                }
-                compatible, reason = _max_pain_shadow_check_contract(
-                    authoritative_formula, bound_row
-                )
-                strict_flag = type(submitted_matched) is bool and submitted_matched == (
-                    evaluation_status == "MATCHED"
-                )
-                if not strict_flag:
+            bound_row = {
+                **event,
+                "input_snapshot": result.get("input_snapshot"),
+                "condition_results": result.get("condition_results"),
+                "decision_cohort_key": result.get("decision_cohort_key"),
+                "decision_anchor_time_utc": result.get(
+                    "decision_anchor_time_utc"
+                ),
+                "evaluation_status": evaluation_status,
+                "matched": submitted_matched,
+            }
+            compatible, reason = _max_pain_shadow_check_contract(
+                authoritative_formula, bound_row
+            )
+            strict_flag = type(submitted_matched) is bool and submitted_matched == (
+                evaluation_status == "MATCHED"
+            )
+            if not strict_flag:
+                compatible = False
+                reason = "submitted matched flag differs from evaluation status"
+            if compatible:
+                if authoritative_error:
                     compatible = False
-                    reason = "submitted matched flag differs from evaluation status"
-                if compatible:
-                    if authoritative_error:
-                        compatible = False
-                        reason = (
-                            "authoritative frozen-row rebuild failed: "
-                            + authoritative_error
-                        )
-                    else:
-                        compatible, reason = _authoritative_v6_row_contract(
-                            authoritative_formula,
-                            event,
-                            result,
-                            authoritative_rows.get(
-                                (
-                                    event_id,
-                                    int(authoritative_formula["horizon_minutes"]),
-                                )
-                            ),
-                        )
-                if not compatible:
-                    evaluation_status = "UNEVALUABLE"
-                    evaluation_reason = (
-                        "v6 Shadow write contract rejected: " + reason
-                    )[:1000]
+                    reason = (
+                        "authoritative frozen-bundle load failed: "
+                        + authoritative_error
+                    )
+                else:
+                    compatible, reason = _authoritative_frozen_row_contract(
+                        authoritative_formula,
+                        event,
+                        result,
+                        authoritative_rows.get(
+                            (
+                                event_id,
+                                int(authoritative_formula["horizon_minutes"]),
+                            )
+                        ),
+                        event,
+                    )
+            if not compatible:
+                evaluation_status = "UNEVALUABLE"
+                evaluation_reason = (
+                    "frozen Shadow write contract rejected: " + reason
+                )[:1000]
+            evidence_policy_version = (
+                _PROSPECTIVE_EVIDENCE_POLICY_VERSION
+                if compatible
+                else _REJECTED_PROSPECTIVE_EVIDENCE_POLICY_VERSION
+            )
+            evidence_slot_id = _strict_int(event.get("anchor_slot_id"))
+            evidence_input_fingerprint = str(
+                event.get("input_fingerprint") or ""
+            ).strip()
+            evidence_bundle_sha256 = str(
+                event.get("feature_bundle_sha256") or ""
+            ).strip()
+            if evidence_slot_id is None or evidence_slot_id <= 0:
+                evidence_slot_id = None
+            if len(evidence_input_fingerprint) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in evidence_input_fingerprint
+            ):
+                evidence_input_fingerprint = None
+            if len(evidence_bundle_sha256) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in evidence_bundle_sha256
+            ):
+                evidence_bundle_sha256 = None
             is_match = evaluation_status == "MATCHED"
             inserted = conn.execute(
                 """
@@ -1751,8 +1850,14 @@ def record_shadow_results(
                     formula_id, event_id, matched, feature_schema_version,
                     evaluation_status, evaluation_reason, input_snapshot,
                     condition_results, decision_cohort_key,
-                    decision_anchor_time_utc
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+                    decision_anchor_time_utc, evidence_policy_version,
+                    prospective_anchor_slot_id,
+                    prospective_input_fingerprint, feature_bundle_sha256,
+                    authoritative_verified
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s,
+                    %s, %s, %s, %s, %s
+                )
                 ON CONFLICT (formula_id, event_id) DO NOTHING
                 RETURNING formula_id
                 """,
@@ -1767,6 +1872,11 @@ def record_shadow_results(
                     _json(result.get("condition_results") or []),
                     result.get("decision_cohort_key"),
                     result.get("decision_anchor_time_utc"),
+                    evidence_policy_version,
+                    evidence_slot_id,
+                    evidence_input_fingerprint,
+                    evidence_bundle_sha256,
+                    bool(compatible),
                 ),
             ).fetchone()
             if not inserted:
@@ -1897,6 +2007,13 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
                o.target_progress_ratio, o.target_reached
         FROM research_formula_shadow_checks c
         JOIN research_events e ON e.event_id=c.event_id
+        JOIN research_prospective_shadow_events authorized
+          ON authorized.event_id=c.event_id
+         AND authorized.anchor_slot_id=c.prospective_anchor_slot_id
+         AND authorized.input_fingerprint
+               IS NOT DISTINCT FROM c.prospective_input_fingerprint
+         AND authorized.feature_bundle_sha256
+               IS NOT DISTINCT FROM c.feature_bundle_sha256
         LEFT JOIN research_first_touch_outcomes ft
           ON ft.event_id=e.event_id
          AND ft.horizon_minutes=%s
@@ -1909,6 +2026,25 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
          AND o.outcome_method_version=%s
          AND o.data_quality_status=ANY(%s)
         WHERE c.formula_id=%s
+          AND c.evidence_policy_version=%s
+          AND c.authoritative_verified IS TRUE
+          AND authorized.sampler_version=%s
+          AND authorized.feature_bundle_policy_version=%s
+          AND c.input_snapshot->>'snapshot_policy_version'=%s
+          AND c.input_snapshot->>'decision_cohort_policy_version'=%s
+          AND c.input_snapshot->>'decision_input_policy_version'=%s
+          AND c.input_snapshot->>'evidence_policy_version'=%s
+          AND c.input_snapshot#>>'{prospective_evidence,sampler_version}'=%s
+          AND c.input_snapshot#>>'{prospective_evidence,feature_bundle_policy_version}'=%s
+          AND c.input_snapshot#>>'{prospective_evidence,anchor_slot_id}'
+                = c.prospective_anchor_slot_id::text
+          AND c.input_snapshot#>>'{prospective_evidence,input_fingerprint}'
+                IS NOT DISTINCT FROM BTRIM(c.prospective_input_fingerprint)
+          AND c.input_snapshot#>>'{prospective_evidence,feature_bundle_sha256}'
+                IS NOT DISTINCT FROM BTRIM(c.feature_bundle_sha256)
+          AND c.condition_results IS NOT DISTINCT FROM
+                c.input_snapshot->'condition_results'
+          AND c.input_snapshot#>>'{event,event_id}'=e.event_id::text
         ORDER BY e.alert_time_utc, e.event_id
         """,
         (
@@ -1920,6 +2056,15 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
             canonical_price_path.METHOD_VERSION,
             list(research_feature_matrix.VERIFIED_OUTCOME_QUALITIES),
             int(formula["formula_id"]),
+            _PROSPECTIVE_EVIDENCE_POLICY_VERSION,
+            _PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+            _FEATURE_BUNDLE_POLICY_VERSION,
+            _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
+            _DECISION_COHORT_POLICY_VERSION,
+            _PROSPECTIVE_EVIDENCE_POLICY_VERSION,
+            _PROSPECTIVE_EVIDENCE_POLICY_VERSION,
+            _PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+            _FEATURE_BUNDLE_POLICY_VERSION,
         ),
     ).fetchall()
     result = [dict(row) for row in rows]
@@ -1927,10 +2072,10 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
         compatible, reason = _terminal_threshold_matches_snapshot(
             row,
             horizon_minutes=horizon_minutes,
-            require_v6_contract=(
-                str(formula.get("formula_schema_version") or "")
-                == str(research_formula_engine.FORMULA_SCHEMA_VERSION)
-            ),
+            # The evidence contract belongs to the sampler-v4 observation,
+            # not to the historical formula schema.  Retained v5 formulas use
+            # the same frozen threshold reference as v6 formulas.
+            require_v6_contract=True,
         )
         row["first_touch_threshold_policy_compatible"] = compatible
         row["first_touch_threshold_policy_reason"] = reason
@@ -2038,6 +2183,29 @@ def _decision_cohort_identity(
                 + str(mapping.get("prospective_slot_created_at_utc") or "missing"),
             )
         )
+    prospective = snapshot.get("prospective_evidence")
+    if not isinstance(prospective, Mapping):
+        prospective = {}
+    canonical_timestamps.extend(
+        (
+            "prospective.sampler_version:"
+            + str(prospective.get("sampler_version") or "missing"),
+            "prospective.feature_bundle_policy_version:"
+            + str(
+                prospective.get("feature_bundle_policy_version") or "missing"
+            ),
+            "prospective.anchor_slot_id:"
+            + str(prospective.get("anchor_slot_id") or "missing"),
+            "prospective.input_fingerprint:"
+            + str(prospective.get("input_fingerprint") or "missing"),
+            "prospective.feature_bundle_sha256:"
+            + str(prospective.get("feature_bundle_sha256") or "missing"),
+            "prospective.source_timestamps:"
+            + _canonical_json(prospective.get("source_timestamps") or {}),
+            "prospective.source_provenance:"
+            + _canonical_json(prospective.get("source_provenance") or {}),
+        )
+    )
     max_pain = snapshot.get("max_pain_provenance")
     if isinstance(max_pain, Mapping):
         provenance = max_pain.get("provenance")
@@ -2107,9 +2275,9 @@ def _decision_cohort_identity(
 def _v6_max_pain_condition_features(
     formula: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    """Return only v6 Max-Pain inputs; legacy v5 Shadow stays untouched."""
-    if str(formula.get("formula_schema_version") or "") != str(
-        research_formula_engine.FORMULA_SCHEMA_VERSION
+    """Return Max-Pain inputs for every supported Shadow formula schema."""
+    if str(formula.get("formula_schema_version") or "") not in (
+        _SHADOW_COMPATIBLE_FORMULA_SCHEMAS
     ):
         return ()
     return tuple(
@@ -2148,9 +2316,45 @@ def _v6_snapshot_base_contract(
     ):
         return False, "Shadow decision cohort policy version is incompatible"
     if snapshot.get("decision_input_policy_version") != (
-        research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+        _PROSPECTIVE_EVIDENCE_POLICY_VERSION
     ):
         return False, "v6 decision inputs are not from frozen prospective slots"
+    if snapshot.get("evidence_policy_version") != (
+        _PROSPECTIVE_EVIDENCE_POLICY_VERSION
+    ):
+        return False, "prospective Shadow evidence policy version is incompatible"
+    formula_id = _strict_int(formula.get("formula_id"))
+    frozen_formula_id = _strict_int(snapshot.get("formula_id"))
+    if (
+        formula_id is None
+        or formula_id <= 0
+        or frozen_formula_id != formula_id
+    ):
+        return False, "frozen v6 formula_id does not match the formula"
+    prospective = _as_mapping(snapshot.get("prospective_evidence"))
+    slot_id = _strict_int(prospective.get("anchor_slot_id"))
+    input_fingerprint = str(prospective.get("input_fingerprint") or "")
+    bundle_sha256 = str(prospective.get("feature_bundle_sha256") or "")
+    if prospective.get("sampler_version") != _PROSPECTIVE_ANCHOR_SAMPLER_VERSION:
+        return False, "frozen prospective sampler version is incompatible"
+    if prospective.get("feature_bundle_policy_version") != (
+        _FEATURE_BUNDLE_POLICY_VERSION
+    ):
+        return False, "frozen decision feature bundle policy is incompatible"
+    if slot_id is None or slot_id <= 0:
+        return False, "frozen prospective anchor slot id is malformed"
+    for value, label in (
+        (input_fingerprint, "input fingerprint"),
+        (bundle_sha256, "feature bundle hash"),
+    ):
+        if len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            return False, f"frozen prospective {label} is malformed"
+    if not isinstance(prospective.get("source_timestamps"), Mapping):
+        return False, "frozen prospective source timestamps are missing"
+    if not isinstance(prospective.get("source_provenance"), Mapping):
+        return False, "frozen prospective source provenance is missing"
 
     expected_conditions = [
         {
@@ -2245,6 +2449,8 @@ def _v6_snapshot_base_contract(
         slot_identities.add((slot_id, fingerprint))
     if len(slot_identities) != 1:
         return False, "frozen v6 source families do not share one prospective slot"
+    if slot_identities != {(slot_id, input_fingerprint)}:
+        return False, "frozen v6 source families differ from prospective evidence"
 
     price_input = _as_mapping(source_inputs.get("price_oi"))
     try:
@@ -2453,6 +2659,80 @@ def _canonical_max_pain_snapshot_evidence(
     }
 
 
+def _legacy_v5_snapshot_base_contract(
+    formula: Mapping[str, Any], snapshot: Mapping[str, Any]
+) -> tuple[bool, str]:
+    """Validate current frozen evidence without rewriting v5 identities."""
+    if str(formula.get("formula_schema_version") or "") != (
+        "research-formula-v5-safe-replay"
+    ):
+        return False, "legacy formula schema is not the supported v5 contract"
+    for key, expected in (
+        ("snapshot_policy_version", _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION),
+        ("decision_cohort_policy_version", _DECISION_COHORT_POLICY_VERSION),
+        ("decision_input_policy_version", _PROSPECTIVE_EVIDENCE_POLICY_VERSION),
+        ("evidence_policy_version", _PROSPECTIVE_EVIDENCE_POLICY_VERSION),
+    ):
+        if snapshot.get(key) != expected:
+            return False, f"legacy frozen {key} is incompatible"
+    for key in (
+        "formula_key",
+        "formula_schema_version",
+        "engine_version",
+        "feature_schema_version",
+        "outcome_method_version",
+    ):
+        if snapshot.get(key) != formula.get(key):
+            return False, f"legacy frozen {key} differs from the formula"
+    for key in ("formula_id", "formula_version", "horizon_minutes"):
+        actual = _strict_int(snapshot.get(key))
+        expected = _strict_int(formula.get(key))
+        if actual is None or actual <= 0 or actual != expected:
+            return False, f"legacy frozen {key} differs from the formula"
+    conditions = _formula_conditions(formula)
+    if not conditions or not _type_strict_json_equal(
+        snapshot.get("conditions"), conditions
+    ):
+        return False, "legacy frozen conditions differ from the formula"
+    features = _as_mapping(snapshot.get("formula_key_features"))
+    if set(features) != {
+        str(condition.get("feature") or "") for condition in conditions
+    }:
+        return False, "legacy frozen formula feature keys differ from conditions"
+    direct = research_formula_engine.evaluate_frozen_feature_values(
+        features,
+        direction=formula.get("direction"),
+        event_direction=formula.get("direction"),
+        conditions=conditions,
+    )
+    if not _type_strict_json_equal(
+        snapshot.get("condition_results"), direct.get("condition_results")
+    ):
+        return False, "legacy frozen condition results differ from feature values"
+    prospective = _as_mapping(snapshot.get("prospective_evidence"))
+    if (
+        prospective.get("sampler_version")
+        != _PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+        or prospective.get("feature_bundle_policy_version")
+        != _FEATURE_BUNDLE_POLICY_VERSION
+    ):
+        return False, "legacy formula is not bound to sampler-v4 evidence"
+    slot_id = _strict_int(prospective.get("anchor_slot_id"))
+    if slot_id is None or slot_id <= 0:
+        return False, "legacy frozen anchor slot id is malformed"
+    for key in ("input_fingerprint", "feature_bundle_sha256"):
+        value = str(prospective.get(key) or "")
+        if len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            return False, f"legacy frozen {key} is malformed"
+    if not isinstance(prospective.get("source_timestamps"), Mapping) or not isinstance(
+        prospective.get("source_provenance"), Mapping
+    ):
+        return False, "legacy frozen source evidence is missing"
+    return True, "legacy v5 formula is bound to current frozen evidence"
+
+
 def _max_pain_snapshot_contract(
     formula: Mapping[str, Any],
     snapshot: Mapping[str, Any],
@@ -2461,20 +2741,24 @@ def _max_pain_snapshot_contract(
     symbol: Any,
 ) -> tuple[bool, str]:
     features = _v6_max_pain_condition_features(formula)
-    if str(formula.get("formula_schema_version") or "") != str(
-        research_formula_engine.FORMULA_SCHEMA_VERSION
-    ):
-        return True, "legacy Shadow snapshot contract is preserved"
-    if str(formula.get("feature_schema_version") or "") != str(
-        research_feature_matrix.FEATURE_SCHEMA_VERSION
-    ):
-        return False, "v6 Max-Pain formula feature schema is incompatible"
-    compatible, reason = _v6_snapshot_base_contract(
-        formula,
-        snapshot,
-        decision_time_utc=decision_time_utc,
-        expected_symbol=symbol,
-    )
+    formula_schema = str(formula.get("formula_schema_version") or "")
+    if formula_schema == str(research_formula_engine.FORMULA_SCHEMA_VERSION):
+        if str(formula.get("feature_schema_version") or "") != str(
+            research_feature_matrix.FEATURE_SCHEMA_VERSION
+        ):
+            return False, "v6 Max-Pain formula feature schema is incompatible"
+        compatible, reason = _v6_snapshot_base_contract(
+            formula,
+            snapshot,
+            decision_time_utc=decision_time_utc,
+            expected_symbol=symbol,
+        )
+    elif formula_schema == "research-formula-v5-safe-replay":
+        compatible, reason = _legacy_v5_snapshot_base_contract(
+            formula, snapshot
+        )
+    else:
+        return True, "non-executable diagnostic formula has no Shadow contract"
     if not compatible:
         return False, reason
     if not features:
@@ -2526,10 +2810,10 @@ def _max_pain_shadow_check_contract(
     formula: Mapping[str, Any], row: Mapping[str, Any]
 ) -> tuple[bool, str]:
     features = _v6_max_pain_condition_features(formula)
-    if str(formula.get("formula_schema_version") or "") != str(
-        research_formula_engine.FORMULA_SCHEMA_VERSION
+    if str(formula.get("formula_schema_version") or "") not in (
+        _SHADOW_COMPATIBLE_FORMULA_SCHEMAS
     ):
-        return True, "legacy Shadow snapshot contract is preserved"
+        return True, "non-executable diagnostic formula has no Shadow contract"
     snapshot = _as_mapping(row.get("input_snapshot"))
     compatible, reason = _max_pain_snapshot_contract(
         formula,
@@ -2615,12 +2899,12 @@ def _max_pain_shadow_check_contract(
     if evaluation_status in {"MATCHED", "UNMATCHED"}:
         condition_results = snapshot.get("condition_results") or []
         if not all(item.get("available") is True for item in condition_results):
-            return False, "evaluable v6 check has unavailable frozen conditions"
+            return False, "evaluable check has unavailable frozen conditions"
         expected_match = all(item.get("passed") is True for item in condition_results)
         if expected_match != (evaluation_status == "MATCHED"):
-            return False, "v6 evaluation status differs from frozen condition results"
+            return False, "evaluation status differs from frozen condition results"
         if bool(row.get("matched")) != expected_match:
-            return False, "v6 matched flag differs from frozen condition results"
+            return False, "matched flag differs from frozen condition results"
     event = {
         "event_id": row.get("event_id"),
         "alert_time_utc": row.get("alert_time_utc"),
@@ -2645,30 +2929,70 @@ def _max_pain_shadow_check_contract(
         return False, "decision_cohort_key does not match frozen inputs"
     if features:
         return True, "complete Max-Pain provenance and decision cohort are bound"
-    return True, "complete v6 snapshot and decision cohort are bound"
+    return True, "complete frozen snapshot and decision cohort are bound"
 
 
-def _authoritative_v6_row_contract(
+def _authoritative_frozen_row_contract(
     formula: Mapping[str, Any],
     event: Mapping[str, Any],
     result: Mapping[str, Any],
     row: Optional[Mapping[str, Any]],
+    authorized: Optional[Mapping[str, Any]] = None,
 ) -> tuple[bool, str]:
-    """Recompute a submitted v6 check from immutable authoritative inputs.
+    """Verify a Shadow write using only its immutable sampler-v4 bundle.
 
-    Slot ids and fingerprints prove identity, but cannot by themselves prove a
-    derived window value. The write boundary therefore rebuilds the row from
-    the frozen slot series and compares every formula-visible value, source
-    family, width reference and Max-Pain bundle before accepting a hit.
+    This applies equally to active legacy-v5 and current-v6 Shadow formulas.
+    The only computation repeated here is each stored formula operator against
+    the flat values already frozen at decision time.  No archive feature
+    extraction or later reconstruction is permitted at this write boundary.
     """
     if not isinstance(row, Mapping):
         return False, "authoritative frozen feature row is unavailable"
-    if row.get("feature_schema_version") != research_feature_matrix.FEATURE_SCHEMA_VERSION:
-        return False, "authoritative feature schema version is incompatible"
-    if row.get("decision_input_policy_version") != (
-        research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+    if not isinstance(authorized, Mapping):
+        return False, "authoritative sampler-v4 database row is unavailable"
+    if row.get("decision_input_policy_version") != _PROSPECTIVE_EVIDENCE_POLICY_VERSION:
+        return False, "authoritative row uses an incompatible evidence policy"
+
+    snapshot = _as_mapping(result.get("input_snapshot"))
+    if snapshot.get("snapshot_policy_version") != _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION:
+        return False, "submitted Shadow snapshot policy is incompatible"
+    if snapshot.get("decision_cohort_policy_version") != _DECISION_COHORT_POLICY_VERSION:
+        return False, "submitted decision cohort policy is incompatible"
+    if snapshot.get("decision_input_policy_version") != _PROSPECTIVE_EVIDENCE_POLICY_VERSION:
+        return False, "submitted decision input policy is incompatible"
+    if snapshot.get("evidence_policy_version") != _PROSPECTIVE_EVIDENCE_POLICY_VERSION:
+        return False, "submitted evidence policy is incompatible"
+
+    formula_identity = {
+        "formula_id": _strict_int(formula.get("formula_id")),
+        "formula_key": str(formula.get("formula_key") or ""),
+        "formula_version": _strict_int(formula.get("formula_version")),
+        "formula_schema_version": str(formula.get("formula_schema_version") or ""),
+        "engine_version": formula.get("engine_version"),
+        "feature_schema_version": str(formula.get("feature_schema_version") or ""),
+        "outcome_method_version": str(formula.get("outcome_method_version") or ""),
+        "horizon_minutes": _strict_int(formula.get("horizon_minutes")),
+    }
+    if (
+        formula_identity["formula_id"] is None
+        or formula_identity["formula_id"] <= 0
+        or formula_identity["formula_version"] is None
+        or formula_identity["formula_version"] <= 0
+        or formula_identity["horizon_minutes"] not in {60, 240, 720, 1440}
     ):
-        return False, "authoritative row is not from the frozen prospective policy"
+        return False, "authoritative formula identity is malformed"
+    for key, expected in formula_identity.items():
+        actual = _strict_int(snapshot.get(key)) if key in {
+            "formula_id", "formula_version", "horizon_minutes"
+        } else snapshot.get(key)
+        if actual != expected:
+            return False, f"submitted {key} differs from the database formula"
+    expected_conditions = _formula_conditions(formula)
+    if not expected_conditions or not _type_strict_json_equal(
+        snapshot.get("conditions"), expected_conditions
+    ):
+        return False, "submitted conditions differ from the database formula"
+
     row_event = _as_mapping(row.get("event"))
     try:
         row_event_id = _strict_int(row_event.get("event_id"))
@@ -2696,18 +3020,138 @@ def _authoritative_v6_row_contract(
         event.get("direction") or ""
     ).upper():
         return False, "authoritative row direction does not match"
+    if str(row_event.get("event_type") or "") != str(
+        event.get("event_type") or ""
+    ):
+        return False, "authoritative row event_type does not match"
+    if str(row_event.get("setup_key") or "") != str(
+        event.get("setup_key") or ""
+    ):
+        return False, "authoritative row setup_key does not match"
+    for key in ("source_side", "timeframe", "strategy_version", "code_version"):
+        if str(row_event.get(key) or "") != str(event.get(key) or ""):
+            return False, f"authoritative row {key} does not match"
 
-    evaluation = research_formula_engine.evaluate_formula(
-        row,
-        direction=formula.get("direction"),
-        conditions=_formula_conditions(formula),
+    frozen_event = _as_mapping(snapshot.get("event"))
+    for key in (
+        "event_id",
+        "alert_time_utc",
+        "symbol",
+        "direction",
+        "event_type",
+        "setup_key",
+        "source_side",
+        "timeframe",
+        "strategy_version",
+        "code_version",
+    ):
+        expected = event.get(key)
+        actual = frozen_event.get(key)
+        if key == "event_id":
+            actual, expected = _strict_int(actual), _strict_int(expected)
+        elif key == "alert_time_utc":
+            try:
+                actual, expected = _as_utc(actual), _as_utc(expected)
+            except (TypeError, ValueError, OverflowError):
+                return False, "submitted frozen event time is malformed"
+        elif key in {"symbol", "direction"}:
+            actual, expected = str(actual or "").upper(), str(expected or "").upper()
+        else:
+            actual, expected = str(actual or ""), str(expected or "")
+        if actual != expected:
+            return False, f"submitted frozen event {key} differs from database"
+
+    bundle = _as_mapping(authorized.get("decision_feature_bundle"))
+    bundle_hash = str(authorized.get("feature_bundle_sha256") or "").strip()
+    compatible, reason = research_prospective_feature_freeze.validate_feature_bundle(
+        bundle,
+        expected_sha256=bundle_hash,
+        expected_symbol=event.get("symbol"),
+        expected_decision_time_utc=event.get("alert_time_utc"),
     )
-    snapshot = _as_mapping(result.get("input_snapshot"))
+    if not compatible:
+        return False, "authoritative decision feature bundle rejected: " + reason
+    if row.get("feature_schema_version") != bundle.get("feature_schema_version"):
+        return False, "loaded feature schema differs from authoritative bundle"
+    if authorized.get("sampler_version") != _PROSPECTIVE_ANCHOR_SAMPLER_VERSION:
+        return False, "authoritative sampler version is incompatible"
+    if authorized.get("feature_bundle_policy_version") != _FEATURE_BUNDLE_POLICY_VERSION:
+        return False, "authoritative feature bundle policy is incompatible"
+    try:
+        expected_input_fingerprint = research_prospective_anchors.compute_input_fingerprint(
+            sampler_version=authorized.get("sampler_version"),
+            coverage_policy_version=authorized.get("coverage_policy_version"),
+            coverage_snapshot=_as_mapping(authorized.get("coverage_snapshot")),
+            symbol=authorized.get("symbol"),
+            source_candle_open_utc=authorized.get("source_candle_open_utc"),
+            source_candle_close_utc=authorized.get("source_candle_close_utc"),
+            base_eligible_at_utc=authorized.get("base_eligible_at_utc"),
+            expires_at_utc=authorized.get("expires_at_utc"),
+            evaluation_status=research_prospective_anchors.EVALUABLE,
+            decision_time_utc=authorized.get("decision_time_utc"),
+            source_timestamps=_as_mapping(authorized.get("source_timestamps")),
+            source_provenance=_as_mapping(authorized.get("source_provenance")),
+            frozen_inputs=_as_mapping(authorized.get("frozen_inputs")),
+            feature_bundle_policy_version=authorized.get(
+                "feature_bundle_policy_version"
+            ),
+            feature_bundle_sha256=bundle_hash,
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        return False, f"authoritative prospective input fingerprint is malformed: {exc}"
+    recorded_input_fingerprint = str(
+        authorized.get("input_fingerprint") or ""
+    ).strip()
+    if expected_input_fingerprint != recorded_input_fingerprint:
+        return False, "authoritative prospective input fingerprint mismatch"
+
+    prospective = _as_mapping(snapshot.get("prospective_evidence"))
+    row_prospective = _as_mapping(row.get("prospective_evidence"))
+    expected_prospective = {
+        "sampler_version": _PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+        "feature_bundle_policy_version": _FEATURE_BUNDLE_POLICY_VERSION,
+        "anchor_slot_id": _strict_int(authorized.get("anchor_slot_id")),
+        "input_fingerprint": recorded_input_fingerprint,
+        "feature_bundle_sha256": bundle_hash,
+        "source_timestamps": dict(_as_mapping(authorized.get("source_timestamps"))),
+        "source_provenance": dict(_as_mapping(authorized.get("source_provenance"))),
+    }
+    if expected_prospective["anchor_slot_id"] is None or expected_prospective[
+        "anchor_slot_id"
+    ] <= 0:
+        return False, "authoritative prospective anchor slot id is malformed"
+    if not _type_strict_json_equal(row_prospective, expected_prospective):
+        return False, "loaded prospective evidence differs from database slot"
+    if not _type_strict_json_equal(prospective, expected_prospective):
+        return False, "submitted prospective evidence differs from database slot"
+
+    bundle_features_by_direction = _as_mapping(bundle.get("features_by_direction"))
+    authoritative_features = _as_mapping(
+        bundle_features_by_direction.get(str(formula.get("direction") or "").upper())
+    )
+    if str(authoritative_features.get("event.symbol") or "").upper() != str(
+        event.get("symbol") or ""
+    ).upper():
+        return False, "authoritative bundle event symbol does not match"
+    if str(authoritative_features.get("event.event_type") or "") != str(
+        event.get("event_type") or ""
+    ):
+        return False, "authoritative bundle event type does not match"
+    if not _type_strict_json_equal(
+        row.get("frozen_decision_features"), authoritative_features
+    ):
+        return False, "loaded frozen feature values differ from authoritative bundle"
+    evaluation = research_formula_engine.evaluate_frozen_feature_values(
+        authoritative_features,
+        direction=formula.get("direction"),
+        event_direction=event.get("direction"),
+        conditions=expected_conditions,
+    )
     expected_features = evaluation.get("features")
     if not isinstance(expected_features, Mapping):
         expected_features = {}
     condition_names = {
-        str(item.get("feature") or "") for item in _formula_conditions(formula)
+        str(item.get("feature") or "") for item in expected_conditions
     }
     authoritative_formula_features = {
         name: expected_features.get(name) for name in condition_names
@@ -2716,22 +3160,32 @@ def _authoritative_v6_row_contract(
         snapshot.get("formula_key_features") or {},
         authoritative_formula_features,
     ):
-        return False, "submitted formula feature values differ from authoritative slots"
+        return False, "submitted formula feature values differ from authoritative bundle"
     if not _type_strict_json_equal(
         result.get("condition_results") or [],
         evaluation.get("condition_results") or [],
     ):
-        return False, "submitted condition results differ from authoritative evaluation"
+        return False, "submitted condition results differ from frozen operator evaluation"
     expected_status = str(evaluation.get("status") or "UNEVALUABLE").upper()
     submitted_status = str(result.get("evaluation_status") or "").upper()
     if submitted_status != expected_status:
-        return False, "submitted evaluation status differs from authoritative evaluation"
+        return False, "submitted evaluation status differs from frozen operator evaluation"
+    if str(result.get("evaluation_reason") or "") != str(
+        evaluation.get("reason") or ""
+    ):
+        return False, "submitted evaluation reason differs from frozen operator evaluation"
+    if str(snapshot.get("evaluation_status") or "").upper() != expected_status:
+        return False, "snapshot evaluation status differs from frozen operator evaluation"
+    if str(snapshot.get("evaluation_reason") or "") != str(
+        evaluation.get("reason") or ""
+    ):
+        return False, "snapshot evaluation reason differs from frozen operator evaluation"
     expected_matched = expected_status == "MATCHED"
     if (
         type(result.get("matched")) is not bool
         or result.get("matched") is not expected_matched
     ):
-        return False, "submitted matched flag differs from authoritative evaluation"
+        return False, "submitted matched flag differs from frozen operator evaluation"
 
     raw = _as_mapping(row.get("raw_features"))
     latest = _as_mapping(raw.get("latest_at_or_before_alert"))
@@ -2745,18 +3199,67 @@ def _authoritative_v6_row_contract(
     ):
         return False, "submitted source inputs differ from authoritative frozen slots"
 
+    horizon = str(int(formula_identity["horizon_minutes"]))
+    context = _as_mapping(_as_mapping(bundle.get("horizon_context")).get(horizon))
+    context_session = _as_mapping(context.get("session"))
+    expected_session = {
+        "session_active_ratio": context_session.get("active_ratio"),
+        "session_weekend_ratio": context_session.get("weekend_ratio"),
+        "session_segments": context_session.get("segments"),
+        "session_composition": context_session.get("composition"),
+    }
+    width_reference = _as_mapping(context.get("movement_width_reference"))
     outcome_label = _as_mapping(row.get("outcome_label"))
-    width_reference = _as_mapping(outcome_label.get("movement_width_reference"))
+    loaded_session = {
+        key: outcome_label.get(key) for key in expected_session
+    }
+    if not _type_strict_json_equal(loaded_session, expected_session):
+        return False, "loaded horizon session differs from authoritative bundle"
+    if not _type_strict_json_equal(
+        outcome_label.get("movement_width_reference"), width_reference
+    ):
+        return False, "loaded movement-width reference differs from authoritative bundle"
+    if not _type_strict_json_equal(
+        snapshot.get("outcome_window_session") or {}, expected_session
+    ):
+        return False, "submitted horizon session differs from authoritative bundle"
     if not _type_strict_json_equal(
         snapshot.get("movement_width_reference") or {}, width_reference
     ):
-        return False, "submitted movement-width reference differs from authoritative row"
+        return False, "submitted movement-width reference differs from authoritative bundle"
 
     expected_max_pain = _canonical_max_pain_snapshot_evidence(formula, row)
     recorded_max_pain = snapshot.get("max_pain_provenance")
     if not _type_strict_json_equal(recorded_max_pain, expected_max_pain):
         return False, "submitted Max-Pain evidence differs from the frozen slot bundle"
-    return True, "v6 check matches authoritative frozen feature recomputation"
+    try:
+        expected_cohort_key, expected_anchor = _decision_cohort_identity(
+            formula=formula,
+            event=event,
+            snapshot=snapshot,
+        )
+        recorded_anchor = _as_utc(result.get("decision_anchor_time_utc"))
+        decision_time = _as_utc(event.get("alert_time_utc"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        return False, f"submitted decision cohort evidence is malformed: {exc}"
+    if str(result.get("decision_cohort_key") or "") != expected_cohort_key:
+        return False, "submitted decision cohort key differs from frozen evidence"
+    if recorded_anchor != expected_anchor or expected_anchor > decision_time:
+        return False, "submitted decision cohort anchor differs from frozen evidence"
+    return True, "Shadow check matches the authoritative frozen decision bundle"
+
+
+def _authoritative_v6_row_contract(
+    formula: Mapping[str, Any],
+    event: Mapping[str, Any],
+    result: Mapping[str, Any],
+    row: Optional[Mapping[str, Any]],
+    authorized: Optional[Mapping[str, Any]] = None,
+) -> tuple[bool, str]:
+    """Compatibility alias for callers of the former v6-only verifier."""
+    return _authoritative_frozen_row_contract(
+        formula, event, result, row, authorized
+    )
 
 
 def _max_pain_validation_evidence(
@@ -2860,13 +3363,17 @@ def _terminal_threshold_matches_snapshot(
         if snapshot.get("snapshot_policy_version") != (
             _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
         ):
-            return False, "terminal v6 snapshot policy version is incompatible"
+            return False, "terminal frozen snapshot policy version is incompatible"
         if snapshot.get("decision_cohort_policy_version") != (
             _DECISION_COHORT_POLICY_VERSION
         ):
-            return False, "terminal v6 decision cohort policy is incompatible"
+            return False, "terminal frozen decision cohort policy is incompatible"
+        if snapshot.get("evidence_policy_version") != (
+            _PROSPECTIVE_EVIDENCE_POLICY_VERSION
+        ):
+            return False, "terminal frozen evidence policy is incompatible"
         if not reference:
-            return False, "terminal v6 movement-width reference is missing"
+            return False, "terminal frozen movement-width reference is missing"
     raw_scale = (
         reference.get("threshold_scale_factor")
         if reference.get("threshold_scale_factor") is not None
@@ -2901,7 +3408,10 @@ def _terminal_threshold_matches_snapshot(
             expected_policy = research_no_dwell_outcome.freeze_threshold_policy(
                 horizon_minutes=horizon_minutes,
                 decision_time=decision_time,
-                prior_only_reference=reference if relaxed else None,
+                # Even scale=1 is an explicit prior-only decision-time
+                # calibration result, not permission to substitute a static
+                # threshold later.
+                prior_only_reference=reference,
             )
             actual_policy = _as_mapping(
                 source.get("first_touch_threshold_policy")
@@ -2909,14 +3419,14 @@ def _terminal_threshold_matches_snapshot(
             if not _type_strict_json_equal(actual_policy, expected_policy):
                 return False, "terminal threshold policy differs from frozen snapshot"
         except (TypeError, ValueError, OverflowError):
-            return False, "terminal v6 width provenance is malformed"
+            return False, "terminal frozen width provenance is malformed"
     if not math.isclose(
         actual_scale, expected_scale, rel_tol=0.0, abs_tol=1e-8
     ):
         return False, "terminal threshold scale differs from frozen width"
     expected_kind = (
         "PRIOR_ONLY_SESSION_CALIBRATION"
-        if relaxed
+        if require_v6_contract or relaxed
         else "STATIC_HORIZON_FLOOR"
     )
     if str(source.get("first_touch_threshold_source_kind") or "").upper() != expected_kind:
@@ -3267,9 +3777,9 @@ def _build_shadow_validation(
             "requires a separately frozen prospective review"
         ),
         "sampling_frame": (
-            "new delivered bot ALERT rows plus authorized atomic silent "
-            "DECISION_SAMPLE LONG/SHORT anchors; controls are evaluable formula "
-            "nonmatches within that prospective population"
+            "authoritative sampler-v4 silent DECISION_SAMPLE LONG/SHORT "
+            "anchors with verified frozen feature-bundle evidence; controls "
+            "are evaluable formula nonmatches within that population"
         ),
         "metrics": metrics,
         "priority_ranking": priority,

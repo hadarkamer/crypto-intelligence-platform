@@ -9,6 +9,7 @@ from pathlib import Path
 
 import research_prospective_anchor_store as store_module
 import research_prospective_anchors as anchors
+import research_prospective_feature_freeze as feature_freeze
 import research_formula_schema_admin
 
 
@@ -252,9 +253,20 @@ def run() -> None:
     migration_path = Path("migrations/010_prospective_max_pain_freeze_v1.sql")
     assert migration_path.resolve() in research_formula_schema_admin.MIGRATION_PATHS
     migration_sql = migration_path.read_text(encoding="utf-8")
-    assert anchors.SAMPLER_VERSION in migration_sql
+    assert "prospective-neutral-anchor-v3-max-pain-frozen" in migration_sql
     assert migration_sql.count("COALESCE((") == 2
     assert "frozen_inputs#>'{max_pain,features}'" in migration_sql
+    freeze_migration_path = Path(
+        "migrations/013_prospective_decision_feature_freeze_v1.sql"
+    )
+    assert (
+        freeze_migration_path.resolve()
+        in research_formula_schema_admin.MIGRATION_PATHS
+    )
+    freeze_migration_sql = freeze_migration_path.read_text(encoding="utf-8")
+    assert anchors.SAMPLER_VERSION in freeze_migration_sql
+    assert feature_freeze.FEATURE_POLICY_VERSION in freeze_migration_sql
+    assert "decision_feature_bundle JSONB" in freeze_migration_sql
     slot = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
     now = datetime(2026, 8, 29, 12, 34, tzinfo=UTC)
     replay_coverage = {}
@@ -421,6 +433,22 @@ def run() -> None:
     else:
         raise AssertionError("a pre-cutoff read-completion timestamp was accepted")
 
+    generated_feature_bundles = input_store.build_decision_feature_bundles(
+        source_inputs_by_symbol=source_inputs,
+        decision_time_utc=source_batch.read_completed_at_utc,
+        code_version="selftest",
+    )
+    assert set(generated_feature_bundles) == {"BTC"}
+    feature_bundle_entry = generated_feature_bundles["BTC"]
+    feature_bundle_valid, feature_bundle_reason = (
+        feature_freeze.validate_feature_bundle(
+            feature_bundle_entry["decision_feature_bundle"],
+            expected_sha256=feature_bundle_entry["feature_bundle_sha256"],
+            expected_symbol="BTC",
+            expected_decision_time_utc=source_batch.read_completed_at_utc,
+        )
+    )
+    assert feature_bundle_valid, feature_bundle_reason
     batch = anchors.build_anchor_batch(
         now=source_batch.read_completed_at_utc,
         slot_open_utc=slot,
@@ -429,6 +457,7 @@ def run() -> None:
         coverage_policy_version=store_module.COVERAGE_POLICY_VERSION,
         strategy_version="selftest",
         code_version="selftest",
+        feature_bundles_by_symbol={"BTC": feature_bundle_entry},
     )
     assert batch.decisions[0].evaluation_status == anchors.EVALUABLE
     assert len(batch.events) == 2
@@ -454,6 +483,13 @@ def run() -> None:
         def load_source_inputs(self, **kwargs):
             assert kwargs["checked_at_utc"] == now
             return source_batch
+
+        def build_decision_feature_bundles(self, **kwargs):
+            assert kwargs["decision_time_utc"] == (
+                source_batch.read_completed_at_utc
+            )
+            assert tuple(kwargs["source_inputs_by_symbol"]) == ("BTC",)
+            return {"BTC": deepcopy(feature_bundle_entry)}
 
         def persist_bundle(self, bundle):
             return store_module.PersistResult(
@@ -500,6 +536,33 @@ def run() -> None:
         flow_timestamp_mode="open",
     )
     bundle = batch.atomic_persistence_bundles()[0]
+    mutated_bundle = deepcopy(bundle)
+    mutated_bundle["slot"]["decision_feature_bundle"]["symbol"] = "ETH"
+    state_before_mutation_probe = deepcopy(state)
+    connections_before_mutation_probe = len(connections)
+    try:
+        persistence.persist_bundle(mutated_bundle)
+    except ValueError as exc:
+        assert "feature bundle rejected" in str(exc)
+    else:
+        raise AssertionError("a post-hash feature-bundle mutation was accepted")
+    assert state == state_before_mutation_probe
+    assert len(connections) == connections_before_mutation_probe
+
+    mutated_inputs_bundle = deepcopy(bundle)
+    for record_name in ("attempt", "slot"):
+        mutated_inputs_bundle[record_name]["frozen_inputs"]["price_oi"][
+            "oi_change_pct"
+        ] = 999.0
+    try:
+        persistence.persist_bundle(mutated_inputs_bundle)
+    except ValueError as exc:
+        assert "input fingerprint mismatch" in str(exc)
+    else:
+        raise AssertionError("post-fingerprint source mutation was accepted")
+    assert state == state_before_mutation_probe
+    assert len(connections) == connections_before_mutation_probe
+
     first = persistence.persist_bundle(bundle)
     assert first.idempotent is False
     assert first.long_event_id != first.short_event_id
@@ -527,6 +590,7 @@ def run() -> None:
         coverage_policy_version=store_module.COVERAGE_POLICY_VERSION,
         strategy_version="selftest",
         code_version="selftest",
+        feature_bundles_by_symbol={"BTC": feature_bundle_entry},
     )
     before_conflict = deepcopy(state)
     try:

@@ -1,6 +1,8 @@
 """Deterministic checks for the no-lookahead research feature matrix."""
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import math
 
 import research_feature_matrix as matrix
 
@@ -179,93 +181,201 @@ def run() -> None:
     assert "created_at_utc<=requested.decision_time_utc" in candidate_query
     assert "LIMIT 2" in candidate_query
 
-    # Prospective sampler v3 rows are accepted only when the complete slot
-    # payload reproduces its fingerprint. Max Pain comes from that same frozen
-    # payload and is mapped to both neutral directions.
+    # Prior immutable source slots are accepted only when their complete
+    # payload reproduces its fingerprint *and* the sampler's deep source-time,
+    # no-fallback and canonical-route contract still passes.  This helper is
+    # capture-only; Shadow consumes a separate v4 bundle below.
     slot_time = datetime(2026, 8, 29, 12, 34, tzinfo=timezone.utc)
     slot_open = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
     slot_close = slot_open + timedelta(minutes=30)
     eligible_at = slot_close + timedelta(minutes=2)
     expires_at = eligible_at + timedelta(minutes=30)
-    slot_timestamps = {
-        family: {"source_time_utc": slot_open.isoformat()}
-        for family in matrix.research_prospective_anchors.REQUIRED_FAMILIES
-    }
-    slot_provenance = {
-        "official_price": {
-            "source": "binance_spot",
-            "price_exchange": "Binance",
-            "price_market": "spot",
-            "price_pair": "BTCUSDT",
-            "price_timeframe": "1m",
-        },
-        "price_oi": {"source": "oi_regime_snapshots"},
-        "futures_cvd": {
-            "source": "coinglass_futures_aggregated_cvd",
-            "exchange_list": "Binance,OKX,Bybit",
-        },
-        "spot_cvd": {
-            "source": "coinglass_spot_aggregated_cvd",
-            "exchange_list": "Binance,OKX,Bybit",
-        },
-    }
-    slot_frozen = {
-        "official_price": {"price": 100.0},
-        "price_oi": {"oi_close_usd": 1_000_000.0},
-        "futures_cvd": {
-            "buy_volume_usd": 20.0,
-            "sell_volume_usd": 10.0,
-            "api_cum_vol_delta_usd": 9.0,
-            "continuous_cum_vol_delta_usd": 10.0,
-        },
-        "spot_cvd": {
-            "buy_volume_usd": 11.0,
-            "sell_volume_usd": 8.0,
-            "api_cum_vol_delta_usd": 2.0,
-            "continuous_cum_vol_delta_usd": 3.0,
-        },
-        "max_pain": {
-            "evaluation_status": "UNEVALUABLE",
-            "reason": "no prior coherent snapshot",
-            "features": {},
-        },
-    }
-    coverage_snapshot = {"symbol": "BTC", "eligible": True}
-    slot_row = {
-        "anchor_slot_id": 71,
-        "sampler_version": matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
-        "coverage_policy_version": "selftest-coverage",
-        "coverage_snapshot": coverage_snapshot,
-        "symbol": "BTC",
-        "source_candle_open_utc": slot_open,
-        "source_candle_close_utc": slot_close,
-        "base_eligible_at_utc": eligible_at,
-        "expires_at_utc": expires_at,
-        "decision_time_utc": slot_time,
-        "source_timestamps": slot_timestamps,
-        "source_provenance": slot_provenance,
-        "frozen_inputs": slot_frozen,
-        "long_event_id": 701,
-        "short_event_id": 702,
-        "created_at_utc": slot_time + timedelta(seconds=1),
-    }
-    slot_row["input_fingerprint"] = (
-        matrix.research_prospective_anchors.compute_input_fingerprint(
-            sampler_version=slot_row["sampler_version"],
-            coverage_policy_version=slot_row["coverage_policy_version"],
-            coverage_snapshot=coverage_snapshot,
-            symbol="BTC",
-            source_candle_open_utc=slot_open,
-            source_candle_close_utc=slot_close,
-            base_eligible_at_utc=eligible_at,
-            expires_at_utc=expires_at,
-            evaluation_status=matrix.research_prospective_anchors.EVALUABLE,
-            decision_time_utc=slot_time,
-            source_timestamps=slot_timestamps,
-            source_provenance=slot_provenance,
-            frozen_inputs=slot_frozen,
+    legacy_v3 = "prospective-neutral-anchor-v3-max-pain-frozen"
+
+    def _slot(symbol, *, sampler_version=legacy_v3, slot_id=71):
+        hype = symbol == "HYPE"
+        source_timestamps = {
+            "official_price": {
+                "observed_at_utc": (slot_time - timedelta(seconds=20)).isoformat(),
+                "refresh_completed_at_utc": (
+                    slot_time - timedelta(seconds=10)
+                ).isoformat(),
+            },
+            "price_oi": {
+                "observation_time_utc": (
+                    slot_time - timedelta(seconds=8)
+                ).isoformat(),
+                "refresh_completed_at_utc": (
+                    slot_time - timedelta(seconds=4)
+                ).isoformat(),
+                "price_fetched_at_utc": (
+                    slot_time - timedelta(seconds=12)
+                ).isoformat(),
+                "oi_fetched_at_utc": (
+                    slot_time - timedelta(seconds=11)
+                ).isoformat(),
+            },
+            "futures_cvd": {
+                "source_candle_time_utc": slot_open.isoformat(),
+                "refresh_completed_at_utc": (
+                    slot_time - timedelta(seconds=6)
+                ).isoformat(),
+            },
+            "spot_cvd": {
+                "source_candle_time_utc": slot_open.isoformat(),
+                "refresh_completed_at_utc": (
+                    slot_time - timedelta(seconds=5)
+                ).isoformat(),
+            },
+        }
+        official_source = "hyperliquid_spot_@107" if hype else "binance_spot"
+        source_provenance = {
+            "official_price": {
+                "source": official_source,
+                "quality_status": "PASS",
+                "price_exchange": "Hyperliquid" if hype else "Binance",
+                "price_market": "spot",
+                "price_pair": "HYPE/USDT" if hype else f"{symbol}USDT",
+                # Binance pair identifiers are retained as provenance but are
+                # not provider API instruments. HYPE must retain @107.
+                "price_instrument_id": "@107" if hype else f"{symbol}USDT",
+                "price_timeframe": "1m",
+                "fallback_used": False,
+                "fallback_policy": "PROVIDER_ATTESTED_NO_FALLBACK",
+            },
+            "price_oi": {
+                "source": "oi_regime_snapshots",
+                "quality_status": "PASS",
+                "source_table": "oi_regime_snapshots",
+                "price_source": official_source,
+                "oi_source": "coinglass",
+            },
+            "futures_cvd": {
+                "source": "coinglass_futures_aggregated_cvd",
+                "quality_status": "PASS",
+                "exchange_list": "Binance,OKX,Bybit",
+                "candle_timestamp_mode": "open",
+            },
+            "spot_cvd": {
+                "source": "coinglass_spot_aggregated_cvd",
+                "quality_status": "PASS",
+                "exchange_list": "Binance,OKX,Bybit",
+                "candle_timestamp_mode": "open",
+            },
+        }
+        frozen_inputs = {
+            "official_price": {"price": 100.0},
+            "price_oi": {
+                "price_close": 100.0,
+                "oi_close_usd": 1_000_000.0,
+            },
+            "futures_cvd": {
+                "buy_volume_usd": 20.0,
+                "sell_volume_usd": 10.0,
+                "api_cum_vol_delta_usd": 9.0,
+                "continuous_cum_vol_delta_usd": 10.0,
+            },
+            "spot_cvd": {
+                "buy_volume_usd": 11.0,
+                "sell_volume_usd": 8.0,
+                "api_cum_vol_delta_usd": 2.0,
+                "continuous_cum_vol_delta_usd": 3.0,
+            },
+            "max_pain": {
+                "evaluation_status": "UNEVALUABLE",
+                "reason": "no prior coherent snapshot",
+                "features": {},
+            },
+        }
+        coverage_minimum = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+        coverage_maximum = coverage_minimum + timedelta(hours=336)
+        replay_completed = coverage_maximum + timedelta(hours=24)
+        coverage_snapshot = {
+            "symbol": symbol,
+            "eligible": True,
+            "failed_gates": [],
+            "coverage_policy_version": (
+                matrix.research_prospective_anchors.COVERAGE_POLICY_VERSION
+            ),
+            "method_version": matrix.research_no_dwell_outcome.METHOD_VERSION,
+            "replay_version": matrix.research_historical_replay.REPLAY_VERSION,
+            "coverage_scope_version": (
+                matrix.research_historical_replay.COVERAGE_SCOPE_VERSION
+            ),
+            "movement_width_calibration_version": (
+                matrix.research_session_width.CALIBRATION_VERSION
+            ),
+            "canonical_price_method_version": (
+                matrix.canonical_price_path.METHOD_VERSION
+            ),
+            "canonical_price_provenance_version": (
+                matrix.canonical_price_path.PRICE_PROVENANCE_VERSION
+            ),
+            "replay_run_id": 1,
+            "as_of_utc": (replay_completed + timedelta(days=1)).isoformat(),
+            "replay_completed_at_utc": replay_completed.isoformat(),
+            "horizons": {
+                str(horizon): {
+                    "eligible": True,
+                    "failed_gates": [],
+                    "anchors": 250,
+                    "utc_dates": 15,
+                    "span_hours": 336.0,
+                    "min_anchor_time_utc": coverage_minimum.isoformat(),
+                    "max_anchor_time_utc": coverage_maximum.isoformat(),
+                }
+                for horizon in (60, 240, 720, 1440)
+            },
+        }
+        row = {
+            "anchor_slot_id": slot_id,
+            "sampler_version": sampler_version,
+            "coverage_policy_version": (
+                matrix.research_prospective_anchors.COVERAGE_POLICY_VERSION
+            ),
+            "coverage_snapshot": coverage_snapshot,
+            "symbol": symbol,
+            "source_candle_open_utc": slot_open,
+            "source_candle_close_utc": slot_close,
+            "base_eligible_at_utc": eligible_at,
+            "expires_at_utc": expires_at,
+            "decision_time_utc": slot_time,
+            "source_timestamps": source_timestamps,
+            "source_provenance": source_provenance,
+            "frozen_inputs": frozen_inputs,
+            "feature_bundle_policy_version": None,
+            "feature_bundle_sha256": None,
+            "long_event_id": slot_id * 10 + 1,
+            "short_event_id": slot_id * 10 + 2,
+            "created_at_utc": slot_time + timedelta(seconds=1),
+        }
+        return row
+
+    def _rehash(row):
+        row["input_fingerprint"] = (
+            matrix.research_prospective_anchors.compute_input_fingerprint(
+                sampler_version=row["sampler_version"],
+                coverage_policy_version=row["coverage_policy_version"],
+                coverage_snapshot=row["coverage_snapshot"],
+                symbol=row["symbol"],
+                source_candle_open_utc=row["source_candle_open_utc"],
+                source_candle_close_utc=row["source_candle_close_utc"],
+                base_eligible_at_utc=row["base_eligible_at_utc"],
+                expires_at_utc=row["expires_at_utc"],
+                evaluation_status=matrix.research_prospective_anchors.EVALUABLE,
+                decision_time_utc=row["decision_time_utc"],
+                source_timestamps=row["source_timestamps"],
+                source_provenance=row["source_provenance"],
+                frozen_inputs=row["frozen_inputs"],
+                feature_bundle_policy_version=row.get(
+                    "feature_bundle_policy_version"
+                ),
+                feature_bundle_sha256=row.get("feature_bundle_sha256"),
+            )
         )
-    )
+        return row
+
+    slot_row = _rehash(_slot("BTC"))
 
     class _FrozenSlotConnection:
         def __init__(self, row):
@@ -273,7 +383,9 @@ def run() -> None:
 
         def execute(self, query, params):
             assert query.count("%s") == len(params)
-            assert params[0] == matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+            assert "sampler_version=ANY(%s)" in query
+            assert params[0] == [self.row["sampler_version"]]
+            assert "created_at_utc <= %s" in query
             return _BatchResult(many=[self.row])
 
     frozen_loaded = matrix._load_prospective_frozen_rows(
@@ -281,20 +393,567 @@ def run() -> None:
         symbols=("BTC",),
         start=slot_time - timedelta(days=1),
         end=slot_time,
+        sampler_versions=(legacy_v3,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
     )
     assert [len(values) for values in frozen_loaded[:4]] == [1, 1, 1, 1]
     assert frozen_loaded[4] == {
-        701: slot_frozen["max_pain"],
-        702: slot_frozen["max_pain"],
+        slot_row["long_event_id"]: slot_row["frozen_inputs"]["max_pain"],
+        slot_row["short_event_id"]: slot_row["frozen_inputs"]["max_pain"],
     }
+    assert frozen_loaded[0][0]["price_instrument_id"] is None
+    assert frozen_loaded[0][0]["prospective_sampler_version"] == legacy_v3
+    try:
+        matrix._load_prospective_frozen_rows(
+            _FrozenSlotConnection(slot_row),
+            symbols=("BTC",),
+            start=slot_time - timedelta(days=1),
+            end=slot_time,
+            sampler_versions=("unsupported-sampler",),
+        )
+        raise AssertionError("unsupported prospective sampler was accepted")
+    except ValueError as error:
+        assert "unsupported prospective source sampler" in str(error)
+    hype_row = _rehash(_slot("HYPE", slot_id=72))
+    hype_loaded = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(hype_row),
+        symbols=("HYPE",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+        sampler_versions=(legacy_v3,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
+    )
+    assert [len(values) for values in hype_loaded[:4]] == [1, 1, 1, 1]
+    assert hype_loaded[0][0]["price_exchange"] == "hyperliquid"
+    assert hype_loaded[0][0]["price_pair"] == "HYPE/USDT"
+    assert hype_loaded[0][0]["price_instrument_id"] == "@107"
+
     fingerprint_tampered = {**slot_row, "input_fingerprint": "0" * 64}
     rejected = matrix._load_prospective_frozen_rows(
         _FrozenSlotConnection(fingerprint_tampered),
         symbols=("BTC",),
         start=slot_time - timedelta(days=1),
         end=slot_time,
+        sampler_versions=(legacy_v3,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
     )
     assert all(not values for values in rejected)
+
+    # A recomputed payload hash cannot legalize fallback or future evidence.
+    fallback_tampered = deepcopy(slot_row)
+    fallback_tampered["source_provenance"]["official_price"][
+        "fallback_used"
+    ] = True
+    _rehash(fallback_tampered)
+    rejected = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(fallback_tampered),
+        symbols=("BTC",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+        sampler_versions=(legacy_v3,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
+    )
+    assert all(not values for values in rejected)
+    missing_fallback_policy = deepcopy(slot_row)
+    del missing_fallback_policy["source_provenance"]["official_price"][
+        "fallback_policy"
+    ]
+    _rehash(missing_fallback_policy)
+    rejected = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(missing_fallback_policy),
+        symbols=("BTC",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+        sampler_versions=(legacy_v3,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
+    )
+    assert all(not values for values in rejected)
+    future_tampered = deepcopy(slot_row)
+    future_tampered["source_timestamps"]["official_price"][
+        "observed_at_utc"
+    ] = (slot_time + timedelta(seconds=1)).isoformat()
+    _rehash(future_tampered)
+    rejected = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(future_tampered),
+        symbols=("BTC",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+        sampler_versions=(legacy_v3,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
+    )
+    assert all(not values for values in rejected)
+    coverage_tampered = deepcopy(slot_row)
+    coverage_tampered["coverage_snapshot"]["horizons"]["240"][
+        "eligible"
+    ] = False
+    _rehash(coverage_tampered)
+    rejected = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(coverage_tampered),
+        symbols=("BTC",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+        sampler_versions=(legacy_v3,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
+    )
+    assert all(not values for values in rejected)
+
+    # Shadow is v4-only and reads the stored flat bundle directly.  Its
+    # authority path must never open the raw market archive, load later
+    # Max-Pain/prior-alert state, or invoke the feature-row builder.
+    bundle_price, bundle_oi, bundle_futures, bundle_spot = (
+        matrix.prospective_feature_series_rows(
+            symbol="BTC",
+            decision_time_utc=slot_time,
+            frozen_inputs=slot_row["frozen_inputs"],
+            source_provenance=slot_row["source_provenance"],
+        )
+    )
+    bundle_latest = {
+        "price_oi": matrix._latest_price_oi(
+            bundle_price, 0.0, bundle_oi, 0.0
+        ),
+        "futures_cvd": matrix._latest_flow(bundle_futures, 0.0),
+        "spot_cvd": matrix._latest_flow(bundle_spot, 0.0),
+    }
+    bundle_windows = {}
+    bundle_historical_windows = {}
+    for minutes in matrix.CORE_WINDOWS_MINUTES:
+        active, weekend, segments = (
+            matrix.market_session_baseline.session_ratios(
+                slot_time - timedelta(minutes=minutes), slot_time
+            )
+        )
+        session_values = {
+            "session_active_ratio": round(active, 6),
+            "session_weekend_ratio": round(weekend, 6),
+            "session_composition": (
+                matrix._session_composition_label(active)
+            ),
+        }
+        bundle_windows[f"{minutes}m"] = {
+            **session_values,
+            "session_segments": segments,
+        }
+        if minutes == 60:
+            # Exercise valid raw -> categorical/ratio and LONG/SHORT
+            # aligned/log round-trips in the positive authority fixture.
+            bundle_windows[f"{minutes}m"].update(
+                {
+                    "price_change_pct": 2.0,
+                    "oi_change_pct": 3.0,
+                    "futures_continuous_cvd_change_usd": 4.0,
+                    "spot_continuous_cvd_change_usd": -2.0,
+                }
+            )
+        window_values = bundle_windows[f"{minutes}m"]
+        price_change = window_values.get("price_change_pct")
+        oi_change = window_values.get("oi_change_pct")
+        futures_change = window_values.get(
+            "futures_continuous_cvd_change_usd"
+        )
+        spot_change = window_values.get(
+            "spot_continuous_cvd_change_usd"
+        )
+        window_values.update(
+            {
+                "price_oi_state": matrix._price_oi_state(
+                    price_change, oi_change
+                ),
+                "spot_futures_alignment": matrix._alignment(
+                    spot_change, futures_change
+                ),
+                "price_spot_alignment": matrix._alignment(
+                    price_change, spot_change
+                ),
+                "price_futures_alignment": matrix._alignment(
+                    price_change, futures_change
+                ),
+            }
+        )
+        if futures_change not in (None, 0.0) and spot_change is not None:
+            window_values["spot_to_futures_abs_cvd_ratio"] = round(
+                abs(spot_change) / abs(futures_change), 6
+            )
+        bundle_historical_windows[f"{minutes}m"] = dict(session_values)
+    bundle_historical = {
+        "event_market_session": (
+            "ACTIVE"
+            if matrix.market_session_baseline.is_active_market(slot_time)
+            else "WEEKEND"
+        ),
+        "windows": bundle_historical_windows,
+    }
+    bundle_rows = []
+    for direction in ("LONG", "SHORT"):
+        for horizon in (60, 240, 720, 1440):
+            active, weekend, segments = (
+                matrix.market_session_baseline.session_ratios(
+                    slot_time, slot_time + timedelta(minutes=horizon)
+                )
+            )
+            width = matrix.research_session_width.movement_width_reference(
+                symbol="BTC",
+                event_time=slot_time,
+                horizon_minutes=horizon,
+                as_of_utc=slot_time,
+                historical_index={},
+                lookback_days=matrix.HISTORICAL_BASELINE_DAYS,
+                minimum_effective_samples=(
+                    matrix.HISTORICAL_BASELINE_MIN_SAMPLES
+                ),
+                composition_tolerance=(
+                    matrix.HISTORICAL_BASELINE_COMPOSITION_TOLERANCE
+                ),
+            )
+            bundle_rows.append(
+                {
+                    "feature_schema_version": matrix.FEATURE_SCHEMA_VERSION,
+                    "event": {
+                        "event_id": 901 if direction == "LONG" else 902,
+                        "alert_time_utc": slot_time,
+                        "symbol": "BTC",
+                        "direction": direction,
+                        "source_side": "RAW_NEUTRAL",
+                        "timeframe": "30m",
+                        "event_type": (
+                            matrix.research_prospective_anchors.EVENT_TYPE
+                        ),
+                        "strategy_version": "formula-prospective-neutral-v4",
+                        "code_version": "selftest-v4",
+                    },
+                    "time_features": matrix._time_features(slot_time),
+                    "raw_features": {
+                        "captured_event_inputs": {},
+                        "latest_at_or_before_alert": deepcopy(bundle_latest),
+                        "windows": deepcopy(bundle_windows),
+                    },
+                    "historical_context": deepcopy(bundle_historical),
+                    "model_features": {},
+                    "sequence_features": {},
+                    "max_pain_features": {
+                        "evaluation_status": "UNEVALUABLE",
+                        "features": {},
+                    },
+                    "outcome_label": {
+                        "horizon_minutes": horizon,
+                        "session_active_ratio": round(active, 6),
+                        "session_weekend_ratio": round(weekend, 6),
+                        "session_segments": segments,
+                        "session_composition": (
+                            matrix._session_composition_label(active)
+                        ),
+                        "movement_width_reference": width,
+                    },
+                }
+            )
+    decision_bundle = (
+        matrix.research_prospective_feature_freeze.build_feature_bundle(
+            decision_time_utc=slot_time,
+            symbol="BTC",
+            feature_rows=bundle_rows,
+            source_series_manifest={
+                "count": 0,
+                "first_decision_time_utc": None,
+                "last_decision_time_utc": None,
+                "sha256": "0" * 64,
+                "sampler_versions": [],
+            },
+        )
+    )
+    bundle_sha = (
+        matrix.research_prospective_feature_freeze.compute_feature_bundle_sha256(
+            decision_bundle
+        )
+    )
+    v4_slot = _slot(
+        "BTC",
+        sampler_version=matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+        slot_id=90,
+    )
+    v4_slot["coverage_policy_version"] = (
+        matrix.research_prospective_anchors.COVERAGE_POLICY_VERSION
+    )
+    v4_slot["feature_bundle_policy_version"] = (
+        matrix.research_prospective_feature_freeze.FEATURE_POLICY_VERSION
+    )
+    v4_slot["feature_bundle_sha256"] = bundle_sha
+    v4_slot["decision_feature_bundle"] = decision_bundle
+    v4_slot["long_event_id"] = 901
+    v4_slot["short_event_id"] = 902
+    _rehash(v4_slot)
+    v4_prior = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(v4_slot),
+        symbols=("BTC",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+        sampler_versions=(matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
+    )
+    assert [len(values) for values in v4_prior[:4]] == [1, 1, 1, 1]
+    v4_bundle_tampered = deepcopy(v4_slot)
+    v4_bundle_tampered["decision_feature_bundle"][
+        "features_by_direction"
+    ]["LONG"]["event.symbol"] = "ETH"
+    rejected = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(v4_bundle_tampered),
+        symbols=("BTC",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+        sampler_versions=(matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION,),
+        as_of_created_utc=slot_time + timedelta(seconds=2),
+    )
+    assert all(not values for values in rejected)
+    anchor_snapshot = {
+        "sampler_version": v4_slot["sampler_version"],
+        "input_fingerprint": v4_slot["input_fingerprint"],
+        "source_candle_open_utc": slot_open.isoformat(),
+        "source_candle_close_utc": slot_close.isoformat(),
+        "base_eligible_at_utc": eligible_at.isoformat(),
+        "expires_at_utc": expires_at.isoformat(),
+        "decision_time_utc": slot_time.isoformat(),
+        "coverage_policy_version": v4_slot["coverage_policy_version"],
+        "coverage_snapshot": deepcopy(v4_slot["coverage_snapshot"]),
+        "source_timestamps": deepcopy(v4_slot["source_timestamps"]),
+        "source_provenance": deepcopy(v4_slot["source_provenance"]),
+        "frozen_inputs": deepcopy(v4_slot["frozen_inputs"]),
+        "feature_bundle_policy_version": v4_slot[
+            "feature_bundle_policy_version"
+        ],
+        "feature_bundle_sha256": bundle_sha,
+    }
+    authority_row = {
+        **v4_slot,
+        "interval_minutes": 30,
+        "event_id": 901,
+        "alert_time_utc": slot_time,
+        "direction": "LONG",
+        "event_type": matrix.research_prospective_anchors.EVENT_TYPE,
+        "source_side": "RAW_NEUTRAL",
+        "timeframe": matrix.research_prospective_anchors.TIMEFRAME,
+        "setup_key": "selftest-v4",
+        "strategy_version": "formula-prospective-neutral-v4",
+        "code_version": "selftest-v4",
+        "event_fingerprint": (
+            matrix.research_prospective_anchors._sha256(
+                {
+                    "sampler_version": (
+                        matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+                    ),
+                    "event_type": (
+                        matrix.research_prospective_anchors.EVENT_TYPE
+                    ),
+                    "symbol": "BTC",
+                    "direction": "LONG",
+                    "source_candle_open_utc": (
+                        matrix.research_prospective_anchors._iso(slot_open)
+                    ),
+                }
+            )
+        ),
+        "current_price": 100.0,
+        "engine_snapshot": {"prospective_anchor": anchor_snapshot},
+    }
+
+    class _ShadowAuthorityConnection:
+        def __init__(self, row):
+            self.row = row
+            self.queries = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params):
+            assert query.count("%s") == len(params)
+            assert "FROM research_prospective_shadow_events" in query
+            assert "research_events" not in query
+            assert params == ([901],)
+            self.queries.append(query)
+            return _BatchResult(many=[self.row])
+
+    shadow_conn = _ShadowAuthorityConnection(authority_row)
+    forbidden_calls = []
+
+    def _forbidden(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("Shadow attempted a mutable/reconstructed read")
+
+    original_research_url = matrix._research_database_url
+    original_raw_url = matrix._raw_database_url
+    original_connect = matrix._connect
+    original_raw_loader = matrix._load_raw_rows
+    original_prior_loader = matrix._load_prior_events
+    original_max_pain_loader = matrix._load_max_pain_features_batch
+    original_builder = matrix.build_feature_rows
+    matrix._research_database_url = lambda: "postgresql://research"
+    matrix._raw_database_url = _forbidden
+    matrix._connect = lambda url: shadow_conn
+    matrix._load_raw_rows = _forbidden
+    matrix._load_prior_events = _forbidden
+    matrix._load_max_pain_features_batch = _forbidden
+    matrix.build_feature_rows = _forbidden
+    try:
+        direct_rows = matrix.load_shadow_feature_rows_by_horizon(
+            {60: [901]}
+        )
+    finally:
+        matrix._research_database_url = original_research_url
+        matrix._raw_database_url = original_raw_url
+        matrix._connect = original_connect
+        matrix._load_raw_rows = original_raw_loader
+        matrix._load_prior_events = original_prior_loader
+        matrix._load_max_pain_features_batch = original_max_pain_loader
+        matrix.build_feature_rows = original_builder
+    assert forbidden_calls == []
+    assert len(shadow_conn.queries) == 1
+    direct = direct_rows[(901, 60)]
+    assert direct["decision_input_policy_version"] == (
+        "prospective-shadow-frozen-decision-features-v1"
+    )
+    assert direct["frozen_decision_features"] == (
+        decision_bundle["features_by_direction"]["LONG"]
+    )
+    assert direct["decision_feature_bundle"] == decision_bundle
+    assert direct["raw_features"]["windows"] == {}
+    assert direct["feature_bundle_sha256"] == bundle_sha
+    assert direct["prospective_evidence"]["anchor_slot_id"] == 90
+    assert direct["authoritative_verified"] is True
+    try:
+        matrix.load_shadow_feature_rows([901])
+        raise AssertionError("horizonless Shadow loader did not fail closed")
+    except ValueError as error:
+        assert "explicit formula horizon" in str(error)
+
+    def _rehash_authority_bundle(row):
+        digest = (
+            matrix.research_prospective_feature_freeze.compute_feature_bundle_sha256(
+                row["decision_feature_bundle"]
+            )
+        )
+        row["feature_bundle_sha256"] = digest
+        _rehash(row)
+        anchor = row["engine_snapshot"]["prospective_anchor"]
+        anchor["feature_bundle_sha256"] = digest
+        anchor["input_fingerprint"] = row["input_fingerprint"]
+        return row
+
+    # The authority loader refuses a legacy sampler or bundle tamper rather
+    # than falling back to raw reconstruction.
+    assert matrix._validated_shadow_authority(
+        {**authority_row, "sampler_version": legacy_v3}
+    ) is None
+    tampered_bundle_row = deepcopy(authority_row)
+    tampered_bundle_row["decision_feature_bundle"]["features_by_direction"][
+        "LONG"
+    ]["event.symbol"] = "ETH"
+    assert matrix._validated_shadow_authority(tampered_bundle_row) is None
+    forged_source_row = deepcopy(authority_row)
+    forged_source_row["decision_feature_bundle"]["features_by_direction"][
+        "LONG"
+    ]["event.source_side"] = "FORGED"
+    _rehash_authority_bundle(forged_source_row)
+    assert matrix._validated_shadow_authority(forged_source_row) is None
+    forged_max_pain_row = deepcopy(authority_row)
+    for features in forged_max_pain_row["decision_feature_bundle"][
+        "features_by_direction"
+    ].values():
+        features["max_pain.aggregate.consensus_ratio"] = 0.5
+    _rehash_authority_bundle(forged_max_pain_row)
+    assert matrix._validated_shadow_authority(forged_max_pain_row) is None
+
+    forged_latest_row = deepcopy(authority_row)
+    for features in forged_latest_row["decision_feature_bundle"][
+        "features_by_direction"
+    ].values():
+        features["latest.futures_cvd.buy_sell_ratio"] = 999.0
+    _rehash_authority_bundle(forged_latest_row)
+    assert matrix._validated_shadow_authority(forged_latest_row) is None
+
+    forged_event_session_row = deepcopy(authority_row)
+    for features in forged_event_session_row["decision_feature_bundle"][
+        "features_by_direction"
+    ].values():
+        features["historical.event_market_session"] = "ACTIVE"
+    _rehash_authority_bundle(forged_event_session_row)
+    assert (
+        matrix._validated_shadow_authority(forged_event_session_row) is None
+    )
+
+    forged_raw_session_row = deepcopy(authority_row)
+    for features in forged_raw_session_row["decision_feature_bundle"][
+        "features_by_direction"
+    ].values():
+        features["raw.60m.session_active_ratio"] = 1.0
+        features["raw.60m.session_weekend_ratio"] = 0.0
+        features["raw.60m.session_composition"] = "ACTIVE_ONLY"
+    _rehash_authority_bundle(forged_raw_session_row)
+    assert matrix._validated_shadow_authority(forged_raw_session_row) is None
+
+    forged_historical_session_row = deepcopy(authority_row)
+    for features in forged_historical_session_row[
+        "decision_feature_bundle"
+    ]["features_by_direction"].values():
+        features["historical.60m.session_active_ratio"] = 1.0
+        features["historical.60m.session_weekend_ratio"] = 0.0
+        features["historical.60m.session_composition"] = "ACTIVE_ONLY"
+    _rehash_authority_bundle(forged_historical_session_row)
+    assert (
+        matrix._validated_shadow_authority(
+            forged_historical_session_row
+        )
+        is None
+    )
+
+    forged_alignment_row = deepcopy(authority_row)
+    alignment_maps = forged_alignment_row["decision_feature_bundle"][
+        "features_by_direction"
+    ]
+    for features in alignment_maps.values():
+        features["raw.60m.price_change_pct"] = 2.0
+    alignment_maps["LONG"]["aligned.60m.price_change_pct"] = 999.0
+    alignment_maps["LONG"]["aligned_log.60m.price_change_pct"] = (
+        math.log10(1000.0)
+    )
+    alignment_maps["SHORT"]["aligned.60m.price_change_pct"] = -999.0
+    alignment_maps["SHORT"]["aligned_log.60m.price_change_pct"] = (
+        -math.log10(1000.0)
+    )
+    _rehash_authority_bundle(forged_alignment_row)
+    assert matrix._validated_shadow_authority(forged_alignment_row) is None
+
+    forged_derived_state_row = deepcopy(authority_row)
+    for features in forged_derived_state_row["decision_feature_bundle"][
+        "features_by_direction"
+    ].values():
+        features["raw.60m.price_oi_state"] = "PRICE_DOWN__OI_DOWN"
+        features["raw.60m.spot_futures_alignment"] = "ALIGNED"
+    _rehash_authority_bundle(forged_derived_state_row)
+    assert (
+        matrix._validated_shadow_authority(forged_derived_state_row) is None
+    )
+
+    forged_derived_ratio_row = deepcopy(authority_row)
+    for features in forged_derived_ratio_row["decision_feature_bundle"][
+        "features_by_direction"
+    ].values():
+        features["raw.60m.spot_to_futures_abs_cvd_ratio"] = 999.0
+    _rehash_authority_bundle(forged_derived_ratio_row)
+    assert (
+        matrix._validated_shadow_authority(forged_derived_ratio_row) is None
+    )
+
+    forged_directional_raw_row = deepcopy(authority_row)
+    directional_maps = forged_directional_raw_row[
+        "decision_feature_bundle"
+    ]["features_by_direction"]
+    directional_maps["LONG"]["raw.60m.price_oi_state"] = "PRICE_UP_OI_UP"
+    directional_maps["SHORT"]["raw.60m.price_oi_state"] = "PRICE_DOWN_OI_DOWN"
+    _rehash_authority_bundle(forged_directional_raw_row)
+    assert (
+        matrix._validated_shadow_authority(forged_directional_raw_row) is None
+    )
 
     coverage_time = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 

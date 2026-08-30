@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import os
@@ -31,8 +32,10 @@ except Exception:  # pragma: no cover - optional in unit-only environments
 
 import research_event_store
 import canonical_price_path
+import research_feature_matrix
 import research_historical_replay
 import research_max_pain_archive
+import research_prospective_feature_freeze
 import research_session_width
 import research_prospective_anchors as anchors
 
@@ -57,6 +60,10 @@ _HORIZONS = (60, 240, 720, 1440)
 _MIN_ANCHORS = 250
 _MIN_UTC_DATES = 14
 _MIN_SPAN_HOURS = 336.0
+_PRIOR_FROZEN_SOURCE_SAMPLERS: tuple[str, ...] = (
+    "prospective-neutral-anchor-v3-max-pain-frozen",
+    anchors.SAMPLER_VERSION,
+)
 
 _COVERAGE_SQL = """
 SELECT replay_run_id, replay_version, outcome_method_version,
@@ -115,6 +122,7 @@ INSERT INTO research_prospective_anchor_attempts (
     base_eligible_at_utc, expires_at_utc, decision_time_utc, checked_at_utc,
     evaluation_status, evaluation_reason, missing_sources,
     source_timestamps, source_provenance, frozen_inputs,
+    feature_bundle_policy_version, feature_bundle_sha256,
     input_fingerprint, attempt_fingerprint
 ) VALUES (
     %(sampler_version)s, %(coverage_policy_version)s,
@@ -124,6 +132,7 @@ INSERT INTO research_prospective_anchor_attempts (
     %(checked_at_utc)s, %(evaluation_status)s, %(evaluation_reason)s,
     %(missing_sources)s::jsonb, %(source_timestamps)s::jsonb,
     %(source_provenance)s::jsonb, %(frozen_inputs)s::jsonb,
+    %(feature_bundle_policy_version)s, %(feature_bundle_sha256)s,
     %(input_fingerprint)s, %(attempt_fingerprint)s
 )
 ON CONFLICT (attempt_fingerprint) DO NOTHING
@@ -157,6 +166,8 @@ INSERT INTO research_prospective_anchor_slots (
     interval_minutes, source_candle_open_utc, source_candle_close_utc,
     base_eligible_at_utc, expires_at_utc, decision_time_utc,
     input_fingerprint, source_timestamps, source_provenance, frozen_inputs,
+    feature_bundle_policy_version, feature_bundle_sha256,
+    decision_feature_bundle,
     long_event_id, short_event_id
 ) VALUES (
     %(sampler_version)s, %(coverage_policy_version)s,
@@ -165,6 +176,8 @@ INSERT INTO research_prospective_anchor_slots (
     %(base_eligible_at_utc)s, %(expires_at_utc)s, %(decision_time_utc)s,
     %(input_fingerprint)s, %(source_timestamps)s::jsonb,
     %(source_provenance)s::jsonb, %(frozen_inputs)s::jsonb,
+    %(feature_bundle_policy_version)s, %(feature_bundle_sha256)s,
+    %(decision_feature_bundle)s::jsonb,
     %(long_event_id)s, %(short_event_id)s
 )
 ON CONFLICT (sampler_version, symbol, source_candle_open_utc) DO NOTHING
@@ -271,6 +284,11 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _mapping(value: Any) -> Mapping[str, Any]:
+    parsed = _json_value(value)
+    return parsed if isinstance(parsed, Mapping) else {}
+
+
 def _same_json(left: Any, right: Any) -> bool:
     return _json(_json_value(left)) == _json(_json_value(right))
 
@@ -311,6 +329,79 @@ def _row_dict(row: Any) -> Dict[str, Any]:
     return dict(row) if row is not None else {}
 
 
+def _frozen_source_payload(
+    source_rows: Mapping[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Freeze the base source values and their exact decision-time evidence."""
+    frozen_inputs = anchors.freeze_source_inputs(source_rows)
+    timestamps: Dict[str, Any] = {}
+    provenance: Dict[str, Any] = {}
+    for family in anchors.REQUIRED_FAMILIES:
+        row = source_rows.get(family)
+        if not isinstance(row, Mapping):
+            continue
+        provenance[family] = anchors._provenance(row)
+        evidence = anchors._source_timestamp_evidence(family, row)
+        if evidence:
+            timestamps[family] = evidence
+    return frozen_inputs, timestamps, provenance
+
+
+def _source_series_manifest(
+    price_rows: Sequence[Mapping[str, Any]], *, symbol: str
+) -> Dict[str, Any]:
+    """Hash the exact immutable prior-slot identities used by one bundle."""
+    entries: Dict[int, Dict[str, Any]] = {}
+    for source in price_rows:
+        if str(source.get("symbol") or "").strip().upper() != symbol:
+            continue
+        slot_id = source.get("prospective_anchor_slot_id")
+        fingerprint = str(
+            source.get("prospective_input_fingerprint") or ""
+        ).strip().lower()
+        sampler_version = str(
+            source.get("prospective_sampler_version") or ""
+        ).strip()
+        decision_time = source.get("prospective_decision_time_utc")
+        if (
+            isinstance(slot_id, bool)
+            or not isinstance(slot_id, int)
+            or slot_id <= 0
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+            or sampler_version not in _PRIOR_FROZEN_SOURCE_SAMPLERS
+            or decision_time in (None, "")
+        ):
+            continue
+        entries[slot_id] = {
+            "anchor_slot_id": slot_id,
+            "input_fingerprint": fingerprint,
+            "sampler_version": sampler_version,
+            "decision_time_utc": _iso(decision_time),
+        }
+    ordered = sorted(
+        entries.values(),
+        key=lambda item: (
+            _utc(item["decision_time_utc"]),
+            int(item["anchor_slot_id"]),
+        ),
+    )
+    digest = hashlib.sha256(_json(ordered).encode("utf-8")).hexdigest()
+    return {
+        "count": len(ordered),
+        "first_decision_time_utc": (
+            ordered[0]["decision_time_utc"] if ordered else None
+        ),
+        "last_decision_time_utc": (
+            ordered[-1]["decision_time_utc"] if ordered else None
+        ),
+        "sha256": digest,
+        "sampler_versions": sorted(
+            {item["sampler_version"] for item in ordered}
+        ),
+    }
+
+
 def _fetchone(result: Any) -> Optional[Dict[str, Any]]:
     row = result.fetchone()
     return _row_dict(row) if row is not None else None
@@ -340,6 +431,7 @@ def _slot_params(slot: Mapping[str, Any], event_ids: Mapping[str, int]) -> Dict[
         "source_timestamps",
         "source_provenance",
         "frozen_inputs",
+        "decision_feature_bundle",
     ):
         result[key] = _json(result.get(key) or {})
     result["long_event_id"] = int(event_ids["LONG"])
@@ -363,6 +455,8 @@ def _verify_attempt(existing: Mapping[str, Any], expected: Mapping[str, Any]) ->
         "interval_minutes",
         "evaluation_status",
         "evaluation_reason",
+        "feature_bundle_policy_version",
+        "feature_bundle_sha256",
         "input_fingerprint",
         "attempt_fingerprint",
     ):
@@ -435,6 +529,8 @@ def _verify_slot(
         "coverage_policy_version",
         "symbol",
         "interval_minutes",
+        "feature_bundle_policy_version",
+        "feature_bundle_sha256",
         "input_fingerprint",
     ):
         _assert_equal(key, str(existing.get(key)).strip(), str(expected.get(key)).strip())
@@ -452,6 +548,7 @@ def _verify_slot(
         "source_timestamps",
         "source_provenance",
         "frozen_inputs",
+        "decision_feature_bundle",
     ):
         if not _same_json(existing.get(key), expected.get(key)):
             raise ProspectiveAnchorConflictError(f"slot JSON conflict: {key}")
@@ -752,6 +849,171 @@ class ProspectiveAnchorStore:
             output[symbol] = families
         return SourceInputBatch(output, checked, read_completed)
 
+    def build_decision_feature_bundles(
+        self,
+        *,
+        source_inputs_by_symbol: Mapping[str, Mapping[str, Any]],
+        decision_time_utc: Any,
+        code_version: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Materialize each outcome-blind feature bundle once at its cutoff.
+
+        Only validated immutable v3/v4 slots may supply prior history.  The
+        current source payload is appended in memory, the pure feature builder
+        runs once, and the resulting flat values/session-width contexts are
+        hashed before any DECISION_SAMPLE event is published.
+        """
+        decision_time = _utc(decision_time_utc)
+        symbols = sorted(
+            {
+                _symbol(symbol)
+                for symbol, values in source_inputs_by_symbol.items()
+                if isinstance(values, Mapping)
+            }
+        )
+        if not symbols:
+            return {}
+        history_start = decision_time - timedelta(
+            days=research_feature_matrix.HISTORICAL_BASELINE_DAYS,
+            minutes=(
+                max(research_feature_matrix.CORE_WINDOWS_MINUTES)
+                + research_feature_matrix.MAX_POINT_AGE_MINUTES
+            ),
+        )
+        with self._connect() as conn:
+            (
+                price_rows,
+                oi_rows,
+                futures_rows,
+                spot_rows,
+                _prior_max_pain,
+            ) = research_feature_matrix._load_prospective_frozen_rows(
+                conn,
+                symbols=symbols,
+                start=history_start,
+                end=decision_time,
+                sampler_versions=_PRIOR_FROZEN_SOURCE_SAMPLERS,
+                as_of_created_utc=decision_time,
+            )
+
+        prior_price_rows = list(price_rows)
+        all_price_rows = list(price_rows)
+        all_oi_rows = list(oi_rows)
+        all_futures_rows = list(futures_rows)
+        all_spot_rows = list(spot_rows)
+        frozen_by_symbol: Dict[str, Dict[str, Any]] = {}
+        for symbol in symbols:
+            source_rows = source_inputs_by_symbol.get(symbol)
+            if not isinstance(source_rows, Mapping):
+                continue
+            frozen, _timestamps, provenance = _frozen_source_payload(source_rows)
+            try:
+                price_row, oi_row, futures_row, spot_row = (
+                    research_feature_matrix.prospective_feature_series_rows(
+                        symbol=symbol,
+                        decision_time_utc=decision_time,
+                        frozen_inputs=frozen,
+                        source_provenance=provenance,
+                        sampler_version=anchors.SAMPLER_VERSION,
+                    )
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+            frozen_by_symbol[symbol] = frozen
+            all_price_rows.append(price_row)
+            all_oi_rows.append(oi_row)
+            all_futures_rows.append(futures_row)
+            all_spot_rows.append(spot_row)
+
+        events: list[Dict[str, Any]] = []
+        max_pain_by_event_id: Dict[int, Dict[str, Any]] = {}
+        event_sequence = 0
+        for symbol in symbols:
+            frozen = frozen_by_symbol.get(symbol)
+            if not frozen:
+                continue
+            current_price = _mapping(frozen.get("official_price")).get("price")
+            max_pain = _mapping(frozen.get("max_pain"))
+            for direction in anchors.DIRECTIONS:
+                for horizon in _HORIZONS:
+                    event_sequence += 1
+                    event_id = -event_sequence
+                    events.append(
+                        {
+                            "event_id": event_id,
+                            "event_kind": "DECISION_SAMPLE",
+                            "alert_time_utc": decision_time,
+                            "symbol": symbol,
+                            "direction": direction,
+                            "source_side": "RAW_NEUTRAL",
+                            "timeframe": anchors.TIMEFRAME,
+                            "event_type": anchors.EVENT_TYPE,
+                            "score": None,
+                            "current_price": current_price,
+                            "target_price": None,
+                            "initial_target_distance_pct": None,
+                            "categories": [],
+                            "setup_key": None,
+                            "strategy_version": "formula-prospective-neutral-v4",
+                            "code_version": code_version,
+                            "engine_snapshot": {},
+                            "horizon_minutes": horizon,
+                        }
+                    )
+                    max_pain_by_event_id[event_id] = dict(max_pain)
+
+        if not events:
+            return {}
+        feature_rows = research_feature_matrix.build_feature_rows(
+            events,
+            price_oi_rows=all_price_rows,
+            oi_rows=all_oi_rows,
+            futures_rows=all_futures_rows,
+            spot_rows=all_spot_rows,
+            prior_events=[],
+            windows_minutes=research_feature_matrix.CORE_WINDOWS_MINUTES,
+            max_pain_by_event_id=max_pain_by_event_id,
+        )
+        rows_by_symbol: Dict[str, list[Dict[str, Any]]] = {
+            symbol: [] for symbol in symbols
+        }
+        for row in feature_rows:
+            event = row.get("event") if isinstance(row, Mapping) else None
+            symbol = str(
+                event.get("symbol") if isinstance(event, Mapping) else ""
+            ).strip().upper()
+            if symbol in rows_by_symbol:
+                rows_by_symbol[symbol].append(dict(row))
+
+        bundles: Dict[str, Dict[str, Any]] = {}
+        for symbol, rows in rows_by_symbol.items():
+            if not rows:
+                continue
+            try:
+                bundle = research_prospective_feature_freeze.build_feature_bundle(
+                    decision_time_utc=decision_time,
+                    symbol=symbol,
+                    feature_rows=rows,
+                    source_series_manifest=_source_series_manifest(
+                        prior_price_rows, symbol=symbol
+                    ),
+                )
+                digest = (
+                    research_prospective_feature_freeze.compute_feature_bundle_sha256(
+                        bundle
+                    )
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+            bundles[symbol] = {
+                "feature_bundle_policy_version": (
+                    research_prospective_feature_freeze.FEATURE_POLICY_VERSION
+                ),
+                "decision_feature_bundle": bundle,
+                "feature_bundle_sha256": digest,
+            }
+        return bundles
+
     @staticmethod
     def _price_oi_family(row: Mapping[str, Any], checked: datetime) -> Dict[str, Any]:
         return {
@@ -813,9 +1075,111 @@ class ProspectiveAnchorStore:
             raise ValueError("prospective persistence requires an atomic bundle")
         if bundle.get("live_delivery_allowed") is not False:
             raise ValueError("prospective anchor bundle must forbid live delivery")
+        self._validate_v4_persistence_bundle(bundle)
         with self._connect() as conn:
             with conn.transaction():
                 return self._persist_bundle_with_connection(conn, bundle)
+
+    @staticmethod
+    def _validate_v4_persistence_bundle(bundle: Mapping[str, Any]) -> None:
+        """Reject a mutated v4 bundle before any audit/event row is written."""
+        attempt = bundle.get("attempt")
+        if not isinstance(attempt, Mapping):
+            raise ValueError("prospective bundle is missing its audit attempt")
+        if str(attempt.get("sampler_version") or "") != anchors.SAMPLER_VERSION:
+            return
+        if str(attempt.get("evaluation_status") or "") != anchors.EVALUABLE:
+            return
+        slot = bundle.get("slot")
+        if not isinstance(slot, Mapping):
+            raise ValueError("evaluable sampler-v4 attempt is missing its slot")
+        policy = str(slot.get("feature_bundle_policy_version") or "")
+        digest = str(slot.get("feature_bundle_sha256") or "").strip().lower()
+        if policy != research_prospective_feature_freeze.FEATURE_POLICY_VERSION:
+            raise ValueError("sampler-v4 feature bundle policy is incompatible")
+        for field in (
+            "feature_bundle_policy_version",
+            "feature_bundle_sha256",
+            "input_fingerprint",
+            "symbol",
+            "decision_time_utc",
+        ):
+            left = attempt.get(field)
+            right = slot.get(field)
+            if field == "decision_time_utc":
+                equal = _same_time(left, right)
+            else:
+                equal = str(left or "").strip() == str(right or "").strip()
+            if not equal:
+                raise ValueError(f"sampler-v4 attempt/slot {field} mismatch")
+        for field in (
+            "coverage_snapshot",
+            "source_timestamps",
+            "source_provenance",
+            "frozen_inputs",
+        ):
+            if not _same_json(attempt.get(field), slot.get(field)):
+                raise ValueError(f"sampler-v4 attempt/slot {field} mismatch")
+        for record, evaluation_status, label in (
+            (attempt, anchors.EVALUABLE, "attempt"),
+            (slot, anchors.EVALUABLE, "slot"),
+        ):
+            expected_input_fingerprint = anchors.compute_input_fingerprint(
+                sampler_version=record.get("sampler_version"),
+                coverage_policy_version=record.get("coverage_policy_version"),
+                coverage_snapshot=record.get("coverage_snapshot"),
+                symbol=record.get("symbol"),
+                source_candle_open_utc=record.get("source_candle_open_utc"),
+                source_candle_close_utc=record.get("source_candle_close_utc"),
+                base_eligible_at_utc=record.get("base_eligible_at_utc"),
+                expires_at_utc=record.get("expires_at_utc"),
+                evaluation_status=evaluation_status,
+                decision_time_utc=record.get("decision_time_utc"),
+                source_timestamps=record.get("source_timestamps"),
+                source_provenance=record.get("source_provenance"),
+                frozen_inputs=record.get("frozen_inputs"),
+                feature_bundle_policy_version=record.get(
+                    "feature_bundle_policy_version"
+                ),
+                feature_bundle_sha256=record.get("feature_bundle_sha256"),
+            )
+            if expected_input_fingerprint != str(
+                record.get("input_fingerprint") or ""
+            ).strip():
+                raise ValueError(
+                    f"sampler-v4 {label} input fingerprint mismatch"
+                )
+        decision_bundle = slot.get("decision_feature_bundle")
+        valid, reason = research_prospective_feature_freeze.validate_feature_bundle(
+            decision_bundle,
+            expected_sha256=digest,
+            expected_symbol=slot.get("symbol"),
+            expected_decision_time_utc=slot.get("decision_time_utc"),
+        )
+        if not valid:
+            raise ValueError(f"sampler-v4 feature bundle rejected: {reason}")
+        event_persistence = bundle.get("event_persistence") or ()
+        if len(event_persistence) != 2:
+            raise ValueError("sampler-v4 requires exactly two silent events")
+        for item in event_persistence:
+            event = item.get("event") if isinstance(item, Mapping) else None
+            snapshot = getattr(event, "engine_snapshot", None)
+            anchor = (
+                snapshot.get("prospective_anchor")
+                if isinstance(snapshot, Mapping)
+                else None
+            )
+            if not isinstance(anchor, Mapping):
+                raise ValueError("sampler-v4 event lacks its anchor reference")
+            if "decision_feature_bundle" in anchor:
+                raise ValueError("sampler-v4 event duplicates the slot bundle")
+            for field, expected in (
+                ("feature_bundle_policy_version", policy),
+                ("feature_bundle_sha256", digest),
+                ("input_fingerprint", str(slot.get("input_fingerprint") or "")),
+            ):
+                if str(anchor.get(field) or "").strip() != expected:
+                    raise ValueError(f"sampler-v4 event {field} mismatch")
 
     def _persist_bundle_with_connection(
         self, conn: Any, bundle: Mapping[str, Any]
@@ -1013,11 +1377,17 @@ class ProspectiveAnchorService:
             official_prices_by_symbol=official_prices_by_symbol,
         )
         decision_checked = max(checked, _utc(source_batch.read_completed_at_utc))
+        feature_bundles = self.store.build_decision_feature_bundles(
+            source_inputs_by_symbol=source_batch.inputs_by_symbol,
+            decision_time_utc=decision_checked,
+            code_version=self.code_version,
+        )
         batch = anchors.build_anchor_batch(
             now=decision_checked,
             slot_open_utc=opened,
             coverage_by_symbol=pending_coverage,
             source_inputs_by_symbol=source_batch.inputs_by_symbol,
+            feature_bundles_by_symbol=feature_bundles,
             coverage_policy_version=self.coverage_policy_version,
             strategy_version=self.strategy_version,
             code_version=self.code_version,

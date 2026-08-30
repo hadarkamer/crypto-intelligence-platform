@@ -56,6 +56,85 @@ def _candle(open_time, *, high=100.0, low=100.0, close=100.0):
     )
 
 
+def _strict_record(
+    event,
+    horizon,
+    *,
+    formula_schema_version="research-formula-v5-safe-replay",
+):
+    """Build one exact sampler-v4 check without any realized outcome input."""
+    event_time = event["alert_time_utc"]
+    reference = worker.research_session_width.movement_width_reference(
+        symbol=event["symbol"],
+        event_time=event_time,
+        horizon_minutes=horizon,
+        as_of_utc=event_time - timedelta(minutes=1),
+        historical_index={},
+    )
+    session = {
+        "session_active_ratio": reference["session_active_ratio"],
+        "session_weekend_ratio": reference["session_weekend_ratio"],
+        "session_segments": reference["session_segments"],
+        "session_composition": reference["session_composition"],
+    }
+    snapshot = {
+        "snapshot_policy_version": (
+            worker._STRICT_FROZEN_SNAPSHOT_POLICY_VERSION
+        ),
+        "evidence_policy_version": (
+            worker._STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+        ),
+        "decision_input_policy_version": (
+            worker._STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+        ),
+        "horizon_minutes": horizon,
+        "event": {
+            "event_id": event["event_id"],
+            "alert_time_utc": event_time,
+            "symbol": event["symbol"],
+            "direction": event["direction"],
+            "event_type": event.get("event_type"),
+            "setup_key": event.get("setup_key"),
+        },
+        "prospective_evidence": {
+            "sampler_version": worker._STRICT_PROSPECTIVE_SAMPLER_VERSION,
+            "anchor_slot_id": 23,
+            "input_fingerprint": "e" * 64,
+            "feature_bundle_policy_version": (
+                worker._STRICT_FEATURE_BUNDLE_POLICY_VERSION
+            ),
+            "feature_bundle_sha256": "d" * 64,
+            "source_timestamps": {
+                "price_oi": {
+                    "timestamp_utc": event_time - timedelta(minutes=1)
+                }
+            },
+            "source_provenance": {
+                "price_oi": {
+                    "source": "binance_spot",
+                    "pair": f"{event['symbol']}USDT",
+                }
+            },
+        },
+        "outcome_window_session": session,
+        "movement_width_reference": reference,
+    }
+    return {
+        "event_id": event["event_id"],
+        "horizon_minutes": horizon,
+        "formula_id": 11,
+        "formula_schema_version": formula_schema_version,
+        "input_snapshot": snapshot,
+        "evidence_policy_version": (
+            worker._STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+        ),
+        "prospective_anchor_slot_id": 23,
+        "prospective_input_fingerprint": "e" * 64,
+        "feature_bundle_sha256": "d" * 64,
+        "authoritative_verified": True,
+    }
+
+
 def _run_once_with_path(
     candles,
     *,
@@ -65,6 +144,8 @@ def _run_once_with_path(
     event_kind="DECISION_SAMPLE",
     delivery_status="NOT_APPLICABLE",
     engine_snapshot=None,
+    strict_current=False,
+    omit_strict_width=False,
 ):
     now = datetime.now(timezone.utc)
     event_time = now.replace(second=0, microsecond=0) - timedelta(minutes=3)
@@ -82,35 +163,55 @@ def _run_once_with_path(
         "first_touch_versions": first_touch_versions or {},
         "open_first_touch_horizons": [horizon],
     }
+    if strict_current:
+        event["engine_snapshot"] = {
+            **event["engine_snapshot"],
+            "prospective_anchor": {
+                "sampler_version": worker._STRICT_PROSPECTIVE_SAMPLER_VERSION,
+                "input_fingerprint": "e" * 64,
+                "feature_bundle_policy_version": (
+                    worker._STRICT_FEATURE_BUNDLE_POLICY_VERSION
+                ),
+                "feature_bundle_sha256": "d" * 64,
+            },
+        }
+        strict_record = _strict_record(event, horizon)
+        if omit_strict_width:
+            strict_record["input_snapshot"].pop("movement_width_reference")
+        frozen_records = [strict_record]
+    else:
+        frozen_records = [
+            {
+                "event_id": event["event_id"],
+                "horizon_minutes": horizon,
+                "formula_id": index + 1,
+                "input_snapshot": {
+                    "movement_width_reference": {
+                        "policy": (
+                            "prior raw price width; same-symbol "
+                            "session-composition matched"
+                        ),
+                        "horizon_minutes": horizon,
+                        "session_weekend_ratio": 1.0,
+                        "floor_scale_factor": scale,
+                        "applied": scale < 1.0,
+                    },
+                    "source_inputs": {
+                        "price_oi": {
+                            "timestamp_utc": event_time - timedelta(minutes=1)
+                        }
+                    },
+                },
+            }
+            for index, scale in enumerate(frozen_scales)
+        ]
     captured_writes = []
     service = worker.ResearchOutcomeWorker()
     service._load_open_first_touch_events = lambda conn, limit: [event]
     service._load_due_events = lambda conn, limit: []
-    service._load_frozen_threshold_references = lambda conn, event_ids: [
-        {
-            "event_id": event["event_id"],
-            "horizon_minutes": horizon,
-            "formula_id": index + 1,
-            "input_snapshot": {
-                "movement_width_reference": {
-                    "policy": (
-                        "prior raw price width; same-symbol "
-                        "session-composition matched"
-                    ),
-                    "horizon_minutes": horizon,
-                    "session_weekend_ratio": 1.0,
-                    "floor_scale_factor": scale,
-                    "applied": scale < 1.0,
-                },
-                "source_inputs": {
-                    "price_oi": {
-                        "timestamp_utc": event_time - timedelta(minutes=1)
-                    }
-                },
-            },
-        }
-        for index, scale in enumerate(frozen_scales)
-    ]
+    service._load_frozen_threshold_references = (
+        lambda conn, event_ids: frozen_records
+    )
     service._write_first_touch_outcome = (
         lambda conn, **kwargs: captured_writes.append(kwargs) or True
     )
@@ -217,6 +318,14 @@ def run() -> None:
         "research_prospective_shadow_events authorized",
         "research_formula_shadow_checks open_check",
         "open_check.evaluation_status='MATCHED'",
+        "open_check.evidence_policy_version=%s",
+        "open_check.authoritative_verified=TRUE",
+        "open_check.prospective_anchor_slot_id IS NOT NULL",
+        "open_check.prospective_input_fingerprint",
+        "open_check.feature_bundle_sha256",
+        "authorized.anchor_slot_id",
+        "authorized.input_fingerprint",
+        "authorized.feature_bundle_sha256",
         "open_formula.current_stage='SHADOW'",
         "open_ft.status IN ('HIT', 'MISS')",
         "open_first_touch_horizons",
@@ -362,6 +471,14 @@ def run() -> None:
     )
     assert "f.horizon_minutes" in reference_capture.query
     assert "f.formula_schema_version" in reference_capture.query
+    for required in (
+        "c.evidence_policy_version",
+        "c.prospective_anchor_slot_id",
+        "c.prospective_input_fingerprint",
+        "c.feature_bundle_sha256",
+        "c.authoritative_verified",
+    ):
+        assert required in reference_capture.query
     assert reference_capture.params == [[7, 8]]
 
     legacy_snapshot = {
@@ -395,154 +512,34 @@ def run() -> None:
     assert frozen_policy["threshold_scale_factor"] == 0.60
     assert frozen_policy["qualifying_move_threshold_pct"] == 0.60
 
-    width_times = tuple(
-        START - timedelta(minutes=100 - index) for index in range(80)
-    )
-    width_series = worker.research_session_width.PriceWidthSeries(
-        times=width_times,
-        abs_return_pcts=tuple([1.0] * 40 + [0.6] * 40),
-        active_ratios=tuple([1.0] * 40 + [0.0] * 40),
-    )
-    strict_reference = worker.research_session_width.movement_width_reference(
-        symbol="BTC",
-        event_time=START,
-        horizon_minutes=240,
-        as_of_utc=START - timedelta(minutes=1),
-        historical_index={("BTC", 240): width_series},
-    )
-    assert strict_reference["threshold_scale_factor"] == 0.60
+    # Current strictness is keyed by the evidence/snapshot policy and sampler,
+    # not by the formula schema.  A v5 formula on an exact v4 anchor therefore
+    # consumes the frozen width/session bundle just as strictly as v6.
     strict_event = {
         "event_id": 1,
         "alert_time_utc": START,
         "symbol": "BTC",
         "direction": "LONG",
         "event_type": "SELFTEST",
+        "setup_key": "SELFTEST",
+        "engine_snapshot": {
+            "prospective_anchor": {
+                "sampler_version": worker._STRICT_PROSPECTIVE_SAMPLER_VERSION,
+                "input_fingerprint": "e" * 64,
+                "feature_bundle_policy_version": (
+                    worker._STRICT_FEATURE_BUNDLE_POLICY_VERSION
+                ),
+                "feature_bundle_sha256": "d" * 64,
+            }
+        },
     }
-    strict_condition = {
-        "feature": "raw.60m.price_change_pct",
-        "operator": ">=",
-        "value": 0.1,
-    }
-    strict_formula = {
-        "formula_id": 11,
-        "formula_key": "f" * 64,
-        "formula_version": 1,
-        "formula_schema_version": (
-            worker.research_formula_engine.FORMULA_SCHEMA_VERSION
-        ),
-        "engine_version": worker.research_formula_engine.ENGINE_VERSION,
-        "feature_schema_version": (
-            worker.research_formula_store.research_feature_matrix.FEATURE_SCHEMA_VERSION
-        ),
-        "outcome_method_version": (
-            worker.research_formula_store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
-        ),
-        "direction": "LONG",
-        "horizon_minutes": 240,
-        "conditions": [strict_condition],
-    }
-    strict_results = [
-        {
-            "feature": strict_condition["feature"],
-            "operator": strict_condition["operator"],
-            "expected": strict_condition["value"],
-            "actual": 0.2,
-            "available": True,
-            "passed": True,
-        }
+    strict_record = _strict_record(strict_event, 240)
+    strict_reference = strict_record["input_snapshot"][
+        "movement_width_reference"
     ]
-    strict_snapshot = {
-        "snapshot_policy_version": (
-            worker.research_formula_store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
-        ),
-        "decision_cohort_policy_version": (
-            worker.research_formula_store._DECISION_COHORT_POLICY_VERSION
-        ),
-        "decision_input_policy_version": (
-            worker.research_formula_store.research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
-        ),
-        "formula_key": strict_formula["formula_key"],
-        "formula_version": 1,
-        "formula_schema_version": strict_formula["formula_schema_version"],
-        "engine_version": strict_formula["engine_version"],
-        "outcome_method_version": strict_formula["outcome_method_version"],
-        "horizon_minutes": 240,
-        "feature_schema_version": strict_formula["feature_schema_version"],
-        "event": strict_event,
-        "formula_key_features": {strict_condition["feature"]: 0.2},
-        "conditions": [strict_condition],
-        "condition_results": strict_results,
-        "source_inputs": {},
-        "movement_width_reference": strict_reference,
-    }
-    strict_slot = {
-        "prospective_anchor_slot_id": 23,
-        "prospective_input_fingerprint": "e" * 64,
-        "prospective_slot_created_at_utc": START,
-    }
-    strict_source_time = START - timedelta(minutes=1)
-    strict_snapshot["source_inputs"] = {
-        "price_oi": {
-            "timestamp_utc": strict_source_time,
-            "price_timestamp_utc": strict_source_time,
-            "oi_timestamp_utc": strict_source_time,
-            "price_exchange": "binance",
-            "price_market": "spot",
-            "price_pair": "BTCUSDT",
-            "price_instrument_id": None,
-            "price_source": "binance_spot",
-            "source": "binance_spot",
-            "price_timeframe": "1m",
-            "price_interval_seconds": 60,
-            "canonical_price_method_version": (
-                worker.canonical_price_path.METHOD_VERSION
-            ),
-            "canonical_price_provenance_version": (
-                worker.canonical_price_path.PRICE_PROVENANCE_VERSION
-            ),
-            "canonical_price_provenance": {
-                "provenance_version": worker.canonical_price_path.PRICE_PROVENANCE_VERSION,
-                "method_version": worker.canonical_price_path.METHOD_VERSION,
-                "symbol": "BTC",
-                "exchange": "binance",
-                "market": "spot",
-                "pair": "BTCUSDT",
-                "instrument": None,
-                "interval": "1m",
-                "interval_seconds": 60,
-            },
-            **strict_slot,
-        },
-        "futures_cvd": {
-            "timestamp_utc": strict_source_time,
-            "source": "coinglass_futures_aggregated_cvd",
-            "exchange_list": "Binance,OKX,Bybit",
-            **strict_slot,
-        },
-        "spot_cvd": {
-            "timestamp_utc": strict_source_time,
-            "source": "coinglass_spot_aggregated_cvd",
-            "exchange_list": "Binance,OKX,Bybit",
-            **strict_slot,
-        },
-    }
-    cohort_key, cohort_anchor = (
-        worker.research_formula_store._decision_cohort_identity(
-            formula=strict_formula,
-            event=strict_event,
-            snapshot=strict_snapshot,
-        )
+    assert strict_record["formula_schema_version"] == (
+        "research-formula-v5-safe-replay"
     )
-    strict_record = {
-        **strict_formula,
-        "event_id": 1,
-        "input_snapshot": strict_snapshot,
-        "condition_results": strict_results,
-        "decision_cohort_key": cohort_key,
-        "decision_anchor_time_utc": cohort_anchor,
-        "evaluation_status": "MATCHED",
-        "matched": True,
-    }
     strict_policy = worker._frozen_threshold_policy(
         event=strict_event,
         horizon_minutes=240,
@@ -556,10 +553,55 @@ def run() -> None:
             strict_reference
         )
     )
+    assert strict_policy["threshold_source_kind"] == (
+        "PRIOR_ONLY_SESSION_CALIBRATION"
+    )
+    assert strict_policy["threshold_reference_hash"]
+
+    missing_width = {
+        **strict_record,
+        "input_snapshot": {
+            key: value
+            for key, value in strict_record["input_snapshot"].items()
+            if key != "movement_width_reference"
+        },
+    }
+    try:
+        worker._frozen_threshold_policy(
+            event=strict_event,
+            horizon_minutes=240,
+            snapshot_records=[missing_width],
+        )
+    except worker.FrozenThresholdPolicyConflict as exc:
+        assert "movement-width" in str(exc)
+    else:
+        raise AssertionError("missing sampler-v4 frozen width used a fallback")
+
+    mismatched_session = {
+        **strict_record,
+        "input_snapshot": {
+            **strict_record["input_snapshot"],
+            "outcome_window_session": {
+                **strict_record["input_snapshot"]["outcome_window_session"],
+                "session_weekend_ratio": 0.25,
+            },
+        },
+    }
+    try:
+        worker._frozen_threshold_policy(
+            event=strict_event,
+            horizon_minutes=240,
+            snapshot_records=[mismatched_session],
+        )
+    except worker.FrozenThresholdPolicyConflict as exc:
+        assert "session" in str(exc)
+    else:
+        raise AssertionError("mismatched sampler-v4 frozen session was accepted")
+
     forged_strict = {
         **strict_record,
         "input_snapshot": {
-            **strict_snapshot,
+            **strict_record["input_snapshot"],
             "movement_width_reference": {
                 **strict_reference,
                 "as_of_utc": START + timedelta(days=10),
@@ -575,7 +617,33 @@ def run() -> None:
     except worker.FrozenThresholdPolicyConflict as exc:
         assert "newer than decision time" in str(exc)
     else:
-        raise AssertionError("future v6 movement-width calibration was accepted")
+        raise AssertionError("future v4 movement-width calibration was accepted")
+
+    try:
+        worker._frozen_threshold_policy(
+            event=strict_event,
+            horizon_minutes=240,
+            snapshot_records=[],
+        )
+    except worker.FrozenThresholdPolicyConflict as exc:
+        assert "no current frozen threshold evidence" in str(exc)
+    else:
+        raise AssertionError("sampler-v4 event without evidence used a fallback")
+
+    legacy_v3_event = {
+        "alert_time_utc": START,
+        "engine_snapshot": {
+            "prospective_anchor": {
+                "sampler_version": "prospective-neutral-anchor-v3-max-pain-frozen"
+            }
+        },
+    }
+    audit_policy = worker._frozen_threshold_policy(
+        event=legacy_v3_event,
+        horizon_minutes=240,
+        snapshot_records=[],
+    )
+    assert audit_policy["threshold_source_kind"] == "STATIC_HORIZON_FLOOR"
 
     conflicting_record = {
         **legacy_record,
@@ -627,6 +695,38 @@ def run() -> None:
             raise AssertionError(
                 "relaxed reference with a missing/mismatched horizon was accepted"
             )
+
+    # The exact v4 bundle produces a label without waiting for candle dwell.
+    # Removing only its frozen width fails closed even with the same favorable
+    # canonical wick: no HIT/PENDING row is written.
+    strict_complete, strict_complete_writes = _run_once_with_path(
+        lambda event_time: [
+            _candle(event_time, high=100.6, low=99.8, close=99.9),
+            _candle(event_time + timedelta(minutes=1)),
+            _candle(event_time + timedelta(minutes=2)),
+        ],
+        strict_current=True,
+    )
+    assert strict_complete["first_touch_hits"] == 1
+    assert len(strict_complete_writes) == 1
+    assert strict_complete_writes[0]["first_touch"]["status"] == "HIT"
+    assert strict_complete_writes[0]["first_touch"][
+        "threshold_source_kind"
+    ] == "PRIOR_ONLY_SESSION_CALIBRATION"
+
+    strict_missing, strict_missing_writes = _run_once_with_path(
+        lambda event_time: [
+            _candle(event_time, high=100.6, low=99.8, close=99.9),
+            _candle(event_time + timedelta(minutes=1)),
+            _candle(event_time + timedelta(minutes=2)),
+        ],
+        strict_current=True,
+        omit_strict_width=True,
+    )
+    assert strict_missing_writes == []
+    assert strict_missing["first_touch_hits"] == 0
+    assert strict_missing["first_touch_rows_written"] == 0
+    assert strict_missing["first_touch_threshold_policy_conflicts"] == 1
 
     # A favorable wick on a gapped prefix is not allowed to freeze a terminal
     # HIT.  Once the complete prefix is available, the same wick qualifies
@@ -784,6 +884,14 @@ def run() -> None:
     assert policy["post_hit_reversal"] == "does not cancel success"
     assert "every minute" in policy["worker_evaluation"]
     assert "eligible delivered Alerts" in policy["worker_evaluation"]
+    assert policy["current_evidence_policy"] == (
+        worker._STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+    )
+    assert policy["current_sampler"] == (
+        worker._STRICT_PROSPECTIVE_SAMPLER_VERSION
+    )
+    assert "fails closed" in policy["current_threshold_input"]
+    assert policy["legacy_evidence"] == "audit_only"
     assert "fail closed" in status["price_paths"]["alert_reference_policy"]
     assert worker._POLL_SECONDS >= 60
 

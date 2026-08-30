@@ -43,6 +43,9 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "012_historical_replay_v2_streaming_index.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "013_prospective_decision_feature_freeze_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

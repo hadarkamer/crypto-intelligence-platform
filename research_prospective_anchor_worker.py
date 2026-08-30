@@ -261,7 +261,7 @@ class ProspectiveAnchorWorker:
             self._service = self._service_factory(
                 self._store,
                 symbols=self.symbols,
-                strategy_version="formula-prospective-neutral-v3",
+                strategy_version="formula-prospective-neutral-v4",
                 code_version=(
                     os.getenv("RENDER_GIT_COMMIT")
                     or os.getenv("GITHUB_SHA")
