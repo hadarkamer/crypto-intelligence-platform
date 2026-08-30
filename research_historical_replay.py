@@ -42,6 +42,9 @@ REPLAY_VERSION = (
 )
 SELECTION_POLICY_VERSION = "balanced-even-time-per-symbol-v1"
 RESUME_POLICY_VERSION = "revalidate-rehome-interrupted-chunks-v1"
+HYPE_ROLLING_WINDOW_POLICY_VERSION = (
+    "hyperliquid-5000m-hype-first-margin-180m-v1"
+)
 COVERAGE_SCOPE_VERSION = (
     "bounded-balanced-coherent-current-replay-all-horizons-v1"
 )
@@ -53,6 +56,8 @@ _STREAM_BATCH_SIZE = 500
 _STREAM_CURSOR_IDS = itertools.count(1)
 _FETCH_SEGMENT_MINUTES = 1900
 _HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES = 5000
+_HYPERLIQUID_ROLLING_WINDOW_SAFETY_MARGIN_MINUTES = 180
+_HYPE_REFERENCE_LOOKBACK_MINUTES = 2
 _HORIZON_CLOSE_GRACE_MINUTES = 5
 
 
@@ -176,14 +181,48 @@ def _json(value: Any) -> str:
 def _hype_one_minute_observation_floor(
     now: Optional[datetime] = None,
 ) -> datetime:
-    """Earliest HYPE anchor whose reference minute remains in official history."""
+    """Earliest HYPE anchor safely inside official rolling one-minute history."""
     current = _floor_minute(now or datetime.now(timezone.utc))
     # The replay asks for two minutes before an anchor so it can prove that the
     # reference candle closed before the decision time. Hyperliquid exposes
-    # only its most recent 5000 candles, so reserve those two minutes here.
+    # only its most recent 5000 candles.  Keep another fixed three-hour margin:
+    # two hours cover startup/selection-to-fetch delay and the final hour is an
+    # operational reserve.  HYPE is also processed first, so this margin is not
+    # consumed by Binance symbols.  Older anchors are excluded, never rerouted.
     return current - timedelta(
-        minutes=_HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES - 2
+        minutes=(
+            _HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES
+            - _HYPE_REFERENCE_LOOKBACK_MINUTES
+            - _HYPERLIQUID_ROLLING_WINDOW_SAFETY_MARGIN_MINUTES
+        )
     )
+
+
+def _hype_anchor_path_is_available(
+    observation_time: datetime,
+    *,
+    horizon_minutes: int,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Return whether Hyperliquid can still supply the complete official path."""
+    current = _floor_minute(now or datetime.now(timezone.utc))
+    observation = _utc(observation_time)
+    reference_fetch_start = _floor_minute(observation) - timedelta(
+        minutes=_HYPE_REFERENCE_LOOKBACK_MINUTES
+    )
+    provider_floor = current - timedelta(
+        minutes=_HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES
+    )
+    outcome_is_closed = observation <= fully_closed_end(
+        (int(horizon_minutes),), now=current
+    )
+    return reference_fetch_start >= provider_floor and outcome_is_closed
+
+
+def _replay_symbol_order(symbols: Iterable[str]) -> tuple[str, ...]:
+    """Process rolling-window HYPE first, then all other symbols alphabetically."""
+    normalized = {str(symbol).strip().upper() for symbol in symbols if symbol}
+    return tuple(sorted(normalized, key=lambda symbol: (symbol != "HYPE", symbol)))
 
 
 def _research_database_url() -> str:
@@ -367,6 +406,7 @@ def _load_anchors(
     start: Optional[datetime],
     end: Optional[datetime],
     symbols: Sequence[str],
+    hype_availability_as_of: Optional[datetime] = None,
 ) -> list[Anchor]:
     """Load canonical decision times without double-counting archive overlap."""
     params: list[Any] = []
@@ -416,7 +456,9 @@ def _load_anchors(
             live_filters.append("live.symbol=ANY(%s)")
             live_params.append(list(symbols))
         live_filters.append("(live.symbol<>'HYPE' OR live.collected_at >= %s)")
-        live_params.append(_hype_one_minute_observation_floor())
+        live_params.append(
+            _hype_one_minute_observation_floor(hype_availability_as_of)
+        )
         live_filters.extend(
             (
                 """(
@@ -2204,7 +2246,16 @@ def status() -> Dict[str, Any]:
         "first_touch_method_version": research_no_dwell_outcome.METHOD_VERSION,
         "canonical_source": canonical_price_path.canonical_source_description(),
         "hype_one_minute_history_policy": {
+            "version": HYPE_ROLLING_WINDOW_POLICY_VERSION,
             "provider_limit_candles": _HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES,
+            "reference_lookback_minutes": _HYPE_REFERENCE_LOOKBACK_MINUTES,
+            "safety_margin_minutes": (
+                _HYPERLIQUID_ROLLING_WINDOW_SAFETY_MARGIN_MINUTES
+            ),
+            "processing_order": "HYPE_FIRST_THEN_SYMBOL_ASC",
+            "provider": "hyperliquid",
+            "instrument": "@107",
+            "interval": "1m",
             "eligible_observation_floor_utc": _hype_one_minute_observation_floor(),
             "older_hype_anchors": "excluded rather than approximated or mislabeled",
         },
@@ -2292,7 +2343,10 @@ def run_backfill(
     normalized_symbols = tuple(sorted({str(item).upper() for item in symbols if item}))
     chunk_span = timedelta(days=max(1, min(int(chunk_days), 14)))
     frozen_now = datetime.now(timezone.utc)
-    closed_end = fully_closed_end(normalized_horizons, now=frozen_now)
+    hype_availability_as_of = _floor_minute(frozen_now)
+    closed_end = fully_closed_end(
+        normalized_horizons, now=hype_availability_as_of
+    )
     effective_end = min(_utc(end), closed_end) if end is not None else closed_end
     effective_start = _utc(start) if start is not None else None
     if effective_start is not None and effective_start >= effective_end:
@@ -2313,6 +2367,7 @@ def run_backfill(
             start=effective_start,
             end=effective_end,
             symbols=normalized_symbols,
+            hype_availability_as_of=hype_availability_as_of,
         )
     if not anchors:
         return {
@@ -2383,6 +2438,27 @@ def run_backfill(
             existing_by_symbol=existing_by_symbol,
             max_anchors=max_anchors,
         )
+        hype_selection_floor = _hype_one_minute_observation_floor(
+            hype_availability_as_of
+        )
+        invalid_hype_anchors = [
+            anchor
+            for anchor in pending_anchors
+            if anchor.symbol == "HYPE"
+            and (
+                _utc(anchor.observation_time_utc) < hype_selection_floor
+                or _utc(anchor.observation_time_utc) > effective_end
+            )
+        ]
+        if invalid_hype_anchors:
+            research_conn.execute(
+                "SELECT pg_advisory_unlock(%s)", (_LOCK_ID,)
+            )
+            research_conn.commit()
+            raise RuntimeError(
+                "HYPE bounded selection is outside the frozen official "
+                "Hyperliquid rolling-window path"
+            )
         if pending_anchors and max_anchors is None:
             research_conn.execute(
                 "SELECT pg_advisory_unlock(%s)", (_LOCK_ID,)
@@ -2410,6 +2486,29 @@ def run_backfill(
             "coverage_scope_version": COVERAGE_SCOPE_VERSION,
             "resume_policy_version": RESUME_POLICY_VERSION,
             "frozen_fully_closed_end_utc": effective_end,
+            "hype_rolling_window_policy": {
+                "version": HYPE_ROLLING_WINDOW_POLICY_VERSION,
+                "provider": "hyperliquid",
+                "instrument": "@107",
+                "interval": "1m",
+                "provider_limit_candles": (
+                    _HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES
+                ),
+                "reference_lookback_minutes": (
+                    _HYPE_REFERENCE_LOOKBACK_MINUTES
+                ),
+                "safety_margin_minutes": (
+                    _HYPERLIQUID_ROLLING_WINDOW_SAFETY_MARGIN_MINUTES
+                ),
+                "processing_order": "HYPE_FIRST_THEN_SYMBOL_ASC",
+                "availability_as_of_utc": hype_availability_as_of,
+                "eligible_observation_floor_utc": hype_selection_floor,
+                "selected_observation_ceiling_utc": effective_end,
+                "required_outcome_minutes": max(normalized_horizons),
+                "older_hype_anchors": (
+                    "excluded rather than approximated or mislabeled"
+                ),
+            },
             **selected_contract,
         }
         if not pending_anchors:
@@ -2549,7 +2648,8 @@ def run_backfill(
                     )
                     for row in canonical_references
                 }
-            for symbol, symbol_anchors in grouped.items():
+            for symbol in _replay_symbol_order(grouped):
+                symbol_anchors = grouped[symbol]
                 chunk_start = _floor_minute(symbol_anchors[0].observation_time_utc)
                 symbol_end = symbol_anchors[-1].observation_time_utc + timedelta(minutes=1)
                 while chunk_start < symbol_end:
@@ -2579,6 +2679,17 @@ def run_backfill(
                         # are writes of ownership, not skips.
                         chunk_start = chunk_end
                         continue
+                    if symbol == "HYPE" and any(
+                        not _hype_anchor_path_is_available(
+                            anchor.observation_time_utc,
+                            horizon_minutes=max(normalized_horizons),
+                        )
+                        for anchor in pending
+                    ):
+                        raise RuntimeError(
+                            "HYPE official @107 rolling path expired before "
+                            "processing; refusing fallback or incomplete replay"
+                        )
                     fetch_start = min(
                         anchor.observation_time_utc for anchor in pending
                     ) - timedelta(minutes=2)

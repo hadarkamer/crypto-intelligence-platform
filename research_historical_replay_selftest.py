@@ -40,9 +40,55 @@ def run() -> None:
     assert "_coverage(" not in status_source
     assert "status='COMPLETED'" in status_source
     observation = datetime(2026, 8, 29, 12, 32, tzinfo=timezone.utc)
-    assert replay._hype_one_minute_observation_floor(
-        datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
-    ) == datetime(2026, 8, 26, 0, 42, tzinfo=timezone.utc)
+    hype_availability_as_of = datetime(
+        2026, 8, 29, 12, 0, tzinfo=timezone.utc
+    )
+    hype_floor = replay._hype_one_minute_observation_floor(
+        hype_availability_as_of
+    )
+    assert hype_floor == datetime(
+        2026, 8, 26, 3, 42, tzinfo=timezone.utc
+    )
+    assert replay._HYPERLIQUID_ROLLING_WINDOW_SAFETY_MARGIN_MINUTES == 180
+    assert replay.HYPE_ROLLING_WINDOW_POLICY_VERSION.endswith("margin-180m-v1")
+    # The selected floor remains fetchable after the promised two-hour
+    # operating delay and still has a further one-hour reserve.  Once the full
+    # 180-minute margin is exceeded, Replay fails closed instead of falling
+    # back to another venue or accepting an incomplete canonical path.
+    assert replay._hype_anchor_path_is_available(
+        hype_floor,
+        horizon_minutes=1440,
+        now=hype_availability_as_of + timedelta(minutes=120),
+    )
+    assert replay._hype_anchor_path_is_available(
+        hype_floor,
+        horizon_minutes=1440,
+        now=hype_availability_as_of + timedelta(minutes=180),
+    )
+    assert not replay._hype_anchor_path_is_available(
+        hype_floor,
+        horizon_minutes=1440,
+        now=hype_availability_as_of + timedelta(minutes=181),
+    )
+    latest_closed_hype = replay.fully_closed_end(
+        (1440,), now=hype_availability_as_of
+    )
+    assert replay._hype_anchor_path_is_available(
+        latest_closed_hype,
+        horizon_minutes=1440,
+        now=hype_availability_as_of,
+    )
+    assert not replay._hype_anchor_path_is_available(
+        latest_closed_hype + timedelta(minutes=1),
+        horizon_minutes=1440,
+        now=hype_availability_as_of,
+    )
+    assert replay._replay_symbol_order(
+        ("BTC", "HYPE", "ETH", "BNB")
+    ) == ("HYPE", "BNB", "BTC", "ETH")
+    assert "for symbol in _replay_symbol_order(grouped)" in inspect.getsource(
+        replay.run_backfill
+    )
     candles = [
         _candle(observation + timedelta(minutes=index), 100.0 + index / 10)
         for index in range(-2, 61)
@@ -613,6 +659,7 @@ def run() -> None:
             "coverage_scope_version",
             "resume_policy_version",
             "frozen_fully_closed_end_utc",
+            "hype_rolling_window_policy",
             "selection_policy_version",
             "selected_anchor_fingerprint_sha256",
             "selected_anchor_count",
@@ -638,6 +685,32 @@ def run() -> None:
         assert recovery_config["resume_policy_version"] == (
             replay.RESUME_POLICY_VERSION
         )
+        hype_policy = recovery_config["hype_rolling_window_policy"]
+        assert hype_policy == {
+            "version": replay.HYPE_ROLLING_WINDOW_POLICY_VERSION,
+            "provider": "hyperliquid",
+            "instrument": "@107",
+            "interval": "1m",
+            "provider_limit_candles": 5000,
+            "reference_lookback_minutes": 2,
+            "safety_margin_minutes": 180,
+            "processing_order": "HYPE_FIRST_THEN_SYMBOL_ASC",
+            "availability_as_of_utc": hype_policy["availability_as_of_utc"],
+            "eligible_observation_floor_utc": (
+                hype_policy["eligible_observation_floor_utc"]
+            ),
+            "selected_observation_ceiling_utc": str(recovery_end),
+            "required_outcome_minutes": 240,
+            "older_hype_anchors": (
+                "excluded rather than approximated or mislabeled"
+            ),
+        }
+        assert (
+            datetime.fromisoformat(hype_policy["availability_as_of_utc"])
+            - datetime.fromisoformat(
+                hype_policy["eligible_observation_floor_utc"]
+            )
+        ) == timedelta(minutes=4818)
         assert recovery_config["selection_policy_version"] == (
             replay.SELECTION_POLICY_VERSION
         )
