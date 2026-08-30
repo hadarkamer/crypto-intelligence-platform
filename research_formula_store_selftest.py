@@ -24,6 +24,8 @@ def _shadow_row(
         "symbol": symbol,
         "direction": "LONG",
         "event_type": "SELFTEST_ALERT",
+        "decision_cohort_key": f"{event_id:064x}"[-64:],
+        "decision_anchor_time_utc": at,
         "evaluation_status": status,
         "first_touch_available": True,
         "first_touch_hit": True,
@@ -440,6 +442,7 @@ def _replacement_contract() -> tuple[dict, dict, list[dict]]:
         "minimum_span_hours_per_symbol": (
             store.research_feature_matrix.REPLAY_MIN_SPAN_HOURS_PER_SYMBOL
         ),
+        "continuity_gap_is_diagnostic_only": True,
     }
     coverage = {
         "dataset_kind": "historical_raw_opportunity_replay",
@@ -461,9 +464,10 @@ def _replacement_contract() -> tuple[dict, dict, list[dict]]:
         "span_hours": 336.0,
         "by_symbol": {
             symbol: {
-                "anchors": 250,
+                "anchors": 673,
                 "utc_dates": 14,
                 "span_hours": 336.0,
+                "maximum_anchor_gap_minutes": 30.0,
                 "eligible": True,
                 "failed_gates": [],
             }
@@ -652,6 +656,7 @@ def run() -> None:
     )
     assert compatible_shadow_schemas == {
         "research-formula-v5-safe-replay",
+        store.research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
         store.research_formula_engine.FORMULA_SCHEMA_VERSION,
     }
     persist_source_raw = inspect.getsource(store.persist_discovery_run)
@@ -1032,13 +1037,12 @@ def run() -> None:
     start = datetime(2026, 8, 29, 0, 0, tzinfo=timezone.utc)
     rows = [
         _shadow_row(1, at=start),
-        # Same-symbol outcome windows overlap, so only the first match is an
-        # independent prospective evidence unit.
+        # Every later symbol/anchor inside the same fixed 24-hour Market
+        # Episode is correlated audit evidence, not another proof.
         _shadow_row(2, at=start + timedelta(minutes=30)),
-        # An interval beginning exactly at the prior horizon boundary does not
-        # overlap the half-open outcome interval and must remain eligible.
+        # A one-hour boundary is still inside the 24-hour Market Episode.
         _shadow_row(3, at=start + timedelta(minutes=60)),
-        # Simultaneous evidence for another symbol is independent.
+        # Another symbol in the same broad move is not independent.
         _shadow_row(4, at=start + timedelta(minutes=30), symbol="ETH"),
         # A same-symbol control overlapping a retained match is excluded.
         _shadow_row(
@@ -1046,7 +1050,7 @@ def run() -> None:
             at=start + timedelta(minutes=10),
             status="UNMATCHED",
         ),
-        # This control starts exactly at the second retained match's boundary.
+        # Controls inside the retained Market Episode are excluded.
         _shadow_row(
             6,
             at=start + timedelta(minutes=120),
@@ -1062,12 +1066,13 @@ def run() -> None:
         _shadow_row(8, at=start, symbol="SOL", status="UNEVALUABLE"),
     ]
     selected = store._select_independent_shadow_rows(rows, horizon_minutes=60)
-    assert [row["event_id"] for row in selected["matches"]] == [1, 4, 3]
-    assert [row["event_id"] for row in selected["controls"]] == [6]
-    assert selected["excluded_match_event_ids"] == [2]
-    assert selected["excluded_control_event_ids"] == [5, 7]
+    assert [row["event_id"] for row in selected["matches"]] == [1]
+    assert selected["controls"] == []
+    assert selected["excluded_match_event_ids"] == [2, 3, 4, 8]
+    assert selected["excluded_control_event_ids"] == [5, 6, 7]
     assert selected["exact_cohort_excluded_event_ids"] == []
     assert 8 not in {row["event_id"] for row in selected["rows"]}
+    assert selected["membership_censor_event_ids"] == [8]
 
     # Active v5 formulas stay in SHADOW, but all new work now comes only from
     # the exact sampler-v4 authority view. Delivered ALERTs and older sampler
@@ -1096,13 +1101,7 @@ def run() -> None:
             self.queries.append(normalized)
             if "FROM research_formulas" in normalized:
                 assert "f.current_stage='SHADOW'" in normalized
-                assert (
-                    "f.formula_schema_version=%sOR("
-                    "f.formula_schema_version=%sAND"
-                    "f.engine_version=%sAND"
-                    "f.feature_schema_version=%sAND"
-                    "f.outcome_method_version=%s)"
-                ) in dense
+                assert dense.count("f.formula_schema_version=%sAND") >= 3
                 assert "f.current_stage='LIVE'" in normalized
                 assert (
                     "f.current_stage='LIVE'AND"
@@ -1117,8 +1116,14 @@ def run() -> None:
                     store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
                     store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
                 )
+                legacy_v6_contract = (
+                    store.research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
+                    store.research_formula_engine.LEGACY_V6_ENGINE_VERSION,
+                    store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                    store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                )
                 assert params == (
-                    "research-formula-v5-safe-replay",
+                    *legacy_v6_contract,
                     *current_contract,
                     *current_contract,
                 )
@@ -1126,14 +1131,16 @@ def run() -> None:
                     [
                         {
                             "formula_id": 3153,
-                            "formula_key": "legacy-v5-shadow",
+                            "formula_key": "legacy-v6-shadow",
                             "formula_version": 1,
                             "formula_text": "legacy formula",
-                            "formula_schema_version": "research-formula-v5-safe-replay",
+                            "formula_schema_version": store.research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
+                            "engine_version": store.research_formula_engine.LEGACY_V6_ENGINE_VERSION,
                             "direction": "SHORT",
                             "horizon_minutes": 720,
                             "conditions": [],
-                            "feature_schema_version": "research-feature-matrix-v5",
+                            "feature_schema_version": store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                            "outcome_method_version": store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
                             "last_shadow_event_id": 0,
                             "shadow_started_at_utc": start,
                             "current_stage": "SHADOW",
@@ -1182,8 +1189,8 @@ def run() -> None:
     finally:
         store._connect = original_connect
     assert len(legacy_work) == 1
-    assert legacy_work[0]["formula_schema_version"].startswith(
-        "research-formula-v5"
+    assert legacy_work[0]["formula_schema_version"] == (
+        store.research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION
     )
     assert legacy_work[0]["events"][0]["event_id"] == 9001
 
@@ -1203,7 +1210,7 @@ def run() -> None:
             dense = normalized.replace(" ", "")
             if "FROM research_formulas" in normalized:
                 assert "current_stage='SHADOW'" in normalized
-                assert "formula_schema_version=%sOR(" in dense
+                assert dense.count("formula_schema_version=%sAND") >= 2
                 assert "engine_version=%s" in dense
                 assert "feature_schema_version=%s" in dense
                 assert "outcome_method_version=%s" in dense
@@ -1215,7 +1222,10 @@ def run() -> None:
                 assert "direction" in normalized
                 assert "conditions" in normalized
                 assert params == (
-                    "research-formula-v5-safe-replay",
+                    store.research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
+                    store.research_formula_engine.LEGACY_V6_ENGINE_VERSION,
+                    store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                    store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
                     store.research_formula_engine.FORMULA_SCHEMA_VERSION,
                     store.research_formula_engine.ENGINE_VERSION,
                     store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
@@ -1225,14 +1235,14 @@ def run() -> None:
                     [
                         {
                             "formula_id": 3153,
-                            "formula_key": "legacy-v5-shadow",
+                            "formula_key": "legacy-v6-shadow",
                             "formula_version": 1,
                             "formula_schema_version": (
-                                "research-formula-v5-safe-replay"
+                                store.research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION
                             ),
-                            "engine_version": "formula-discovery-engine-v5",
+                            "engine_version": store.research_formula_engine.LEGACY_V6_ENGINE_VERSION,
                             "feature_schema_version": (
-                                "research-feature-matrix-v5"
+                                store.research_feature_matrix.FEATURE_SCHEMA_VERSION
                             ),
                             "outcome_method_version": (
                                 store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
@@ -1248,13 +1258,12 @@ def run() -> None:
                 )
             if "FROM research_formula_shadow_checks" in normalized:
                 assert "JOIN research_prospective_shadow_events authorized" in normalized
-                assert "c.evidence_policy_version=%s" in normalized
-                assert "c.authoritative_verified IS TRUE" in normalized
+                assert "c.evidence_policy_version" in normalized
+                assert "c.authoritative_verified" in normalized
+                assert "c.authoritative_verified IS TRUE" not in normalized
                 assert "authorized.sampler_version=%s" in normalized
                 assert "authorized.feature_bundle_policy_version=%s" in normalized
-                assert "c.input_snapshot->>'evidence_policy_version'=%s" in normalized
-                assert "prospective_evidence,feature_bundle_sha256" in normalized
-                assert "c.condition_results IS NOT DISTINCT FROM" in normalized
+                assert "c.input_snapshot->>'evidence_policy_version'=%s" not in normalized
                 assert "research_first_touch_outcomes" in normalized
                 assert "ft.success AS path_success" in normalized
                 assert "AS first_touch_available" in normalized
@@ -1286,9 +1295,8 @@ def run() -> None:
     assert readiness["evaluated"] == 1
     assert readiness_connection.updated is True
 
-    # Exact decision cohorts collapse before non-overlap selection. If an
-    # unexpected mixed-status duplicate exists, the matched observation is the
-    # conservative representative and the other event remains auditable.
+    # Exact decision cohorts collapse before episode selection. A mixed-status
+    # authoritative cohort is contradictory and therefore fails closed.
     exact_duplicate = [
         {
             **_shadow_row(10, at=start, status="UNMATCHED"),
@@ -1304,9 +1312,82 @@ def run() -> None:
     collapsed = store._select_independent_shadow_rows(
         exact_duplicate, horizon_minutes=60
     )
-    assert [row["event_id"] for row in collapsed["matches"]] == [11]
+    assert collapsed["matches"] == []
     assert collapsed["controls"] == []
-    assert collapsed["exact_cohort_excluded_event_ids"] == [10]
+    assert collapsed["exact_cohort_excluded_event_ids"] == []
+    assert collapsed["conflicting_cohort_event_ids"] == [10, 11]
+
+    # Only the forecast-start cohort can supply an episode outcome. Source
+    # availability anchors may sort differently after retries, but they must
+    # never select a later forecast or shorten the independence window.
+    later_forecast = _shadow_row(
+        200, at=start + timedelta(minutes=30)
+    )
+    later_forecast["decision_anchor_time_utc"] = start
+    later_forecast["mfe_pct"] = 1.0
+    earlier_forecast = _shadow_row(
+        201, at=start + timedelta(minutes=15)
+    )
+    earlier_forecast["decision_anchor_time_utc"] = start + timedelta(
+        minutes=15
+    )
+    earlier_forecast["mfe_pct"] = 9.0
+    forecast_validation = store._build_shadow_validation(
+        {"horizon_minutes": 60},
+        [later_forecast, earlier_forecast],
+        evaluated_at_utc=start + timedelta(hours=25),
+    )
+    assert forecast_validation["metrics"]["sample_event_ids"] == [201]
+    assert forecast_validation["metrics"]["median_mfe_pct"] == 9.0
+
+    # Missing evidence at the episode's first forecast fails closed. A later
+    # correlated row remains audit-visible but cannot veto or rescue it.
+    first = _shadow_row(100, at=start)
+    later = _shadow_row(101, at=start + timedelta(hours=1))
+    missing_first = {
+        **first,
+        "outcome_available": False,
+        "outcome_due": True,
+    }
+    missing_first_validation = store._build_shadow_validation(
+        {"horizon_minutes": 60},
+        [missing_first, later],
+        evaluated_at_utc=start + timedelta(hours=25),
+    )
+    assert missing_first_validation["metrics"]["sample_size"] == 0
+    assert missing_first_validation["evidence"]["overdue_outcome_event_ids"] == [
+        100
+    ]
+    assert missing_first_validation["evidence"][
+        "correlated_overdue_outcome_event_ids"
+    ] == []
+    assert (
+        missing_first_validation["gates"][
+            "no overdue canonical outcome gaps"
+        ]
+        is False
+    )
+    missing_later = {
+        **later,
+        "outcome_available": False,
+        "outcome_due": True,
+    }
+    missing_later_validation = store._build_shadow_validation(
+        {"horizon_minutes": 60},
+        [first, missing_later],
+        evaluated_at_utc=start + timedelta(hours=25),
+    )
+    assert missing_later_validation["metrics"]["sample_size"] == 1
+    assert missing_later_validation["evidence"]["overdue_outcome_event_ids"] == []
+    assert missing_later_validation["evidence"][
+        "correlated_overdue_outcome_event_ids"
+    ] == [101]
+    assert (
+        missing_later_validation["gates"][
+            "no overdue canonical outcome gaps"
+        ]
+        is True
+    )
 
     # Session composition and weekend width calibration are frozen at the
     # decision timestamp. Realized outcomes populate labels only and never
@@ -1516,6 +1597,8 @@ def run() -> None:
 
     mismatched_terminal = {
         **_shadow_row(30, at=start + timedelta(hours=8)),
+        "authoritative_verified": True,
+        "evidence_policy_version": store._PROSPECTIVE_EVIDENCE_POLICY_VERSION,
         "input_snapshot": relaxed_snapshot,
         "outcome_due": True,
         "first_touch_threshold_scale_factor": 1.0,
@@ -1544,9 +1627,9 @@ def run() -> None:
         "threshold_policy_mismatch_event_ids"
     ] == [30]
 
-    # v6 Max-Pain proof/cohort is checked before independence selection. A
-    # malformed historical check remains listed for audit but cannot overlap-exclude, or
-    # permanently poison, sufficient later valid evidence.
+    # v7 Max-Pain proof/cohort is checked before independence selection. A
+    # malformed observation remains an outcome-blind membership censor: a
+    # later correlated match cannot erase the missing first-cohort evidence.
     max_pain_formula = {
         "formula_id": 42,
         "formula_key": "f" * 64,
@@ -1679,6 +1762,9 @@ def run() -> None:
         "feature_schema_version",
     ):
         legacy_check["input_snapshot"][key] = legacy_formula[key]
+    legacy_check["input_snapshot"]["legacy_v5_shadow_adapter_version"] = (
+        store._LEGACY_V5_SHADOW_ADAPTER_VERSION
+    )
     legacy_key, legacy_anchor = store._decision_cohort_identity(
         formula=legacy_formula,
         event=legacy_check,
@@ -2059,7 +2145,7 @@ def run() -> None:
     max_pain_validation = store._build_shadow_validation(
         max_pain_formula,
         [malformed, valid_max_pain],
-        evaluated_at_utc=valid_at + timedelta(hours=1),
+        evaluated_at_utc=valid_at + timedelta(hours=25),
     )
     max_pain_evidence = max_pain_validation["evidence"][
         "max_pain_provenance"
@@ -2068,11 +2154,11 @@ def run() -> None:
     assert max_pain_evidence["incompatible_event_ids"] == [40]
     assert [
         item["event_id"] for item in max_pain_evidence["event_provenance_refs"]
-    ] == [41]
+    ] == []
     assert max_pain_validation["gates"][
         "complete Max-Pain provenance chain"
     ] is True
-    assert max_pain_validation["metrics"]["sample_size"] == 1
+    assert max_pain_validation["metrics"]["sample_size"] == 0
     assert max_pain_validation["evidence"]["raw_evaluation_status"] == {
         "MATCHED": 1,
         "UNMATCHED": 0,
@@ -2081,7 +2167,7 @@ def run() -> None:
     reordered_validation = store._build_shadow_validation(
         max_pain_formula,
         [valid_max_pain, malformed],
-        evaluated_at_utc=valid_at + timedelta(hours=1),
+        evaluated_at_utc=valid_at + timedelta(hours=25),
     )
     assert reordered_validation["evidence"]["max_pain_provenance"][
         "canonical_evidence_sha256"

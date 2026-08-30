@@ -117,6 +117,9 @@ def run() -> None:
             assert "ft.pre_qualifying_mae_pct" in query
             assert "ft.method_version=%s" in query
             assert "ft.status IN ('HIT', 'MISS')" in query
+            assert "e.alert_time_utc <= %s" in query
+            assert "ft.created_at_utc <= %s" in query
+            assert "o.created_at <= %s" in query
             assert matrix.VERIFIED_OUTCOME_METHOD in params
             assert matrix.canonical_price_path.METHOD_VERSION in params
             return _Fetched()
@@ -129,6 +132,7 @@ def run() -> None:
         lookback_days=30,
         horizon_minutes=240,
         limit=100,
+        analysis_as_of_utc=candle_open,
     )
     assert loaded == [{"event_id": 1, "symbol": "BTC"}]
 
@@ -968,7 +972,9 @@ def run() -> None:
         normalized = " ".join(query.split())
         assert query.count("%s") == len(params)
         assert "historical.horizon_minutes=%s" in normalized
-        assert "NOW() - (%s * INTERVAL '1 day')" in normalized
+        assert "%s - (%s * INTERVAL '1 day')" in normalized
+        assert "historical.observation_time_utc <= %s" in normalized
+        assert "historical.created_at_utc <= %s" in normalized
         assert "historical.first_touch_method_version=%s" in normalized
         assert "historical.replay_version=%s" in normalized
         assert (
@@ -989,14 +995,19 @@ def run() -> None:
             "owner_run.replay_version=historical.replay_version" in normalized
         )
         assert "owner_run.status='COMPLETED'" in normalized
+        assert "owner_run.completed_at_utc <= %s" in normalized
         assert params == (
             240,
+            coverage_time,
             3650,
+            coverage_time,
+            coverage_time,
             matrix.VERIFIED_OUTCOME_METHOD,
             matrix.research_historical_replay.REPLAY_VERSION,
             list(matrix.VERIFIED_OUTCOME_QUALITIES),
             matrix.canonical_price_path.METHOD_VERSION,
             list(matrix.VERIFIED_OUTCOME_QUALITIES),
+            coverage_time,
         )
 
     class _StreamingCoverageCursor:
@@ -1039,7 +1050,7 @@ def run() -> None:
             rows = []
             opportunity_id = 1
             for symbol in ("BTC", "ETH", "SOL", "DOGE"):
-                for index in range(300):
+                for index in range(961):
                     rows.append(
                         {
                             "opportunity_id": opportunity_id,
@@ -1048,7 +1059,7 @@ def run() -> None:
                                 coverage_time
                                 - timedelta(days=20)
                                 + timedelta(
-                                    seconds=(20 * 86400 * index / 299)
+                                    seconds=(20 * 86400 * index / 960)
                                 )
                             ),
                             "coherent": True,
@@ -1179,7 +1190,10 @@ def run() -> None:
     )
     try:
         coverage = matrix._historical_replay_coverage(
-            coverage_conn, lookback_days=3650, horizon_minutes=240
+            coverage_conn,
+            lookback_days=3650,
+            horizon_minutes=240,
+            analysis_as_of_utc=coverage_time,
         )
     finally:
         matrix.research_historical_replay.load_canonical_reference_rows = (
@@ -1195,9 +1209,10 @@ def run() -> None:
     assert coverage["symbols"] == 4
     assert coverage["stored_symbols"] == 5
     assert coverage["eligible_symbols"] == ["BTC", "DOGE", "ETH", "SOL"]
-    assert coverage["stored_anchors"] == 1301
-    assert coverage["coherent_anchors"] == 1300
-    assert coverage["by_symbol"]["BTC"]["anchors"] == 300
+    assert coverage["stored_anchors"] == 3945
+    assert coverage["coherent_anchors"] == 3944
+    assert coverage["by_symbol"]["BTC"]["anchors"] == 961
+    assert coverage["by_symbol"]["BTC"]["maximum_anchor_gap_minutes"] == 30.0
     assert coverage["by_symbol"]["BTC"]["recomputed_policy_rejections"] == 1
     assert coverage["recomputed_policy_rejections"] == 1
     assert coverage["coverage_validation"] == "full-row prior-only recomputation"
@@ -1332,6 +1347,7 @@ def run() -> None:
                 in normalized
             )
             assert "owner_run.status='COMPLETED'" in normalized
+            assert "owner_run.completed_at_utc <= %s" in normalized
             # Model PostgreSQL applying the owner predicate: all three rows
             # below are structurally coherent but are not returned.
             assert all(row["coherent"] for row in self.owner_rejected)
@@ -1351,6 +1367,7 @@ def run() -> None:
         horizon_minutes=240,
         anchor_limit=100,
         symbols=["ETH", "BTC"],
+        analysis_as_of_utc=coverage_time,
     )
     assert [row["opportunity_id"] for row in owner_bound_opportunities] == [901]
     assert opportunity_conn.fetchall_calls == 0

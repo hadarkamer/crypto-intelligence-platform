@@ -205,7 +205,7 @@ def run() -> None:
     proof_source = [
         {
             "event_id": 501,
-            "alert_time_utc": now - timedelta(minutes=1),
+            "alert_time_utc": now - timedelta(hours=25),
             "outcome_due": True,
             "outcome_available": True,
             "evaluation_status": "MATCHED",
@@ -240,6 +240,13 @@ def run() -> None:
                 "rows": proof_source,
                 "matches": proof_source,
                 "controls": [],
+                "match_episodes": (
+                    research_formula_store.research_market_episode.group_rows(
+                        proof_source,
+                        horizon_minutes=horizon_minutes,
+                    )
+                ),
+                "control_episodes": [],
                 "excluded_match_event_ids": [],
                 "excluded_control_event_ids": [],
                 "exact_cohort_excluded_event_ids": [],
@@ -268,6 +275,9 @@ def run() -> None:
     assert second_frozen[0]["frozen_review"][
         "max_pain_provenance_evidence_sha256"
     ] == "b" * 64
+    assert first_frozen[0]["frozen_review"]["cutoff"][
+        "completed_independent_event_ids"
+    ] == [501]
 
     originals = {
         "connect": research_formula_store._connect,

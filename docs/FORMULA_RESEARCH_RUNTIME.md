@@ -1,10 +1,12 @@
-# Formula Research Runtime v3
+# Formula Research Runtime v4 — adaptive evidence
 
 ## Objective
 
-Find reproducible decision-time conditions that precede the widest practical
-LONG or SHORT move, while retaining high out-of-sample probability, low
-adverse excursion, fast favorable progress and useful MFE/MAE efficiency.
+Find reproducible decision-time conditions that currently precede a useful
+LONG or SHORT bias. A formula may qualify through high directional probability
+or through strong favorable/adverse movement asymmetry. It does not need to be
+perfect, and a deep adverse tail is disclosed rather than automatically used
+to reject an otherwise material edge.
 
 ## Evidence contract
 
@@ -33,6 +35,23 @@ adverse excursion, fast favorable progress and useful MFE/MAE efficiency.
 - Technical metadata such as archive sample counts, point age, completeness,
   schema versions and raw UTC/DST offsets is diagnostic only and cannot become
   a formula predicate.
+- Statistical evidence is counted in outcome-blind Market Episodes, not raw
+  alerts. After exact frozen cohorts collapse, the first forecast start opens
+  a fixed 24-hour window (or the formula horizon if longer). All symbols and
+  later matches inside it remain auditable but carry total evidence weight one.
+  A new episode can start only when that forecast window no longer overlaps.
+- Market Episode counts are formula-local. Counts from different formulas or
+  horizons must never be added as if they were independent proof. Formula
+  family deduplication separately compares their compact time intervals so
+  shifted formulas supported by the same broad moves collapse to one champion.
+- Discovery reads a rolling 120-day archive by default. Current relevance uses
+  the latest 21 days with a 14-day half-life after episode collapse. Both raw
+  recent counts and Kish effective sample sizes are reported.
+- Absolute dollar CVD changes remain auditable inputs but are forbidden as v7
+  discovery predicates across symbols. Discovery uses prior-only, same-symbol,
+  session-composition-matched percentile forms instead. This prevents a dollar
+  cutoff learned from a large market from being treated as equivalent evidence
+  for a smaller market.
 
 ## Discovery
 
@@ -50,26 +69,42 @@ For each horizon and direction, the engine:
    not inspected until the complete hypothesis family has been frozen;
 6. prevents correlated-family stacking without a frozen written exception and
    always forbids combining composite Max Pain evidence with its components;
-7. corrects every statistically tested candidate with one Benjamini-Hochberg
-   family, including hierarchical children that fail the nested discovery gain
-   screen, before final holdout validation begins;
+7. tests probability and asymmetry for every candidate, then corrects all
+   `2 × candidate` hypotheses together in one Benjamini-Hochberg family before
+   final holdout validation begins. Each route keeps its own mapped q-value;
 8. collapses exact/overlapping evidence fingerprints into deterministic formula
    families and persists one champion per family. Single-coin effects remain
    eligible; cross-symbol breadth is not a family-grouping requirement;
 9. compares each candidate with its same-direction complement after matching
    the outcome horizon's ACTIVE/WEEKEND composition with triangular weights;
-10. ranks candidates with material priority for movement width: median MFE,
-   MFE percentile in the same direction/horizon universe, movement beyond p90
-   MAE and a horizon-specific minimum; probability, speed, sample reliability
-   and stability remain required. The absolute movement floor may be scaled
-   down for weekend/mixed horizons only from sufficient prior raw-price
-   evidence; probability, Wilson, control improvement, MAE, efficiency and
-   movement-percentile gates are never relaxed.
+10. blends 70% cumulative historical quality with 30% current relevance. Both
+    parts are route-aware. Risk, speed, width, p90/p95 MAE, sample reliability
+    and stability remain visible. Weekend calibration may adjust only the
+    absolute favorable-width floor.
 
-Small samples remain visible but cannot pass the strict Holdout gate.
-In addition, automatic eligibility to enter Shadow requires at least 72 hours across
-three UTC dates in discovery and 24 hours across two UTC dates in holdout. A
-high percentage from a single day therefore remains `BACKTESTED` at most.
+Small samples remain visible but cannot become research-ready. Historical
+holdout acceptance requires common independence, currentness, width, baseline
+and data-integrity gates, then either:
+
+- Probability: at least 60% current weighted hit rate, weighted Wilson lower
+  bound 45%, at least five percentage points over controls, MFE/MAE at least
+  1.10 and joint-family q at most 0.20.
+- Asymmetry: hit rate at least 45%, favorable excursion exceeds adverse in at
+  least 70% of valid pairs, dominance Wilson at least 40%, at least five points
+  over paired controls, MFE/MAE at least 2.0, positive paired median edge and
+  joint-family q at most 0.20.
+
+Prospective research readiness uses the stricter probability floors 65%/50%
+and asymmetry Wilson floor 45%, with at least 12 independent matches, 12
+independent controls and six effective recent match/control episodes. Three to
+five effective recent episodes may be labelled `EARLY_CURRENT_EDGE`, never
+`RESEARCH_READY`. Missing current p90 or p95 MAE fails closed; a known deep p90
+tail is a mandatory warning, not a standalone rejection.
+
+The former 72-hour/three-UTC-date rule is not a research-maturity gate because
+Market Episodes now prevent one rise from creating repeated proof. It remains
+unchanged inside the separate legacy owner/LIVE approval contract until that
+contract is explicitly redesigned and migrated.
 
 ## Lifecycle and safety
 
@@ -77,6 +112,10 @@ high percentage from a single day therefore remains `BACKTESTED` at most.
 - Automatic rolling evaluation has a hard ceiling of
   `SHADOW_PENDING_EXPLICIT_APPROVAL`. This is an observational readiness state;
   it never changes a formula to `APPROVED` or `LIVE`.
+- Registry and Shadow status expose `RESEARCH_READY`, `EARLY_CURRENT_EDGE`,
+  accepted route, missing gates, rolling metrics and episode counts. The old
+  LIVE-review readiness is reported separately and is not an alias for the new
+  research contract.
 - After enough genuinely future evidence exists, a separate prospective review
   freezes a predeclared cutoff and evaluates that fixed sample. Only an
   explicit, immutable human approval may then activate `APPROVED` or `LIVE`.
@@ -135,6 +174,8 @@ runtime contract.
   promotes a Shadow formula or bypasses the frozen prospective review.
 - `FORMULA_DISCOVERY_HORIZONS=60,240,720,1440`
 - `FORMULA_DISCOVERY_INTERVAL_SECONDS=21600`
+- `FORMULA_DISCOVERY_LOOKBACK_DAYS=120` is the adaptive default. An explicit
+  environment override remains bounded to 1–3650 days.
 - `FORMULA_DISCOVERY_HIERARCHICAL_ENABLED=1` explicitly enables the bounded
   stable-parent four/five-condition beam; absent/false preserves the default
   single/pair/triple search.
@@ -180,3 +221,14 @@ Hyperliquid's official candle endpoint exposes only its most recent 5000
 candles. HYPE replay therefore uses only exact one-minute observations still
 inside that window; older HYPE anchors are excluded rather than approximated or
 labeled from another venue.
+
+Formula schema v7 adds the two-route acceptance contract, rolling relevance
+and Market Episodes. Existing v5/v6 Shadow formulas remain observable under
+their frozen contracts. Only an exact current v7 runtime may satisfy the LIVE
+runtime identity check, and Stage 1 neither creates a Telegram experiment nor
+enables LIVE delivery.
+
+The scheduler is intentionally unchanged in this stage: after a complete
+multi-horizon Discovery cycle finishes, the worker sleeps six hours. Therefore
+the next cycle starts approximately `previous runtime + 6h`, not at a fixed UTC
+clock time. Fixed-time/adaptive scheduling is a separate operational stage.

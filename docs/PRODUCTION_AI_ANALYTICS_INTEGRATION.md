@@ -103,28 +103,44 @@ cannot become formula conditions.
 ## Formula objective and remaining stages
 
 The primary analytical objective is to find reproducible conditions associated
-with high directional probability, low adverse movement and fast favorable
-progress. Existing bot scores and raw source measurements are both valid feature
-families; neither is assumed to be optimal in advance.
+with either high directional probability or a material favorable/adverse
+movement asymmetry. Low adverse movement and fast favorable progress improve
+ranking, but a known deep tail is disclosed rather than automatically erasing a
+clear statistical bias. Existing bot scores and raw source measurements are
+both valid feature families; neither is assumed to be optimal in advance.
 
 After the price path and core feature matrix, the operational order is:
 
 1. apply the additive replay schema and backfill every eligible raw observation;
 2. rerun candidate generation independently for 1h, 4h, 12h and 24h;
 3. keep identical timestamps together across the chronological split;
-4. rank by baseline improvement, MFE, MAE, speed and sample coverage;
+4. collapse all symbols and adjacent matches into fixed, outcome-blind 24-hour
+   Market Episodes, then rank by probability or asymmetry, baseline
+   improvement, MFE, MAE, speed and sample coverage;
 5. register only coverage-ready candidates and monitor them in Shadow;
 6. accumulate genuinely future Shadow observations without promotion;
 7. freeze a predeclared prospective cutoff for a separate review and require
    explicit immutable human approval before any LIVE alert condition is
    available to opted-in chats.
 
+Discovery uses a 120-day rolling archive by default. Ranking blends 70%
+cumulative historical quality with 30% current relevance from a 21-day window
+and 14-day half-life. Probability and asymmetry p-values are corrected together
+in one BH family because either route may qualify. Formula and horizon sample
+counts remain separate and must never be added as independent proof.
+
 Rolling Shadow metrics are observational. Their automatic ceiling is
 `SHADOW_PENDING_EXPLICIT_APPROVAL`; passing every rolling gate does not change
-the stored stage, approve a formula or emit an alert. Weekend calibration may
-adjust only the absolute movement-width floor from sufficient prior-only
-evidence. Probability, directional advantage, MAE, efficiency and relative
-width gates remain unchanged.
+the stored stage, approve a formula or emit an alert. Status exposes the
+accepted route, `EARLY_CURRENT_EDGE`/`RESEARCH_READY`, missing gates, effective
+sample size, p90/p95 adverse risk and Market Episode counts. Weekend calibration
+may adjust only the absolute movement-width floor from sufficient prior-only
+evidence.
+
+The 72-hour/three-date condition remains only in the legacy owner/LIVE approval
+contract. It is no longer used to manufacture independence for research
+maturity; Market Episodes provide that protection directly. Stage 1 adds no
+Telegram experiment and performs no LIVE activation.
 
 ## Explicit activation gates
 

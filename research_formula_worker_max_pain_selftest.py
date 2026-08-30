@@ -76,7 +76,7 @@ def _provenance(*, delta: bool) -> dict:
 
 
 def _formula(feature: str, *, schema: str | None = None) -> dict:
-    return {
+    formula = {
         "formula_id": 42,
         "formula_key": "f" * 64,
         "formula_version": 1,
@@ -90,6 +90,19 @@ def _formula(feature: str, *, schema: str | None = None) -> dict:
         "horizon_minutes": 240,
         "conditions": [{"feature": feature, "operator": ">=", "value": 1.0}],
     }
+    if schema == research_formula_store._LEGACY_V5_FORMULA_SCHEMA_VERSION:
+        formula.update(
+            {
+                "engine_version": research_formula_store._LEGACY_V5_ENGINE_VERSION,
+                "feature_schema_version": (
+                    research_formula_store._LEGACY_V5_FEATURE_SCHEMA_VERSION
+                ),
+                "outcome_method_version": (
+                    research_formula_store._LEGACY_V5_OUTCOME_METHOD_VERSION
+                ),
+            }
+        )
+    return formula
 
 
 def _event() -> dict:
@@ -225,6 +238,55 @@ def _evaluation(feature: str) -> dict:
 
 
 def run() -> None:
+    prefix_work = [
+        {
+            "formula_id": 1,
+            "events": [
+                {"event_id": 100, "alert_time_utc": BASE},
+                {"event_id": 1, "alert_time_utc": BASE + timedelta(days=2)},
+                {"event_id": 50, "alert_time_utc": BASE + timedelta(days=1)},
+            ],
+        },
+        {
+            "formula_id": 2,
+            "events": [
+                {"event_id": 100, "alert_time_utc": BASE - timedelta(days=1)},
+                {"event_id": 2, "alert_time_utc": BASE + timedelta(days=3)},
+            ],
+        },
+    ]
+    selected_prefixes = research_formula_worker._select_shadow_work_prefixes(
+        prefix_work, max_formula_events=3
+    )
+    assert selected_prefixes == {1: [1, 50], 2: [2]}
+    many_formulas = [
+        {"formula_id": formula_id, "events": [{"event_id": formula_id}]}
+        for formula_id in range(1, 301)
+    ]
+    first_batch = research_formula_worker._select_shadow_work_prefixes(
+        many_formulas, max_formula_events=250
+    )
+    assert set(first_batch) == set(range(1, 251))
+    second_work = [
+        {
+            "formula_id": formula_id,
+            "events": [
+                {
+                    "event_id": (
+                        1000 + formula_id
+                        if formula_id in first_batch
+                        else formula_id
+                    )
+                }
+            ],
+        }
+        for formula_id in range(1, 301)
+    ]
+    second_batch = research_formula_worker._select_shadow_work_prefixes(
+        second_work, max_formula_events=250
+    )
+    assert set(range(251, 301)).issubset(second_batch)
+
     current_feature = "max_pain.aggregate.short_long_liquidity_ratio"
     original_extractor = research_formula_engine.extract_decision_features
     research_formula_engine.extract_decision_features = (

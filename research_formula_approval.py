@@ -213,10 +213,29 @@ def _frozen_validation(
         source_rows,
         horizon_minutes=int(formula["horizon_minutes"]),
     )
+    finalized_episodes = []
+    for episodes in (
+        independent["match_episodes"],
+        independent["control_episodes"],
+    ):
+        finalized, _ = research_formula_store.research_market_episode.partition_finalized(
+            episodes,
+            horizon_minutes=int(formula["horizon_minutes"]),
+            as_of_utc=transaction_time,
+        )
+        finalized_episodes.extend(finalized)
     complete = [
         row
-        for row in independent["rows"]
-        if bool(row.get("outcome_available"))
+        for episode in finalized_episodes
+        if all(
+            bool(row.get("outcome_available"))
+            for row in research_formula_store.research_market_episode.episode_evidence_rows(
+                episode
+            )
+        )
+        for row in research_formula_store.research_market_episode.episode_evidence_rows(
+            episode
+        )
     ]
     if not complete:
         raise ApprovalRefused("readiness produced no completed independent evidence")

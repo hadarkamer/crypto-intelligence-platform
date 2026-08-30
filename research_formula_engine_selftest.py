@@ -8,7 +8,9 @@ import research_formula_engine as engine
 
 
 def _row(index: int):
-    event_time = datetime(2026, 8, 1, tzinfo=timezone.utc) + timedelta(minutes=index * 30)
+    event_time = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(
+        hours=index * 30
+    )
     input_active, input_weekend, _ = engine.market_session_baseline.session_ratios(
         event_time - timedelta(minutes=60), event_time
     )
@@ -34,6 +36,7 @@ def _row(index: int):
             "source_side": "SHORT" if direction == "LONG" else "LONG",
             "timeframe": "1h",
             "event_type": "SELFTEST_SIGNAL",
+            "current_price": 100.0,
             "strategy_version": "selftest-v1",
             "code_version": "abc123",
         },
@@ -156,7 +159,7 @@ def _row(index: int):
 def _hierarchy_row(index: int) -> dict:
     """Five bounded feature families with stable incremental information."""
     event_time = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(
-        minutes=index * 30
+        hours=index * 30
     )
     residue = index % 17
     false_residues = (
@@ -176,6 +179,7 @@ def _hierarchy_row(index: int) -> dict:
             "symbol": "BTC",
             "direction": "LONG",
             "event_type": "HIERARCHY_SELFTEST",
+            "current_price": 100.0,
         },
         "model_features": {
             "alert_score": None,
@@ -205,7 +209,73 @@ def _hierarchy_row(index: int) -> dict:
     }
 
 
+def _summarize(selected, universe):
+    """Bypass episode construction in tests of unrelated metric semantics."""
+
+    return engine._metrics(
+        selected, universe, already_independent_episodes=True
+    )
+
+
 def run() -> None:
+    assert engine.candidate_feature_allowed(
+        "raw.60m.futures_continuous_cvd_change_usd"
+    )
+    assert not engine.discovery_candidate_feature_allowed(
+        "raw.60m.futures_continuous_cvd_change_usd"
+    )
+    assert engine.candidate_feature_allowed(
+        "aligned_log.60m.spot_api_cvd_change_usd"
+    )
+    assert not engine.discovery_candidate_feature_allowed(
+        "aligned_log.60m.spot_api_cvd_change_usd"
+    )
+    assert engine.candidate_feature_allowed(
+        "historical.60m.spot_continuous_cvd_change_usd_"
+        "median_session_matched"
+    )
+    assert not engine.discovery_candidate_feature_allowed(
+        "historical.60m.spot_continuous_cvd_change_usd_"
+        "median_session_matched"
+    )
+    assert engine.discovery_candidate_feature_allowed(
+        "historical.60m.futures_continuous_cvd_change_usd_"
+        "percentile_session_matched"
+    )
+    assert abs(
+        engine._one_sided_two_proportion_p(10, 10, 8, 10)
+        - 0.23684210526315788
+    ) < 1e-12
+    joint_route_q = engine._bh_q_values([0.15, 0.80])
+    assert joint_route_q == [0.30, 0.80]
+    assert joint_route_q[0] > 0.20
+    asymmetry_fit = {
+        "hit_rate_pct": 40.0,
+        "hit_rate_improvement_pct_points": -5.0,
+        "favorable_dominance_rate_pct": 80.0,
+        "favorable_dominance_improvement_pct_points": 15.0,
+        "median_paired_favorable_minus_adverse_pct": 2.0,
+    }
+    asymmetry_selection = {
+        **asymmetry_fit,
+        "hit_rate_pct": 70.0,
+        "favorable_dominance_rate_pct": 75.0,
+    }
+    assert engine._stable_route_names(
+        asymmetry_fit,
+        asymmetry_selection,
+        maximum_rate_gap=20.0,
+    ) == ("ASYMMETRY",)
+    no_stable_route = {
+        **asymmetry_selection,
+        "favorable_dominance_improvement_pct_points": -1.0,
+        "median_paired_favorable_minus_adverse_pct": -0.1,
+    }
+    assert not engine._stable_route_names(
+        asymmetry_fit,
+        no_stable_route,
+        maximum_rate_gap=20.0,
+    )
     assert engine.condition_matches(
         {"x": 1.0}, {"feature": "x", "operator": "==", "value": 1}
     )
@@ -222,6 +292,92 @@ def run() -> None:
         engine.research_no_dwell_outcome.BASE_FAVORABLE_WIDTH_PCT_BY_HORIZON
     )
     rows = [_row(index) for index in range(140)]
+
+    # Evidence-family overlap is based on independent Market Episodes, not on
+    # the several raw alerts that happened inside the same broad move.
+    episode_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    correlated = []
+    for offset, minute in enumerate((0, 30, 60, 48 * 60), start=1):
+        item = _row(offset)
+        item["event"].update(
+            {
+                "event_id": 9000 + offset,
+                "alert_time_utc": episode_start + timedelta(minutes=minute),
+                "symbol": "BTC",
+                "direction": "LONG",
+            }
+        )
+        item["outcome_label"].update(
+            {"path_success": True, "first_touch_status": "HIT"}
+        )
+        correlated.append(item)
+    evidence_a = engine._metrics(
+        correlated[:3],
+        correlated,
+        evidence_as_of_utc=episode_start + timedelta(hours=72),
+        include_private_evidence_keys=True,
+    )
+    evidence_b = engine._metrics(
+        [correlated[0], correlated[2]],
+        correlated,
+        evidence_as_of_utc=episode_start + timedelta(hours=72),
+        include_private_evidence_keys=True,
+    )
+    assert evidence_a["raw_sample_size"] == 3
+    assert evidence_b["raw_sample_size"] == 2
+    assert evidence_a["_market_episode_evidence_intervals"] == evidence_b[
+        "_market_episode_evidence_intervals"
+    ]
+    assert len(evidence_a["_market_episode_evidence_intervals"]) == 1
+    tail_rows = []
+    for offset, adverse in enumerate((0.2, 0.3, 10.0), start=1):
+        item = _row(offset + 20)
+        item["event"].update(
+            {
+                "event_id": 9100 + offset,
+                "alert_time_utc": episode_start,
+                "symbol": ("BTC", "ETH", "SOL")[offset - 1],
+                "direction": "LONG",
+            }
+        )
+        item["outcome_label"].update(
+            {
+                "path_success": True,
+                "first_touch_status": "HIT",
+                "mfe_pct": 2.0,
+                "mae_pct": adverse,
+            }
+        )
+        tail_rows.append(item)
+    tail_control = correlated[-1]
+    tail_metrics = engine._metrics(
+        tail_rows,
+        [*tail_rows, tail_control],
+        evidence_as_of_utc=episode_start + timedelta(hours=72),
+    )
+    assert tail_metrics["median_mae_pct"] == 0.3
+    assert tail_metrics["mae_p90_pct"] == 10.0
+    assert tail_metrics["mae_p95_pct"] == 10.0
+    shifted_evidence = engine._metrics(
+        correlated[1:3],
+        correlated,
+        evidence_as_of_utc=episode_start + timedelta(hours=72),
+        include_private_evidence_keys=True,
+    )
+    assert engine.research_formula_families.evidence_interval_overlap(
+        [
+            ("discovery", start, end)
+            for start, end in evidence_a[
+                "_market_episode_evidence_intervals"
+            ]
+        ],
+        [
+            ("discovery", start, end)
+            for start, end in shifted_evidence[
+                "_market_episode_evidence_intervals"
+            ]
+        ],
+    ) >= 0.75
 
     # Success is the explicit final first-touch label, never the endpoint
     # return.  A later negative close cannot erase a prior touch, while a
@@ -247,17 +403,17 @@ def run() -> None:
             "full_horizon_mae_pct": 50.0,
         }
     )
-    explicit_metrics = engine.summarize_outcomes(
+    explicit_metrics = _summarize(
         [endpoint_positive_miss, endpoint_negative_hit],
         [endpoint_positive_miss, endpoint_negative_hit],
     )
     assert explicit_metrics["successes"] == 1
     assert explicit_metrics["hit_rate_pct"] == 50.0
     assert explicit_metrics["median_mae_pct"] == 0.5
-    positive_miss_metrics = engine.summarize_outcomes(
+    positive_miss_metrics = _summarize(
         [endpoint_positive_miss], [endpoint_positive_miss]
     )
-    negative_hit_metrics = engine.summarize_outcomes(
+    negative_hit_metrics = _summarize(
         [endpoint_negative_hit], [endpoint_negative_hit]
     )
     assert positive_miss_metrics["successes"] == 0
@@ -267,6 +423,7 @@ def run() -> None:
 
     session_selected = _row(500)
     session_selected["event"]["event_id"] = 900_000
+    session_selected["event"]["symbol"] = "BTC"
     session_selected["outcome_label"].update(
         {
             "directional_return_pct": -5.0,
@@ -281,6 +438,7 @@ def run() -> None:
     for index in range(30):
         control = _row(600 + index)
         control["event"]["event_id"] = 901_000 + index
+        control["event"]["symbol"] = "BTC"
         control["outcome_label"].update(
             {
                 "directional_return_pct": 5.0,
@@ -292,7 +450,7 @@ def run() -> None:
             }
         )
         endpoint_positive_controls.append(control)
-    baseline_metrics = engine.summarize_outcomes(
+    baseline_metrics = _summarize(
         [session_selected],
         [session_selected, *endpoint_positive_controls],
     )
@@ -306,7 +464,7 @@ def run() -> None:
 
     missing_label = _row(2)
     missing_label["outcome_label"].pop("path_success")
-    missing_metrics = engine.summarize_outcomes([missing_label], [missing_label])
+    missing_metrics = _summarize([missing_label], [missing_label])
     assert missing_metrics["successes"] == 0
     assert missing_metrics["hit_rate_pct"] is None
 
@@ -322,7 +480,7 @@ def run() -> None:
             {"path_success": path_success, "first_touch_status": status}
         )
         malformed_labels.append(malformed)
-    malformed_metrics = engine.summarize_outcomes(
+    malformed_metrics = _summarize(
         malformed_labels, malformed_labels
     )
     assert malformed_metrics["successes"] == 0
@@ -350,9 +508,29 @@ def run() -> None:
     )
     assert (
         eligibility["discovery_sample_size"]
+        + eligibility["selection_sample_size"]
         + eligibility["holdout_sample_size"]
-        == 6
-    ), "a non-terminal or inconsistent first-touch label entered Discovery"
+        == 8
+    ), "decision rows must freeze membership before terminal labels are inspected"
+    pending_same_anchor = _row(500)
+    pending_same_anchor["event"] = dict(pending_same_anchor["event"])
+    pending_same_anchor["event"]["event_id"] = 50_000
+    pending_same_anchor["outcome_label"] = dict(
+        pending_same_anchor["outcome_label"]
+    )
+    pending_same_anchor["outcome_label"].update(
+        {"path_success": None, "first_touch_status": "PENDING"}
+    )
+    hit_same_anchor = _row(500)
+    incomplete_cohort = engine.summarize_outcomes(
+        [hit_same_anchor, pending_same_anchor],
+        [hit_same_anchor, pending_same_anchor],
+        evidence_as_of_utc=(
+            hit_same_anchor["event"]["alert_time_utc"] + timedelta(days=2)
+        ),
+    )
+    assert incomplete_cohort["sample_size"] == 0
+    assert incomplete_cohort["market_episode_open_matches"] == 1
     corrected = engine._bh_q_values([0.01, None, 0.02])
     assert corrected[1] is None
     assert corrected[0] is not None and corrected[0] >= 0.03 - 1e-12
@@ -406,6 +584,20 @@ def run() -> None:
     )
     assert unevaluable["status"] == "UNEVALUABLE"
     assert unevaluable["condition_results"][0]["available"] is False
+    known_false_with_unknown = engine.evaluate_formula(
+        guarded,
+        direction="LONG",
+        conditions=[
+            {**condition, "value": 3.0},
+            {
+                "feature": "raw.60m.feature_that_was_not_captured",
+                "operator": ">=",
+                "value": 1.0,
+            },
+        ],
+    )
+    assert known_false_with_unknown["status"] == "UNMATCHED"
+    assert known_false_with_unknown["matched"] is False
     assert engine.evaluate_formula(
         None, direction="LONG", conditions=[condition]
     )["status"] == "UNEVALUABLE"
@@ -431,7 +623,8 @@ def run() -> None:
             max_formulas_returned=5,
         ),
     )
-    assert paired_result["discovery_sample_size"] == 84
+    assert paired_result["discovery_sample_size"] == 58
+    assert paired_result["selection_sample_size"] == 26
     assert paired_result["holdout_sample_size"] == 36
     assert "identical timestamps never split" in paired_result["split_policy"]
     selected_ratios = [0.0, 0.2, 0.5, 0.8, 1.0]
@@ -459,7 +652,8 @@ def run() -> None:
         feature_schema_version="selftest-matrix-v2",
     )
     assert result["available"] is True
-    assert result["discovery_sample_size"] == 98
+    assert result["discovery_sample_size"] == 68
+    assert result["selection_sample_size"] == 30
     assert result["holdout_sample_size"] == 42
     assert result["candidates_evaluated"] >= 1000
     assert result["formulas"]
@@ -690,7 +884,7 @@ def run() -> None:
         _outcome_row(50_200 + index, active_ratio=1.0, mfe_pct=5.0)
         for index in range(30)
     ]
-    missing_reference_metrics = engine.summarize_outcomes(
+    missing_reference_metrics = _summarize(
         selected_without_reference,
         [*selected_without_reference, *weekend_controls, *active_controls],
     )
@@ -715,7 +909,7 @@ def run() -> None:
             width_scale=0.60,
         )
     ]
-    frozen_reference_metrics = engine.summarize_outcomes(
+    frozen_reference_metrics = _summarize(
         selected_with_reference,
         [*selected_with_reference, *weekend_controls, *active_controls],
     )
@@ -806,8 +1000,12 @@ def run() -> None:
         ]
         assert len(families) == len(set(families))
         assert (
-            formula["multiple_testing"]["hypotheses_tested"]
+            formula["multiple_testing"]["hypotheses_tested_per_route"]
             == long_diagnostics["statistical_hypotheses_tested"]
+        )
+        assert (
+            formula["multiple_testing"]["total_route_hypotheses_tested"]
+            == 2 * long_diagnostics["statistical_hypotheses_tested"]
         )
         assert "evidence_family" in formula["multiple_testing"]
 
@@ -857,14 +1055,35 @@ def run() -> None:
         "hypothesis_family_fingerprint",
     ):
         assert adversarial_diagnostics[diagnostic] == hierarchy_diagnostics[diagnostic]
+    def frozen_formula_signature(direction_result):
+        return [
+            (
+                formula["formula_key"],
+                formula["rank"],
+                formula["ranking_score"],
+                formula["multiple_testing"]["evidence_family"]["family_id"],
+                tuple(
+                    formula["multiple_testing"]["evidence_family"][
+                        "family_member_formula_keys"
+                    ]
+                ),
+            )
+            for formula in direction_result["formulas"]
+        ]
 
-    # The nested screen also preserves timestamp groups at its own boundary.
+    assert frozen_formula_signature(adversarial_long) == frozen_formula_signature(
+        long_diagnostics
+    ), "final Test changed a frozen formula identity, rank or evidence family"
+
+    # The public Selection partition is supplied explicitly to the hierarchy;
+    # the final Test remains a separate third input.
     nested_boundary_rows = [_hierarchy_row(index) for index in range(40)]
     nested_boundary_rows[27]["event"]["alert_time_utc"] = nested_boundary_rows[
         28
     ]["event"]["alert_time_utc"]
     nested_boundary_result = engine._search_direction(
-        nested_boundary_rows,
+        nested_boundary_rows[:27],
+        nested_boundary_rows[27:],
         [],
         direction="LONG",
         horizon_minutes=240,
@@ -874,10 +1093,7 @@ def run() -> None:
     nested_boundary_diagnostics = nested_boundary_result["hierarchical_search"]
     assert nested_boundary_diagnostics["fit_rows"] == 27
     assert nested_boundary_diagnostics["selection_rows"] == 13
-    assert (
-        engine._utc(nested_boundary_diagnostics["selection_start_time_utc"])
-        == engine._utc(nested_boundary_rows[27]["event"]["alert_time_utc"])
-    )
+    assert nested_boundary_diagnostics["final_test_used_for_hierarchical_selection"] is False
 
     four_only_result = engine.discover_formulas(
         hierarchy_rows,

@@ -5,7 +5,8 @@
 The production AI Research layer exists to discover reproducible conditions
 that precede movement in a defined direction with:
 
-1. high out-of-sample probability;
+1. either high out-of-sample probability or a material favorable/adverse
+   movement asymmetry;
 2. movement as wide as practical, measured absolutely and relative to the
    same direction/horizon universe;
 3. low adverse movement before the favorable move;
@@ -26,14 +27,15 @@ Automatic processing stops at the observational readiness state
 `SHADOW_PENDING_EXPLICIT_APPROVAL`. `APPROVED -> LIVE` is a separate human
 activation path, not an automatic continuation of the lifecycle.
 
-Runtime status (2026-08-29): neutral historical raw-opportunity replay,
+Runtime status (2026-08-30): neutral historical raw-opportunity replay,
 automatic discovery, chronological holdout, multiple-testing correction,
-wide-move ranking, versioned registry and future Shadow evaluation are
-implemented. GPT cannot approve a formula, and rolling Shadow evaluation never
-promotes one. After enough genuinely future evidence exists, a separate review
-freezes a predeclared prospective cutoff and evaluates that fixed sample. Only
-an explicit, immutable human approval may then move a formula to `APPROVED` or
-`LIVE`.
+wide-move ranking, adaptive v7 evidence, outcome-blind Market Episodes and
+future Shadow evaluation are implemented. The current contract accepts either
+probability or asymmetry, weights recent evidence and reports maturity without
+promoting anything. GPT cannot approve a formula, and rolling Shadow evaluation
+never promotes one. After enough genuinely future evidence exists, a separate
+review freezes a predeclared prospective cutoff. Only an explicit, immutable
+human approval may then move a formula to `APPROVED` or `LIVE`.
 
 - `DISCOVERED`: reproducible conditions and discovery-set metrics exist.
 - `BACKTESTED`: full path metrics, counterexamples and baseline comparisons exist.
@@ -91,6 +93,9 @@ It also derives without look-ahead:
   window and for the future outcome horizon;
 - prior-only historical Price/OI/Futures CVD/Spot CVD percentiles matched to
   each individual window's session composition rather than a binary UTC day;
+- raw dollar CVD changes are retained for audit and legacy evaluation but are
+  not eligible v7 discovery predicates; the same-symbol/session percentile is
+  the formula-visible comparable measure;
 - prior alert/repeat counts at 30m, 2h and 6h;
 - same-setup repetition and cross-symbol directional breadth;
 - strategy/code version and data-quality flags for audit only.
@@ -134,6 +139,10 @@ For every candidate report:
 - target/partial-target results where relevant;
 - coin, direction, timeframe, session and regime coverage;
 - strongest failures and invalidation conditions.
+- cumulative and latest-21-day metrics, 14-day decay, raw recent sample and
+  Kish effective sample size;
+- accepted route, maturity, every missing gate and p90/p95 adverse-tail
+  disclosure.
 
 ### 4. Validation
 
@@ -143,13 +152,23 @@ For every candidate report:
 - Compare with simpler baselines and account for the number of hypotheses tried.
 - Re-test across coins/periods only where pooling is logically defensible.
 - Prefer stable performance across windows over a single exceptional period.
+- Collapse exact cohorts and all-symbol matches into fixed, outcome-blind
+  Market Episodes before any sample count, Wilson estimate or control test.
+- Correct probability and asymmetry hypotheses in one joint BH family because
+  acceptance is the union of the two routes.
+- Keep a 120-day rolling Discovery archive and blend 70% historical quality
+  with 30% current relevance from the last 21 days (14-day half-life).
 
 ### 5. Shadow and live gates
 
-Holdout-passed candidates run in Shadow against future events. Shadow records
-every occurrence, including failures. Rolling sample, control, temporal,
-probability, width and risk metrics are observational; passing them reports
-`SHADOW_PENDING_EXPLICIT_APPROVAL` and cannot change the stored formula stage.
+Holdout-passed candidates run in Shadow against authoritative neutral future
+decision samples. Shadow records every occurrence, including failures. Rolling
+sample, control, probability/asymmetry, width and risk metrics are
+observational; passing them reports `SHADOW_PENDING_EXPLICIT_APPROVAL` and
+cannot change the stored formula stage. `EARLY_CURRENT_EDGE` labels three to
+five effective recent episodes; `RESEARCH_READY` requires at least 12
+independent matches, 12 controls and six effective recent match/control
+episodes. Neither state is an alert authorization.
 Any activation review must use a separately frozen, predeclared prospective
 cutoff so repeated rolling checks do not become an automatic stopping rule.
 Only an explicit, immutable human approval after that review may transition the
@@ -162,11 +181,12 @@ rarity, sample count and validation state. It never executes a trade.
 The production AI can inspect replay coverage, explore verified path
 aggregates, fetch alert paths, inspect raw/model feature rows, enumerate bounded
 single/pair/triple formulas plus opt-in bounded stable-parent four/five-condition
-expansion, correct every tested hypothesis for multiple testing, group
-overlapping evidence into deterministic champion families, rank wide movements,
-validate chronologically and observe formulas in Shadow. The runtime can deliver
-only separately reviewed and explicitly human-approved LIVE matches to opted-in
-Telegram chats. Remaining operational work is accumulating genuinely future
-Shadow outcomes, freezing a prospective review sample and obtaining explicit
-approval before any LIVE activation; optional context features remain listed
-above.
+expansion, jointly correct both acceptance routes, group overlapping evidence
+into deterministic champion families, rank historical/current relevance,
+validate chronologically and expose Shadow maturity with missing gates. The
+runtime can deliver only separately reviewed and explicitly human-approved LIVE
+matches to opted-in Telegram chats. Stage 1 deliberately did not add an
+experimental Telegram route or activate LIVE. Remaining operational work
+includes bounded formula supersession, scheduler/caching efficiency, genuinely
+future evidence, a frozen review sample and explicit approval; optional context
+features remain listed above.

@@ -883,6 +883,7 @@ def load_canonical_reference_rows(
     end: datetime,
     symbols: Sequence[str],
     include_running_run_id: Optional[int] = None,
+    available_as_of_utc: Any = None,
 ) -> list[Dict[str, Any]]:
     """Load proven canonical decision-time prices for calibration/features.
 
@@ -899,7 +900,20 @@ def load_canonical_reference_rows(
         type(include_running_run_id) is not int or include_running_run_id <= 0
     ):
         raise ValueError("include_running_run_id must be a positive integer")
-    query = """
+    availability_cutoff = (
+        _utc(available_as_of_utc)
+        if available_as_of_utc not in (None, "")
+        else None
+    )
+    availability_clause = (
+        """
+          AND price_ref.created_at_utc <= %s
+          AND replay_owner.completed_at_utc <= %s
+        """
+        if availability_cutoff is not None
+        else ""
+    )
+    query = f"""
         SELECT price_ref.opportunity_id, price_ref.symbol,
                price_ref.observation_time_utc,
                price_ref.source_observation_time_utc,
@@ -913,7 +927,9 @@ def load_canonical_reference_rows(
                price_ref.first_touch_replay_run_id,
                price_ref.first_touch_method_version,
                price_ref.first_touch_data_quality_status,
-               replay_owner.status AS replay_owner_status
+               price_ref.created_at_utc,
+               replay_owner.status AS replay_owner_status,
+               replay_owner.completed_at_utc AS replay_owner_completed_at_utc
         FROM research_historical_opportunity_outcomes price_ref
         LEFT JOIN research_historical_replay_runs replay_owner
           ON replay_owner.replay_run_id=price_ref.replay_run_id
@@ -921,13 +937,17 @@ def load_canonical_reference_rows(
         WHERE price_ref.observation_time_utc >= %s
           AND price_ref.observation_time_utc < %s
           AND price_ref.symbol=ANY(%s)
+          {availability_clause}
         ORDER BY price_ref.symbol, price_ref.observation_time_utc,
                  price_ref.horizon_minutes, price_ref.opportunity_id
     """
+    params: list[Any] = [_utc(start), _utc(end), normalized_symbols]
+    if availability_cutoff is not None:
+        params.extend((availability_cutoff, availability_cutoff))
     rows = iter_query_rows(
         conn,
         query,
-        (_utc(start), _utc(end), normalized_symbols),
+        tuple(params),
         batch_size=_STREAM_BATCH_SIZE,
     )
     deduplicated: Dict[tuple[str, datetime], Dict[str, Any]] = {}

@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import heapq
 import json
 from math import ceil
 import os
 from typing import Any, Dict, Mapping, Optional
 
 import research_feature_matrix
+import research_formula_acceptance
 import research_formula_engine
 import research_formula_store
+import research_market_episode
 import research_max_pain_archive
 import research_mfe_mae_efficiency
 
@@ -28,7 +31,7 @@ _DISCOVERY_STARTUP_DELAY_SECONDS = max(
     15, int(os.getenv("FORMULA_DISCOVERY_STARTUP_DELAY_SECONDS", "180"))
 )
 _SHADOW_POLL_SECONDS = max(30, int(os.getenv("FORMULA_SHADOW_POLL_SECONDS", "60")))
-_LOOKBACK_DAYS = max(1, min(3650, int(os.getenv("FORMULA_DISCOVERY_LOOKBACK_DAYS", "3650"))))
+_LOOKBACK_DAYS = max(1, min(3650, int(os.getenv("FORMULA_DISCOVERY_LOOKBACK_DAYS", "120"))))
 _DATASET_LIMIT = max(100, min(5000, int(os.getenv("FORMULA_DISCOVERY_DATASET_LIMIT", "2000"))))
 _DATASET_MODE = os.getenv("FORMULA_DISCOVERY_DATASET_MODE", "auto").strip().lower()
 if _DATASET_MODE not in {"auto", "alerts", "historical_replay"}:
@@ -83,6 +86,44 @@ def _conditions(value: Any) -> list[Dict[str, Any]]:
         except json.JSONDecodeError:
             value = []
     return [dict(item) for item in value or [] if isinstance(item, dict)]
+
+
+def _select_shadow_work_prefixes(
+    work: list[Mapping[str, Any]], *, max_formula_events: int = 250
+) -> Dict[int, list[int]]:
+    """Select only contiguous event-id prefixes for each formula cursor."""
+
+    budget = max(1, int(max_formula_events))
+    queues: Dict[int, list[int]] = {}
+    for formula in work:
+        formula_id = int(formula["formula_id"])
+        event_ids = sorted(
+            {int(event["event_id"]) for event in formula.get("events") or []}
+        )
+        if event_ids:
+            queues[formula_id] = event_ids
+    selected: Dict[int, list[int]] = {formula_id: [] for formula_id in queues}
+    offsets = {formula_id: 0 for formula_id in queues}
+    pending = [
+        (event_ids[0], formula_id)
+        for formula_id, event_ids in queues.items()
+    ]
+    heapq.heapify(pending)
+    while budget > 0 and pending:
+        event_id, formula_id = heapq.heappop(pending)
+        selected[formula_id].append(event_id)
+        budget -= 1
+        offset = offsets[formula_id] + 1
+        offsets[formula_id] = offset
+        if offset < len(queues[formula_id]):
+            heapq.heappush(
+                pending, (queues[formula_id][offset], formula_id)
+            )
+    return {
+        formula_id: event_ids
+        for formula_id, event_ids in selected.items()
+        if event_ids
+    }
 
 
 def _as_utc(value: Any) -> datetime:
@@ -218,6 +259,13 @@ def _shadow_snapshot(
             "return, MFE or MAE"
         ),
     }
+    if (
+        formula.get("formula_schema_version")
+        == research_formula_store._LEGACY_V5_FORMULA_SCHEMA_VERSION
+    ):
+        snapshot["legacy_v5_shadow_adapter_version"] = (
+            research_formula_store._LEGACY_V5_SHADOW_ADAPTER_VERSION
+        )
     max_pain_evidence = _max_pain_snapshot_evidence(formula=formula, row=row)
     if max_pain_evidence is not None:
         # Audit identities are stored only for formulas that actually consume
@@ -254,6 +302,8 @@ class FormulaWorkerMetrics:
     live_deliveries_failed: int = 0
     formulas_promoted_live: int = 0
     formulas_ready_for_review: int = 0
+    research_ready_formulas: int = 0
+    legacy_live_review_ready_formulas: int = 0
     failures: int = 0
     last_discovery_utc: Optional[str] = None
     last_shadow_utc: Optional[str] = None
@@ -292,6 +342,12 @@ class FormulaResearchWorker:
             "dataset_limit": _DATASET_LIMIT,
             "dataset_mode": _DATASET_MODE,
             "hierarchical_search_enabled": _HIERARCHICAL_SEARCH_ENABLED,
+            "research_acceptance_policy_version": (
+                research_formula_acceptance.POLICY_VERSION
+            ),
+            "market_episode_policy_version": research_market_episode.POLICY_VERSION,
+            "recent_window_days": _discovery_config().recent_window_days,
+            "recency_half_life_days": _discovery_config().recency_half_life_days,
             "discovery_interval_seconds": _DISCOVERY_INTERVAL_SECONDS,
             "shadow_poll_seconds": _SHADOW_POLL_SECONDS,
             "shadow_evidence_policy_version": (
@@ -402,12 +458,14 @@ class FormulaResearchWorker:
 
     def run_discovery_once(self) -> Dict[str, Any]:
         results = []
+        cycle_as_of = datetime.now(timezone.utc)
         self.metrics.discovery_cycles += 1
         for horizon in _horizons():
             dataset = research_feature_matrix.load_formula_dataset(
                 lookback_days=_LOOKBACK_DAYS,
                 horizon_minutes=horizon,
                 limit=_DATASET_LIMIT,
+                analysis_as_of_utc=cycle_as_of,
             )
             if not dataset.get("available") or int(dataset.get("sample_size") or 0) < 2:
                 results.append(
@@ -425,6 +483,7 @@ class FormulaResearchWorker:
                 horizon_minutes=horizon,
                 feature_schema_version=dataset["feature_schema_version"],
                 config=_discovery_config(),
+                analysis_as_of_utc=cycle_as_of,
             )
             if not discovery.get("available"):
                 results.append(
@@ -465,35 +524,29 @@ class FormulaResearchWorker:
         self.metrics.last_discovery_utc = now
         self.metrics.last_error = None
         print(f"[formula-discovery] completed: {results}", flush=True)
-        return {"completed_at_utc": now, "results": results}
+        return {
+            "completed_at_utc": now,
+            "analysis_as_of_utc": cycle_as_of.isoformat(),
+            "results": results,
+        }
 
     def run_shadow_once(self) -> Dict[str, Any]:
         self.metrics.shadow_cycles += 1
         work = research_formula_store.load_shadow_work()
-        events_by_id = {
-            int(event["event_id"]): event
-            for formula in work
-            for event in formula.get("events") or []
-        }
-        event_ids = [
-            event_id
-            for event_id, _ in sorted(
-                events_by_id.items(),
-                key=lambda item: (
-                    _as_utc(item[1]["alert_time_utc"]),
-                    int(item[0]),
-                ),
-            )[:250]
-        ]
-        selected_event_ids = set(event_ids)
+        selected_by_formula = _select_shadow_work_prefixes(
+            work, max_formula_events=250
+        )
+        event_ids = sorted(
+            {
+                event_id
+                for selected in selected_by_formula.values()
+                for event_id in selected
+            }
+        )
         event_ids_by_horizon: Dict[int, list[int]] = {}
         for formula in work:
             horizon = int(formula["horizon_minutes"])
-            selected = [
-                int(event["event_id"])
-                for event in formula.get("events") or []
-                if int(event["event_id"]) in selected_event_ids
-            ]
+            selected = selected_by_formula.get(int(formula["formula_id"]), [])
             if selected:
                 event_ids_by_horizon.setdefault(horizon, []).extend(selected)
         feature_rows = research_feature_matrix.load_shadow_feature_rows_by_horizon(
@@ -503,6 +556,9 @@ class FormulaResearchWorker:
         matched = 0
         queued = 0
         for formula in work:
+            selected_event_ids = set(
+                selected_by_formula.get(int(formula["formula_id"]), [])
+            )
             conditions = _conditions(formula.get("conditions"))
             results = []
             for event in formula.get("events") or []:
@@ -583,18 +639,26 @@ class FormulaResearchWorker:
             matched += persisted["matched"]
             queued += int(persisted.get("queued") or 0)
         validation = research_formula_store.evaluate_shadow_readiness()
-        ready_for_review = len(validation.get("ready_for_explicit_review") or [])
+        research_ready = len(validation.get("research_ready") or [])
+        legacy_live_review_ready = len(
+            validation.get("legacy_live_review_ready") or []
+        )
         self.metrics.shadow_checks += checked
         self.metrics.shadow_hits += matched
         self.metrics.live_candidates_queued += queued
-        self.metrics.formulas_ready_for_review = ready_for_review
+        self.metrics.formulas_ready_for_review = research_ready
+        self.metrics.research_ready_formulas = research_ready
+        self.metrics.legacy_live_review_ready_formulas = (
+            legacy_live_review_ready
+        )
         now = datetime.now(timezone.utc).isoformat()
         self.metrics.last_shadow_utc = now
         self.metrics.last_error = None
         if checked or matched:
             print(
                 f"[formula-shadow] checked={checked}; matched={matched}; "
-                f"queued={queued}; ready_for_explicit_review={ready_for_review}; "
+                f"queued={queued}; research_ready={research_ready}; "
+                f"legacy_live_review_ready={legacy_live_review_ready}; "
                 "promoted_live=0",
                 flush=True,
             )
@@ -602,6 +666,9 @@ class FormulaResearchWorker:
             "completed_at_utc": now,
             "active_formulas": len(work),
             "events_loaded": len(event_ids),
+            "formula_event_checks_loaded": sum(
+                len(selected) for selected in selected_by_formula.values()
+            ),
             "checked": checked,
             "matched": matched,
             "queued_live_deliveries": queued,

@@ -83,6 +83,7 @@ HISTORICAL_BASELINE_FEATURES: tuple[str, ...] = (
 )
 REPLAY_MIN_ANCHORS_PER_SYMBOL = 250
 REPLAY_MIN_UTC_DATES_PER_SYMBOL = 14
+REPLAY_MAX_CONTINUITY_GAP_MINUTES = 45
 REPLAY_MIN_SPAN_HOURS_PER_SYMBOL = 336.0
 REPLAY_MIN_ELIGIBLE_SYMBOLS = 4
 REPLAY_COVERAGE_STREAM_BATCH_SIZE = 500
@@ -1088,6 +1089,7 @@ def build_feature_rows(
                     "source_side": event.get("source_side"),
                     "timeframe": event.get("timeframe"),
                     "event_type": event.get("event_type"),
+                    "current_price": _float(event.get("current_price")),
                     "strategy_version": event.get("strategy_version"),
                     "code_version": event.get("code_version"),
                 },
@@ -1131,15 +1133,25 @@ def _load_verified_events(
     lookback_days: int,
     horizon_minutes: int,
     limit: int,
+    analysis_as_of_utc: Any = None,
 ) -> list[Dict[str, Any]]:
+    cutoff = (
+        _as_utc(analysis_as_of_utc)
+        if analysis_as_of_utc not in (None, "")
+        else datetime.now(timezone.utc)
+    )
     clauses: list[str] = []
     params: list[Any] = [
+        cutoff,
         lookback_days,
+        cutoff,
         horizon_minutes,
         VERIFIED_OUTCOME_METHOD,
         list(VERIFIED_OUTCOME_QUALITIES),
+        cutoff,
         canonical_price_path.METHOD_VERSION,
         list(VERIFIED_OUTCOME_QUALITIES),
+        cutoff,
     ]
     if symbol:
         clauses.append("AND e.symbol=%s")
@@ -1187,13 +1199,16 @@ def _load_verified_events(
              AND o.horizon_minutes=ft.horizon_minutes
             WHERE e.event_kind='ALERT'
               AND e.delivery_status='DELIVERED'
-              AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
+              AND e.alert_time_utc >= %s - (%s * INTERVAL '1 day')
+              AND e.alert_time_utc <= %s
               AND ft.horizon_minutes=%s
               AND ft.method_version=%s
               AND ft.status IN ('HIT', 'MISS')
               AND ft.data_quality_status=ANY(%s)
+              AND ft.created_at_utc <= %s
               AND o.outcome_method_version=%s
               AND o.data_quality_status=ANY(%s)
+              AND o.created_at <= %s
               {filters}
             ORDER BY e.alert_time_utc DESC, e.event_id DESC
             LIMIT %s
@@ -1388,8 +1403,17 @@ def _load_max_pain_features_batch(
 
 
 def _verified_coverage(
-    conn, *, lookback_days: int, horizon_minutes: int
+    conn,
+    *,
+    lookback_days: int,
+    horizon_minutes: int,
+    analysis_as_of_utc: Any = None,
 ) -> Dict[str, Any]:
+    cutoff = (
+        _as_utc(analysis_as_of_utc)
+        if analysis_as_of_utc not in (None, "")
+        else datetime.now(timezone.utc)
+    )
     rows = conn.execute(
         """
         SELECT e.symbol,
@@ -1402,8 +1426,10 @@ def _verified_coverage(
          AND ft.method_version=%s
          AND ft.status IN ('HIT', 'MISS')
          AND ft.data_quality_status=ANY(%s)
+         AND ft.created_at_utc <= %s
         WHERE e.event_kind='ALERT' AND e.delivery_status='DELIVERED'
-          AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
+          AND e.alert_time_utc >= %s - (%s * INTERVAL '1 day')
+          AND e.alert_time_utc <= %s
         GROUP BY e.symbol
         ORDER BY e.symbol
         """,
@@ -1411,7 +1437,10 @@ def _verified_coverage(
             horizon_minutes,
             VERIFIED_OUTCOME_METHOD,
             list(VERIFIED_OUTCOME_QUALITIES),
+            cutoff,
+            cutoff,
             lookback_days,
+            cutoff,
         ),
     ).fetchall()
     by_symbol: Dict[str, Any] = {}
@@ -1441,11 +1470,16 @@ def _verified_coverage(
     }
 
 
-def _completed_replay_owner_sql(alias: str) -> str:
+def _completed_replay_owner_sql(
+    alias: str, *, freeze_completed_at: bool = False
+) -> str:
     """Bind a stored outcome to the exact Replay run that completed it."""
     normalized = str(alias or "").strip()
     if not normalized.replace("_", "").isalnum():
         raise ValueError("invalid SQL alias for replay owner binding")
+    completed_cutoff = (
+        "AND owner_run.completed_at_utc <= %s" if freeze_completed_at else ""
+    )
     return f"""
         {normalized}.first_touch_replay_run_id={normalized}.replay_run_id
         AND EXISTS (
@@ -1454,32 +1488,50 @@ def _completed_replay_owner_sql(alias: str) -> str:
             WHERE owner_run.replay_run_id={normalized}.replay_run_id
               AND owner_run.replay_version={normalized}.replay_version
               AND owner_run.status='COMPLETED'
+              {completed_cutoff}
         )
     """
 
 
 def _historical_replay_coverage(
-    conn, *, lookback_days: int, horizon_minutes: int
+    conn,
+    *,
+    lookback_days: int,
+    horizon_minutes: int,
+    analysis_as_of_utc: Any = None,
 ) -> Dict[str, Any]:
+    cutoff = (
+        _as_utc(analysis_as_of_utc)
+        if analysis_as_of_utc not in (None, "")
+        else datetime.now(timezone.utc)
+    )
     sibling_coherence = (
         research_historical_replay.sibling_reference_coherence_sql(
             "historical"
         )
     )
-    completed_owner = _completed_replay_owner_sql("historical")
+    completed_owner = _completed_replay_owner_sql(
+        "historical", freeze_completed_at=True
+    )
     exact_params = (
         horizon_minutes,
+        cutoff,
         lookback_days,
+        cutoff,
+        cutoff,
         VERIFIED_OUTCOME_METHOD,
         research_historical_replay.REPLAY_VERSION,
         list(VERIFIED_OUTCOME_QUALITIES),
         canonical_price_path.METHOD_VERSION,
         list(VERIFIED_OUTCOME_QUALITIES),
+        cutoff,
     )
     exact_filters = f"""
           historical.horizon_minutes=%s
       AND historical.observation_time_utc >=
-            NOW() - (%s * INTERVAL '1 day')
+            %s - (%s * INTERVAL '1 day')
+      AND historical.observation_time_utc <= %s
+      AND historical.created_at_utc <= %s
       AND historical.first_touch_method_version=%s
       AND historical.replay_version=%s
       AND historical.first_touch_data_quality_status=ANY(%s)
@@ -1534,6 +1586,7 @@ def _historical_replay_coverage(
                 ),
                 end=last_candidate + timedelta(minutes=1),
                 symbols=candidate_symbols,
+                available_as_of_utc=cutoff,
             )
         )
         width_index = research_historical_replay.build_canonical_width_index(
@@ -1547,6 +1600,8 @@ def _historical_replay_coverage(
     coherent_first: Dict[str, datetime] = {}
     coherent_last: Dict[str, datetime] = {}
     coherent_dates: Dict[str, set[Any]] = defaultdict(set)
+    coherent_previous: Dict[str, datetime] = {}
+    coherent_max_gap_minutes: Dict[str, float] = defaultdict(float)
     coherent_total = 0
     if candidate_symbols:
         candidate_query = f"""
@@ -1591,6 +1646,13 @@ def _historical_replay_coverage(
             ):
                 continue
             observation_time = _as_utc(row["observation_time_utc"])
+            previous = coherent_previous.get(symbol)
+            if previous is not None:
+                coherent_max_gap_minutes[symbol] = max(
+                    coherent_max_gap_minutes[symbol],
+                    (observation_time - previous).total_seconds() / 60.0,
+                )
+            coherent_previous[symbol] = observation_time
             coherent_counts[symbol] += 1
             coherent_total += 1
             coherent_dates[symbol].add(observation_time.date())
@@ -1624,6 +1686,7 @@ def _historical_replay_coverage(
             failures.append("minimum_utc_dates")
         if span_hours < REPLAY_MIN_SPAN_HOURS_PER_SYMBOL:
             failures.append("minimum_span_hours")
+        max_gap_minutes = coherent_max_gap_minutes.get(symbol, 0.0)
         by_symbol[symbol] = {
             "anchors": anchors,
             "directional_rows": anchors * 2,
@@ -1631,6 +1694,7 @@ def _historical_replay_coverage(
             "last_observation_utc": last_observation,
             "utc_dates": utc_dates,
             "span_hours": round(span_hours, 3),
+            "maximum_anchor_gap_minutes": round(max_gap_minutes, 3),
             "stored_candidates": stored_candidates,
             "recomputed_policy_rejections": stored_candidates - anchors,
             "eligible": not failures,
@@ -1672,6 +1736,7 @@ def _historical_replay_coverage(
     )
     return {
         "dataset_kind": "historical_raw_opportunity_replay",
+        "analysis_as_of_utc": cutoff,
         "replay_version": research_historical_replay.REPLAY_VERSION,
         "first_touch_method_version": VERIFIED_OUTCOME_METHOD,
         "movement_width_calibration_version": (
@@ -1686,6 +1751,7 @@ def _historical_replay_coverage(
             "minimum_eligible_symbols": REPLAY_MIN_ELIGIBLE_SYMBOLS,
             "minimum_utc_dates_per_symbol": REPLAY_MIN_UTC_DATES_PER_SYMBOL,
             "minimum_span_hours_per_symbol": REPLAY_MIN_SPAN_HOURS_PER_SYMBOL,
+            "continuity_gap_is_diagnostic_only": True,
         },
         "anchors": total_anchors,
         "directional_rows": total_anchors * 2,
@@ -1731,17 +1797,32 @@ def _load_historical_opportunities(
     horizon_minutes: int,
     anchor_limit: int,
     symbols: Sequence[str],
+    analysis_as_of_utc: Any = None,
 ) -> list[Dict[str, Any]]:
     symbols = sorted({str(symbol).upper() for symbol in symbols if symbol})
     if not symbols:
         return []
     quota = max(1, (anchor_limit + len(symbols) - 1) // len(symbols))
+    # Keep sampled anchors more than one minimum Market-Episode span apart on
+    # average. Independence still requires a frozen directional price reset;
+    # sampling alone can never create another proof from the same rise/fall.
+    maximum_spread_samples = max(
+        2, int(lookback_days * 1440 / (1440 + 30))
+    )
+    quota = min(quota, maximum_spread_samples)
     sibling_coherence = (
         research_historical_replay.sibling_reference_coherence_sql(
             "historical"
         )
     )
-    completed_owner = _completed_replay_owner_sql("historical")
+    cutoff = (
+        _as_utc(analysis_as_of_utc)
+        if analysis_as_of_utc not in (None, "")
+        else datetime.now(timezone.utc)
+    )
+    completed_owner = _completed_replay_owner_sql(
+        "historical", freeze_completed_at=True
+    )
     query = f"""
         WITH eligible AS (
             SELECT opportunity_id, symbol, observation_time_utc,
@@ -1765,7 +1846,9 @@ def _load_historical_opportunities(
                    COUNT(*) OVER (PARTITION BY symbol) AS symbol_total
             FROM research_historical_opportunity_outcomes historical
             WHERE horizon_minutes=%s
-              AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
+              AND observation_time_utc >= %s - (%s * INTERVAL '1 day')
+              AND observation_time_utc <= %s
+              AND historical.created_at_utc <= %s
               AND first_touch_method_version=%s
               AND replay_version=%s
               AND ({completed_owner})
@@ -1811,9 +1894,13 @@ def _load_historical_opportunities(
         """
     params = (
         horizon_minutes,
+        cutoff,
         lookback_days,
+        cutoff,
+        cutoff,
         VERIFIED_OUTCOME_METHOD,
         research_historical_replay.REPLAY_VERSION,
+        cutoff,
         list(VERIFIED_OUTCOME_QUALITIES),
         canonical_price_path.METHOD_VERSION,
         list(VERIFIED_OUTCOME_QUALITIES),
@@ -1838,9 +1925,11 @@ def _load_historical_opportunities(
     base, remainder = divmod(anchor_limit, len(symbols))
     sampled: list[Dict[str, Any]] = []
     for index, symbol in enumerate(symbols):
-        sampled.extend(
-            _even_sample(grouped.get(symbol, []), base + (1 if index < remainder else 0))
+        target = min(
+            base + (1 if index < remainder else 0),
+            maximum_spread_samples,
         )
+        sampled.extend(_even_sample(grouped.get(symbol, []), target))
     return sorted(
         sampled,
         key=lambda row: (
@@ -2818,6 +2907,7 @@ def load_historical_replay_dataset(
     lookback_days: int = 3650,
     horizon_minutes: int = 240,
     limit: int = 2000,
+    analysis_as_of_utc: Any = None,
 ) -> Dict[str, Any]:
     """Load an evenly sampled, chronological raw-opportunity replay dataset."""
     days = max(1, min(int(lookback_days), 3650))
@@ -2826,6 +2916,11 @@ def load_historical_replay_dataset(
         raise ValueError("horizon_minutes must be 60, 240, 720 or 1440")
     row_limit = max(50, min(int(limit), 5000))
     anchor_limit = max(25, row_limit // 2)
+    analysis_as_of = (
+        _as_utc(analysis_as_of_utc)
+        if analysis_as_of_utc not in (None, "")
+        else datetime.now(timezone.utc)
+    )
     research_url = _research_database_url()
     raw_url = _raw_database_url()
     if not research_url or not raw_url:
@@ -2846,6 +2941,7 @@ def load_historical_replay_dataset(
             research_conn,
             lookback_days=days,
             horizon_minutes=horizon,
+            analysis_as_of_utc=analysis_as_of,
         )
         opportunities = _load_historical_opportunities(
             research_conn,
@@ -2853,6 +2949,7 @@ def load_historical_replay_dataset(
             horizon_minutes=horizon,
             anchor_limit=anchor_limit,
             symbols=coverage.get("eligible_symbols") or [],
+            analysis_as_of_utc=analysis_as_of,
         )
     if not opportunities:
         if coverage.get("eligible_symbols"):
@@ -2883,6 +2980,7 @@ def load_historical_replay_dataset(
                 canonical_price_path.PRICE_PROVENANCE_VERSION
             ),
             "horizon_minutes": horizon,
+            "analysis_as_of_utc": analysis_as_of,
             "sample_size": 0,
             "coverage": coverage,
             "rows": [],
@@ -2907,6 +3005,7 @@ def load_historical_replay_dataset(
                 start=raw_start,
                 end=last_time + timedelta(minutes=1),
                 symbols=symbols,
+                available_as_of_utc=analysis_as_of,
             )
         )
         width_index = research_historical_replay.build_canonical_width_index(
@@ -3007,14 +3106,16 @@ def load_historical_replay_dataset(
             "outcome_quality": VERIFIED_OUTCOME_QUALITY,
             "horizon_minutes": horizon,
             "lookback_days": days,
+            "analysis_as_of_utc": analysis_as_of,
             "sample_size": len(rows),
             "anchor_sample_size": len(opportunities),
             "first_alert_time_utc": first_time,
             "last_alert_time_utc": last_time,
             "chronological_order": "ascending",
             "sampling": (
-                "deterministic even sampling by symbol and observation time; "
-                "both LONG and SHORT labels per anchor"
+                "deterministic time-spread sampling by symbol; another proof "
+                "still requires minimum separation plus a frozen directional "
+                "price reset; both LONG and SHORT labels per anchor"
             ),
             "historical_baseline": {
                 "lookback_days": HISTORICAL_BASELINE_DAYS,
@@ -3035,6 +3136,7 @@ def _load_alert_formula_dataset(
     lookback_days: int = 3650,
     horizon_minutes: int = 240,
     limit: int = 2000,
+    analysis_as_of_utc: Any = None,
 ) -> Dict[str, Any]:
     """Load a chronological, bounded delivered-alert dataset.
 
@@ -3047,6 +3149,11 @@ def _load_alert_formula_dataset(
     if horizon not in {60, 240, 720, 1440}:
         raise ValueError("horizon_minutes must be 60, 240, 720 or 1440")
     row_limit = max(50, min(int(limit), 5000))
+    analysis_as_of = (
+        _as_utc(analysis_as_of_utc)
+        if analysis_as_of_utc not in (None, "")
+        else datetime.now(timezone.utc)
+    )
     research_url = _research_database_url()
     raw_url = _raw_database_url()
     if not research_url or not raw_url:
@@ -3072,6 +3179,7 @@ def _load_alert_formula_dataset(
             research_conn,
             lookback_days=days,
             horizon_minutes=horizon,
+            analysis_as_of_utc=analysis_as_of,
         )
         events = _load_verified_events(
             research_conn,
@@ -3081,6 +3189,7 @@ def _load_alert_formula_dataset(
             lookback_days=days,
             horizon_minutes=horizon,
             limit=row_limit,
+            analysis_as_of_utc=analysis_as_of,
         )
         events.sort(key=lambda row: (_as_utc(row["alert_time_utc"]), int(row["event_id"])))
         if not events:
@@ -3141,6 +3250,7 @@ def _load_alert_formula_dataset(
             "outcome_quality": VERIFIED_OUTCOME_QUALITY,
             "horizon_minutes": horizon,
             "lookback_days": days,
+            "analysis_as_of_utc": analysis_as_of,
             "sample_size": len(rows),
             "first_alert_time_utc": first_time,
             "last_alert_time_utc": last_time,
@@ -3164,6 +3274,7 @@ def load_formula_dataset(
     lookback_days: int = 3650,
     horizon_minutes: int = 240,
     limit: int = 2000,
+    analysis_as_of_utc: Any = None,
 ) -> Dict[str, Any]:
     """Select the safest ready dataset for automatic formula discovery.
 
@@ -3180,6 +3291,7 @@ def load_formula_dataset(
             lookback_days=lookback_days,
             horizon_minutes=horizon_minutes,
             limit=limit,
+            analysis_as_of_utc=analysis_as_of_utc,
         )
         ready = bool((replay.get("coverage") or {}).get("replacement_ready"))
         if mode == "historical_replay" or ready:
@@ -3191,6 +3303,7 @@ def load_formula_dataset(
         lookback_days=lookback_days,
         horizon_minutes=horizon_minutes,
         limit=limit,
+        analysis_as_of_utc=analysis_as_of_utc,
     )
     if replay is not None:
         alerts = dict(alerts)

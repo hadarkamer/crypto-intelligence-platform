@@ -20,6 +20,7 @@ def _summary_row(event_id: int, *, mfe: float, mae: float) -> dict:
             "alert_time_utc": datetime(2026, 8, 29, tzinfo=timezone.utc)
             + timedelta(hours=event_id),
             "symbol": "BTC",
+            "direction": "LONG",
             "event_type": "ZERO_MAE_SELFTEST",
         },
         "outcome_label": {
@@ -52,8 +53,27 @@ def _gate_metrics(*, mfe: object, mae: object) -> dict:
         "hit_rate_pct": 75.0,
         "wilson_95_lower_pct": 55.0,
         "session_hit_rate_improvement_pct_points": 15.0,
+        "recent_sample_size": 12,
+        "recent_control_sample_size": 12,
+        "recency_effective_sample_size": 12.0,
+        "recency_control_effective_sample_size": 12.0,
+        "last_sample_age_hours": 1.0,
+        "recency_weighted_hit_rate_pct": 75.0,
+        "recency_weighted_wilson_95_lower_approx_pct": 55.0,
+        "recency_weighted_hit_rate_improvement_pct_points": 15.0,
+        "recency_weighted_median_mfe_pct": mfe,
+        "recency_weighted_median_mae_pct": mae,
+        "recency_weighted_mae_p90_pct": mae,
+        "recency_weighted_mae_p95_pct": mae,
+        "recency_weighted_favorable_dominance_rate_pct": 80.0,
+        "recency_weighted_favorable_dominance_wilson_95_lower_approx_pct": 55.0,
+        "recency_weighted_favorable_dominance_improvement_pct_points": 20.0,
+        "recency_weighted_median_paired_favorable_minus_adverse_pct": 2.0,
+        "recency_favorable_dominance_effective_sample_size": 12.0,
+        "recency_control_favorable_dominance_effective_sample_size": 12.0,
         "median_mfe_pct": mfe,
         "median_mae_pct": mae,
+        "movement_width_floor_effective_pct": 0.5,
         "mae_p90_pct": 0.0 if mae == 0.0 else mae,
         "favorable_minus_p90_adverse_pct": (
             float(mfe) - float(mae)
@@ -77,6 +97,9 @@ def _shadow_row(*, mfe: float, mae: float) -> dict:
         "alert_time_utc": datetime(2026, 8, 29, tzinfo=timezone.utc),
         "symbol": "BTC",
         "event_type": "ZERO_MAE_SELFTEST",
+        "direction": "LONG",
+        "decision_cohort_key": "a" * 64,
+        "decision_anchor_time_utc": datetime(2026, 8, 29, tzinfo=timezone.utc),
         "evaluation_status": "MATCHED",
         "outcome_available": True,
         "outcome_due": True,
@@ -165,7 +188,9 @@ def run() -> None:
     json.dumps(overflow.evidence(), allow_nan=False)
 
     rows = [_summary_row(index, mfe=2.0, mae=0.0) for index in range(1, 4)]
-    metrics = engine.summarize_outcomes(rows, rows)
+    metrics = engine._metrics(
+        rows, rows, already_independent_episodes=True
+    )
     assert metrics["median_mfe_mae_ratio"] is None
     assert metrics["median_mfe_mae_ratio_state"] == efficiency.UNBOUNDED_ZERO_MAE
     assert (
@@ -187,9 +212,9 @@ def run() -> None:
     priority = engine.rank_prospective_metrics(
         gate_metrics, horizon_minutes=240
     )
-    assert priority["components"]["mfe_mae_ratio"] == 10.0
+    assert priority["components"]["mfe_mae_ratio"] == 7.0
     assert priority["policy_version"].startswith(
-        "prospective-shadow-priority-v2"
+        "prospective-shadow-priority-v3"
     )
     assert (
         priority["mfe_mae_efficiency_policy_version"]
@@ -221,10 +246,10 @@ def run() -> None:
         q_value=0.01,
         complexity=1,
     )
-    assert round(final_unbounded - final_invalid, 4) == 8.0
+    assert round(final_unbounded - final_invalid, 4) == 5.6
 
     adverse_tail = {**gate_metrics, "mae_p90_pct": 3.0}
-    _, adverse_reasons = engine._recommended_stage(
+    adverse_stage, adverse_reasons = engine._recommended_stage(
         adverse_tail,
         adverse_tail,
         horizon_minutes=240,
@@ -232,30 +257,31 @@ def run() -> None:
         config=engine.DiscoveryConfig(),
     )
     assert "MFE/MAE efficiency" not in adverse_reasons
-    assert (
-        "favorable excursion exceeds p90 adverse excursion"
-        in adverse_reasons
-    )
+    assert adverse_stage == "SHADOW", adverse_reasons
+    assert "favorable excursion exceeds p90 adverse excursion" not in adverse_reasons
 
     stale_undefined = {**_gate_metrics(mfe=0.0, mae=0.0)}
     stale_undefined["median_mfe_mae_ratio"] = 999.0
     stale_undefined["median_mfe_mae_ratio_state"] = efficiency.FINITE
+    stale_undefined["recency_weighted_median_mfe_pct"] = 0.0
+    stale_undefined["recency_weighted_median_mae_pct"] = 0.0
     assert efficiency.from_metrics(stale_undefined).state == (
         efficiency.UNDEFINED_ZERO_ZERO
     )
-    _, undefined_reasons = engine._recommended_stage(
+    undefined_stage, undefined_reasons = engine._recommended_stage(
         stale_undefined,
         stale_undefined,
         horizon_minutes=240,
         q_value=0.01,
         config=engine.DiscoveryConfig(),
     )
-    assert "MFE/MAE efficiency" in undefined_reasons
+    assert undefined_stage != "SHADOW"
+    assert "efficiency" in " ".join(undefined_reasons)
 
     validation = store._build_shadow_validation(
         {"horizon_minutes": 240},
         [_shadow_row(mfe=2.0, mae=0.0)],
-        evaluated_at_utc=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        evaluated_at_utc=datetime(2026, 8, 31, tzinfo=timezone.utc),
     )
     assert validation["gates"]["future MFE/MAE efficiency"] is True
     assert validation["metrics"]["median_mfe_mae_ratio"] is None
@@ -275,7 +301,7 @@ def run() -> None:
     invalid_validation = store._build_shadow_validation(
         {"horizon_minutes": 240},
         [_shadow_row(mfe=0.0, mae=0.0)],
-        evaluated_at_utc=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        evaluated_at_utc=datetime(2026, 8, 31, tzinfo=timezone.utc),
     )
     assert invalid_validation["gates"]["future MFE/MAE efficiency"] is False
 

@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
 
-EVIDENCE_FAMILY_VERSION = "formula-evidence-family-v1"
+EVIDENCE_FAMILY_VERSION = "formula-evidence-family-v2-interval-duration-overlap"
 
 _MAX_PAIN_COMPONENT_MARKERS = (
     "distance_pct",
@@ -171,6 +172,82 @@ def evidence_overlap(left: Iterable[Any], right: Iterable[Any]) -> float:
     return len(left_set & right_set) / len(union) if union else 1.0
 
 
+def _interval_timestamp(value: Any) -> float:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def _merged_evidence_intervals(
+    values: Iterable[Any],
+) -> Dict[str, list[tuple[float, float]]]:
+    grouped: Dict[str, list[tuple[float, float]]] = {}
+    for value in values:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            continue
+        if len(value) != 3:
+            continue
+        partition = str(value[0])
+        try:
+            start = _interval_timestamp(value[1])
+            end = _interval_timestamp(value[2])
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if end <= start:
+            continue
+        grouped.setdefault(partition, []).append((start, end))
+    merged: Dict[str, list[tuple[float, float]]] = {}
+    for partition, intervals in grouped.items():
+        combined: list[tuple[float, float]] = []
+        for start, end in sorted(intervals):
+            if combined and start <= combined[-1][1]:
+                combined[-1] = (combined[-1][0], max(combined[-1][1], end))
+            else:
+                combined.append((start, end))
+        merged[partition] = combined
+    return merged
+
+
+def evidence_interval_overlap(left: Iterable[Any], right: Iterable[Any]) -> float:
+    """Duration Jaccard across compact, partitioned evidence intervals."""
+
+    left_by_partition = _merged_evidence_intervals(left)
+    right_by_partition = _merged_evidence_intervals(right)
+    left_total = sum(
+        end - start
+        for intervals in left_by_partition.values()
+        for start, end in intervals
+    )
+    right_total = sum(
+        end - start
+        for intervals in right_by_partition.values()
+        for start, end in intervals
+    )
+    intersection = 0.0
+    for partition in set(left_by_partition) & set(right_by_partition):
+        left_intervals = left_by_partition[partition]
+        right_intervals = right_by_partition[partition]
+        left_index = right_index = 0
+        while left_index < len(left_intervals) and right_index < len(
+            right_intervals
+        ):
+            left_start, left_end = left_intervals[left_index]
+            right_start, right_end = right_intervals[right_index]
+            intersection += max(
+                0.0, min(left_end, right_end) - max(left_start, right_start)
+            )
+            if left_end <= right_end:
+                left_index += 1
+            else:
+                right_index += 1
+    union = left_total + right_total - intersection
+    return intersection / union if union > 0.0 else 1.0
+
+
 def _formula_priority(formula: Mapping[str, Any]) -> tuple[Any, ...]:
     stage_order = {
         "SHADOW": 4,
@@ -215,8 +292,10 @@ def group_formula_evidence(
     for source in formulas:
         formula = dict(source)
         evidence_keys = tuple(sorted({str(value) for value in formula.get("_evidence_keys") or ()}))
+        evidence_intervals = tuple(formula.get("_evidence_intervals") or ())
         fingerprint = evidence_fingerprint(evidence_keys)
         formula["_evidence_keys"] = evidence_keys
+        formula["_evidence_intervals"] = evidence_intervals
         formula["_evidence_fingerprint"] = fingerprint
         prepared.append(formula)
     prepared.sort(key=_formula_priority, reverse=True)
@@ -255,9 +334,15 @@ def group_formula_evidence(
                 != int(leader.get("horizon_minutes") or 0)
             ):
                 continue
-            overlap = evidence_overlap(
-                formula.get("_evidence_keys") or (),
-                leader.get("_evidence_keys") or (),
+            formula_intervals = formula.get("_evidence_intervals") or ()
+            leader_intervals = leader.get("_evidence_intervals") or ()
+            overlap = (
+                evidence_interval_overlap(formula_intervals, leader_intervals)
+                if formula_intervals and leader_intervals
+                else evidence_overlap(
+                    formula.get("_evidence_keys") or (),
+                    leader.get("_evidence_keys") or (),
+                )
             )
             if overlap >= threshold and overlap > best_overlap:
                 best_index = index
@@ -294,6 +379,7 @@ def group_formula_evidence(
         multiple_testing["evidence_family"] = metadata
         champion["multiple_testing"] = multiple_testing
         champion.pop("_evidence_keys", None)
+        champion.pop("_evidence_intervals", None)
         champion.pop("_evidence_fingerprint", None)
         champion.pop("_exact_duplicate_formula_keys", None)
         champions.append(champion)

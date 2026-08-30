@@ -18,8 +18,10 @@ except Exception:  # pragma: no cover
 
 import canonical_price_path
 import research_feature_matrix
+import research_formula_acceptance
 import research_formula_engine
 import research_historical_replay
+import research_market_episode
 import research_max_pain_archive
 import research_mfe_mae_efficiency
 import research_no_dwell_outcome
@@ -51,7 +53,17 @@ _REPLACEMENT_QUALIFYING_STAGES = frozenset(
 )
 _SHADOW_COMPATIBLE_FORMULA_SCHEMAS = (
     "research-formula-v5-safe-replay",
+    research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
     research_formula_engine.FORMULA_SCHEMA_VERSION,
+)
+_LEGACY_V5_FORMULA_SCHEMA_VERSION = "research-formula-v5-safe-replay"
+_LEGACY_V5_ENGINE_VERSION = "formula-discovery-v5-safe-replay"
+_LEGACY_V5_FEATURE_SCHEMA_VERSION = (
+    "research-feature-matrix-v4-safe-replay"
+)
+_LEGACY_V5_OUTCOME_METHOD_VERSION = "canonical-spot-1m-ohlc-path-v3"
+_LEGACY_V5_SHADOW_ADAPTER_VERSION = (
+    "legacy-v5-to-sampler-v4-first-touch-shadow-adapter-v1"
 )
 _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION = (
     "formula-shadow-input-snapshot-v5-frozen-decision-features"
@@ -119,8 +131,41 @@ _LIVE_APPROVAL_TRIGGER_CONTRACTS = {
 _LIVE_APPROVAL_UNIQUE_INDEX = "idx_formula_live_approvals_exact_runtime"
 
 
-def _current_v6_formula_contract(formula: Mapping[str, Any]) -> bool:
-    """Return whether every executable v6 contract version is exact."""
+def _shadow_executable_formula_contract(formula: Mapping[str, Any]) -> bool:
+    """Return whether a retained Shadow formula has an exact runtime tuple."""
+    runtime_tuple = (
+        str(formula.get("formula_schema_version") or ""),
+        str(formula.get("engine_version") or ""),
+        str(formula.get("feature_schema_version") or ""),
+        str(formula.get("outcome_method_version") or ""),
+    )
+    return bool(
+        runtime_tuple
+        in {
+            (
+                _LEGACY_V5_FORMULA_SCHEMA_VERSION,
+                _LEGACY_V5_ENGINE_VERSION,
+                _LEGACY_V5_FEATURE_SCHEMA_VERSION,
+                _LEGACY_V5_OUTCOME_METHOD_VERSION,
+            ),
+            (
+                research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
+                research_formula_engine.LEGACY_V6_ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+            ),
+            (
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+            ),
+        }
+    )
+
+
+def _current_live_formula_contract(formula: Mapping[str, Any]) -> bool:
+    """Only the exact current v7 runtime may ever authorize delivery."""
     return bool(
         formula.get("formula_schema_version")
         == research_formula_engine.FORMULA_SCHEMA_VERSION
@@ -150,12 +195,25 @@ def _bind_max_pain_policy(policy_version: str) -> str:
     return base
 
 
+def _bind_adaptive_evidence_policy(policy_version: str) -> str:
+    base = str(policy_version or "").strip()
+    for binding in (
+        research_formula_acceptance.POLICY_VERSION,
+        research_market_episode.POLICY_VERSION,
+    ):
+        if binding not in base:
+            base = f"{base}+{binding}"
+    return base
+
+
 _SHADOW_MONITORING_POLICY_BASE = (
     os.getenv("FORMULA_SHADOW_MONITORING_POLICY_VERSION", "").strip()
     or "shadow-monitoring-v4-frozen-decision-features-2026-08-30"
 )
 _SHADOW_MONITORING_POLICY_VERSION = _bind_max_pain_policy(
-    _bind_efficiency_policy(_SHADOW_MONITORING_POLICY_BASE)
+    _bind_adaptive_evidence_policy(
+        _bind_efficiency_policy(_SHADOW_MONITORING_POLICY_BASE)
+    )
 )
 _SHADOW_MIN_MATCHES = max(
     12, int(os.getenv("FORMULA_SHADOW_MIN_VALIDATED_MATCHES", "12"))
@@ -346,10 +404,13 @@ def _verified_replacement_readiness(
         "minimum_eligible_symbols": research_feature_matrix.REPLAY_MIN_ELIGIBLE_SYMBOLS,
         "minimum_utc_dates_per_symbol": research_feature_matrix.REPLAY_MIN_UTC_DATES_PER_SYMBOL,
         "minimum_span_hours_per_symbol": research_feature_matrix.REPLAY_MIN_SPAN_HOURS_PER_SYMBOL,
+        "continuity_gap_is_diagnostic_only": True,
     }
     for key, expected in expected_policy.items():
         actual = policy.get(key)
-        if isinstance(expected, int):
+        if isinstance(expected, bool):
+            valid = actual is expected
+        elif isinstance(expected, int):
             valid = _strict_int(actual) == expected
         else:
             valid = _strict_finite_number(actual) == float(expected)
@@ -534,6 +595,65 @@ def _formula_registry_row(value: Mapping[str, Any]) -> Dict[str, Any]:
     row = dict(value)
     for key in ("discovery_metrics", "holdout_metrics"):
         row[key] = _annotate_mfe_mae_metrics(row.get(key))
+    validation = row.pop("shadow_validation_metrics", None)
+    if isinstance(validation, str):
+        try:
+            validation = json.loads(validation)
+        except json.JSONDecodeError:
+            validation = None
+    if isinstance(validation, Mapping):
+        acceptance = validation.get("research_acceptance")
+        acceptance = acceptance if isinstance(acceptance, Mapping) else {}
+        metrics = validation.get("metrics")
+        metrics = metrics if isinstance(metrics, Mapping) else {}
+        evidence = validation.get("evidence")
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        row["research_maturity"] = {
+            "evaluated_at_utc": validation.get("evaluated_at_utc"),
+            "policy_version": acceptance.get("policy_version"),
+            "research_ready": bool(acceptance.get("research_ready")),
+            "maturity": acceptance.get("maturity"),
+            "accepted_paths": list(acceptance.get("accepted_paths") or []),
+            "early_current_paths": list(
+                acceptance.get("early_current_paths") or []
+            ),
+            "missing_by_path": acceptance.get("missing_by_path") or {},
+            "rolling_metrics": {
+                key: metrics.get(key)
+                for key in (
+                    "sample_size",
+                    "control_sample_size",
+                    "recent_sample_size",
+                    "recency_effective_sample_size",
+                    "recency_control_effective_sample_size",
+                    "last_sample_age_hours",
+                    "recency_weighted_hit_rate_pct",
+                    "recency_weighted_wilson_95_lower_approx_pct",
+                    "recency_weighted_hit_rate_improvement_pct_points",
+                    "recency_weighted_favorable_dominance_rate_pct",
+                    "recency_weighted_favorable_dominance_wilson_95_lower_approx_pct",
+                    "recency_weighted_favorable_dominance_improvement_pct_points",
+                    "recency_weighted_median_mfe_pct",
+                    "recency_weighted_median_mae_pct",
+                    "recency_weighted_mae_p90_pct",
+                    "recency_weighted_mae_p95_pct",
+                )
+            },
+            "market_episodes": {
+                key: evidence.get(key)
+                for key in (
+                    "independent_matches",
+                    "independent_controls",
+                    "finalized_independent_matches",
+                    "finalized_independent_controls",
+                    "complete_independent_matches",
+                    "complete_independent_controls",
+                    "correlated_match_exclusions",
+                    "correlated_control_exclusions",
+                )
+            },
+            "live_effect": "NONE; explicit owner approval remains separate",
+        }
     return row
 
 
@@ -1045,6 +1165,9 @@ def persist_discovery_run(
     coverage_for_run["store_replacement_verification"] = (
         replacement_verification
     )
+    coverage_for_run["analysis_as_of_utc"] = discovery.get(
+        "analysis_as_of_utc"
+    )
     dataset_kind = str(coverage.get("dataset_kind") or "unknown")
     outcome_method_version = str(
         dataset.get("outcome_method_version")
@@ -1455,9 +1578,11 @@ def formula_registry(
         rows = conn.execute(
             f"""
             SELECT f.formula_id, f.formula_key, f.formula_version,
+                   f.formula_schema_version, f.engine_version,
                    f.direction, f.horizon_minutes, f.conditions,
                    f.formula_text, f.current_stage, f.active,
                    f.live_alert_approved, f.shadow_started_at_utc,
+                   f.shadow_validation_metrics,
                    f.created_at_utc, f.updated_at_utc,
                    e.ranking_score, e.discovery_metrics,
                    e.holdout_metrics, e.multiple_testing, e.gate_notes,
@@ -1543,6 +1668,19 @@ def shadow_status(limit: int = 20) -> Dict[str, Any]:
             """,
             (row_limit,),
         ).fetchall()
+        maturity_rows = conn.execute(
+            """
+            SELECT formula_id, formula_key, formula_version,
+                   formula_schema_version, engine_version,
+                   direction, horizon_minutes, current_stage,
+                   shadow_validation_metrics
+            FROM research_formulas
+            WHERE active=TRUE AND current_stage='SHADOW'
+            ORDER BY updated_at_utc DESC, formula_id DESC
+            LIMIT %s
+            """,
+            (row_limit,),
+        ).fetchall()
         delivery_counts = conn.execute(
             """
             SELECT status, COUNT(*)::bigint AS count
@@ -1561,6 +1699,9 @@ def shadow_status(limit: int = 20) -> Dict[str, Any]:
             "available": True,
             "stages": {row["current_stage"]: int(row["count"] or 0) for row in stages},
             "recent_shadow_hits": [dict(row) for row in recent],
+            "research_maturity": [
+                _formula_registry_row(row) for row in maturity_rows
+            ],
             "live_delivery": {
                 "active_subscriptions": int(subscriptions["count"] or 0),
                 "by_status": {
@@ -1601,7 +1742,12 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
                 (
                   f.current_stage='SHADOW'
                   AND (
-                    f.formula_schema_version=%s
+                    (
+                      f.formula_schema_version=%s
+                      AND f.engine_version=%s
+                      AND f.feature_schema_version=%s
+                      AND f.outcome_method_version=%s
+                    )
                     OR (
                       f.formula_schema_version=%s
                       AND f.engine_version=%s
@@ -1624,7 +1770,10 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
               f.formula_id
             """,
             (
-                "research-formula-v5-safe-replay",
+                research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
+                research_formula_engine.LEGACY_V6_ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
                 research_formula_engine.FORMULA_SCHEMA_VERSION,
                 research_formula_engine.ENGINE_VERSION,
                 research_feature_matrix.FEATURE_SCHEMA_VERSION,
@@ -1958,7 +2107,7 @@ def record_shadow_results(
                     and current["current_stage"] == "LIVE"
                     and bool(current["live_alert_approved"])
                     and bool(str(current.get("live_alert_approved_by") or "").strip())
-                    and _current_v6_formula_contract(current)
+                    and _current_live_formula_contract(current)
                 ):
                     inserted_deliveries = conn.execute(
                         """
@@ -2032,10 +2181,11 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
     rows = conn.execute(
         """
         SELECT c.matched, c.evaluation_status, c.evaluation_reason,
+               c.evidence_policy_version, c.authoritative_verified,
                c.input_snapshot, c.condition_results,
                c.decision_cohort_key, c.decision_anchor_time_utc,
                e.event_id, e.alert_time_utc, e.symbol, e.event_type,
-               e.direction, e.setup_key,
+               e.direction, e.setup_key, e.current_price,
                (e.alert_time_utc + (%s * INTERVAL '1 minute') <= NOW()) AS outcome_due,
                (ft.event_id IS NOT NULL) AS first_touch_available,
                (ft.status='HIT') AS first_touch_hit,
@@ -2077,25 +2227,8 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
          AND o.outcome_method_version=%s
          AND o.data_quality_status=ANY(%s)
         WHERE c.formula_id=%s
-          AND c.evidence_policy_version=%s
-          AND c.authoritative_verified IS TRUE
           AND authorized.sampler_version=%s
           AND authorized.feature_bundle_policy_version=%s
-          AND c.input_snapshot->>'snapshot_policy_version'=%s
-          AND c.input_snapshot->>'decision_cohort_policy_version'=%s
-          AND c.input_snapshot->>'decision_input_policy_version'=%s
-          AND c.input_snapshot->>'evidence_policy_version'=%s
-          AND c.input_snapshot#>>'{prospective_evidence,sampler_version}'=%s
-          AND c.input_snapshot#>>'{prospective_evidence,feature_bundle_policy_version}'=%s
-          AND c.input_snapshot#>>'{prospective_evidence,anchor_slot_id}'
-                = c.prospective_anchor_slot_id::text
-          AND c.input_snapshot#>>'{prospective_evidence,input_fingerprint}'
-                IS NOT DISTINCT FROM BTRIM(c.prospective_input_fingerprint)
-          AND c.input_snapshot#>>'{prospective_evidence,feature_bundle_sha256}'
-                IS NOT DISTINCT FROM BTRIM(c.feature_bundle_sha256)
-          AND c.condition_results IS NOT DISTINCT FROM
-                c.input_snapshot->'condition_results'
-          AND c.input_snapshot#>>'{event,event_id}'=e.event_id::text
         ORDER BY e.alert_time_utc, e.event_id
         """,
         (
@@ -2107,19 +2240,26 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
             canonical_price_path.METHOD_VERSION,
             list(research_feature_matrix.VERIFIED_OUTCOME_QUALITIES),
             int(formula["formula_id"]),
-            _PROSPECTIVE_EVIDENCE_POLICY_VERSION,
-            _PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
-            _FEATURE_BUNDLE_POLICY_VERSION,
-            _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
-            _DECISION_COHORT_POLICY_VERSION,
-            _PROSPECTIVE_EVIDENCE_POLICY_VERSION,
-            _PROSPECTIVE_EVIDENCE_POLICY_VERSION,
             _PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
             _FEATURE_BUNDLE_POLICY_VERSION,
         ),
     ).fetchall()
     result = [dict(row) for row in rows]
     for row in result:
+        authoritative_membership = bool(
+            row.get("authoritative_verified") is True
+            and row.get("evidence_policy_version")
+            == _PROSPECTIVE_EVIDENCE_POLICY_VERSION
+        )
+        if not authoritative_membership:
+            row["matched"] = False
+            row["evaluation_status"] = "UNEVALUABLE"
+            row["evaluation_reason"] = (
+                "membership censor: Shadow check failed the frozen evidence contract"
+            )
+            row["first_touch_available"] = False
+            row["first_touch_hit"] = False
+            row["outcome_available"] = False
         compatible, reason = _terminal_threshold_matches_snapshot(
             row,
             horizon_minutes=horizon_minutes,
@@ -2130,7 +2270,11 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
         )
         row["first_touch_threshold_policy_compatible"] = compatible
         row["first_touch_threshold_policy_reason"] = reason
-        if bool(row.get("first_touch_available")) and not compatible:
+        if (
+            authoritative_membership
+            and bool(row.get("first_touch_available"))
+            and not compatible
+        ):
             # Preserve the terminal row in PostgreSQL for audit, but never let
             # a label computed with a different width enter prospective gates.
             row["first_touch_available"] = False
@@ -2350,11 +2494,11 @@ def _v6_snapshot_base_contract(
     expected_symbol: Any,
 ) -> tuple[bool, str]:
     """Bind every v6 check to its complete frozen decision-time inputs."""
-    if not _current_v6_formula_contract(formula):
+    if not _shadow_executable_formula_contract(formula):
         return False, "v6 formula execution contract versions are incompatible"
     frozen_versions = {
-        "formula_schema_version": research_formula_engine.FORMULA_SCHEMA_VERSION,
-        "engine_version": research_formula_engine.ENGINE_VERSION,
+        "formula_schema_version": formula.get("formula_schema_version"),
+        "engine_version": formula.get("engine_version"),
         "feature_schema_version": research_feature_matrix.FEATURE_SCHEMA_VERSION,
         "outcome_method_version": research_feature_matrix.VERIFIED_OUTCOME_METHOD,
     }
@@ -2714,10 +2858,14 @@ def _legacy_v5_snapshot_base_contract(
     formula: Mapping[str, Any], snapshot: Mapping[str, Any]
 ) -> tuple[bool, str]:
     """Validate current frozen evidence without rewriting v5 identities."""
-    if str(formula.get("formula_schema_version") or "") != (
-        "research-formula-v5-safe-replay"
+    if not _shadow_executable_formula_contract(formula) or str(
+        formula.get("formula_schema_version") or ""
+    ) != _LEGACY_V5_FORMULA_SCHEMA_VERSION:
+        return False, "legacy formula runtime tuple is not the supported v5 adapter"
+    if snapshot.get("legacy_v5_shadow_adapter_version") != (
+        _LEGACY_V5_SHADOW_ADAPTER_VERSION
     ):
-        return False, "legacy formula schema is not the supported v5 contract"
+        return False, "legacy frozen feature adapter version is incompatible"
     for key, expected in (
         ("snapshot_policy_version", _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION),
         ("decision_cohort_policy_version", _DECISION_COHORT_POLICY_VERSION),
@@ -2781,7 +2929,11 @@ def _legacy_v5_snapshot_base_contract(
         prospective.get("source_provenance"), Mapping
     ):
         return False, "legacy frozen source evidence is missing"
-    return True, "legacy v5 formula is bound to current frozen evidence"
+    return (
+        True,
+        "legacy v5 formula is bound to current frozen evidence through "
+        + _LEGACY_V5_SHADOW_ADAPTER_VERSION,
+    )
 
 
 def _max_pain_snapshot_contract(
@@ -2793,7 +2945,10 @@ def _max_pain_snapshot_contract(
 ) -> tuple[bool, str]:
     features = _v6_max_pain_condition_features(formula)
     formula_schema = str(formula.get("formula_schema_version") or "")
-    if formula_schema == str(research_formula_engine.FORMULA_SCHEMA_VERSION):
+    if formula_schema in {
+        str(research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION),
+        str(research_formula_engine.FORMULA_SCHEMA_VERSION),
+    }:
         if str(formula.get("feature_schema_version") or "") != str(
             research_feature_matrix.FEATURE_SCHEMA_VERSION
         ):
@@ -3516,19 +3671,17 @@ def _select_independent_shadow_rows(
 ) -> Dict[str, Any]:
     """Select outcome-blind, non-overlapping prospective evidence units.
 
-    Formula matches are selected first because they are the target population.
-    Unmatched controls are then retained only when they overlap neither a
-    retained match nor an earlier retained control for the same symbol.  The
-    selection first collapses exact decision cohorts, then uses their frozen
-    decision anchors. It never reads MFE, MAE, return or outcome availability.
+    Exact immutable cohorts collapse first. A mixed MATCHED/UNMATCHED cohort
+    fails closed. Market episodes then group all symbols together for at least
+    24 hours, so one broad move cannot become several proofs. Membership never
+    reads MFE, MAE, return, outcome availability or success.
     """
-    horizon = timedelta(minutes=int(horizon_minutes))
     eligible = sorted(
         (
             dict(row)
             for row in rows
             if str(row.get("evaluation_status") or "").upper()
-            in {"MATCHED", "UNMATCHED"}
+            in {"MATCHED", "UNMATCHED", "UNEVALUABLE"}
         ),
         key=lambda row: (
             _as_utc(
@@ -3539,86 +3692,94 @@ def _select_independent_shadow_rows(
         ),
     )
     exact_cohorts: Dict[tuple[str, str], list[Dict[str, Any]]] = {}
+    malformed_cohort_event_ids: list[int] = []
+    membership_censors: list[Dict[str, Any]] = []
     for row in eligible:
         symbol = str(row.get("symbol") or "").upper()
-        cohort_key = str(row.get("decision_cohort_key") or f"event:{row['event_id']}")
+        cohort_key = str(row.get("decision_cohort_key") or "")
+        if len(cohort_key) != 64:
+            malformed_cohort_event_ids.append(int(row["event_id"]))
+            censored = dict(row)
+            censored["evaluation_status"] = "UNEVALUABLE"
+            membership_censors.append(censored)
+            continue
         exact_cohorts.setdefault((symbol, cohort_key), []).append(row)
     collapsed: list[Dict[str, Any]] = []
     exact_cohort_exclusions: list[int] = []
+    conflicting_cohort_event_ids: list[int] = []
     for cohort_rows in exact_cohorts.values():
+        statuses = {
+            str(row.get("evaluation_status") or "").upper()
+            for row in cohort_rows
+        }
+        if len(statuses) != 1:
+            conflicting_cohort_event_ids.extend(
+                int(row["event_id"]) for row in cohort_rows
+            )
+            censored = dict(
+                min(
+                    cohort_rows,
+                    key=lambda row: (
+                        _as_utc(row["alert_time_utc"]), int(row["event_id"])
+                    ),
+                )
+            )
+            censored["evaluation_status"] = "UNEVALUABLE"
+            membership_censors.append(censored)
+            continue
         ordered = sorted(
             cohort_rows,
             key=lambda row: (
-                0
-                if str(row.get("evaluation_status") or "").upper() == "MATCHED"
-                else 1,
+                _as_utc(
+                    row.get("decision_anchor_time_utc")
+                    or row["alert_time_utc"]
+                ),
                 _as_utc(row["alert_time_utc"]),
                 int(row["event_id"]),
             ),
         )
         collapsed.append(ordered[0])
         exact_cohort_exclusions.extend(int(row["event_id"]) for row in ordered[1:])
-    eligible = sorted(
-        collapsed,
-        key=lambda row: (
-            _as_utc(
-                row.get("decision_anchor_time_utc") or row["alert_time_utc"]
-            ),
-            _as_utc(row["alert_time_utc"]),
-            int(row["event_id"]),
-        ),
+    selected = research_market_episode.select_independent(
+        [
+            row
+            for row in (*collapsed, *membership_censors)
+            if str(row.get("evaluation_status") or "").upper()
+            in {"MATCHED", "UNEVALUABLE"}
+        ],
+        [
+            row
+            for row in collapsed
+            if str(row.get("evaluation_status") or "").upper() == "UNMATCHED"
+        ],
+        horizon_minutes=int(horizon_minutes),
+        presorted=False,
     )
-    retained_matches: list[Dict[str, Any]] = []
-    retained_controls: list[Dict[str, Any]] = []
-    excluded_matches: list[int] = []
-    excluded_controls: list[int] = []
-
-    def overlaps_retained(
-        candidate: Mapping[str, Any], retained: Sequence[Mapping[str, Any]]
-    ) -> bool:
-        symbol = str(candidate.get("symbol") or "").upper()
-        start = _as_utc(
-            candidate.get("decision_anchor_time_utc")
-            or candidate["alert_time_utc"]
-        )
-        return any(
-            str(other.get("symbol") or "").upper() == symbol
-            and _windows_overlap(
-                start,
-                _as_utc(
-                    other.get("decision_anchor_time_utc")
-                    or other["alert_time_utc"]
-                ),
-                horizon,
-            )
-            for other in retained
-        )
-
-    for row in eligible:
-        if str(row.get("evaluation_status") or "").upper() != "MATCHED":
-            continue
-        if overlaps_retained(row, retained_matches):
-            excluded_matches.append(int(row["event_id"]))
-        else:
-            retained_matches.append(row)
-
-    for row in eligible:
-        if str(row.get("evaluation_status") or "").upper() != "UNMATCHED":
-            continue
-        if overlaps_retained(row, retained_matches) or overlaps_retained(
-            row, retained_controls
-        ):
-            excluded_controls.append(int(row["event_id"]))
-        else:
-            retained_controls.append(row)
-
+    censor_ids = {
+        int(row["event_id"])
+        for row in (*collapsed, *membership_censors)
+        if str(row.get("evaluation_status") or "").upper() == "UNEVALUABLE"
+    }
     return {
-        "rows": retained_matches + retained_controls,
-        "matches": retained_matches,
-        "controls": retained_controls,
-        "excluded_match_event_ids": excluded_matches,
-        "excluded_control_event_ids": excluded_controls,
+        **selected,
+        "matches": [
+            row
+            for row in selected["matches"]
+            if str(row.get("evaluation_status") or "").upper() == "MATCHED"
+        ],
+        "rows": [
+            row
+            for row in selected["rows"]
+            if str(row.get("evaluation_status") or "").upper()
+            != "UNEVALUABLE"
+        ],
+        "excluded_match_event_ids": sorted(
+            set(selected["excluded_match_event_ids"]) | censor_ids
+        ),
         "exact_cohort_excluded_event_ids": sorted(exact_cohort_exclusions),
+        "conflicting_cohort_event_ids": sorted(conflicting_cohort_event_ids),
+        "malformed_cohort_event_ids": sorted(malformed_cohort_event_ids),
+        "membership_censor_event_ids": sorted(censor_ids),
     }
 
 
@@ -3632,8 +3793,17 @@ def _metric_row(
         "event": {
             "event_id": int(source["event_id"]),
             "alert_time_utc": source["alert_time_utc"],
+            "forecast_start_time_utc": (
+                source.get("forecast_start_time_utc")
+                or source["alert_time_utc"]
+            ),
+            "decision_anchor_time_utc": (
+                source.get("decision_anchor_time_utc")
+                or source["alert_time_utc"]
+            ),
             "symbol": source.get("symbol"),
             "event_type": source.get("event_type"),
+            "direction": source.get("direction"),
         },
         "outcome_label": {
             "horizon_minutes": int(horizon_minutes),
@@ -3673,7 +3843,7 @@ def _build_shadow_validation(
     *,
     evaluated_at_utc: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Build one side-effect-free v6 prospective readiness snapshot.
+    """Build one side-effect-free prospective readiness snapshot.
 
     Rolling monitoring and the manual owner-approval transaction deliberately
     call this same function.  It consumes terminal first-touch labels, keeps
@@ -3700,20 +3870,71 @@ def _build_shadow_validation(
     independent = _select_independent_shadow_rows(
         source_rows, horizon_minutes=horizon_minutes
     )
-    independent_rows = list(independent["rows"])
+    match_episodes = list(independent["match_episodes"])
+    control_episodes = list(independent["control_episodes"])
+    evaluation_time = evaluated_at_utc or datetime.now(timezone.utc)
+    finalized_match_episodes, open_match_episodes = (
+        research_market_episode.partition_finalized(
+            match_episodes,
+            horizon_minutes=horizon_minutes,
+            as_of_utc=evaluation_time,
+        )
+    )
+    finalized_control_episodes, open_control_episodes = (
+        research_market_episode.partition_finalized(
+            control_episodes,
+            horizon_minutes=horizon_minutes,
+            as_of_utc=evaluation_time,
+        )
+    )
+    complete_match_episodes = [
+        episode
+        for episode in finalized_match_episodes
+        if research_market_episode.episode_evidence_rows(episode)
+        and all(
+            str(row.get("evaluation_status") or "").upper() == "MATCHED"
+            and bool(row.get("outcome_available"))
+            for row in research_market_episode.episode_evidence_rows(episode)
+        )
+    ]
+    complete_control_episodes = [
+        episode
+        for episode in finalized_control_episodes
+        if research_market_episode.episode_evidence_rows(episode)
+        and all(
+            str(row.get("evaluation_status") or "").upper() == "UNMATCHED"
+            and bool(row.get("outcome_available"))
+            for row in research_market_episode.episode_evidence_rows(episode)
+        )
+    ]
+
+    def aggregate_episode(episode: Mapping[str, Any]) -> Dict[str, Any]:
+        member_metrics = [
+            _metric_row(row, horizon_minutes=horizon_minutes)
+            for row in episode["rows"]
+        ]
+        return research_market_episode.aggregate_metric_episode(
+            member_metrics,
+            episode_key=str(episode["episode_key"]),
+            episode_start_utc=_as_utc(episode["start_time_utc"]),
+            episode_end_utc=_as_utc(episode["end_time_utc"]),
+        )
+
+    selected = [aggregate_episode(episode) for episode in complete_match_episodes]
+    control_metrics = [
+        aggregate_episode(episode) for episode in complete_control_episodes
+    ]
+    universe = selected + control_metrics
     complete_rows = [
-        row for row in independent_rows if bool(row.get("outcome_available"))
+        row
+        for episode in (*complete_match_episodes, *complete_control_episodes)
+        for row in research_market_episode.episode_evidence_rows(episode)
     ]
-    universe = [
-        _metric_row(row, horizon_minutes=horizon_minutes)
-        for row in complete_rows
-    ]
-    selected = [
-        _metric_row(row, horizon_minutes=horizon_minutes)
-        for row in complete_rows
-        if str(row.get("evaluation_status") or "").upper() == "MATCHED"
-    ]
-    metrics = research_formula_engine.summarize_outcomes(selected, universe)
+    metrics = research_formula_engine.summarize_preaggregated_market_episodes(
+        selected,
+        universe,
+        evidence_as_of_utc=evaluation_time,
+    )
     priority = research_formula_engine.rank_prospective_metrics(
         metrics, horizon_minutes=horizon_minutes
     )
@@ -3737,37 +3958,55 @@ def _build_shadow_validation(
         )
         for status in ("MATCHED", "UNMATCHED", "UNEVALUABLE")
     }
+    observed_member_rows = [
+        row
+        for episode in (*match_episodes, *control_episodes)
+        for row in episode["rows"]
+    ]
+    independent_member_rows = [
+        row
+        for episode in (*match_episodes, *control_episodes)
+        for row in research_market_episode.episode_evidence_rows(episode)
+    ]
+    evidence_event_ids = {int(row["event_id"]) for row in independent_member_rows}
+    correlated_overdue_outcome_event_ids = [
+        int(row["event_id"])
+        for row in observed_member_rows
+        if int(row["event_id"]) not in evidence_event_ids
+        and not bool(row.get("outcome_available"))
+        and bool(row.get("outcome_due"))
+    ]
     pending_outcome_event_ids = [
         int(row["event_id"])
-        for row in independent_rows
+        for row in independent_member_rows
         if not bool(row.get("outcome_available"))
         and not bool(row.get("outcome_due"))
     ]
     overdue_outcome_event_ids = [
         int(row["event_id"])
-        for row in independent_rows
+        for row in independent_member_rows
         if not bool(row.get("outcome_available"))
         and bool(row.get("outcome_due"))
     ]
     threshold_policy_mismatch_event_ids = [
         int(row["event_id"])
-        for row in independent_rows
+        for row in independent_member_rows
         if row.get("first_touch_threshold_policy_compatible") is False
     ]
     early_first_touch_terminal_event_ids = [
         int(row["event_id"])
-        for row in independent_rows
+        for row in independent_member_rows
         if bool(row.get("first_touch_available"))
     ]
     early_first_touch_hit_event_ids = [
         int(row["event_id"])
-        for row in independent_rows
+        for row in independent_member_rows
         if bool(row.get("first_touch_available"))
         and bool(row.get("first_touch_hit"))
     ]
     early_matched_first_touch_hit_event_ids = [
         int(row["event_id"])
-        for row in independent_rows
+        for row in independent_member_rows
         if str(row.get("evaluation_status") or "").upper() == "MATCHED"
         and bool(row.get("first_touch_available"))
         and bool(row.get("first_touch_hit"))
@@ -3782,6 +4021,12 @@ def _build_shadow_validation(
         "future UTC dates": int(metrics.get("distinct_utc_dates") or 0)
         >= _SHADOW_MIN_DATES,
         "no overdue canonical outcome gaps": not overdue_outcome_event_ids,
+        "authoritative cohort conflicts absent": not independent.get(
+            "conflicting_cohort_event_ids"
+        ),
+        "authoritative cohort keys valid": not independent.get(
+            "malformed_cohort_event_ids"
+        ),
         "future session-composition baseline coverage": bool(
             metrics.get("session_baseline_complete")
         ),
@@ -3814,6 +4059,106 @@ def _build_shadow_validation(
             )
         ),
     }
+    research_acceptance = research_formula_acceptance.evaluate(
+        metrics,
+        phase="PROSPECTIVE",
+        minimum_matches=_SHADOW_MIN_MATCHES,
+        minimum_controls=_SHADOW_MIN_CONTROLS,
+        minimum_recent_matches=3,
+        minimum_recent_effective_samples=6.0,
+        minimum_recent_control_effective_samples=6.0,
+        maximum_last_match_age_hours=21.0 * 24.0,
+        require_multiple_testing=False,
+        mandatory_checks={
+            "current v7 adaptive formula contract": (
+                _current_live_formula_contract(formula)
+            ),
+            "no overdue canonical outcome gaps": not overdue_outcome_event_ids,
+            "authoritative cohort conflicts absent": not independent.get(
+                "conflicting_cohort_event_ids"
+            ),
+            "authoritative cohort keys valid": not independent.get(
+                "malformed_cohort_event_ids"
+            ),
+            "prospective control baseline is sufficient": float(
+                metrics.get("session_matched_control_effective_samples") or 0.0
+            )
+            >= float(_SHADOW_MIN_CONTROLS),
+            "future wide movement percentile": float(
+                movement_percentile or 0.0
+            )
+            >= 70.0,
+            "complete Max-Pain provenance chain": (
+                not bool(max_pain_evidence["required"])
+                or bool(
+                    max_pain_evidence[
+                        "completed_independent_provenance_complete"
+                    ]
+                )
+            ),
+        },
+        early_mandatory_checks={
+            "current v7 adaptive formula contract": (
+                _current_live_formula_contract(formula)
+            ),
+            "no overdue canonical outcome gaps": not overdue_outcome_event_ids,
+            "authoritative cohort conflicts absent": not independent.get(
+                "conflicting_cohort_event_ids"
+            ),
+            "authoritative cohort keys valid": not independent.get(
+                "malformed_cohort_event_ids"
+            ),
+            "future wide movement percentile": float(
+                movement_percentile or 0.0
+            )
+            >= 70.0,
+            "complete Max-Pain provenance chain": (
+                not bool(max_pain_evidence["required"])
+                or bool(
+                    max_pain_evidence[
+                        "completed_independent_provenance_complete"
+                    ]
+                )
+            ),
+        },
+    )
+    episode_fingerprint = hashlib.sha256(
+        _canonical_json(
+            {
+                "policy_version": research_market_episode.POLICY_VERSION,
+                "matches": [
+                    {
+                        "key": episode["episode_key"],
+                        "member_event_ids": sorted(
+                            int(row["event_id"]) for row in episode["rows"]
+                        ),
+                        "evidence_event_ids": sorted(
+                            int(row["event_id"])
+                            for row in research_market_episode.episode_evidence_rows(
+                                episode
+                            )
+                        ),
+                    }
+                    for episode in complete_match_episodes
+                ],
+                "controls": [
+                    {
+                        "key": episode["episode_key"],
+                        "member_event_ids": sorted(
+                            int(row["event_id"]) for row in episode["rows"]
+                        ),
+                        "evidence_event_ids": sorted(
+                            int(row["event_id"])
+                            for row in research_market_episode.episode_evidence_rows(
+                                episode
+                            )
+                        ),
+                    }
+                    for episode in complete_control_episodes
+                ],
+            }
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "policy_version": _SHADOW_MONITORING_POLICY_VERSION,
         "input_snapshot_policy_version": _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
@@ -3821,7 +4166,7 @@ def _build_shadow_validation(
             research_mfe_mae_efficiency.POLICY_VERSION
         ),
         "outcome_method_version": research_feature_matrix.VERIFIED_OUTCOME_METHOD,
-        "evaluated_at_utc": evaluated_at_utc or datetime.now(timezone.utc),
+        "evaluated_at_utc": evaluation_time,
         "stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
         "statistical_use": (
             "rolling descriptive monitoring only; explicit owner approval "
@@ -3834,11 +4179,51 @@ def _build_shadow_validation(
         ),
         "metrics": metrics,
         "priority_ranking": priority,
+        "research_acceptance": research_acceptance,
+        "formula_contract": {
+            "current_v7": _current_live_formula_contract(formula),
+            "exact_retained_v5": bool(
+                str(formula.get("formula_schema_version") or "")
+                == _LEGACY_V5_FORMULA_SCHEMA_VERSION
+                and _shadow_executable_formula_contract(formula)
+            ),
+            "legacy_v5_adapter_version": (
+                _LEGACY_V5_SHADOW_ADAPTER_VERSION
+                if str(formula.get("formula_schema_version") or "")
+                == _LEGACY_V5_FORMULA_SCHEMA_VERSION
+                else None
+            ),
+            "research_acceptance_eligible": (
+                _current_live_formula_contract(formula)
+            ),
+        },
         "evidence": {
             "raw_checks": len(source_rows),
             "raw_evaluation_status": raw_status_counts,
-            "independent_matches": len(independent["matches"]),
-            "independent_controls": len(independent["controls"]),
+            "independent_matches": len(match_episodes),
+            "independent_controls": len(control_episodes),
+            "finalized_independent_matches": len(finalized_match_episodes),
+            "finalized_independent_controls": len(finalized_control_episodes),
+            "complete_independent_matches": len(complete_match_episodes),
+            "complete_independent_controls": len(complete_control_episodes),
+            "open_match_episode_keys": [
+                str(episode["episode_key"]) for episode in open_match_episodes
+            ],
+            "open_control_episode_keys": [
+                str(episode["episode_key"]) for episode in open_control_episodes
+            ],
+            "episode_finalization_rule": (
+                "count only after a full quiet gap has closed membership and "
+                "the earliest forecast cohort's outcome horizon has matured"
+            ),
+            "market_episode_policy_version": (
+                research_market_episode.POLICY_VERSION
+            ),
+            "market_episode_fingerprint": episode_fingerprint,
+            "market_episode_minutes": max(
+                research_market_episode.MINIMUM_EPISODE_MINUTES,
+                horizon_minutes,
+            ),
             "correlated_match_exclusions": len(
                 independent["excluded_match_event_ids"]
             ),
@@ -3848,8 +4233,23 @@ def _build_shadow_validation(
             "exact_cohort_exclusions": len(
                 independent["exact_cohort_excluded_event_ids"]
             ),
+            "conflicting_cohort_event_ids": independent.get(
+                "conflicting_cohort_event_ids"
+            )
+            or [],
+            "malformed_cohort_event_ids": independent.get(
+                "malformed_cohort_event_ids"
+            )
+            or [],
+            "membership_censor_event_ids": independent.get(
+                "membership_censor_event_ids"
+            )
+            or [],
             "pending_outcome_event_ids": pending_outcome_event_ids,
             "overdue_outcome_event_ids": overdue_outcome_event_ids,
+            "correlated_overdue_outcome_event_ids": (
+                correlated_overdue_outcome_event_ids
+            ),
             "threshold_policy_mismatch_event_ids": (
                 threshold_policy_mismatch_event_ids
             ),
@@ -3870,8 +4270,10 @@ def _build_shadow_validation(
             },
             "max_pain_provenance": max_pain_evidence,
             "independence_policy": (
-                "exact decision cohorts collapse first; same-symbol frozen "
-                "decision-anchor windows must not overlap"
+                "exact decision cohorts collapse first; all symbols inside "
+                "one outcome-blind market episode carry total evidence weight "
+                "one; a new episode requires the fixed window to end and a "
+                "decision-time directional price reset"
             ),
         },
         "gates": gate_results,
@@ -3894,6 +4296,7 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
     """
     evaluated = 0
     thresholds_met: list[int] = []
+    research_ready: list[int] = []
     ranked: list[Dict[str, Any]] = []
     with _connect(read_only=False) as conn:
         formulas = conn.execute(
@@ -3907,7 +4310,12 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
             WHERE active=TRUE
               AND current_stage='SHADOW'
               AND (
-                    formula_schema_version=%s
+                    (
+                      formula_schema_version=%s
+                      AND engine_version=%s
+                      AND feature_schema_version=%s
+                      AND outcome_method_version=%s
+                    )
                     OR (
                       formula_schema_version=%s
                       AND engine_version=%s
@@ -3919,7 +4327,10 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
             FOR UPDATE
             """,
             (
-                "research-formula-v5-safe-replay",
+                research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
+                research_formula_engine.LEGACY_V6_ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
                 research_formula_engine.FORMULA_SCHEMA_VERSION,
                 research_formula_engine.ENGINE_VERSION,
                 research_feature_matrix.FEATURE_SCHEMA_VERSION,
@@ -3954,6 +4365,12 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
             )
             if bool(validation["thresholds_met"]):
                 thresholds_met.append(formula_id)
+            if bool(
+                (validation.get("research_acceptance") or {}).get(
+                    "research_ready"
+                )
+            ):
+                research_ready.append(formula_id)
         conn.commit()
     ranked.sort(key=lambda item: (float(item["score"]), -int(item["formula_id"])), reverse=True)
     for rank, item in enumerate(ranked, start=1):
@@ -3963,6 +4380,9 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
         "evaluated": evaluated,
         "thresholds_met": thresholds_met,
         "ready_for_explicit_review": thresholds_met,
+        "legacy_live_review_ready": thresholds_met,
+        "research_ready": research_ready,
+        "research_ready_for_experimental_review": research_ready,
         "prospective_ranking": ranked,
         "promoted": [],
         "automatic_stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
