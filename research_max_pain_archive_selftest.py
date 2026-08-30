@@ -121,7 +121,11 @@ def _payload(
 
 
 def _db_shape(payload, set_id):
-    set_record = {"snapshot_set_id": set_id, **payload["set"]}
+    set_record = {
+        "snapshot_set_id": set_id,
+        **payload["set"],
+        "created_at_utc": payload["set"]["available_at_utc"],
+    }
     manifests = {item["symbol"]: item for item in payload["symbols"]}
     return set_record, manifests
 
@@ -176,6 +180,23 @@ def run() -> None:
         expected_symbol="BTC",
         require_previous=False,
     )[0] is True
+    for forged_id in ("2", 2.0, True):
+        forged_current_id = {
+            **provenance,
+            "current": {
+                **provenance["current"],
+                "snapshot_set_id": forged_id,
+            },
+        }
+        forged_valid, forged_reason = archive.validate_shadow_provenance(
+            forged_current_id,
+            archive.canonical_provenance_sha256(forged_current_id),
+            decision_time_utc=BASE + timedelta(minutes=10),
+            expected_symbol="BTC",
+            require_previous=False,
+        )
+        assert forged_valid is False
+        assert "snapshot_set_id is missing or invalid" in forged_reason
 
     mixed = _payload(symbols=("BTC", "HYPE"), generic_hype=True)
     mixed_set, mixed_manifests = _db_shape(mixed, 3)
@@ -366,6 +387,19 @@ def run() -> None:
     )
     assert before_available["evaluation_status"] == "UNEVALUABLE"
     assert stale["evaluation_status"] == "UNEVALUABLE"
+    inserted_late_set = {
+        **current_set,
+        "created_at_utc": BASE + timedelta(minutes=11),
+    }
+    inserted_late = archive.derive_prior_only_features(
+        symbol="BTC",
+        decision_time_utc=BASE + timedelta(minutes=10),
+        current_set=inserted_late_set,
+        current_rows=valid["rows"],
+        current_symbol_manifest=current_manifests["BTC"],
+    )
+    assert inserted_late["evaluation_status"] == "UNEVALUABLE"
+    assert "inserted after decision" in inserted_late["reason"]
     exactly_available = archive.derive_prior_only_features(
         symbol="BTC",
         decision_time_utc=BASE + timedelta(minutes=5),
@@ -405,6 +439,55 @@ def run() -> None:
         expected_symbol="BTC",
         require_previous=True,
     )[0] is True
+    for forged_id in ("1", 1.0, True):
+        forged_previous_id = {
+            **delta["provenance"],
+            "previous": {
+                **delta["provenance"]["previous"],
+                "snapshot_set_id": forged_id,
+            },
+        }
+        forged_valid, forged_reason = archive.validate_shadow_provenance(
+            forged_previous_id,
+            archive.canonical_provenance_sha256(forged_previous_id),
+            decision_time_utc=BASE + timedelta(minutes=10),
+            expected_symbol="BTC",
+            require_previous=True,
+        )
+        assert forged_valid is False
+        assert "snapshot_set_id is missing or invalid" in forged_reason
+    for forged_policy_count in ("90", 90.0, True):
+        forged_gap_policy = {
+            **delta["provenance"],
+            "previous_gap_policy_minutes": forged_policy_count,
+        }
+        forged_valid, forged_reason = archive.validate_shadow_provenance(
+            forged_gap_policy,
+            archive.canonical_provenance_sha256(forged_gap_policy),
+            decision_time_utc=BASE + timedelta(minutes=10),
+            expected_symbol="BTC",
+            require_previous=True,
+        )
+        assert forged_valid is False
+        assert "previous snapshot gap policy is missing or invalid" in forged_reason
+    for forged_gap in ("30.0", "30", True):
+        forged_previous_gap = {
+            **delta["provenance"],
+            "previous_gap_minutes": forged_gap,
+        }
+        forged_valid, forged_reason = archive.validate_shadow_provenance(
+            forged_previous_gap,
+            archive.canonical_provenance_sha256(forged_previous_gap),
+            decision_time_utc=BASE + timedelta(minutes=10),
+            expected_symbol="BTC",
+            require_previous=True,
+        )
+        assert forged_valid is False
+        assert "previous snapshot gap is missing or invalid" in forged_reason
+    assert archive._strict_positive_json_number(30) == 30.0
+    assert archive._strict_positive_json_number(30.0) == 30.0
+    for invalid_gap in (0, -1, float("nan"), float("inf"), float("-inf")):
+        assert archive._strict_positive_json_number(invalid_gap) is None
     assert (
         delta["features"]["max_pain.delta.upside_liquidity_usd_trend"]
         == "STRENGTHENING"

@@ -80,16 +80,42 @@ def _source_rows(slot: datetime, *, symbol: str = "BTC", refresh_minute: int = 3
     }
 
 
-def _coverage(*, eligible: bool = True):
+def _coverage(*, symbol: str = "BTC", eligible: bool = True):
     return {
+        "symbol": symbol,
         "eligible": eligible,
         "failed_gates": [] if eligible else ["minimum_utc_dates"],
+        "coverage_policy_version": anchors.COVERAGE_POLICY_VERSION,
+        "method_version": anchors.research_no_dwell_outcome.METHOD_VERSION,
+        "replay_version": anchors.research_historical_replay.REPLAY_VERSION,
+        "coverage_scope_version": (
+            anchors.research_historical_replay.COVERAGE_SCOPE_VERSION
+        ),
+        "movement_width_calibration_version": (
+            anchors.research_session_width.CALIBRATION_VERSION
+        ),
+        "canonical_price_method_version": (
+            anchors.canonical_price_path.METHOD_VERSION
+        ),
+        "canonical_price_provenance_version": (
+            anchors.canonical_price_path.PRICE_PROVENANCE_VERSION
+        ),
+        "replay_run_id": 7,
+        "replay_completed_at_utc": "2026-08-29T11:00:00Z",
+        "as_of_utc": "2026-08-29T11:00:00Z",
         "horizons": {
             str(horizon): {
                 "eligible": eligible,
                 "anchors": 300 if eligible else 40,
                 "utc_dates": 18 if eligible else 2,
                 "span_hours": 500.0 if eligible else 48.0,
+                "min_anchor_time_utc": (
+                    "2026-08-07T14:00:00Z"
+                    if eligible
+                    else "2026-08-26T10:00:00Z"
+                ),
+                "max_anchor_time_utc": "2026-08-28T10:00:00Z",
+                "failed_gates": [] if eligible else ["minimum_utc_dates"],
             }
             for horizon in (60, 240, 720, 1440)
         },
@@ -113,15 +139,61 @@ def run() -> None:
     hype_before = deepcopy(hype)
     coverage = {
         "BTC": _coverage(),
-        "ETH": _coverage(),
-        "HYPE": _coverage(eligible=False),
+        "ETH": _coverage(symbol="ETH"),
+        "HYPE": _coverage(symbol="HYPE", eligible=False),
     }
+    forged_coverage = {
+        **_coverage(),
+        "coverage_policy_version": "forged",
+        "method_version": "forged",
+        "replay_version": "forged",
+        "movement_width_calibration_version": "forged",
+        "canonical_price_method_version": "forged",
+        "canonical_price_provenance_version": "forged",
+        "replay_run_id": -1,
+        "replay_completed_at_utc": "2026-09-08T12:00:00Z",
+        "as_of_utc": "2026-09-08T12:00:00Z",
+    }
+    eligible, failures = anchors._coverage_status(
+        forged_coverage,
+        expected_symbol="BTC",
+        checked_at_utc=now,
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
+    )
+    assert eligible is False
+    assert "replay_run_id_invalid" in failures
+    assert "coverage_as_of_is_future" in failures
+    assert "replay_completed_at_is_future" in failures
+    # The frozen coverage contract is typed JSON evidence. Numeric-looking
+    # strings, booleans and fractional counts must fail closed.
+    for field, corrupt_value, expected_failure in (
+        ("anchors", "300", "60m_anchors"),
+        ("anchors", 300.5, "60m_anchors"),
+        ("anchors", True, "60m_anchors"),
+        ("utc_dates", "18", "60m_utc_dates"),
+        ("utc_dates", 18.5, "60m_utc_dates"),
+        ("utc_dates", True, "60m_utc_dates"),
+        ("span_hours", "500.0", "60m_span_hours"),
+        ("span_hours", True, "60m_span_hours"),
+        ("span_hours", float("nan"), "60m_span_hours"),
+        ("span_hours", float("inf"), "60m_span_hours"),
+    ):
+        malformed = deepcopy(_coverage())
+        malformed["horizons"]["60"][field] = corrupt_value
+        eligible, malformed_failures = anchors._coverage_status(
+            malformed,
+            expected_symbol="BTC",
+            checked_at_utc=now,
+            coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
+        )
+        assert eligible is False
+        assert expected_failure in malformed_failures
     batch = anchors.build_anchor_batch(
         now=now,
         slot_open_utc=slot,
         coverage_by_symbol=coverage,
         source_inputs_by_symbol={"BTC": btc, "ETH": eth, "HYPE": hype},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
         strategy_version="test-strategy",
         code_version="test-code",
     )
@@ -206,7 +278,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol=coverage,
         source_inputs_by_symbol={"BTC": btc, "ETH": eth, "HYPE": hype},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
         strategy_version="test-strategy",
         code_version="test-code",
     )
@@ -223,7 +295,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": revised},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
         strategy_version="test-strategy",
         code_version="test-code",
     )
@@ -246,7 +318,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": future_refresh},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert pending.decisions[0].evaluation_status == anchors.UNEVALUABLE
     assert "REFRESH_NOT_COMPLETE:spot_cvd" in pending.decisions[0].evaluation_reason
@@ -257,7 +329,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": future_refresh},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert later.decisions[0].evaluation_status == anchors.EVALUABLE
     assert later.decisions[0].decision_time_utc == datetime(
@@ -270,7 +342,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": btc},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert expired.decisions[0].evaluation_status == anchors.UNEVALUABLE
     assert "PROSPECTIVE_CAPTURE_WINDOW_EXPIRED" in expired.decisions[0].evaluation_reason
@@ -281,7 +353,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": btc},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert too_early.decisions[0].evaluation_status == anchors.NOT_DUE
     assert too_early.decisions[0].ledger_record() is None
@@ -290,9 +362,9 @@ def run() -> None:
     hype_eligible = anchors.build_anchor_batch(
         now=now,
         slot_open_utc=slot,
-        coverage_by_symbol={"HYPE": _coverage()},
+        coverage_by_symbol={"HYPE": _coverage(symbol="HYPE")},
         source_inputs_by_symbol={"HYPE": hype},
-        coverage_policy_version="future-hype-coverage-pass-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert hype_eligible.decisions[0].evaluation_status == anchors.EVALUABLE
     assert len(hype_eligible.events) == 2
@@ -306,7 +378,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": bad_slot},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert mismatched.decisions[0].evaluation_status == anchors.UNEVALUABLE
     assert "SOURCE_SLOT_MISMATCH:futures_cvd" in mismatched.decisions[0].evaluation_reason
@@ -318,7 +390,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": fallback},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert unofficial.decisions[0].evaluation_status == anchors.UNEVALUABLE
     assert (
@@ -335,7 +407,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": mutable_import_time},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert no_live_refresh_proof.decisions[0].evaluation_status == anchors.UNEVALUABLE
     assert (
@@ -352,7 +424,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _coverage()},
         source_inputs_by_symbol={"BTC": before_grace},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert premature_refresh.decisions[0].evaluation_status == anchors.UNEVALUABLE
     assert (
@@ -367,7 +439,7 @@ def run() -> None:
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": malformed_coverage},
         source_inputs_by_symbol={"BTC": btc},
-        coverage_policy_version="replay-coverage-test-v1",
+        coverage_policy_version=anchors.COVERAGE_POLICY_VERSION,
     )
     assert coverage_rejected.decisions[0].evaluation_status == anchors.COVERAGE_EXCLUDED
     assert "720m_anchors" in coverage_rejected.decisions[0].evaluation_reason

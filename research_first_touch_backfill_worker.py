@@ -124,9 +124,11 @@ class FirstTouchBackfillWorker:
     async def _run(self) -> None:
         now = datetime.now(timezone.utc)
         horizons = _horizons()
-        # Freeze a fully closed cohort.  Five extra minutes keeps the newest
-        # canonical 1m candle safely outside exchange/API close latency.
-        frozen_end = now - timedelta(minutes=max(horizons) + 5)
+        import research_historical_replay
+
+        frozen_end = research_historical_replay.fully_closed_end(
+            horizons, now=now
+        )
         self.metrics.started_at_utc = now.isoformat()
         self.metrics.frozen_end_utc = frozen_end.isoformat()
         self.metrics.running = True

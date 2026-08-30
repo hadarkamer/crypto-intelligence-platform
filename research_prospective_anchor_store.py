@@ -30,6 +30,10 @@ except Exception:  # pragma: no cover - optional in unit-only environments
     dict_row = None
 
 import research_event_store
+import canonical_price_path
+import research_historical_replay
+import research_max_pain_archive
+import research_session_width
 import research_prospective_anchors as anchors
 
 
@@ -38,10 +42,7 @@ COMPLETE_PRICE_PATH_QUALITIES: tuple[str, ...] = (
     "VERIFIED_BINANCE_SPOT_1M_CLOSED_CANDLES",
     "VERIFIED_HYPERLIQUID_SPOT_1M_CLOSED_CANDLES",
 )
-COVERAGE_POLICY_VERSION = (
-    "prospective-coverage-v1-final-first-touch-all-4-horizons:"
-    + FIRST_TOUCH_METHOD_VERSION
-)
+COVERAGE_POLICY_VERSION = anchors.COVERAGE_POLICY_VERSION
 DEFAULT_SYMBOLS: tuple[str, ...] = (
     "BTC",
     "ETH",
@@ -58,52 +59,23 @@ _MIN_UTC_DATES = 14
 _MIN_SPAN_HOURS = 336.0
 
 _COVERAGE_SQL = """
-WITH finalized_first_touch AS (
-    SELECT historical.symbol,
-           historical.horizon_minutes,
-           historical.observation_time_utc AS anchor_time_utc
-      FROM research_historical_opportunity_outcomes historical
-     WHERE historical.first_touch_method_version = %(method_version)s
-       AND historical.first_touch_data_quality_status
-            = ANY(%(complete_qualities)s)
-       AND historical.long_first_touch_metrics->>'status' IN ('HIT', 'MISS')
-       AND historical.short_first_touch_metrics->>'status' IN ('HIT', 'MISS')
-       AND historical.long_first_touch_metrics->>'success' IN ('true', 'false')
-       AND historical.short_first_touch_metrics->>'success' IN ('true', 'false')
-       AND historical.observation_time_utc
-            + historical.horizon_minutes * INTERVAL '1 minute'
-            <= %(as_of_utc)s
-       AND historical.symbol = ANY(%(symbols)s)
-    UNION
-    SELECT event.symbol,
-           outcome.horizon_minutes,
-           event.alert_time_utc AS anchor_time_utc
-      FROM research_first_touch_outcomes outcome
-      JOIN research_events event ON event.event_id = outcome.event_id
-     WHERE outcome.method_version = %(method_version)s
-       AND outcome.status IN ('HIT', 'MISS')
-       AND outcome.success IS NOT NULL
-       AND outcome.observed_through_utc <= %(as_of_utc)s
-       AND outcome.data_quality_status = ANY(%(complete_qualities)s)
-       AND event.direction IN ('LONG', 'SHORT')
-       AND event.alert_time_utc <= %(as_of_utc)s
-       AND event.symbol = ANY(%(symbols)s)
-), unique_anchors AS (
-    SELECT DISTINCT symbol, horizon_minutes, anchor_time_utc
-      FROM finalized_first_touch
-)
-SELECT symbol,
-       horizon_minutes,
-       COUNT(*)::bigint AS anchors,
-       COUNT(DISTINCT (anchor_time_utc AT TIME ZONE 'UTC')::date)::bigint
-            AS utc_dates,
-       MIN(anchor_time_utc) AS min_anchor_time_utc,
-       MAX(anchor_time_utc) AS max_anchor_time_utc,
-       EXTRACT(EPOCH FROM (MAX(anchor_time_utc) - MIN(anchor_time_utc)))
-            / 3600.0 AS span_hours
-  FROM unique_anchors
- GROUP BY symbol, horizon_minutes
- ORDER BY symbol, horizon_minutes
+SELECT replay_run_id, replay_version, outcome_method_version,
+       config, coverage, completed_at_utc
+  FROM research_historical_replay_runs
+ WHERE status='COMPLETED'
+   AND replay_version=%(replay_version)s
+   AND outcome_method_version=%(price_method_version)s
+   AND config->>'first_touch_method_version'=%(method_version)s
+   AND config->>'movement_width_calibration_version'=%(calibration_version)s
+   AND config->>'canonical_price_provenance_version'=%(price_provenance_version)s
+   AND config->>'coverage_scope_version'=%(coverage_scope_version)s
+   AND jsonb_typeof(config)='object'
+   AND jsonb_typeof(coverage)='object'
+   AND completed_at_utc IS NOT NULL
+   AND completed_at_utc <= %(as_of_utc)s
+   AND (config->>'frozen_fully_closed_end_utc')::timestamptz <= %(as_of_utc)s
+ ORDER BY completed_at_utc DESC, replay_run_id DESC
+ LIMIT 1
 """
 
 _EXISTING_SLOTS_SQL = """
@@ -248,6 +220,13 @@ class SamplingRun:
         }
 
 
+@dataclass(frozen=True)
+class SourceInputBatch:
+    inputs_by_symbol: Mapping[str, Mapping[str, Any]]
+    cutoff_at_utc: datetime
+    read_completed_at_utc: datetime
+
+
 def _utc(value: Any) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -311,6 +290,21 @@ def _same_float(left: Any, right: Any) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+def _strict_nonnegative_int(value: Any) -> Optional[int]:
+    """Accept a JSON integer count without coercing strings/bools/floats."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return int(value)
+
+
+def _strict_nonnegative_finite_number(value: Any) -> Optional[float]:
+    """Accept a JSON number for a derived span, rejecting bools and strings."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0.0 else None
 
 
 def _row_dict(row: Any) -> Dict[str, Any]:
@@ -534,59 +528,100 @@ class ProspectiveAnchorStore:
         normalized = tuple(dict.fromkeys(_symbol(item) for item in symbols))
         coverage: Dict[str, Dict[str, Any]] = {
             symbol: {
+                "symbol": symbol,
                 "eligible": False,
                 "failed_gates": [],
+                "coverage_policy_version": COVERAGE_POLICY_VERSION,
                 "method_version": FIRST_TOUCH_METHOD_VERSION,
+                "replay_version": research_historical_replay.REPLAY_VERSION,
+                "coverage_scope_version": (
+                    research_historical_replay.COVERAGE_SCOPE_VERSION
+                ),
+                "movement_width_calibration_version": (
+                    research_session_width.CALIBRATION_VERSION
+                ),
+                "canonical_price_method_version": (
+                    canonical_price_path.METHOD_VERSION
+                ),
+                "canonical_price_provenance_version": (
+                    canonical_price_path.PRICE_PROVENANCE_VERSION
+                ),
                 "as_of_utc": _iso(as_of_utc),
                 "horizons": {},
             }
             for symbol in normalized
         }
         with self._connect() as conn:
-            rows = _fetchall(
-                conn.execute(
-                    _COVERAGE_SQL,
-                    {
-                        "method_version": FIRST_TOUCH_METHOD_VERSION,
-                        "as_of_utc": _utc(as_of_utc),
-                        "symbols": list(normalized),
-                        "complete_qualities": list(
-                            COMPLETE_PRICE_PATH_QUALITIES
-                        ),
-                    },
+            run_row = conn.execute(
+                _COVERAGE_SQL,
+                {
+                    "method_version": FIRST_TOUCH_METHOD_VERSION,
+                    "replay_version": research_historical_replay.REPLAY_VERSION,
+                    "calibration_version": research_session_width.CALIBRATION_VERSION,
+                    "price_method_version": canonical_price_path.METHOD_VERSION,
+                    "price_provenance_version": canonical_price_path.PRICE_PROVENANCE_VERSION,
+                    "coverage_scope_version": (
+                        research_historical_replay.COVERAGE_SCOPE_VERSION
+                    ),
+                    "as_of_utc": _utc(as_of_utc),
+                },
+            ).fetchone()
+        run_coverage = {}
+        if run_row:
+            parsed = _json_value(run_row.get("coverage"))
+            if isinstance(parsed, Mapping):
+                run_coverage = parsed
+            for snapshot in coverage.values():
+                snapshot["replay_run_id"] = int(run_row["replay_run_id"])
+                snapshot["replay_completed_at_utc"] = _iso(
+                    run_row["completed_at_utc"]
                 )
-            )
-        by_key = {
-            (_symbol(row["symbol"]), int(row["horizon_minutes"])): row
-            for row in rows
-        }
         for symbol, snapshot in coverage.items():
             failures: list[str] = []
             for horizon in _HORIZONS:
-                row = by_key.get((symbol, horizon), {})
-                count = int(row.get("anchors") or 0)
-                dates = int(row.get("utc_dates") or 0)
-                span = float(row.get("span_hours") or 0.0)
+                row = run_coverage.get(f"{symbol}:{horizon}", {})
+                if not isinstance(row, Mapping):
+                    row = {}
+                count = _strict_nonnegative_int(row.get("outcomes"))
+                dates = _strict_nonnegative_int(row.get("utc_dates"))
+                first = row.get("first_observation_utc")
+                last = row.get("last_observation_utc")
+                first_time = last_time = None
+                try:
+                    first_time = _utc(first)
+                    last_time = _utc(last)
+                    span = _strict_nonnegative_finite_number(max(
+                        0.0,
+                        (last_time - first_time).total_seconds() / 3600.0,
+                    ))
+                except (TypeError, ValueError, OverflowError):
+                    span = None
                 horizon_failures: list[str] = []
-                if count < _MIN_ANCHORS:
+                if count is None:
+                    horizon_failures.append("outcomes_type")
+                elif count < _MIN_ANCHORS:
                     horizon_failures.append("minimum_anchors")
-                if dates < _MIN_UTC_DATES:
+                if dates is None:
+                    horizon_failures.append("utc_dates_type")
+                elif dates < _MIN_UTC_DATES:
                     horizon_failures.append("minimum_utc_dates")
-                if span < _MIN_SPAN_HOURS:
+                if span is None:
+                    horizon_failures.append("span_hours_type")
+                elif span < _MIN_SPAN_HOURS:
                     horizon_failures.append("minimum_span_hours")
                 snapshot["horizons"][str(horizon)] = {
                     "eligible": not horizon_failures,
-                    "anchors": count,
-                    "utc_dates": dates,
-                    "span_hours": span,
+                    "anchors": count if count is not None else 0,
+                    "utc_dates": dates if dates is not None else 0,
+                    "span_hours": span if span is not None else 0.0,
                     "min_anchor_time_utc": (
-                        _iso(row["min_anchor_time_utc"])
-                        if row.get("min_anchor_time_utc") is not None
+                        _iso(first_time)
+                        if first_time is not None
                         else None
                     ),
                     "max_anchor_time_utc": (
-                        _iso(row["max_anchor_time_utc"])
-                        if row.get("max_anchor_time_utc") is not None
+                        _iso(last_time)
+                        if last_time is not None
                         else None
                     ),
                     "failed_gates": horizon_failures,
@@ -627,10 +662,11 @@ class ProspectiveAnchorStore:
         slot_open_utc: Any,
         checked_at_utc: Any,
         official_prices_by_symbol: Mapping[str, Mapping[str, Any]],
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> SourceInputBatch:
         normalized = tuple(dict.fromkeys(_symbol(item) for item in symbols))
         if not normalized:
-            return {}
+            checked = _utc(checked_at_utc)
+            return SourceInputBatch({}, checked, checked)
         opened = _utc(slot_open_utc)
         closed = opened + timedelta(minutes=anchors.INTERVAL_MINUTES)
         eligible_at = closed + timedelta(minutes=anchors.GRACE_MINUTES)
@@ -656,6 +692,33 @@ class ProspectiveAnchorStore:
                     params,
                 )
             )
+            max_pain_by_symbol = {
+                symbol: research_max_pain_archive.load_prior_only_features_from_connection(
+                    conn,
+                    symbol,
+                    checked,
+                )
+                for symbol in normalized
+            }
+            read_completed_row = _fetchone(
+                conn.execute(
+                    "SELECT clock_timestamp() AS read_completed_at_utc",
+                    (),
+                )
+            )
+            if not read_completed_row or read_completed_row.get(
+                "read_completed_at_utc"
+            ) is None:
+                raise ProspectiveAnchorError(
+                    "database did not return the prospective source-read completion time"
+                )
+            read_completed = _utc(
+                read_completed_row["read_completed_at_utc"]
+            )
+            if read_completed < checked:
+                raise ProspectiveAnchorError(
+                    "prospective source-read completion predates its cutoff"
+                )
         oi_by_symbol = {_symbol(row["symbol"]): row for row in oi_rows}
         futures_by_symbol = {_symbol(row["symbol"]): row for row in futures_rows}
         spot_by_symbol = {_symbol(row["symbol"]): row for row in spot_rows}
@@ -671,7 +734,7 @@ class ProspectiveAnchorStore:
                 families["official_price"] = official[symbol]
             if symbol in oi_by_symbol:
                 families["price_oi"] = self._price_oi_family(
-                    oi_by_symbol[symbol], checked
+                    oi_by_symbol[symbol], read_completed
                 )
             if symbol in futures_by_symbol:
                 families["futures_cvd"] = self._flow_family(
@@ -681,8 +744,13 @@ class ProspectiveAnchorStore:
                 families["spot_cvd"] = self._flow_family(
                     spot_by_symbol[symbol], "spot"
                 )
+            # Max Pain is optional for the neutral anchor itself.  Its exact
+            # decision-time result (including an explicit UNEVALUABLE state)
+            # is nevertheless frozen into the slot so a later archive insert
+            # cannot rewrite formulas that do consume it.
+            families["max_pain"] = dict(max_pain_by_symbol.get(symbol) or {})
             output[symbol] = families
-        return output
+        return SourceInputBatch(output, checked, read_completed)
 
     @staticmethod
     def _price_oi_family(row: Mapping[str, Any], checked: datetime) -> Dict[str, Any]:
@@ -938,17 +1006,18 @@ class ProspectiveAnchorService:
         pending_coverage = {
             symbol: coverage[symbol] for symbol in pending_symbols
         }
-        source_inputs = self.store.load_source_inputs(
+        source_batch = self.store.load_source_inputs(
             symbols=pending_symbols,
             slot_open_utc=opened,
             checked_at_utc=checked,
             official_prices_by_symbol=official_prices_by_symbol,
         )
+        decision_checked = max(checked, _utc(source_batch.read_completed_at_utc))
         batch = anchors.build_anchor_batch(
-            now=checked,
+            now=decision_checked,
             slot_open_utc=opened,
             coverage_by_symbol=pending_coverage,
-            source_inputs_by_symbol=source_inputs,
+            source_inputs_by_symbol=source_batch.inputs_by_symbol,
             coverage_policy_version=self.coverage_policy_version,
             strategy_version=self.strategy_version,
             code_version=self.code_version,
@@ -963,7 +1032,7 @@ class ProspectiveAnchorService:
         return SamplingRun(
             sampler_version=anchors.SAMPLER_VERSION,
             slot_open_utc=opened,
-            checked_at_utc=checked,
+            checked_at_utc=decision_checked,
             existing_symbols=tuple(sorted(existing)),
             batch=batch,
             persisted=tuple(persisted),

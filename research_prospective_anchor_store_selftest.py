@@ -5,9 +5,11 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 
 import research_prospective_anchor_store as store_module
 import research_prospective_anchors as anchors
+import research_formula_schema_admin
 
 
 UTC = timezone.utc
@@ -25,11 +27,20 @@ class _Result:
 
 
 class _ReadConnection:
-    def __init__(self, *, coverage_rows=None, oi_rows=None, futures_rows=None, spot_rows=None):
+    def __init__(
+        self,
+        *,
+        coverage_rows=None,
+        oi_rows=None,
+        futures_rows=None,
+        spot_rows=None,
+        read_completed_at=None,
+    ):
         self.coverage_rows = coverage_rows or []
         self.oi_rows = oi_rows or []
         self.futures_rows = futures_rows or []
         self.spot_rows = spot_rows or []
+        self.read_completed_at = read_completed_at
 
     def __enter__(self):
         return self
@@ -38,7 +49,13 @@ class _ReadConnection:
         return False
 
     def execute(self, sql, params):
-        if "WITH finalized_first_touch" in sql:
+        if "to_regclass('public.research_max_pain_snapshot_sets')" in sql:
+            return _Result([{"sets": None, "symbols": None, "rows": None}])
+        if "SELECT clock_timestamp() AS read_completed_at_utc" in sql:
+            return _Result(
+                [{"read_completed_at_utc": self.read_completed_at}]
+            )
+        if "FROM research_historical_replay_runs" in sql:
             return _Result(self.coverage_rows)
         if "FROM oi_regime_snapshots" in sql:
             return _Result(self.oi_rows)
@@ -176,17 +193,38 @@ class _MemoryConnection:
         raise AssertionError(f"unexpected persistence SQL: {compact[:100]}")
 
 
-def _eligible_coverage():
+def _eligible_coverage(*, symbol: str = "BTC"):
     return {
+        "symbol": symbol,
         "eligible": True,
         "failed_gates": [],
+        "coverage_policy_version": store_module.COVERAGE_POLICY_VERSION,
         "method_version": store_module.FIRST_TOUCH_METHOD_VERSION,
+        "replay_version": store_module.research_historical_replay.REPLAY_VERSION,
+        "coverage_scope_version": (
+            store_module.research_historical_replay.COVERAGE_SCOPE_VERSION
+        ),
+        "movement_width_calibration_version": (
+            store_module.research_session_width.CALIBRATION_VERSION
+        ),
+        "canonical_price_method_version": (
+            store_module.canonical_price_path.METHOD_VERSION
+        ),
+        "canonical_price_provenance_version": (
+            store_module.canonical_price_path.PRICE_PROVENANCE_VERSION
+        ),
+        "replay_run_id": 7,
+        "replay_completed_at_utc": "2026-08-29T12:00:00Z",
+        "as_of_utc": "2026-08-29T12:00:00Z",
         "horizons": {
             str(horizon): {
                 "eligible": True,
                 "anchors": 300,
                 "utc_dates": 18,
                 "span_hours": 500.0,
+                "min_anchor_time_utc": "2026-08-07T16:00:00Z",
+                "max_anchor_time_utc": "2026-08-28T12:00:00Z",
+                "failed_gates": [],
             }
             for horizon in (60, 240, 720, 1440)
         },
@@ -211,21 +249,34 @@ def _official(symbol, observed):
 
 
 def run() -> None:
+    migration_path = Path("migrations/010_prospective_max_pain_freeze_v1.sql")
+    assert research_formula_schema_admin.MIGRATION_PATHS[-2] == (
+        migration_path.resolve()
+    )
+    migration_sql = migration_path.read_text(encoding="utf-8")
+    assert anchors.SAMPLER_VERSION in migration_sql
+    assert migration_sql.count("COALESCE((") == 2
+    assert "frozen_inputs#>'{max_pain,features}'" in migration_sql
     slot = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
     now = datetime(2026, 8, 29, 12, 34, tzinfo=UTC)
-    coverage_rows = []
+    replay_coverage = {}
     for horizon in (60, 240, 720, 1440):
-        coverage_rows.append(
-            {
-                "symbol": "BTC",
-                "horizon_minutes": horizon,
-                "anchors": 300,
-                "utc_dates": 18,
-                "min_anchor_time_utc": now - timedelta(hours=500),
-                "max_anchor_time_utc": now - timedelta(hours=25),
-                "span_hours": 475.0,
-            }
-        )
+        replay_coverage[f"BTC:{horizon}"] = {
+            "outcomes": 300,
+            "utc_dates": 18,
+            "first_observation_utc": now - timedelta(hours=500),
+            "last_observation_utc": now - timedelta(hours=25),
+        }
+    coverage_rows = [
+        {
+            "replay_run_id": 7,
+            "replay_version": store_module.research_historical_replay.REPLAY_VERSION,
+            "outcome_method_version": store_module.canonical_price_path.METHOD_VERSION,
+            "config": {},
+            "coverage": replay_coverage,
+            "completed_at_utc": now - timedelta(minutes=1),
+        }
+    ]
     coverage_store = store_module.ProspectiveAnchorStore(
         connection_factory=lambda: _ReadConnection(coverage_rows=coverage_rows),
         flow_timestamp_mode="open",
@@ -234,11 +285,57 @@ def run() -> None:
         symbols=("BTC", "HYPE"), as_of_utc=now
     )
     assert coverage["BTC"]["eligible"] is True
+    assert coverage["BTC"]["replay_run_id"] == 7
+    assert coverage["BTC"]["movement_width_calibration_version"] == (
+        store_module.research_session_width.CALIBRATION_VERSION
+    )
     assert coverage["HYPE"]["eligible"] is False
-    assert "60m_minimum_anchors" in coverage["HYPE"]["failed_gates"]
-    assert "research_alert_outcomes" not in store_module._COVERAGE_SQL
-    assert "outcome.status IN ('HIT', 'MISS')" in store_module._COVERAGE_SQL
-    assert "observation_time_utc" in store_module._COVERAGE_SQL
+    assert "60m_outcomes_type" in coverage["HYPE"]["failed_gates"]
+
+    # Replay coverage is persisted JSON evidence. Numeric-looking strings,
+    # booleans and fractional counts must not be normalized into eligibility.
+    for field, corrupt_value, expected_gate in (
+        ("outcomes", "300", "60m_outcomes_type"),
+        ("outcomes", 300.5, "60m_outcomes_type"),
+        ("outcomes", True, "60m_outcomes_type"),
+        ("utc_dates", "18", "60m_utc_dates_type"),
+        ("utc_dates", 18.5, "60m_utc_dates_type"),
+        ("utc_dates", True, "60m_utc_dates_type"),
+    ):
+        corrupt_replay_coverage = deepcopy(replay_coverage)
+        corrupt_replay_coverage["BTC:60"] = {
+            **corrupt_replay_coverage["BTC:60"],
+            field: corrupt_value,
+        }
+        corrupt_store = store_module.ProspectiveAnchorStore(
+            connection_factory=lambda value=corrupt_replay_coverage: _ReadConnection(
+                coverage_rows=[{**coverage_rows[0], "coverage": value}]
+            ),
+            flow_timestamp_mode="open",
+        )
+        corrupt_coverage = corrupt_store.load_coverage(
+            symbols=("BTC",), as_of_utc=now
+        )["BTC"]
+        assert corrupt_coverage["eligible"] is False
+        assert expected_gate in corrupt_coverage["failed_gates"]
+
+    assert store_module._strict_nonnegative_finite_number(500.0) == 500.0
+    for corrupt_span in ("500", True, float("nan"), float("inf"), -1.0):
+        assert store_module._strict_nonnegative_finite_number(corrupt_span) is None
+    assert "research_historical_opportunity_outcomes" not in (
+        store_module._COVERAGE_SQL
+    )
+    assert "research_first_touch_outcomes" not in store_module._COVERAGE_SQL
+    for required_run_guard in (
+        "status='COMPLETED'",
+        "replay_version=%(replay_version)s",
+        "outcome_method_version=%(price_method_version)s",
+        "first_touch_method_version",
+        "movement_width_calibration_version",
+        "canonical_price_provenance_version",
+        "frozen_fully_closed_end_utc",
+    ):
+        assert required_run_guard in store_module._COVERAGE_SQL
 
     oi_row = {
         "id": 44,
@@ -273,27 +370,61 @@ def run() -> None:
     }
     input_store = store_module.ProspectiveAnchorStore(
         connection_factory=lambda: _ReadConnection(
-            oi_rows=[oi_row], futures_rows=[future], spot_rows=[spot]
+            oi_rows=[oi_row],
+            futures_rows=[future],
+            spot_rows=[spot],
+            read_completed_at=now + timedelta(seconds=1),
         ),
         flow_timestamp_mode="open",
     )
-    source_inputs = input_store.load_source_inputs(
+    source_batch = input_store.load_source_inputs(
         symbols=("BTC",),
         slot_open_utc=slot,
         checked_at_utc=now,
         official_prices_by_symbol={"BTC": _official("BTC", now)},
     )
+    assert source_batch.cutoff_at_utc == now
+    assert source_batch.read_completed_at_utc == now + timedelta(seconds=1)
+    source_inputs = source_batch.inputs_by_symbol
     price_oi = source_inputs["BTC"]["price_oi"]
     assert price_oi["source_table"] == "oi_regime_snapshots"
     assert price_oi["source_record_id"] == 44
     assert price_oi["price_source"] == "binance_spot"
     assert price_oi["oi_source"] == "coinglass_open_interest_exchange_list"
     assert price_oi["observation_time_utc"] == oi_row["collected_at"]
+    assert price_oi["refresh_completed_at_utc"] == (
+        now + timedelta(seconds=1)
+    )
     assert source_inputs["BTC"]["futures_cvd"]["source"] == future["source"]
     assert source_inputs["BTC"]["futures_cvd"]["candle_timestamp_mode"] == "open"
+    assert source_inputs["BTC"]["max_pain"] == {
+        "evaluation_status": "UNEVALUABLE",
+        "reason": "migration 007 Max-Pain archive schema is unavailable",
+        "features": {},
+    }
+    regressed_clock_store = store_module.ProspectiveAnchorStore(
+        connection_factory=lambda: _ReadConnection(
+            oi_rows=[oi_row],
+            futures_rows=[future],
+            spot_rows=[spot],
+            read_completed_at=now - timedelta(seconds=1),
+        ),
+        flow_timestamp_mode="open",
+    )
+    try:
+        regressed_clock_store.load_source_inputs(
+            symbols=("BTC",),
+            slot_open_utc=slot,
+            checked_at_utc=now,
+            official_prices_by_symbol={"BTC": _official("BTC", now)},
+        )
+    except store_module.ProspectiveAnchorError as exc:
+        assert "predates its cutoff" in str(exc)
+    else:
+        raise AssertionError("a pre-cutoff read-completion timestamp was accepted")
 
     batch = anchors.build_anchor_batch(
-        now=now,
+        now=source_batch.read_completed_at_utc,
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _eligible_coverage()},
         source_inputs_by_symbol=source_inputs,
@@ -303,10 +434,53 @@ def run() -> None:
     )
     assert batch.decisions[0].evaluation_status == anchors.EVALUABLE
     assert len(batch.events) == 2
+    assert all(
+        store_module._utc(event.alert_time_utc)
+        == source_batch.read_completed_at_utc
+        for event in batch.events
+    )
     contract = batch.events[0].engine_snapshot["prospective_anchor"]
     assert contract["frozen_inputs"]["price_oi"]["oi_change_pct"] == 0.1
     assert contract["source_provenance"]["price_oi"]["source_record_id"] == 44
     assert "source_record_id" not in contract["frozen_inputs"]["price_oi"]
+
+    class _ServiceStore:
+        def load_coverage(self, *, symbols, as_of_utc):
+            assert tuple(symbols) == ("BTC",)
+            assert as_of_utc == now
+            return {"BTC": _eligible_coverage()}
+
+        def existing_captured_symbols(self, *, symbols, slot_open_utc):
+            return {}
+
+        def load_source_inputs(self, **kwargs):
+            assert kwargs["checked_at_utc"] == now
+            return source_batch
+
+        def persist_bundle(self, bundle):
+            return store_module.PersistResult(
+                symbol="BTC",
+                evaluation_status=anchors.EVALUABLE,
+                attempt_id=1,
+                anchor_slot_id=1,
+                long_event_id=1,
+                short_event_id=2,
+                idempotent=False,
+            )
+
+    sampling = store_module.ProspectiveAnchorService(
+        _ServiceStore(), symbols=("BTC",)
+    ).run_once(
+        now=now,
+        slot_open_utc=slot,
+        official_prices_by_symbol={"BTC": _official("BTC", now)},
+    )
+    assert sampling.checked_at_utc == source_batch.read_completed_at_utc
+    assert all(
+        store_module._utc(event.alert_time_utc)
+        == source_batch.read_completed_at_utc
+        for event in sampling.batch.events
+    )
 
     state = {
         "attempts": {},
@@ -348,7 +522,7 @@ def run() -> None:
         "continuous_cum_vol_delta_usd"
     ] = 99_999.0
     revised_batch = anchors.build_anchor_batch(
-        now=now,
+        now=source_batch.read_completed_at_utc,
         slot_open_utc=slot,
         coverage_by_symbol={"BTC": _eligible_coverage()},
         source_inputs_by_symbol=revised_inputs,

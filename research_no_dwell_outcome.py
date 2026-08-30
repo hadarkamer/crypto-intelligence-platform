@@ -15,6 +15,8 @@ later than the decision time.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import math
 from types import MappingProxyType
 from typing import Any, Dict, Iterable, Mapping, Optional
@@ -33,6 +35,61 @@ MIN_THRESHOLD_SCALE_FACTOR = 0.50
 MAX_THRESHOLD_SCALE_FACTOR = 1.00
 _PRIOR_ONLY_SOURCE_KIND = "PRIOR_ONLY_SESSION_CALIBRATION"
 _STATIC_SOURCE_KIND = "STATIC_HORIZON_FLOOR"
+
+
+def _canonical_reference_value(value: Any, *, depth: int = 0) -> Any:
+    """Return a bounded, JSON-safe calibration value for hashing/audit."""
+    if depth > 8:
+        raise ValueError("threshold calibration reference is too deeply nested")
+    if isinstance(value, datetime):
+        return _utc(value).isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        )
+    if isinstance(value, Mapping):
+        if len(value) > 80:
+            raise ValueError("threshold calibration reference has too many fields")
+        return {
+            str(key): _canonical_reference_value(item, depth=depth + 1)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        if len(value) > 200:
+            raise ValueError("threshold calibration reference list is too large")
+        return [
+            _canonical_reference_value(item, depth=depth + 1) for item in value
+        ]
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("threshold calibration reference is not finite")
+        return value
+    number = _number(value)
+    if number is not None:
+        return number
+    raise ValueError("threshold calibration reference contains an unsupported value")
+
+
+def threshold_reference_snapshot(
+    reference: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Canonicalize the exact prior-only evidence frozen at decision time."""
+    value = _canonical_reference_value(reference)
+    if not isinstance(value, dict):  # pragma: no cover - mapping input guarantees
+        raise ValueError("threshold calibration reference must be an object")
+    return value
+
+
+def threshold_reference_hash(reference: Mapping[str, Any]) -> str:
+    snapshot = threshold_reference_snapshot(reference)
+    payload = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _utc(value: Any) -> datetime:
@@ -98,6 +155,9 @@ def freeze_threshold_policy(
     source_kind = _STATIC_SOURCE_KIND
     source = "versioned static horizon floor"
     as_of_utc: Optional[datetime] = None
+    reference_snapshot: Optional[Dict[str, Any]] = None
+    reference_hash: Optional[str] = None
+    reference_version: Optional[str] = None
 
     if prior_only_reference is not None:
         if not isinstance(prior_only_reference, Mapping):
@@ -135,6 +195,11 @@ def freeze_threshold_policy(
             or prior_only_reference.get("policy")
             or "prior-only session calibration"
         )
+        reference_snapshot = threshold_reference_snapshot(prior_only_reference)
+        reference_hash = threshold_reference_hash(reference_snapshot)
+        reference_version = str(
+            prior_only_reference.get("calibration_version") or ""
+        ).strip() or None
 
     return {
         "method_version": METHOD_VERSION,
@@ -145,6 +210,9 @@ def freeze_threshold_policy(
         "threshold_source_kind": source_kind,
         "threshold_source": source,
         "threshold_as_of_utc": as_of_utc,
+        "threshold_reference_version": reference_version,
+        "threshold_reference": reference_snapshot,
+        "threshold_reference_hash": reference_hash,
         "session_weekend_ratio": (
             _number(prior_only_reference.get("session_weekend_ratio"))
             if prior_only_reference is not None
@@ -193,6 +261,41 @@ def _validated_policy(
             raise ValueError(
                 "threshold relaxation is allowed only for a weekend/mixed horizon"
             )
+        reference = policy.get("threshold_reference")
+        reference_hash = str(policy.get("threshold_reference_hash") or "")
+        if reference is not None or reference_hash:
+            if not isinstance(reference, Mapping) or not reference_hash:
+                raise ValueError("prior-only threshold reference audit is incomplete")
+            if threshold_reference_hash(reference) != reference_hash:
+                raise ValueError("prior-only threshold reference hash mismatch")
+            stored_reference_version = str(
+                policy.get("threshold_reference_version") or ""
+            )
+            reference_version = str(
+                reference.get("calibration_version") or ""
+            )
+            if stored_reference_version != reference_version:
+                raise ValueError("threshold reference version mismatch")
+            if str(reference.get("source_kind") or "").upper() != source_kind:
+                raise ValueError("threshold reference source kind mismatch")
+            if reference.get("horizon_minutes") is not None and int(
+                reference.get("horizon_minutes")
+            ) != int(horizon_minutes):
+                raise ValueError("threshold reference horizon mismatch")
+            reference_scale = _number(
+                reference.get(
+                    "threshold_scale_factor",
+                    reference.get("floor_scale_factor"),
+                )
+            )
+            if reference_scale is None or not math.isclose(
+                reference_scale, scale, rel_tol=0.0, abs_tol=1e-8
+            ):
+                raise ValueError("threshold reference scale mismatch")
+            if reference.get("as_of_utc") is None or _utc(
+                reference["as_of_utc"]
+            ) != _utc(policy["threshold_as_of_utc"]):
+                raise ValueError("threshold reference as-of mismatch")
     return dict(policy)
 
 

@@ -23,10 +23,20 @@ import math
 from typing import Any, Dict, Mapping, Optional
 
 import market_session_baseline
+import canonical_price_path
 import research_event_capture
+import research_historical_replay
+import research_no_dwell_outcome
+import research_session_width
 
 
-SAMPLER_VERSION = "prospective-neutral-anchor-v2-source-frozen"
+SAMPLER_VERSION = "prospective-neutral-anchor-v3-max-pain-frozen"
+COVERAGE_POLICY_VERSION = (
+    "prospective-coverage-v3-completed-fully-validated-replay-run:"
+    + research_no_dwell_outcome.METHOD_VERSION
+    + ":"
+    + research_historical_replay.REPLAY_VERSION
+)
 EVENT_TYPE = "PROSPECTIVE_NEUTRAL_30M"
 TIMEFRAME = "30m"
 INTERVAL_MINUTES = market_session_baseline.COINGLASS_CANDLE_INTERVAL_MINUTES
@@ -124,6 +134,46 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def compute_input_fingerprint(
+    *,
+    sampler_version: Any,
+    coverage_policy_version: Any,
+    coverage_snapshot: Mapping[str, Any],
+    symbol: Any,
+    source_candle_open_utc: Any,
+    source_candle_close_utc: Any,
+    base_eligible_at_utc: Any,
+    expires_at_utc: Any,
+    evaluation_status: Any,
+    decision_time_utc: Any,
+    source_timestamps: Mapping[str, Any],
+    source_provenance: Mapping[str, Any],
+    frozen_inputs: Mapping[str, Any],
+) -> str:
+    """Canonical identity for one frozen prospective decision payload."""
+    return _sha256(
+        {
+            "sampler_version": str(sampler_version),
+            "coverage_policy_version": str(coverage_policy_version),
+            "coverage_snapshot": dict(coverage_snapshot),
+            "symbol": _symbol(symbol),
+            "source_candle_open_utc": _iso(source_candle_open_utc),
+            "source_candle_close_utc": _iso(source_candle_close_utc),
+            "base_eligible_at_utc": _iso(base_eligible_at_utc),
+            "expires_at_utc": _iso(expires_at_utc),
+            "evaluation_status": str(evaluation_status),
+            "decision_time_utc": (
+                _iso(decision_time_utc)
+                if decision_time_utc not in (None, "")
+                else None
+            ),
+            "source_timestamps": dict(source_timestamps),
+            "source_provenance": dict(source_provenance),
+            "frozen_formula_visible_inputs": dict(frozen_inputs),
+        }
+    )
+
+
 def _symbol(value: Any) -> str:
     normalized = str(value or "").strip().upper()
     if (
@@ -143,6 +193,21 @@ def _number(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _strict_nonnegative_json_int(value: Any) -> Optional[int]:
+    """Accept a persisted JSON count without bool/string/float coercion."""
+    if type(value) is not int or value < 0:
+        return None
+    return value
+
+
+def _strict_nonnegative_json_number(value: Any) -> Optional[float]:
+    """Accept a finite persisted JSON number without bool/string coercion."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) and result >= 0.0 else None
 
 
 def _floor_interval(value: Any) -> datetime:
@@ -173,32 +238,111 @@ def _coverage_entries(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return value
 
 
-def _coverage_status(value: Any) -> tuple[bool, list[str]]:
+def _coverage_status(
+    value: Any,
+    *,
+    expected_symbol: Any,
+    checked_at_utc: Any,
+    coverage_policy_version: str,
+) -> tuple[bool, list[str]]:
     """Require a frozen all-horizon replay-coverage decision per symbol."""
     if not isinstance(value, Mapping):
         return False, ["coverage_snapshot_missing"]
+    failures: list[str] = []
+    expected_versions = {
+        "coverage_policy_version": COVERAGE_POLICY_VERSION,
+        "method_version": research_no_dwell_outcome.METHOD_VERSION,
+        "replay_version": research_historical_replay.REPLAY_VERSION,
+        "coverage_scope_version": (
+            research_historical_replay.COVERAGE_SCOPE_VERSION
+        ),
+        "movement_width_calibration_version": (
+            research_session_width.CALIBRATION_VERSION
+        ),
+        "canonical_price_method_version": canonical_price_path.METHOD_VERSION,
+        "canonical_price_provenance_version": (
+            canonical_price_path.PRICE_PROVENANCE_VERSION
+        ),
+    }
+    if str(coverage_policy_version or "") != COVERAGE_POLICY_VERSION:
+        failures.append("coverage_policy_argument_incompatible")
+    normalized_symbol = _symbol(expected_symbol)
+    try:
+        recorded_symbol = _symbol(value.get("symbol"))
+    except (TypeError, ValueError):
+        recorded_symbol = ""
+    if recorded_symbol != normalized_symbol:
+        failures.append("coverage_symbol_mismatch")
+    for key, expected in expected_versions.items():
+        if value.get(key) != expected:
+            failures.append(f"{key}_incompatible")
+    run_id = value.get("replay_run_id")
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+        failures.append("replay_run_id_invalid")
+    checked_at = snapshot_as_of = completed_at = None
+    try:
+        checked_at = _utc(checked_at_utc)
+        snapshot_as_of = _utc(value.get("as_of_utc"))
+        completed_at = _utc(value.get("replay_completed_at_utc"))
+        if snapshot_as_of > checked_at:
+            failures.append("coverage_as_of_is_future")
+        if completed_at > checked_at:
+            failures.append("replay_completed_at_is_future")
+        if completed_at > snapshot_as_of:
+            failures.append("replay_completed_after_coverage_as_of")
+    except (TypeError, ValueError, OverflowError):
+        failures.append("coverage_timestamps_invalid")
     horizons = value.get("horizons")
     if not isinstance(horizons, Mapping):
-        return False, ["coverage_horizons_missing"]
-    failures: list[str] = []
+        return False, sorted(set([*failures, "coverage_horizons_missing"]))
     for horizon in _REQUIRED_COVERAGE_HORIZONS:
         item = horizons.get(str(horizon), horizons.get(horizon))
         if not isinstance(item, Mapping):
             failures.append(f"{horizon}m_missing")
             continue
-        if not bool(item.get("eligible")):
+        if item.get("eligible") is not True:
             failures.append(f"{horizon}m_ineligible")
-        anchors = _number(item.get("anchors"))
-        utc_dates = _number(item.get("utc_dates"))
-        span_hours = _number(item.get("span_hours"))
+        item_failed_gates = item.get("failed_gates")
+        if not isinstance(item_failed_gates, list) or item_failed_gates:
+            failures.append(f"{horizon}m_failed_gates_inconsistent")
+        anchors = _strict_nonnegative_json_int(item.get("anchors"))
+        utc_dates = _strict_nonnegative_json_int(item.get("utc_dates"))
+        span_hours = _strict_nonnegative_json_number(item.get("span_hours"))
         if anchors is None or anchors < _MIN_COVERAGE_ANCHORS:
             failures.append(f"{horizon}m_anchors")
         if utc_dates is None or utc_dates < _MIN_COVERAGE_UTC_DATES:
             failures.append(f"{horizon}m_utc_dates")
         if span_hours is None or span_hours < _MIN_COVERAGE_SPAN_HOURS:
             failures.append(f"{horizon}m_span_hours")
-    if not bool(value.get("eligible")):
-        failures.extend(str(item) for item in value.get("failed_gates") or [])
+        try:
+            minimum_time = _utc(item.get("min_anchor_time_utc"))
+            maximum_time = _utc(item.get("max_anchor_time_utc"))
+            if minimum_time > maximum_time:
+                failures.append(f"{horizon}m_anchor_time_order")
+            if snapshot_as_of is not None and maximum_time > snapshot_as_of:
+                failures.append(f"{horizon}m_anchor_time_is_future")
+            if completed_at is not None:
+                if maximum_time > completed_at:
+                    failures.append(f"{horizon}m_anchor_time_is_future")
+                if maximum_time + timedelta(minutes=horizon) > completed_at:
+                    failures.append(f"{horizon}m_outcome_not_closed_at_replay_completion")
+            actual_span = (
+                maximum_time - minimum_time
+            ).total_seconds() / 3600.0
+            if span_hours is None or not math.isclose(
+                span_hours, actual_span, rel_tol=0.0, abs_tol=1e-6
+            ):
+                failures.append(f"{horizon}m_span_mismatch")
+        except (TypeError, ValueError, OverflowError):
+            failures.append(f"{horizon}m_anchor_times_invalid")
+    aggregate_failed_gates = value.get("failed_gates")
+    if not isinstance(aggregate_failed_gates, list):
+        failures.append("aggregate_failed_gates_invalid")
+        aggregate_failed_gates = []
+    if value.get("eligible") is True and aggregate_failed_gates:
+        failures.append("aggregate_failed_gates_inconsistent")
+    if value.get("eligible") is not True:
+        failures.extend(str(item) for item in aggregate_failed_gates)
         if not failures:
             failures.append("aggregate_coverage_ineligible")
     return not failures, sorted(set(failures))
@@ -640,7 +784,12 @@ def _decision(
     code_version: Optional[str],
 ) -> AnchorDecision:
     normalized_symbol = _symbol(symbol)
-    eligible, coverage_failures = _coverage_status(coverage)
+    eligible, coverage_failures = _coverage_status(
+        coverage,
+        expected_symbol=normalized_symbol,
+        checked_at_utc=checked_at,
+        coverage_policy_version=coverage_policy_version,
+    )
     coverage_snapshot = dict(coverage) if isinstance(coverage, Mapping) else {}
     source_rows = family_rows if isinstance(family_rows, Mapping) else {}
     timestamps: Dict[str, Any] = {}
@@ -700,22 +849,27 @@ def _decision(
         for family in REQUIRED_FAMILIES
         if isinstance(source_rows.get(family), Mapping)
     }
-    input_payload = {
-        "sampler_version": SAMPLER_VERSION,
-        "coverage_policy_version": coverage_policy_version,
-        "coverage_snapshot": coverage_snapshot,
-        "symbol": normalized_symbol,
-        "source_candle_open_utc": _iso(slot_open),
-        "source_candle_close_utc": _iso(slot_close),
-        "base_eligible_at_utc": _iso(base_eligible_at),
-        "expires_at_utc": _iso(expires_at),
-        "evaluation_status": status,
-        "decision_time_utc": _iso(checked_at) if status == EVALUABLE else None,
-        "source_timestamps": timestamps,
-        "source_provenance": provenance,
-        "frozen_formula_visible_inputs": frozen_inputs,
-    }
-    input_fingerprint = _sha256(input_payload)
+    if isinstance(source_rows.get("max_pain"), Mapping):
+        # Preserve the complete derived feature/provenance wrapper exactly as
+        # selected during the decision-time read. Max Pain remains optional:
+        # formulas that do not use it are evaluable even when this wrapper says
+        # UNEVALUABLE, while formulas that do use it fail closed later.
+        frozen_inputs["max_pain"] = dict(source_rows["max_pain"])
+    input_fingerprint = compute_input_fingerprint(
+        sampler_version=SAMPLER_VERSION,
+        coverage_policy_version=coverage_policy_version,
+        coverage_snapshot=coverage_snapshot,
+        symbol=normalized_symbol,
+        source_candle_open_utc=slot_open,
+        source_candle_close_utc=slot_close,
+        base_eligible_at_utc=base_eligible_at,
+        expires_at_utc=expires_at,
+        evaluation_status=status,
+        decision_time_utc=checked_at if status == EVALUABLE else None,
+        source_timestamps=timestamps,
+        source_provenance=provenance,
+        frozen_inputs=frozen_inputs,
+    )
     # Never backdate a prospective event to a source-refresh time. The actual
     # successful check/persistence attempt is the earliest knowable decision
     # time; source refreshes remain provenance only.
@@ -780,7 +934,7 @@ def _decision(
                     "sampling_frame": "NEUTRAL_30M_BOTH_DIRECTIONS",
                 },
                 strategy_version=strategy_version
-                or "formula-prospective-neutral-v2",
+                or "formula-prospective-neutral-v3",
                 code_version=code_version,
             )
             # The generic builder hashes the whole snapshot. Raw source rows

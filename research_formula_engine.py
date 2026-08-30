@@ -490,6 +490,7 @@ def formula_key(
 ) -> str:
     canonical = {
         "formula_schema_version": FORMULA_SCHEMA_VERSION,
+        "engine_version": ENGINE_VERSION,
         "direction": str(direction).upper(),
         "horizon_minutes": int(horizon_minutes),
         "feature_schema_version": str(feature_schema_version),

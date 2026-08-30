@@ -109,6 +109,28 @@ def _positive_int(value: Any) -> Optional[int]:
     return number if number is not None and number > 0 else None
 
 
+def _strict_positive_json_int(value: Any) -> Optional[int]:
+    """Accept only a positive JSON integer, never a coercible scalar.
+
+    PostgreSQL integer columns arrive here as Python ``int`` values.  Persisted
+    JSON provenance, however, is an untyped trust boundary: strings, floats and
+    booleans must not be allowed to impersonate archive identifiers or integer
+    policy counts merely because ``int()``/``float()`` can coerce them.
+    """
+    return value if type(value) is int and value > 0 else None
+
+
+def _strict_positive_json_number(value: Any) -> Optional[float]:
+    """Accept only a finite positive JSON number, never a coercible scalar."""
+    if type(value) not in (int, float):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
 def _round(value: Any, digits: int = 8) -> Optional[float]:
     number = _float(value)
     return round(number, digits) if number is not None else None
@@ -207,6 +229,7 @@ def _compact_snapshot_provenance(
         "cutover_marker": set_record.get("cutover_marker"),
         "cutover_time_utc": _iso_or_none(set_record.get("cutover_time_utc")),
         "available_at_utc": _iso_or_none(set_record.get("available_at_utc")),
+        "created_at_utc": _iso_or_none(set_record.get("created_at_utc")),
         "cycle_id": set_record.get("cycle_id"),
         "cycle_time_utc": _iso_or_none(set_record.get("cycle_time_utc")),
         "source": set_record.get("source"),
@@ -286,7 +309,7 @@ def _snapshot_provenance_errors(
     errors: list[str] = []
     if not record:
         return ["snapshot provenance record is missing"]
-    if _positive_int(record.get("snapshot_set_id")) is None:
+    if _strict_positive_json_int(record.get("snapshot_set_id")) is None:
         errors.append("snapshot_set_id is missing or invalid")
     for field in (
         "snapshot_key",
@@ -313,7 +336,7 @@ def _snapshot_provenance_errors(
     for field in ("cycle_id", "collector_version"):
         if not str(record.get(field) or "").strip():
             errors.append(f"{field} is missing")
-    for field in ("available_at_utc", "cycle_time_utc"):
+    for field in ("available_at_utc", "created_at_utc", "cycle_time_utc"):
         try:
             timestamp = _utc(record.get(field))
         except (TypeError, ValueError):
@@ -384,7 +407,9 @@ def _validate_shadow_provenance(
     if not isinstance(used_for_delta, bool):
         errors.append("used_for_delta is not a boolean")
     previous = value.get("previous")
-    policy_gap = _positive_int(value.get("previous_gap_policy_minutes"))
+    policy_gap = _strict_positive_json_int(
+        value.get("previous_gap_policy_minutes")
+    )
     if policy_gap != DEFAULT_MAX_PREVIOUS_GAP_MINUTES:
         errors.append("previous snapshot gap policy is missing or invalid")
     if not require_previous:
@@ -403,8 +428,16 @@ def _validate_shadow_provenance(
             )
         recomputed_gap = None
         if isinstance(current, Mapping) and isinstance(previous, Mapping):
-            if _positive_int(current.get("snapshot_set_id")) == _positive_int(
+            current_set_id = _strict_positive_json_int(
+                current.get("snapshot_set_id")
+            )
+            previous_set_id = _strict_positive_json_int(
                 previous.get("snapshot_set_id")
+            )
+            if (
+                current_set_id is not None
+                and previous_set_id is not None
+                and current_set_id == previous_set_id
             ):
                 errors.append("current and previous snapshot_set_id are identical")
             if str(current.get("snapshot_key") or "") == str(
@@ -421,8 +454,8 @@ def _validate_shadow_provenance(
                     errors.append("previous snapshot is not strictly earlier than current")
             except (TypeError, ValueError):
                 pass
-        gap = _float(value.get("previous_gap_minutes"))
-        if gap is None or gap <= 0:
+        gap = _strict_positive_json_number(value.get("previous_gap_minutes"))
+        if gap is None:
             errors.append("previous snapshot gap is missing or invalid")
         elif recomputed_gap is not None and not math.isclose(
             gap, recomputed_gap, rel_tol=0.0, abs_tol=1e-6
@@ -434,6 +467,7 @@ def _validate_shadow_provenance(
         decision_time = _utc(decision_time_utc)
         if isinstance(current, Mapping):
             current_available = _utc(current.get("available_at_utc"))
+            current_created = _utc(current.get("created_at_utc"))
             current_age_minutes = (
                 decision_time - current_available
             ).total_seconds() / 60.0
@@ -441,6 +475,11 @@ def _validate_shadow_provenance(
                 errors.append("current snapshot was not available at decision time")
             elif current_age_minutes > DEFAULT_MAX_DECISION_AGE_MINUTES:
                 errors.append("current snapshot was stale at decision time")
+            if current_created > decision_time:
+                errors.append("current snapshot was inserted after decision time")
+        if isinstance(previous, Mapping):
+            if _utc(previous.get("created_at_utc")) > decision_time:
+                errors.append("previous snapshot was inserted after decision time")
     except (TypeError, ValueError):
         errors.append("decision timestamp is missing or invalid")
     if errors:
@@ -1604,7 +1643,16 @@ def _snapshot_validation_errors(
             errors.append("symbol manifest declares missing timeframes")
         if manifest.get("duplicate_timeframes"):
             errors.append("symbol manifest declares duplicate timeframes")
-    available = _utc(set_record.get("available_at_utc"))
+    try:
+        available = _utc(set_record.get("available_at_utc"))
+    except (TypeError, ValueError):
+        errors.append("snapshot availability timestamp is missing or invalid")
+        available = decision_time
+    try:
+        created = _utc(set_record.get("created_at_utc"))
+    except (TypeError, ValueError):
+        errors.append("snapshot creation timestamp is missing or invalid")
+        created = decision_time
     if available < CUTOVER_TIME_UTC:
         errors.append("snapshot availability predates the archive cutover")
     age_minutes = (decision_time - available).total_seconds() / 60.0
@@ -1612,6 +1660,8 @@ def _snapshot_validation_errors(
         errors.append("snapshot was not available at decision time")
     elif age_minutes > max(1, int(max_age_minutes)):
         errors.append("snapshot is stale at decision time")
+    if created > decision_time:
+        errors.append("snapshot was inserted after decision time")
     if len(rows) != len(REQUIRED_TIMEFRAMES):
         errors.append("symbol does not have exactly seven snapshot rows")
     timeframes = {str(row.get("timeframe") or "") for row in rows}
@@ -1850,6 +1900,118 @@ def derive_prior_only_features(
     }
 
 
+def load_prior_only_features_from_connection(
+    conn: Any,
+    symbol: str,
+    decision_time_utc: Any,
+    *,
+    max_age_minutes: int = DEFAULT_MAX_DECISION_AGE_MINUTES,
+    max_previous_gap_minutes: int = DEFAULT_MAX_PREVIOUS_GAP_MINUTES,
+) -> Dict[str, Any]:
+    """Read at most two already-visible migration-007 sets on ``conn``.
+
+    This surface lets the prospective sampler freeze the selected feature and
+    provenance bundle in the same read pass that fixes the decision time.  A
+    later archive insert can therefore never rewrite an older decision.
+    """
+    normalized_symbol = _symbol(symbol)
+    if normalized_symbol is None:
+        raise ValueError("invalid symbol")
+    decision_time = _utc(decision_time_utc)
+    relation = conn.execute(
+        "SELECT to_regclass('public.research_max_pain_snapshot_sets') AS sets, "
+        "to_regclass('public.research_max_pain_snapshot_symbols') AS symbols, "
+        "to_regclass('public.research_max_pain_snapshot_rows') AS rows",
+        (),
+    ).fetchone()
+    if (
+        not relation
+        or not relation.get("sets")
+        or not relation.get("symbols")
+        or not relation.get("rows")
+    ):
+        return {
+            "evaluation_status": "UNEVALUABLE",
+            "reason": "migration 007 Max-Pain archive schema is unavailable",
+            "features": {},
+        }
+    sets = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT s.*
+            FROM research_max_pain_snapshot_sets s
+            JOIN research_max_pain_snapshot_symbols m
+              ON m.snapshot_set_id=s.snapshot_set_id
+            WHERE s.research_eligible=TRUE
+              AND m.research_eligible=TRUE
+              AND m.symbol=%s
+              AND s.method_version=%s
+              AND s.cutover_marker=%s
+              AND s.available_at_utc <= %s
+              AND s.created_at_utc <= %s
+            ORDER BY s.available_at_utc DESC, s.snapshot_set_id DESC
+            LIMIT 2
+            """,
+            (
+                normalized_symbol,
+                METHOD_VERSION,
+                CUTOVER_MARKER,
+                decision_time,
+                decision_time,
+            ),
+        ).fetchall()
+    ]
+    rows_by_set: Dict[int, list[Dict[str, Any]]] = {}
+    manifests_by_set: Dict[int, Dict[str, Any]] = {}
+    for set_record in sets:
+        set_id = int(set_record["snapshot_set_id"])
+        manifest = conn.execute(
+            "SELECT * FROM research_max_pain_snapshot_symbols "
+            "WHERE snapshot_set_id=%s AND symbol=%s",
+            (set_id, normalized_symbol),
+        ).fetchone()
+        manifests_by_set[set_id] = dict(manifest or {})
+        rows_by_set[set_id] = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT * FROM research_max_pain_snapshot_rows
+                WHERE snapshot_set_id=%s AND symbol=%s
+                ORDER BY CASE timeframe
+                    WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3
+                    WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6
+                    WHEN '1m' THEN 7 ELSE 99 END
+                """,
+                (set_id, normalized_symbol),
+            ).fetchall()
+        ]
+    if not sets:
+        return {
+            "evaluation_status": "UNEVALUABLE",
+            "reason": "no prior coherent Max-Pain snapshot is available",
+            "features": {},
+        }
+    current = sets[0]
+    previous = sets[1] if len(sets) > 1 else None
+    return derive_prior_only_features(
+        symbol=normalized_symbol,
+        decision_time_utc=decision_time,
+        current_set=current,
+        current_rows=rows_by_set[int(current["snapshot_set_id"])],
+        current_symbol_manifest=manifests_by_set[int(current["snapshot_set_id"])],
+        previous_set=previous,
+        previous_rows=(
+            rows_by_set[int(previous["snapshot_set_id"])] if previous else ()
+        ),
+        previous_symbol_manifest=(
+            manifests_by_set[int(previous["snapshot_set_id"])] if previous else None
+        ),
+        max_age_minutes=max_age_minutes,
+        max_previous_gap_minutes=max_previous_gap_minutes,
+    )
+
+
 def load_prior_only_features(
     symbol: str,
     decision_time_utc: Any,
@@ -1876,87 +2038,10 @@ def load_prior_only_features(
         connect_timeout=5,
         options="-c statement_timeout=8000 -c default_transaction_read_only=on",
     ) as conn:
-        relation = conn.execute(
-            "SELECT to_regclass('public.research_max_pain_snapshot_sets') AS sets, "
-            "to_regclass('public.research_max_pain_snapshot_symbols') AS symbols, "
-            "to_regclass('public.research_max_pain_snapshot_rows') AS rows"
-        ).fetchone()
-        if (
-            not relation
-            or not relation.get("sets")
-            or not relation.get("symbols")
-            or not relation.get("rows")
-        ):
-            return {
-                "evaluation_status": "UNEVALUABLE",
-                "reason": "migration 007 Max-Pain archive schema is unavailable",
-                "features": {},
-            }
-        sets = [
-            dict(row)
-            for row in conn.execute(
-                """
-                SELECT s.*
-                FROM research_max_pain_snapshot_sets s
-                JOIN research_max_pain_snapshot_symbols m
-                  ON m.snapshot_set_id=s.snapshot_set_id
-                WHERE s.research_eligible=TRUE
-                  AND m.research_eligible=TRUE
-                  AND m.symbol=%s
-                  AND s.method_version=%s
-                  AND s.cutover_marker=%s
-                  AND s.available_at_utc <= %s
-                ORDER BY s.available_at_utc DESC, s.snapshot_set_id DESC
-                LIMIT 2
-                """,
-                (normalized_symbol, METHOD_VERSION, CUTOVER_MARKER, decision_time),
-            ).fetchall()
-        ]
-        rows_by_set: Dict[int, list[Dict[str, Any]]] = {}
-        manifests_by_set: Dict[int, Dict[str, Any]] = {}
-        for set_record in sets:
-            set_id = int(set_record["snapshot_set_id"])
-            manifest = conn.execute(
-                "SELECT * FROM research_max_pain_snapshot_symbols "
-                "WHERE snapshot_set_id=%s AND symbol=%s",
-                (set_id, normalized_symbol),
-            ).fetchone()
-            manifests_by_set[set_id] = dict(manifest or {})
-            rows_by_set[set_id] = [
-                dict(row)
-                for row in conn.execute(
-                    """
-                    SELECT * FROM research_max_pain_snapshot_rows
-                    WHERE snapshot_set_id=%s AND symbol=%s
-                    ORDER BY CASE timeframe
-                        WHEN '12h' THEN 1 WHEN '24h' THEN 2 WHEN '48h' THEN 3
-                        WHEN '3d' THEN 4 WHEN '1w' THEN 5 WHEN '2w' THEN 6
-                        WHEN '1m' THEN 7 ELSE 99 END
-                    """,
-                    (set_id, normalized_symbol),
-                ).fetchall()
-            ]
-    if not sets:
-        return {
-            "evaluation_status": "UNEVALUABLE",
-            "reason": "no prior coherent Max-Pain snapshot is available",
-            "features": {},
-        }
-    current = sets[0]
-    previous = sets[1] if len(sets) > 1 else None
-    return derive_prior_only_features(
-        symbol=normalized_symbol,
-        decision_time_utc=decision_time,
-        current_set=current,
-        current_rows=rows_by_set[int(current["snapshot_set_id"])],
-        current_symbol_manifest=manifests_by_set[int(current["snapshot_set_id"])],
-        previous_set=previous,
-        previous_rows=(
-            rows_by_set[int(previous["snapshot_set_id"])] if previous else ()
-        ),
-        previous_symbol_manifest=(
-            manifests_by_set[int(previous["snapshot_set_id"])] if previous else None
-        ),
-        max_age_minutes=max_age_minutes,
-        max_previous_gap_minutes=max_previous_gap_minutes,
-    )
+        return load_prior_only_features_from_connection(
+            conn,
+            normalized_symbol,
+            decision_time,
+            max_age_minutes=max_age_minutes,
+            max_previous_gap_minutes=max_previous_gap_minutes,
+        )

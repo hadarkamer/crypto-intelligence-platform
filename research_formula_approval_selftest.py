@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import os
+from pathlib import Path
 
 import research_feature_matrix
 import research_formula_approval as approval
@@ -127,6 +128,7 @@ def run() -> None:
 
     compatible = {
         "formula_schema_version": research_formula_engine.FORMULA_SCHEMA_VERSION,
+        "engine_version": research_formula_engine.ENGINE_VERSION,
         "feature_schema_version": research_feature_matrix.FEATURE_SCHEMA_VERSION,
         "outcome_method_version": research_feature_matrix.VERIFIED_OUTCOME_METHOD,
     }
@@ -137,6 +139,36 @@ def run() -> None:
         ),
         "incompatible",
     )
+    _expect_refusal(
+        lambda: approval._assert_current_schema(
+            {**compatible, "engine_version": "obsolete-engine"}
+        ),
+        "incompatible",
+    )
+    migration = Path(
+        "migrations/011_formula_owner_live_engine_binding_v2.sql"
+    ).read_text(encoding="utf-8")
+    assert approval.OPERATION_VERSION in migration
+    assert "approval.engine_version=NEW.engine_version" in migration
+    assert "NEW.engine_version IS DISTINCT FROM OLD.engine_version" in migration
+    assert "protected formula runtime contract is immutable" in migration
+    assert "protected formula stage cannot be downgraded or reactivated" in migration
+    assert "protected formula active state is inconsistent with lifecycle stage" in migration
+    assert "protected formula approval evidence is immutable" in migration
+    validate_body = migration.split(
+        "CREATE OR REPLACE FUNCTION validate_formula_owner_live_approval()", 1
+    )[1].split(
+        "CREATE OR REPLACE FUNCTION require_formula_owner_live_approval()", 1
+    )[0]
+    protected_body = migration.split(
+        "CREATE OR REPLACE FUNCTION prevent_protected_formula_contract_mutation()", 1
+    )[1].split("DROP TRIGGER IF EXISTS", 1)[0]
+    assert "NEW.current_stage" not in validate_body
+    assert "NEW.active" not in validate_body
+    assert (
+        "protected formula active state is inconsistent with lifecycle stage"
+        in protected_body
+    )
 
     now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
     fake = _FakeConnection(now)
@@ -145,7 +177,6 @@ def run() -> None:
         "formula_key": "a" * 64,
         "formula_version": 1,
         **compatible,
-        "engine_version": research_formula_engine.ENGINE_VERSION,
         "direction": "LONG",
         "horizon_minutes": 60,
         "conditions": [{"feature": "raw.price", "operator": ">=", "value": 1}],
@@ -273,6 +304,8 @@ def run() -> None:
     assert frozen_calls == [formula_id], "current readiness was not rechecked"
     assert fake.committed and fake.stage_changes == 2
     assert fake.insert_params is not None
+    assert research_formula_engine.ENGINE_VERSION in fake.insert_params
+    assert approval.OPERATION_VERSION in fake.insert_params
     assert not any("live_deliveries" in sql for sql in fake.sql)
     assert result["stage"] == "LIVE"
     assert result["live_alerts_enabled_by_operation"] is False

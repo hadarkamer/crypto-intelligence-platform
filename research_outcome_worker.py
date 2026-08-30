@@ -34,7 +34,10 @@ except Exception:  # pragma: no cover
 
 import binance_spot_price_path
 import canonical_price_path
+import research_formula_engine
+import research_formula_store
 import research_no_dwell_outcome
+import research_session_width
 
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -132,15 +135,61 @@ def _frozen_threshold_policy(
     """
     horizon = int(horizon_minutes)
     decision_time = _utc(event["alert_time_utc"])
-    relevant = [
+    raw_relevant = [
         record
         for record in snapshot_records
         if int(record.get("horizon_minutes") or 0) == horizon
     ]
-    if not relevant:
+    if not raw_relevant:
         return research_no_dwell_outcome.freeze_threshold_policy(
             horizon_minutes=horizon,
             decision_time=decision_time,
+        )
+
+    relevant: list[Mapping[str, Any]] = []
+    rejected_v6: list[str] = []
+    for record in raw_relevant:
+        strict_v6 = str(record.get("formula_schema_version") or "") == str(
+            research_formula_engine.FORMULA_SCHEMA_VERSION
+        )
+        if not strict_v6:
+            relevant.append(record)
+            continue
+        formula = {
+            key: record.get(key)
+            for key in (
+                "formula_id",
+                "formula_key",
+                "formula_version",
+                "formula_schema_version",
+                "engine_version",
+                "feature_schema_version",
+                "outcome_method_version",
+                "direction",
+                "horizon_minutes",
+                "conditions",
+            )
+        }
+        check_row = {
+            **dict(event),
+            "input_snapshot": record.get("input_snapshot"),
+            "condition_results": record.get("condition_results"),
+            "decision_cohort_key": record.get("decision_cohort_key"),
+            "decision_anchor_time_utc": record.get("decision_anchor_time_utc"),
+            "evaluation_status": record.get("evaluation_status"),
+            "matched": record.get("matched"),
+        }
+        compatible, reason = research_formula_store._max_pain_shadow_check_contract(
+            formula, check_row
+        )
+        if compatible:
+            relevant.append(record)
+        else:
+            rejected_v6.append(reason)
+    if not relevant:
+        raise FrozenThresholdPolicyConflict(
+            "all v6 frozen threshold snapshots were rejected: "
+            + "; ".join(sorted(set(rejected_v6)))
         )
 
     normalized_relaxed: list[tuple[tuple[Any, ...], Dict[str, Any]]] = []
@@ -148,7 +197,14 @@ def _frozen_threshold_policy(
     for record in relevant:
         snapshot = _mapping(record.get("input_snapshot"))
         reference = _mapping(snapshot.get("movement_width_reference"))
+        strict_v6 = str(record.get("formula_schema_version") or "") == str(
+            research_formula_engine.FORMULA_SCHEMA_VERSION
+        )
         if not reference:
+            if strict_v6:
+                raise FrozenThresholdPolicyConflict(
+                    "v6 frozen movement-width reference is missing"
+                )
             static_records += 1
             continue
         scale = _finite_number(
@@ -161,6 +217,17 @@ def _frozen_threshold_policy(
                 "frozen movement-width scale is missing or outside 0.50-1.00"
             )
         applied = reference.get("applied") is True
+        if strict_v6:
+            compatible, reason = (
+                research_session_width.validate_movement_width_reference(
+                    reference,
+                    expected_symbol=event.get("symbol"),
+                    event_time=decision_time,
+                    horizon_minutes=horizon,
+                )
+            )
+            if not compatible:
+                raise FrozenThresholdPolicyConflict(reason)
         if math.isclose(scale, 1.0, rel_tol=0.0, abs_tol=1e-9):
             if applied:
                 raise FrozenThresholdPolicyConflict(
@@ -220,13 +287,17 @@ def _frozen_threshold_policy(
         if weekend_ratio is None:
             session = _mapping(snapshot.get("outcome_window_session"))
             weekend_ratio = _finite_number(session.get("session_weekend_ratio"))
-        prior_reference = {
-            "source_kind": source_kind,
-            "as_of_utc": as_of_utc,
-            "threshold_scale_factor": scale,
-            "session_weekend_ratio": weekend_ratio,
-            "source": policy_source or "prior-only session calibration",
-        }
+        prior_reference = (
+            dict(reference)
+            if strict_v6
+            else {
+                "source_kind": source_kind,
+                "as_of_utc": as_of_utc,
+                "threshold_scale_factor": scale,
+                "session_weekend_ratio": weekend_ratio,
+                "source": policy_source or "prior-only session calibration",
+            }
+        )
         try:
             threshold_policy = research_no_dwell_outcome.freeze_threshold_policy(
                 horizon_minutes=horizon,
@@ -241,6 +312,7 @@ def _frozen_threshold_policy(
             _utc(threshold_policy["threshold_as_of_utc"]).isoformat(),
             str(threshold_policy["threshold_source_kind"]),
             str(threshold_policy["threshold_source"]),
+            str(threshold_policy.get("threshold_reference_hash") or ""),
         )
         normalized_relaxed.append((fingerprint, threshold_policy))
 
@@ -646,7 +718,12 @@ class ResearchOutcomeWorker:
         rows = conn.execute(
             """
             SELECT c.event_id, f.horizon_minutes, c.formula_id,
-                   c.input_snapshot
+                   f.formula_key, f.formula_version,
+                   f.formula_schema_version, f.engine_version,
+                   f.feature_schema_version, f.outcome_method_version,
+                   f.direction, f.conditions, c.input_snapshot,
+                   c.condition_results, c.decision_cohort_key,
+                   c.decision_anchor_time_utc, c.evaluation_status, c.matched
             FROM research_formula_shadow_checks c
             JOIN research_formulas f ON f.formula_id=c.formula_id
             WHERE c.event_id=ANY(%s)
@@ -702,6 +779,7 @@ class ResearchOutcomeWorker:
             )
         query = f"""
             SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+                   e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status,
                    e.current_price, e.target_price, e.engine_snapshot,
                    COALESCE(
@@ -780,6 +858,7 @@ class ResearchOutcomeWorker:
         """
         query = f"""
             SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+                   e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status,
                    e.current_price, e.target_price, e.engine_snapshot,
                    '{{}}'::jsonb AS outcome_versions,

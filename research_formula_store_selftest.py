@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import inspect
 import json
@@ -63,6 +64,7 @@ def _max_pain_snapshot(*, decision_time: datetime, tampered_hash: bool = False) 
         "cutover_marker": archive.CUTOVER_MARKER,
         "cutover_time_utc": archive.CUTOVER_TIME_UTC.isoformat(),
         "available_at_utc": available.isoformat(),
+        "created_at_utc": (available + timedelta(seconds=5)).isoformat(),
         "cycle_id": f"selftest:{int(decision_time.timestamp())}",
         "cycle_time_utc": (available - timedelta(minutes=5)).isoformat(),
         "source": "WATCH_SHARED",
@@ -85,6 +87,9 @@ def _max_pain_snapshot(*, decision_time: datetime, tampered_hash: bool = False) 
             "condition_features": [
                 "max_pain.aggregate.short_long_liquidity_ratio"
             ],
+            "condition_values": {
+                "max_pain.aggregate.short_long_liquidity_ratio": 2.0
+            },
             "requires_previous": False,
             "evaluation_status": "EVALUABLE",
             "evaluation_reason": "current snapshot is coherent",
@@ -99,10 +104,31 @@ def _max_pain_snapshot(*, decision_time: datetime, tampered_hash: bool = False) 
 def _bind_max_pain_check(
     formula: dict, row: dict, snapshot: dict
 ) -> dict:
+    conditions = [dict(item) for item in formula.get("conditions") or []]
+    feature_values = {
+        str(condition["feature"]): 2.0 for condition in conditions
+    }
+    condition_results = [
+        {
+            "feature": str(condition["feature"]),
+            "operator": str(condition["operator"]),
+            "expected": condition.get("value"),
+            "actual": feature_values[str(condition["feature"])],
+            "available": True,
+            "passed": True,
+        }
+        for condition in conditions
+    ]
     frozen = {
         **snapshot,
+        "decision_input_policy_version": (
+            store.research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+        ),
         "formula_key": formula["formula_key"],
         "formula_version": formula["formula_version"],
+        "formula_schema_version": formula.get("formula_schema_version"),
+        "engine_version": formula.get("engine_version"),
+        "outcome_method_version": formula.get("outcome_method_version"),
         "horizon_minutes": formula["horizon_minutes"],
         "feature_schema_version": formula["feature_schema_version"],
         "event": {
@@ -112,16 +138,69 @@ def _bind_max_pain_check(
             "direction": row["direction"],
             "event_type": row["event_type"],
         },
-        "formula_key_features": {
-            "max_pain.aggregate.short_long_liquidity_ratio": 2.0
+        "formula_key_features": feature_values,
+        "conditions": conditions,
+        "condition_results": condition_results,
+        "source_inputs": {},
+        "movement_width_reference": (
+            store.research_session_width.movement_width_reference(
+                symbol=row["symbol"],
+                event_time=row["alert_time_utc"],
+                horizon_minutes=formula["horizon_minutes"],
+                as_of_utc=row["alert_time_utc"] - timedelta(minutes=10),
+                historical_index={},
+            )
+        ),
+    }
+    slot = {
+        "prospective_anchor_slot_id": 17,
+        "prospective_input_fingerprint": "d" * 64,
+        "prospective_slot_created_at_utc": row["alert_time_utc"].isoformat(),
+    }
+    source_time = (row["alert_time_utc"] - timedelta(minutes=10)).isoformat()
+    frozen["source_inputs"] = {
+        "price_oi": {
+            "timestamp_utc": source_time,
+            "price_timestamp_utc": source_time,
+            "oi_timestamp_utc": source_time,
+            "price_exchange": "binance",
+            "price_market": "spot",
+            "price_pair": "BTCUSDT",
+            "price_instrument_id": None,
+            "price_source": "binance_spot",
+            "source": "binance_spot",
+            "price_timeframe": "1m",
+            "price_interval_seconds": 60,
+            "canonical_price_method_version": (
+                store.canonical_price_path.METHOD_VERSION
+            ),
+            "canonical_price_provenance_version": (
+                store.canonical_price_path.PRICE_PROVENANCE_VERSION
+            ),
+            "canonical_price_provenance": {
+                "provenance_version": store.canonical_price_path.PRICE_PROVENANCE_VERSION,
+                "method_version": store.canonical_price_path.METHOD_VERSION,
+                "symbol": row["symbol"],
+                "exchange": "binance",
+                "market": "spot",
+                "pair": "BTCUSDT",
+                "instrument": None,
+                "interval": "1m",
+                "interval_seconds": 60,
+            },
+            **slot,
         },
-        "source_inputs": {
-            family: {
-                "timestamp_utc": (
-                    row["alert_time_utc"] - timedelta(minutes=10)
-                ).isoformat()
-            }
-            for family in ("price_oi", "futures_cvd", "spot_cvd")
+        "futures_cvd": {
+            "timestamp_utc": source_time,
+            "source": "coinglass_futures_aggregated_cvd",
+            "exchange_list": "Binance,OKX,Bybit",
+            **slot,
+        },
+        "spot_cvd": {
+            "timestamp_utc": source_time,
+            "source": "coinglass_spot_aggregated_cvd",
+            "exchange_list": "Binance,OKX,Bybit",
+            **slot,
         },
     }
     cohort_key, cohort_anchor = store._decision_cohort_identity(
@@ -132,12 +211,268 @@ def _bind_max_pain_check(
     return {
         **row,
         "input_snapshot": frozen,
+        "condition_results": condition_results,
+        "matched": True,
+        "evaluation_status": "MATCHED",
         "decision_cohort_key": cohort_key,
         "decision_anchor_time_utc": cohort_anchor,
     }
 
 
+def _authoritative_row_from_check(check: dict) -> dict:
+    """Build the immutable row independently reloaded by the v6 writer."""
+    snapshot = check["input_snapshot"]
+    max_pain = snapshot.get("max_pain_provenance")
+    row = {
+        "feature_schema_version": (
+            store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+        ),
+        "decision_input_policy_version": (
+            store.research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+        ),
+        "event": deepcopy(snapshot["event"]),
+        "raw_features": {
+            "latest_at_or_before_alert": deepcopy(snapshot["source_inputs"]),
+        },
+        "outcome_label": {
+            "movement_width_reference": deepcopy(
+                snapshot["movement_width_reference"]
+            ),
+        },
+    }
+    if isinstance(max_pain, dict):
+        row["max_pain_features"] = {
+            "features": deepcopy(max_pain["condition_values"]),
+            "evaluation_status": max_pain["evaluation_status"],
+            "reason": max_pain["evaluation_reason"],
+            "change_evaluation_status": max_pain[
+                "change_evaluation_status"
+            ],
+            "change_reason": max_pain["change_reason"],
+            "provenance": deepcopy(max_pain["provenance"]),
+            "provenance_sha256": max_pain["provenance_sha256"],
+        }
+    return row
+
+
+def _replacement_contract() -> tuple[dict, dict, list[dict]]:
+    symbols = ("BTC", "DOGE", "ETH", "SOL")
+    policy = {
+        "minimum_anchors_per_symbol": (
+            store.research_feature_matrix.REPLAY_MIN_ANCHORS_PER_SYMBOL
+        ),
+        "minimum_eligible_symbols": (
+            store.research_feature_matrix.REPLAY_MIN_ELIGIBLE_SYMBOLS
+        ),
+        "minimum_utc_dates_per_symbol": (
+            store.research_feature_matrix.REPLAY_MIN_UTC_DATES_PER_SYMBOL
+        ),
+        "minimum_span_hours_per_symbol": (
+            store.research_feature_matrix.REPLAY_MIN_SPAN_HOURS_PER_SYMBOL
+        ),
+    }
+    coverage = {
+        "dataset_kind": "historical_raw_opportunity_replay",
+        "replacement_ready": True,
+        "replay_version": store.research_historical_replay.REPLAY_VERSION,
+        "first_touch_method_version": (
+            store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+        ),
+        "movement_width_calibration_version": (
+            store.research_session_width.CALIBRATION_VERSION
+        ),
+        "canonical_price_provenance_version": (
+            store.canonical_price_path.PRICE_PROVENANCE_VERSION
+        ),
+        "readiness_policy": policy,
+        "eligible_symbols": list(symbols),
+        "symbols": len(symbols),
+        "distinct_utc_dates": 14,
+        "span_hours": 336.0,
+        "by_symbol": {
+            symbol: {
+                "anchors": 250,
+                "utc_dates": 14,
+                "span_hours": 336.0,
+                "eligible": True,
+                "failed_gates": [],
+            }
+            for symbol in symbols
+        },
+    }
+    dataset = {
+        "available": True,
+        "coverage": coverage,
+        "replay_version": store.research_historical_replay.REPLAY_VERSION,
+        "first_touch_method_version": (
+            store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+        ),
+        "movement_width_calibration_version": (
+            store.research_session_width.CALIBRATION_VERSION
+        ),
+        "canonical_price_provenance_version": (
+            store.canonical_price_path.PRICE_PROVENANCE_VERSION
+        ),
+        "outcome_method_version": (
+            store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+        ),
+        "feature_schema_version": (
+            store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+        ),
+        "horizon_minutes": 240,
+    }
+    discovery = {
+        "available": True,
+        "engine_version": store.research_formula_engine.ENGINE_VERSION,
+        "formula_schema_version": (
+            store.research_formula_engine.FORMULA_SCHEMA_VERSION
+        ),
+        "feature_schema_version": (
+            store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+        ),
+        "horizon_minutes": 240,
+    }
+    formulas = [
+        {
+            "formula_version": 1,
+            "formula_schema_version": (
+                store.research_formula_engine.FORMULA_SCHEMA_VERSION
+            ),
+            "engine_version": store.research_formula_engine.ENGINE_VERSION,
+            "feature_schema_version": (
+                store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+            ),
+            "outcome_method_version": (
+                store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+            ),
+            "horizon_minutes": 240,
+            "recommended_stage": "BACKTESTED",
+        }
+    ]
+    return dataset, discovery, formulas
+
+
 def run() -> None:
+    assert store._type_strict_json_equal({"value": 1.0}, {"value": 1.0})
+    assert not store._type_strict_json_equal({"value": True}, {"value": 1.0})
+
+    class _EnforcementRows:
+        def __init__(self, *, rows=None, row=None):
+            self.rows = list(rows or [])
+            self.row = row
+
+        def fetchall(self):
+            return self.rows
+
+        def fetchone(self):
+            return self.row
+
+    class _EnforcementConnection:
+        def __init__(
+            self,
+            *,
+            disabled_trigger=None,
+            replica_only_trigger=None,
+            wrong_type_trigger=None,
+            include_index=True,
+            wrong_index_keys=False,
+            wrong_index_predicate=False,
+        ):
+            self.disabled_trigger = disabled_trigger
+            self.replica_only_trigger = replica_only_trigger
+            self.wrong_type_trigger = wrong_type_trigger
+            self.include_index = include_index
+            self.wrong_index_keys = wrong_index_keys
+            self.wrong_index_predicate = wrong_index_predicate
+
+        def execute(self, query, params=()):
+            normalized = " ".join(str(query).split())
+            if "FROM pg_trigger" in normalized:
+                rows = []
+                for name, contract in store._LIVE_APPROVAL_TRIGGER_CONTRACTS.items():
+                    rows.append(
+                        {
+                            "trigger_name": name,
+                            "table_name": contract["table"],
+                            "enabled_state": (
+                                "D"
+                                if name == self.disabled_trigger
+                                else "R"
+                                if name == self.replica_only_trigger
+                                else "O"
+                            ),
+                            "trigger_type": (
+                                7
+                                if name == self.wrong_type_trigger
+                                else contract["trigger_type"]
+                            ),
+                            "update_columns": list(contract["update_columns"]),
+                            "function_name": contract["function"],
+                            "function_definition": " ".join(contract["tokens"]),
+                        }
+                    )
+                return _EnforcementRows(rows=rows)
+            if "FROM pg_index" in normalized:
+                if not self.include_index:
+                    return _EnforcementRows(row=None)
+                return _EnforcementRows(
+                    row={
+                        "indisunique": True,
+                        "indisvalid": True,
+                        "indisready": True,
+                        "key_columns": [
+                            (
+                                "approval_id"
+                                if self.wrong_index_keys
+                                else "formula_id"
+                            ),
+                            "formula_version",
+                            "formula_schema_version",
+                            "engine_version",
+                            "feature_schema_version",
+                            "outcome_method_version",
+                        ],
+                        "predicate_definition": (
+                            "(formula_id IS NOT NULL)"
+                            if self.wrong_index_predicate
+                            else "(engine_version IS NOT NULL)"
+                        ),
+                    }
+                )
+            raise AssertionError(f"unexpected enforcement query: {normalized}")
+
+    assert store._live_approval_enforcement_status(
+        _EnforcementConnection()
+    )["ready"] is True
+    assert store._live_approval_enforcement_status(
+        _EnforcementConnection(
+            disabled_trigger="trg_require_formula_owner_live_approval"
+        )
+    )["ready"] is False
+    assert store._live_approval_enforcement_status(
+        _EnforcementConnection(
+            replica_only_trigger="trg_require_formula_owner_live_approval"
+        )
+    )["ready"] is False
+    assert store._live_approval_enforcement_status(
+        _EnforcementConnection(
+            disabled_trigger="trg_formula_live_approvals_append_only"
+        )
+    )["ready"] is False
+    assert store._live_approval_enforcement_status(
+        _EnforcementConnection(
+            wrong_type_trigger="trg_require_formula_owner_live_approval"
+        )
+    )["ready"] is False
+    assert store._live_approval_enforcement_status(
+        _EnforcementConnection(wrong_index_keys=True)
+    )["ready"] is False
+    assert store._live_approval_enforcement_status(
+        _EnforcementConnection(wrong_index_predicate=True)
+    )["ready"] is False
+    assert store._live_approval_enforcement_status(
+        _EnforcementConnection(include_index=False)
+    )["ready"] is False
     rebound_policy = store._bind_max_pain_policy("legacy-render-override")
     for max_pain_policy_binding in (
         store.research_max_pain_archive.SHADOW_PROVENANCE_POLICY_VERSION,
@@ -152,13 +487,369 @@ def run() -> None:
         "research-formula-v5-safe-replay",
         store.research_formula_engine.FORMULA_SCHEMA_VERSION,
     }
-    persist_source = " ".join(
-        inspect.getsource(store.persist_discovery_run).split()
-    )
+    persist_source_raw = inspect.getsource(store.persist_discovery_run)
+    persist_source = " ".join(persist_source_raw.split())
     assert (
         "current_stage NOT IN ('SHADOW', 'APPROVED', 'LIVE', 'RETIRED')"
         in persist_source
     )
+    assert persist_source_raw.index("for global_rank") < persist_source_raw.index(
+        "superseded = conn.execute"
+    ), "predecessors may be retired only after the replacement cohort is persisted"
+    assert "if retirement_ready else []" in persist_source_raw
+    assert "horizon_minutes=%s" in persist_source_raw
+    assert "if current_stage not in _PROTECTED_FORMULA_STAGES" in persist_source_raw
+    assert "SET engine_version" not in persist_source_raw
+    assert (
+        "current_stage NOT IN (\n"
+        "                              'SHADOW', 'APPROVED', 'LIVE', 'RETIRED'"
+        in persist_source_raw
+    )
+    assert persist_source_raw.count("WHERE formula_id=ANY(%s)") == 2
+    assert "rowcount != len(superseded_ids)" in persist_source_raw
+    assert "rowcount != len(stale_candidate_ids)" in persist_source_raw
+
+    valid_dataset, valid_discovery, valid_formulas = _replacement_contract()
+    identity_formula = {
+        "formula_version": 1,
+        "formula_schema_version": store.research_formula_engine.FORMULA_SCHEMA_VERSION,
+        "engine_version": store.research_formula_engine.ENGINE_VERSION,
+        "feature_schema_version": store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+        "direction": "LONG",
+        "horizon_minutes": 240,
+        "conditions": [
+            {"feature": "price.return_60m", "operator": ">=", "value": 1.0}
+        ],
+        "condition_count": 1,
+    }
+    identity_stored = {
+        **identity_formula,
+        "outcome_method_version": (
+            store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+        ),
+    }
+    assert store._formula_identity_matches_discovery(
+        identity_stored,
+        identity_formula,
+        outcome_method_version=store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+    )
+    assert not store._formula_identity_matches_discovery(
+        {**identity_stored, "engine_version": "stale-engine"},
+        identity_formula,
+        outcome_method_version=store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+    )
+    assert not store._formula_identity_matches_discovery(
+        {
+            **identity_stored,
+            "conditions": [
+                {
+                    "feature": "price.return_60m",
+                    "operator": ">=",
+                    "value": True,
+                }
+            ],
+        },
+        identity_formula,
+        outcome_method_version=store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+    )
+    record_source = inspect.getsource(store.record_shadow_results)
+    pending_source = inspect.getsource(store.load_pending_live_deliveries)
+    for approval_binding in (
+        "formula_schema_version",
+        "engine_version",
+        "feature_schema_version",
+        "outcome_method_version",
+        "approval_operation_version",
+        "delivery_environment_enabled",
+    ):
+        assert approval_binding in record_source
+        assert approval_binding in pending_source
+    for runtime_guard in (
+        "f.formula_schema_version=%s",
+        "f.engine_version=%s",
+        "f.feature_schema_version=%s",
+        "f.outcome_method_version=%s",
+    ):
+        assert runtime_guard in pending_source
+
+    class _PendingRows:
+        def fetchall(self):
+            return []
+
+    class _PendingConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params=()):
+            assert str(query).count("%s") == len(params)
+            return _PendingRows()
+
+    original_pending_connect = store._connect
+    store._connect = lambda *, read_only: _PendingConnection()
+    try:
+        assert store.load_pending_live_deliveries(limit=5) == []
+    finally:
+        store._connect = original_pending_connect
+    verified = store._verified_replacement_readiness(
+        dataset=valid_dataset,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert verified["verified"] is True, verified
+    assert verified["eligible_symbols"] == ["BTC", "DOGE", "ETH", "SOL"]
+    assert verified["qualifying_formula_count"] == 1
+    active_replacement = {
+        "active": True,
+        "formula_version": 1,
+        "formula_schema_version": (
+            store.research_formula_engine.FORMULA_SCHEMA_VERSION
+        ),
+        "engine_version": store.research_formula_engine.ENGINE_VERSION,
+        "feature_schema_version": (
+            store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+        ),
+        "outcome_method_version": (
+            store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+        ),
+        "horizon_minutes": 240,
+        "latest_evaluation_run_id": 70,
+        "current_stage": "BACKTESTED",
+    }
+    assert store._replacement_cohort_supports_retirement(
+        True, [active_replacement], horizon_minutes=240, run_id=70
+    ) is True
+    assert store._replacement_cohort_supports_retirement(
+        True, [], horizon_minutes=240, run_id=70
+    ) is False
+    assert store._replacement_cohort_supports_retirement(
+        True,
+        [{**active_replacement, "active": False, "current_stage": "SHADOW"}],
+        horizon_minutes=240,
+        run_id=70,
+    ) is False
+    assert store._replacement_cohort_supports_retirement(
+        True,
+        [{**active_replacement, "latest_evaluation_run_id": 69}],
+        horizon_minutes=240,
+        run_id=70,
+    ) is False
+    assert store._replacement_cohort_supports_retirement(
+        False, [active_replacement], horizon_minutes=240, run_id=70
+    ) is False
+    for version_field, wrong_value in (
+        ("formula_version", 2),
+        ("formula_schema_version", "wrong-formula-schema"),
+        ("engine_version", "wrong-engine"),
+        ("feature_schema_version", "wrong-feature-schema"),
+        ("outcome_method_version", "wrong-outcome-method"),
+    ):
+        assert store._replacement_cohort_supports_retirement(
+            True,
+            [{**active_replacement, version_field: wrong_value}],
+            horizon_minutes=240,
+            run_id=70,
+        ) is False
+
+    unavailable_dataset = dict(valid_dataset)
+    unavailable_dataset["available"] = False
+    unavailable_result = store._verified_replacement_readiness(
+        dataset=unavailable_dataset,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert unavailable_result["verified"] is False
+    assert "dataset_available" in unavailable_result["reasons"]
+
+    missing_versions = dict(valid_dataset)
+    missing_versions.pop("replay_version")
+    missing_versions.pop("first_touch_method_version")
+    missing_versions["coverage"] = {
+        key: value
+        for key, value in valid_dataset["coverage"].items()
+        if key not in {"replay_version", "first_touch_method_version"}
+    }
+    missing_version_result = store._verified_replacement_readiness(
+        dataset=missing_versions,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert missing_version_result["verified"] is False
+    assert "replay_version" in missing_version_result["reasons"]
+    assert "first_touch_method_version" in missing_version_result["reasons"]
+
+    missing_coverage_versions = dict(valid_dataset)
+    missing_coverage_versions["coverage"] = {
+        key: value
+        for key, value in valid_dataset["coverage"].items()
+        if key
+        not in {
+            "replay_version",
+            "first_touch_method_version",
+            "canonical_price_provenance_version",
+        }
+    }
+    missing_coverage_version_result = store._verified_replacement_readiness(
+        dataset=missing_coverage_versions,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert missing_coverage_version_result["verified"] is False
+    assert "coverage_replay_version_conflict" in (
+        missing_coverage_version_result["reasons"]
+    )
+    assert "coverage_first_touch_method_version_conflict" in (
+        missing_coverage_version_result["reasons"]
+    )
+    assert "coverage_canonical_price_provenance_version_conflict" in (
+        missing_coverage_version_result["reasons"]
+    )
+
+    missing_calibration = dict(valid_dataset)
+    missing_calibration.pop("movement_width_calibration_version")
+    missing_calibration_result = store._verified_replacement_readiness(
+        dataset=missing_calibration,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert missing_calibration_result["verified"] is False
+    assert "movement_width_calibration_version" in (
+        missing_calibration_result["reasons"]
+    )
+
+    conflicting_calibration = dict(valid_dataset)
+    conflicting_calibration_coverage = dict(valid_dataset["coverage"])
+    conflicting_calibration_coverage[
+        "movement_width_calibration_version"
+    ] = "wrong-calibration"
+    conflicting_calibration["coverage"] = conflicting_calibration_coverage
+    conflicting_calibration_result = store._verified_replacement_readiness(
+        dataset=conflicting_calibration,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert conflicting_calibration_result["verified"] is False
+    assert "coverage_movement_width_calibration_version" in (
+        conflicting_calibration_result["reasons"]
+    )
+
+    missing_provenance = dict(valid_dataset)
+    missing_provenance.pop("canonical_price_provenance_version")
+    missing_provenance_result = store._verified_replacement_readiness(
+        dataset=missing_provenance,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert missing_provenance_result["verified"] is False
+    assert "canonical_price_provenance_version" in (
+        missing_provenance_result["reasons"]
+    )
+
+    conflicting_provenance = dict(valid_dataset)
+    conflicting_provenance_coverage = dict(valid_dataset["coverage"])
+    conflicting_provenance_coverage[
+        "canonical_price_provenance_version"
+    ] = "wrong-provenance"
+    conflicting_provenance["coverage"] = conflicting_provenance_coverage
+    conflicting_provenance_result = store._verified_replacement_readiness(
+        dataset=conflicting_provenance,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert conflicting_provenance_result["verified"] is False
+    assert "coverage_canonical_price_provenance_version_conflict" in (
+        conflicting_provenance_result["reasons"]
+    )
+
+    conflicting_versions = dict(valid_dataset)
+    conflicting_coverage = dict(valid_dataset["coverage"])
+    conflicting_coverage["replay_version"] = "conflicting-replay-version"
+    conflicting_versions["coverage"] = conflicting_coverage
+    conflicting_result = store._verified_replacement_readiness(
+        dataset=conflicting_versions,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert conflicting_result["verified"] is False
+    assert "coverage_replay_version_conflict" in conflicting_result["reasons"]
+
+    forged_boolean = dict(valid_dataset)
+    forged_coverage = dict(valid_dataset["coverage"])
+    forged_coverage["dataset_kind"] = "delivered_alert_outcomes"
+    forged_boolean["coverage"] = forged_coverage
+    assert store._verified_replacement_readiness(
+        dataset=forged_boolean,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )["verified"] is False
+
+    malformed_coverage_dataset = dict(valid_dataset)
+    malformed_coverage = dict(valid_dataset["coverage"])
+    malformed_by_symbol = {
+        key: dict(value)
+        for key, value in valid_dataset["coverage"]["by_symbol"].items()
+    }
+    malformed_by_symbol["BTC"]["anchors"] = 249
+    malformed_coverage["by_symbol"] = malformed_by_symbol
+    malformed_coverage_dataset["coverage"] = malformed_coverage
+    malformed_result = store._verified_replacement_readiness(
+        dataset=malformed_coverage_dataset,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert malformed_result["verified"] is False
+    assert "by_symbol.BTC.eligibility_mismatch" in malformed_result["reasons"]
+
+    nonfinite_dataset = dict(valid_dataset)
+    nonfinite_coverage = dict(valid_dataset["coverage"])
+    nonfinite_coverage["span_hours"] = float("nan")
+    nonfinite_dataset["coverage"] = nonfinite_coverage
+    nonfinite_result = store._verified_replacement_readiness(
+        dataset=nonfinite_dataset,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert nonfinite_result["verified"] is False
+    assert "span_hours" in nonfinite_result["reasons"]
+
+    empty_result = store._verified_replacement_readiness(
+        dataset=valid_dataset,
+        discovery=valid_discovery,
+        formulas=[],
+    )
+    assert empty_result["verified"] is False
+    assert "nonempty_replacement_cohort" in empty_result["reasons"]
+    assert "qualifying_replacement_formula" in empty_result["reasons"]
+
+    discovered_only = [{**valid_formulas[0], "recommended_stage": "DISCOVERED"}]
+    discovered_result = store._verified_replacement_readiness(
+        dataset=valid_dataset,
+        discovery=valid_discovery,
+        formulas=discovered_only,
+    )
+    assert discovered_result["verified"] is False
+    assert "qualifying_replacement_formula" in discovered_result["reasons"]
+
+    wrong_horizon = [{**valid_formulas[0], "horizon_minutes": 60}]
+    horizon_result = store._verified_replacement_readiness(
+        dataset=valid_dataset,
+        discovery=valid_discovery,
+        formulas=wrong_horizon,
+    )
+    assert horizon_result["verified"] is False
+    assert "formula_version_or_horizon" in horizon_result["reasons"]
+
+    missing_formula_version = [dict(valid_formulas[0])]
+    missing_formula_version[0].pop("formula_version")
+    formula_version_result = store._verified_replacement_readiness(
+        dataset=valid_dataset,
+        discovery=valid_discovery,
+        formulas=missing_formula_version,
+    )
+    assert formula_version_result["verified"] is False
+    assert "formula_version_or_horizon" in formula_version_result["reasons"]
 
     start = datetime(2026, 8, 29, 0, 0, tzinfo=timezone.utc)
     rows = [
@@ -227,10 +918,32 @@ def run() -> None:
             self.queries.append(normalized)
             if "FROM research_formulas" in normalized:
                 assert "f.current_stage='SHADOW'" in normalized
-                assert "f.formula_schema_version=ANY(%s)" in dense
+                assert (
+                    "f.formula_schema_version=%sOR("
+                    "f.formula_schema_version=%sAND"
+                    "f.engine_version=%sAND"
+                    "f.feature_schema_version=%sAND"
+                    "f.outcome_method_version=%s)"
+                ) in dense
                 assert "f.current_stage='LIVE'" in normalized
-                assert set(params[0]) == compatible_shadow_schemas
-                assert params[1] == store.research_formula_engine.FORMULA_SCHEMA_VERSION
+                assert (
+                    "f.current_stage='LIVE'AND"
+                    "f.formula_schema_version=%sAND"
+                    "f.engine_version=%sAND"
+                    "f.feature_schema_version=%sAND"
+                    "f.outcome_method_version=%s"
+                ) in dense
+                current_contract = (
+                    store.research_formula_engine.FORMULA_SCHEMA_VERSION,
+                    store.research_formula_engine.ENGINE_VERSION,
+                    store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                    store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                )
+                assert params == (
+                    "research-formula-v5-safe-replay",
+                    *current_contract,
+                    *current_contract,
+                )
                 return _Rows(
                     [
                         {
@@ -298,12 +1011,24 @@ def run() -> None:
             dense = normalized.replace(" ", "")
             if "FROM research_formulas" in normalized:
                 assert "current_stage='SHADOW'" in normalized
-                assert "formula_schema_version=ANY(%s)" in dense
+                assert "formula_schema_version=%sOR(" in dense
+                assert "engine_version=%s" in dense
+                assert "feature_schema_version=%s" in dense
+                assert "outcome_method_version=%s" in dense
                 assert "formula_schema_version" in normalized
                 assert "formula_key" in normalized
+                assert "engine_version" in normalized
                 assert "feature_schema_version" in normalized
+                assert "outcome_method_version" in normalized
+                assert "direction" in normalized
                 assert "conditions" in normalized
-                assert set(params[0]) == compatible_shadow_schemas
+                assert params == (
+                    "research-formula-v5-safe-replay",
+                    store.research_formula_engine.FORMULA_SCHEMA_VERSION,
+                    store.research_formula_engine.ENGINE_VERSION,
+                    store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                    store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                )
                 return _Rows(
                     [
                         {
@@ -313,9 +1038,14 @@ def run() -> None:
                             "formula_schema_version": (
                                 "research-formula-v5-safe-replay"
                             ),
+                            "engine_version": "formula-discovery-engine-v5",
                             "feature_schema_version": (
                                 "research-feature-matrix-v5"
                             ),
+                            "outcome_method_version": (
+                                store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+                            ),
+                            "direction": "SHORT",
                             "conditions": [],
                             "horizon_minutes": 720,
                             "latest_evaluation_run_id": 29,
@@ -484,6 +1214,103 @@ def run() -> None:
     )
     assert compatible is True and "matches" in reason
 
+    strict_width_times = tuple(
+        start - timedelta(minutes=100 - index) for index in range(80)
+    )
+    strict_reference = store.research_session_width.movement_width_reference(
+        symbol="BTC",
+        event_time=start,
+        horizon_minutes=240,
+        as_of_utc=start - timedelta(minutes=1),
+        historical_index={
+            ("BTC", 240): store.research_session_width.PriceWidthSeries(
+                times=strict_width_times,
+                abs_return_pcts=tuple([1.0] * 40 + [0.6] * 40),
+                active_ratios=tuple([1.0] * 40 + [0.0] * 40),
+            )
+        },
+    )
+    assert strict_reference["threshold_scale_factor"] == 0.60
+    strict_policy = store.research_no_dwell_outcome.freeze_threshold_policy(
+        horizon_minutes=240,
+        decision_time=start,
+        prior_only_reference=strict_reference,
+    )
+    strict_source = {
+        "first_touch_available": True,
+        "alert_time_utc": start,
+        "symbol": "BTC",
+        "input_snapshot": {
+            "snapshot_policy_version": (
+                store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
+            ),
+            "decision_cohort_policy_version": (
+                store._DECISION_COHORT_POLICY_VERSION
+            ),
+            "movement_width_reference": strict_reference,
+        },
+        "first_touch_threshold_scale_factor": 0.60,
+        "first_touch_threshold_source_kind": (
+            "PRIOR_ONLY_SESSION_CALIBRATION"
+        ),
+        "first_touch_threshold_policy": strict_policy,
+        "qualifying_move_threshold_pct": 0.60,
+    }
+    compatible, reason = store._terminal_threshold_matches_snapshot(
+        strict_source,
+        horizon_minutes=240,
+        require_v6_contract=True,
+    )
+    assert compatible is True and "matches" in reason
+    forged_reference = {
+        **strict_reference,
+        "calibration_version": "forged-calibration",
+    }
+    compatible, _ = store._terminal_threshold_matches_snapshot(
+        {
+            **strict_source,
+            "input_snapshot": {
+                **strict_source["input_snapshot"],
+                "movement_width_reference": forged_reference,
+            },
+        },
+        horizon_minutes=240,
+        require_v6_contract=True,
+    )
+    assert compatible is False
+    future_reference = {
+        **strict_reference,
+        "as_of_utc": start + timedelta(days=10),
+    }
+    compatible, _ = store._terminal_threshold_matches_snapshot(
+        {
+            **strict_source,
+            "input_snapshot": {
+                **strict_source["input_snapshot"],
+                "movement_width_reference": future_reference,
+            },
+        },
+        horizon_minutes=240,
+        require_v6_contract=True,
+    )
+    assert compatible is False
+    forged_policy = deepcopy(strict_policy)
+    forged_policy["threshold_reference_hash"] = "0" * 64
+    compatible, _ = store._terminal_threshold_matches_snapshot(
+        {**strict_source, "first_touch_threshold_policy": forged_policy},
+        horizon_minutes=240,
+        require_v6_contract=True,
+    )
+    assert compatible is False
+    boolean_policy = deepcopy(strict_policy)
+    boolean_policy["base_threshold_pct"] = True
+    compatible, _ = store._terminal_threshold_matches_snapshot(
+        {**strict_source, "first_touch_threshold_policy": boolean_policy},
+        horizon_minutes=240,
+        require_v6_contract=True,
+    )
+    assert compatible is False
+
     mismatched_terminal = {
         **_shadow_row(30, at=start + timedelta(hours=8)),
         "input_snapshot": relaxed_snapshot,
@@ -522,7 +1349,9 @@ def run() -> None:
         "formula_key": "f" * 64,
         "formula_version": 1,
         "formula_schema_version": store.research_formula_engine.FORMULA_SCHEMA_VERSION,
+        "engine_version": store.research_formula_engine.ENGINE_VERSION,
         "feature_schema_version": store.research_feature_matrix.FEATURE_SCHEMA_VERSION,
+        "outcome_method_version": store.research_feature_matrix.VERIFIED_OUTCOME_METHOD,
         "direction": "LONG",
         "horizon_minutes": 60,
         "conditions": [
@@ -533,6 +1362,58 @@ def run() -> None:
             }
         ],
     }
+    no_max_pain_formula = {
+        **max_pain_formula,
+        "formula_key": "e" * 64,
+        "conditions": [
+            {"feature": "price.return_60m", "operator": ">=", "value": 0.1}
+        ],
+    }
+    compatible, _ = store._max_pain_shadow_check_contract(
+        no_max_pain_formula,
+        {
+            **_shadow_row(39, at=start + timedelta(minutes=5)),
+            "input_snapshot": {},
+            "decision_cohort_key": "0" * 64,
+            "decision_anchor_time_utc": start + timedelta(days=1),
+        },
+    )
+    assert compatible is False
+    header_only_snapshot = {
+        "formula_schema_version": (
+            store.research_formula_engine.FORMULA_SCHEMA_VERSION
+        ),
+        "engine_version": store.research_formula_engine.ENGINE_VERSION,
+        "feature_schema_version": (
+            store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+        ),
+        "outcome_method_version": (
+            store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+        ),
+        "snapshot_policy_version": store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
+        "decision_cohort_policy_version": (
+            store._DECISION_COHORT_POLICY_VERSION
+        ),
+        "decision_input_policy_version": (
+            store.research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+        ),
+        "movement_width_reference": (
+            store.research_session_width.movement_width_reference(
+                symbol="BTC",
+                event_time=start + timedelta(minutes=5),
+                horizon_minutes=60,
+                as_of_utc=start,
+                historical_index={},
+            )
+        ),
+    }
+    compatible, reason = store._max_pain_snapshot_contract(
+        no_max_pain_formula,
+        header_only_snapshot,
+        decision_time_utc=start + timedelta(minutes=5),
+        symbol="BTC",
+    )
+    assert compatible is False and "conditions" in reason
     malformed_at = start + timedelta(minutes=10)
     valid_at = start + timedelta(minutes=40)
     malformed = _bind_max_pain_check(
@@ -546,6 +1427,257 @@ def run() -> None:
         {**_shadow_row(41, at=valid_at), "outcome_due": True},
         _max_pain_snapshot(decision_time=valid_at),
     )
+    for location, field, corrupt_value in (
+        ("event", "event_id", str(valid_max_pain["event_id"])),
+        ("event", "event_id", True),
+        ("snapshot", "formula_version", "1"),
+        ("snapshot", "formula_version", True),
+        ("snapshot", "horizon_minutes", "60"),
+        ("snapshot", "horizon_minutes", True),
+    ):
+        malformed_identity = deepcopy(valid_max_pain)
+        if location == "event":
+            malformed_identity["input_snapshot"]["event"][field] = corrupt_value
+        else:
+            malformed_identity["input_snapshot"][field] = corrupt_value
+        compatible, _ = store._max_pain_shadow_check_contract(
+            max_pain_formula, malformed_identity
+        )
+        assert compatible is False
+
+    # The v6 write boundary does not trust a caller merely because all of its
+    # submitted fields agree with one another. It independently rebuilds the
+    # formula-visible row from immutable slots and compares every bound input.
+    authoritative_row = _authoritative_row_from_check(valid_max_pain)
+    compatible, reason = store._authoritative_v6_row_contract(
+        max_pain_formula,
+        valid_max_pain,
+        valid_max_pain,
+        authoritative_row,
+    )
+    assert compatible is True and "authoritative" in reason
+
+    max_pain_feature = (
+        "max_pain.aggregate.short_long_liquidity_ratio"
+    )
+    boolean_condition = deepcopy(valid_max_pain)
+    boolean_condition["input_snapshot"]["conditions"][0]["value"] = True
+    boolean_condition["input_snapshot"]["condition_results"][0][
+        "expected"
+    ] = True
+    boolean_condition["condition_results"][0]["expected"] = True
+    compatible, _ = store._max_pain_shadow_check_contract(
+        max_pain_formula, boolean_condition
+    )
+    assert compatible is False
+
+    # Even a caller that forges every submitted copy consistently cannot use
+    # Python's True == 1.0 equivalence at the authoritative write boundary.
+    boolean_feature = deepcopy(valid_max_pain)
+    boolean_authoritative = deepcopy(authoritative_row)
+    boolean_authoritative["max_pain_features"]["features"][
+        max_pain_feature
+    ] = 1.0
+    boolean_feature["input_snapshot"]["formula_key_features"][
+        max_pain_feature
+    ] = True
+    boolean_feature["input_snapshot"]["condition_results"][0].update(
+        {"actual": True, "passed": True}
+    )
+    boolean_feature["condition_results"][0].update(
+        {"actual": True, "passed": True}
+    )
+    boolean_feature["input_snapshot"]["max_pain_provenance"][
+        "condition_values"
+    ][max_pain_feature] = True
+    compatible, reason = store._authoritative_v6_row_contract(
+        max_pain_formula,
+        boolean_feature,
+        boolean_feature,
+        boolean_authoritative,
+    )
+    assert compatible is False and "feature values" in reason
+
+    consistent_forgery = deepcopy(valid_max_pain)
+    forged_value = 0.25
+    consistent_forgery["input_snapshot"]["formula_key_features"][
+        max_pain_feature
+    ] = forged_value
+    consistent_forgery["input_snapshot"]["condition_results"][0].update(
+        {"actual": forged_value, "passed": False}
+    )
+    consistent_forgery["condition_results"][0].update(
+        {"actual": forged_value, "passed": False}
+    )
+    consistent_forgery["input_snapshot"]["max_pain_provenance"][
+        "condition_values"
+    ][max_pain_feature] = forged_value
+    consistent_forgery["evaluation_status"] = "UNMATCHED"
+    consistent_forgery["matched"] = False
+    compatible, reason = store._authoritative_v6_row_contract(
+        max_pain_formula,
+        consistent_forgery,
+        consistent_forgery,
+        authoritative_row,
+    )
+    assert compatible is False and "feature values" in reason
+
+    forged_sources = deepcopy(valid_max_pain)
+    forged_sources["input_snapshot"]["source_inputs"]["futures_cvd"][
+        "prospective_input_fingerprint"
+    ] = "0" * 64
+    compatible, reason = store._authoritative_v6_row_contract(
+        max_pain_formula,
+        forged_sources,
+        forged_sources,
+        authoritative_row,
+    )
+    assert compatible is False and "source inputs" in reason
+
+    forged_width = deepcopy(valid_max_pain)
+    forged_width["input_snapshot"]["movement_width_reference"][
+        "threshold_scale_factor"
+    ] = 0.01
+    compatible, reason = store._authoritative_v6_row_contract(
+        max_pain_formula,
+        forged_width,
+        forged_width,
+        authoritative_row,
+    )
+    assert compatible is False and "movement-width" in reason
+
+    forged_max_pain = deepcopy(valid_max_pain)
+    forged_max_pain["input_snapshot"]["max_pain_provenance"][
+        "provenance_sha256"
+    ] = "0" * 64
+    compatible, reason = store._authoritative_v6_row_contract(
+        max_pain_formula,
+        forged_max_pain,
+        forged_max_pain,
+        authoritative_row,
+    )
+    assert compatible is False and "Max-Pain" in reason
+
+    missing_row_compatible, missing_row_reason = (
+        store._authoritative_v6_row_contract(
+            max_pain_formula,
+            valid_max_pain,
+            valid_max_pain,
+            None,
+        )
+    )
+    assert missing_row_compatible is False
+    assert "unavailable" in missing_row_reason
+
+    class _WriteRows:
+        def __init__(self, rows):
+            self._rows = list(rows)
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return self._rows
+
+    class _AuthoritativeWriteConnection:
+        def __init__(self):
+            self.queries = []
+            self.inserted_check = None
+            self.committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params=()):
+            assert query.count("%s") == len(params)
+            normalized = " ".join(query.split())
+            self.queries.append(normalized)
+            if "FROM research_formulas WHERE formula_id=" in normalized:
+                return _WriteRows(
+                    [
+                        {
+                            **max_pain_formula,
+                            "current_stage": "SHADOW",
+                            "active": True,
+                            "shadow_started_at_utc": valid_at
+                            - timedelta(minutes=1),
+                            "last_shadow_event_id": 0,
+                            "live_alert_approved": False,
+                            "live_alert_approved_by": None,
+                        }
+                    ]
+                )
+            if "FROM research_events candidate" in normalized:
+                return _WriteRows(
+                    [
+                        {
+                            "event_id": valid_max_pain["event_id"],
+                            "alert_time_utc": valid_at,
+                            "symbol": "BTC",
+                            "direction": "LONG",
+                            "event_type": "SELFTEST_ALERT",
+                            "setup_key": None,
+                            "event_kind": "ALERT",
+                            "delivery_status": "DELIVERED",
+                            "shadow_eligible": True,
+                        }
+                    ]
+                )
+            if "INSERT INTO research_formula_shadow_checks" in normalized:
+                self.inserted_check = params
+                return _WriteRows([{"formula_id": max_pain_formula["formula_id"]}])
+            if "UPDATE research_formulas" in normalized:
+                return _WriteRows([])
+            raise AssertionError(f"unexpected authoritative write query: {normalized}")
+
+        def commit(self):
+            self.committed = True
+
+    # If the authoritative rebuild crashes, the submitted MATCHED payload is
+    # persisted only as UNEVALUABLE. It must never create a hit or LIVE queue.
+    write_connection = _AuthoritativeWriteConnection()
+    original_authoritative_loader = (
+        store.research_feature_matrix.load_shadow_feature_rows_by_horizon
+    )
+    original_write_connect = store._connect
+    store.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+        lambda _requested: (_ for _ in ()).throw(
+            RuntimeError("selftest frozen-slot archive unavailable")
+        )
+    )
+    store._connect = lambda *, read_only: write_connection
+    try:
+        write_result = store.record_shadow_results(
+            formula=max_pain_formula,
+            results=[valid_max_pain],
+        )
+    finally:
+        store._connect = original_write_connect
+        store.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+            original_authoritative_loader
+        )
+    assert write_result == {
+        "checked": 1,
+        "matched": 0,
+        "queued": 0,
+        "new_hit_event_ids": [],
+    }
+    assert write_connection.committed is True
+    assert write_connection.inserted_check is not None
+    assert write_connection.inserted_check[2] is False
+    assert write_connection.inserted_check[4] == "UNEVALUABLE"
+    assert "authoritative frozen-row rebuild failed" in str(
+        write_connection.inserted_check[5]
+    )
+    assert not any(
+        "INSERT INTO research_formula_shadow_hits" in query
+        or "INSERT INTO research_formula_live_deliveries" in query
+        for query in write_connection.queries
+    )
+
     max_pain_validation = store._build_shadow_validation(
         max_pain_formula,
         [malformed, valid_max_pain],

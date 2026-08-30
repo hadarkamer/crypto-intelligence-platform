@@ -34,6 +34,12 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "009_formula_owner_live_approval_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "010_prospective_max_pain_freeze_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "011_formula_owner_live_engine_binding_v2.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

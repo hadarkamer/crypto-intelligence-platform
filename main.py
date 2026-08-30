@@ -4863,7 +4863,13 @@ def _start_first_touch_backfill_task(*, schema_ready: bool) -> bool:
     if FIRST_TOUCH_BACKFILL_TASK is not None and not FIRST_TOUCH_BACKFILL_TASK.done():
         return True
     symbols, max_anchors = _first_touch_backfill_config()
-    frozen_end = datetime.now(timezone.utc)
+    # Import only after both explicit writer guards pass.  The shared helper
+    # freezes a cohort whose longest outcome (24h) has closed plus API grace.
+    import research_historical_replay
+
+    frozen_end = research_historical_replay.fully_closed_end(
+        (60, 240, 720, 1440), now=datetime.now(timezone.utc)
+    )
     FIRST_TOUCH_BACKFILL_TASK = asyncio.create_task(
         _first_touch_backfill_once(
             frozen_end_at_utc=frozen_end,

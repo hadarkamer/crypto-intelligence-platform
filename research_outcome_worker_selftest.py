@@ -361,6 +361,7 @@ def run() -> None:
         reference_capture.query
     )
     assert "f.horizon_minutes" in reference_capture.query
+    assert "f.formula_schema_version" in reference_capture.query
     assert reference_capture.params == [[7, 8]]
 
     legacy_snapshot = {
@@ -393,6 +394,188 @@ def run() -> None:
     )
     assert frozen_policy["threshold_scale_factor"] == 0.60
     assert frozen_policy["qualifying_move_threshold_pct"] == 0.60
+
+    width_times = tuple(
+        START - timedelta(minutes=100 - index) for index in range(80)
+    )
+    width_series = worker.research_session_width.PriceWidthSeries(
+        times=width_times,
+        abs_return_pcts=tuple([1.0] * 40 + [0.6] * 40),
+        active_ratios=tuple([1.0] * 40 + [0.0] * 40),
+    )
+    strict_reference = worker.research_session_width.movement_width_reference(
+        symbol="BTC",
+        event_time=START,
+        horizon_minutes=240,
+        as_of_utc=START - timedelta(minutes=1),
+        historical_index={("BTC", 240): width_series},
+    )
+    assert strict_reference["threshold_scale_factor"] == 0.60
+    strict_event = {
+        "event_id": 1,
+        "alert_time_utc": START,
+        "symbol": "BTC",
+        "direction": "LONG",
+        "event_type": "SELFTEST",
+    }
+    strict_condition = {
+        "feature": "raw.60m.price_change_pct",
+        "operator": ">=",
+        "value": 0.1,
+    }
+    strict_formula = {
+        "formula_id": 11,
+        "formula_key": "f" * 64,
+        "formula_version": 1,
+        "formula_schema_version": (
+            worker.research_formula_engine.FORMULA_SCHEMA_VERSION
+        ),
+        "engine_version": worker.research_formula_engine.ENGINE_VERSION,
+        "feature_schema_version": (
+            worker.research_formula_store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+        ),
+        "outcome_method_version": (
+            worker.research_formula_store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+        ),
+        "direction": "LONG",
+        "horizon_minutes": 240,
+        "conditions": [strict_condition],
+    }
+    strict_results = [
+        {
+            "feature": strict_condition["feature"],
+            "operator": strict_condition["operator"],
+            "expected": strict_condition["value"],
+            "actual": 0.2,
+            "available": True,
+            "passed": True,
+        }
+    ]
+    strict_snapshot = {
+        "snapshot_policy_version": (
+            worker.research_formula_store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
+        ),
+        "decision_cohort_policy_version": (
+            worker.research_formula_store._DECISION_COHORT_POLICY_VERSION
+        ),
+        "decision_input_policy_version": (
+            worker.research_formula_store.research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+        ),
+        "formula_key": strict_formula["formula_key"],
+        "formula_version": 1,
+        "formula_schema_version": strict_formula["formula_schema_version"],
+        "engine_version": strict_formula["engine_version"],
+        "outcome_method_version": strict_formula["outcome_method_version"],
+        "horizon_minutes": 240,
+        "feature_schema_version": strict_formula["feature_schema_version"],
+        "event": strict_event,
+        "formula_key_features": {strict_condition["feature"]: 0.2},
+        "conditions": [strict_condition],
+        "condition_results": strict_results,
+        "source_inputs": {},
+        "movement_width_reference": strict_reference,
+    }
+    strict_slot = {
+        "prospective_anchor_slot_id": 23,
+        "prospective_input_fingerprint": "e" * 64,
+        "prospective_slot_created_at_utc": START,
+    }
+    strict_source_time = START - timedelta(minutes=1)
+    strict_snapshot["source_inputs"] = {
+        "price_oi": {
+            "timestamp_utc": strict_source_time,
+            "price_timestamp_utc": strict_source_time,
+            "oi_timestamp_utc": strict_source_time,
+            "price_exchange": "binance",
+            "price_market": "spot",
+            "price_pair": "BTCUSDT",
+            "price_instrument_id": None,
+            "price_source": "binance_spot",
+            "source": "binance_spot",
+            "price_timeframe": "1m",
+            "price_interval_seconds": 60,
+            "canonical_price_method_version": (
+                worker.canonical_price_path.METHOD_VERSION
+            ),
+            "canonical_price_provenance_version": (
+                worker.canonical_price_path.PRICE_PROVENANCE_VERSION
+            ),
+            "canonical_price_provenance": {
+                "provenance_version": worker.canonical_price_path.PRICE_PROVENANCE_VERSION,
+                "method_version": worker.canonical_price_path.METHOD_VERSION,
+                "symbol": "BTC",
+                "exchange": "binance",
+                "market": "spot",
+                "pair": "BTCUSDT",
+                "instrument": None,
+                "interval": "1m",
+                "interval_seconds": 60,
+            },
+            **strict_slot,
+        },
+        "futures_cvd": {
+            "timestamp_utc": strict_source_time,
+            "source": "coinglass_futures_aggregated_cvd",
+            "exchange_list": "Binance,OKX,Bybit",
+            **strict_slot,
+        },
+        "spot_cvd": {
+            "timestamp_utc": strict_source_time,
+            "source": "coinglass_spot_aggregated_cvd",
+            "exchange_list": "Binance,OKX,Bybit",
+            **strict_slot,
+        },
+    }
+    cohort_key, cohort_anchor = (
+        worker.research_formula_store._decision_cohort_identity(
+            formula=strict_formula,
+            event=strict_event,
+            snapshot=strict_snapshot,
+        )
+    )
+    strict_record = {
+        **strict_formula,
+        "event_id": 1,
+        "input_snapshot": strict_snapshot,
+        "condition_results": strict_results,
+        "decision_cohort_key": cohort_key,
+        "decision_anchor_time_utc": cohort_anchor,
+        "evaluation_status": "MATCHED",
+        "matched": True,
+    }
+    strict_policy = worker._frozen_threshold_policy(
+        event=strict_event,
+        horizon_minutes=240,
+        snapshot_records=[strict_record],
+    )
+    assert strict_policy["threshold_reference_version"] == (
+        worker.research_session_width.CALIBRATION_VERSION
+    )
+    assert strict_policy["threshold_reference"] == (
+        worker.research_no_dwell_outcome.threshold_reference_snapshot(
+            strict_reference
+        )
+    )
+    forged_strict = {
+        **strict_record,
+        "input_snapshot": {
+            **strict_snapshot,
+            "movement_width_reference": {
+                **strict_reference,
+                "as_of_utc": START + timedelta(days=10),
+            }
+        },
+    }
+    try:
+        worker._frozen_threshold_policy(
+            event=strict_event,
+            horizon_minutes=240,
+            snapshot_records=[forged_strict],
+        )
+    except worker.FrozenThresholdPolicyConflict as exc:
+        assert "newer than decision time" in str(exc)
+    else:
+        raise AssertionError("future v6 movement-width calibration was accepted")
 
     conflicting_record = {
         **legacy_record,

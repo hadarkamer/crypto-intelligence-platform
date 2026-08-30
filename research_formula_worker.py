@@ -77,52 +77,9 @@ def _max_pain_snapshot_evidence(
     formula: Mapping[str, Any],
     row: Optional[Mapping[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    condition_features = research_formula_store._v6_max_pain_condition_features(
-        formula
+    return research_formula_store._canonical_max_pain_snapshot_evidence(
+        formula, row
     )
-    if not condition_features:
-        return None
-    wrapper = row.get("max_pain_features") if isinstance(row, Mapping) else {}
-    if not isinstance(wrapper, Mapping):
-        wrapper = {}
-    requires_previous = research_formula_store._max_pain_previous_required(
-        condition_features
-    )
-    provenance = (
-        dict(wrapper.get("provenance"))
-        if isinstance(wrapper.get("provenance"), Mapping)
-        else {}
-    )
-    if provenance and not requires_previous:
-        # The feature builder may have derived deltas for other formulas in the
-        # same event batch. A current-only formula must bind only the snapshot it
-        # actually consumed, not an unused previous set.
-        provenance.update(
-            {
-                "previous": None,
-                "used_for_delta": False,
-                "previous_gap_minutes": None,
-            }
-        )
-    provenance_sha256 = (
-        research_max_pain_archive.canonical_provenance_sha256(provenance)
-        if provenance
-        else wrapper.get("provenance_sha256")
-    )
-    return {
-        "condition_features": list(condition_features),
-        "requires_previous": requires_previous,
-        "evaluation_status": str(
-            wrapper.get("evaluation_status") or "UNEVALUABLE"
-        ).upper(),
-        "evaluation_reason": wrapper.get("reason"),
-        "change_evaluation_status": str(
-            wrapper.get("change_evaluation_status") or "UNEVALUABLE"
-        ).upper(),
-        "change_reason": wrapper.get("change_reason"),
-        "provenance": provenance,
-        "provenance_sha256": provenance_sha256,
-    }
 
 
 def _shadow_snapshot(
@@ -159,8 +116,16 @@ def _shadow_snapshot(
             research_formula_store._SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
         ),
         "decision_cohort_policy_version": _DECISION_COHORT_POLICY_VERSION,
+        "decision_input_policy_version": (
+            row.get("decision_input_policy_version")
+            if isinstance(row, Mapping)
+            else None
+        ),
         "formula_key": formula.get("formula_key"),
         "formula_version": int(formula.get("formula_version") or 0),
+        "formula_schema_version": formula.get("formula_schema_version"),
+        "engine_version": formula.get("engine_version"),
+        "outcome_method_version": formula.get("outcome_method_version"),
         "horizon_minutes": int(formula.get("horizon_minutes") or 0),
         "event": {
             "event_id": int(event["event_id"]),

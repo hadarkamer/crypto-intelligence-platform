@@ -36,6 +36,7 @@ def _record(set_id: int, *, available_at: datetime, marker: str) -> dict:
             research_max_pain_archive.CUTOVER_TIME_UTC.isoformat()
         ),
         "available_at_utc": available_at.isoformat(),
+        "created_at_utc": (available_at + timedelta(seconds=5)).isoformat(),
         "cycle_id": f"selftest:{set_id}",
         "cycle_time_utc": (available_at - timedelta(minutes=5)).isoformat(),
         "source": "WATCH_SHARED",
@@ -82,7 +83,9 @@ def _formula(feature: str, *, schema: str | None = None) -> dict:
         "formula_schema_version": (
             schema or research_formula_engine.FORMULA_SCHEMA_VERSION
         ),
+        "engine_version": research_formula_engine.ENGINE_VERSION,
         "feature_schema_version": research_feature_matrix.FEATURE_SCHEMA_VERSION,
+        "outcome_method_version": research_feature_matrix.VERIFIED_OUTCOME_METHOD,
         "direction": "LONG",
         "horizon_minutes": 240,
         "conditions": [{"feature": feature, "operator": ">=", "value": 1.0}],
@@ -102,14 +105,75 @@ def _event() -> dict:
 
 def _row(*, delta: bool) -> dict:
     provenance = _provenance(delta=delta)
+    slot = {
+        "prospective_anchor_slot_id": 7,
+        "prospective_input_fingerprint": "c" * 64,
+        "prospective_slot_created_at_utc": (
+            BASE + timedelta(minutes=10)
+        ).isoformat(),
+    }
     return {
+        "decision_input_policy_version": (
+            research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+        ),
         "raw_features": {
             "latest_at_or_before_alert": {
-                family: {"timestamp_utc": BASE.isoformat()}
-                for family in ("price_oi", "futures_cvd", "spot_cvd")
+                "price_oi": {
+                    "timestamp_utc": BASE.isoformat(),
+                    "price_timestamp_utc": BASE.isoformat(),
+                    "oi_timestamp_utc": BASE.isoformat(),
+                    "price_exchange": "binance",
+                    "price_market": "spot",
+                    "price_pair": "BTCUSDT",
+                    "price_instrument_id": None,
+                    "price_source": "binance_spot",
+                    "source": "binance_spot",
+                    "price_timeframe": "1m",
+                    "price_interval_seconds": 60,
+                    "canonical_price_method_version": (
+                        research_formula_store.canonical_price_path.METHOD_VERSION
+                    ),
+                    "canonical_price_provenance_version": (
+                        research_formula_store.canonical_price_path.PRICE_PROVENANCE_VERSION
+                    ),
+                    "canonical_price_provenance": {
+                        "provenance_version": research_formula_store.canonical_price_path.PRICE_PROVENANCE_VERSION,
+                        "method_version": research_formula_store.canonical_price_path.METHOD_VERSION,
+                        "symbol": "BTC",
+                        "exchange": "binance",
+                        "market": "spot",
+                        "pair": "BTCUSDT",
+                        "instrument": None,
+                        "interval": "1m",
+                        "interval_seconds": 60,
+                    },
+                    **slot,
+                },
+                "futures_cvd": {
+                    "timestamp_utc": BASE.isoformat(),
+                    "source": "coinglass_futures_aggregated_cvd",
+                    "exchange_list": "Binance,OKX,Bybit",
+                    **slot,
+                },
+                "spot_cvd": {
+                    "timestamp_utc": BASE.isoformat(),
+                    "source": "coinglass_spot_aggregated_cvd",
+                    "exchange_list": "Binance,OKX,Bybit",
+                    **slot,
+                },
             }
         },
-        "outcome_label": {},
+        "outcome_label": {
+            "movement_width_reference": (
+                research_formula_store.research_session_width.movement_width_reference(
+                    symbol="BTC",
+                    event_time=BASE + timedelta(minutes=10),
+                    horizon_minutes=240,
+                    as_of_utc=BASE,
+                    historical_index={},
+                )
+            )
+        },
         "max_pain_features": {
             "evaluation_status": "EVALUABLE",
             "reason": "current snapshot is coherent",
@@ -119,6 +183,10 @@ def _row(*, delta: bool) -> dict:
                 if delta
                 else "no eligible earlier snapshot is available"
             ),
+            "features": {
+                "max_pain.aggregate.short_long_liquidity_ratio": 2.0,
+                "max_pain.delta.upside_liquidity_usd_trend": 2.0,
+            },
             **provenance,
         },
     }
@@ -130,7 +198,16 @@ def _evaluation(feature: str) -> dict:
         "matched": True,
         "reason": "all formula conditions passed",
         "features": {feature: 2.0},
-        "condition_results": [],
+        "condition_results": [
+            {
+                "feature": feature,
+                "operator": ">=",
+                "expected": 1.0,
+                "actual": 2.0,
+                "available": True,
+                "passed": True,
+            }
+        ],
     }
 
 
@@ -201,6 +278,9 @@ def run() -> None:
     frozen_check = {
         **event,
         "input_snapshot": snapshot,
+        "condition_results": snapshot["condition_results"],
+        "evaluation_status": "MATCHED",
+        "matched": True,
         "decision_cohort_key": cohort_key,
         "decision_anchor_time_utc": anchor,
     }

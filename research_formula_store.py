@@ -19,9 +19,11 @@ except Exception:  # pragma: no cover
 import canonical_price_path
 import research_feature_matrix
 import research_formula_engine
+import research_historical_replay
 import research_max_pain_archive
 import research_mfe_mae_efficiency
 import research_no_dwell_outcome
+import research_session_width
 
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -38,16 +40,84 @@ _STAGE_ORDER = {
     "RETIRED": 6,
 }
 _AUTOMATIC_STAGE_PATH = ("DISCOVERED", "BACKTESTED", "HOLDOUT_PASSED", "SHADOW")
+_PROTECTED_FORMULA_STAGES = frozenset(
+    {"SHADOW", "APPROVED", "LIVE", "RETIRED"}
+)
+_REPLACEMENT_DATASET_KIND = "historical_raw_opportunity_replay"
+_REPLACEMENT_QUALIFYING_STAGES = frozenset(
+    {"BACKTESTED", "HOLDOUT_PASSED", "SHADOW", "APPROVED", "LIVE"}
+)
 _SHADOW_COMPATIBLE_FORMULA_SCHEMAS = (
     "research-formula-v5-safe-replay",
     research_formula_engine.FORMULA_SCHEMA_VERSION,
 )
 _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION = (
-    "formula-shadow-input-snapshot-v3-max-pain-provenance"
+    "formula-shadow-input-snapshot-v4-authoritative-frozen-recompute"
 )
 _DECISION_COHORT_POLICY_VERSION = (
-    "formula-shadow-decision-cohort-v2-max-pain-anchor"
+    "formula-shadow-decision-cohort-v4-frozen-max-pain-all-source-timestamps"
 )
+_LIVE_APPROVAL_OPERATION_VERSION = (
+    "formula-owner-live-approval-v2-engine-bound"
+)
+_LIVE_APPROVAL_TRIGGER_CONTRACTS = {
+    "trg_formula_live_approvals_append_only": {
+        "table": "research_formula_live_approvals",
+        "function": "prevent_formula_live_approval_mutation",
+        "trigger_type": 27,
+        "update_columns": (),
+        "tokens": ("research_formula_live_approvals is append-only",),
+    },
+    "trg_validate_formula_owner_live_approval": {
+        "table": "research_formula_live_approvals",
+        "function": "validate_formula_owner_live_approval",
+        "trigger_type": 7,
+        "update_columns": (),
+        "tokens": (
+            _LIVE_APPROVAL_OPERATION_VERSION,
+            "formula_row.engine_version",
+            "new.engine_version",
+        ),
+    },
+    "trg_require_formula_owner_live_approval": {
+        "table": "research_formulas",
+        "function": "require_formula_owner_live_approval",
+        "trigger_type": 19,
+        "update_columns": ("current_stage",),
+        "tokens": (
+            _LIVE_APPROVAL_OPERATION_VERSION,
+            "approval.engine_version",
+            "new.engine_version",
+        ),
+    },
+    "trg_prevent_protected_formula_contract_mutation": {
+        "table": "research_formulas",
+        "function": "prevent_protected_formula_contract_mutation",
+        "trigger_type": 19,
+        "update_columns": (),
+        "tokens": (
+            "protected formula stage cannot be downgraded or reactivated",
+            "protected formula active state is inconsistent with lifecycle stage",
+            "protected formula runtime contract is immutable",
+            "protected formula approval evidence is immutable",
+            "new.engine_version",
+        ),
+    },
+}
+_LIVE_APPROVAL_UNIQUE_INDEX = "idx_formula_live_approvals_exact_runtime"
+
+
+def _current_v6_formula_contract(formula: Mapping[str, Any]) -> bool:
+    """Return whether every executable v6 contract version is exact."""
+    return bool(
+        formula.get("formula_schema_version")
+        == research_formula_engine.FORMULA_SCHEMA_VERSION
+        and formula.get("engine_version") == research_formula_engine.ENGINE_VERSION
+        and formula.get("feature_schema_version")
+        == research_feature_matrix.FEATURE_SCHEMA_VERSION
+        and formula.get("outcome_method_version")
+        == research_feature_matrix.VERIFIED_OUTCOME_METHOD
+    )
 
 
 def _bind_efficiency_policy(policy_version: str) -> str:
@@ -130,6 +200,26 @@ def _json(value: Any) -> str:
     )
 
 
+def _canonical_json(value: Any) -> str:
+    """Serialize JSON for exact comparisons, preserving scalar JSON types."""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _type_strict_json_equal(left: Any, right: Any) -> bool:
+    """Compare canonical JSON without Python's bool/number equality coercion."""
+    try:
+        return _canonical_json(left) == _canonical_json(right)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _json_safe(value: Any) -> Any:
     return json.loads(
         json.dumps(
@@ -137,6 +227,263 @@ def _json_safe(value: Any) -> Any:
             ensure_ascii=False,
             default=str,
             allow_nan=False,
+        )
+    )
+
+
+def _strict_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return int(value)
+
+
+def _strict_finite_number(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _verified_replacement_readiness(
+    *,
+    dataset: Mapping[str, Any],
+    discovery: Mapping[str, Any],
+    formulas: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Verify the complete v6 replacement contract without trusting one flag.
+
+    Coverage is produced by the historical replay loader, but retirement is a
+    durable lifecycle change.  Recheck its frozen evidence here and require an
+    explicitly version-bound, non-empty same-horizon replacement cohort.
+    Missing or malformed evidence fails closed.
+    """
+    coverage_source = dataset.get("coverage")
+    coverage = dict(coverage_source) if isinstance(coverage_source, Mapping) else {}
+    reasons: list[str] = []
+    expected_horizon = _strict_int(discovery.get("horizon_minutes"))
+
+    if dataset.get("available") is not True:
+        reasons.append("dataset_available")
+    if discovery.get("available") is not True:
+        reasons.append("discovery_available")
+    if coverage.get("dataset_kind") != _REPLACEMENT_DATASET_KIND:
+        reasons.append("dataset_kind")
+    if coverage.get("replacement_ready") is not True:
+        reasons.append("declared_replacement_ready")
+
+    replay_version = dataset.get("replay_version")
+    first_touch_version = dataset.get("first_touch_method_version")
+    if replay_version != research_historical_replay.REPLAY_VERSION:
+        reasons.append("replay_version")
+    if coverage.get("replay_version") != replay_version:
+        reasons.append("coverage_replay_version_conflict")
+    if first_touch_version != research_feature_matrix.VERIFIED_OUTCOME_METHOD:
+        reasons.append("first_touch_method_version")
+    if coverage.get("first_touch_method_version") != first_touch_version:
+        reasons.append("coverage_first_touch_method_version_conflict")
+    calibration_version = dataset.get(
+        "movement_width_calibration_version"
+    )
+    if calibration_version != research_session_width.CALIBRATION_VERSION:
+        reasons.append("movement_width_calibration_version")
+    if coverage.get("movement_width_calibration_version") != (
+        research_session_width.CALIBRATION_VERSION
+    ):
+        reasons.append("coverage_movement_width_calibration_version")
+    provenance_version = dataset.get("canonical_price_provenance_version")
+    if provenance_version != canonical_price_path.PRICE_PROVENANCE_VERSION:
+        reasons.append("canonical_price_provenance_version")
+    if coverage.get("canonical_price_provenance_version") != provenance_version:
+        reasons.append("coverage_canonical_price_provenance_version_conflict")
+    if (
+        dataset.get("outcome_method_version")
+        != research_feature_matrix.VERIFIED_OUTCOME_METHOD
+    ):
+        reasons.append("outcome_method_version")
+    if (
+        dataset.get("feature_schema_version")
+        != research_feature_matrix.FEATURE_SCHEMA_VERSION
+    ):
+        reasons.append("dataset_feature_schema_version")
+    if (
+        discovery.get("feature_schema_version")
+        != research_feature_matrix.FEATURE_SCHEMA_VERSION
+    ):
+        reasons.append("discovery_feature_schema_version")
+    if (
+        discovery.get("formula_schema_version")
+        != research_formula_engine.FORMULA_SCHEMA_VERSION
+    ):
+        reasons.append("formula_schema_version")
+    if discovery.get("engine_version") != research_formula_engine.ENGINE_VERSION:
+        reasons.append("engine_version")
+
+    dataset_horizon = _strict_int(dataset.get("horizon_minutes"))
+    if expected_horizon not in {60, 240, 720, 1440}:
+        reasons.append("discovery_horizon_minutes")
+    if dataset_horizon != expected_horizon:
+        reasons.append("dataset_horizon_minutes")
+
+    readiness_policy = coverage.get("readiness_policy")
+    policy = dict(readiness_policy) if isinstance(readiness_policy, Mapping) else {}
+    expected_policy = {
+        "minimum_anchors_per_symbol": research_feature_matrix.REPLAY_MIN_ANCHORS_PER_SYMBOL,
+        "minimum_eligible_symbols": research_feature_matrix.REPLAY_MIN_ELIGIBLE_SYMBOLS,
+        "minimum_utc_dates_per_symbol": research_feature_matrix.REPLAY_MIN_UTC_DATES_PER_SYMBOL,
+        "minimum_span_hours_per_symbol": research_feature_matrix.REPLAY_MIN_SPAN_HOURS_PER_SYMBOL,
+    }
+    for key, expected in expected_policy.items():
+        actual = policy.get(key)
+        if isinstance(expected, int):
+            valid = _strict_int(actual) == expected
+        else:
+            valid = _strict_finite_number(actual) == float(expected)
+        if not valid:
+            reasons.append(f"readiness_policy.{key}")
+
+    by_symbol_source = coverage.get("by_symbol")
+    by_symbol = by_symbol_source if isinstance(by_symbol_source, Mapping) else {}
+    eligible_symbols: list[str] = []
+    for raw_symbol, raw_item in sorted(
+        by_symbol.items(), key=lambda item: str(item[0])
+    ):
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol or not isinstance(raw_item, Mapping):
+            reasons.append("by_symbol_shape")
+            continue
+        anchors = _strict_int(raw_item.get("anchors"))
+        utc_dates = _strict_int(raw_item.get("utc_dates"))
+        span_hours = _strict_finite_number(raw_item.get("span_hours"))
+        failed_gates = raw_item.get("failed_gates")
+        failed_gates_valid = (
+            isinstance(failed_gates, (list, tuple)) and not failed_gates
+        )
+        eligible = bool(
+            anchors is not None
+            and anchors >= research_feature_matrix.REPLAY_MIN_ANCHORS_PER_SYMBOL
+            and utc_dates is not None
+            and utc_dates >= research_feature_matrix.REPLAY_MIN_UTC_DATES_PER_SYMBOL
+            and span_hours is not None
+            and span_hours >= research_feature_matrix.REPLAY_MIN_SPAN_HOURS_PER_SYMBOL
+            and raw_item.get("eligible") is True
+            and failed_gates_valid
+        )
+        if eligible:
+            eligible_symbols.append(symbol)
+        elif raw_item.get("eligible") is True:
+            reasons.append(f"by_symbol.{symbol}.eligibility_mismatch")
+
+    declared_symbols = coverage.get("eligible_symbols")
+    normalized_declared_symbols = (
+        sorted(
+            {
+                str(value or "").strip().upper()
+                for value in declared_symbols
+                if value
+            }
+        )
+        if isinstance(declared_symbols, (list, tuple))
+        else []
+    )
+    if normalized_declared_symbols != eligible_symbols:
+        reasons.append("eligible_symbols")
+    if _strict_int(coverage.get("symbols")) != len(eligible_symbols):
+        reasons.append("eligible_symbol_count")
+    if len(eligible_symbols) < research_feature_matrix.REPLAY_MIN_ELIGIBLE_SYMBOLS:
+        reasons.append("minimum_eligible_symbols")
+    distinct_dates = _strict_int(coverage.get("distinct_utc_dates"))
+    if (
+        distinct_dates is None
+        or distinct_dates < research_feature_matrix.REPLAY_MIN_UTC_DATES_PER_SYMBOL
+    ):
+        reasons.append("distinct_utc_dates")
+    total_span = _strict_finite_number(coverage.get("span_hours"))
+    if (
+        total_span is None
+        or total_span < research_feature_matrix.REPLAY_MIN_SPAN_HOURS_PER_SYMBOL
+    ):
+        reasons.append("span_hours")
+
+    same_horizon_formulas = []
+    qualifying_formulas = []
+    for formula in formulas:
+        if not isinstance(formula, Mapping):
+            reasons.append("formula_shape")
+            continue
+        formula_horizon = _strict_int(formula.get("horizon_minutes"))
+        version_match = bool(
+            formula.get("formula_schema_version")
+            == research_formula_engine.FORMULA_SCHEMA_VERSION
+            and formula.get("engine_version") == research_formula_engine.ENGINE_VERSION
+            and formula.get("feature_schema_version")
+            == research_feature_matrix.FEATURE_SCHEMA_VERSION
+            and formula.get("outcome_method_version")
+            == research_feature_matrix.VERIFIED_OUTCOME_METHOD
+            and _strict_int(formula.get("formula_version")) == 1
+        )
+        if formula_horizon == expected_horizon and version_match:
+            same_horizon_formulas.append(formula)
+            if (
+                str(formula.get("recommended_stage") or "").upper()
+                in _REPLACEMENT_QUALIFYING_STAGES
+            ):
+                qualifying_formulas.append(formula)
+        else:
+            reasons.append("formula_version_or_horizon")
+    if not formulas or not same_horizon_formulas:
+        reasons.append("nonempty_replacement_cohort")
+    if not qualifying_formulas:
+        reasons.append("qualifying_replacement_formula")
+
+    unique_reasons = list(dict.fromkeys(reasons))
+    return {
+        "verified": not unique_reasons,
+        "reasons": unique_reasons,
+        "eligible_symbols": eligible_symbols,
+        "same_horizon_formula_count": len(same_horizon_formulas),
+        "qualifying_formula_count": len(qualifying_formulas),
+        "expected": {
+            "dataset_kind": _REPLACEMENT_DATASET_KIND,
+            "replay_version": research_historical_replay.REPLAY_VERSION,
+            "first_touch_method_version": research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+            "feature_schema_version": research_feature_matrix.FEATURE_SCHEMA_VERSION,
+            "formula_schema_version": research_formula_engine.FORMULA_SCHEMA_VERSION,
+            "engine_version": research_formula_engine.ENGINE_VERSION,
+            "readiness_policy": expected_policy,
+        },
+    }
+
+
+def _replacement_cohort_supports_retirement(
+    verified_readiness: bool,
+    replacement_rows: Sequence[Mapping[str, Any]],
+    *,
+    horizon_minutes: int,
+    run_id: int,
+) -> bool:
+    """Require an active current-run replacement before predecessor retirement."""
+    return bool(
+        verified_readiness
+        and any(
+            row.get("active") is True
+            and _strict_int(row.get("formula_version")) == 1
+            and row.get("formula_schema_version")
+            == research_formula_engine.FORMULA_SCHEMA_VERSION
+            and row.get("engine_version")
+            == research_formula_engine.ENGINE_VERSION
+            and row.get("feature_schema_version")
+            == research_feature_matrix.FEATURE_SCHEMA_VERSION
+            and row.get("outcome_method_version")
+            == research_feature_matrix.VERIFIED_OUTCOME_METHOD
+            and _strict_int(row.get("horizon_minutes")) == int(horizon_minutes)
+            and _strict_int(row.get("latest_evaluation_run_id")) == int(run_id)
+            and str(row.get("current_stage") or "").upper()
+            in _REPLACEMENT_QUALIFYING_STAGES
+            for row in replacement_rows
+            if isinstance(row, Mapping)
         )
     )
 
@@ -205,6 +552,122 @@ def _missing_columns(
     return missing
 
 
+def _live_approval_enforcement_status(conn) -> Dict[str, Any]:
+    """Prove that migration 011 enforcement objects are installed and enabled."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT trigger.tgname AS trigger_name,
+                   relation.relname AS table_name,
+                   trigger.tgenabled AS enabled_state,
+                   trigger.tgtype::integer AS trigger_type,
+                   ARRAY(
+                       SELECT attribute.attname
+                       FROM UNNEST(trigger.tgattr::smallint[])
+                            WITH ORDINALITY AS update_column(
+                                attnum, ordinal_position
+                            )
+                       JOIN pg_attribute attribute
+                         ON attribute.attrelid=trigger.tgrelid
+                        AND attribute.attnum=update_column.attnum
+                       ORDER BY update_column.ordinal_position
+                   ) AS update_columns,
+                   function.proname AS function_name,
+                   pg_get_functiondef(function.oid) AS function_definition
+            FROM pg_trigger trigger
+            JOIN pg_class relation ON relation.oid=trigger.tgrelid
+            JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+            JOIN pg_proc function ON function.oid=trigger.tgfoid
+            WHERE namespace.nspname='public'
+              AND trigger.tgisinternal=FALSE
+              AND trigger.tgname=ANY(%s)
+            """,
+            (sorted(_LIVE_APPROVAL_TRIGGER_CONTRACTS),),
+        ).fetchall()
+        index = conn.execute(
+            """
+            SELECT index_meta.indisunique, index_meta.indisvalid,
+                   index_meta.indisready,
+                   ARRAY(
+                       SELECT attribute.attname
+                       FROM UNNEST(index_meta.indkey::smallint[])
+                            WITH ORDINALITY AS key_column(attnum, ordinal_position)
+                       JOIN pg_attribute attribute
+                         ON attribute.attrelid=index_meta.indrelid
+                        AND attribute.attnum=key_column.attnum
+                       ORDER BY key_column.ordinal_position
+                   ) AS key_columns,
+                   pg_get_expr(index_meta.indpred, index_meta.indrelid)
+                       AS predicate_definition
+            FROM pg_index index_meta
+            JOIN pg_class index_relation
+              ON index_relation.oid=index_meta.indexrelid
+            JOIN pg_class table_relation
+              ON table_relation.oid=index_meta.indrelid
+            JOIN pg_namespace namespace
+              ON namespace.oid=table_relation.relnamespace
+            WHERE namespace.nspname='public'
+              AND table_relation.relname='research_formula_live_approvals'
+              AND index_relation.relname=%s
+            """,
+            (_LIVE_APPROVAL_UNIQUE_INDEX,),
+        ).fetchone()
+    except Exception as exc:
+        return {
+            "ready": False,
+            "missing": ["migration_011_enforcement_inspection_failed"],
+            "inspection_error": f"{type(exc).__name__}: {exc}"[:500],
+        }
+
+    by_name = {str(row.get("trigger_name") or ""): row for row in rows}
+    missing: list[str] = []
+    for trigger_name, contract in _LIVE_APPROVAL_TRIGGER_CONTRACTS.items():
+        row = by_name.get(trigger_name)
+        if not row:
+            missing.append(f"trigger:{trigger_name}")
+            continue
+        definition = " ".join(
+            str(row.get("function_definition") or "").lower().split()
+        )
+        if (
+            str(row.get("table_name") or "") != contract["table"]
+            or str(row.get("function_name") or "") != contract["function"]
+            or str(row.get("enabled_state") or "") not in {"O", "A"}
+            or type(row.get("trigger_type")) is not int
+            or row.get("trigger_type") != contract["trigger_type"]
+            or tuple(row.get("update_columns") or ())
+            != contract["update_columns"]
+            or any(str(token).lower() not in definition for token in contract["tokens"])
+        ):
+            missing.append(f"trigger_contract:{trigger_name}")
+
+    index_columns = (
+        "formula_id",
+        "formula_version",
+        "formula_schema_version",
+        "engine_version",
+        "feature_schema_version",
+        "outcome_method_version",
+    )
+    if (
+        not index
+        or index.get("indisunique") is not True
+        or index.get("indisvalid") is not True
+        or index.get("indisready") is not True
+        or tuple(index.get("key_columns") or ()) != index_columns
+        or " ".join(
+            str(index.get("predicate_definition") or "")
+            .strip()
+            .strip("()")
+            .lower()
+            .split()
+        )
+        != "engine_version is not null"
+    ):
+        missing.append(f"index:{_LIVE_APPROVAL_UNIQUE_INDEX}")
+    return {"ready": not missing, "missing": sorted(set(missing))}
+
+
 def schema_status() -> Dict[str, Any]:
     required = (
         "research_formula_runs",
@@ -252,6 +715,7 @@ def schema_status() -> Dict[str, Any]:
             "approval_reason",
             "validation_snapshot",
             "formula_schema_version",
+            "engine_version",
             "feature_schema_version",
             "outcome_method_version",
             "approval_operation_version",
@@ -297,6 +761,7 @@ def schema_status() -> Dict[str, Any]:
         "schema_present": False,
         "missing_tables": list(required),
         "missing_columns": [],
+        "missing_enforcement": [],
     }
     if not base["configured"] or psycopg is None:
         return base
@@ -309,6 +774,14 @@ def schema_status() -> Dict[str, Any]:
         base["missing_columns"] = missing_columns
         base["schema_present"] = not missing_columns
         if missing_columns:
+            return base
+        enforcement = _live_approval_enforcement_status(conn)
+        base["live_approval_enforcement"] = enforcement
+        base["missing_enforcement"] = list(enforcement.get("missing") or [])
+        base["schema_present"] = bool(
+            base["schema_present"] and enforcement.get("ready") is True
+        )
+        if not base["schema_present"]:
             return base
         counts = conn.execute(
             """
@@ -410,6 +883,53 @@ def _requested_stage_for_dataset(
     return requested_stage, gate_notes
 
 
+def _formula_identity_matches_discovery(
+    stored: Mapping[str, Any],
+    discovered: Mapping[str, Any],
+    *,
+    outcome_method_version: str,
+) -> bool:
+    """Verify that a formula-key lookup resolved the exact immutable contract."""
+    stored_formula_version = _strict_int(stored.get("formula_version"))
+    discovered_formula_version = _strict_int(
+        discovered.get("formula_version", 1)
+    )
+    stored_horizon = _strict_int(stored.get("horizon_minutes"))
+    discovered_horizon = _strict_int(discovered.get("horizon_minutes"))
+    stored_count = _strict_int(stored.get("condition_count"))
+    discovered_count = _strict_int(discovered.get("condition_count"))
+    if any(
+        value is None or value <= 0
+        for value in (
+            stored_formula_version,
+            discovered_formula_version,
+            stored_horizon,
+            discovered_horizon,
+            stored_count,
+            discovered_count,
+        )
+    ):
+        return False
+    scalar_match = bool(
+        stored_formula_version == discovered_formula_version
+        and str(stored.get("formula_schema_version") or "")
+        == str(discovered.get("formula_schema_version") or "")
+        and str(stored.get("engine_version") or "")
+        == str(discovered.get("engine_version") or "")
+        and str(stored.get("feature_schema_version") or "")
+        == str(discovered.get("feature_schema_version") or "")
+        and str(stored.get("outcome_method_version") or "")
+        == str(outcome_method_version or "")
+        and str(stored.get("direction") or "").upper()
+        == str(discovered.get("direction") or "").upper()
+        and stored_horizon == discovered_horizon
+        and stored_count == discovered_count
+    )
+    return scalar_match and _type_strict_json_equal(
+        stored.get("conditions"), discovered.get("conditions")
+    )
+
+
 def persist_discovery_run(
     *,
     dataset: Mapping[str, Any],
@@ -420,9 +940,29 @@ def persist_discovery_run(
     if not discovery.get("available"):
         raise ValueError("cannot persist an unavailable discovery result")
     formulas = list(discovery.get("formulas") or [])
-    coverage = dict(dataset.get("coverage") or {})
-    replacement_ready = bool(coverage.get("replacement_ready"))
+    coverage_source = dataset.get("coverage")
+    coverage = (
+        dict(coverage_source) if isinstance(coverage_source, Mapping) else {}
+    )
+    replacement_verification = _verified_replacement_readiness(
+        dataset=dataset,
+        discovery=discovery,
+        formulas=formulas,
+    )
+    replacement_ready = bool(replacement_verification["verified"])
+    coverage_for_run = dict(coverage)
+    coverage_for_run["declared_replacement_ready"] = coverage.get(
+        "replacement_ready"
+    )
+    coverage_for_run["replacement_ready"] = replacement_ready
+    coverage_for_run["store_replacement_verification"] = (
+        replacement_verification
+    )
     dataset_kind = str(coverage.get("dataset_kind") or "unknown")
+    outcome_method_version = str(
+        dataset.get("outcome_method_version")
+        or research_feature_matrix.VERIFIED_OUTCOME_METHOD
+    )
     with _connect(read_only=False) as conn:
         if not _table_exists(conn, "research_formulas"):
             raise RuntimeError("Formula Research schema is not installed")
@@ -442,7 +982,7 @@ def persist_discovery_run(
             (
                 discovery["engine_version"],
                 discovery["feature_schema_version"],
-                dataset.get("outcome_method_version") or research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                outcome_method_version,
                 int(discovery["horizon_minutes"]),
                 int(lookback_days),
                 discovery.get("first_alert_time_utc"),
@@ -453,61 +993,10 @@ def persist_discovery_run(
                 int(discovery.get("holdout_sample_size") or 0),
                 int(discovery.get("candidates_evaluated") or 0),
                 _json(discovery.get("config") or {}),
-                _json(coverage),
+                _json(coverage_for_run),
             ),
         ).fetchone()
         run_id = int(run["run_id"])
-        # A new schema may retire its predecessor only after the replacement
-        # dataset has broad chronological coverage.  This prevents a tiny
-        # post-deploy alert sample from deleting the last auditable cohort.
-        superseded = conn.execute(
-            """
-            SELECT formula_id, current_stage
-            FROM research_formulas
-            WHERE active=TRUE
-              AND formula_schema_version<>%s
-              AND horizon_minutes=%s
-              AND current_stage NOT IN ('SHADOW', 'APPROVED', 'LIVE', 'RETIRED')
-            FOR UPDATE
-            """,
-            (
-                research_formula_engine.FORMULA_SCHEMA_VERSION,
-                int(discovery["horizon_minutes"]),
-            ),
-        ).fetchall() if replacement_ready else []
-        for old_formula in superseded:
-            conn.execute(
-                """
-                INSERT INTO research_formula_stage_history (
-                    formula_id, run_id, from_stage, to_stage, reason, actor
-                ) VALUES (%s, %s, %s, 'RETIRED', %s, 'automatic-research-engine')
-                ON CONFLICT (formula_id, run_id, to_stage) DO NOTHING
-                """,
-                (
-                    int(old_formula["formula_id"]),
-                    run_id,
-                    str(old_formula["current_stage"]),
-                    (
-                        "superseded by hierarchical evidence-family formula schema v6 "
-                        f"from {dataset_kind}"
-                    ),
-                ),
-            )
-        if superseded:
-            conn.execute(
-                """
-                UPDATE research_formulas
-                SET current_stage='RETIRED', active=FALSE, updated_at_utc=NOW()
-                WHERE active=TRUE
-                  AND formula_schema_version<>%s
-                  AND horizon_minutes=%s
-                  AND current_stage NOT IN ('SHADOW', 'APPROVED', 'LIVE', 'RETIRED')
-                """,
-                (
-                    research_formula_engine.FORMULA_SCHEMA_VERSION,
-                    int(discovery["horizon_minutes"]),
-                ),
-            )
         persisted = 0
         stage_counts: Dict[str, int] = {}
         for global_rank, formula in enumerate(formulas, start=1):
@@ -516,26 +1005,42 @@ def persist_discovery_run(
                 replacement_ready=replacement_ready,
             )
             existing = conn.execute(
-                "SELECT formula_id, current_stage FROM research_formulas WHERE formula_key=%s",
+                """
+                SELECT formula_id, formula_version, formula_schema_version,
+                       engine_version, feature_schema_version,
+                       outcome_method_version, direction, horizon_minutes,
+                       conditions, condition_count, formula_text,
+                       current_stage, active
+                FROM research_formulas
+                WHERE formula_key=%s
+                FOR UPDATE
+                """,
                 (formula["formula_key"],),
             ).fetchone()
             if existing:
                 formula_id = int(existing["formula_id"])
-                current_stage = str(existing["current_stage"])
-                conn.execute(
-                    """
-                    UPDATE research_formulas
-                    SET engine_version=%s, latest_evaluation_run_id=%s,
-                        formula_text=%s, updated_at_utc=NOW()
-                    WHERE formula_id=%s
-                    """,
-                    (
-                        formula["engine_version"],
-                        run_id,
-                        formula["formula_text"],
-                        formula_id,
-                    ),
-                )
+                current_stage = str(existing["current_stage"]).upper()
+                if not _formula_identity_matches_discovery(
+                    existing,
+                    formula,
+                    outcome_method_version=outcome_method_version,
+                ):
+                    raise RuntimeError(
+                        "formula_key resolved a different immutable formula contract"
+                    )
+                if current_stage not in _PROTECTED_FORMULA_STAGES:
+                    conn.execute(
+                        """
+                        UPDATE research_formulas
+                        SET latest_evaluation_run_id=%s,
+                            formula_text=%s, updated_at_utc=NOW()
+                        WHERE formula_id=%s
+                          AND current_stage NOT IN (
+                              'SHADOW', 'APPROVED', 'LIVE', 'RETIRED'
+                          )
+                        """,
+                        (run_id, formula["formula_text"], formula_id),
+                    )
             else:
                 inserted = conn.execute(
                     """
@@ -556,7 +1061,7 @@ def persist_discovery_run(
                         formula["formula_schema_version"],
                         formula["engine_version"],
                         formula["feature_schema_version"],
-                        dataset.get("outcome_method_version") or research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                        outcome_method_version,
                         formula["direction"],
                         int(formula["horizon_minutes"]),
                         _json(formula["conditions"]),
@@ -613,6 +1118,121 @@ def persist_discovery_run(
             stage_counts[final_stage] = stage_counts.get(final_stage, 0) + 1
             persisted += 1
 
+        # Durable retirement is intentionally last: the new same-horizon
+        # cohort and its evaluations must already exist in this transaction,
+        # and at least one active current-schema/current-run formula must remain
+        # BACKTESTED or higher. Inactive/retired rows cannot authorize removal
+        # of a predecessor. SHADOW/APPROVED/LIVE predecessors are never selected.
+        active_replacements = conn.execute(
+            """
+            SELECT formula_id, formula_version, current_stage, active,
+                   formula_schema_version, engine_version,
+                   feature_schema_version, outcome_method_version,
+                   horizon_minutes, latest_evaluation_run_id
+            FROM research_formulas
+            WHERE active=TRUE
+              AND formula_version=1
+              AND formula_schema_version=%s
+              AND engine_version=%s
+              AND feature_schema_version=%s
+              AND outcome_method_version=%s
+              AND horizon_minutes=%s
+              AND latest_evaluation_run_id=%s
+              AND current_stage IN (
+                  'BACKTESTED', 'HOLDOUT_PASSED', 'SHADOW', 'APPROVED', 'LIVE'
+              )
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                int(discovery["horizon_minutes"]),
+                run_id,
+            ),
+        ).fetchall() if replacement_ready else []
+        retirement_ready = _replacement_cohort_supports_retirement(
+            replacement_ready,
+            active_replacements,
+            horizon_minutes=int(discovery["horizon_minutes"]),
+            run_id=run_id,
+        )
+        superseded = conn.execute(
+            """
+            SELECT formula_id, current_stage
+            FROM research_formulas
+            WHERE active=TRUE
+              AND (
+                  formula_schema_version IS DISTINCT FROM %s
+                  OR engine_version IS DISTINCT FROM %s
+                  OR feature_schema_version IS DISTINCT FROM %s
+                  OR outcome_method_version IS DISTINCT FROM %s
+              )
+              AND horizon_minutes=%s
+              AND current_stage NOT IN ('SHADOW', 'APPROVED', 'LIVE', 'RETIRED')
+            FOR UPDATE
+            """,
+            (
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                int(discovery["horizon_minutes"]),
+            ),
+        ).fetchall() if retirement_ready else []
+        for old_formula in superseded:
+            conn.execute(
+                """
+                INSERT INTO research_formula_stage_history (
+                    formula_id, run_id, from_stage, to_stage, reason, actor
+                ) VALUES (%s, %s, %s, 'RETIRED', %s, 'automatic-research-engine')
+                ON CONFLICT (formula_id, run_id, to_stage) DO NOTHING
+                """,
+                (
+                    int(old_formula["formula_id"]),
+                    run_id,
+                    str(old_formula["current_stage"]),
+                    (
+                        "superseded by hierarchical evidence-family formula schema v6 "
+                        f"from {dataset_kind}"
+                    ),
+                ),
+            )
+        if superseded:
+            superseded_ids = sorted(
+                {int(row["formula_id"]) for row in superseded}
+            )
+            retired_cursor = conn.execute(
+                """
+                UPDATE research_formulas
+                SET current_stage='RETIRED', active=FALSE, updated_at_utc=NOW()
+                WHERE formula_id=ANY(%s)
+                  AND active=TRUE
+                  AND (
+                      formula_schema_version IS DISTINCT FROM %s
+                      OR engine_version IS DISTINCT FROM %s
+                      OR feature_schema_version IS DISTINCT FROM %s
+                      OR outcome_method_version IS DISTINCT FROM %s
+                  )
+                  AND horizon_minutes=%s
+                  AND current_stage NOT IN ('SHADOW', 'APPROVED', 'LIVE', 'RETIRED')
+                """,
+                (
+                    superseded_ids,
+                    research_formula_engine.FORMULA_SCHEMA_VERSION,
+                    research_formula_engine.ENGINE_VERSION,
+                    research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                    research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                    int(discovery["horizon_minutes"]),
+                ),
+            )
+            if retired_cursor.rowcount != len(superseded_ids):
+                raise RuntimeError(
+                    "superseded formula retirement changed after row locking"
+                )
+
         # Keep the active discovery surface tied to the newest chronological
         # cohort for this horizon.  Earlier candidates remain in the audit
         # archive, but a stale BACKTESTED formula must not outrank a formula
@@ -624,6 +1244,9 @@ def persist_discovery_run(
             FROM research_formulas
             WHERE active=TRUE
               AND formula_schema_version=%s
+              AND engine_version=%s
+              AND feature_schema_version=%s
+              AND outcome_method_version=%s
               AND horizon_minutes=%s
               AND current_stage IN ('DISCOVERED', 'BACKTESTED', 'HOLDOUT_PASSED')
               AND latest_evaluation_run_id IS DISTINCT FROM %s
@@ -631,10 +1254,13 @@ def persist_discovery_run(
             """,
             (
                 research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
                 int(discovery["horizon_minutes"]),
                 run_id,
             ),
-        ).fetchall() if replacement_ready else []
+        ).fetchall() if retirement_ready else []
         for stale_formula in stale_candidates:
             conn.execute(
                 """
@@ -651,22 +1277,37 @@ def persist_discovery_run(
                 ),
             )
         if stale_candidates:
-            conn.execute(
+            stale_candidate_ids = sorted(
+                {int(row["formula_id"]) for row in stale_candidates}
+            )
+            stale_cursor = conn.execute(
                 """
                 UPDATE research_formulas
                 SET current_stage='RETIRED', active=FALSE, updated_at_utc=NOW()
-                WHERE active=TRUE
+                WHERE formula_id=ANY(%s)
+                  AND active=TRUE
                   AND formula_schema_version=%s
+                  AND engine_version=%s
+                  AND feature_schema_version=%s
+                  AND outcome_method_version=%s
                   AND horizon_minutes=%s
                   AND current_stage IN ('DISCOVERED', 'BACKTESTED', 'HOLDOUT_PASSED')
                   AND latest_evaluation_run_id IS DISTINCT FROM %s
                 """,
                 (
+                    stale_candidate_ids,
                     research_formula_engine.FORMULA_SCHEMA_VERSION,
+                    research_formula_engine.ENGINE_VERSION,
+                    research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                    research_feature_matrix.VERIFIED_OUTCOME_METHOD,
                     int(discovery["horizon_minutes"]),
                     run_id,
                 ),
             )
+            if stale_cursor.rowcount != len(stale_candidate_ids):
+                raise RuntimeError(
+                    "stale formula retirement changed after row locking"
+                )
 
         conn.execute(
             """
@@ -683,6 +1324,11 @@ def persist_discovery_run(
         "horizon_minutes": int(discovery["horizon_minutes"]),
         "formulas_persisted": persisted,
         "stage_counts": stage_counts,
+        "replacement_ready": replacement_ready,
+        "replacement_readiness_reasons": list(
+            replacement_verification["reasons"]
+        ),
+        "retirement_ready": retirement_ready,
     }
 
 
@@ -847,8 +1493,10 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
         formulas = conn.execute(
             """
             SELECT f.formula_id, f.formula_key, f.formula_version, f.formula_text,
-                   f.formula_schema_version, f.direction, f.horizon_minutes,
+                   f.formula_schema_version, f.engine_version,
+                   f.direction, f.horizon_minutes,
                    f.conditions, f.feature_schema_version,
+                   f.outcome_method_version,
                    f.last_shadow_event_id, f.shadow_started_at_utc,
                    f.current_stage, f.live_alert_approved,
                    e.ranking_score, e.holdout_metrics
@@ -860,11 +1508,22 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
               AND (
                 (
                   f.current_stage='SHADOW'
-                  AND f.formula_schema_version=ANY(%s)
+                  AND (
+                    f.formula_schema_version=%s
+                    OR (
+                      f.formula_schema_version=%s
+                      AND f.engine_version=%s
+                      AND f.feature_schema_version=%s
+                      AND f.outcome_method_version=%s
+                    )
+                  )
                 )
                 OR (
                   f.current_stage='LIVE'
                   AND f.formula_schema_version=%s
+                  AND f.engine_version=%s
+                  AND f.feature_schema_version=%s
+                  AND f.outcome_method_version=%s
                 )
               )
             ORDER BY
@@ -873,8 +1532,15 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
               f.formula_id
             """,
             (
-                list(_SHADOW_COMPATIBLE_FORMULA_SCHEMAS),
+                "research-formula-v5-safe-replay",
                 research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
             ),
         ).fetchall()
         for formula in formulas:
@@ -931,11 +1597,33 @@ def record_shadow_results(
     queued = 0
     new_hit_event_ids: list[int] = []
     max_event_id = 0
+    authoritative_rows: Dict[tuple[int, int], Dict[str, Any]] = {}
+    authoritative_error: Optional[str] = None
+    if str(formula.get("formula_schema_version") or "") == str(
+        research_formula_engine.FORMULA_SCHEMA_VERSION
+    ):
+        requested_ids = sorted({int(result["event_id"]) for result in results})
+        try:
+            authoritative_rows = (
+                research_feature_matrix.load_shadow_feature_rows_by_horizon(
+                    {int(formula.get("horizon_minutes") or 0): requested_ids}
+                )
+            )
+        except Exception as exc:
+            # A missing archive/configuration or malformed frozen slot is a
+            # fail-closed UNEVALUABLE check, never permission to trust the
+            # caller's materialized feature values.
+            authoritative_error = f"{type(exc).__name__}: {exc}"[:800]
     with _connect(read_only=False) as conn:
         current = conn.execute(
             """
-            SELECT current_stage, active, formula_version,
-                   live_alert_approved, live_alert_approved_by
+            SELECT formula_id, formula_key, formula_version,
+                   formula_schema_version, engine_version,
+                   feature_schema_version, outcome_method_version,
+                   direction, horizon_minutes, conditions,
+                   current_stage, active, shadow_started_at_utc,
+                   last_shadow_event_id, live_alert_approved,
+                   live_alert_approved_by
             FROM research_formulas WHERE formula_id=%s FOR UPDATE
             """,
             (formula_id,),
@@ -956,15 +1644,21 @@ def record_shadow_results(
         )
         event_rows = conn.execute(
             """
-            SELECT candidate.event_id, candidate.event_kind,
-                   candidate.delivery_status,
+            SELECT candidate.event_id, candidate.alert_time_utc,
+                   candidate.symbol, candidate.direction,
+                   candidate.event_type, candidate.setup_key,
+                   candidate.event_kind, candidate.delivery_status,
                    (
                      (candidate.event_kind='ALERT'
                       AND candidate.delivery_status='DELIVERED')
-                     OR EXISTS (
-                       SELECT 1
-                       FROM research_prospective_shadow_events authorized
-                       WHERE authorized.event_id=candidate.event_id
+                     OR (
+                       candidate.event_kind='DECISION_SAMPLE'
+                       AND candidate.delivery_status='NOT_APPLICABLE'
+                       AND EXISTS (
+                         SELECT 1
+                         FROM research_prospective_shadow_events authorized
+                         WHERE authorized.event_id=candidate.event_id
+                       )
                      )
                    ) AS shadow_eligible
             FROM research_events candidate
@@ -972,21 +1666,28 @@ def record_shadow_results(
             """,
             (requested_event_ids,),
         ).fetchall()
-        event_delivery = {
-            int(row["event_id"]): (
-                str(row["event_kind"]),
-                str(row["delivery_status"]),
-                bool(row["shadow_eligible"]),
-            )
-            for row in event_rows
-        }
+        events_by_id = {int(row["event_id"]): dict(row) for row in event_rows}
+        authoritative_formula = dict(current)
         for result in results:
             event_id = int(result["event_id"])
-            event_kind, event_delivery_status, event_shadow_eligible = event_delivery.get(
-                event_id, ("", "", False)
-            )
-            if not event_shadow_eligible:
+            event = events_by_id.get(event_id)
+            if not event or not bool(event.get("shadow_eligible")):
                 continue
+            if str(event.get("direction") or "").upper() != str(
+                authoritative_formula.get("direction") or ""
+            ).upper():
+                continue
+            if event_id <= int(authoritative_formula.get("last_shadow_event_id") or 0):
+                continue
+            try:
+                if _as_utc(event.get("alert_time_utc")) < _as_utc(
+                    authoritative_formula.get("shadow_started_at_utc")
+                ):
+                    continue
+            except (TypeError, ValueError, OverflowError):
+                continue
+            event_kind = str(event.get("event_kind") or "")
+            event_delivery_status = str(event.get("delivery_status") or "")
             max_event_id = max(max_event_id, event_id)
             evaluation_status = str(
                 result.get("evaluation_status")
@@ -994,6 +1695,55 @@ def record_shadow_results(
             ).upper()
             if evaluation_status not in {"MATCHED", "UNMATCHED", "UNEVALUABLE"}:
                 evaluation_status = "UNEVALUABLE"
+            evaluation_reason = str(result.get("evaluation_reason") or "")
+            submitted_matched = result.get("matched")
+            if str(
+                authoritative_formula.get("formula_schema_version") or ""
+            ) == str(research_formula_engine.FORMULA_SCHEMA_VERSION):
+                bound_row = {
+                    **event,
+                    "input_snapshot": result.get("input_snapshot"),
+                    "condition_results": result.get("condition_results"),
+                    "decision_cohort_key": result.get("decision_cohort_key"),
+                    "decision_anchor_time_utc": result.get(
+                        "decision_anchor_time_utc"
+                    ),
+                    "evaluation_status": evaluation_status,
+                    "matched": submitted_matched,
+                }
+                compatible, reason = _max_pain_shadow_check_contract(
+                    authoritative_formula, bound_row
+                )
+                strict_flag = type(submitted_matched) is bool and submitted_matched == (
+                    evaluation_status == "MATCHED"
+                )
+                if not strict_flag:
+                    compatible = False
+                    reason = "submitted matched flag differs from evaluation status"
+                if compatible:
+                    if authoritative_error:
+                        compatible = False
+                        reason = (
+                            "authoritative frozen-row rebuild failed: "
+                            + authoritative_error
+                        )
+                    else:
+                        compatible, reason = _authoritative_v6_row_contract(
+                            authoritative_formula,
+                            event,
+                            result,
+                            authoritative_rows.get(
+                                (
+                                    event_id,
+                                    int(authoritative_formula["horizon_minutes"]),
+                                )
+                            ),
+                        )
+                if not compatible:
+                    evaluation_status = "UNEVALUABLE"
+                    evaluation_reason = (
+                        "v6 Shadow write contract rejected: " + reason
+                    )[:1000]
             is_match = evaluation_status == "MATCHED"
             inserted = conn.execute(
                 """
@@ -1010,9 +1760,9 @@ def record_shadow_results(
                     formula_id,
                     event_id,
                     is_match,
-                    formula["feature_schema_version"],
+                    authoritative_formula["feature_schema_version"],
                     evaluation_status,
-                    str(result.get("evaluation_reason") or "")[:1000] or None,
+                    evaluation_reason[:1000] or None,
                     _json(result.get("input_snapshot") or {}),
                     _json(result.get("condition_results") or []),
                     result.get("decision_cohort_key"),
@@ -1036,7 +1786,7 @@ def record_shadow_results(
                     (
                         formula_id,
                         event_id,
-                        result.get("alert_time_utc") or datetime.now(timezone.utc),
+                        event.get("alert_time_utc"),
                         _json(result.get("input_snapshot") or {}),
                     ),
                 )
@@ -1047,6 +1797,7 @@ def record_shadow_results(
                     and current["current_stage"] == "LIVE"
                     and bool(current["live_alert_approved"])
                     and bool(str(current.get("live_alert_approved_by") or "").strip())
+                    and _current_v6_formula_contract(current)
                 ):
                     inserted_deliveries = conn.execute(
                         """
@@ -1062,6 +1813,12 @@ def record_shadow_results(
                               WHERE a.formula_id=%s
                                 AND a.formula_version=%s
                                 AND a.horizon_minutes=%s
+                                AND a.formula_schema_version=%s
+                                AND a.engine_version=%s
+                                AND a.feature_schema_version=%s
+                                AND a.outcome_method_version=%s
+                                AND a.approval_operation_version=%s
+                                AND a.delivery_environment_enabled=FALSE
                                 AND a.review_kind='FROZEN_PROSPECTIVE'
                                 AND a.thresholds_met=TRUE
                                 AND a.validated_future_matches>=%s
@@ -1077,7 +1834,12 @@ def record_shadow_results(
                             event_id,
                             formula_id,
                             int(current["formula_version"]),
-                            int(formula["horizon_minutes"]),
+                            int(authoritative_formula["horizon_minutes"]),
+                            str(authoritative_formula["formula_schema_version"]),
+                            str(authoritative_formula["engine_version"]),
+                            str(authoritative_formula["feature_schema_version"]),
+                            str(authoritative_formula["outcome_method_version"]),
+                            _LIVE_APPROVAL_OPERATION_VERSION,
                             _SHADOW_MIN_MATCHES,
                             _SHADOW_MIN_CONTROLS,
                             float(_SHADOW_MIN_SPAN_HOURS),
@@ -1129,6 +1891,7 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
                ft.qualifying_move_threshold_pct,
                ft.threshold_scale_factor AS first_touch_threshold_scale_factor,
                ft.threshold_source_kind AS first_touch_threshold_source_kind,
+               ft.threshold_policy AS first_touch_threshold_policy,
                ft.qualifying_candle_order_ambiguous,
                o.time_to_mfe_seconds,
                o.target_progress_ratio, o.target_reached
@@ -1162,7 +1925,12 @@ def _shadow_outcome_rows(conn, formula: Mapping[str, Any]) -> list[Dict[str, Any
     result = [dict(row) for row in rows]
     for row in result:
         compatible, reason = _terminal_threshold_matches_snapshot(
-            row, horizon_minutes=horizon_minutes
+            row,
+            horizon_minutes=horizon_minutes,
+            require_v6_contract=(
+                str(formula.get("formula_schema_version") or "")
+                == str(research_formula_engine.FORMULA_SCHEMA_VERSION)
+            ),
         )
         row["first_touch_threshold_policy_compatible"] = compatible
         row["first_touch_threshold_policy_reason"] = reason
@@ -1211,6 +1979,32 @@ def _formula_conditions(formula: Mapping[str, Any]) -> list[Dict[str, Any]]:
     return [dict(item) for item in value or [] if isinstance(item, Mapping)]
 
 
+_SOURCE_TIMESTAMP_FIELDS = {
+    "price_oi": ("timestamp_utc", "price_timestamp_utc", "oi_timestamp_utc"),
+    "futures_cvd": ("timestamp_utc",),
+    "spot_cvd": ("timestamp_utc",),
+}
+
+
+def _source_timestamp_items(
+    source_inputs: Mapping[str, Any],
+) -> list[tuple[str, str, Any]]:
+    """Return every canonical or additional source-availability timestamp."""
+    output: list[tuple[str, str, Any]] = []
+    for family, required_names in _SOURCE_TIMESTAMP_FIELDS.items():
+        values = source_inputs.get(family)
+        mapping = values if isinstance(values, Mapping) else {}
+        names = set(required_names)
+        names.update(
+            str(key)
+            for key in mapping
+            if str(key) == "timestamp_utc" or str(key).endswith("_timestamp_utc")
+        )
+        for name in sorted(names):
+            output.append((family, name, mapping.get(name)))
+    return output
+
+
 def _decision_cohort_identity(
     *,
     formula: Mapping[str, Any],
@@ -1223,15 +2017,27 @@ def _decision_cohort_identity(
         source_inputs = {}
     timestamps: list[datetime] = []
     canonical_timestamps: list[str] = []
-    for family in ("price_oi", "futures_cvd", "spot_cvd"):
-        values = source_inputs.get(family)
-        value = values.get("timestamp_utc") if isinstance(values, Mapping) else None
+    for family, name, value in _source_timestamp_items(source_inputs):
+        label = f"{family}.{name}"
         if value in (None, ""):
-            canonical_timestamps.append(f"{family}:missing")
+            canonical_timestamps.append(f"{label}:missing")
             continue
         timestamp = _as_utc(value)
         timestamps.append(timestamp)
-        canonical_timestamps.append(f"{family}:{timestamp.isoformat()}")
+        canonical_timestamps.append(f"{label}:{timestamp.isoformat()}")
+    for family in ("price_oi", "futures_cvd", "spot_cvd"):
+        values = source_inputs.get(family)
+        mapping = values if isinstance(values, Mapping) else {}
+        canonical_timestamps.extend(
+            (
+                f"{family}.prospective_anchor_slot_id:"
+                + str(mapping.get("prospective_anchor_slot_id") or "missing"),
+                f"{family}.prospective_input_fingerprint:"
+                + str(mapping.get("prospective_input_fingerprint") or "missing"),
+                f"{family}.prospective_slot_created_at_utc:"
+                + str(mapping.get("prospective_slot_created_at_utc") or "missing"),
+            )
+        )
     max_pain = snapshot.get("max_pain_provenance")
     if isinstance(max_pain, Mapping):
         provenance = max_pain.get("provenance")
@@ -1317,6 +2123,278 @@ def _v6_max_pain_condition_features(
     )
 
 
+def _v6_snapshot_base_contract(
+    formula: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    *,
+    decision_time_utc: Any,
+    expected_symbol: Any,
+) -> tuple[bool, str]:
+    """Bind every v6 check to its complete frozen decision-time inputs."""
+    if not _current_v6_formula_contract(formula):
+        return False, "v6 formula execution contract versions are incompatible"
+    frozen_versions = {
+        "formula_schema_version": research_formula_engine.FORMULA_SCHEMA_VERSION,
+        "engine_version": research_formula_engine.ENGINE_VERSION,
+        "feature_schema_version": research_feature_matrix.FEATURE_SCHEMA_VERSION,
+        "outcome_method_version": research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+    }
+    if any(snapshot.get(key) != expected for key, expected in frozen_versions.items()):
+        return False, "frozen v6 formula contract versions are incompatible"
+    if snapshot.get("snapshot_policy_version") != _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION:
+        return False, "Shadow input snapshot policy version is incompatible"
+    if snapshot.get("decision_cohort_policy_version") != (
+        _DECISION_COHORT_POLICY_VERSION
+    ):
+        return False, "Shadow decision cohort policy version is incompatible"
+    if snapshot.get("decision_input_policy_version") != (
+        research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+    ):
+        return False, "v6 decision inputs are not from frozen prospective slots"
+
+    expected_conditions = [
+        {
+            "feature": str(item.get("feature") or ""),
+            "operator": str(item.get("operator") or ""),
+            "value": item.get("value"),
+        }
+        for item in _formula_conditions(formula)
+    ]
+    recorded_conditions = [
+        {
+            "feature": str(item.get("feature") or ""),
+            "operator": str(item.get("operator") or ""),
+            "value": item.get("value"),
+        }
+        for item in _formula_conditions(
+            {"conditions": snapshot.get("conditions")}
+        )
+    ]
+    if not expected_conditions or not _type_strict_json_equal(
+        recorded_conditions, expected_conditions
+    ):
+        return False, "frozen v6 conditions do not match the formula"
+    if any(
+        item["feature"].startswith(("sequence.", "aligned_sequence."))
+        or item["feature"].startswith("model.snapshot.prospective_anchor.")
+        for item in expected_conditions
+    ):
+        return False, "v6 formula uses a source family not frozen prospectively"
+
+    features = snapshot.get("formula_key_features")
+    if not isinstance(features, Mapping):
+        return False, "frozen v6 formula feature values are missing"
+    expected_feature_names = {item["feature"] for item in expected_conditions}
+    if set(str(key) for key in features) != expected_feature_names:
+        return False, "frozen v6 formula feature keys do not match conditions"
+
+    results = snapshot.get("condition_results")
+    if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
+        return False, "frozen v6 condition results are missing"
+    if len(results) != len(expected_conditions):
+        return False, "frozen v6 condition result count differs from formula"
+    for condition, result in zip(expected_conditions, results):
+        if not isinstance(result, Mapping):
+            return False, "frozen v6 condition result is malformed"
+        feature = condition["feature"]
+        feature_available = features.get(feature) is not None
+        expected_passed = feature_available and (
+            research_formula_engine.condition_matches(features, condition)
+        )
+        if (
+            str(result.get("feature") or "") != feature
+            or str(result.get("operator") or "") != condition["operator"]
+            or not _type_strict_json_equal(
+                result.get("expected"), condition["value"]
+            )
+            or not _type_strict_json_equal(
+                result.get("actual"), features.get(feature)
+            )
+            or not isinstance(result.get("available"), bool)
+            or not isinstance(result.get("passed"), bool)
+            or result.get("available") is not feature_available
+            or result.get("passed") is not expected_passed
+        ):
+            return False, "frozen v6 condition result differs from inputs"
+
+    source_inputs = snapshot.get("source_inputs")
+    if not isinstance(source_inputs, Mapping):
+        return False, "frozen v6 source inputs are missing"
+    decision_time = _as_utc(decision_time_utc)
+    slot_identities: set[tuple[int, str]] = set()
+    for family in ("price_oi", "futures_cvd", "spot_cvd"):
+        values = source_inputs.get(family)
+        if not isinstance(values, Mapping):
+            return False, "frozen v6 prospective source family is missing"
+        slot_id = values.get("prospective_anchor_slot_id")
+        fingerprint = str(values.get("prospective_input_fingerprint") or "")
+        if (
+            isinstance(slot_id, bool)
+            or not isinstance(slot_id, int)
+            or slot_id <= 0
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            return False, "frozen v6 prospective slot identity is malformed"
+        try:
+            created_at = _as_utc(values.get("prospective_slot_created_at_utc"))
+        except (TypeError, ValueError, OverflowError):
+            return False, "frozen v6 prospective slot creation time is malformed"
+        if created_at > decision_time + timedelta(minutes=5):
+            return False, "frozen v6 prospective slot was inserted after its decision"
+        slot_identities.add((slot_id, fingerprint))
+    if len(slot_identities) != 1:
+        return False, "frozen v6 source families do not share one prospective slot"
+
+    price_input = _as_mapping(source_inputs.get("price_oi"))
+    try:
+        route = canonical_price_path.validated_route(
+            expected_symbol,
+            {
+                "exchange": price_input.get("price_exchange"),
+                "market": price_input.get("price_market"),
+                "pair": price_input.get("price_pair"),
+                "interval": price_input.get("price_timeframe"),
+                "interval_seconds": price_input.get("price_interval_seconds"),
+                "api_coin": price_input.get("price_instrument_id"),
+                "complete": True,
+                "provenance": "FROZEN_PROSPECTIVE_SLOT",
+            },
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        return False, f"frozen v6 price route is not canonical: {exc}"
+    if (
+        price_input.get("canonical_price_method_version")
+        != canonical_price_path.METHOD_VERSION
+        or price_input.get("canonical_price_provenance_version")
+        != canonical_price_path.PRICE_PROVENANCE_VERSION
+    ):
+        return False, "frozen v6 canonical price versions are incompatible"
+    recorded_route = _as_mapping(price_input.get("canonical_price_provenance"))
+    for key in (
+        "provenance_version",
+        "method_version",
+        "symbol",
+        "exchange",
+        "market",
+        "pair",
+        "instrument",
+        "interval",
+        "interval_seconds",
+    ):
+        if recorded_route.get(key) != route.get(key):
+            return False, "frozen v6 canonical price provenance is inconsistent"
+    expected_price_source = (
+        "hyperliquid_spot_@107"
+        if str(expected_symbol or "").upper() == "HYPE"
+        else "binance_spot"
+    )
+    if (
+        str(price_input.get("price_source") or "").lower()
+        != expected_price_source
+        or str(price_input.get("source") or "").lower()
+        != expected_price_source
+    ):
+        return False, "frozen v6 price source conflicts with the canonical route"
+    for family, expected_source in (
+        ("futures_cvd", "coinglass_futures_aggregated_cvd"),
+        ("spot_cvd", "coinglass_spot_aggregated_cvd"),
+    ):
+        flow_input = _as_mapping(source_inputs.get(family))
+        if str(flow_input.get("source") or "").lower() != expected_source:
+            return False, f"frozen v6 {family} source provenance is incompatible"
+        exchanges = {
+            part.strip().upper()
+            for part in str(flow_input.get("exchange_list") or "").split(",")
+            if part.strip()
+        }
+        if exchanges != {"BINANCE", "OKX", "BYBIT"}:
+            return False, f"frozen v6 {family} exchange set is incompatible"
+    source_timestamps: Dict[str, Dict[str, datetime]] = {}
+    try:
+        for family in ("price_oi", "futures_cvd", "spot_cvd"):
+            values = source_inputs.get(family)
+            if values is None:
+                continue
+            if not isinstance(values, Mapping):
+                return False, "frozen v6 source input family is malformed"
+        for family, name, timestamp in _source_timestamp_items(source_inputs):
+            if timestamp in (None, ""):
+                continue
+            parsed = _as_utc(timestamp)
+            if parsed > decision_time:
+                return False, "frozen v6 source input is newer than decision time"
+            source_timestamps.setdefault(family, {})[name] = parsed
+    except (TypeError, ValueError, OverflowError):
+        return False, "frozen v6 source input timestamp is malformed"
+
+    def required_timestamps(feature: str) -> Dict[str, set[str]]:
+        name = feature.lower()
+        required: Dict[str, set[str]] = {}
+
+        def add(family: str, *fields: str) -> None:
+            required.setdefault(family, set()).update(fields or ("timestamp_utc",))
+
+        if "spot_to_futures_abs_cvd_ratio" in name or "spot_futures_alignment" in name:
+            add("spot_cvd", "timestamp_utc")
+            add("futures_cvd", "timestamp_utc")
+        if "price_spot_alignment" in name:
+            add("price_oi", "timestamp_utc", "price_timestamp_utc")
+            add("spot_cvd", "timestamp_utc")
+        if "price_futures_alignment" in name:
+            add("price_oi", "timestamp_utc", "price_timestamp_utc")
+            add("futures_cvd", "timestamp_utc")
+        if "futures_continuous_cvd" in name or "futures_api_cvd" in name:
+            add("futures_cvd", "timestamp_utc")
+        if "spot_continuous_cvd" in name or "spot_api_cvd" in name:
+            add("spot_cvd", "timestamp_utc")
+        if "price_oi_state" in name:
+            add(
+                "price_oi",
+                "timestamp_utc",
+                "price_timestamp_utc",
+                "oi_timestamp_utc",
+            )
+        else:
+            if "price_change" in name:
+                add("price_oi", "timestamp_utc", "price_timestamp_utc")
+            if "oi_change" in name or "open_interest" in name:
+                add("price_oi", "oi_timestamp_utc")
+        if name.startswith("latest.price_oi."):
+            add(
+                "price_oi",
+                "timestamp_utc",
+                "price_timestamp_utc",
+                "oi_timestamp_utc",
+            )
+        if name.startswith("latest.futures_cvd."):
+            add("futures_cvd", "timestamp_utc")
+        if name.startswith("latest.spot_cvd."):
+            add("spot_cvd", "timestamp_utc")
+        return required
+
+    for condition in expected_conditions:
+        missing: list[str] = []
+        for family, names in required_timestamps(condition["feature"]).items():
+            present_names = set(source_timestamps.get(family, {}))
+            missing.extend(
+                f"{family}.{name}" for name in sorted(names - present_names)
+            )
+        if missing:
+            return False, "frozen v6 condition lacks required source timestamp: " + ",".join(missing)
+
+    width_reference = _as_mapping(snapshot.get("movement_width_reference"))
+    compatible, reason = research_session_width.validate_movement_width_reference(
+        width_reference,
+        expected_symbol=expected_symbol,
+        event_time=decision_time_utc,
+        horizon_minutes=int(formula.get("horizon_minutes") or 0),
+    )
+    if not compatible:
+        return False, reason
+    return True, "complete v6 decision-time input snapshot is bound"
+
+
 def _max_pain_previous_required(features: Sequence[str]) -> bool:
     return any(
         feature.startswith("max_pain.delta.")
@@ -1324,6 +2402,55 @@ def _max_pain_previous_required(features: Sequence[str]) -> bool:
         or ".trend" in feature
         for feature in features
     )
+
+
+def _canonical_max_pain_snapshot_evidence(
+    formula: Mapping[str, Any], row: Optional[Mapping[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Build the one canonical evidence wrapper used by writer and verifier."""
+    condition_features = _v6_max_pain_condition_features(formula)
+    if not condition_features:
+        return None
+    wrapper = row.get("max_pain_features") if isinstance(row, Mapping) else {}
+    if not isinstance(wrapper, Mapping):
+        wrapper = {}
+    requires_previous = _max_pain_previous_required(condition_features)
+    wrapper_features = _as_mapping(wrapper.get("features"))
+    provenance = (
+        dict(wrapper.get("provenance"))
+        if isinstance(wrapper.get("provenance"), Mapping)
+        else {}
+    )
+    if provenance and not requires_previous:
+        provenance.update(
+            {
+                "previous": None,
+                "used_for_delta": False,
+                "previous_gap_minutes": None,
+            }
+        )
+    provenance_sha256 = (
+        research_max_pain_archive.canonical_provenance_sha256(provenance)
+        if provenance
+        else wrapper.get("provenance_sha256")
+    )
+    return {
+        "condition_features": list(condition_features),
+        "condition_values": {
+            feature: wrapper_features.get(feature) for feature in condition_features
+        },
+        "requires_previous": requires_previous,
+        "evaluation_status": str(
+            wrapper.get("evaluation_status") or "UNEVALUABLE"
+        ).upper(),
+        "evaluation_reason": wrapper.get("reason"),
+        "change_evaluation_status": str(
+            wrapper.get("change_evaluation_status") or "UNEVALUABLE"
+        ).upper(),
+        "change_reason": wrapper.get("change_reason"),
+        "provenance": provenance,
+        "provenance_sha256": provenance_sha256,
+    }
 
 
 def _max_pain_snapshot_contract(
@@ -1334,18 +2461,24 @@ def _max_pain_snapshot_contract(
     symbol: Any,
 ) -> tuple[bool, str]:
     features = _v6_max_pain_condition_features(formula)
-    if not features:
-        return True, "Max-Pain provenance is not required for this formula"
+    if str(formula.get("formula_schema_version") or "") != str(
+        research_formula_engine.FORMULA_SCHEMA_VERSION
+    ):
+        return True, "legacy Shadow snapshot contract is preserved"
     if str(formula.get("feature_schema_version") or "") != str(
         research_feature_matrix.FEATURE_SCHEMA_VERSION
     ):
         return False, "v6 Max-Pain formula feature schema is incompatible"
-    if snapshot.get("snapshot_policy_version") != _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION:
-        return False, "Shadow input snapshot policy version is incompatible"
-    if snapshot.get("decision_cohort_policy_version") != (
-        _DECISION_COHORT_POLICY_VERSION
-    ):
-        return False, "Shadow decision cohort policy version is incompatible"
+    compatible, reason = _v6_snapshot_base_contract(
+        formula,
+        snapshot,
+        decision_time_utc=decision_time_utc,
+        expected_symbol=symbol,
+    )
+    if not compatible:
+        return False, reason
+    if not features:
+        return True, "complete v6 snapshot contract; Max-Pain is not required"
     evidence = _as_mapping(snapshot.get("max_pain_provenance"))
     if not evidence:
         return False, "Max-Pain provenance evidence is missing"
@@ -1357,6 +2490,17 @@ def _max_pain_snapshot_contract(
     recorded_features = tuple(sorted(str(value) for value in raw_recorded_features))
     if recorded_features != features:
         return False, "Max-Pain provenance condition features do not match the formula"
+    recorded_values = _as_mapping(evidence.get("condition_values"))
+    frozen_formula_values = _as_mapping(snapshot.get("formula_key_features"))
+    if set(str(key) for key in recorded_values) != set(features):
+        return False, "Max-Pain frozen condition values are missing"
+    if any(
+        not _type_strict_json_equal(
+            recorded_values.get(feature), frozen_formula_values.get(feature)
+        )
+        for feature in features
+    ):
+        return False, "Max-Pain formula values differ from frozen Max-Pain evidence"
     if str(evidence.get("evaluation_status") or "").upper() != "EVALUABLE":
         return False, str(evidence.get("evaluation_reason") or "current snapshot is unevaluable")
     require_previous = _max_pain_previous_required(features)
@@ -1382,8 +2526,10 @@ def _max_pain_shadow_check_contract(
     formula: Mapping[str, Any], row: Mapping[str, Any]
 ) -> tuple[bool, str]:
     features = _v6_max_pain_condition_features(formula)
-    if not features:
-        return True, "Max-Pain provenance is not required for this formula"
+    if str(formula.get("formula_schema_version") or "") != str(
+        research_formula_engine.FORMULA_SCHEMA_VERSION
+    ):
+        return True, "legacy Shadow snapshot contract is preserved"
     snapshot = _as_mapping(row.get("input_snapshot"))
     compatible, reason = _max_pain_snapshot_contract(
         formula,
@@ -1395,11 +2541,17 @@ def _max_pain_shadow_check_contract(
         return False, reason
 
     frozen_event = _as_mapping(snapshot.get("event"))
-    try:
-        if int(frozen_event.get("event_id") or 0) != int(row.get("event_id") or 0):
-            return False, "frozen Shadow event_id does not match the check"
-    except (TypeError, ValueError):
+    frozen_event_id = _strict_int(frozen_event.get("event_id"))
+    row_event_id = _strict_int(row.get("event_id"))
+    if (
+        frozen_event_id is None
+        or frozen_event_id <= 0
+        or row_event_id is None
+        or row_event_id <= 0
+    ):
         return False, "frozen Shadow event_id is invalid"
+    if frozen_event_id != row_event_id:
+        return False, "frozen Shadow event_id does not match the check"
     if str(frozen_event.get("symbol") or "").upper() != str(
         row.get("symbol") or ""
     ).upper():
@@ -1408,6 +2560,19 @@ def _max_pain_shadow_check_contract(
         row.get("direction") or ""
     ).upper():
         return False, "frozen Shadow direction does not match the check"
+    formula_direction = str(formula.get("direction") or "").upper()
+    if formula_direction not in {"LONG", "SHORT"} or formula_direction != str(
+        row.get("direction") or ""
+    ).upper():
+        return False, "Shadow event direction does not match the formula"
+    if str(frozen_event.get("event_type") or "") != str(
+        row.get("event_type") or ""
+    ):
+        return False, "frozen Shadow event_type does not match the check"
+    if str(frozen_event.get("setup_key") or "") != str(
+        row.get("setup_key") or ""
+    ):
+        return False, "frozen Shadow setup_key does not match the check"
     try:
         if _as_utc(frozen_event.get("alert_time_utc")) != _as_utc(
             row.get("alert_time_utc")
@@ -1419,12 +2584,19 @@ def _max_pain_shadow_check_contract(
         formula.get("formula_key") or ""
     ):
         return False, "frozen formula_key does not match the Shadow formula"
-    try:
-        frozen_formula_version = int(snapshot.get("formula_version") or 0)
-        formula_version = int(formula.get("formula_version") or 0)
-        frozen_horizon = int(snapshot.get("horizon_minutes") or 0)
-        formula_horizon = int(formula.get("horizon_minutes") or 0)
-    except (TypeError, ValueError, OverflowError):
+    frozen_formula_version = _strict_int(snapshot.get("formula_version"))
+    formula_version = _strict_int(formula.get("formula_version"))
+    frozen_horizon = _strict_int(snapshot.get("horizon_minutes"))
+    formula_horizon = _strict_int(formula.get("horizon_minutes"))
+    if any(
+        value is None or value <= 0
+        for value in (
+            frozen_formula_version,
+            formula_version,
+            frozen_horizon,
+            formula_horizon,
+        )
+    ):
         return False, "frozen Formula identity contains invalid numerics"
     if frozen_formula_version != formula_version:
         return False, "frozen formula_version does not match the Shadow formula"
@@ -1434,6 +2606,21 @@ def _max_pain_shadow_check_contract(
         formula.get("feature_schema_version") or ""
     ):
         return False, "frozen feature schema does not match the Shadow formula"
+    if not _type_strict_json_equal(
+        row.get("condition_results") or [],
+        snapshot.get("condition_results") or [],
+    ):
+        return False, "stored condition results differ from frozen snapshot"
+    evaluation_status = str(row.get("evaluation_status") or "").upper()
+    if evaluation_status in {"MATCHED", "UNMATCHED"}:
+        condition_results = snapshot.get("condition_results") or []
+        if not all(item.get("available") is True for item in condition_results):
+            return False, "evaluable v6 check has unavailable frozen conditions"
+        expected_match = all(item.get("passed") is True for item in condition_results)
+        if expected_match != (evaluation_status == "MATCHED"):
+            return False, "v6 evaluation status differs from frozen condition results"
+        if bool(row.get("matched")) != expected_match:
+            return False, "v6 matched flag differs from frozen condition results"
     event = {
         "event_id": row.get("event_id"),
         "alert_time_utc": row.get("alert_time_utc"),
@@ -1456,7 +2643,120 @@ def _max_pain_shadow_check_contract(
         return False, "decision anchor contains an input unavailable at decision time"
     if str(row.get("decision_cohort_key") or "") != expected_key:
         return False, "decision_cohort_key does not match frozen inputs"
-    return True, "complete Max-Pain provenance and decision cohort are bound"
+    if features:
+        return True, "complete Max-Pain provenance and decision cohort are bound"
+    return True, "complete v6 snapshot and decision cohort are bound"
+
+
+def _authoritative_v6_row_contract(
+    formula: Mapping[str, Any],
+    event: Mapping[str, Any],
+    result: Mapping[str, Any],
+    row: Optional[Mapping[str, Any]],
+) -> tuple[bool, str]:
+    """Recompute a submitted v6 check from immutable authoritative inputs.
+
+    Slot ids and fingerprints prove identity, but cannot by themselves prove a
+    derived window value. The write boundary therefore rebuilds the row from
+    the frozen slot series and compares every formula-visible value, source
+    family, width reference and Max-Pain bundle before accepting a hit.
+    """
+    if not isinstance(row, Mapping):
+        return False, "authoritative frozen feature row is unavailable"
+    if row.get("feature_schema_version") != research_feature_matrix.FEATURE_SCHEMA_VERSION:
+        return False, "authoritative feature schema version is incompatible"
+    if row.get("decision_input_policy_version") != (
+        research_feature_matrix.PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+    ):
+        return False, "authoritative row is not from the frozen prospective policy"
+    row_event = _as_mapping(row.get("event"))
+    try:
+        row_event_id = _strict_int(row_event.get("event_id"))
+        event_id = _strict_int(event.get("event_id"))
+        if (
+            row_event_id is None
+            or row_event_id <= 0
+            or event_id is None
+            or event_id <= 0
+        ):
+            return False, "authoritative row event_id is malformed"
+        if row_event_id != event_id:
+            return False, "authoritative row event_id does not match"
+        if _as_utc(row_event.get("alert_time_utc")) != _as_utc(
+            event.get("alert_time_utc")
+        ):
+            return False, "authoritative row decision time does not match"
+    except (TypeError, ValueError, OverflowError):
+        return False, "authoritative row event identity is malformed"
+    if str(row_event.get("symbol") or "").upper() != str(
+        event.get("symbol") or ""
+    ).upper():
+        return False, "authoritative row symbol does not match"
+    if str(row_event.get("direction") or "").upper() != str(
+        event.get("direction") or ""
+    ).upper():
+        return False, "authoritative row direction does not match"
+
+    evaluation = research_formula_engine.evaluate_formula(
+        row,
+        direction=formula.get("direction"),
+        conditions=_formula_conditions(formula),
+    )
+    snapshot = _as_mapping(result.get("input_snapshot"))
+    expected_features = evaluation.get("features")
+    if not isinstance(expected_features, Mapping):
+        expected_features = {}
+    condition_names = {
+        str(item.get("feature") or "") for item in _formula_conditions(formula)
+    }
+    authoritative_formula_features = {
+        name: expected_features.get(name) for name in condition_names
+    }
+    if not _type_strict_json_equal(
+        snapshot.get("formula_key_features") or {},
+        authoritative_formula_features,
+    ):
+        return False, "submitted formula feature values differ from authoritative slots"
+    if not _type_strict_json_equal(
+        result.get("condition_results") or [],
+        evaluation.get("condition_results") or [],
+    ):
+        return False, "submitted condition results differ from authoritative evaluation"
+    expected_status = str(evaluation.get("status") or "UNEVALUABLE").upper()
+    submitted_status = str(result.get("evaluation_status") or "").upper()
+    if submitted_status != expected_status:
+        return False, "submitted evaluation status differs from authoritative evaluation"
+    expected_matched = expected_status == "MATCHED"
+    if (
+        type(result.get("matched")) is not bool
+        or result.get("matched") is not expected_matched
+    ):
+        return False, "submitted matched flag differs from authoritative evaluation"
+
+    raw = _as_mapping(row.get("raw_features"))
+    latest = _as_mapping(raw.get("latest_at_or_before_alert"))
+    authoritative_sources = {
+        family: dict(values) if isinstance(values, Mapping) else {}
+        for family, values in latest.items()
+        if family in {"price_oi", "futures_cvd", "spot_cvd"}
+    }
+    if not _type_strict_json_equal(
+        snapshot.get("source_inputs") or {}, authoritative_sources
+    ):
+        return False, "submitted source inputs differ from authoritative frozen slots"
+
+    outcome_label = _as_mapping(row.get("outcome_label"))
+    width_reference = _as_mapping(outcome_label.get("movement_width_reference"))
+    if not _type_strict_json_equal(
+        snapshot.get("movement_width_reference") or {}, width_reference
+    ):
+        return False, "submitted movement-width reference differs from authoritative row"
+
+    expected_max_pain = _canonical_max_pain_snapshot_evidence(formula, row)
+    recorded_max_pain = snapshot.get("max_pain_provenance")
+    if not _type_strict_json_equal(recorded_max_pain, expected_max_pain):
+        return False, "submitted Max-Pain evidence differs from the frozen slot bundle"
+    return True, "v6 check matches authoritative frozen feature recomputation"
 
 
 def _max_pain_validation_evidence(
@@ -1546,13 +2846,27 @@ def _max_pain_validation_evidence(
 
 
 def _terminal_threshold_matches_snapshot(
-    source: Mapping[str, Any], *, horizon_minutes: int
+    source: Mapping[str, Any],
+    *,
+    horizon_minutes: int,
+    require_v6_contract: bool = False,
 ) -> tuple[bool, str]:
     """Require terminal first-touch semantics to match frozen Shadow width."""
     if not bool(source.get("first_touch_available")):
         return True, "no terminal first-touch row"
     snapshot = _as_mapping(source.get("input_snapshot"))
     reference = _as_mapping(snapshot.get("movement_width_reference"))
+    if require_v6_contract:
+        if snapshot.get("snapshot_policy_version") != (
+            _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION
+        ):
+            return False, "terminal v6 snapshot policy version is incompatible"
+        if snapshot.get("decision_cohort_policy_version") != (
+            _DECISION_COHORT_POLICY_VERSION
+        ):
+            return False, "terminal v6 decision cohort policy is incompatible"
+        if not reference:
+            return False, "terminal v6 movement-width reference is missing"
     raw_scale = (
         reference.get("threshold_scale_factor")
         if reference.get("threshold_scale_factor") is not None
@@ -1571,6 +2885,31 @@ def _terminal_threshold_matches_snapshot(
         return False, "frozen relaxed width was not marked applied"
     if not 0.50 <= expected_scale <= 1.00:
         return False, "frozen threshold scale is outside 0.50-1.00"
+    if require_v6_contract:
+        try:
+            decision_time = _as_utc(source.get("alert_time_utc"))
+            compatible, reason = (
+                research_session_width.validate_movement_width_reference(
+                    reference,
+                    expected_symbol=source.get("symbol"),
+                    event_time=decision_time,
+                    horizon_minutes=horizon_minutes,
+                )
+            )
+            if not compatible:
+                return False, "terminal " + reason
+            expected_policy = research_no_dwell_outcome.freeze_threshold_policy(
+                horizon_minutes=horizon_minutes,
+                decision_time=decision_time,
+                prior_only_reference=reference if relaxed else None,
+            )
+            actual_policy = _as_mapping(
+                source.get("first_touch_threshold_policy")
+            )
+            if not _type_strict_json_equal(actual_policy, expected_policy):
+                return False, "terminal threshold policy differs from frozen snapshot"
+        except (TypeError, ValueError, OverflowError):
+            return False, "terminal v6 width provenance is malformed"
     if not math.isclose(
         actual_scale, expected_scale, rel_tol=0.0, abs_tol=1e-8
     ):
@@ -1999,17 +3338,32 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
         formulas = conn.execute(
             """
             SELECT formula_id, formula_key, formula_version, formula_schema_version,
-                   feature_schema_version, conditions, horizon_minutes,
+                   engine_version, feature_schema_version,
+                   outcome_method_version, direction, conditions, horizon_minutes,
                    latest_evaluation_run_id, shadow_started_at_utc,
                    last_shadow_event_id
             FROM research_formulas
             WHERE active=TRUE
               AND current_stage='SHADOW'
-              AND formula_schema_version=ANY(%s)
+              AND (
+                    formula_schema_version=%s
+                    OR (
+                      formula_schema_version=%s
+                      AND engine_version=%s
+                      AND feature_schema_version=%s
+                      AND outcome_method_version=%s
+                    )
+                  )
             ORDER BY formula_id
             FOR UPDATE
             """,
-            (list(_SHADOW_COMPATIBLE_FORMULA_SCHEMAS),),
+            (
+                "research-formula-v5-safe-replay",
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+            ),
         ).fetchall()
         for formula in formulas:
             source_rows = _shadow_outcome_rows(conn, formula)
@@ -2138,6 +3492,10 @@ def load_pending_live_deliveries(limit: int = 50) -> list[Dict[str, Any]]:
             JOIN research_formula_alert_subscriptions s
               ON s.chat_id=d.chat_id AND s.active=TRUE
             WHERE f.active=TRUE AND f.current_stage='LIVE'
+              AND f.formula_schema_version=%s
+              AND f.engine_version=%s
+              AND f.feature_schema_version=%s
+              AND f.outcome_method_version=%s
               AND e.event_kind='ALERT'
               AND e.delivery_status='DELIVERED'
               AND f.live_alert_approved=TRUE
@@ -2148,6 +3506,12 @@ def load_pending_live_deliveries(limit: int = 50) -> list[Dict[str, Any]]:
                   WHERE a.formula_id=f.formula_id
                     AND a.formula_version=f.formula_version
                     AND a.horizon_minutes=f.horizon_minutes
+                    AND a.formula_schema_version=f.formula_schema_version
+                    AND a.engine_version=f.engine_version
+                    AND a.feature_schema_version=f.feature_schema_version
+                    AND a.outcome_method_version=f.outcome_method_version
+                    AND a.approval_operation_version=%s
+                    AND a.delivery_environment_enabled=FALSE
                     AND a.review_kind='FROZEN_PROSPECTIVE'
                     AND a.thresholds_met=TRUE
                     AND a.validated_future_matches>=%s
@@ -2168,6 +3532,11 @@ def load_pending_live_deliveries(limit: int = 50) -> list[Dict[str, Any]]:
             LIMIT %s
             """,
             (
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                _LIVE_APPROVAL_OPERATION_VERSION,
                 _SHADOW_MIN_MATCHES,
                 _SHADOW_MIN_CONTROLS,
                 float(_SHADOW_MIN_SPAN_HOURS),

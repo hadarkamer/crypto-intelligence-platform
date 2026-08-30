@@ -26,6 +26,8 @@ import market_session_baseline
 import research_historical_replay
 import research_max_pain_archive
 import research_no_dwell_outcome
+import research_prospective_anchors
+import research_session_width
 
 try:
     import psycopg
@@ -35,7 +37,15 @@ except Exception:  # pragma: no cover - validated at runtime
     dict_row = None
 
 
-FEATURE_SCHEMA_VERSION = "research-feature-matrix-v6-first-touch-maxpain"
+FEATURE_SCHEMA_VERSION = (
+    "research-feature-matrix-v8-prospective-max-pain-frozen"
+)
+PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION = (
+    "prospective-frozen-anchor-slot-series-v2-max-pain"
+)
+PROSPECTIVE_ANCHOR_SAMPLER_VERSION = (
+    research_prospective_anchors.SAMPLER_VERSION
+)
 VERIFIED_OUTCOME_METHOD = research_no_dwell_outcome.METHOD_VERSION
 VERIFIED_OUTCOME_QUALITIES = canonical_price_path.COMPLETE_QUALITIES
 # Compatibility alias for callers that persist one textual dataset contract.
@@ -53,10 +63,10 @@ MAX_POINT_AGE_MINUTES = 45
 # from the same symbol and with an ACTIVE/WEEKEND composition similar to the
 # current window.  The session contract is shared with the production bot and
 # is evaluated in America/New_York, including DST transitions.
-HISTORICAL_BASELINE_DAYS = 180
-HISTORICAL_BASELINE_MIN_SAMPLES = 30
+HISTORICAL_BASELINE_DAYS = research_session_width.LOOKBACK_DAYS
+HISTORICAL_BASELINE_MIN_SAMPLES = research_session_width.MIN_EFFECTIVE_SAMPLES
 HISTORICAL_BASELINE_COMPOSITION_TOLERANCE = (
-    market_session_baseline.DEFAULT_COMPOSITION_TOLERANCE
+    research_session_width.COMPOSITION_TOLERANCE
 )
 HISTORICAL_BASELINE_FEATURES: tuple[str, ...] = (
     "price_change_pct",
@@ -236,18 +246,75 @@ def _price_oi_state(price_change_pct: Any, oi_change_pct: Any) -> str:
     return f"PRICE_{labels[price_sign]}__OI_{labels[oi_sign]}"
 
 
-def _latest_price_oi(row: Optional[Mapping[str, Any]], age: Optional[float]) -> Dict[str, Any]:
-    if not row:
+def _latest_price_oi(
+    price_row: Optional[Mapping[str, Any]],
+    price_age: Optional[float],
+    oi_row: Optional[Mapping[str, Any]] = None,
+    oi_age: Optional[float] = None,
+) -> Dict[str, Any]:
+    oi_row = oi_row if oi_row is not None else price_row
+    oi_age = oi_age if oi_age is not None else price_age
+    if not price_row and not oi_row:
         return {"available": False, "age_minutes": None}
     return {
-        "available": True,
-        "timestamp_utc": row.get("candle_time"),
-        "age_minutes": age,
-        "price_close": _round(row.get("price_close")),
-        "oi_close_usd": _round(row.get("oi_close_usd"), 2),
-        "price_exchange": row.get("price_exchange"),
-        "price_pair": row.get("price_pair"),
-        "source": row.get("source"),
+        "available": bool(price_row and oi_row),
+        "timestamp_utc": price_row.get("candle_time") if price_row else None,
+        "age_minutes": price_age,
+        "price_timestamp_utc": (
+            price_row.get("candle_time") if price_row else None
+        ),
+        "price_age_minutes": price_age,
+        "oi_timestamp_utc": oi_row.get("candle_time") if oi_row else None,
+        "oi_age_minutes": oi_age,
+        "price_close": _round(
+            price_row.get("price_close") if price_row else None
+        ),
+        "oi_close_usd": _round(
+            oi_row.get("oi_close_usd") if oi_row else None, 2
+        ),
+        "price_exchange": (
+            price_row.get("price_exchange") if price_row else None
+        ),
+        "price_pair": price_row.get("price_pair") if price_row else None,
+        "price_source": price_row.get("source") if price_row else None,
+        "oi_source": oi_row.get("source") if oi_row else None,
+        "source": price_row.get("source") if price_row else None,
+        "price_market": price_row.get("price_market") if price_row else None,
+        "price_instrument_id": (
+            price_row.get("price_instrument_id") if price_row else None
+        ),
+        "price_timeframe": (
+            price_row.get("price_timeframe") if price_row else None
+        ),
+        "price_interval_seconds": (
+            price_row.get("price_interval_seconds") if price_row else None
+        ),
+        "canonical_price_method_version": (
+            price_row.get("canonical_price_method_version")
+            if price_row
+            else None
+        ),
+        "canonical_price_provenance_version": (
+            price_row.get("canonical_price_provenance_version")
+            if price_row
+            else None
+        ),
+        "canonical_price_provenance": (
+            price_row.get("canonical_price_provenance") if price_row else None
+        ),
+        "prospective_anchor_slot_id": (
+            price_row.get("prospective_anchor_slot_id") if price_row else None
+        ),
+        "prospective_input_fingerprint": (
+            price_row.get("prospective_input_fingerprint")
+            if price_row
+            else None
+        ),
+        "prospective_slot_created_at_utc": (
+            price_row.get("prospective_slot_created_at_utc")
+            if price_row
+            else None
+        ),
     }
 
 
@@ -269,6 +336,13 @@ def _latest_flow(row: Optional[Mapping[str, Any]], age: Optional[float]) -> Dict
         "api_cvd_usd": _round(row.get("api_cum_vol_delta_usd"), 2),
         "exchange_list": row.get("exchange_list"),
         "source": row.get("source"),
+        "prospective_anchor_slot_id": row.get("prospective_anchor_slot_id"),
+        "prospective_input_fingerprint": row.get(
+            "prospective_input_fingerprint"
+        ),
+        "prospective_slot_created_at_utc": row.get(
+            "prospective_slot_created_at_utc"
+        ),
     }
 
 
@@ -279,6 +353,7 @@ def _window_features(
     price_series: Optional[_Series],
     futures_series: Optional[_Series],
     spot_series: Optional[_Series],
+    oi_series: Optional[_Series] = None,
 ) -> Dict[str, Any]:
     reference_time = event_time - timedelta(minutes=minutes)
     active_ratio, weekend_ratio, session_segments = (
@@ -286,6 +361,9 @@ def _window_features(
     )
     current_price, current_price_age = _prior_point(price_series, event_time)
     prior_price, prior_price_age = _prior_point(price_series, reference_time)
+    effective_oi_series = oi_series if oi_series is not None else price_series
+    current_oi, current_oi_age = _prior_point(effective_oi_series, event_time)
+    prior_oi, prior_oi_age = _prior_point(effective_oi_series, reference_time)
     current_futures, current_futures_age = _prior_point(futures_series, event_time)
     prior_futures, prior_futures_age = _prior_point(futures_series, reference_time)
     current_spot, current_spot_age = _prior_point(spot_series, event_time)
@@ -296,8 +374,8 @@ def _window_features(
         prior_price.get("price_close") if prior_price else None,
     )
     oi_change = _pct_change(
-        current_price.get("oi_close_usd") if current_price else None,
-        prior_price.get("oi_close_usd") if prior_price else None,
+        current_oi.get("oi_close_usd") if current_oi else None,
+        prior_oi.get("oi_close_usd") if prior_oi else None,
     )
     futures_cvd_change = _difference(
         current_futures.get("continuous_cum_vol_delta_usd") if current_futures else None,
@@ -342,6 +420,8 @@ def _window_features(
         "source_ages_minutes": {
             "price_current": current_price_age,
             "price_reference": prior_price_age,
+            "oi_current": current_oi_age,
+            "oi_reference": prior_oi_age,
             "futures_current": current_futures_age,
             "futures_reference": prior_futures_age,
             "spot_current": current_spot_age,
@@ -404,7 +484,14 @@ def _model_features(event: Mapping[str, Any]) -> Dict[str, Any]:
         except json.JSONDecodeError:
             snapshot = {}
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
-    flattened = _flatten_snapshot(snapshot)
+    # Prospective sampler metadata is an audit envelope, not a bot model
+    # prediction. Exposing it as ``model.*`` would let formula discovery or
+    # Shadow evaluation consume coverage/status/hash fields as market inputs.
+    flattened = (
+        {}
+        if isinstance(snapshot.get("prospective_anchor"), Mapping)
+        else _flatten_snapshot(snapshot)
+    )
     return {
         "alert_score": _round(event.get("score")),
         "initial_target_distance_pct": _round(event.get("initial_target_distance_pct")),
@@ -547,11 +634,7 @@ class _HistoricalWindowSeries:
 
 
 def _session_composition_label(active_ratio: float) -> str:
-    if active_ratio >= 1.0 - 1e-9:
-        return "ACTIVE_ONLY"
-    if active_ratio <= 1e-9:
-        return "WEEKEND_ONLY"
-    return "MIXED"
+    return research_session_width.session_composition_label(active_ratio)
 
 
 def _weighted_percentile_rank(
@@ -578,6 +661,7 @@ def _weighted_percentile_rank(
 def _historical_window_index(
     *,
     price_series: Mapping[str, _Series],
+    oi_series: Optional[Mapping[str, _Series]] = None,
     futures_series: Mapping[str, _Series],
     spot_series: Mapping[str, _Series],
     windows_minutes: Sequence[int],
@@ -593,12 +677,19 @@ def _historical_window_index(
         tuple[str, int], list[tuple[datetime, Dict[str, float], float]]
     ] = defaultdict(list)
     for symbol, prices in price_series.items():
+        anchor_times = tuple(
+            _as_utc(row.get("decision_time_utc"))
+            if row.get("decision_time_utc") is not None
+            else point_time
+            for point_time, row in zip(prices.times, prices.rows)
+        )
         for minutes in windows_minutes:
-            for anchor_time in prices.times:
+            for anchor_time in anchor_times:
                 window = _window_features(
                     event_time=anchor_time,
                     minutes=int(minutes),
                     price_series=prices,
+                    oi_series=(oi_series or price_series).get(symbol),
                     futures_series=futures_series.get(symbol),
                     spot_series=spot_series.get(symbol),
                 )
@@ -789,100 +880,27 @@ def _movement_width_reference(
     symbol: str,
     event_time: datetime,
     current_price_row: Optional[Mapping[str, Any]],
-    historical_index: Mapping[tuple[str, int], _HistoricalWindowSeries],
+    historical_index: Mapping[
+        tuple[str, int], research_session_width.PriceWidthSeries
+    ],
 ) -> Dict[str, Any]:
-    """Return a prior-only weekend width scale for the outcome horizon.
-
-    The ratio is a conservative volatility calibration, not a success or risk
-    gate.  It can only lower the absolute MFE floor (never probability, Wilson,
-    improvement, MAE, efficiency or percentile requirements), and only when
-    both the composition-matched and ACTIVE reference samples are sufficient.
-    """
+    """Delegate to the replay-shared prior-only movement-width policy."""
     horizon = int(event.get("horizon_minutes") or 0)
-    outcome_end = event_time + timedelta(minutes=max(0, horizon))
-    active_ratio, weekend_ratio, segments = market_session_baseline.session_ratios(
-        event_time, outcome_end
-    )
     cutoff = (
         _as_utc(current_price_row["candle_time"])
         if current_price_row and current_price_row.get("candle_time") is not None
         else event_time
     )
-    result: Dict[str, Any] = {
-        "policy": "prior raw price width; same-symbol session-composition matched",
-        "source_kind": "PRIOR_ONLY_SESSION_CALIBRATION",
-        "as_of_utc": cutoff,
-        "horizon_minutes": horizon,
-        "session_active_ratio": round(active_ratio, 6),
-        "session_weekend_ratio": round(weekend_ratio, 6),
-        "session_segments": segments,
-        "session_composition": _session_composition_label(active_ratio),
-        "minimum_effective_samples": HISTORICAL_BASELINE_MIN_SAMPLES,
-        "floor_scale_factor": 1.0,
-        "threshold_scale_factor": 1.0,
-        "applied": False,
-    }
-    historical = historical_index.get((symbol, horizon))
-    if horizon <= 0 or historical is None:
-        result["reason"] = "historical horizon unavailable"
-        return result
-
-    start = cutoff - timedelta(days=HISTORICAL_BASELINE_DAYS)
-    left = bisect_left(historical.times, start)
-    right = bisect_left(historical.times, cutoff)
-    samples = [
-        (abs(float(point["price_change_pct"])), float(point_active_ratio))
-        for point, point_active_ratio in zip(
-            historical.values[left:right], historical.active_ratios[left:right]
-        )
-        if "price_change_pct" in point
-    ]
-    matched = market_session_baseline.composition_weighted_values(
-        samples,
-        active_ratio,
-        HISTORICAL_BASELINE_COMPOSITION_TOLERANCE,
+    return research_session_width.movement_width_reference(
+        symbol=symbol,
+        event_time=event_time,
+        horizon_minutes=horizon,
+        as_of_utc=cutoff,
+        historical_index=historical_index,
+        lookback_days=HISTORICAL_BASELINE_DAYS,
+        minimum_effective_samples=HISTORICAL_BASELINE_MIN_SAMPLES,
+        composition_tolerance=HISTORICAL_BASELINE_COMPOSITION_TOLERANCE,
     )
-    active_reference = market_session_baseline.composition_weighted_values(
-        samples,
-        1.0,
-        HISTORICAL_BASELINE_COMPOSITION_TOLERANCE,
-    )
-    matched_effective = sum(weight for _, weight in matched)
-    active_effective = sum(weight for _, weight in active_reference)
-    matched_p90 = market_session_baseline.weighted_percentile(matched, 0.90)
-    active_p90 = market_session_baseline.weighted_percentile(
-        active_reference, 0.90
-    )
-    result.update(
-        {
-            "prior_points": len(samples),
-            "session_matched_samples": len(matched),
-            "session_matched_effective_samples": round(matched_effective, 4),
-            "active_reference_samples": len(active_reference),
-            "active_reference_effective_samples": round(active_effective, 4),
-            "session_matched_abs_return_p90_pct": _round(matched_p90, 6),
-            "active_reference_abs_return_p90_pct": _round(active_p90, 6),
-        }
-    )
-    if (
-        matched_effective < HISTORICAL_BASELINE_MIN_SAMPLES
-        or active_effective < HISTORICAL_BASELINE_MIN_SAMPLES
-        or matched_p90 is None
-        or active_p90 in (None, 0.0)
-    ):
-        result["reason"] = "insufficient prior-only width calibration evidence"
-        return result
-
-    scale = min(1.0, max(0.50, float(matched_p90) / float(active_p90)))
-    result["floor_scale_factor"] = round(scale, 6)
-    result["threshold_scale_factor"] = round(scale, 6)
-    result["applied"] = scale < 1.0 - 1e-9
-    result["reason"] = (
-        "weekend/mixed width floor calibrated from prior raw price history"
-        if result["applied"]
-        else "session width was not below the ACTIVE reference"
-    )
-    return result
 
 
 def _outcome_label(
@@ -891,7 +909,9 @@ def _outcome_label(
     symbol: str,
     event_time: datetime,
     current_price_row: Optional[Mapping[str, Any]],
-    historical_index: Mapping[tuple[str, int], _HistoricalWindowSeries],
+    historical_index: Mapping[
+        tuple[str, int], research_session_width.PriceWidthSeries
+    ],
 ) -> Dict[str, Any]:
     horizon = int(event.get("horizon_minutes") or 0)
     active_ratio, weekend_ratio, segments = market_session_baseline.session_ratios(
@@ -962,6 +982,7 @@ def build_feature_rows(
     events: Sequence[Mapping[str, Any]],
     *,
     price_oi_rows: Iterable[Mapping[str, Any]],
+    oi_rows: Optional[Iterable[Mapping[str, Any]]] = None,
     futures_rows: Iterable[Mapping[str, Any]],
     spot_rows: Iterable[Mapping[str, Any]],
     prior_events: Sequence[Mapping[str, Any]],
@@ -969,14 +990,45 @@ def build_feature_rows(
     max_pain_by_event_id: Optional[Mapping[int, Mapping[str, Any]]] = None,
 ) -> list[Dict[str, Any]]:
     """Pure deterministic builder used by the DB wrapper and self-tests."""
-    price_series = _prepare_series(price_oi_rows, time_column="candle_time")
+    shared_price_oi_rows = list(price_oi_rows)
+    independent_oi_rows = (
+        list(oi_rows) if oi_rows is not None else shared_price_oi_rows
+    )
+    price_series = _prepare_series(
+        shared_price_oi_rows, time_column="candle_time"
+    )
+    oi_series = _prepare_series(independent_oi_rows, time_column="candle_time")
     futures_series = _prepare_series(futures_rows, time_column="candle_time")
     spot_series = _prepare_series(spot_rows, time_column="candle_time")
     historical_index = _historical_window_index(
         price_series=price_series,
+        oi_series=oi_series,
         futures_series=futures_series,
         spot_series=spot_series,
         windows_minutes=windows_minutes,
+    )
+    width_horizons = sorted(
+        {
+            int(value)
+            for value in windows_minutes
+            if int(value) > 0
+        }
+        | {
+            int(event.get("horizon_minutes") or 0)
+            for event in events
+            if int(event.get("horizon_minutes") or 0) > 0
+        }
+    )
+    width_index = research_session_width.build_price_width_index(
+        price_points={
+            symbol: tuple(
+                (point_time, row.get("price_close"))
+                for point_time, row in zip(series.times, series.rows)
+            )
+            for symbol, series in price_series.items()
+        },
+        horizons_minutes=width_horizons,
+        max_point_age_minutes=MAX_POINT_AGE_MINUTES,
     )
     rows: list[Dict[str, Any]] = []
 
@@ -985,6 +1037,7 @@ def build_feature_rows(
         event_time = _as_utc(event["alert_time_utc"])
         symbol = str(event.get("symbol") or "").upper()
         current_price, current_price_age = _prior_point(price_series.get(symbol), event_time)
+        current_oi, current_oi_age = _prior_point(oi_series.get(symbol), event_time)
         current_futures, current_futures_age = _prior_point(futures_series.get(symbol), event_time)
         current_spot, current_spot_age = _prior_point(spot_series.get(symbol), event_time)
 
@@ -993,6 +1046,7 @@ def build_feature_rows(
                 event_time=event_time,
                 minutes=int(minutes),
                 price_series=price_series.get(symbol),
+                oi_series=oi_series.get(symbol),
                 futures_series=futures_series.get(symbol),
                 spot_series=spot_series.get(symbol),
             )
@@ -1029,7 +1083,12 @@ def build_feature_rows(
                 "raw_features": {
                     "captured_event_inputs": _captured_event_inputs(event),
                     "latest_at_or_before_alert": {
-                        "price_oi": _latest_price_oi(current_price, current_price_age),
+                        "price_oi": _latest_price_oi(
+                            current_price,
+                            current_price_age,
+                            current_oi,
+                            current_oi_age,
+                        ),
                         "futures_cvd": _latest_flow(current_futures, current_futures_age),
                         "spot_cvd": _latest_flow(current_spot, current_spot_age),
                     },
@@ -1044,7 +1103,7 @@ def build_feature_rows(
                     symbol=symbol,
                     event_time=event_time,
                     current_price_row=current_price,
-                    historical_index=historical_index,
+                    historical_index=width_index,
                 ),
             }
         )
@@ -1147,7 +1206,7 @@ def _load_delivered_events_by_id(
         dict(row)
         for row in conn.execute(
             """
-            SELECT event_id, alert_time_utc, symbol, direction,
+            SELECT event_id, event_kind, alert_time_utc, symbol, direction,
                    source_side, timeframe, event_type, score,
                    current_price, target_price, initial_target_distance_pct,
                    categories, setup_key, strategy_version, code_version,
@@ -1232,6 +1291,7 @@ def _load_max_pain_features_batch(
             AND snapshot.method_version=%s
             AND snapshot.cutover_marker=%s
             AND snapshot.available_at_utc<=requested.decision_time_utc
+            AND snapshot.created_at_utc<=requested.decision_time_utc
           ORDER BY snapshot.available_at_utc DESC, snapshot.snapshot_set_id DESC
           LIMIT 2
         ) chosen
@@ -1372,41 +1432,92 @@ def _verified_coverage(
 def _historical_replay_coverage(
     conn, *, lookback_days: int, horizon_minutes: int
 ) -> Dict[str, Any]:
-    rows = conn.execute(
-        """
-        SELECT symbol, COUNT(*)::bigint AS anchors,
-               MIN(observation_time_utc) AS first_observation_utc,
-               MAX(observation_time_utc) AS last_observation_utc,
-               COUNT(DISTINCT observation_time_utc::date)::bigint AS utc_dates
-        FROM research_historical_opportunity_outcomes
-        WHERE horizon_minutes=%s
-          AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
-          AND first_touch_method_version=%s
-          AND replay_version=%s
-          AND first_touch_data_quality_status=ANY(%s)
-        GROUP BY symbol
-        ORDER BY symbol
-        """,
-        (
-            horizon_minutes,
-            lookback_days,
-            VERIFIED_OUTCOME_METHOD,
-            research_historical_replay.REPLAY_VERSION,
-            list(VERIFIED_OUTCOME_QUALITIES),
-        ),
-    ).fetchall()
+    sibling_coherence = (
+        research_historical_replay.sibling_reference_coherence_sql(
+            "historical"
+        )
+    )
+    candidates = [
+        dict(row)
+        for row in conn.execute(
+            f"""
+            SELECT opportunity_id, symbol, observation_time_utc,
+                   source_observation_time_utc, horizon_minutes,
+                   reference_time_utc, reference_price,
+                   price_at_horizon, raw_return_pct,
+                   long_metrics, short_metrics,
+                   long_first_touch_metrics, short_first_touch_metrics,
+                   first_touch_method_version, first_touch_path_samples,
+                   path_samples,
+                   first_touch_data_quality_status, outcome_method_version,
+                   exchange, market, pair, interval_seconds, provenance,
+                   data_quality_status, replay_version,
+                   ({sibling_coherence}) AS sibling_reference_coherent
+            FROM research_historical_opportunity_outcomes historical
+            WHERE horizon_minutes=%s
+              AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
+            ORDER BY symbol, observation_time_utc, opportunity_id
+            """,
+            (horizon_minutes, lookback_days),
+        ).fetchall()
+    ]
+    candidate_symbols = sorted(
+        {str(row.get("symbol") or "").upper() for row in candidates if row.get("symbol")}
+    )
+    if candidates:
+        first_candidate = min(
+            _as_utc(row["observation_time_utc"]) for row in candidates
+        )
+        last_candidate = max(
+            _as_utc(row["observation_time_utc"]) for row in candidates
+        )
+        canonical_references = (
+            research_historical_replay.load_canonical_reference_rows(
+                conn,
+                start=first_candidate
+                - timedelta(
+                    days=HISTORICAL_BASELINE_DAYS,
+                    minutes=(
+                        max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES
+                    ),
+                ),
+                end=last_candidate + timedelta(minutes=1),
+                symbols=candidate_symbols,
+            )
+        )
+        width_index = research_historical_replay.build_canonical_width_index(
+            canonical_references,
+            horizons=(horizon_minutes,),
+        )
+        coherent = [
+            row
+            for row in candidates
+            if research_historical_replay.replay_outcome_row_is_coherent(
+                row, width_index=width_index
+            )
+        ]
+    else:
+        coherent = []
+    coherent_by_symbol: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
+    candidate_counts: Dict[str, int] = defaultdict(int)
+    for row in candidates:
+        candidate_counts[str(row["symbol"]).upper()] += 1
+    for row in coherent:
+        coherent_by_symbol[str(row["symbol"]).upper()].append(row)
+
     by_symbol: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        symbol = str(row["symbol"]).upper()
-        first_observation = row["first_observation_utc"]
-        last_observation = row["last_observation_utc"]
+    for symbol in candidate_symbols:
+        rows = coherent_by_symbol.get(symbol, [])
+        times = sorted(_as_utc(row["observation_time_utc"]) for row in rows)
+        first_observation = times[0] if times else None
+        last_observation = times[-1] if times else None
         span_hours = (
             (last_observation - first_observation).total_seconds() / 3600.0
             if first_observation and last_observation
             else 0.0
         )
-        anchors = int(row["anchors"] or 0)
-        utc_dates = int(row["utc_dates"] or 0)
+        anchors = len(rows)
+        utc_dates = len({value.date() for value in times})
         failures = []
         if anchors < REPLAY_MIN_ANCHORS_PER_SYMBOL:
             failures.append("minimum_anchors")
@@ -1421,6 +1532,10 @@ def _historical_replay_coverage(
             "last_observation_utc": last_observation,
             "utc_dates": utc_dates,
             "span_hours": round(span_hours, 3),
+            "stored_candidates": candidate_counts[symbol],
+            "recomputed_policy_rejections": (
+                candidate_counts[symbol] - anchors
+            ),
             "eligible": not failures,
             "failed_gates": failures,
         }
@@ -1434,7 +1549,7 @@ def _historical_replay_coverage(
     }
     eligible_items = [by_symbol[symbol] for symbol in eligible_symbols]
     total_anchors = sum(item["anchors"] for item in eligible_items)
-    stored_anchors = sum(item["anchors"] for item in by_symbol.values())
+    stored_anchors = sum(candidate_counts.values())
     first = min(
         (item["first_observation_utc"] for item in eligible_items),
         default=None,
@@ -1443,33 +1558,13 @@ def _historical_replay_coverage(
         (item["last_observation_utc"] for item in eligible_items),
         default=None,
     )
-    distinct_dates = 0
-    if eligible_symbols:
-        distinct_dates = len(
-            {
-                row["date"]
-                for row in conn.execute(
-                    """
-                    SELECT DISTINCT observation_time_utc::date AS date
-                    FROM research_historical_opportunity_outcomes
-                    WHERE horizon_minutes=%s
-                      AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
-                      AND first_touch_method_version=%s
-                      AND replay_version=%s
-                      AND first_touch_data_quality_status=ANY(%s)
-                      AND symbol=ANY(%s)
-                    """,
-                    (
-                        horizon_minutes,
-                        lookback_days,
-                        VERIFIED_OUTCOME_METHOD,
-                        research_historical_replay.REPLAY_VERSION,
-                        list(VERIFIED_OUTCOME_QUALITIES),
-                        eligible_symbols,
-                    ),
-                ).fetchall()
-            }
-        )
+    distinct_dates = len(
+        {
+            _as_utc(row["observation_time_utc"]).date()
+            for symbol in eligible_symbols
+            for row in coherent_by_symbol.get(symbol, [])
+        }
+    )
     span_hours = (
         (last - first).total_seconds() / 3600.0 if first and last else 0.0
     )
@@ -1480,6 +1575,14 @@ def _historical_replay_coverage(
     )
     return {
         "dataset_kind": "historical_raw_opportunity_replay",
+        "replay_version": research_historical_replay.REPLAY_VERSION,
+        "first_touch_method_version": VERIFIED_OUTCOME_METHOD,
+        "movement_width_calibration_version": (
+            research_session_width.CALIBRATION_VERSION
+        ),
+        "canonical_price_provenance_version": (
+            canonical_price_path.PRICE_PROVENANCE_VERSION
+        ),
         "replacement_ready": replacement_ready,
         "readiness_policy": {
             "minimum_anchors_per_symbol": REPLAY_MIN_ANCHORS_PER_SYMBOL,
@@ -1493,7 +1596,10 @@ def _historical_replay_coverage(
         "eligible_symbols": eligible_symbols,
         "excluded_symbols": excluded_symbols,
         "stored_anchors": stored_anchors,
-        "stored_symbols": len(by_symbol),
+        "stored_symbols": len(candidate_symbols),
+        "coherent_anchors": len(coherent),
+        "recomputed_policy_rejections": len(candidates) - len(coherent),
+        "coverage_validation": "full-row prior-only recomputation",
         "distinct_utc_dates": distinct_dates,
         "span_hours": round(span_hours, 3),
         "first_observation_utc": first,
@@ -1533,28 +1639,65 @@ def _load_historical_opportunities(
     if not symbols:
         return []
     quota = max(1, (anchor_limit + len(symbols) - 1) // len(symbols))
+    sibling_coherence = (
+        research_historical_replay.sibling_reference_coherence_sql(
+            "historical"
+        )
+    )
     rows = conn.execute(
-        """
+        f"""
         WITH eligible AS (
             SELECT opportunity_id, symbol, observation_time_utc,
                    source_observation_time_utc, horizon_minutes,
-                   reference_price, price_at_horizon, raw_return_pct,
+                   reference_time_utc, reference_price,
+                   price_at_horizon, raw_return_pct,
                    long_metrics, short_metrics, path_samples,
                    long_first_touch_metrics, short_first_touch_metrics,
-                   first_touch_method_version,
+                   first_touch_method_version, first_touch_path_samples,
                    first_touch_data_quality_status,
                    outcome_method_version AS legacy_outcome_method_version,
                    data_quality_status AS legacy_data_quality_status,
+                   outcome_method_version, data_quality_status,
+                   exchange, market, pair, interval_seconds, provenance,
+                   replay_version,
+                   ({sibling_coherence}) AS sibling_reference_coherent,
                    ROW_NUMBER() OVER (
                        PARTITION BY symbol ORDER BY observation_time_utc, opportunity_id
                    ) AS sequence_number,
                    COUNT(*) OVER (PARTITION BY symbol) AS symbol_total
-            FROM research_historical_opportunity_outcomes
+            FROM research_historical_opportunity_outcomes historical
             WHERE horizon_minutes=%s
               AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
               AND first_touch_method_version=%s
               AND replay_version=%s
               AND first_touch_data_quality_status=ANY(%s)
+              AND outcome_method_version=%s
+              AND data_quality_status=ANY(%s)
+              AND long_first_touch_metrics->>'method_version'=%s
+              AND short_first_touch_metrics->>'method_version'=%s
+              AND long_first_touch_metrics->>'status' IN ('HIT', 'MISS')
+              AND short_first_touch_metrics->>'status' IN ('HIT', 'MISS')
+              AND long_first_touch_metrics->>'direction'='LONG'
+              AND short_first_touch_metrics->>'direction'='SHORT'
+              AND long_first_touch_metrics->>'horizon_minutes'=horizon_minutes::text
+              AND short_first_touch_metrics->>'horizon_minutes'=horizon_minutes::text
+              AND long_first_touch_metrics->>'dwell_required_seconds'='0'
+              AND short_first_touch_metrics->>'dwell_required_seconds'='0'
+              AND long_first_touch_metrics->'threshold_policy'
+                  = short_first_touch_metrics->'threshold_policy'
+              AND long_first_touch_metrics->'threshold_policy'
+                    ->>'threshold_reference_version'=%s
+              AND long_first_touch_metrics->'threshold_policy'
+                    ->>'threshold_reference_hash' ~ '^[0-9a-f]{64}$'
+              AND LOWER(market)='spot' AND interval_seconds=60
+              AND (
+                    (symbol='HYPE' AND LOWER(exchange)='hyperliquid'
+                     AND UPPER(pair)='HYPE/USDT'
+                     AND provenance LIKE '%%"instrument":"@107"%%')
+                    OR
+                    (symbol<>'HYPE' AND LOWER(exchange)='binance'
+                     AND REPLACE(UPPER(pair), '/', '')=symbol || 'USDT')
+                  )
               AND symbol=ANY(%s)
         )
         SELECT *
@@ -1573,6 +1716,11 @@ def _load_historical_opportunities(
             VERIFIED_OUTCOME_METHOD,
             research_historical_replay.REPLAY_VERSION,
             list(VERIFIED_OUTCOME_QUALITIES),
+            canonical_price_path.METHOD_VERSION,
+            list(VERIFIED_OUTCOME_QUALITIES),
+            VERIFIED_OUTCOME_METHOD,
+            VERIFIED_OUTCOME_METHOD,
+            research_session_width.CALIBRATION_VERSION,
             symbols,
             quota,
             quota,
@@ -1697,6 +1845,211 @@ def _load_prior_events(conn, start: datetime, end: datetime) -> list[Dict[str, A
     ]
 
 
+def _mapping_value(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _load_prospective_frozen_rows(
+    conn,
+    *,
+    symbols: Sequence[str],
+    start: datetime,
+    end: datetime,
+) -> tuple[
+    list[Dict[str, Any]],
+    list[Dict[str, Any]],
+    list[Dict[str, Any]],
+    list[Dict[str, Any]],
+    Dict[int, Dict[str, Any]],
+]:
+    """Rebuild decision series only from immutable prospective slot inputs.
+
+    ``created_at_utc`` must be within five minutes of the recorded decision.
+    This admits the normal atomic event/slot transaction while preventing a
+    later insert with a backdated decision time from changing an old feature
+    row. No mutable raw archive or candle-time-only fallback is consulted.
+    """
+    rows = conn.execute(
+        """
+        SELECT anchor_slot_id, sampler_version, coverage_policy_version,
+               coverage_snapshot, symbol, source_candle_open_utc,
+               source_candle_close_utc, base_eligible_at_utc, expires_at_utc,
+               decision_time_utc, input_fingerprint, source_timestamps,
+               source_provenance, frozen_inputs,
+               long_event_id, short_event_id, created_at_utc
+        FROM research_prospective_anchor_slots
+        WHERE sampler_version=%s
+          AND symbol=ANY(%s)
+          AND decision_time_utc >= %s
+          AND decision_time_utc <= %s
+          AND created_at_utc <= decision_time_utc + INTERVAL '5 minutes'
+        ORDER BY symbol, decision_time_utc, anchor_slot_id
+        """,
+        (PROSPECTIVE_ANCHOR_SAMPLER_VERSION, list(symbols), start, end),
+    ).fetchall()
+    price_rows: list[Dict[str, Any]] = []
+    oi_rows: list[Dict[str, Any]] = []
+    futures_rows: list[Dict[str, Any]] = []
+    spot_rows: list[Dict[str, Any]] = []
+    max_pain_by_event_id: Dict[int, Dict[str, Any]] = {}
+    for source in rows:
+        row = dict(source)
+        symbol = str(row.get("symbol") or "").strip().upper()
+        decision_time = _as_utc(row["decision_time_utc"])
+        frozen = _mapping_value(row.get("frozen_inputs"))
+        provenance = _mapping_value(row.get("source_provenance"))
+        timestamps = _mapping_value(row.get("source_timestamps"))
+        coverage = _mapping_value(row.get("coverage_snapshot"))
+        try:
+            expected_fingerprint = (
+                research_prospective_anchors.compute_input_fingerprint(
+                    sampler_version=row.get("sampler_version"),
+                    coverage_policy_version=row.get("coverage_policy_version"),
+                    coverage_snapshot=coverage,
+                    symbol=symbol,
+                    source_candle_open_utc=row.get("source_candle_open_utc"),
+                    source_candle_close_utc=row.get("source_candle_close_utc"),
+                    base_eligible_at_utc=row.get("base_eligible_at_utc"),
+                    expires_at_utc=row.get("expires_at_utc"),
+                    evaluation_status=research_prospective_anchors.EVALUABLE,
+                    decision_time_utc=decision_time,
+                    source_timestamps=timestamps,
+                    source_provenance=provenance,
+                    frozen_inputs=frozen,
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if expected_fingerprint != str(row.get("input_fingerprint") or "").strip():
+            continue
+        official = _mapping_value(frozen.get("official_price"))
+        price_oi = _mapping_value(frozen.get("price_oi"))
+        futures = _mapping_value(frozen.get("futures_cvd"))
+        spot = _mapping_value(frozen.get("spot_cvd"))
+        max_pain = _mapping_value(frozen.get("max_pain"))
+        if not max_pain or not isinstance(max_pain.get("features"), Mapping):
+            # Sampler v3 requires an explicit frozen Max-Pain result, including
+            # the empty feature map of an UNEVALUABLE decision-time lookup.
+            continue
+        official_provenance = _mapping_value(provenance.get("official_price"))
+        shared = {
+            "symbol": symbol,
+            "candle_time": decision_time,
+            "prospective_anchor_slot_id": int(row["anchor_slot_id"]),
+            "prospective_input_fingerprint": str(row["input_fingerprint"]),
+            "prospective_slot_created_at_utc": row["created_at_utc"],
+        }
+        instrument = official_provenance.get("price_instrument_id")
+        canonical_route = {
+            "provenance_version": canonical_price_path.PRICE_PROVENANCE_VERSION,
+            "method_version": canonical_price_path.METHOD_VERSION,
+            "symbol": symbol,
+            "exchange": str(
+                official_provenance.get("price_exchange") or ""
+            ).strip().lower(),
+            "market": str(
+                official_provenance.get("price_market") or ""
+            ).strip().lower(),
+            "pair": str(
+                official_provenance.get("price_pair") or ""
+            ).strip().upper(),
+            "instrument": str(instrument).strip() if instrument else None,
+            "interval": str(
+                official_provenance.get("price_timeframe") or ""
+            ).strip().lower(),
+            "interval_seconds": 60,
+            "provider_provenance": str(
+                official_provenance.get("source") or ""
+            ),
+        }
+        try:
+            canonical_route = canonical_price_path.validated_route(
+                symbol,
+                {
+                    "exchange": canonical_route["exchange"],
+                    "market": canonical_route["market"],
+                    "pair": canonical_route["pair"],
+                    "interval": canonical_route["interval"],
+                    "interval_seconds": canonical_route["interval_seconds"],
+                    "api_coin": canonical_route["instrument"],
+                    "complete": True,
+                    "provenance": canonical_route["provider_provenance"],
+                },
+            )
+        except (TypeError, ValueError, OverflowError):
+            # One malformed immutable slot cannot be allowed to contaminate
+            # later windows; omitting it makes affected features unavailable.
+            continue
+        price_rows.append(
+            {
+                **shared,
+                "price_close": official.get("price"),
+                "price_exchange": canonical_route["exchange"],
+                "price_market": canonical_route["market"],
+                "price_pair": canonical_route["pair"],
+                "price_instrument_id": canonical_route["instrument"],
+                "price_timeframe": canonical_route["interval"],
+                "price_interval_seconds": 60,
+                "source": official_provenance.get("source"),
+                "canonical_price_method_version": (
+                    canonical_price_path.METHOD_VERSION
+                ),
+                "canonical_price_provenance_version": (
+                    canonical_price_path.PRICE_PROVENANCE_VERSION
+                ),
+                "canonical_price_provenance": canonical_route,
+            }
+        )
+        oi_rows.append(
+            {
+                **shared,
+                "oi_close_usd": price_oi.get("oi_close_usd"),
+                "source": _mapping_value(provenance.get("price_oi")).get(
+                    "source"
+                ),
+            }
+        )
+        for values, family_provenance, target in (
+            (futures, provenance.get("futures_cvd"), futures_rows),
+            (spot, provenance.get("spot_cvd"), spot_rows),
+        ):
+            flow_provenance = _mapping_value(family_provenance)
+            target.append(
+                {
+                    **shared,
+                    "buy_volume_usd": values.get("buy_volume_usd"),
+                    "sell_volume_usd": values.get("sell_volume_usd"),
+                    "api_cum_vol_delta_usd": values.get(
+                        "api_cum_vol_delta_usd"
+                    ),
+                    "continuous_cum_vol_delta_usd": values.get(
+                        "continuous_cum_vol_delta_usd"
+                    ),
+                    "exchange_list": flow_provenance.get("exchange_list"),
+                    "source": flow_provenance.get("source"),
+                }
+            )
+        for event_column in ("long_event_id", "short_event_id"):
+            event_id = row.get(event_column)
+            if event_id is not None:
+                max_pain_by_event_id[int(event_id)] = dict(max_pain)
+    return (
+        price_rows,
+        oi_rows,
+        futures_rows,
+        spot_rows,
+        max_pain_by_event_id,
+    )
+
+
 def _load_raw_rows(
     conn, *, symbols: Sequence[str], start: datetime, end: datetime
 ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], list[Dict[str, Any]]]:
@@ -1778,6 +2131,123 @@ def _load_raw_rows(
             ])
         )
     return price_rows, flow_rows[0], flow_rows[1]
+
+
+def _load_independent_oi_rows(
+    conn, *, symbols: Sequence[str], start: datetime, end: datetime
+) -> list[Dict[str, Any]]:
+    """Load OI only; archived CoinGlass prices are deliberately not selected."""
+    rows = _closed_archive_rows(
+        [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT symbol, candle_time, oi_close_usd,
+                       ('oi_price_history:' || source) AS source
+                FROM oi_price_history
+                WHERE symbol=ANY(%s) AND symbol<>'HYPE'
+                  AND candle_time >= %s AND candle_time <= %s
+                ORDER BY symbol, candle_time
+                """,
+                (list(symbols), start, end),
+            ).fetchall()
+        ]
+    )
+    if _table_exists(conn, "oi_regime_snapshots"):
+        rows.extend(
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT symbol, collected_at AS candle_time,
+                       open_interest_usd AS oi_close_usd,
+                       ('oi_regime_snapshots:' || COALESCE(oi_source, 'unknown'))
+                           AS source
+                FROM oi_regime_snapshots live
+                WHERE live.symbol=ANY(%s)
+                  AND live.collected_at >= %s AND live.collected_at <= %s
+                  AND live.data_quality_status='PASS'
+                  AND (
+                    live.symbol='HYPE'
+                    OR live.collected_at > COALESCE(
+                      (SELECT MAX(backfill.candle_time)
+                       FROM oi_price_history backfill
+                       WHERE backfill.symbol=live.symbol),
+                      '-infinity'::timestamptz
+                    )
+                  )
+                ORDER BY live.symbol, live.collected_at
+                """,
+                (list(symbols), start, end),
+            ).fetchall()
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("symbol") or ""),
+            _as_utc(row["candle_time"]),
+        ),
+    )
+
+
+def _load_raw_flow_rows(
+    conn, *, symbols: Sequence[str], start: datetime, end: datetime
+) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+    flows: list[list[Dict[str, Any]]] = []
+    for table in ("futures_taker_history", "spot_taker_history"):
+        flows.append(
+            _closed_archive_rows(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT symbol, candle_time, buy_volume_usd,
+                               sell_volume_usd, api_cum_vol_delta_usd,
+                               continuous_cum_vol_delta_usd,
+                               exchange_list, source
+                        FROM {table}
+                        WHERE symbol=ANY(%s)
+                          AND candle_time >= %s AND candle_time <= %s
+                        ORDER BY symbol, candle_time
+                        """,
+                        (list(symbols), start, end),
+                    ).fetchall()
+                ]
+            )
+        )
+    return flows[0], flows[1]
+
+
+def _canonical_price_feature_rows(
+    references: Sequence[Mapping[str, Any]],
+) -> list[Dict[str, Any]]:
+    """Expose only proven canonical reference prices as raw Price inputs."""
+    rows: list[Dict[str, Any]] = []
+    for source in references:
+        row = dict(source)
+        symbol = str(row.get("symbol") or "").upper()
+        rows.append(
+            {
+                "symbol": symbol,
+                "candle_time": row["reference_time_utc"],
+                "price_close": row["reference_price"],
+                "price_exchange": row.get("exchange"),
+                "price_pair": row.get("pair"),
+                "source": (
+                    "research_historical_opportunity_outcomes:"
+                    "canonical_reference_price"
+                ),
+                "canonical_price_method_version": row.get(
+                    "outcome_method_version"
+                ),
+                "canonical_price_replay_version": row.get("replay_version"),
+                "canonical_price_provenance": row.get("provenance"),
+                "source_observation_time_utc": row.get(
+                    "source_observation_time_utc"
+                ),
+                "decision_time_utc": row.get("observation_time_utc"),
+            }
+        )
+    return rows
 
 
 def research_feature_matrix(
@@ -1977,6 +2447,14 @@ def load_historical_replay_dataset(
             "available": True,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "outcome_method_version": VERIFIED_OUTCOME_METHOD,
+            "replay_version": research_historical_replay.REPLAY_VERSION,
+            "first_touch_method_version": VERIFIED_OUTCOME_METHOD,
+            "movement_width_calibration_version": (
+                research_session_width.CALIBRATION_VERSION
+            ),
+            "canonical_price_provenance_version": (
+                canonical_price_path.PRICE_PROVENANCE_VERSION
+            ),
             "horizon_minutes": horizon,
             "sample_size": 0,
             "coverage": coverage,
@@ -1984,17 +2462,67 @@ def load_historical_replay_dataset(
             "reason": "no verified historical replay outcomes are available",
         }
 
-    events = _opportunity_events(opportunities)
-    with _connect(research_url) as research_conn:
-        max_pain_by_event_id = _load_max_pain_features_batch(
-            research_conn, events
-        )
-    first_time = min(_as_utc(row["alert_time_utc"]) for row in events)
-    last_time = max(_as_utc(row["alert_time_utc"]) for row in events)
-    symbols = sorted({str(row["symbol"]).upper() for row in events})
+    first_time = min(
+        _as_utc(row["observation_time_utc"]) for row in opportunities
+    )
+    last_time = max(
+        _as_utc(row["observation_time_utc"]) for row in opportunities
+    )
+    symbols = sorted({str(row["symbol"]).upper() for row in opportunities})
     raw_start = first_time - timedelta(
         days=HISTORICAL_BASELINE_DAYS,
         minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES,
+    )
+    with _connect(research_url) as research_conn:
+        canonical_references = (
+            research_historical_replay.load_canonical_reference_rows(
+                research_conn,
+                start=raw_start,
+                end=last_time + timedelta(minutes=1),
+                symbols=symbols,
+            )
+        )
+        width_index = research_historical_replay.build_canonical_width_index(
+            canonical_references,
+            horizons=sorted(set(CORE_WINDOWS_MINUTES) | {horizon}),
+        )
+        candidate_count = len(opportunities)
+        opportunities = [
+            row
+            for row in opportunities
+            if research_historical_replay.replay_outcome_row_is_coherent(
+                row, width_index=width_index
+            )
+        ]
+        rejected = candidate_count - len(opportunities)
+        if rejected:
+            coverage = dict(coverage)
+            coverage["replacement_ready"] = False
+            coverage["recomputed_policy_rejections"] = rejected
+            coverage["replacement_blocker"] = (
+                "stored threshold/reference differs from prior-only recomputation"
+            )
+        events = _opportunity_events(opportunities)
+        max_pain_by_event_id = (
+            _load_max_pain_features_batch(research_conn, events)
+            if events
+            else {}
+        )
+    if not opportunities:
+        return {
+            "available": True,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "outcome_method_version": VERIFIED_OUTCOME_METHOD,
+            "replay_version": research_historical_replay.REPLAY_VERSION,
+            "first_touch_method_version": VERIFIED_OUTCOME_METHOD,
+            "horizon_minutes": horizon,
+            "sample_size": 0,
+            "coverage": coverage,
+            "rows": [],
+            "reason": "all sampled replay rows failed coherent-policy recomputation",
+        }
+    canonical_price_rows = _canonical_price_feature_rows(
+        canonical_references
     )
     with _connect(raw_url) as raw_conn:
         required_raw = (
@@ -2011,7 +2539,13 @@ def load_historical_replay_dataset(
                 "reason": "raw market archive schema is incomplete",
                 "missing_tables": missing_raw,
             }
-        price_rows, futures_rows, spot_rows = _load_raw_rows(
+        oi_rows = _load_independent_oi_rows(
+            raw_conn,
+            symbols=symbols,
+            start=raw_start,
+            end=last_time,
+        )
+        futures_rows, spot_rows = _load_raw_flow_rows(
             raw_conn,
             symbols=symbols,
             start=raw_start,
@@ -2020,7 +2554,8 @@ def load_historical_replay_dataset(
 
     rows = build_feature_rows(
         events,
-        price_oi_rows=price_rows,
+        price_oi_rows=canonical_price_rows,
+        oi_rows=oi_rows,
         futures_rows=futures_rows,
         spot_rows=spot_rows,
         # Alert-sequence features are intentionally absent in the neutral raw
@@ -2034,6 +2569,14 @@ def load_historical_replay_dataset(
             "available": True,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "outcome_method_version": VERIFIED_OUTCOME_METHOD,
+            "replay_version": research_historical_replay.REPLAY_VERSION,
+            "first_touch_method_version": VERIFIED_OUTCOME_METHOD,
+            "movement_width_calibration_version": (
+                research_session_width.CALIBRATION_VERSION
+            ),
+            "canonical_price_provenance_version": (
+                canonical_price_path.PRICE_PROVENANCE_VERSION
+            ),
             "outcome_quality": VERIFIED_OUTCOME_QUALITY,
             "horizon_minutes": horizon,
             "lookback_days": days,
@@ -2279,27 +2822,65 @@ def load_shadow_feature_rows_by_horizon(
             return {}
         first_time = min(_as_utc(row["alert_time_utc"]) for row in events)
         last_time = max(_as_utc(row["alert_time_utc"]) for row in events)
+        symbols = sorted({str(row["symbol"] or "").upper() for row in events})
+        raw_start = first_time - timedelta(
+            days=HISTORICAL_BASELINE_DAYS,
+            minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES,
+        )
         prior_events = _load_prior_events(
             research_conn,
             first_time - timedelta(minutes=max(SEQUENCE_WINDOWS_MINUTES)),
             last_time,
         )
+        prospective_events = [
+            row for row in events if str(row.get("event_kind") or "") == "DECISION_SAMPLE"
+        ]
+        alert_events = [
+            row for row in events if str(row.get("event_kind") or "") == "ALERT"
+        ]
+        # Delivered ALERT compatibility keeps its old prior-only archive
+        # reconstruction. Prospective v6 samples never consult Max-Pain here;
+        # they consume only the wrapper frozen in their authoritative slot.
         max_pain_by_event_id = _load_max_pain_features_batch(
-            research_conn, events
+            research_conn, alert_events
         )
+        if prospective_events:
+            (
+                frozen_price_rows,
+                frozen_oi_rows,
+                frozen_futures_rows,
+                frozen_spot_rows,
+                frozen_max_pain_by_event_id,
+            ) = _load_prospective_frozen_rows(
+                research_conn,
+                symbols=sorted(
+                    {str(row["symbol"] or "").upper() for row in prospective_events}
+                ),
+                start=raw_start,
+                end=last_time,
+            )
+            max_pain_by_event_id.update(frozen_max_pain_by_event_id)
+        else:
+            frozen_price_rows = []
+            frozen_oi_rows = []
+            frozen_futures_rows = []
+            frozen_spot_rows = []
+            frozen_max_pain_by_event_id = {}
 
-    symbols = sorted({str(row["symbol"] or "").upper() for row in events})
-    raw_start = first_time - timedelta(
-        days=HISTORICAL_BASELINE_DAYS,
-        minutes=max(CORE_WINDOWS_MINUTES) + MAX_POINT_AGE_MINUTES,
-    )
-    with _connect(raw_url) as raw_conn:
-        price_rows, futures_rows, spot_rows = _load_raw_rows(
-            raw_conn,
-            symbols=symbols,
-            start=raw_start,
-            end=last_time,
-        )
+    if alert_events:
+        with _connect(raw_url) as raw_conn:
+            price_rows, futures_rows, spot_rows = _load_raw_rows(
+                raw_conn,
+                symbols=sorted(
+                    {str(row["symbol"] or "").upper() for row in alert_events}
+                ),
+                start=raw_start,
+                end=last_time,
+            )
+    else:
+        price_rows = []
+        futures_rows = []
+        spot_rows = []
     events_by_id = {int(row["event_id"]): dict(row) for row in events}
     horizon_events = []
     for horizon, event_ids in sorted(normalized_by_horizon.items()):
@@ -2310,15 +2891,48 @@ def load_shadow_feature_rows_by_horizon(
             event = dict(source)
             event["horizon_minutes"] = horizon
             horizon_events.append(event)
-    rows = build_feature_rows(
-        horizon_events,
-        price_oi_rows=price_rows,
-        futures_rows=futures_rows,
-        spot_rows=spot_rows,
-        prior_events=prior_events,
-        windows_minutes=CORE_WINDOWS_MINUTES,
-        max_pain_by_event_id=max_pain_by_event_id,
-    )
+    prospective_horizon_events = [
+        event
+        for event in horizon_events
+        if str(event.get("event_kind") or "") == "DECISION_SAMPLE"
+    ]
+    alert_horizon_events = [
+        event
+        for event in horizon_events
+        if str(event.get("event_kind") or "") == "ALERT"
+    ]
+    rows: list[Dict[str, Any]] = []
+    if prospective_horizon_events:
+        frozen_rows = build_feature_rows(
+            prospective_horizon_events,
+            price_oi_rows=frozen_price_rows,
+            oi_rows=frozen_oi_rows,
+            futures_rows=frozen_futures_rows,
+            spot_rows=frozen_spot_rows,
+            prior_events=prior_events,
+            windows_minutes=CORE_WINDOWS_MINUTES,
+            max_pain_by_event_id=max_pain_by_event_id,
+        )
+        for row in frozen_rows:
+            row["decision_input_policy_version"] = (
+                PROSPECTIVE_FROZEN_INPUT_POLICY_VERSION
+            )
+        rows.extend(frozen_rows)
+    if alert_horizon_events:
+        legacy_rows = build_feature_rows(
+            alert_horizon_events,
+            price_oi_rows=price_rows,
+            futures_rows=futures_rows,
+            spot_rows=spot_rows,
+            prior_events=prior_events,
+            windows_minutes=CORE_WINDOWS_MINUTES,
+            max_pain_by_event_id=max_pain_by_event_id,
+        )
+        for row in legacy_rows:
+            row["decision_input_policy_version"] = (
+                "legacy-mutable-raw-archive-reconstruction"
+            )
+        rows.extend(legacy_rows)
     result: Dict[tuple[int, int], Dict[str, Any]] = {}
     for row in rows:
         event_id = row.get("event", {}).get("event_id")
@@ -2346,6 +2960,12 @@ def load_shadow_feature_rows(event_ids: Sequence[int]) -> Dict[int, Dict[str, An
         raise RuntimeError("research and raw market archives must both be configured")
     with _connect(research_url) as research_conn:
         events = _load_delivered_events_by_id(research_conn, normalized)
+        # Prospective samples require an explicit formula horizon so they can
+        # be rebuilt exclusively from immutable slot series. This legacy
+        # wrapper fails closed for them instead of touching mutable archives.
+        events = [
+            row for row in events if str(row.get("event_kind") or "") == "ALERT"
+        ]
         if not events:
             return {}
         first_time = min(_as_utc(row["alert_time_utc"]) for row in events)

@@ -176,7 +176,125 @@ def run() -> None:
         and "requested" in query
     )
     assert "available_at_utc<=requested.decision_time_utc" in candidate_query
+    assert "created_at_utc<=requested.decision_time_utc" in candidate_query
     assert "LIMIT 2" in candidate_query
+
+    # Prospective sampler v3 rows are accepted only when the complete slot
+    # payload reproduces its fingerprint. Max Pain comes from that same frozen
+    # payload and is mapped to both neutral directions.
+    slot_time = datetime(2026, 8, 29, 12, 34, tzinfo=timezone.utc)
+    slot_open = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    slot_close = slot_open + timedelta(minutes=30)
+    eligible_at = slot_close + timedelta(minutes=2)
+    expires_at = eligible_at + timedelta(minutes=30)
+    slot_timestamps = {
+        family: {"source_time_utc": slot_open.isoformat()}
+        for family in matrix.research_prospective_anchors.REQUIRED_FAMILIES
+    }
+    slot_provenance = {
+        "official_price": {
+            "source": "binance_spot",
+            "price_exchange": "Binance",
+            "price_market": "spot",
+            "price_pair": "BTCUSDT",
+            "price_timeframe": "1m",
+        },
+        "price_oi": {"source": "oi_regime_snapshots"},
+        "futures_cvd": {
+            "source": "coinglass_futures_aggregated_cvd",
+            "exchange_list": "Binance,OKX,Bybit",
+        },
+        "spot_cvd": {
+            "source": "coinglass_spot_aggregated_cvd",
+            "exchange_list": "Binance,OKX,Bybit",
+        },
+    }
+    slot_frozen = {
+        "official_price": {"price": 100.0},
+        "price_oi": {"oi_close_usd": 1_000_000.0},
+        "futures_cvd": {
+            "buy_volume_usd": 20.0,
+            "sell_volume_usd": 10.0,
+            "api_cum_vol_delta_usd": 9.0,
+            "continuous_cum_vol_delta_usd": 10.0,
+        },
+        "spot_cvd": {
+            "buy_volume_usd": 11.0,
+            "sell_volume_usd": 8.0,
+            "api_cum_vol_delta_usd": 2.0,
+            "continuous_cum_vol_delta_usd": 3.0,
+        },
+        "max_pain": {
+            "evaluation_status": "UNEVALUABLE",
+            "reason": "no prior coherent snapshot",
+            "features": {},
+        },
+    }
+    coverage_snapshot = {"symbol": "BTC", "eligible": True}
+    slot_row = {
+        "anchor_slot_id": 71,
+        "sampler_version": matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+        "coverage_policy_version": "selftest-coverage",
+        "coverage_snapshot": coverage_snapshot,
+        "symbol": "BTC",
+        "source_candle_open_utc": slot_open,
+        "source_candle_close_utc": slot_close,
+        "base_eligible_at_utc": eligible_at,
+        "expires_at_utc": expires_at,
+        "decision_time_utc": slot_time,
+        "source_timestamps": slot_timestamps,
+        "source_provenance": slot_provenance,
+        "frozen_inputs": slot_frozen,
+        "long_event_id": 701,
+        "short_event_id": 702,
+        "created_at_utc": slot_time + timedelta(seconds=1),
+    }
+    slot_row["input_fingerprint"] = (
+        matrix.research_prospective_anchors.compute_input_fingerprint(
+            sampler_version=slot_row["sampler_version"],
+            coverage_policy_version=slot_row["coverage_policy_version"],
+            coverage_snapshot=coverage_snapshot,
+            symbol="BTC",
+            source_candle_open_utc=slot_open,
+            source_candle_close_utc=slot_close,
+            base_eligible_at_utc=eligible_at,
+            expires_at_utc=expires_at,
+            evaluation_status=matrix.research_prospective_anchors.EVALUABLE,
+            decision_time_utc=slot_time,
+            source_timestamps=slot_timestamps,
+            source_provenance=slot_provenance,
+            frozen_inputs=slot_frozen,
+        )
+    )
+
+    class _FrozenSlotConnection:
+        def __init__(self, row):
+            self.row = row
+
+        def execute(self, query, params):
+            assert query.count("%s") == len(params)
+            assert params[0] == matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+            return _BatchResult(many=[self.row])
+
+    frozen_loaded = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(slot_row),
+        symbols=("BTC",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+    )
+    assert [len(values) for values in frozen_loaded[:4]] == [1, 1, 1, 1]
+    assert frozen_loaded[4] == {
+        701: slot_frozen["max_pain"],
+        702: slot_frozen["max_pain"],
+    }
+    fingerprint_tampered = {**slot_row, "input_fingerprint": "0" * 64}
+    rejected = matrix._load_prospective_frozen_rows(
+        _FrozenSlotConnection(fingerprint_tampered),
+        symbols=("BTC",),
+        start=slot_time - timedelta(days=1),
+        end=slot_time,
+    )
+    assert all(not values for values in rejected)
 
     coverage_time = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
@@ -188,50 +306,96 @@ def run() -> None:
             return self._rows
 
     class _CoverageConnection:
-        def __init__(self):
-            self.calls = 0
-
         def execute(self, query, params):
             assert query.count("%s") == len(params)
-            self.calls += 1
-            if self.calls == 1:
-                assert "first_touch_method_version=%s" in query
-                assert "first_touch_data_quality_status=ANY(%s)" in query
-                assert matrix.VERIFIED_OUTCOME_METHOD in params
-                return _CoverageRows(
-                    [
+            assert "SELECT opportunity_id" in query
+            rows = []
+            opportunity_id = 1
+            for symbol in ("BTC", "ETH", "SOL", "DOGE"):
+                for index in range(300):
+                    rows.append(
                         {
+                            "opportunity_id": opportunity_id,
                             "symbol": symbol,
-                            "anchors": 300,
-                            "first_observation_utc": coverage_time - timedelta(days=20),
-                            "last_observation_utc": coverage_time,
-                            "utc_dates": 21,
+                            "observation_time_utc": (
+                                coverage_time
+                                - timedelta(days=20)
+                                + timedelta(
+                                    seconds=(20 * 86400 * index / 299)
+                                )
+                            ),
+                            "coherent": True,
                         }
-                        for symbol in ("BTC", "ETH", "SOL", "DOGE")
-                    ]
-                    + [
-                        {
-                            "symbol": "HYPE",
-                            "anchors": 100,
-                            "first_observation_utc": coverage_time - timedelta(days=3),
-                            "last_observation_utc": coverage_time,
-                            "utc_dates": 4,
-                        }
-                    ]
-                )
-            assert "symbol=ANY(%s)" in query
-            assert params[-1] == ["BTC", "DOGE", "ETH", "SOL"]
-            return _CoverageRows(
-                [{"date": (coverage_time - timedelta(days=offset)).date()} for offset in range(21)]
+                    )
+                    opportunity_id += 1
+            # This structurally selectable row sits outside any bounded
+            # training sample and simulates a tampered reference/hash.  Full
+            # coverage recomputation must reject rather than count it.
+            rows.append(
+                {
+                    "opportunity_id": opportunity_id,
+                    "symbol": "BTC",
+                    "observation_time_utc": coverage_time - timedelta(days=10),
+                    "coherent": False,
+                }
             )
+            opportunity_id += 1
+            for index in range(100):
+                rows.append(
+                    {
+                        "opportunity_id": opportunity_id,
+                        "symbol": "HYPE",
+                        "observation_time_utc": (
+                            coverage_time
+                            - timedelta(days=3)
+                            + timedelta(seconds=(3 * 86400 * index / 99))
+                        ),
+                        "coherent": True,
+                    }
+                )
+                opportunity_id += 1
+            return _CoverageRows(rows)
 
-    coverage = matrix._historical_replay_coverage(
-        _CoverageConnection(), lookback_days=3650, horizon_minutes=240
+    original_reference_loader = (
+        matrix.research_historical_replay.load_canonical_reference_rows
     )
+    original_width_builder = (
+        matrix.research_historical_replay.build_canonical_width_index
+    )
+    original_coherence = (
+        matrix.research_historical_replay.replay_outcome_row_is_coherent
+    )
+    matrix.research_historical_replay.load_canonical_reference_rows = (
+        lambda *args, **kwargs: []
+    )
+    matrix.research_historical_replay.build_canonical_width_index = (
+        lambda *args, **kwargs: {}
+    )
+    matrix.research_historical_replay.replay_outcome_row_is_coherent = (
+        lambda row, **kwargs: bool(row.get("coherent"))
+    )
+    try:
+        coverage = matrix._historical_replay_coverage(
+            _CoverageConnection(), lookback_days=3650, horizon_minutes=240
+        )
+    finally:
+        matrix.research_historical_replay.load_canonical_reference_rows = (
+            original_reference_loader
+        )
+        matrix.research_historical_replay.build_canonical_width_index = (
+            original_width_builder
+        )
+        matrix.research_historical_replay.replay_outcome_row_is_coherent = (
+            original_coherence
+        )
     assert coverage["replacement_ready"] is True
     assert coverage["symbols"] == 4
     assert coverage["stored_symbols"] == 5
     assert coverage["eligible_symbols"] == ["BTC", "DOGE", "ETH", "SOL"]
+    assert coverage["by_symbol"]["BTC"]["anchors"] == 300
+    assert coverage["by_symbol"]["BTC"]["recomputed_policy_rejections"] == 1
+    assert coverage["recomputed_policy_rejections"] == 1
+    assert coverage["coverage_validation"] == "full-row prior-only recomputation"
     assert coverage["excluded_symbols"]["HYPE"] == [
         "minimum_anchors",
         "minimum_utc_dates",
@@ -261,6 +425,9 @@ def run() -> None:
             assert "long_first_touch_metrics" in query
             assert "short_first_touch_metrics" in query
             assert "first_touch_method_version=%s" in query
+            assert "first_touch_path_samples" in query
+            assert "sibling_reference_coherent" in query
+            assert "NOT EXISTS" in query
             assert "first_touch_data_quality_status=ANY(%s)" in query
             assert matrix.VERIFIED_OUTCOME_METHOD in params
             return _CoverageRows([])

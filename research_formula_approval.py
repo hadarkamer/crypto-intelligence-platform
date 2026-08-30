@@ -22,7 +22,7 @@ import research_formula_engine
 import research_formula_store
 
 
-OPERATION_VERSION = "formula-owner-live-approval-v1"
+OPERATION_VERSION = "formula-owner-live-approval-v2-engine-bound"
 OWNER_TOKEN_ENV = "FORMULA_OWNER_APPROVAL_TOKEN"
 OWNER_TOKEN_CONFIRM_ENV = "FORMULA_OWNER_APPROVAL_TOKEN_CONFIRM"
 _TRUE = {"1", "true", "yes", "on"}
@@ -116,6 +116,7 @@ def _as_utc(value: Any) -> datetime:
 def _assert_current_schema(formula: Mapping[str, Any]) -> None:
     expected = {
         "formula_schema_version": research_formula_engine.FORMULA_SCHEMA_VERSION,
+        "engine_version": research_formula_engine.ENGINE_VERSION,
         "feature_schema_version": research_feature_matrix.FEATURE_SCHEMA_VERSION,
         "outcome_method_version": research_feature_matrix.VERIFIED_OUTCOME_METHOD,
     }
@@ -133,6 +134,7 @@ def _assert_current_schema(formula: Mapping[str, Any]) -> None:
 def _approval_schema_present(conn) -> bool:
     required = {
         "formula_schema_version",
+        "engine_version",
         "feature_schema_version",
         "outcome_method_version",
         "approval_operation_version",
@@ -150,7 +152,10 @@ def _approval_schema_present(conn) -> bool:
         """,
         (sorted(required),),
     ).fetchall()
-    return required == {str(row["column_name"]) for row in rows}
+    if required != {str(row["column_name"]) for row in rows}:
+        return False
+    enforcement = research_formula_store._live_approval_enforcement_status(conn)
+    return enforcement.get("ready") is True
 
 
 def _locked_formula(conn, formula_id: int) -> Mapping[str, Any]:
@@ -231,6 +236,7 @@ def _frozen_validation(
             "formula_key": str(formula["formula_key"]),
             "formula_version": int(formula["formula_version"]),
             "formula_schema_version": str(formula["formula_schema_version"]),
+            "engine_version": str(formula["engine_version"]),
             "feature_schema_version": str(formula["feature_schema_version"]),
             "outcome_method_version": str(formula["outcome_method_version"]),
             "direction": str(formula["direction"]),
@@ -310,7 +316,7 @@ def promote_formula_to_live(
         )
         if not _approval_schema_present(conn):
             raise ApprovalRefused(
-                "migration 009_formula_owner_live_approval_v1.sql is not applied"
+                "migration 011_formula_owner_live_engine_binding_v2.sql is not applied"
             )
         formula = _locked_formula(conn, identifier)
         transaction_row = conn.execute(
@@ -350,14 +356,14 @@ def promote_formula_to_live(
                 validated_span_hours, validated_utc_dates,
                 thresholds_met, approved_by, approval_reason,
                 validation_snapshot, approved_at_utc,
-                formula_schema_version, feature_schema_version,
+                formula_schema_version, engine_version, feature_schema_version,
                 outcome_method_version, approval_operation_version,
                 confirmation_method, approval_request_fingerprint,
                 delivery_environment_enabled
             ) VALUES (
                 %s, %s, %s,
                 'FROZEN_PROSPECTIVE', %s,
-                %s, %s,
+                %s, %s, %s,
                 %s, %s,
                 %s, %s,
                 %s, %s,
@@ -388,6 +394,7 @@ def promote_formula_to_live(
                 research_formula_store._json(validation),
                 approved_at,
                 str(formula["formula_schema_version"]),
+                str(formula["engine_version"]),
                 str(formula["feature_schema_version"]),
                 str(formula["outcome_method_version"]),
                 OPERATION_VERSION,
@@ -478,7 +485,7 @@ def formula_approval_status(formula_id: int) -> Dict[str, Any]:
         formula = conn.execute(
             """
             SELECT formula_id, formula_version, formula_schema_version,
-                   feature_schema_version, outcome_method_version,
+                   engine_version, feature_schema_version, outcome_method_version,
                    direction, horizon_minutes, formula_text, current_stage,
                    active, live_alert_approved, live_alert_approved_at_utc,
                    live_alert_approved_by, shadow_started_at_utc,
@@ -496,13 +503,30 @@ def formula_approval_status(formula_id: int) -> Dict[str, Any]:
                    approval_reason, validation_policy_version,
                    validation_fingerprint, validated_future_matches,
                    validated_future_controls, validated_span_hours,
-                   validated_utc_dates, thresholds_met
+                   validated_utc_dates, thresholds_met,
+                   formula_schema_version, engine_version,
+                   feature_schema_version, outcome_method_version,
+                   approval_operation_version
             FROM research_formula_live_approvals
             WHERE formula_id=%s AND formula_version=%s
+              AND formula_schema_version=%s
+              AND engine_version=%s
+              AND feature_schema_version=%s
+              AND outcome_method_version=%s
+              AND approval_operation_version=%s
+              AND delivery_environment_enabled=FALSE
             ORDER BY approved_at_utc DESC
             LIMIT 1
             """,
-            (identifier, int(formula["formula_version"])),
+            (
+                identifier,
+                int(formula["formula_version"]),
+                str(formula["formula_schema_version"]),
+                str(formula["engine_version"]),
+                str(formula["feature_schema_version"]),
+                str(formula["outcome_method_version"]),
+                OPERATION_VERSION,
+            ),
         ).fetchone()
     compatibility_error = None
     try:
@@ -513,7 +537,7 @@ def formula_approval_status(formula_id: int) -> Dict[str, Any]:
     return research_formula_store._json_safe(
         {
             "formula": dict(formula),
-            "migration_009_ready": migration_ready,
+            "migration_011_ready": migration_ready,
             "runtime_schema_compatible": compatibility_error is None,
             "schema_blocker": compatibility_error,
             "last_readiness_evaluation": {
