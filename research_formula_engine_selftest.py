@@ -734,8 +734,9 @@ def run() -> None:
         )
 
     # Four/five-condition search is opt-in and hierarchical: only stable triple
-    # parents enter the bounded beam, and every child must improve both the
-    # discovery score and the later chronological holdout score.
+    # parents enter the bounded beam, and every child must improve in both
+    # halves of a nested chronological screen inside discovery.  The outer
+    # holdout may validate/rank frozen finalists but must never shape the beam.
     hierarchy_rows = [_hierarchy_row(index) for index in range(816)]
     hierarchy_config = engine.DiscoveryConfig(
         numeric_quantiles=(0.50,),
@@ -773,6 +774,12 @@ def run() -> None:
     assert hierarchy_diagnostics["quint_candidates_passed_gain"] > 0
     assert hierarchy_diagnostics["quad_candidates_attempted"] <= 30
     assert hierarchy_diagnostics["quint_candidates_attempted"] <= 20
+    assert hierarchy_diagnostics["fit_rows"] > 0
+    assert hierarchy_diagnostics["selection_rows"] > 0
+    assert (
+        hierarchy_diagnostics["outer_holdout_used_for_hierarchical_selection"]
+        is False
+    )
     assert long_diagnostics["candidates_evaluated"] <= 100
     hierarchical_formulas = [
         formula
@@ -787,8 +794,10 @@ def run() -> None:
     for formula in hierarchical_formulas:
         validation = formula["hierarchical_validation"]
         assert validation["passed"] is True
-        assert validation["discovery_incremental_score_gain"] >= 0.25
-        assert validation["holdout_incremental_score_gain"] >= 0.25
+        assert validation["fit_incremental_score_gain"] >= 0.25
+        assert validation["selection_incremental_score_gain"] >= 0.25
+        assert validation["outer_holdout_used_for_selection"] is False
+        assert "holdout_incremental_score_gain" not in validation
         families = [
             engine.research_formula_families.feature_correlation_family(
                 condition["feature"]
@@ -801,6 +810,74 @@ def run() -> None:
             == long_diagnostics["statistical_hypotheses_tested"]
         )
         assert "evidence_family" in formula["multiple_testing"]
+
+    # Changing only the outer holdout must not change which hierarchical
+    # hypotheses were generated or their discovery-only q-value fingerprint.
+    adversarial_holdout_rows = [_hierarchy_row(index) for index in range(816)]
+    holdout_start = engine._utc(hierarchy_result["holdout_start_time_utc"])
+    for row in adversarial_holdout_rows:
+        if engine._utc(row["event"]["alert_time_utc"]) < holdout_start:
+            continue
+        row["model_features"]["snapshot_features"] = {
+            feature: 0.0
+            for feature in row["model_features"]["snapshot_features"]
+        }
+        row["outcome_label"].update(
+            {
+                "directional_return_pct": -9.0,
+                "path_success": False,
+                "first_touch_status": "MISS",
+                "mfe_pct": 0.0,
+                "mae_pct": 9.0,
+                "target_progress_ratio": 0.0,
+                "target_reached": False,
+            }
+        )
+    adversarial_result = engine.discover_formulas(
+        adversarial_holdout_rows,
+        horizon_minutes=240,
+        feature_schema_version="hierarchy-selftest-v1",
+        config=hierarchy_config,
+    )
+    adversarial_long = next(
+        direction
+        for direction in adversarial_result["directions"]
+        if direction["direction"] == "LONG"
+    )
+    adversarial_diagnostics = adversarial_long["hierarchical_search"]
+    for diagnostic in (
+        "stable_triple_parents",
+        "quad_candidates_attempted",
+        "quad_candidates_tested",
+        "quad_candidates_passed_gain",
+        "stable_quad_parents",
+        "quint_candidates_attempted",
+        "quint_candidates_tested",
+        "quint_candidates_passed_gain",
+        "hypothesis_family_fingerprint",
+    ):
+        assert adversarial_diagnostics[diagnostic] == hierarchy_diagnostics[diagnostic]
+
+    # The nested screen also preserves timestamp groups at its own boundary.
+    nested_boundary_rows = [_hierarchy_row(index) for index in range(40)]
+    nested_boundary_rows[27]["event"]["alert_time_utc"] = nested_boundary_rows[
+        28
+    ]["event"]["alert_time_utc"]
+    nested_boundary_result = engine._search_direction(
+        nested_boundary_rows,
+        [],
+        direction="LONG",
+        horizon_minutes=240,
+        feature_schema_version="hierarchy-boundary-selftest-v1",
+        config=hierarchy_config,
+    )
+    nested_boundary_diagnostics = nested_boundary_result["hierarchical_search"]
+    assert nested_boundary_diagnostics["fit_rows"] == 27
+    assert nested_boundary_diagnostics["selection_rows"] == 13
+    assert (
+        engine._utc(nested_boundary_diagnostics["selection_start_time_utc"])
+        == engine._utc(nested_boundary_rows[27]["event"]["alert_time_utc"])
+    )
 
     four_only_result = engine.discover_formulas(
         hierarchy_rows,

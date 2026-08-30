@@ -44,12 +44,15 @@ For each horizon and direction, the engine:
 3. derives numeric thresholds from discovery quantiles only;
 4. evaluates single, pair and triple conditions in a bounded search by default;
 5. only when `FORMULA_DISCOVERY_HIERARCHICAL_ENABLED=1`, expands a bounded
-   beam of stable triple parents to four and then five conditions, requiring
-   incremental score gain in both discovery and chronological holdout;
+   beam of stable triple parents to four and then five conditions. A nested,
+   timestamp-safe chronological fit/screen split inside discovery selects that
+   hierarchy and requires incremental gain in both parts; the outer holdout is
+   not inspected until the complete hypothesis family has been frozen;
 6. prevents correlated-family stacking without a frozen written exception and
    always forbids combining composite Max Pain evidence with its components;
 7. corrects every statistically tested candidate with one Benjamini-Hochberg
-   family, including hierarchical children that fail the later gain screen;
+   family, including hierarchical children that fail the nested discovery gain
+   screen, before final holdout validation begins;
 8. collapses exact/overlapping evidence fingerprints into deterministic formula
    families and persists one champion per family. Single-coin effects remain
    eligible; cross-symbol breadth is not a family-grouping requirement;

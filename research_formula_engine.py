@@ -26,7 +26,7 @@ import research_mfe_mae_efficiency
 import research_no_dwell_outcome
 
 ENGINE_VERSION = (
-    "formula-discovery-v6.1-first-touch-maxpain-hierarchical-zero-mae"
+    "formula-discovery-v6.2-first-touch-maxpain-hierarchical-holdout-isolated"
 )
 FORMULA_SCHEMA_VERSION = "research-formula-v6-first-touch-maxpain"
 ALLOWED_OPERATORS = {">=", "<=", "=="}
@@ -1421,7 +1421,45 @@ def _search_direction(
     config: DiscoveryConfig,
 ) -> Dict[str, Any]:
     discovery_features = [extract_decision_features(row) for row in discovery_rows]
-    holdout_features = [extract_decision_features(row) for row in holdout_rows]
+    holdout_features: Optional[list[Dict[str, Any]]] = None
+    # The outer holdout is the final validation surface.  Hierarchical beam
+    # construction must never inspect it, because doing so would make the
+    # number and identity of tested hypotheses depend on the evidence later
+    # reported as frozen validation.  Instead, use a timestamp-safe nested
+    # fit/screen split drawn only from the outer discovery partition.
+    hierarchical_fit_rows: list[Mapping[str, Any]] = []
+    hierarchical_selection_rows: list[Mapping[str, Any]] = []
+    if config.hierarchical_search_enabled:
+        hierarchical_fit_rows = list(discovery_rows)
+        discovery_times = sorted(
+            {_utc(row["event"]["alert_time_utc"]) for row in discovery_rows}
+        )
+        if len(discovery_times) >= 2:
+            target_index = int(
+                math.floor(len(discovery_rows) * config.discovery_fraction)
+            )
+            target_index = max(1, min(len(discovery_rows) - 1, target_index))
+            selection_start = _utc(
+                discovery_rows[target_index]["event"]["alert_time_utc"]
+            )
+            if selection_start == discovery_times[0]:
+                selection_start = discovery_times[1]
+            hierarchical_fit_rows = [
+                row
+                for row in discovery_rows
+                if _utc(row["event"]["alert_time_utc"]) < selection_start
+            ]
+            hierarchical_selection_rows = [
+                row
+                for row in discovery_rows
+                if _utc(row["event"]["alert_time_utc"]) >= selection_start
+            ]
+    hierarchical_fit_features = [
+        extract_decision_features(row) for row in hierarchical_fit_rows
+    ]
+    hierarchical_selection_features = [
+        extract_decision_features(row) for row in hierarchical_selection_rows
+    ]
     predicates = _predicate_catalog(discovery_rows, discovery_features, config)
     predicate_matches: list[set[int]] = []
     usable_predicates: list[Dict[str, Any]] = []
@@ -1529,8 +1567,13 @@ def _search_direction(
         return candidate
 
     def attach_holdout(candidate: Dict[str, Any]) -> None:
+        nonlocal holdout_features
         if "holdout_metrics" in candidate:
             return
+        if holdout_features is None:
+            holdout_features = [
+                extract_decision_features(row) for row in holdout_rows
+            ]
         matched_indexes = tuple(
             index
             for index, features in enumerate(holdout_features)
@@ -1559,43 +1602,75 @@ def _search_direction(
             value = _number(metrics.get("hit_rate_improvement_pct_points"))
         return value
 
+    def attach_hierarchical_screen(candidate: Dict[str, Any]) -> None:
+        if "hierarchical_selection_metrics" in candidate:
+            return
+        conditions = candidate["conditions"]
+        fit_indexes = tuple(
+            index
+            for index, features in enumerate(hierarchical_fit_features)
+            if all(condition_matches(features, condition) for condition in conditions)
+        )
+        selection_indexes = tuple(
+            index
+            for index, features in enumerate(hierarchical_selection_features)
+            if all(condition_matches(features, condition) for condition in conditions)
+        )
+        fit_metrics = _metrics(
+            [hierarchical_fit_rows[index] for index in fit_indexes],
+            hierarchical_fit_rows,
+        )
+        selection_metrics = _metrics(
+            [hierarchical_selection_rows[index] for index in selection_indexes],
+            hierarchical_selection_rows,
+        )
+        candidate["hierarchical_fit_metrics"] = fit_metrics
+        candidate["hierarchical_selection_metrics"] = selection_metrics
+        candidate["hierarchical_fit_preliminary_score"] = _preliminary_score(
+            fit_metrics, len(conditions)
+        )
+        candidate["hierarchical_selection_preliminary_score"] = _preliminary_score(
+            selection_metrics, len(conditions)
+        )
+
     def stable_parent(candidate: Dict[str, Any]) -> bool:
-        attach_holdout(candidate)
+        attach_hierarchical_screen(candidate)
         depth = len(candidate["conditions"])
         if depth <= 3:
-            required_discovery = config.strict_discovery_samples
-            required_holdout = config.strict_holdout_samples
+            required_fit = config.strict_discovery_samples
+            required_selection = config.strict_holdout_samples
         else:
-            required_discovery = max(
+            required_fit = max(
                 config.strict_discovery_samples,
                 config.hierarchical_min_discovery_samples
                 + (depth - 4) * config.hierarchical_discovery_sample_increment,
             )
-            required_holdout = max(
+            required_selection = max(
                 config.strict_holdout_samples,
                 config.hierarchical_min_holdout_samples
                 + (depth - 4) * config.hierarchical_holdout_sample_increment,
             )
-        discovery_metrics = candidate["discovery_metrics"]
-        holdout_metrics = candidate["holdout_metrics"]
-        discovery_hit = _number(discovery_metrics.get("hit_rate_pct"))
-        holdout_hit = _number(holdout_metrics.get("hit_rate_pct"))
-        discovery_improvement = improvement(discovery_metrics)
-        holdout_improvement = improvement(holdout_metrics)
+        fit_metrics = candidate["hierarchical_fit_metrics"]
+        selection_metrics = candidate["hierarchical_selection_metrics"]
+        fit_hit = _number(fit_metrics.get("hit_rate_pct"))
+        selection_hit = _number(selection_metrics.get("hit_rate_pct"))
+        fit_improvement = improvement(fit_metrics)
+        selection_improvement = improvement(selection_metrics)
         stable = bool(
-            int(discovery_metrics.get("sample_size") or 0) >= required_discovery
-            and int(holdout_metrics.get("sample_size") or 0) >= required_holdout
-            and discovery_hit is not None
-            and holdout_hit is not None
-            and abs(discovery_hit - holdout_hit)
+            int(fit_metrics.get("sample_size") or 0) >= required_fit
+            and int(selection_metrics.get("sample_size") or 0)
+            >= required_selection
+            and fit_hit is not None
+            and selection_hit is not None
+            and abs(fit_hit - selection_hit)
             <= float(config.hierarchical_max_parent_hit_rate_gap)
-            and candidate["holdout_preliminary_score"]
-            >= candidate["preliminary_score"]
+            and candidate["hierarchical_selection_preliminary_score"]
+            >= candidate["hierarchical_fit_preliminary_score"]
             - float(config.hierarchical_max_parent_score_drop)
-            and discovery_improvement is not None
-            and discovery_improvement >= 0.0
-            and holdout_improvement is not None
-            and holdout_improvement >= 0.0
+            and fit_improvement is not None
+            and fit_improvement >= 0.0
+            and selection_improvement is not None
+            and selection_improvement >= 0.0
         )
         candidate["hierarchical_parent_stable"] = stable
         return stable
@@ -1617,36 +1692,42 @@ def _search_direction(
     def finish_hierarchical_child(
         child: Dict[str, Any], parent: Dict[str, Any]
     ) -> bool:
-        attach_holdout(parent)
-        attach_holdout(child)
+        attach_hierarchical_screen(parent)
+        attach_hierarchical_screen(child)
         depth = len(child["conditions"])
-        required_discovery, required_holdout = hierarchical_samples(depth)
-        discovery_gain = child["preliminary_score"] - parent["preliminary_score"]
-        holdout_gain = (
-            child["holdout_preliminary_score"]
-            - parent["holdout_preliminary_score"]
+        required_fit, required_selection = hierarchical_samples(depth)
+        fit_gain = (
+            child["hierarchical_fit_preliminary_score"]
+            - parent["hierarchical_fit_preliminary_score"]
+        )
+        selection_gain = (
+            child["hierarchical_selection_preliminary_score"]
+            - parent["hierarchical_selection_preliminary_score"]
         )
         passed = bool(
-            int(child["discovery_metrics"].get("sample_size") or 0)
-            >= required_discovery
-            and int(child["holdout_metrics"].get("sample_size") or 0)
-            >= required_holdout
-            and discovery_gain >= float(config.hierarchical_min_parent_gain)
-            and holdout_gain >= float(config.hierarchical_min_parent_gain)
+            int(child["hierarchical_fit_metrics"].get("sample_size") or 0)
+            >= required_fit
+            and int(
+                child["hierarchical_selection_metrics"].get("sample_size") or 0
+            )
+            >= required_selection
+            and fit_gain >= float(config.hierarchical_min_parent_gain)
+            and selection_gain >= float(config.hierarchical_min_parent_gain)
         )
         child["eligible_for_output"] = passed
         child["hierarchical_validation"] = {
             "parent_condition_count": len(parent["conditions"]),
             "parent_conditions": list(parent["conditions"]),
-            "discovery_incremental_score_gain": round(discovery_gain, 6),
-            "holdout_incremental_score_gain": round(holdout_gain, 6),
+            "fit_incremental_score_gain": round(fit_gain, 6),
+            "selection_incremental_score_gain": round(selection_gain, 6),
             "minimum_incremental_gain": float(config.hierarchical_min_parent_gain),
-            "required_discovery_samples": required_discovery,
-            "required_holdout_samples": required_holdout,
+            "required_fit_samples": required_fit,
+            "required_selection_samples": required_selection,
             "passed": passed,
+            "outer_holdout_used_for_selection": False,
             "selection_note": (
-                "chronological holdout is used as a hierarchical stability/gain "
-                "screen and remains reported separately"
+                "a timestamp-safe nested screen inside the discovery partition "
+                "selects the hierarchy; the outer holdout remains untouched"
             ),
         }
         return passed
@@ -1692,6 +1773,15 @@ def _search_direction(
 
     hierarchical_diagnostics: Dict[str, Any] = {
         "enabled": bool(config.hierarchical_search_enabled),
+        "selection_policy": "nested-chronological-discovery-fit-screen-v1",
+        "fit_rows": len(hierarchical_fit_rows),
+        "selection_rows": len(hierarchical_selection_rows),
+        "selection_start_time_utc": (
+            hierarchical_selection_rows[0]["event"]["alert_time_utc"]
+            if hierarchical_selection_rows
+            else None
+        ),
+        "outer_holdout_used_for_hierarchical_selection": False,
         "stable_triple_parents": 0,
         "quad_candidates_attempted": 0,
         "quad_candidates_tested": 0,
@@ -1727,7 +1817,8 @@ def _search_direction(
         ]
         stable_triples.sort(
             key=lambda item: min(
-                item["preliminary_score"], item["holdout_preliminary_score"]
+                item["hierarchical_fit_preliminary_score"],
+                item["hierarchical_selection_preliminary_score"],
             ),
             reverse=True,
         )
@@ -1776,7 +1867,8 @@ def _search_direction(
             stable_quads = [candidate for candidate in quads if stable_parent(candidate)]
             stable_quads.sort(
                 key=lambda item: min(
-                    item["preliminary_score"], item["holdout_preliminary_score"]
+                    item["hierarchical_fit_preliminary_score"],
+                    item["hierarchical_selection_preliminary_score"],
                 ),
                 reverse=True,
             )
@@ -1817,14 +1909,28 @@ def _search_direction(
             hierarchical_diagnostics["quint_candidates_attempted"] = quint_attempts
 
     # Correct across every unique candidate inspected, not only the shortlist
-    # later persisted in the registry. Hierarchical children that fail their
-    # holdout gain gate remain in this correction family because their discovery
-    # hypothesis was actually tested.
+    # later persisted in the registry. The complete hypothesis family is now
+    # frozen using discovery-only evidence before the outer holdout is touched.
     all_q_values = _bh_q_values(
         [candidate["discovery_metrics"].get("one_sided_p_value") for candidate in candidates]
     )
     for candidate, q_value in zip(candidates, all_q_values):
         candidate["discovery_q_value"] = q_value
+    hypothesis_payload = [
+        {
+            "conditions": candidate["conditions"],
+            "discovery_q_value": candidate.get("discovery_q_value"),
+        }
+        for candidate in candidates
+    ]
+    hierarchical_diagnostics["hypothesis_family_fingerprint"] = hashlib.sha256(
+        json.dumps(
+            hypothesis_payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     eligible_candidates = sorted(
         (candidate for candidate in candidates if candidate["eligible_for_output"]),
         key=lambda item: item["preliminary_score"],
