@@ -512,9 +512,6 @@ def _replacement_contract() -> tuple[dict, dict, list[dict]]:
             "feature_schema_version": (
                 store.research_feature_matrix.FEATURE_SCHEMA_VERSION
             ),
-            "outcome_method_version": (
-                store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
-            ),
             "horizon_minutes": 240,
             "recommended_stage": "BACKTESTED",
         }
@@ -768,6 +765,7 @@ def run() -> None:
         discovery=valid_discovery,
         formulas=valid_formulas,
     )
+    assert "outcome_method_version" not in valid_formulas[0]
     assert verified["verified"] is True, verified
     assert verified["eligible_symbols"] == ["BTC", "DOGE", "ETH", "SOL"]
     assert verified["qualifying_formula_count"] == 1
@@ -849,6 +847,16 @@ def run() -> None:
     assert missing_version_result["verified"] is False
     assert "replay_version" in missing_version_result["reasons"]
     assert "first_touch_method_version" in missing_version_result["reasons"]
+
+    wrong_outcome_method = dict(valid_dataset)
+    wrong_outcome_method["outcome_method_version"] = "wrong-outcome-method"
+    wrong_outcome_result = store._verified_replacement_readiness(
+        dataset=wrong_outcome_method,
+        discovery=valid_discovery,
+        formulas=valid_formulas,
+    )
+    assert wrong_outcome_result["verified"] is False
+    assert "outcome_method_version" in wrong_outcome_result["reasons"]
 
     missing_coverage_versions = dict(valid_dataset)
     missing_coverage_versions["coverage"] = {

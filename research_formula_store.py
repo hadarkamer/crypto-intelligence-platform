@@ -426,14 +426,15 @@ def _verified_replacement_readiness(
             reasons.append("formula_shape")
             continue
         formula_horizon = _strict_int(formula.get("horizon_minutes"))
+        # Outcome provenance is a dataset-level immutable contract verified
+        # above and persisted uniformly for every formula in this run.  Engine
+        # formula payloads intentionally do not duplicate that field.
         version_match = bool(
             formula.get("formula_schema_version")
             == research_formula_engine.FORMULA_SCHEMA_VERSION
             and formula.get("engine_version") == research_formula_engine.ENGINE_VERSION
             and formula.get("feature_schema_version")
             == research_feature_matrix.FEATURE_SCHEMA_VERSION
-            and formula.get("outcome_method_version")
-            == research_feature_matrix.VERIFIED_OUTCOME_METHOD
             and _strict_int(formula.get("formula_version")) == 1
         )
         if formula_horizon == expected_horizon and version_match:
