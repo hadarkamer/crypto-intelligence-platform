@@ -476,6 +476,19 @@ def run() -> None:
     assert "ADD COLUMN IF NOT EXISTS long_first_touch_metrics" in first_touch_migration
     assert "ADD COLUMN IF NOT EXISTS first_touch_replay_run_id" in first_touch_migration
     assert "ADD COLUMN IF NOT EXISTS first_touch_method_version" in first_touch_migration
+    rejection_migration = (
+        root / "migrations" / "014_outcome_rejection_audit_v1.sql"
+    ).read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS research_outcome_event_rejections" in (
+        rejection_migration
+    )
+    assert "PRIMARY KEY (event_id, rejection_policy_version)" in rejection_migration
+    assert "BEFORE UPDATE OR DELETE ON research_outcome_event_rejections" in (
+        rejection_migration
+    )
+    assert "BEFORE TRUNCATE ON research_outcome_event_rejections" in (
+        rejection_migration
+    )
 
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS

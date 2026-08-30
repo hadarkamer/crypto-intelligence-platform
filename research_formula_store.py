@@ -699,6 +699,7 @@ def schema_status() -> Dict[str, Any]:
         "research_prospective_anchor_attempts",
         "research_prospective_anchor_slots",
         "research_prospective_shadow_events",
+        "research_outcome_event_rejections",
     )
     required_columns = {
         "research_formula_shadow_checks": (
@@ -791,6 +792,13 @@ def schema_status() -> Dict[str, Any]:
             "feature_bundle_sha256",
             "decision_feature_bundle",
         ),
+        "research_outcome_event_rejections": (
+            "rejection_policy_version",
+            "reason_code",
+            "reason_text",
+            "event_snapshot",
+            "rejected_at_utc",
+        ),
     }
     base = {
         "configured": bool(_database_url()),
@@ -829,7 +837,8 @@ def schema_status() -> Dict[str, Any]:
               (SELECT COUNT(*) FROM research_formula_shadow_hits) AS shadow_hits,
               (SELECT COUNT(*) FROM research_legacy_alert_messages) AS legacy_messages,
               (SELECT COUNT(*) FROM research_formula_alert_subscriptions WHERE active) AS active_subscriptions,
-              (SELECT COUNT(*) FROM research_formula_live_deliveries WHERE status='PENDING') AS pending_live_deliveries
+              (SELECT COUNT(*) FROM research_formula_live_deliveries WHERE status='PENDING') AS pending_live_deliveries,
+              (SELECT COUNT(*) FROM research_outcome_event_rejections) AS rejected_outcome_events
             """
         ).fetchone()
         base.update({key: int(counts[key] or 0) for key in counts})

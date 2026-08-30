@@ -27,7 +27,7 @@ class _CaptureResult:
         return []
 
     def fetchone(self):
-        return {"event_id": 1}
+        return {"event_id": 1, "inserted": 1}
 
 
 class _ConnectionContext:
@@ -215,6 +215,9 @@ def _run_once_with_path(
     service._write_first_touch_outcome = (
         lambda conn, **kwargs: captured_writes.append(kwargs) or True
     )
+    service._write_alert_reference_rejections = (
+        lambda conn, rejections: len(rejections)
+    )
     original_psycopg = worker.psycopg
     original_enabled = worker._ENABLED
     original_database_url = worker._database_url
@@ -308,6 +311,8 @@ def run() -> None:
     assert "ARRAY[]::integer[] AS open_first_touch_horizons" in closed_capture.query
     assert "e.event_kind, e.delivery_status" in closed_capture.query
     assert "research_formula_shadow_checks open_check" not in closed_capture.query
+    assert "research_outcome_event_rejections rejected" in closed_capture.query
+    assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in closed_capture.params
 
     captured = _CaptureResult()
     assert worker.ResearchOutcomeWorker._load_open_first_touch_events(
@@ -336,11 +341,13 @@ def run() -> None:
         "e.delivery_status='DELIVERED'",
         "e.event_kind='DECISION_SAMPLE'",
         "e.delivery_status='NOT_APPLICABLE'",
+        "research_outcome_event_rejections rejected",
     ):
         assert required in captured.query
     assert "e.event_kind, e.delivery_status" in captured.query
     assert "FROM research_events e" in captured.query
     assert "research_formula_live_deliveries" not in captured.query
+    assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in captured.params
 
     canonical_alert = {
         "event_kind": "ALERT",
@@ -422,6 +429,35 @@ def run() -> None:
             "engine_snapshot": {},
         }
     ) is None
+
+    rejection_capture = _CaptureResult()
+    inserted = worker.ResearchOutcomeWorker._write_alert_reference_rejections(
+        rejection_capture,
+        [
+            {
+                "event": {**canonical_alert, "event_id": 77},
+                "reason": "legacy Alert has no canonical price provenance",
+            }
+        ],
+    )
+    assert inserted == 1
+    assert rejection_capture.query.count("%s") == len(rejection_capture.params)
+    assert "ON CONFLICT (event_id, rejection_policy_version) DO NOTHING" in (
+        rejection_capture.query
+    )
+    assert rejection_capture.params[1] == (
+        worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION
+    )
+    rejection_payload = __import__("json").loads(rejection_capture.params[0])
+    assert rejection_payload[0]["event_id"] == 77
+    assert rejection_payload[0]["reason_code"] == "BINANCE_REFERENCE_PROVENANCE"
+    assert rejection_payload[0]["event_snapshot"]["price_provenance"] == {
+        "source": "binance_spot",
+        "exchange": "",
+        "market": "",
+        "pair": "ZECUSDT",
+        "instrument": "",
+    }
     queue_priority = worker._alert_reference_queue_priority_sql("e")
     assert "CASE" in queue_priority
     assert "e.event_kind<>'ALERT'" in queue_priority

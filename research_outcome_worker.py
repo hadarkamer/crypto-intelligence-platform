@@ -64,6 +64,7 @@ _STRICT_FEATURE_BUNDLE_POLICY_VERSION = (
 _STRICT_PROSPECTIVE_SAMPLER_VERSION = (
     "prospective-neutral-anchor-v4-decision-features-frozen"
 )
+_ALERT_REFERENCE_REJECTION_POLICY_VERSION = "alert-reference-provenance-v1"
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -1108,6 +1109,12 @@ class ResearchOutcomeWorker:
                     )
                 )
               )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM research_outcome_event_rejections rejected
+                  WHERE rejected.event_id=e.event_id
+                    AND rejected.rejection_policy_version=%s
+              )
               AND ({' OR '.join(clauses)})
             GROUP BY e.event_id
             ORDER BY
@@ -1121,6 +1128,7 @@ class ResearchOutcomeWorker:
             list(canonical_price_path.COMPLETE_QUALITIES),
             list(canonical_price_path.COMPLETE_QUALITIES),
             _FIRST_TOUCH_METHOD_VERSION,
+            _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
             *condition_params,
             max(1, min(int(limit), 1000)),
         ]
@@ -1209,6 +1217,12 @@ class ResearchOutcomeWorker:
                         )
                     )
                   )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM research_outcome_event_rejections rejected
+                  WHERE rejected.event_id=e.event_id
+                    AND rejected.rejection_policy_version=%s
+              )
               AND e.alert_time_utc
                     + (open_formula.horizon_minutes * INTERVAL '1 minute')
                   > NOW()
@@ -1255,12 +1269,74 @@ class ResearchOutcomeWorker:
             _FIRST_TOUCH_METHOD_VERSION,
             _STRICT_FROZEN_EVIDENCE_POLICY_VERSION,
             _FIRST_TOUCH_METHOD_VERSION,
+            _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
             _FIRST_TOUCH_METHOD_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),
             list(canonical_price_path.COMPLETE_QUALITIES),
             max(1, min(int(limit), _OPEN_FIRST_TOUCH_EVENT_LIMIT)),
         ]
         return conn.execute(query, params).fetchall()
+
+    @staticmethod
+    def _write_alert_reference_rejections(
+        conn, rejections: Sequence[Mapping[str, Any]]
+    ) -> int:
+        """Persist one immutable audit row per event and policy version."""
+        payload = []
+        for rejection in rejections:
+            event = rejection["event"]
+            symbol = str(event.get("symbol") or "").strip().upper()
+            payload.append(
+                {
+                    "event_id": int(event["event_id"]),
+                    "reason_code": (
+                        "HYPE_REFERENCE_PROVENANCE"
+                        if symbol == "HYPE"
+                        else "BINANCE_REFERENCE_PROVENANCE"
+                    ),
+                    "reason_text": str(rejection["reason"]),
+                    "event_snapshot": {
+                        "event_kind": str(event.get("event_kind") or ""),
+                        "delivery_status": str(
+                            event.get("delivery_status") or ""
+                        ),
+                        "symbol": symbol,
+                        "price_provenance": _snapshot_price_provenance(
+                            event.get("engine_snapshot")
+                        ),
+                    },
+                }
+            )
+        if not payload:
+            return 0
+        row = conn.execute(
+            """
+            WITH candidates AS (
+                SELECT *
+                FROM jsonb_to_recordset(%s::jsonb) AS item(
+                    event_id BIGINT,
+                    reason_code TEXT,
+                    reason_text TEXT,
+                    event_snapshot JSONB
+                )
+            ), inserted AS (
+                INSERT INTO research_outcome_event_rejections (
+                    event_id, rejection_policy_version, reason_code,
+                    reason_text, event_snapshot
+                )
+                SELECT event_id, %s, reason_code, reason_text, event_snapshot
+                FROM candidates
+                ON CONFLICT (event_id, rejection_policy_version) DO NOTHING
+                RETURNING event_id
+            )
+            SELECT COUNT(*) AS inserted FROM inserted
+            """,
+            (
+                json.dumps(payload, ensure_ascii=False, default=str),
+                _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
+            ),
+        ).fetchone()
+        return int(row["inserted"] or 0)
 
     @staticmethod
     def _write_outcome(
@@ -1486,6 +1562,7 @@ class ResearchOutcomeWorker:
         first_touch_pending = 0
         first_touch_policy_conflicts = 0
         alert_reference_provenance_rejections = 0
+        rejected_alerts: list[Dict[str, Any]] = []
         first_touch_terminal_deferred = 0
         now = datetime.now(timezone.utc)
         latest_closed_cutoff = _latest_closed_candle_cutoff(now)
@@ -1574,11 +1651,8 @@ class ResearchOutcomeWorker:
             provenance_error = _alert_reference_provenance_error(event)
             if provenance_error is not None:
                 alert_reference_provenance_rejections += 1
-                print(
-                    "[research-outcomes] non-canonical Alert reference "
-                    f"event={event['event_id']} symbol={symbol}; skipped: "
-                    f"{provenance_error}",
-                    flush=True,
+                rejected_alerts.append(
+                    {"event": event, "reason": provenance_error}
                 )
                 continue
 
@@ -1756,6 +1830,36 @@ class ResearchOutcomeWorker:
                         "upgrade": horizon in versions,
                     }
                 )
+
+        if rejected_alerts:
+            with psycopg.connect(
+                url,
+                row_factory=dict_row,
+                connect_timeout=5,
+                options="-c statement_timeout=15000 -c lock_timeout=1000",
+            ) as conn:
+                newly_quarantined = self._write_alert_reference_rejections(
+                    conn, rejected_alerts
+                )
+            by_route: Dict[str, int] = {}
+            for rejected in rejected_alerts:
+                route = (
+                    "HYPE"
+                    if str(rejected["event"].get("symbol") or "").upper()
+                    == "HYPE"
+                    else "BINANCE"
+                )
+                by_route[route] = by_route.get(route, 0) + 1
+            summary = ", ".join(
+                f"{route}={by_route[route]}" for route in sorted(by_route)
+            )
+            print(
+                "[research-outcomes] quarantined non-canonical Alert references "
+                f"policy={_ALERT_REFERENCE_REJECTION_POLICY_VERSION} "
+                f"new={newly_quarantined} checked={len(rejected_alerts)} "
+                f"routes={summary}",
+                flush=True,
+            )
 
         if unavailable_symbols:
             summary = ", ".join(
