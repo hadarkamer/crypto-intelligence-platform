@@ -97,6 +97,11 @@ class _StateSampling:
         preserve_slot_open=False,
     ):
         captured_symbols = {str(symbol).upper() for symbol in captured}
+        conflicted_symbols = {
+            str(item).split(":", 1)[0].strip().upper()
+            for item in conflicts
+            if str(item).strip()
+        }
         self.existing_symbols = tuple(existing)
         self.preserve_slot_open = bool(preserve_slot_open)
         self.batch = SimpleNamespace(
@@ -114,6 +119,7 @@ class _StateSampling:
             for index, decision in enumerate(decisions)
             if decision["evaluation_status"]
             != worker_module.research_prospective_anchors.NOT_DUE
+            and str(decision["symbol"]).upper() not in conflicted_symbols
         )
         self.conflicts = tuple(conflicts)
 
@@ -395,23 +401,42 @@ async def _exercise_slot_rollover() -> None:
     first = _StateSampling(
         (
             {
-                "symbol": "HYPE",
+                "symbol": "BTC",
                 "evaluation_status": (
-                    worker_module.research_prospective_anchors.COVERAGE_EXCLUDED
+                    worker_module.research_prospective_anchors.EVALUABLE
                 ),
-                "checked_at_utc": datetime(
-                    2026, 8, 29, 13, 2, 5, tzinfo=UTC
-                ),
+                "checked_at_utc": current_now[0],
                 "expires_at_utc": expires,
             },
-        )
+            {
+                "symbol": "ETH",
+                "evaluation_status": (
+                    worker_module.research_prospective_anchors.UNEVALUABLE
+                ),
+                "checked_at_utc": current_now[0],
+                "expires_at_utc": expires,
+            },
+        ),
+        captured=("BTC",),
     )
     second = _StateSampling(
         (
             {
-                "symbol": "HYPE",
+                "symbol": "ETH",
                 "evaluation_status": (
-                    worker_module.research_prospective_anchors.COVERAGE_EXCLUDED
+                    worker_module.research_prospective_anchors.UNEVALUABLE
+                ),
+                "checked_at_utc": expires,
+                "expires_at_utc": expires,
+            },
+        )
+    )
+    third = _StateSampling(
+        (
+            {
+                "symbol": symbol,
+                "evaluation_status": (
+                    worker_module.research_prospective_anchors.EVALUABLE
                 ),
                 "checked_at_utc": datetime(
                     2026, 8, 29, 13, 3, 5, tzinfo=UTC
@@ -419,12 +444,14 @@ async def _exercise_slot_rollover() -> None:
                 "expires_at_utc": datetime(
                     2026, 8, 29, 13, 32, tzinfo=UTC
                 ),
-            },
-        )
+            }
+            for symbol in ("BTC", "ETH")
+        ),
+        captured=("BTC", "ETH"),
     )
 
     def service_factory(store, **kwargs):
-        return _SequenceService(store, samplings=(first, second), **kwargs)
+        return _SequenceService(store, samplings=(first, second, third), **kwargs)
 
     def crossing_fetcher(symbols, *, observed_at_utc):
         current_now[0] = (
@@ -435,7 +462,7 @@ async def _exercise_slot_rollover() -> None:
         return _price_result()
 
     worker = worker_module.ProspectiveAnchorWorker(
-        symbols=("HYPE",),
+        symbols=("BTC", "ETH"),
         price_fetcher=crossing_fetcher,
         store_factory=_FakeStore,
         service_factory=service_factory,
@@ -445,13 +472,27 @@ async def _exercise_slot_rollover() -> None:
     assert await worker._run_due_slot(
         datetime(2026, 8, 29, 13, 1, tzinfo=UTC)
     )
+    assert worker.status()["retry_pending_symbols"] == ["ETH"]
+    current_now[0] = datetime(2026, 8, 29, 13, 2, 5, tzinfo=UTC)
+    assert await worker._run_due_slot(
+        datetime(2026, 8, 29, 13, 2, tzinfo=UTC)
+    )
+    assert worker.status()["last_completed_slot_utc"].endswith(
+        "12:00:00.000000Z"
+    )
     current_now[0] = datetime(2026, 8, 29, 13, 3, 5, tzinfo=UTC)
     assert await worker._run_due_slot(
         datetime(2026, 8, 29, 13, 3, tzinfo=UTC)
     )
     assert [call["slot_open_utc"] for call in worker._service.calls] == [
         datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
         datetime(2026, 8, 29, 12, 30, tzinfo=UTC),
+    ]
+    assert [call["symbols"] for call in worker._service.calls] == [
+        ("BTC", "ETH"),
+        ("ETH",),
+        ("BTC", "ETH"),
     ]
     await worker.stop()
 
@@ -494,7 +535,9 @@ async def _exercise_slot_rollover() -> None:
 
 
 async def _exercise_conflict_block() -> None:
-    checked = datetime(2026, 8, 29, 12, 34, 5, tzinfo=UTC)
+    current_now = [datetime(2026, 8, 29, 12, 34, 5, tzinfo=UTC)]
+    checked = current_now[0]
+    expires = datetime(2026, 8, 29, 13, 2, tzinfo=UTC)
     conflict = _StateSampling(
         (
             {
@@ -503,35 +546,115 @@ async def _exercise_conflict_block() -> None:
                     worker_module.research_prospective_anchors.EVALUABLE
                 ),
                 "checked_at_utc": checked,
-                "expires_at_utc": datetime(
-                    2026, 8, 29, 13, 2, tzinfo=UTC
+                "expires_at_utc": expires,
+            },
+            {
+                "symbol": "ETH",
+                "evaluation_status": (
+                    worker_module.research_prospective_anchors.UNEVALUABLE
                 ),
+                "checked_at_utc": checked,
+                "expires_at_utc": expires,
             },
         ),
         conflicts=("BTC:frozen slot conflict",),
     )
+    recovered = _StateSampling(
+        (
+            {
+                "symbol": "ETH",
+                "evaluation_status": (
+                    worker_module.research_prospective_anchors.EVALUABLE
+                ),
+                "checked_at_utc": datetime(
+                    2026, 8, 29, 12, 35, 5, tzinfo=UTC
+                ),
+                "expires_at_utc": expires,
+            },
+        ),
+        captured=("ETH",),
+    )
+    next_slot = _StateSampling(
+        (
+            {
+                "symbol": symbol,
+                "evaluation_status": (
+                    worker_module.research_prospective_anchors.EVALUABLE
+                ),
+                "checked_at_utc": datetime(
+                    2026, 8, 29, 13, 3, 5, tzinfo=UTC
+                ),
+                "expires_at_utc": datetime(
+                    2026, 8, 29, 13, 32, tzinfo=UTC
+                ),
+            }
+            for symbol in ("BTC", "ETH")
+        ),
+        captured=("BTC", "ETH"),
+    )
 
     def service_factory(store, **kwargs):
-        return _SequenceService(store, samplings=(conflict,), **kwargs)
+        return _SequenceService(
+            store,
+            samplings=(conflict, recovered, next_slot),
+            **kwargs,
+        )
 
     worker = worker_module.ProspectiveAnchorWorker(
-        symbols=("BTC",),
+        symbols=("BTC", "ETH"),
         price_fetcher=lambda symbols, **kwargs: _price_result(),
         store_factory=_FakeStore,
         service_factory=service_factory,
-        now_provider=lambda: checked,
+        now_provider=lambda: current_now[0],
     )
     assert await worker.start(schema_ready=True) is True
     run_at = datetime(2026, 8, 29, 12, 34, tzinfo=UTC)
     assert await worker._run_due_slot(run_at) is True
     status = worker.status()
+    assert status["status"] == "retry_pending_with_conflicts"
+    assert status["last_completed_slot_utc"] is None
+    assert status["last_blocked_slot_utc"] is None
+    assert status["active_conflict_slot_utc"].endswith("12:00:00.000000Z")
+    assert status["active_conflict_symbols"] == ["BTC"]
+    assert status["retry_pending_symbols"] == ["ETH"]
+    assert status["last_conflicts"] == ["BTC:frozen slot conflict"]
+    assert status["cycles_failed"] == 1
+    current_now[0] = datetime(2026, 8, 29, 12, 35, 5, tzinfo=UTC)
+    assert await worker._run_due_slot(
+        datetime(2026, 8, 29, 12, 35, tzinfo=UTC)
+    ) is True
+    status = worker.status()
     assert status["status"] == "blocked_conflict"
     assert status["last_completed_slot_utc"] is None
     assert status["last_blocked_slot_utc"].endswith("12:00:00.000000Z")
+    assert status["active_conflict_slot_utc"] is None
+    assert status["active_conflict_symbols"] == []
+    assert status["retry_pending_symbols"] == []
     assert status["last_conflicts"] == ["BTC:frozen slot conflict"]
+    assert status["cycles_started"] == 2
+    assert status["cycles_completed"] == 1
     assert status["cycles_failed"] == 1
-    assert await worker._run_due_slot(run_at) is False
-    assert len(worker._service.calls) == 1
+    assert await worker._run_due_slot(
+        datetime(2026, 8, 29, 12, 36, tzinfo=UTC)
+    ) is False
+    current_now[0] = datetime(2026, 8, 29, 13, 3, 5, tzinfo=UTC)
+    assert await worker._run_due_slot(
+        datetime(2026, 8, 29, 13, 3, tzinfo=UTC)
+    ) is True
+    assert [call["symbols"] for call in worker._service.calls] == [
+        ("BTC", "ETH"),
+        ("ETH",),
+        ("BTC", "ETH"),
+    ]
+    assert [call["slot_open_utc"] for call in worker._service.calls] == [
+        datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        datetime(2026, 8, 29, 12, 30, tzinfo=UTC),
+    ]
+    status = worker.status()
+    assert status["cycles_started"] == 3
+    assert status["cycles_completed"] == 2
+    assert status["cycles_failed"] == 1
     await worker.stop()
 
 
@@ -634,7 +757,7 @@ def run() -> None:
         ) == []
         assert worker_module._retry_pending_symbols(
             conflict, expected_symbols=("BTC",)
-        ) == ["BTC"]
+        ) == []
         assert worker_module._retry_pending_symbols(
             empty, expected_symbols=("BTC", "ETH")
         ) == ["BTC", "ETH"]
