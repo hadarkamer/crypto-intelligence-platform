@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 import json
+from math import ceil
 import os
 from typing import Any, Dict, Mapping, Optional
 
@@ -51,6 +52,28 @@ def _horizons() -> tuple[int, ...]:
         if value in {60, 240, 720, 1440} and value not in values:
             values.append(value)
     return tuple(values or (240,))
+
+
+def _discovery_config() -> research_formula_engine.DiscoveryConfig:
+    return research_formula_engine.DiscoveryConfig(
+        hierarchical_search_enabled=_HIERARCHICAL_SEARCH_ENABLED
+    )
+
+
+def _discovery_startup_delay_seconds(
+    latest_runs: Mapping[int, Any], *, now: datetime
+) -> int:
+    """Preserve the six-hour cadence across restarts without skipping gaps."""
+    horizons = _horizons()
+    if any(horizon not in latest_runs for horizon in horizons):
+        return _DISCOVERY_STARTUP_DELAY_SECONDS
+    newest = max(_as_utc(latest_runs[horizon]) for horizon in horizons)
+    due_at = newest + timedelta(seconds=_DISCOVERY_INTERVAL_SECONDS)
+    remaining = ceil((due_at - _as_utc(now)).total_seconds())
+    return min(
+        _DISCOVERY_INTERVAL_SECONDS,
+        max(_DISCOVERY_STARTUP_DELAY_SECONDS, remaining),
+    )
 
 
 def _conditions(value: Any) -> list[Dict[str, Any]]:
@@ -333,7 +356,29 @@ class FormulaResearchWorker:
         self._shadow_task = None
 
     async def _discovery_loop(self) -> None:
-        await asyncio.sleep(_DISCOVERY_STARTUP_DELAY_SECONDS)
+        delay = _DISCOVERY_STARTUP_DELAY_SECONDS
+        try:
+            latest_runs = await asyncio.to_thread(
+                research_formula_store.latest_completed_discovery_runs,
+                _horizons(),
+                lookback_days=_LOOKBACK_DAYS,
+                config=asdict(_discovery_config()),
+            )
+            delay = _discovery_startup_delay_seconds(
+                latest_runs, now=datetime.now(timezone.utc)
+            )
+            print(
+                "[formula-discovery] restart-aware startup delay "
+                f"seconds={delay} compatible_horizons={sorted(latest_runs)}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                "[formula-discovery] startup cadence inspection failed open; "
+                f"using seconds={delay}: {exc!r}",
+                flush=True,
+            )
+        await asyncio.sleep(delay)
         while not self._stopping:
             try:
                 await asyncio.to_thread(self.run_discovery_once)
@@ -379,9 +424,7 @@ class FormulaResearchWorker:
                 dataset["rows"],
                 horizon_minutes=horizon,
                 feature_schema_version=dataset["feature_schema_version"],
-                config=research_formula_engine.DiscoveryConfig(
-                    hierarchical_search_enabled=_HIERARCHICAL_SEARCH_ENABLED
-                ),
+                config=_discovery_config(),
             )
             if not discovery.get("available"):
                 results.append(

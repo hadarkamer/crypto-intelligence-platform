@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import inspect
 import os
 
@@ -74,6 +74,27 @@ async def _archive_only_check() -> None:
 
 
 def run() -> None:
+    formula_worker = main.research_formula_worker
+    formula_now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    recent_runs = {
+        horizon: formula_now - timedelta(hours=index + 1)
+        for index, horizon in enumerate(formula_worker._horizons())
+    }
+    assert formula_worker._discovery_startup_delay_seconds(
+        recent_runs, now=formula_now
+    ) == formula_worker._DISCOVERY_INTERVAL_SECONDS - 3600
+    assert formula_worker._discovery_startup_delay_seconds(
+        {next(iter(recent_runs)): formula_now}, now=formula_now
+    ) == formula_worker._DISCOVERY_STARTUP_DELAY_SECONDS
+    stale_runs = {
+        horizon: formula_now
+        - timedelta(seconds=formula_worker._DISCOVERY_INTERVAL_SECONDS + 1)
+        for horizon in formula_worker._horizons()
+    }
+    assert formula_worker._discovery_startup_delay_seconds(
+        stale_runs, now=formula_now
+    ) == formula_worker._DISCOVERY_STARTUP_DELAY_SECONDS
+
     original_grace = main.MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS
     main.MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS = 180
     try:

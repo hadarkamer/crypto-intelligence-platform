@@ -845,6 +845,47 @@ def schema_status() -> Dict[str, Any]:
     return _json_safe(base)
 
 
+def latest_completed_discovery_runs(
+    horizons: Sequence[int],
+    *,
+    lookback_days: int,
+    config: Mapping[str, Any],
+) -> Dict[int, datetime]:
+    """Return the latest compatible completed run for each requested horizon."""
+    requested = sorted({int(horizon) for horizon in horizons})
+    if not requested:
+        return {}
+    with _connect(read_only=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT horizon_minutes, MAX(completed_at_utc) AS completed_at_utc
+            FROM research_formula_runs
+            WHERE status='COMPLETED'
+              AND completed_at_utc IS NOT NULL
+              AND engine_version=%s
+              AND feature_schema_version=%s
+              AND outcome_method_version=%s
+              AND lookback_days=%s
+              AND config=%s::jsonb
+              AND horizon_minutes=ANY(%s)
+            GROUP BY horizon_minutes
+            """,
+            (
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                int(lookback_days),
+                _json(config),
+                requested,
+            ),
+        ).fetchall()
+    return {
+        int(row["horizon_minutes"]): row["completed_at_utc"]
+        for row in rows
+        if row.get("completed_at_utc") is not None
+    }
+
+
 def _target_stage(value: Any) -> str:
     stage = str(value or "DISCOVERED").upper()
     if stage not in _AUTOMATIC_STAGE_PATH:
