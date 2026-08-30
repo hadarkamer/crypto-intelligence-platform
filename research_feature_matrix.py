@@ -1777,7 +1777,7 @@ def _load_historical_opportunities(
               AND long_first_touch_metrics->'threshold_policy'
                     ->>'threshold_reference_version'=%s
               AND long_first_touch_metrics->'threshold_policy'
-                    ->>'threshold_reference_hash' ~ '^[0-9a-f]{64}$'
+                    ->>'threshold_reference_hash' ~ '^[0-9a-f]{{64}}$'
               AND LOWER(market)='spot' AND interval_seconds=60
               AND (
                     (symbol='HYPE' AND LOWER(exchange)='hyperliquid'
@@ -2532,6 +2532,21 @@ def load_historical_replay_dataset(
             symbols=coverage.get("eligible_symbols") or [],
         )
     if not opportunities:
+        if coverage.get("eligible_symbols"):
+            return {
+                "available": False,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "outcome_method_version": VERIFIED_OUTCOME_METHOD,
+                "replay_version": research_historical_replay.REPLAY_VERSION,
+                "horizon_minutes": horizon,
+                "sample_size": 0,
+                "coverage": coverage,
+                "rows": [],
+                "reason": (
+                    "historical replay coverage/sample invariant failed: "
+                    "eligible coverage produced no discovery sample"
+                ),
+            }
         return {
             "available": True,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,

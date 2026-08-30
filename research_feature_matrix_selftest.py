@@ -623,6 +623,8 @@ def run() -> None:
             assert "short_first_touch_metrics" in query
             assert "first_touch_method_version=%s" in query
             assert "first_touch_path_samples" in query
+            assert "~ '^[0-9a-f]{64}$'" in normalized
+            assert "~ '^[0-9a-f]64$'" not in normalized
             assert "sibling_reference_coherent" in query
             assert "NOT EXISTS" in query
             assert "first_touch_data_quality_status=ANY(%s)" in query
@@ -662,6 +664,46 @@ def run() -> None:
     }.intersection(
         row["opportunity_id"] for row in owner_bound_opportunities
     )
+
+    class _InvariantConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    original_research_url = matrix._research_database_url
+    original_raw_url = matrix._raw_database_url
+    original_connect = matrix._connect
+    original_table_exists = matrix._table_exists
+    original_coverage_loader = matrix._historical_replay_coverage
+    original_opportunity_loader = matrix._load_historical_opportunities
+    matrix._research_database_url = lambda: "postgresql://research"
+    matrix._raw_database_url = lambda: "postgresql://raw"
+    matrix._connect = lambda url: _InvariantConnection()
+    matrix._table_exists = lambda conn, table: True
+    matrix._historical_replay_coverage = lambda *args, **kwargs: {
+        "anchors": 1,
+        "eligible_symbols": ["BTC"],
+        "replacement_ready": True,
+    }
+    matrix._load_historical_opportunities = lambda *args, **kwargs: []
+    try:
+        invariant_failure = matrix.load_historical_replay_dataset(
+            lookback_days=3650,
+            horizon_minutes=240,
+            limit=2000,
+        )
+    finally:
+        matrix._research_database_url = original_research_url
+        matrix._raw_database_url = original_raw_url
+        matrix._connect = original_connect
+        matrix._table_exists = original_table_exists
+        matrix._historical_replay_coverage = original_coverage_loader
+        matrix._load_historical_opportunities = original_opportunity_loader
+    assert invariant_failure["available"] is False
+    assert invariant_failure["sample_size"] == 0
+    assert "coverage/sample invariant failed" in invariant_failure["reason"]
 
     replay_events = matrix._opportunity_events(
         [
