@@ -40,6 +40,9 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "011_formula_owner_live_engine_binding_v2.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "012_historical_replay_v2_streaming_index.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

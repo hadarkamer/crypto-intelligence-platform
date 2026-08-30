@@ -250,9 +250,7 @@ def _official(symbol, observed):
 
 def run() -> None:
     migration_path = Path("migrations/010_prospective_max_pain_freeze_v1.sql")
-    assert research_formula_schema_admin.MIGRATION_PATHS[-2] == (
-        migration_path.resolve()
-    )
+    assert migration_path.resolve() in research_formula_schema_admin.MIGRATION_PATHS
     migration_sql = migration_path.read_text(encoding="utf-8")
     assert anchors.SAMPLER_VERSION in migration_sql
     assert migration_sql.count("COALESCE((") == 2

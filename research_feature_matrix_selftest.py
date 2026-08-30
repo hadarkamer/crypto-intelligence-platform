@@ -305,10 +305,78 @@ def run() -> None:
         def fetchall(self):
             return self._rows
 
-    class _CoverageConnection:
+    def _assert_exact_coverage_contract(query, params):
+        normalized = " ".join(query.split())
+        assert query.count("%s") == len(params)
+        assert "historical.horizon_minutes=%s" in normalized
+        assert "NOW() - (%s * INTERVAL '1 day')" in normalized
+        assert "historical.first_touch_method_version=%s" in normalized
+        assert "historical.replay_version=%s" in normalized
+        assert (
+            "historical.first_touch_data_quality_status=ANY(%s)"
+            in normalized
+        )
+        assert "historical.outcome_method_version=%s" in normalized
+        assert "historical.data_quality_status=ANY(%s)" in normalized
+        assert (
+            "historical.first_touch_replay_run_id="
+            "historical.replay_run_id" in normalized
+        )
+        assert "FROM research_historical_replay_runs owner_run" in normalized
+        assert (
+            "owner_run.replay_run_id=historical.replay_run_id" in normalized
+        )
+        assert (
+            "owner_run.replay_version=historical.replay_version" in normalized
+        )
+        assert "owner_run.status='COMPLETED'" in normalized
+        assert params == (
+            240,
+            3650,
+            matrix.VERIFIED_OUTCOME_METHOD,
+            matrix.research_historical_replay.REPLAY_VERSION,
+            list(matrix.VERIFIED_OUTCOME_QUALITIES),
+            matrix.canonical_price_path.METHOD_VERSION,
+            list(matrix.VERIFIED_OUTCOME_QUALITIES),
+        )
+
+    class _StreamingCoverageCursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.rows = []
+            self.offset = 0
+            self.closed = False
+
         def execute(self, query, params):
-            assert query.count("%s") == len(params)
-            assert "SELECT opportunity_id" in query
+            _assert_exact_coverage_contract(query, params)
+            normalized = " ".join(query.split())
+            assert "SELECT historical.opportunity_id" in normalized
+            assert "COUNT(*)" not in normalized
+            self.connection.stream_queries.append(normalized)
+            # The fake models PostgreSQL applying the exact current-contract
+            # WHERE clause.  Its explicit legacy row must never reach this
+            # bounded stream.
+            self.rows = list(self.connection.current_rows)
+            assert self.connection.legacy_row not in self.rows
+            return self
+
+        def fetchmany(self, size):
+            assert size == matrix.REPLAY_COVERAGE_STREAM_BATCH_SIZE
+            self.connection.fetchmany_calls += 1
+            start = self.offset
+            self.offset += size
+            return self.rows[start : self.offset]
+
+        def fetchall(self):
+            self.connection.stream_fetchall_calls += 1
+            raise AssertionError("coverage candidates must never use fetchall")
+
+        def close(self):
+            self.closed = True
+            self.connection.closed_stream_cursors += 1
+
+    class _CoverageConnection:
+        def __init__(self):
             rows = []
             opportunity_id = 1
             for symbol in ("BTC", "ETH", "SOL", "DOGE"):
@@ -354,7 +422,83 @@ def run() -> None:
                     }
                 )
                 opportunity_id += 1
-            return _CoverageRows(rows)
+            self.current_rows = rows
+            self.legacy_row = {
+                "opportunity_id": opportunity_id,
+                "symbol": "LEGACY",
+                "observation_time_utc": coverage_time - timedelta(days=1),
+                "replay_version": "historical-raw-opportunity-replay-v1",
+                "coherent": True,
+            }
+            self.owner_rejected_rows = [
+                {
+                    "opportunity_id": opportunity_id + 1,
+                    "symbol": "FAILED_OWNER",
+                    "observation_time_utc": coverage_time - timedelta(days=1),
+                    "replay_run_id": 81,
+                    "first_touch_replay_run_id": 81,
+                    "owner_status": "FAILED",
+                    "coherent": True,
+                },
+                {
+                    "opportunity_id": opportunity_id + 2,
+                    "symbol": "RUNNING_OWNER",
+                    "observation_time_utc": coverage_time - timedelta(days=1),
+                    "replay_run_id": 82,
+                    "first_touch_replay_run_id": 82,
+                    "owner_status": "RUNNING",
+                    "coherent": True,
+                },
+                {
+                    "opportunity_id": opportunity_id + 3,
+                    "symbol": "MISMATCHED_OWNER",
+                    "observation_time_utc": coverage_time - timedelta(days=1),
+                    "replay_run_id": 83,
+                    "first_touch_replay_run_id": 84,
+                    "owner_status": "COMPLETED",
+                    "coherent": True,
+                },
+            ]
+            self.aggregate_fetchall_calls = 0
+            self.stream_fetchall_calls = 0
+            self.fetchmany_calls = 0
+            self.closed_stream_cursors = 0
+            self.stream_queries = []
+            self.cursor_names = []
+
+        def execute(self, query, params):
+            _assert_exact_coverage_contract(query, params)
+            normalized = " ".join(query.split())
+            assert "COUNT(*)::bigint AS stored_candidates" in normalized
+            assert "MIN(historical.observation_time_utc)" in normalized
+            assert "MAX(historical.observation_time_utc)" in normalized
+            assert "SELECT historical.opportunity_id" not in normalized
+            self.aggregate_fetchall_calls += 1
+            grouped = []
+            for symbol in ("BTC", "DOGE", "ETH", "HYPE", "SOL"):
+                symbol_rows = [
+                    row for row in self.current_rows if row["symbol"] == symbol
+                ]
+                grouped.append(
+                    {
+                        "symbol": symbol,
+                        "stored_candidates": len(symbol_rows),
+                        "first_candidate_utc": min(
+                            row["observation_time_utc"] for row in symbol_rows
+                        ),
+                        "last_candidate_utc": max(
+                            row["observation_time_utc"] for row in symbol_rows
+                        ),
+                    }
+                )
+            return _CoverageRows(grouped)
+
+        def cursor(self, *, name):
+            assert name.startswith("research_replay_stream_")
+            self.cursor_names.append(name)
+            return _StreamingCoverageCursor(self)
+
+    coverage_conn = _CoverageConnection()
 
     original_reference_loader = (
         matrix.research_historical_replay.load_canonical_reference_rows
@@ -376,7 +520,7 @@ def run() -> None:
     )
     try:
         coverage = matrix._historical_replay_coverage(
-            _CoverageConnection(), lookback_days=3650, horizon_minutes=240
+            coverage_conn, lookback_days=3650, horizon_minutes=240
         )
     finally:
         matrix.research_historical_replay.load_canonical_reference_rows = (
@@ -392,10 +536,26 @@ def run() -> None:
     assert coverage["symbols"] == 4
     assert coverage["stored_symbols"] == 5
     assert coverage["eligible_symbols"] == ["BTC", "DOGE", "ETH", "SOL"]
+    assert coverage["stored_anchors"] == 1301
+    assert coverage["coherent_anchors"] == 1300
     assert coverage["by_symbol"]["BTC"]["anchors"] == 300
     assert coverage["by_symbol"]["BTC"]["recomputed_policy_rejections"] == 1
     assert coverage["recomputed_policy_rejections"] == 1
     assert coverage["coverage_validation"] == "full-row prior-only recomputation"
+    assert coverage_conn.aggregate_fetchall_calls == 1
+    assert coverage_conn.stream_fetchall_calls == 0
+    assert coverage_conn.fetchmany_calls >= 3
+    assert coverage_conn.closed_stream_cursors == 1
+    assert len(coverage_conn.cursor_names) == 1
+    assert len(coverage_conn.stream_queries) == 1
+    assert "historical-raw-opportunity-replay-v1" not in str(
+        coverage_conn.stream_queries
+    )
+    assert all(row["coherent"] for row in coverage_conn.owner_rejected_rows)
+    assert all(
+        row["symbol"] not in coverage["by_symbol"]
+        for row in coverage_conn.owner_rejected_rows
+    )
     assert coverage["excluded_symbols"]["HYPE"] == [
         "minimum_anchors",
         "minimum_utc_dates",
@@ -418,8 +578,45 @@ def run() -> None:
     assert delivered_coverage["by_symbol"] == {}
 
     class _OpportunityConnection:
+        def __init__(self):
+            self.completed = {
+                "opportunity_id": 901,
+                "symbol": "BTC",
+                "observation_time_utc": coverage_time,
+            }
+            self.owner_rejected = [
+                {
+                    "opportunity_id": 902,
+                    "symbol": "BTC",
+                    "observation_time_utc": coverage_time,
+                    "owner_status": "FAILED",
+                    "replay_run_id": 91,
+                    "first_touch_replay_run_id": 91,
+                    "coherent": True,
+                },
+                {
+                    "opportunity_id": 903,
+                    "symbol": "BTC",
+                    "observation_time_utc": coverage_time,
+                    "owner_status": "RUNNING",
+                    "replay_run_id": 92,
+                    "first_touch_replay_run_id": 92,
+                    "coherent": True,
+                },
+                {
+                    "opportunity_id": 904,
+                    "symbol": "BTC",
+                    "observation_time_utc": coverage_time,
+                    "owner_status": "COMPLETED",
+                    "replay_run_id": 93,
+                    "first_touch_replay_run_id": 94,
+                    "coherent": True,
+                },
+            ]
+
         def execute(self, query, params):
             assert query.count("%s") == len(params)
+            normalized = " ".join(query.split())
             assert "symbol=ANY(%s)" in query
             assert params[-3] == ["BTC", "ETH"]
             assert "long_first_touch_metrics" in query
@@ -430,15 +627,41 @@ def run() -> None:
             assert "NOT EXISTS" in query
             assert "first_touch_data_quality_status=ANY(%s)" in query
             assert matrix.VERIFIED_OUTCOME_METHOD in params
-            return _CoverageRows([])
+            assert (
+                "historical.first_touch_replay_run_id="
+                "historical.replay_run_id" in normalized
+            )
+            assert (
+                "FROM research_historical_replay_runs owner_run" in normalized
+            )
+            assert (
+                "owner_run.replay_run_id=historical.replay_run_id"
+                in normalized
+            )
+            assert (
+                "owner_run.replay_version=historical.replay_version"
+                in normalized
+            )
+            assert "owner_run.status='COMPLETED'" in normalized
+            # Model PostgreSQL applying the owner predicate: all three rows
+            # below are structurally coherent but are not returned.
+            assert all(row["coherent"] for row in self.owner_rejected)
+            return _CoverageRows([self.completed])
 
-    assert matrix._load_historical_opportunities(
-        _OpportunityConnection(),
+    opportunity_conn = _OpportunityConnection()
+    owner_bound_opportunities = matrix._load_historical_opportunities(
+        opportunity_conn,
         lookback_days=3650,
         horizon_minutes=240,
         anchor_limit=100,
         symbols=["ETH", "BTC"],
-    ) == []
+    )
+    assert [row["opportunity_id"] for row in owner_bound_opportunities] == [901]
+    assert not {
+        row["opportunity_id"] for row in opportunity_conn.owner_rejected
+    }.intersection(
+        row["opportunity_id"] for row in owner_bound_opportunities
+    )
 
     replay_events = matrix._opportunity_events(
         [

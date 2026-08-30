@@ -78,6 +78,7 @@ REPLAY_MIN_ANCHORS_PER_SYMBOL = 250
 REPLAY_MIN_UTC_DATES_PER_SYMBOL = 14
 REPLAY_MIN_SPAN_HOURS_PER_SYMBOL = 336.0
 REPLAY_MIN_ELIGIBLE_SYMBOLS = 4
+REPLAY_COVERAGE_STREAM_BATCH_SIZE = 500
 _TRUE = {"1", "true", "yes", "on"}
 
 
@@ -1429,6 +1430,23 @@ def _verified_coverage(
     }
 
 
+def _completed_replay_owner_sql(alias: str) -> str:
+    """Bind a stored outcome to the exact Replay run that completed it."""
+    normalized = str(alias or "").strip()
+    if not normalized.replace("_", "").isalnum():
+        raise ValueError("invalid SQL alias for replay owner binding")
+    return f"""
+        {normalized}.first_touch_replay_run_id={normalized}.replay_run_id
+        AND EXISTS (
+            SELECT 1
+            FROM research_historical_replay_runs owner_run
+            WHERE owner_run.replay_run_id={normalized}.replay_run_id
+              AND owner_run.replay_version={normalized}.replay_version
+              AND owner_run.status='COMPLETED'
+        )
+    """
+
+
 def _historical_replay_coverage(
     conn, *, lookback_days: int, horizon_minutes: int
 ) -> Dict[str, Any]:
@@ -1437,39 +1455,61 @@ def _historical_replay_coverage(
             "historical"
         )
     )
-    candidates = [
-        dict(row)
-        for row in conn.execute(
-            f"""
-            SELECT opportunity_id, symbol, observation_time_utc,
-                   source_observation_time_utc, horizon_minutes,
-                   reference_time_utc, reference_price,
-                   price_at_horizon, raw_return_pct,
-                   long_metrics, short_metrics,
-                   long_first_touch_metrics, short_first_touch_metrics,
-                   first_touch_method_version, first_touch_path_samples,
-                   path_samples,
-                   first_touch_data_quality_status, outcome_method_version,
-                   exchange, market, pair, interval_seconds, provenance,
-                   data_quality_status, replay_version,
-                   ({sibling_coherence}) AS sibling_reference_coherent
-            FROM research_historical_opportunity_outcomes historical
-            WHERE horizon_minutes=%s
-              AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
-            ORDER BY symbol, observation_time_utc, opportunity_id
-            """,
-            (horizon_minutes, lookback_days),
-        ).fetchall()
-    ]
-    candidate_symbols = sorted(
-        {str(row.get("symbol") or "").upper() for row in candidates if row.get("symbol")}
+    completed_owner = _completed_replay_owner_sql("historical")
+    exact_params = (
+        horizon_minutes,
+        lookback_days,
+        VERIFIED_OUTCOME_METHOD,
+        research_historical_replay.REPLAY_VERSION,
+        list(VERIFIED_OUTCOME_QUALITIES),
+        canonical_price_path.METHOD_VERSION,
+        list(VERIFIED_OUTCOME_QUALITIES),
     )
-    if candidates:
+    exact_filters = f"""
+          historical.horizon_minutes=%s
+      AND historical.observation_time_utc >=
+            NOW() - (%s * INTERVAL '1 day')
+      AND historical.first_touch_method_version=%s
+      AND historical.replay_version=%s
+      AND historical.first_touch_data_quality_status=ANY(%s)
+      AND historical.outcome_method_version=%s
+      AND historical.data_quality_status=ANY(%s)
+      AND ({completed_owner})
+    """
+    # Return one lightweight aggregate row per exact current-contract symbol.
+    # Legacy replay/method/quality rows never enter the validation stream.
+    preflight_rows = conn.execute(
+        f"""
+        SELECT historical.symbol,
+               COUNT(*)::bigint AS stored_candidates,
+               MIN(historical.observation_time_utc) AS first_candidate_utc,
+               MAX(historical.observation_time_utc) AS last_candidate_utc
+        FROM research_historical_opportunity_outcomes historical
+        WHERE {exact_filters}
+        GROUP BY historical.symbol
+        ORDER BY historical.symbol
+        """,
+        exact_params,
+    ).fetchall()
+    preflight_by_symbol: Dict[str, Dict[str, Any]] = {}
+    for source in preflight_rows:
+        symbol = str(source.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        preflight_by_symbol[symbol] = {
+            "stored_candidates": int(source.get("stored_candidates") or 0),
+            "first_candidate_utc": _as_utc(source["first_candidate_utc"]),
+            "last_candidate_utc": _as_utc(source["last_candidate_utc"]),
+        }
+    candidate_symbols = sorted(preflight_by_symbol)
+    if candidate_symbols:
         first_candidate = min(
-            _as_utc(row["observation_time_utc"]) for row in candidates
+            item["first_candidate_utc"]
+            for item in preflight_by_symbol.values()
         )
         last_candidate = max(
-            _as_utc(row["observation_time_utc"]) for row in candidates
+            item["last_candidate_utc"]
+            for item in preflight_by_symbol.values()
         )
         canonical_references = (
             research_historical_replay.load_canonical_reference_rows(
@@ -1489,35 +1529,83 @@ def _historical_replay_coverage(
             canonical_references,
             horizons=(horizon_minutes,),
         )
-        coherent = [
-            row
-            for row in candidates
-            if research_historical_replay.replay_outcome_row_is_coherent(
-                row, width_index=width_index
-            )
-        ]
     else:
-        coherent = []
-    coherent_by_symbol: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
-    candidate_counts: Dict[str, int] = defaultdict(int)
-    for row in candidates:
-        candidate_counts[str(row["symbol"]).upper()] += 1
-    for row in coherent:
-        coherent_by_symbol[str(row["symbol"]).upper()].append(row)
+        width_index = {}
+
+    coherent_counts: Dict[str, int] = defaultdict(int)
+    coherent_first: Dict[str, datetime] = {}
+    coherent_last: Dict[str, datetime] = {}
+    coherent_dates: Dict[str, set[Any]] = defaultdict(set)
+    coherent_total = 0
+    if candidate_symbols:
+        candidate_query = f"""
+            SELECT historical.opportunity_id, historical.symbol,
+                   historical.observation_time_utc,
+                   historical.source_observation_time_utc,
+                   historical.horizon_minutes,
+                   historical.reference_time_utc,
+                   historical.reference_price,
+                   historical.price_at_horizon, historical.raw_return_pct,
+                   historical.long_metrics, historical.short_metrics,
+                   historical.long_first_touch_metrics,
+                   historical.short_first_touch_metrics,
+                   historical.first_touch_method_version,
+                   historical.first_touch_path_samples,
+                   historical.path_samples,
+                   historical.first_touch_data_quality_status,
+                   historical.outcome_method_version,
+                   historical.exchange, historical.market, historical.pair,
+                   historical.interval_seconds, historical.provenance,
+                   historical.data_quality_status, historical.replay_version,
+                   historical.replay_run_id,
+                   historical.first_touch_replay_run_id,
+                   ({sibling_coherence}) AS sibling_reference_coherent
+            FROM research_historical_opportunity_outcomes historical
+            WHERE {exact_filters}
+            ORDER BY historical.symbol, historical.observation_time_utc,
+                     historical.opportunity_id
+        """
+        for source in research_historical_replay.iter_query_rows(
+            conn,
+            candidate_query,
+            exact_params,
+            batch_size=REPLAY_COVERAGE_STREAM_BATCH_SIZE,
+        ):
+            row = dict(source)
+            symbol = str(row.get("symbol") or "").upper()
+            if symbol not in preflight_by_symbol:
+                continue
+            if not research_historical_replay.replay_outcome_row_is_coherent(
+                row, width_index=width_index
+            ):
+                continue
+            observation_time = _as_utc(row["observation_time_utc"])
+            coherent_counts[symbol] += 1
+            coherent_total += 1
+            coherent_dates[symbol].add(observation_time.date())
+            if (
+                symbol not in coherent_first
+                or observation_time < coherent_first[symbol]
+            ):
+                coherent_first[symbol] = observation_time
+            if (
+                symbol not in coherent_last
+                or observation_time > coherent_last[symbol]
+            ):
+                coherent_last[symbol] = observation_time
 
     by_symbol: Dict[str, Dict[str, Any]] = {}
     for symbol in candidate_symbols:
-        rows = coherent_by_symbol.get(symbol, [])
-        times = sorted(_as_utc(row["observation_time_utc"]) for row in rows)
-        first_observation = times[0] if times else None
-        last_observation = times[-1] if times else None
+        first_observation = coherent_first.get(symbol)
+        last_observation = coherent_last.get(symbol)
         span_hours = (
             (last_observation - first_observation).total_seconds() / 3600.0
             if first_observation and last_observation
             else 0.0
         )
-        anchors = len(rows)
-        utc_dates = len({value.date() for value in times})
+        anchors = coherent_counts[symbol]
+        utc_dates = len(coherent_dates[symbol])
+        stored_candidates = preflight_by_symbol[symbol]["stored_candidates"]
         failures = []
         if anchors < REPLAY_MIN_ANCHORS_PER_SYMBOL:
             failures.append("minimum_anchors")
@@ -1532,10 +1620,8 @@ def _historical_replay_coverage(
             "last_observation_utc": last_observation,
             "utc_dates": utc_dates,
             "span_hours": round(span_hours, 3),
-            "stored_candidates": candidate_counts[symbol],
-            "recomputed_policy_rejections": (
-                candidate_counts[symbol] - anchors
-            ),
+            "stored_candidates": stored_candidates,
+            "recomputed_policy_rejections": stored_candidates - anchors,
             "eligible": not failures,
             "failed_gates": failures,
         }
@@ -1549,7 +1635,9 @@ def _historical_replay_coverage(
     }
     eligible_items = [by_symbol[symbol] for symbol in eligible_symbols]
     total_anchors = sum(item["anchors"] for item in eligible_items)
-    stored_anchors = sum(candidate_counts.values())
+    stored_anchors = sum(
+        item["stored_candidates"] for item in preflight_by_symbol.values()
+    )
     first = min(
         (item["first_observation_utc"] for item in eligible_items),
         default=None,
@@ -1559,11 +1647,9 @@ def _historical_replay_coverage(
         default=None,
     )
     distinct_dates = len(
-        {
-            _as_utc(row["observation_time_utc"]).date()
-            for symbol in eligible_symbols
-            for row in coherent_by_symbol.get(symbol, [])
-        }
+        set().union(*(coherent_dates[symbol] for symbol in eligible_symbols))
+        if eligible_symbols
+        else set()
     )
     span_hours = (
         (last - first).total_seconds() / 3600.0 if first and last else 0.0
@@ -1597,8 +1683,8 @@ def _historical_replay_coverage(
         "excluded_symbols": excluded_symbols,
         "stored_anchors": stored_anchors,
         "stored_symbols": len(candidate_symbols),
-        "coherent_anchors": len(coherent),
-        "recomputed_policy_rejections": len(candidates) - len(coherent),
+        "coherent_anchors": coherent_total,
+        "recomputed_policy_rejections": stored_anchors - coherent_total,
         "coverage_validation": "full-row prior-only recomputation",
         "distinct_utc_dates": distinct_dates,
         "span_hours": round(span_hours, 3),
@@ -1644,6 +1730,7 @@ def _load_historical_opportunities(
             "historical"
         )
     )
+    completed_owner = _completed_replay_owner_sql("historical")
     rows = conn.execute(
         f"""
         WITH eligible AS (
@@ -1659,7 +1746,8 @@ def _load_historical_opportunities(
                    data_quality_status AS legacy_data_quality_status,
                    outcome_method_version, data_quality_status,
                    exchange, market, pair, interval_seconds, provenance,
-                   replay_version,
+                   replay_version, replay_run_id,
+                   first_touch_replay_run_id,
                    ({sibling_coherence}) AS sibling_reference_coherent,
                    ROW_NUMBER() OVER (
                        PARTITION BY symbol ORDER BY observation_time_utc, opportunity_id
@@ -1670,6 +1758,7 @@ def _load_historical_opportunities(
               AND observation_time_utc >= NOW() - (%s * INTERVAL '1 day')
               AND first_touch_method_version=%s
               AND replay_version=%s
+              AND ({completed_owner})
               AND first_touch_data_quality_status=ANY(%s)
               AND outcome_method_version=%s
               AND data_quality_status=ANY(%s)

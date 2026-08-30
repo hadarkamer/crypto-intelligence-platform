@@ -7,6 +7,7 @@ import json
 from binance_spot_price_path import SpotCandle
 import canonical_price_path
 import research_feature_matrix as feature_matrix
+import research_formula_schema_admin as schema_admin
 import research_historical_replay as replay
 import research_no_dwell_outcome as no_dwell
 import research_session_width as session_width
@@ -30,8 +31,14 @@ def run() -> None:
     coverage_source = inspect.getsource(replay._coverage)
     assert "replay_outcome_row_is_coherent" in coverage_source
     assert "sibling_reference_coherence_sql" in coverage_source
+    assert "iter_query_rows" in coverage_source
+    assert "stored_rows" not in coverage_source
     existing_source = inspect.getsource(replay._existing_keys)
     assert "sibling_reference_coherence_sql" in existing_source
+    assert "iter_query_rows" in existing_source
+    status_source = inspect.getsource(replay.status)
+    assert "_coverage(" not in status_source
+    assert "status='COMPLETED'" in status_source
     observation = datetime(2026, 8, 29, 12, 32, tzinfo=timezone.utc)
     assert replay._hype_one_minute_observation_floor(
         datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
@@ -303,10 +310,155 @@ def run() -> None:
         existing_by_symbol={"BTC": completed},
         max_anchors=2,
     )
-    assert pending == anchors[2:4]
-    assert replay.REPLAY_VERSION.startswith(
-        "historical-raw-opportunity-replay-v2-"
+    assert pending == [anchors[2], anchors[4]]
+    assert replay.REPLAY_VERSION == (
+        "historical-raw-opportunity-replay-v2-balanced-prior-session-width"
     )
+    assert replay.SELECTION_POLICY_VERSION == (
+        "balanced-even-time-per-symbol-v1"
+    )
+    assert "bounded" in replay.COVERAGE_SCOPE_VERSION
+    assert replay.MAX_BOUNDED_ANCHORS == 2000
+    assert "_max_anchors_from_env" in inspect.getsource(replay.main)
+    try:
+        replay._select_pending_anchors(
+            anchors,
+            horizons=(60,),
+            existing_by_symbol={},
+            max_anchors=2001,
+        )
+    except ValueError as exc:
+        assert "between 1 and 2000" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Replay accepted a limit above its hard cap")
+    old_max_env = replay.os.environ.get("HISTORICAL_REPLAY_MAX_ANCHORS")
+    replay.os.environ["HISTORICAL_REPLAY_MAX_ANCHORS"] = "2001"
+    try:
+        try:
+            replay._max_anchors_from_env()
+        except ValueError as exc:
+            assert "between 1 and 2000" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("Replay env bypassed the hard cap")
+    finally:
+        if old_max_env is None:
+            replay.os.environ.pop("HISTORICAL_REPLAY_MAX_ANCHORS", None)
+        else:
+            replay.os.environ["HISTORICAL_REPLAY_MAX_ANCHORS"] = old_max_env
+    replay_index = schema_admin.MIGRATION_PATHS[-1]
+    assert replay_index.name == "012_historical_replay_v2_streaming_index.sql"
+    replay_index_sql = replay_index.read_text(encoding="utf-8")
+    indexed_expression = replay_index_sql.split(
+        "ON research_historical_opportunity_outcomes (", 1
+    )[1].split(");", 1)[0]
+    ordered_index_columns = (
+        "first_touch_method_version",
+        "replay_version",
+        "symbol",
+        "observation_time_utc",
+        "horizon_minutes",
+    )
+    positions = [indexed_expression.index(column) for column in ordered_index_columns]
+    assert positions == sorted(positions)
+
+    # The global limit is max-min fair across symbols, redistributes a short
+    # symbol's unused share, and remains deterministic for shuffled input.
+    balanced_anchors = [
+        replay.Anchor(
+            symbol,
+            observation + timedelta(minutes=minute),
+            observation + timedelta(minutes=minute),
+        )
+        for symbol, count in (("BTC", 9), ("ETH", 2), ("SOL", 5))
+        for minute in range(count)
+    ]
+    balanced = replay._select_pending_anchors(
+        balanced_anchors,
+        horizons=(60,),
+        existing_by_symbol={},
+        max_anchors=8,
+    )
+    assert len(balanced) == 8
+    assert {
+        symbol: sum(anchor.symbol == symbol for anchor in balanced)
+        for symbol in ("BTC", "ETH", "SOL")
+    } == {"BTC": 3, "ETH": 2, "SOL": 3}
+    assert replay._select_pending_anchors(
+        list(reversed(balanced_anchors)),
+        horizons=(60,),
+        existing_by_symbol={},
+        max_anchors=8,
+    ) == balanced
+    for symbol in ("BTC", "ETH", "SOL"):
+        source = [anchor for anchor in balanced_anchors if anchor.symbol == symbol]
+        chosen = [anchor for anchor in balanced if anchor.symbol == symbol]
+        assert chosen[0] == source[0]
+        assert chosen[-1] == source[-1]
+
+    short_and_long = [
+        replay.Anchor(
+            symbol,
+            observation + timedelta(minutes=minute),
+            observation + timedelta(minutes=minute),
+        )
+        for symbol, minutes in (("BTC", (0,)), ("ETH", range(10)))
+        for minute in minutes
+    ]
+    redistributed = replay._select_pending_anchors(
+        short_and_long,
+        horizons=(60,),
+        existing_by_symbol={},
+        max_anchors=5,
+    )
+    assert sum(anchor.symbol == "BTC" for anchor in redistributed) == 1
+    assert sum(anchor.symbol == "ETH" for anchor in redistributed) == 4
+
+    irregular = [
+        replay.Anchor(
+            "BTC",
+            observation + timedelta(minutes=minute),
+            observation + timedelta(minutes=minute),
+        )
+        for minute in (0, 1, 49, 51, 100)
+    ]
+    assert replay._evenly_time_spaced_anchors(irregular, 3) == [
+        irregular[0],
+        irregular[2],
+        irregular[-1],
+    ]
+    contract = replay._selected_anchor_contract(balanced)
+    assert contract["selected_anchor_count"] == 8
+    assert len(contract["selected_anchor_fingerprint_sha256"]) == 64
+    assert contract == replay._selected_anchor_contract(
+        list(reversed(balanced))
+    )
+    changed_source = list(balanced)
+    changed_source[0] = replay.Anchor(
+        changed_source[0].symbol,
+        changed_source[0].observation_time_utc,
+        changed_source[0].source_observation_time_utc
+        - timedelta(minutes=30),
+    )
+    assert replay._selected_anchor_contract(changed_source)[
+        "selected_anchor_fingerprint_sha256"
+    ] != contract["selected_anchor_fingerprint_sha256"]
+    contract_coverage = {
+        f"{symbol}:60": {
+            "outcomes": bounds["count"],
+            "first_observation_utc": bounds["min_observation_time_utc"],
+            "last_observation_utc": bounds["max_observation_time_utc"],
+            "utc_dates": 1,
+        }
+        for symbol, bounds in contract["selected_anchor_scope"].items()
+    }
+    assert replay._coverage_covers_selected_contract(
+        contract_coverage, contract, horizons=(60,)
+    ) is True
+    incomplete_contract_coverage = dict(contract_coverage)
+    incomplete_contract_coverage.pop("SOL:60")
+    assert replay._coverage_covers_selected_contract(
+        incomplete_contract_coverage, contract, horizons=(60,)
+    ) is False
     assert replay.fully_closed_end(
         (60, 1440), now=weekend_event
     ) == weekend_event - timedelta(minutes=1445)
@@ -377,6 +529,7 @@ def run() -> None:
     original_load_references = replay.load_canonical_reference_rows
     original_build_width_index = replay.build_canonical_width_index
     original_existing_keys = replay._existing_keys
+    original_adopt_recoverable = replay._adopt_recoverable_anchors
     original_coverage = replay._coverage
     original_write_outcome = replay._write_outcome
     old_backfill_flag = replay.os.environ.get("HISTORICAL_REPLAY_BACKFILL")
@@ -458,7 +611,12 @@ def run() -> None:
             "movement_width_calibration_version",
             "canonical_price_provenance_version",
             "coverage_scope_version",
+            "resume_policy_version",
             "frozen_fully_closed_end_utc",
+            "selection_policy_version",
+            "selected_anchor_fingerprint_sha256",
+            "selected_anchor_count",
+            "selected_anchor_scope",
             "completion_mode",
         }
         assert recovery_config["symbols"] == ["BTC"]
@@ -476,6 +634,19 @@ def run() -> None:
         )
         assert recovery_config["coverage_scope_version"] == (
             replay.COVERAGE_SCOPE_VERSION
+        )
+        assert recovery_config["resume_policy_version"] == (
+            replay.RESUME_POLICY_VERSION
+        )
+        assert recovery_config["selection_policy_version"] == (
+            replay.SELECTION_POLICY_VERSION
+        )
+        assert recovery_config["selected_anchor_count"] == 0
+        assert recovery_config["selected_anchor_scope"] == {}
+        assert recovery_config["selected_anchor_fingerprint_sha256"] == (
+            replay._selected_anchor_contract([])[
+                "selected_anchor_fingerprint_sha256"
+            ]
         )
         assert recovery_config["frozen_fully_closed_end_utc"] == str(
             recovery_end
@@ -523,6 +694,37 @@ def run() -> None:
             for statement, _ in missing_conn.statements
         )
         assert outcome_write_calls == []
+
+        # None remains legal for metadata-only repair, but cannot authorize a
+        # replay when even one outcome cohort is pending.
+        unbounded_conn = _RecoveryConnection(replay_run_id=814)
+        research_conn_box["value"] = unbounded_conn
+        replay._existing_keys = lambda *args, **kwargs: set()
+        try:
+            replay.run_backfill(
+                start=observation,
+                end=recovery_end,
+                symbols=("BTC",),
+                horizons=recovery_horizons,
+                chunk_days=2,
+                max_anchors=None,
+                pause_seconds=0.0,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == (
+                "Refusing unbounded historical replay while pending work "
+                "exists; set a positive max_anchors"
+            )
+        else:  # pragma: no cover
+            raise AssertionError("unbounded pending replay was accepted")
+        assert any(
+            "pg_advisory_unlock" in statement
+            for statement, _ in unbounded_conn.statements
+        )
+        assert not any(
+            "INSERT INTO research_historical_replay_runs" in statement
+            for statement, _ in unbounded_conn.statements
+        )
     finally:
         replay._connect = original_connect
         replay._table_exists = original_table_exists
@@ -538,6 +740,361 @@ def run() -> None:
             replay.os.environ.pop("HISTORICAL_REPLAY_BACKFILL", None)
         else:
             replay.os.environ["HISTORICAL_REPLAY_BACKFILL"] = old_backfill_flag
+
+    # Production scans use named server cursors and bounded fetchmany calls;
+    # minimal fakes without cursor support retain a small fetchall fallback.
+    class _BatchCursor:
+        def __init__(self, rows):
+            self.rows = list(rows)
+            self.offset = 0
+            self.fetch_sizes = []
+            self.executed = None
+            self.closed = False
+
+        def execute(self, query, params):
+            self.executed = (query, tuple(params))
+
+        def fetchmany(self, size):
+            self.fetch_sizes.append(size)
+            batch = self.rows[self.offset : self.offset + size]
+            self.offset += len(batch)
+            return batch
+
+        def close(self):
+            self.closed = True
+
+    class _BatchConnection:
+        def __init__(self, rows):
+            self.rows = rows
+            self.cursors = []
+
+        def cursor(self, *, name):
+            assert name.startswith("research_replay_stream_")
+            cursor = _BatchCursor(self.rows)
+            self.cursors.append(cursor)
+            return cursor
+
+    batch_conn = _BatchConnection([{"value": index} for index in range(1001)])
+    assert [row["value"] for row in replay.iter_query_rows(
+        batch_conn, "SELECT value FROM fake", (), batch_size=500
+    )] == list(range(1001))
+    assert batch_conn.cursors[0].fetch_sizes == [500, 500, 500, 500]
+    assert batch_conn.cursors[0].closed is True
+
+    class _FallbackRows:
+        def fetchall(self):
+            return [{"value": 1}, {"value": 2}]
+
+    class _FallbackConnection:
+        def execute(self, query, params):
+            assert query == "SELECT fallback"
+            assert params == ()
+            return _FallbackRows()
+
+    assert list(
+        replay.iter_query_rows(_FallbackConnection(), "SELECT fallback")
+    ) == [{"value": 1}, {"value": 2}]
+
+    streaming_rows = [
+        {
+            "symbol": "BTC",
+            "observation_time_utc": observation + timedelta(minutes=index),
+            "horizon_minutes": 60,
+        }
+        for index in range(1001)
+    ]
+    existing_stream = _BatchConnection(streaming_rows)
+    original_coherence = replay.replay_outcome_row_is_coherent
+    replay.replay_outcome_row_is_coherent = lambda *args, **kwargs: True
+    try:
+        streamed_keys = replay._existing_keys(
+            existing_stream,
+            symbol="BTC",
+            start=observation,
+            end=observation + timedelta(days=2),
+            horizons=(60,),
+            width_index={},
+        )
+    finally:
+        replay.replay_outcome_row_is_coherent = original_coherence
+    assert len(streamed_keys) == 1001
+    assert existing_stream.cursors[0].fetch_sizes == [500, 500, 500, 500]
+
+    class _SingleRow:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class _CoverageConnection(_BatchConnection):
+        def execute(self, query, params):
+            normalized = " ".join(query.split())
+            assert "MIN(observation_time_utc)" in normalized
+            assert tuple(params) == (
+                no_dwell.METHOD_VERSION,
+                replay.REPLAY_VERSION,
+            )
+            return _SingleRow(
+                {
+                    "first_observation_utc": streaming_rows[0][
+                        "observation_time_utc"
+                    ],
+                    "last_observation_utc": streaming_rows[-1][
+                        "observation_time_utc"
+                    ],
+                    "symbols": ["BTC"],
+                }
+            )
+
+    coverage_conn = _CoverageConnection(streaming_rows)
+    original_load_references = replay.load_canonical_reference_rows
+    original_build_width_index = replay.build_canonical_width_index
+    original_coherence = replay.replay_outcome_row_is_coherent
+    replay.load_canonical_reference_rows = lambda *args, **kwargs: []
+    replay.build_canonical_width_index = lambda *args, **kwargs: {}
+    replay.replay_outcome_row_is_coherent = lambda *args, **kwargs: True
+    try:
+        streamed_coverage = replay._coverage(coverage_conn)
+    finally:
+        replay.load_canonical_reference_rows = original_load_references
+        replay.build_canonical_width_index = original_build_width_index
+        replay.replay_outcome_row_is_coherent = original_coherence
+    assert streamed_coverage["BTC:60"] == {
+        "outcomes": 1001,
+        "first_observation_utc": streaming_rows[0]["observation_time_utc"],
+        "last_observation_utc": streaming_rows[-1]["observation_time_utc"],
+        "utc_dates": 2,
+    }
+    assert coverage_conn.cursors[0].fetch_sizes == [500, 500, 500, 500]
+
+    # Status reads only frozen coverage from the latest COMPLETED run under
+    # this exact Replay version.  It must never trigger a full coherence scan.
+    class _StatusConnection:
+        def __init__(self):
+            self.queries = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params):
+            normalized = " ".join(query.split())
+            self.queries.append((normalized, tuple(params)))
+            assert tuple(params) == (replay.REPLAY_VERSION,)
+            if "status='COMPLETED'" in normalized:
+                return _SingleRow(
+                    {
+                        "replay_run_id": 21,
+                        "status": "COMPLETED",
+                        "coverage": {"BTC:60": {"outcomes": 1001}},
+                        "anchors_seen": 1001,
+                        "outcomes_written": 1001,
+                        "outcomes_skipped": 0,
+                        "failures": 0,
+                        "started_at_utc": observation,
+                        "completed_at_utc": observation + timedelta(minutes=1),
+                        "error_text": None,
+                    }
+                )
+            return _SingleRow(
+                {
+                    "replay_run_id": 22,
+                    "status": "FAILED",
+                    "anchors_seen": 1,
+                    "outcomes_written": 0,
+                    "outcomes_skipped": 0,
+                    "failures": 1,
+                    "started_at_utc": observation + timedelta(minutes=2),
+                    "completed_at_utc": observation + timedelta(minutes=3),
+                    "error_text": "bounded failure",
+                }
+            )
+
+    status_conn = _StatusConnection()
+    original_connect = replay._connect
+    original_table_exists = replay._table_exists
+    original_research_url = replay._research_database_url
+    original_psycopg = replay.psycopg
+    original_coverage = replay._coverage
+    replay._connect = lambda *args, **kwargs: status_conn
+    replay._table_exists = lambda *args, **kwargs: True
+    replay._research_database_url = lambda: "research://status-selftest"
+    replay.psycopg = object()
+    replay._coverage = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("status recomputed full coverage")
+    )
+    try:
+        replay_status = replay.status()
+    finally:
+        replay._connect = original_connect
+        replay._table_exists = original_table_exists
+        replay._research_database_url = original_research_url
+        replay.psycopg = original_psycopg
+        replay._coverage = original_coverage
+    assert replay_status["coverage"] == {"BTC:60": {"outcomes": 1001}}
+    assert replay_status["latest_completed_run"]["replay_run_id"] == 21
+    assert replay_status["latest_run"]["replay_run_id"] == 22
+    assert replay_status["coverage_source"] == (
+        "LATEST_EXACT_VERSION_COMPLETED_RUN"
+    )
+    assert all(
+        params == (replay.REPLAY_VERSION,) for _, params in status_conn.queries
+    )
+
+    # An outcome failure is terminal for this run: already committed chunks
+    # remain resumable, but the run itself can never be labelled COMPLETED.
+    assert replay._bounded_completion_error(
+        selected_anchor_count=2,
+        horizon_count=4,
+        outcomes_written=8,
+        failures=0,
+    ) is None
+    assert "recorded 1 outcome failures" in replay._bounded_completion_error(
+        selected_anchor_count=1,
+        horizon_count=1,
+        outcomes_written=0,
+        failures=1,
+    )
+    assert "expected 2 writes, observed 1" in replay._bounded_completion_error(
+        selected_anchor_count=1,
+        horizon_count=2,
+        outcomes_written=1,
+        failures=0,
+    )
+
+    class _FailureConnection:
+        def __init__(self):
+            self.statements = []
+            self.commits = 0
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params=()):
+            normalized = " ".join(str(query).split())
+            self.statements.append((normalized, tuple(params or ())))
+            if "pg_try_advisory_lock" in normalized:
+                return _SingleRow({"acquired": True})
+            if "INSERT INTO research_historical_replay_runs" in normalized:
+                return _SingleRow({"replay_run_id": 901})
+            if "UPDATE research_historical_replay_runs" in normalized:
+                return _SingleRow(None)
+            if "pg_advisory_unlock" in normalized:
+                return _SingleRow({"unlocked": True})
+            raise AssertionError(f"unexpected failure SQL: {normalized}")
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    failure_raw_conn = _FailureConnection()
+    failure_research_conn = _FailureConnection()
+    original_connect = replay._connect
+    original_table_exists = replay._table_exists
+    original_load_anchors = replay._load_anchors
+    original_research_url = replay._research_database_url
+    original_raw_url = replay._raw_database_url
+    original_load_references = replay.load_canonical_reference_rows
+    original_build_width_index = replay.build_canonical_width_index
+    original_existing_keys = replay._existing_keys
+    original_fetch_range = replay._fetch_range
+    original_reference_candle = replay._reference_candle
+    original_validated_route = replay.canonical_price_path.validated_route
+    original_coverage = replay._coverage
+    old_backfill_flag = replay.os.environ.get("HISTORICAL_REPLAY_BACKFILL")
+
+    def _failure_connect(url, *, read_only):
+        if url == "raw://failure-selftest":
+            assert read_only is True
+            return failure_raw_conn
+        assert url == "research://failure-selftest"
+        assert read_only is False
+        return failure_research_conn
+
+    replay.os.environ["HISTORICAL_REPLAY_BACKFILL"] = "1"
+    replay._connect = _failure_connect
+    replay._table_exists = lambda *args, **kwargs: True
+    replay._load_anchors = lambda *args, **kwargs: [recovery_anchor]
+    replay._research_database_url = lambda: "research://failure-selftest"
+    replay._raw_database_url = lambda: "raw://failure-selftest"
+    replay.load_canonical_reference_rows = lambda *args, **kwargs: []
+    replay.build_canonical_width_index = lambda *args, **kwargs: {}
+    replay._existing_keys = lambda *args, **kwargs: set()
+    replay._adopt_recoverable_anchors = lambda *args, **kwargs: set()
+    replay._fetch_range = lambda *args, **kwargs: {"candles": []}
+    replay._reference_candle = lambda *args, **kwargs: None
+    replay.canonical_price_path.validated_route = (
+        lambda *args, **kwargs: {"validated": True}
+    )
+    replay._coverage = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("failed run attempted coverage")
+    )
+    try:
+        try:
+            replay.run_backfill(
+                start=observation,
+                end=recovery_end,
+                symbols=("BTC",),
+                horizons=(60,),
+                chunk_days=2,
+                max_anchors=1,
+                pause_seconds=0.0,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "bounded replay recorded 1 outcome failures"
+        else:  # pragma: no cover
+            raise AssertionError("failed bounded cohort was marked complete")
+    finally:
+        replay._connect = original_connect
+        replay._table_exists = original_table_exists
+        replay._load_anchors = original_load_anchors
+        replay._research_database_url = original_research_url
+        replay._raw_database_url = original_raw_url
+        replay.load_canonical_reference_rows = original_load_references
+        replay.build_canonical_width_index = original_build_width_index
+        replay._existing_keys = original_existing_keys
+        replay._adopt_recoverable_anchors = original_adopt_recoverable
+        replay._fetch_range = original_fetch_range
+        replay._reference_candle = original_reference_candle
+        replay.canonical_price_path.validated_route = original_validated_route
+        replay._coverage = original_coverage
+        if old_backfill_flag is None:
+            replay.os.environ.pop("HISTORICAL_REPLAY_BACKFILL", None)
+        else:
+            replay.os.environ["HISTORICAL_REPLAY_BACKFILL"] = old_backfill_flag
+    run_updates = [
+        statement
+        for statement in failure_research_conn.statements
+        if "UPDATE research_historical_replay_runs" in statement[0]
+    ]
+    assert any("status='FAILED'" in sql for sql, _ in run_updates)
+    assert not any("status='COMPLETED'" in sql for sql, _ in run_updates)
+    failed_update = next(
+        params for sql, params in run_updates if "status='FAILED'" in sql
+    )
+    assert failed_update[3] == 1
+    assert failure_research_conn.rollbacks == 1
+    bounded_insert = next(
+        params
+        for sql, params in failure_research_conn.statements
+        if "INSERT INTO research_historical_replay_runs" in sql
+    )
+    bounded_config = json.loads(bounded_insert[4])
+    assert bounded_config["selection_policy_version"] == (
+        replay.SELECTION_POLICY_VERSION
+    )
+    assert bounded_config["selected_anchor_count"] == 1
+    assert bounded_config["selected_anchor_scope"]["BTC"]["count"] == 1
+    assert len(bounded_config["selected_anchor_fingerprint_sha256"]) == 64
 
     # Every fetched segment is validated before its candles can enter the
     # merged path, and even a provenance drift on a later valid-looking
@@ -650,6 +1207,7 @@ def run() -> None:
         "first_touch_path_samples": write_conn.params[13],
         "path_samples": write_conn.params[16],
         "first_touch_data_quality_status": write_conn.params[14],
+        "first_touch_replay_run_id": write_conn.params[15],
         "outcome_method_version": write_conn.params[17],
         "exchange": write_conn.params[18],
         "market": write_conn.params[19],
@@ -658,11 +1216,381 @@ def run() -> None:
         "provenance": write_conn.params[22],
         "data_quality_status": write_conn.params[23],
         "replay_version": write_conn.params[24],
+        "replay_run_id": write_conn.params[25],
         "sibling_reference_coherent": True,
     }
     assert replay.replay_outcome_row_is_coherent(
         coherent_row, width_index={}
     ) is True
+    assert replay.replay_outcome_row_is_coherent(
+        {**coherent_row, "first_touch_replay_run_id": 8},
+        width_index={},
+    ) is False
+
+    owner_sql, owner_params = replay._replay_owner_scope_sql("stored")
+    assert owner_params == ()
+    assert "owner.status='COMPLETED'" in owner_sql
+    assert (
+        "stored.first_touch_replay_run_id=" in owner_sql
+        and "stored.replay_run_id" in owner_sql
+    )
+    running_owner_sql, running_owner_params = (
+        replay._replay_owner_scope_sql(
+            "stored", include_running_run_id=8
+        )
+    )
+    assert "owner.status='RUNNING'" in running_owner_sql
+    assert running_owner_params == (8,)
+
+    persisted_rows = [
+        {
+            **coherent_row,
+            "replay_run_id": 8,
+            "first_touch_replay_run_id": 8,
+        }
+    ]
+    persisted_contract = replay._persisted_selected_anchor_contract(
+        _BatchConnection(persisted_rows),
+        run_id=8,
+        horizons=(60,),
+        width_index={},
+    )
+    assert persisted_contract == replay._selected_anchor_contract([hype_anchor])
+
+    class _UpdateResult:
+        rowcount = 1
+
+    class _AdoptionConnection(_BatchConnection):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.updates = []
+
+        def execute(self, query, params):
+            normalized = " ".join(query.split())
+            assert normalized.startswith(
+                "UPDATE research_historical_opportunity_outcomes stored"
+            )
+            self.updates.append((normalized, tuple(params)))
+            return _UpdateResult()
+
+    adoption_conn = _AdoptionConnection([coherent_row])
+    adopted = replay._adopt_recoverable_anchors(
+        adoption_conn,
+        run_id=8,
+        anchors=(hype_anchor,),
+        horizons=(60,),
+        width_index={},
+    )
+    assert adopted == {("HYPE", weekend_event, 60)}
+    assert len(adoption_conn.updates) == 1
+    assert adoption_conn.updates[0][1][:2] == (8, 8)
+    partial_adoption_conn = _AdoptionConnection([coherent_row])
+    assert replay._adopt_recoverable_anchors(
+        partial_adoption_conn,
+        run_id=8,
+        anchors=(hype_anchor,),
+        horizons=(60, 240),
+        width_index={},
+    ) == set()
+    assert partial_adoption_conn.updates == []
+    incoherent_adoption_conn = _AdoptionConnection(
+        [{**coherent_row, "sibling_reference_coherent": False}]
+    )
+    assert replay._adopt_recoverable_anchors(
+        incoherent_adoption_conn,
+        run_id=8,
+        anchors=(hype_anchor,),
+        horizons=(60,),
+        width_index={},
+    ) == set()
+    assert incoherent_adoption_conn.updates == []
+
+    # End-to-end resume PoC: a complete coherent anchor from a failed owner is
+    # adopted into the new bounded run, completes under the new fingerprint,
+    # and never calls the external candle fetcher.
+    class _ResumeResult:
+        def __init__(self, row=None, *, rowcount=-1):
+            self.row = row
+            self.rowcount = rowcount
+
+        def fetchone(self):
+            return self.row
+
+    class _ResumeCursor(_BatchCursor):
+        def execute(self, query, params):
+            normalized = " ".join(query.split())
+            self.executed = (normalized, tuple(params))
+            if "old_owner" in normalized:
+                self.rows = [coherent_row]
+            elif "WHERE stored.replay_run_id=%s" in normalized:
+                self.rows = [
+                    {
+                        **coherent_row,
+                        "replay_run_id": 902,
+                        "first_touch_replay_run_id": 902,
+                    }
+                ]
+            else:  # pragma: no cover
+                raise AssertionError(f"unexpected resume cursor SQL: {normalized}")
+
+    class _ResumeConnection:
+        def __init__(self, run_id=902):
+            self.run_id = run_id
+            self.statements = []
+            self.cursors = []
+            self.commits = 0
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def cursor(self, *, name):
+            cursor = _ResumeCursor([])
+            self.cursors.append(cursor)
+            return cursor
+
+        def execute(self, query, params=()):
+            normalized = " ".join(str(query).split())
+            self.statements.append((normalized, tuple(params or ())))
+            if "pg_try_advisory_lock" in normalized:
+                return _ResumeResult({"acquired": True})
+            if "INSERT INTO research_historical_replay_runs" in normalized:
+                return _ResumeResult({"replay_run_id": self.run_id})
+            if normalized.startswith(
+                "UPDATE research_historical_opportunity_outcomes stored"
+            ):
+                return _ResumeResult(rowcount=1)
+            if "UPDATE research_historical_replay_runs" in normalized:
+                return _ResumeResult(rowcount=1)
+            if "pg_advisory_unlock" in normalized:
+                return _ResumeResult({"unlocked": True})
+            raise AssertionError(f"unexpected resume SQL: {normalized}")
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    resume_raw_conn = _ResumeConnection()
+    resume_research_conn = _ResumeConnection()
+    resume_fetch_calls = []
+    original_connect = replay._connect
+    original_table_exists = replay._table_exists
+    original_load_anchors = replay._load_anchors
+    original_research_url = replay._research_database_url
+    original_raw_url = replay._raw_database_url
+    original_load_references = replay.load_canonical_reference_rows
+    original_build_width_index = replay.build_canonical_width_index
+    original_existing_keys = replay._existing_keys
+    original_fetch_range = replay._fetch_range
+    original_write_outcome = replay._write_outcome
+    original_coverage = replay._coverage
+    old_backfill_flag = replay.os.environ.get("HISTORICAL_REPLAY_BACKFILL")
+
+    def _resume_connect(url, *, read_only):
+        if url == "raw://resume-selftest":
+            assert read_only is True
+            return resume_raw_conn
+        assert url == "research://resume-selftest"
+        assert read_only is False
+        return resume_research_conn
+
+    def _unexpected_resume_fetch(*args, **kwargs):
+        resume_fetch_calls.append((args, kwargs))
+        raise AssertionError("adopted anchor reached external fetch")
+
+    replay.os.environ["HISTORICAL_REPLAY_BACKFILL"] = "1"
+    replay._connect = _resume_connect
+    replay._table_exists = lambda *args, **kwargs: True
+    replay._load_anchors = lambda *args, **kwargs: [hype_anchor]
+    replay._research_database_url = lambda: "research://resume-selftest"
+    replay._raw_database_url = lambda: "raw://resume-selftest"
+    replay.load_canonical_reference_rows = lambda *args, **kwargs: []
+    replay.build_canonical_width_index = lambda *args, **kwargs: {}
+    replay._existing_keys = lambda *args, **kwargs: set()
+    replay._fetch_range = _unexpected_resume_fetch
+    replay._write_outcome = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("adopted anchor was rewritten")
+    )
+    replay._coverage = lambda *args, **kwargs: {
+        "HYPE:60": {
+            "outcomes": 1,
+            "first_observation_utc": weekend_event,
+            "last_observation_utc": weekend_event,
+            "utc_dates": 1,
+        }
+    }
+    try:
+        resumed = replay.run_backfill(
+            start=weekend_event,
+            end=weekend_event + timedelta(minutes=1),
+            symbols=("HYPE",),
+            horizons=(60,),
+            chunk_days=2,
+            max_anchors=1,
+            pause_seconds=0.0,
+        )
+    finally:
+        replay._connect = original_connect
+        replay._table_exists = original_table_exists
+        replay._load_anchors = original_load_anchors
+        replay._research_database_url = original_research_url
+        replay._raw_database_url = original_raw_url
+        replay.load_canonical_reference_rows = original_load_references
+        replay.build_canonical_width_index = original_build_width_index
+        replay._existing_keys = original_existing_keys
+        replay._fetch_range = original_fetch_range
+        replay._write_outcome = original_write_outcome
+        replay._coverage = original_coverage
+        if old_backfill_flag is None:
+            replay.os.environ.pop("HISTORICAL_REPLAY_BACKFILL", None)
+        else:
+            replay.os.environ["HISTORICAL_REPLAY_BACKFILL"] = old_backfill_flag
+    assert resumed["replay_run_id"] == 902
+    assert resumed["outcomes_written"] == 1
+    assert resumed["outcomes_skipped"] == 0
+    assert resumed["failures"] == 0
+    assert resume_fetch_calls == []
+    assert any(
+        "status='COMPLETED'" in sql
+        for sql, _ in resume_research_conn.statements
+    )
+    assert not any(
+        "status='FAILED'" in sql
+        for sql, _ in resume_research_conn.statements
+    )
+
+    # Mixed resume regression: after one anchor is adopted, the canonical
+    # reference/width index is reloaded with the current run admitted *before*
+    # a later selected anchor is freshly labelled.
+    fresh_hype_anchor = replay.Anchor(
+        "HYPE",
+        weekend_event + timedelta(minutes=120),
+        weekend_event + timedelta(minutes=120),
+    )
+    mixed_anchors = [hype_anchor, fresh_hype_anchor]
+    mixed_raw_conn = _ResumeConnection(run_id=903)
+    mixed_research_conn = _ResumeConnection(run_id=903)
+    mixed_reference_loads = []
+    mixed_width_builds = []
+    mixed_fetches = []
+    mixed_writes = []
+    original_connect = replay._connect
+    original_table_exists = replay._table_exists
+    original_load_anchors = replay._load_anchors
+    original_research_url = replay._research_database_url
+    original_raw_url = replay._raw_database_url
+    original_load_references = replay.load_canonical_reference_rows
+    original_build_width_index = replay.build_canonical_width_index
+    original_existing_keys = replay._existing_keys
+    original_fetch_range = replay._fetch_range
+    original_reference_candle = replay._reference_candle
+    original_outcome_candles = replay._outcome_candles
+    original_write_outcome = replay._write_outcome
+    original_validated_route = replay.canonical_price_path.validated_route
+    original_persisted_contract = replay._persisted_selected_anchor_contract
+    original_coverage = replay._coverage
+    old_backfill_flag = replay.os.environ.get("HISTORICAL_REPLAY_BACKFILL")
+
+    def _mixed_connect(url, *, read_only):
+        if url == "raw://mixed-resume-selftest":
+            assert read_only is True
+            return mixed_raw_conn
+        assert url == "research://mixed-resume-selftest"
+        assert read_only is False
+        return mixed_research_conn
+
+    def _mixed_load_references(*args, **kwargs):
+        mixed_reference_loads.append(dict(kwargs))
+        return []
+
+    def _mixed_build_width(*args, **kwargs):
+        mixed_width_builds.append(len(mixed_reference_loads))
+        return {}
+
+    def _mixed_fetch(*args, **kwargs):
+        assert len(mixed_reference_loads) >= 2
+        assert mixed_reference_loads[-1].get(
+            "include_running_run_id"
+        ) == 903
+        mixed_fetches.append((args, kwargs))
+        return {"candles": []}
+
+    def _mixed_write(*args, **kwargs):
+        assert kwargs["anchor"] == fresh_hype_anchor
+        assert len(mixed_reference_loads) >= 2
+        mixed_writes.append((args, kwargs))
+
+    mixed_contract = replay._selected_anchor_contract(mixed_anchors)
+    mixed_coverage = {
+        "HYPE:60": {
+            "outcomes": 2,
+            "first_observation_utc": weekend_event,
+            "last_observation_utc": fresh_hype_anchor.observation_time_utc,
+            "utc_dates": 1,
+        }
+    }
+    replay.os.environ["HISTORICAL_REPLAY_BACKFILL"] = "1"
+    replay._connect = _mixed_connect
+    replay._table_exists = lambda *args, **kwargs: True
+    replay._load_anchors = lambda *args, **kwargs: mixed_anchors
+    replay._research_database_url = lambda: "research://mixed-resume-selftest"
+    replay._raw_database_url = lambda: "raw://mixed-resume-selftest"
+    replay.load_canonical_reference_rows = _mixed_load_references
+    replay.build_canonical_width_index = _mixed_build_width
+    replay._existing_keys = lambda *args, **kwargs: set()
+    replay._fetch_range = _mixed_fetch
+    replay._reference_candle = lambda *args, **kwargs: hype_reference
+    replay._outcome_candles = lambda *args, **kwargs: hype_future
+    replay._write_outcome = _mixed_write
+    replay.canonical_price_path.validated_route = (
+        lambda *args, **kwargs: {"validated": True}
+    )
+    replay._persisted_selected_anchor_contract = (
+        lambda *args, **kwargs: mixed_contract
+    )
+    replay._coverage = lambda *args, **kwargs: mixed_coverage
+    try:
+        mixed_result = replay.run_backfill(
+            start=weekend_event,
+            end=fresh_hype_anchor.observation_time_utc + timedelta(minutes=1),
+            symbols=("HYPE",),
+            horizons=(60,),
+            chunk_days=2,
+            max_anchors=2,
+            pause_seconds=0.0,
+        )
+    finally:
+        replay._connect = original_connect
+        replay._table_exists = original_table_exists
+        replay._load_anchors = original_load_anchors
+        replay._research_database_url = original_research_url
+        replay._raw_database_url = original_raw_url
+        replay.load_canonical_reference_rows = original_load_references
+        replay.build_canonical_width_index = original_build_width_index
+        replay._existing_keys = original_existing_keys
+        replay._fetch_range = original_fetch_range
+        replay._reference_candle = original_reference_candle
+        replay._outcome_candles = original_outcome_candles
+        replay._write_outcome = original_write_outcome
+        replay.canonical_price_path.validated_route = original_validated_route
+        replay._persisted_selected_anchor_contract = original_persisted_contract
+        replay._coverage = original_coverage
+        if old_backfill_flag is None:
+            replay.os.environ.pop("HISTORICAL_REPLAY_BACKFILL", None)
+        else:
+            replay.os.environ["HISTORICAL_REPLAY_BACKFILL"] = old_backfill_flag
+    assert mixed_result["outcomes_written"] == 2
+    assert mixed_result["outcomes_skipped"] == 0
+    assert len(mixed_reference_loads) >= 2
+    assert mixed_reference_loads[0].get("include_running_run_id") is None
+    assert mixed_reference_loads[1]["include_running_run_id"] == 903
+    assert len(mixed_fetches) == 1
+    assert len(mixed_writes) == 1
     impossible_source_time = {
         **coherent_row,
         "source_observation_time_utc": weekend_event - timedelta(seconds=1),

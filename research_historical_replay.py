@@ -12,8 +12,11 @@ Watch loop and refuses to write unless ``HISTORICAL_REPLAY_BACKFILL=1``.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
+import itertools
 import json
 import math
 import os
@@ -34,11 +37,20 @@ import research_no_dwell_outcome
 import research_session_width
 
 
-REPLAY_VERSION = "historical-raw-opportunity-replay-v2-prior-session-width"
-COVERAGE_SCOPE_VERSION = "global-coherent-current-replay-all-horizons-v1"
+REPLAY_VERSION = (
+    "historical-raw-opportunity-replay-v2-balanced-prior-session-width"
+)
+SELECTION_POLICY_VERSION = "balanced-even-time-per-symbol-v1"
+RESUME_POLICY_VERSION = "revalidate-rehome-interrupted-chunks-v1"
+COVERAGE_SCOPE_VERSION = (
+    "bounded-balanced-coherent-current-replay-all-horizons-v1"
+)
 _TRUE = {"1", "true", "yes", "on"}
 _HORIZONS = (60, 240, 720, 1440)
 _LOCK_ID = 94837243
+MAX_BOUNDED_ANCHORS = 2000
+_STREAM_BATCH_SIZE = 500
+_STREAM_CURSOR_IDS = itertools.count(1)
 _FETCH_SEGMENT_MINUTES = 1900
 _HYPERLIQUID_RECENT_ONE_MINUTE_CANDLES = 5000
 _HORIZON_CLOSE_GRACE_MINUTES = 5
@@ -58,6 +70,33 @@ def sibling_reference_coherence_sql(alias: str) -> str:
               AND sibling.replay_version={normalized}.replay_version
               AND sibling.first_touch_method_version=
                     {normalized}.first_touch_method_version
+              AND (
+                    sibling.replay_run_id={normalized}.replay_run_id
+                    OR (
+                        sibling.first_touch_replay_run_id=
+                            sibling.replay_run_id
+                        AND {normalized}.first_touch_replay_run_id=
+                            {normalized}.replay_run_id
+                        AND EXISTS (
+                            SELECT 1
+                            FROM research_historical_replay_runs sibling_owner
+                            WHERE sibling_owner.replay_run_id=
+                                    sibling.replay_run_id
+                              AND sibling_owner.replay_version=
+                                    sibling.replay_version
+                              AND sibling_owner.status='COMPLETED'
+                        )
+                        AND EXISTS (
+                            SELECT 1
+                            FROM research_historical_replay_runs row_owner
+                            WHERE row_owner.replay_run_id=
+                                    {normalized}.replay_run_id
+                              AND row_owner.replay_version=
+                                    {normalized}.replay_version
+                              AND row_owner.status='COMPLETED'
+                        )
+                    )
+                  )
               AND (
                     sibling.source_observation_time_utc IS DISTINCT FROM
                         {normalized}.source_observation_time_utc
@@ -84,6 +123,40 @@ def sibling_reference_coherence_sql(alias: str) -> str:
                   )
         )
     """
+
+
+def _replay_owner_scope_sql(
+    alias: str,
+    *,
+    include_running_run_id: Optional[int] = None,
+) -> tuple[str, tuple[Any, ...]]:
+    """Bind exact Replay v2 rows to a completed owner or one finalizing run."""
+    normalized = str(alias or "").strip()
+    if not normalized.replace("_", "").isalnum():
+        raise ValueError("invalid SQL alias for replay owner scope")
+    running_clause = ""
+    params: tuple[Any, ...] = ()
+    if include_running_run_id is not None:
+        if type(include_running_run_id) is not int or include_running_run_id <= 0:
+            raise ValueError("include_running_run_id must be a positive integer")
+        running_clause = (
+            " OR (owner.status='RUNNING' AND owner.replay_run_id=%s)"
+        )
+        params = (include_running_run_id,)
+    return (
+        f"""
+        EXISTS (
+            SELECT 1
+            FROM research_historical_replay_runs owner
+            WHERE owner.replay_run_id={normalized}.replay_run_id
+              AND {normalized}.first_touch_replay_run_id=
+                    {normalized}.replay_run_id
+              AND owner.replay_version={normalized}.replay_version
+              AND (owner.status='COMPLETED'{running_clause})
+        )
+        """,
+        params,
+    )
 
 
 def _utc(value: Any) -> datetime:
@@ -145,6 +218,68 @@ def _connect(url: str, *, read_only: bool):
     )
 
 
+def iter_query_rows(
+    conn,
+    query: str,
+    params: Sequence[Any] = (),
+    *,
+    batch_size: int = _STREAM_BATCH_SIZE,
+) -> Iterable[Any]:
+    """Yield query rows in bounded batches, using a server cursor when possible.
+
+    Production psycopg connections expose ``cursor(name=...)`` and therefore
+    keep the result set on PostgreSQL.  Small no-network fakes used by the
+    self-tests commonly expose only ``execute``/``fetchall``; that deliberately
+    supported fallback must never be selected after a real server cursor has
+    accepted the query.
+    """
+    normalized_batch_size = int(batch_size)
+    if normalized_batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    cursor = None
+    cursor_factory = getattr(conn, "cursor", None)
+    if callable(cursor_factory):
+        cursor_name = f"research_replay_stream_{next(_STREAM_CURSOR_IDS)}"
+        try:
+            cursor = cursor_factory(name=cursor_name)
+        except (AttributeError, TypeError):
+            # Compatibility path for intentionally minimal fake connections.
+            cursor = None
+    if cursor is not None:
+        try:
+            cursor.execute(query, tuple(params))
+            while True:
+                batch = cursor.fetchmany(normalized_batch_size)
+                if not batch:
+                    break
+                for row in batch:
+                    yield row
+        finally:
+            close = getattr(cursor, "close", None)
+            if callable(close):
+                close()
+        return
+
+    result = conn.execute(query, tuple(params))
+    fetchmany = getattr(result, "fetchmany", None)
+    if callable(fetchmany):
+        while True:
+            batch = fetchmany(normalized_batch_size)
+            if not batch:
+                break
+            for row in batch:
+                yield row
+        return
+    fetchall = getattr(result, "fetchall", None)
+    if callable(fetchall):
+        for row in fetchall():
+            yield row
+        return
+    for row in result:
+        yield row
+
+
 def _table_exists(conn, name: str) -> bool:
     row = conn.execute(
         "SELECT to_regclass(%s) AS relation", (f"public.{name}",)
@@ -182,6 +317,28 @@ def _horizons_from_env() -> tuple[int, ...]:
 def _optional_time(name: str) -> Optional[datetime]:
     value = os.getenv(name, "").strip()
     return _utc(value) if value else None
+
+
+def _validated_max_anchors(value: Any) -> int:
+    if type(value) is not int or not 1 <= value <= MAX_BOUNDED_ANCHORS:
+        raise ValueError(
+            f"max_anchors must be an integer between 1 and "
+            f"{MAX_BOUNDED_ANCHORS}"
+        )
+    return value
+
+
+def _max_anchors_from_env() -> int:
+    raw = os.getenv(
+        "HISTORICAL_REPLAY_MAX_ANCHORS", str(MAX_BOUNDED_ANCHORS)
+    ).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "HISTORICAL_REPLAY_MAX_ANCHORS must be an integer"
+        ) from exc
+    return _validated_max_anchors(value)
 
 
 def fully_closed_end(
@@ -514,6 +671,7 @@ def load_canonical_reference_rows(
     start: datetime,
     end: datetime,
     symbols: Sequence[str],
+    include_running_run_id: Optional[int] = None,
 ) -> list[Dict[str, Any]]:
     """Load proven canonical decision-time prices for calibration/features.
 
@@ -527,6 +685,10 @@ def load_canonical_reference_rows(
     if not normalized_symbols or _utc(end) <= _utc(start):
         return []
     sibling_coherence = sibling_reference_coherence_sql("price_ref")
+    owner_scope, owner_params = _replay_owner_scope_sql(
+        "price_ref",
+        include_running_run_id=include_running_run_id,
+    )
     rows = conn.execute(
         f"""
         SELECT DISTINCT ON (
@@ -545,6 +707,10 @@ def load_canonical_reference_rows(
           AND price_ref.symbol=ANY(%s)
           AND price_ref.outcome_method_version=%s
           AND price_ref.data_quality_status=ANY(%s)
+          AND (
+                price_ref.replay_version<>%s
+                OR ({owner_scope})
+              )
           AND ({sibling_coherence})
         ORDER BY price_ref.symbol, price_ref.observation_time_utc,
                  (price_ref.replay_version=%s) DESC,
@@ -556,6 +722,8 @@ def load_canonical_reference_rows(
             normalized_symbols,
             canonical_price_path.METHOD_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),
+            REPLAY_VERSION,
+            *owner_params,
             REPLAY_VERSION,
         ),
     ).fetchall()
@@ -936,6 +1104,13 @@ def replay_outcome_row_is_coherent(
             research_no_dwell_outcome.METHOD_VERSION
         ):
             return False
+        replay_run_id = _strict_json_int(
+            source.get("replay_run_id"), minimum=1
+        )
+        if _strict_json_int(
+            source.get("first_touch_replay_run_id"), minimum=1
+        ) != replay_run_id:
+            return False
         if str(source.get("first_touch_data_quality_status") or "") not in (
             canonical_price_path.COMPLETE_QUALITIES
         ):
@@ -1249,8 +1424,8 @@ def _existing_keys(
     ],
 ) -> set[tuple[datetime, int]]:
     sibling_coherence = sibling_reference_coherence_sql("stored")
-    rows = conn.execute(
-        f"""
+    owner_scope, owner_params = _replay_owner_scope_sql("stored")
+    query = f"""
         SELECT stored.symbol, stored.observation_time_utc,
                stored.source_observation_time_utc,
                stored.horizon_minutes, stored.reference_time_utc,
@@ -1264,6 +1439,7 @@ def _existing_keys(
                stored.outcome_method_version, stored.exchange, stored.market,
                stored.pair, stored.interval_seconds, stored.provenance,
                stored.data_quality_status, stored.replay_version,
+               stored.replay_run_id, stored.first_touch_replay_run_id,
                ({sibling_coherence}) AS sibling_reference_coherent
         FROM research_historical_opportunity_outcomes stored
         WHERE stored.symbol=%s
@@ -1273,20 +1449,21 @@ def _existing_keys(
           AND stored.first_touch_method_version=%s
           AND stored.replay_version=%s
           AND stored.first_touch_data_quality_status=ANY(%s)
-        """,
-        (
-            symbol,
-            start,
-            end,
-            list(horizons),
-            research_no_dwell_outcome.METHOD_VERSION,
-            REPLAY_VERSION,
-            list(canonical_price_path.COMPLETE_QUALITIES),
-        ),
-    ).fetchall()
+          AND ({owner_scope})
+        """
+    params = (
+        symbol,
+        start,
+        end,
+        list(horizons),
+        research_no_dwell_outcome.METHOD_VERSION,
+        REPLAY_VERSION,
+        list(canonical_price_path.COMPLETE_QUALITIES),
+        *owner_params,
+    )
     requested = {int(value) for value in horizons}
     coherent_by_anchor: Dict[datetime, set[int]] = {}
-    for row in rows:
+    for row in iter_query_rows(conn, query, params):
         if not replay_outcome_row_is_coherent(
             dict(row), width_index=width_index
         ):
@@ -1313,8 +1490,9 @@ def _select_pending_anchors(
     existing_by_symbol: Dict[str, set[tuple[datetime, int]]],
     max_anchors: Optional[int],
 ) -> list[Anchor]:
-    """Apply the bounded-canary limit only after coherent v2 completion."""
-    pending = [
+    """Select one deterministic, globally bounded and symbol-balanced cohort."""
+    pending = sorted(
+        [
         anchor
         for anchor in anchors
         if any(
@@ -1322,10 +1500,448 @@ def _select_pending_anchors(
             not in existing_by_symbol.get(anchor.symbol, set())
             for horizon in horizons
         )
+        ],
+        key=lambda item: (
+            str(item.symbol).upper(),
+            _utc(item.observation_time_utc),
+            _utc(item.source_observation_time_utc),
+        ),
+    )
+    if not pending or max_anchors is None:
+        return pending
+    bounded_limit = min(_validated_max_anchors(max_anchors), len(pending))
+
+    by_symbol: Dict[str, list[Anchor]] = {}
+    for anchor in pending:
+        by_symbol.setdefault(str(anchor.symbol).upper(), []).append(anchor)
+    symbols = sorted(by_symbol)
+    allocation = {symbol: 0 for symbol in symbols}
+    remaining = bounded_limit
+    # Round-robin assignment is max-min fair.  A short symbol is exhausted,
+    # then its unused share is deterministically redistributed to the others.
+    while remaining:
+        assigned_this_round = False
+        for symbol in symbols:
+            if allocation[symbol] >= len(by_symbol[symbol]):
+                continue
+            allocation[symbol] += 1
+            remaining -= 1
+            assigned_this_round = True
+            if remaining == 0:
+                break
+        if not assigned_this_round:  # defensive; bounded_limit <= len(pending)
+            break
+
+    selected: list[Anchor] = []
+    for symbol in symbols:
+        selected.extend(
+            _evenly_time_spaced_anchors(
+                by_symbol[symbol], allocation[symbol]
+            )
+        )
+    return sorted(
+        selected,
+        key=lambda item: (
+            str(item.symbol).upper(),
+            _utc(item.observation_time_utc),
+            _utc(item.source_observation_time_utc),
+        ),
+    )
+
+
+def _evenly_time_spaced_anchors(
+    anchors: Sequence[Anchor], count: int
+) -> list[Anchor]:
+    """Choose nearest anchors to equal time intervals, retaining endpoints."""
+    ordered = sorted(
+        anchors,
+        key=lambda item: (
+            _utc(item.observation_time_utc),
+            _utc(item.source_observation_time_utc),
+        ),
+    )
+    requested = int(count)
+    if requested <= 0 or not ordered:
+        return []
+    if requested >= len(ordered):
+        return ordered
+    if requested == 1:
+        # A single point cannot contain both endpoints; select the stable
+        # earliest endpoint and let the next fair allocation add the latest.
+        return [ordered[0]]
+    if requested == 2:
+        return [ordered[0], ordered[-1]]
+
+    seconds = [
+        (_utc(anchor.observation_time_utc) - _utc(ordered[0].observation_time_utc))
+        .total_seconds()
+        for anchor in ordered
     ]
-    if max_anchors is not None:
-        pending = pending[: max(1, int(max_anchors))]
-    return pending
+    span = seconds[-1]
+    indices = [0]
+    for position in range(1, requested - 1):
+        target = span * position / (requested - 1)
+        minimum_index = indices[-1] + 1
+        maximum_index = len(ordered) - requested + position
+        insertion = bisect_left(
+            seconds, target, lo=minimum_index, hi=maximum_index + 1
+        )
+        candidates = {
+            max(minimum_index, min(maximum_index, insertion)),
+            max(minimum_index, min(maximum_index, insertion - 1)),
+        }
+        # Earlier wins an exact tie, keeping the policy reproducible.
+        indices.append(
+            min(candidates, key=lambda index: (abs(seconds[index] - target), index))
+        )
+    indices.append(len(ordered) - 1)
+    return [ordered[index] for index in indices]
+
+
+def _anchor_timestamp(value: datetime) -> str:
+    return _utc(value).isoformat().replace("+00:00", "Z")
+
+
+def _selected_anchor_contract(anchors: Sequence[Anchor]) -> Dict[str, Any]:
+    """Freeze the exact bounded cohort into auditable run metadata."""
+    canonical = sorted(
+        (
+            str(anchor.symbol).upper(),
+            _anchor_timestamp(anchor.observation_time_utc),
+            _anchor_timestamp(anchor.source_observation_time_utc),
+        )
+        for anchor in anchors
+    )
+    encoded = json.dumps(
+        canonical, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    grouped: Dict[str, list[tuple[str, str]]] = {}
+    for symbol, observation_time, source_time in canonical:
+        grouped.setdefault(symbol, []).append((observation_time, source_time))
+    return {
+        "selection_policy_version": SELECTION_POLICY_VERSION,
+        "selected_anchor_fingerprint_sha256": hashlib.sha256(encoded).hexdigest(),
+        "selected_anchor_count": len(canonical),
+        "selected_anchor_scope": {
+            symbol: {
+                "count": len(times),
+                "min_observation_time_utc": min(item[0] for item in times),
+                "max_observation_time_utc": max(item[0] for item in times),
+                "min_source_observation_time_utc": min(item[1] for item in times),
+                "max_source_observation_time_utc": max(item[1] for item in times),
+            }
+            for symbol, times in sorted(grouped.items())
+        },
+    }
+
+
+def _bounded_completion_error(
+    *,
+    selected_anchor_count: int,
+    horizon_count: int,
+    outcomes_written: int,
+    failures: int,
+) -> Optional[str]:
+    """Return why a bounded cohort cannot be marked COMPLETED, if anything."""
+    expected = int(selected_anchor_count) * int(horizon_count)
+    if int(failures) > 0:
+        return f"bounded replay recorded {int(failures)} outcome failures"
+    if int(outcomes_written) != expected:
+        return (
+            "bounded replay completion mismatch: "
+            f"expected {expected} writes, observed {int(outcomes_written)}"
+        )
+    return None
+
+
+def _coverage_covers_selected_contract(
+    coverage: Mapping[str, Any],
+    selected_contract: Mapping[str, Any],
+    *,
+    horizons: Sequence[int],
+) -> bool:
+    """Require cumulative coverage to contain every bounded symbol/horizon."""
+    scope = selected_contract.get("selected_anchor_scope")
+    if not isinstance(scope, Mapping):
+        return False
+    try:
+        for symbol, raw_bounds in scope.items():
+            if not isinstance(raw_bounds, Mapping):
+                return False
+            selected_count = _strict_json_int(
+                raw_bounds.get("count"), minimum=1
+            )
+            selected_first = _utc(
+                raw_bounds["min_observation_time_utc"]
+            )
+            selected_last = _utc(
+                raw_bounds["max_observation_time_utc"]
+            )
+            for horizon in horizons:
+                aggregate = coverage.get(
+                    f"{str(symbol).upper()}:{int(horizon)}"
+                )
+                if not isinstance(aggregate, Mapping):
+                    return False
+                if _strict_json_int(
+                    aggregate.get("outcomes"), minimum=1
+                ) < selected_count:
+                    return False
+                if (
+                    _utc(aggregate["first_observation_utc"])
+                    > selected_first
+                    or _utc(aggregate["last_observation_utc"])
+                    < selected_last
+                ):
+                    return False
+        return True
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _persisted_selected_anchor_contract(
+    conn,
+    *,
+    run_id: int,
+    horizons: Sequence[int],
+    width_index: Dict[
+        tuple[str, int], research_session_width.PriceWidthSeries
+    ],
+) -> Dict[str, Any]:
+    """Revalidate and reconstruct rows owned by one bounded RUNNING run."""
+    requested_horizons = {int(value) for value in horizons}
+    if not requested_horizons:
+        raise ValueError("persisted cohort requires at least one horizon")
+    sibling_coherence = sibling_reference_coherence_sql("stored")
+    query = f"""
+        SELECT stored.symbol, stored.observation_time_utc,
+               stored.source_observation_time_utc,
+               stored.horizon_minutes, stored.reference_time_utc,
+               stored.reference_price, stored.price_at_horizon,
+               stored.raw_return_pct, stored.long_metrics,
+               stored.short_metrics, stored.long_first_touch_metrics,
+               stored.short_first_touch_metrics,
+               stored.first_touch_method_version,
+               stored.first_touch_path_samples, stored.path_samples,
+               stored.first_touch_data_quality_status,
+               stored.outcome_method_version, stored.exchange,
+               stored.market, stored.pair, stored.interval_seconds,
+               stored.provenance, stored.data_quality_status,
+               stored.replay_version, stored.replay_run_id,
+               stored.first_touch_replay_run_id,
+               ({sibling_coherence}) AS sibling_reference_coherent
+        FROM research_historical_opportunity_outcomes stored
+        WHERE stored.replay_run_id=%s
+          AND stored.first_touch_replay_run_id=%s
+          AND stored.first_touch_method_version=%s
+          AND stored.replay_version=%s
+        ORDER BY stored.symbol, stored.observation_time_utc,
+                 stored.horizon_minutes
+        """
+    sources: Dict[tuple[str, datetime], datetime] = {}
+    stored_horizons: Dict[tuple[str, datetime], set[int]] = {}
+    outcome_rows = 0
+    for source_row in iter_query_rows(
+        conn,
+        query,
+        (
+            int(run_id),
+            int(run_id),
+            research_no_dwell_outcome.METHOD_VERSION,
+            REPLAY_VERSION,
+        ),
+    ):
+        row = dict(source_row)
+        if not replay_outcome_row_is_coherent(
+            row, width_index=width_index
+        ):
+            raise RuntimeError(
+                "persisted bounded cohort contains an incoherent outcome"
+            )
+        symbol = str(row["symbol"]).upper()
+        observed = _utc(row["observation_time_utc"])
+        source = _utc(row["source_observation_time_utc"])
+        horizon = row["horizon_minutes"]
+        if type(horizon) is not int or horizon not in requested_horizons:
+            raise RuntimeError("persisted bounded cohort has an invalid horizon")
+        key = (symbol, observed)
+        if key in sources and sources[key] != source:
+            raise RuntimeError(
+                "persisted bounded cohort has inconsistent source timestamps"
+            )
+        sources[key] = source
+        stored_horizons.setdefault(key, set()).add(horizon)
+        outcome_rows += 1
+    if outcome_rows != len(sources) * len(requested_horizons):
+        raise RuntimeError("persisted bounded cohort outcome count is incomplete")
+    if any(
+        values != requested_horizons for values in stored_horizons.values()
+    ):
+        raise RuntimeError("persisted bounded cohort horizon set is incomplete")
+    return _selected_anchor_contract(
+        [
+            Anchor(symbol, observed, source)
+            for (symbol, observed), source in sorted(sources.items())
+        ]
+    )
+
+
+def _adopt_recoverable_anchors(
+    conn,
+    *,
+    run_id: int,
+    anchors: Sequence[Anchor],
+    horizons: Sequence[int],
+    width_index: Dict[
+        tuple[str, int], research_session_width.PriceWidthSeries
+    ],
+) -> set[tuple[str, datetime, int]]:
+    """Revalidate and re-home complete anchors from interrupted/failed runs.
+
+    Partial old runs remain invisible to coverage and discovery.  Reuse occurs
+    only after every requested horizon for an exact selected anchor passes the
+    current coherence validator; ownership is then atomically moved to the new
+    bounded RUNNING run, which must itself pass the fingerprint gate.
+    """
+    requested_horizons = {int(value) for value in horizons}
+    selected = {
+        (str(anchor.symbol).upper(), _utc(anchor.observation_time_utc)): anchor
+        for anchor in anchors
+    }
+    if not selected:
+        return set()
+    sibling_coherence = sibling_reference_coherence_sql("stored")
+    adopted: set[tuple[str, datetime, int]] = set()
+    symbols = sorted({key[0] for key in selected})
+    for symbol in symbols:
+        times = [key[1] for key in selected if key[0] == symbol]
+        # Retain only tiny validated identity tuples for one symbol.  Decoded
+        # JSON path payloads are released with each streamed row.
+        grouped: Dict[
+            tuple[str, datetime], Dict[int, tuple[datetime, int]]
+        ] = {}
+        query = f"""
+            SELECT stored.symbol, stored.observation_time_utc,
+                   stored.source_observation_time_utc,
+                   stored.horizon_minutes, stored.reference_time_utc,
+                   stored.reference_price, stored.price_at_horizon,
+                   stored.raw_return_pct, stored.long_metrics,
+                   stored.short_metrics, stored.long_first_touch_metrics,
+                   stored.short_first_touch_metrics,
+                   stored.first_touch_method_version,
+                   stored.first_touch_path_samples, stored.path_samples,
+                   stored.first_touch_data_quality_status,
+                   stored.outcome_method_version, stored.exchange,
+                   stored.market, stored.pair, stored.interval_seconds,
+                   stored.provenance, stored.data_quality_status,
+                   stored.replay_version, stored.replay_run_id,
+                   stored.first_touch_replay_run_id,
+                   ({sibling_coherence}) AS sibling_reference_coherent
+            FROM research_historical_opportunity_outcomes stored
+            WHERE stored.symbol=%s
+              AND stored.observation_time_utc >= %s
+              AND stored.observation_time_utc <= %s
+              AND stored.horizon_minutes=ANY(%s)
+              AND stored.first_touch_method_version=%s
+              AND stored.replay_version=%s
+              AND stored.first_touch_data_quality_status=ANY(%s)
+              AND stored.replay_run_id=stored.first_touch_replay_run_id
+              AND EXISTS (
+                    SELECT 1
+                    FROM research_historical_replay_runs old_owner
+                    WHERE old_owner.replay_run_id=stored.replay_run_id
+                      AND old_owner.replay_version=stored.replay_version
+                      AND old_owner.status IN ('FAILED', 'RUNNING')
+                      AND old_owner.replay_run_id<>%s
+                  )
+            ORDER BY stored.observation_time_utc, stored.horizon_minutes
+            """
+        for source in iter_query_rows(
+            conn,
+            query,
+            (
+                symbol,
+                min(times),
+                max(times),
+                sorted(requested_horizons),
+                research_no_dwell_outcome.METHOD_VERSION,
+                REPLAY_VERSION,
+                list(canonical_price_path.COMPLETE_QUALITIES),
+                int(run_id),
+            ),
+        ):
+            row = dict(source)
+            key = (
+                str(row.get("symbol") or "").upper(),
+                _utc(row["observation_time_utc"]),
+            )
+            if key not in selected:
+                continue
+            if not replay_outcome_row_is_coherent(
+                row, width_index=width_index
+            ):
+                continue
+            horizon = int(row["horizon_minutes"])
+            grouped.setdefault(key, {})[horizon] = (
+                _utc(row["source_observation_time_utc"]),
+                int(row["replay_run_id"]),
+            )
+
+        for key, anchor in sorted(
+            (item for item in selected.items() if item[0][0] == symbol)
+        ):
+            rows = grouped.get(key, {})
+            if set(rows) != requested_horizons:
+                continue
+            if len({item[1] for item in rows.values()}) != 1:
+                continue
+            if any(
+                source_time != _utc(anchor.source_observation_time_utc)
+                for source_time, _ in rows.values()
+            ):
+                continue
+            update = conn.execute(
+                """
+                UPDATE research_historical_opportunity_outcomes stored
+                SET replay_run_id=%s, first_touch_replay_run_id=%s,
+                    updated_at_utc=NOW()
+                WHERE stored.symbol=%s
+                  AND stored.observation_time_utc=%s
+                  AND stored.horizon_minutes=ANY(%s)
+                  AND stored.first_touch_method_version=%s
+                  AND stored.replay_version=%s
+                  AND stored.replay_run_id=stored.first_touch_replay_run_id
+                  AND EXISTS (
+                        SELECT 1
+                        FROM research_historical_replay_runs old_owner
+                        WHERE old_owner.replay_run_id=stored.replay_run_id
+                          AND old_owner.replay_version=stored.replay_version
+                          AND old_owner.status IN ('FAILED', 'RUNNING')
+                          AND old_owner.replay_run_id<>%s
+                      )
+                """,
+                (
+                    int(run_id),
+                    int(run_id),
+                    key[0],
+                    key[1],
+                    sorted(requested_horizons),
+                    research_no_dwell_outcome.METHOD_VERSION,
+                    REPLAY_VERSION,
+                    int(run_id),
+                ),
+            )
+            if int(getattr(update, "rowcount", -1)) != len(
+                requested_horizons
+            ):
+                raise RuntimeError(
+                    "recoverable replay anchor ownership changed during adoption"
+                )
+            adopted.update(
+                (key[0], key[1], horizon)
+                for horizon in requested_horizons
+            )
+    return adopted
 
 
 def _write_outcome(
@@ -1463,41 +2079,43 @@ def _write_outcome(
     )
 
 
-def _coverage(conn) -> Dict[str, Any]:
+def _coverage(
+    conn, *, include_running_run_id: Optional[int] = None
+) -> Dict[str, Any]:
     sibling_coherence = sibling_reference_coherence_sql("stored")
-    stored_rows = [
-        dict(row)
-        for row in conn.execute(
-            f"""
-            SELECT stored.symbol, stored.observation_time_utc,
-                   stored.source_observation_time_utc,
-                   stored.horizon_minutes, stored.reference_time_utc,
-                   stored.reference_price, stored.price_at_horizon,
-                   stored.raw_return_pct, stored.long_metrics,
-                   stored.short_metrics, stored.long_first_touch_metrics,
-                   stored.short_first_touch_metrics,
-                   stored.first_touch_method_version,
-                   stored.first_touch_path_samples, stored.path_samples,
-                   stored.first_touch_data_quality_status,
-                   stored.outcome_method_version, stored.exchange,
-                   stored.market, stored.pair, stored.interval_seconds,
-                   stored.provenance, stored.data_quality_status,
-                   stored.replay_version,
-                   ({sibling_coherence}) AS sibling_reference_coherent
-            FROM research_historical_opportunity_outcomes stored
-            WHERE stored.first_touch_method_version=%s
-              AND stored.replay_version=%s
-            ORDER BY stored.symbol, stored.observation_time_utc,
-                     stored.horizon_minutes
-            """,
-            (research_no_dwell_outcome.METHOD_VERSION, REPLAY_VERSION),
-        ).fetchall()
-    ]
-    if not stored_rows:
+    owner_scope, owner_params = _replay_owner_scope_sql(
+        "stored", include_running_run_id=include_running_run_id
+    )
+    version_params = (
+        research_no_dwell_outcome.METHOD_VERSION,
+        REPLAY_VERSION,
+        *owner_params,
+    )
+    bounds = conn.execute(
+        f"""
+        SELECT MIN(observation_time_utc) AS first_observation_utc,
+               MAX(observation_time_utc) AS last_observation_utc,
+               ARRAY_AGG(DISTINCT UPPER(symbol)) AS symbols
+        FROM research_historical_opportunity_outcomes stored
+        WHERE stored.first_touch_method_version=%s
+          AND stored.replay_version=%s
+          AND ({owner_scope})
+        """,
+        version_params,
+    ).fetchone()
+    if not bounds or bounds.get("first_observation_utc") is None:
         return {}
-    first = min(_utc(row["observation_time_utc"]) for row in stored_rows)
-    last = max(_utc(row["observation_time_utc"]) for row in stored_rows)
-    symbols = sorted({str(row["symbol"]).upper() for row in stored_rows})
+    first = _utc(bounds["first_observation_utc"])
+    last = _utc(bounds["last_observation_utc"])
+    symbols = sorted(
+        {
+            str(symbol).upper()
+            for symbol in (bounds.get("symbols") or ())
+            if symbol
+        }
+    )
+    if not symbols:
+        return {}
     references = load_canonical_reference_rows(
         conn,
         start=first
@@ -1511,22 +2129,65 @@ def _coverage(conn) -> Dict[str, Any]:
         ),
         end=last + timedelta(minutes=1),
         symbols=symbols,
+        include_running_run_id=include_running_run_id,
     )
     width_index = build_canonical_width_index(references, horizons=_HORIZONS)
-    grouped: Dict[tuple[str, int], list[datetime]] = {}
-    for row in stored_rows:
+    query = f"""
+        SELECT stored.symbol, stored.observation_time_utc,
+               stored.source_observation_time_utc,
+               stored.horizon_minutes, stored.reference_time_utc,
+               stored.reference_price, stored.price_at_horizon,
+               stored.raw_return_pct, stored.long_metrics,
+               stored.short_metrics, stored.long_first_touch_metrics,
+               stored.short_first_touch_metrics,
+               stored.first_touch_method_version,
+               stored.first_touch_path_samples, stored.path_samples,
+               stored.first_touch_data_quality_status,
+               stored.outcome_method_version, stored.exchange,
+               stored.market, stored.pair, stored.interval_seconds,
+               stored.provenance, stored.data_quality_status,
+               stored.replay_version,
+               stored.replay_run_id, stored.first_touch_replay_run_id,
+               ({sibling_coherence}) AS sibling_reference_coherent
+        FROM research_historical_opportunity_outcomes stored
+        WHERE stored.first_touch_method_version=%s
+          AND stored.replay_version=%s
+          AND ({owner_scope})
+        ORDER BY stored.symbol, stored.observation_time_utc,
+                 stored.horizon_minutes
+        """
+    grouped: Dict[tuple[str, int], Dict[str, Any]] = {}
+    for source in iter_query_rows(conn, query, version_params):
+        row = dict(source)
         if not replay_outcome_row_is_coherent(row, width_index=width_index):
             continue
         key = (str(row["symbol"]).upper(), int(row["horizon_minutes"]))
-        grouped.setdefault(key, []).append(_utc(row["observation_time_utc"]))
+        observed = _utc(row["observation_time_utc"])
+        aggregate = grouped.setdefault(
+            key,
+            {
+                "outcomes": 0,
+                "first_observation_utc": observed,
+                "last_observation_utc": observed,
+                "utc_dates": set(),
+            },
+        )
+        aggregate["outcomes"] += 1
+        aggregate["first_observation_utc"] = min(
+            aggregate["first_observation_utc"], observed
+        )
+        aggregate["last_observation_utc"] = max(
+            aggregate["last_observation_utc"], observed
+        )
+        aggregate["utc_dates"].add(observed.date())
     return {
         f"{symbol}:{horizon}": {
-            "outcomes": len(times),
-            "first_observation_utc": min(times),
-            "last_observation_utc": max(times),
-            "utc_dates": len({value.date() for value in times}),
+            "outcomes": aggregate["outcomes"],
+            "first_observation_utc": aggregate["first_observation_utc"],
+            "last_observation_utc": aggregate["last_observation_utc"],
+            "utc_dates": len(aggregate["utc_dates"]),
         }
-        for (symbol, horizon), times in sorted(grouped.items())
+        for (symbol, horizon), aggregate in sorted(grouped.items())
     }
 
 
@@ -1537,6 +2198,8 @@ def status() -> Dict[str, Any]:
         "configured": bool(url),
         "schema_present": False,
         "replay_version": REPLAY_VERSION,
+        "selection_policy_version": SELECTION_POLICY_VERSION,
+        "coverage_scope_version": COVERAGE_SCOPE_VERSION,
         "outcome_method_version": canonical_price_path.METHOD_VERSION,
         "first_touch_method_version": research_no_dwell_outcome.METHOD_VERSION,
         "canonical_source": canonical_price_path.canonical_source_description(),
@@ -1563,16 +2226,38 @@ def status() -> Dict[str, Any]:
         if missing:
             return base
         base["schema_present"] = True
-        base["coverage"] = _coverage(conn)
+        completed = conn.execute(
+            """
+            SELECT replay_run_id, status, coverage, anchors_seen,
+                   outcomes_written, outcomes_skipped, failures,
+                   started_at_utc, completed_at_utc, error_text
+            FROM research_historical_replay_runs
+            WHERE replay_version=%s AND status='COMPLETED'
+            ORDER BY replay_run_id DESC
+            LIMIT 1
+            """,
+            (REPLAY_VERSION,),
+        ).fetchone()
+        if completed:
+            completed_row = dict(completed)
+            base["coverage"] = _mapping(completed_row.pop("coverage", {}))
+            base["latest_completed_run"] = completed_row
+            base["coverage_source"] = "LATEST_EXACT_VERSION_COMPLETED_RUN"
+        else:
+            base["coverage"] = {}
+            base["latest_completed_run"] = None
+            base["coverage_source"] = "NO_EXACT_VERSION_COMPLETED_RUN"
         latest = conn.execute(
             """
             SELECT replay_run_id, status, anchors_seen, outcomes_written,
                    outcomes_skipped, failures, started_at_utc,
                    completed_at_utc, error_text
             FROM research_historical_replay_runs
+            WHERE replay_version=%s
             ORDER BY replay_run_id DESC
             LIMIT 1
-            """
+            """,
+            (REPLAY_VERSION,),
         ).fetchone()
         base["latest_run"] = dict(latest) if latest else None
     return json.loads(json.dumps(base, ensure_ascii=False, default=str))
@@ -1602,6 +2287,8 @@ def run_backfill(
     )
     if not normalized_horizons:
         raise ValueError("at least one supported horizon is required")
+    if max_anchors is not None:
+        _validated_max_anchors(max_anchors)
     normalized_symbols = tuple(sorted({str(item).upper() for item in symbols if item}))
     chunk_span = timedelta(days=max(1, min(int(chunk_days), 14)))
     frozen_now = datetime.now(timezone.utc)
@@ -1696,6 +2383,16 @@ def run_backfill(
             existing_by_symbol=existing_by_symbol,
             max_anchors=max_anchors,
         )
+        if pending_anchors and max_anchors is None:
+            research_conn.execute(
+                "SELECT pg_advisory_unlock(%s)", (_LOCK_ID,)
+            )
+            research_conn.commit()
+            raise RuntimeError(
+                "Refusing unbounded historical replay while pending work "
+                "exists; set a positive max_anchors"
+            )
+        selected_contract = _selected_anchor_contract(pending_anchors)
         run_config = {
             "symbols": list(normalized_symbols) or "ALL",
             "horizons_minutes": list(normalized_horizons),
@@ -1711,7 +2408,9 @@ def run_backfill(
                 canonical_price_path.PRICE_PROVENANCE_VERSION
             ),
             "coverage_scope_version": COVERAGE_SCOPE_VERSION,
+            "resume_policy_version": RESUME_POLICY_VERSION,
             "frozen_fully_closed_end_utc": effective_end,
+            **selected_contract,
         }
         if not pending_anchors:
             try:
@@ -1805,6 +2504,51 @@ def run_backfill(
 
         seen = written = skipped = failures = 0
         try:
+            adopted = _adopt_recoverable_anchors(
+                research_conn,
+                run_id=run_id,
+                anchors=pending_anchors,
+                horizons=normalized_horizons,
+                width_index=width_index,
+            )
+            if adopted:
+                for symbol, observation_time, horizon in adopted:
+                    existing_by_symbol.setdefault(symbol, set()).add(
+                        (observation_time, horizon)
+                    )
+                written = len(adopted)
+                research_conn.execute(
+                    """
+                    UPDATE research_historical_replay_runs
+                    SET outcomes_written=%s
+                    WHERE replay_run_id=%s
+                    """,
+                    (written, run_id),
+                )
+                research_conn.commit()
+                # Adoption changes which exact-version price references have
+                # an admissible owner.  Rebuild immediately so all subsequent
+                # fetched anchors and final coverage recompute the same strict
+                # prior-only width history.
+                canonical_references = load_canonical_reference_rows(
+                    research_conn,
+                    start=calibration_start,
+                    end=calibration_end,
+                    symbols=sorted(
+                        {anchor.symbol for anchor in anchors}
+                    ),
+                    include_running_run_id=run_id,
+                )
+                width_index = build_canonical_width_index(
+                    canonical_references, horizons=normalized_horizons
+                )
+                known_reference_keys = {
+                    (
+                        str(row["symbol"]).upper(),
+                        _utc(row["reference_time_utc"]),
+                    )
+                    for row in canonical_references
+                }
             for symbol, symbol_anchors in grouped.items():
                 chunk_start = _floor_minute(symbol_anchors[0].observation_time_utc)
                 symbol_end = symbol_anchors[-1].observation_time_utc + timedelta(minutes=1)
@@ -1829,7 +2573,10 @@ def run_backfill(
                     ]
                     seen += len(chunk)
                     if not pending:
-                        skipped += len(chunk) * len(normalized_horizons)
+                        # Every anchor in ``grouped`` was pending before this
+                        # run.  An empty chunk here therefore means its full
+                        # cohort was revalidated and adopted above; those rows
+                        # are writes of ownership, not skips.
                         chunk_start = chunk_end
                         continue
                     fetch_start = min(
@@ -1940,7 +2687,37 @@ def run_backfill(
                     )
                     chunk_start = chunk_end
 
-            coverage = _coverage(research_conn)
+            completion_error = _bounded_completion_error(
+                selected_anchor_count=len(pending_anchors),
+                horizon_count=len(normalized_horizons),
+                outcomes_written=written,
+                failures=failures,
+            )
+            if completion_error is not None:
+                raise RuntimeError(completion_error)
+            coverage = _coverage(
+                research_conn, include_running_run_id=run_id
+            )
+            persisted_contract = _persisted_selected_anchor_contract(
+                research_conn,
+                run_id=run_id,
+                horizons=normalized_horizons,
+                width_index=width_index,
+            )
+            if persisted_contract != selected_contract:
+                raise RuntimeError(
+                    "persisted bounded cohort differs from its frozen "
+                    "selection fingerprint"
+                )
+            if not _coverage_covers_selected_contract(
+                coverage,
+                selected_contract,
+                horizons=normalized_horizons,
+            ):
+                raise RuntimeError(
+                    "coherent cumulative coverage does not contain the exact "
+                    "bounded cohort"
+                )
             research_conn.execute(
                 """
                 UPDATE research_historical_replay_runs
@@ -1963,7 +2740,14 @@ def run_backfill(
                     completed_at_utc=NOW()
                 WHERE replay_run_id=%s
                 """,
-                (seen, written, skipped, failures + 1, f"{type(exc).__name__}: {exc}", run_id),
+                (
+                    seen,
+                    written,
+                    skipped,
+                    max(1, failures),
+                    f"{type(exc).__name__}: {exc}",
+                    run_id,
+                ),
             )
             research_conn.commit()
             raise
@@ -1985,6 +2769,7 @@ def run_backfill(
         "outcomes_skipped": skipped,
         "failures": failures,
         "coverage": coverage,
+        **selected_contract,
     }
 
 
@@ -1995,9 +2780,7 @@ def main() -> None:
         symbols=_symbols_from_env(),
         horizons=_horizons_from_env(),
         chunk_days=int(os.getenv("HISTORICAL_REPLAY_CHUNK_DAYS", "2")),
-        max_anchors=(
-            int(os.getenv("HISTORICAL_REPLAY_MAX_ANCHORS", "0")) or None
-        ),
+        max_anchors=_max_anchors_from_env(),
         pause_seconds=float(os.getenv("HISTORICAL_REPLAY_API_PAUSE_SECONDS", "0.05")),
     )
     print(_json(result), flush=True)
