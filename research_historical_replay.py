@@ -707,6 +707,175 @@ def _mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if hasattr(value, "items") else {}
 
 
+_REFERENCE_COHERENCE_FIELDS = (
+    "source_observation_time_utc",
+    "reference_time_utc",
+    "reference_price",
+    "outcome_method_version",
+    "exchange",
+    "market",
+    "pair",
+    "interval_seconds",
+    "provenance",
+    "data_quality_status",
+    "first_touch_data_quality_status",
+)
+_REFERENCE_OUTPUT_FIELDS = (
+    "symbol",
+    "observation_time_utc",
+    "source_observation_time_utc",
+    "reference_time_utc",
+    "reference_price",
+    "exchange",
+    "market",
+    "pair",
+    "interval_seconds",
+    "provenance",
+    "data_quality_status",
+    "outcome_method_version",
+    "replay_version",
+)
+
+
+def _sql_equal(left: Any, right: Any) -> bool:
+    """Model SQL ``=`` rather than Python's null-equals-null behavior."""
+    return left is not None and right is not None and left == right
+
+
+def _sql_not_distinct(left: Any, right: Any) -> bool:
+    """Model PostgreSQL ``IS NOT DISTINCT FROM`` for persisted scalars."""
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, float) and isinstance(right, float):
+        if math.isnan(left) and math.isnan(right):
+            return True
+    return left == right
+
+
+def _reference_owner_is_completed(row: Mapping[str, Any]) -> bool:
+    return bool(
+        _sql_equal(row.get("first_touch_replay_run_id"), row.get("replay_run_id"))
+        and str(row.get("replay_owner_status") or "") == "COMPLETED"
+    )
+
+
+def _reference_owner_is_included_running(
+    row: Mapping[str, Any], include_running_run_id: Optional[int]
+) -> bool:
+    return bool(
+        include_running_run_id is not None
+        and _sql_equal(row.get("replay_run_id"), include_running_run_id)
+        and _sql_equal(row.get("first_touch_replay_run_id"), row.get("replay_run_id"))
+        and str(row.get("replay_owner_status") or "") == "RUNNING"
+    )
+
+
+def _reference_candidate_is_eligible(
+    row: Mapping[str, Any], *, include_running_run_id: Optional[int]
+) -> bool:
+    if row.get("outcome_method_version") != canonical_price_path.METHOD_VERSION:
+        return False
+    if row.get("data_quality_status") not in canonical_price_path.COMPLETE_QUALITIES:
+        return False
+    if str(row.get("replay_version") or "") != REPLAY_VERSION:
+        return True
+    return _reference_owner_is_completed(row) or _reference_owner_is_included_running(
+        row, include_running_run_id
+    )
+
+
+def _reference_sibling_is_related(
+    candidate: Mapping[str, Any], sibling: Mapping[str, Any]
+) -> bool:
+    """Reproduce ``sibling_reference_coherence_sql`` relation semantics.
+
+    In particular, ordinary SQL equality means two NULL first-touch method or
+    replay-run IDs do not relate.  Cross-run siblings relate only when both
+    rows are bound to exact completed owners; the one explicitly included
+    RUNNING finalization run never broadens that relation.
+    """
+    if candidate.get("symbol") != sibling.get("symbol"):
+        return False
+    if candidate.get("observation_time_utc") != sibling.get(
+        "observation_time_utc"
+    ):
+        return False
+    if not _sql_equal(
+        candidate.get("replay_version"), sibling.get("replay_version")
+    ):
+        return False
+    if not _sql_equal(
+        candidate.get("first_touch_method_version"),
+        sibling.get("first_touch_method_version"),
+    ):
+        return False
+    return bool(
+        _sql_equal(candidate.get("replay_run_id"), sibling.get("replay_run_id"))
+        or (
+            _reference_owner_is_completed(candidate)
+            and _reference_owner_is_completed(sibling)
+        )
+    )
+
+
+def _reference_coherence_value(row: Mapping[str, Any], field: str) -> Any:
+    value = row.get(field)
+    if value is None:
+        return None
+    if field in {"exchange", "market"}:
+        return str(value).lower()
+    if field == "pair":
+        return str(value).upper()
+    return value
+
+
+def _reference_sibling_is_distinct(
+    candidate: Mapping[str, Any], sibling: Mapping[str, Any]
+) -> bool:
+    return any(
+        not _sql_not_distinct(
+            _reference_coherence_value(candidate, field),
+            _reference_coherence_value(sibling, field),
+        )
+        for field in _REFERENCE_COHERENCE_FIELDS
+    )
+
+
+def _select_reference_candidate(
+    anchor_rows: Sequence[Mapping[str, Any]],
+    *,
+    include_running_run_id: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    coherent: list[Dict[str, Any]] = []
+    materialized = [dict(row) for row in anchor_rows]
+    for candidate in materialized:
+        if not _reference_candidate_is_eligible(
+            candidate, include_running_run_id=include_running_run_id
+        ):
+            continue
+        if any(
+            _reference_sibling_is_related(candidate, sibling)
+            and _reference_sibling_is_distinct(candidate, sibling)
+            for sibling in materialized
+        ):
+            continue
+        coherent.append(candidate)
+    if not coherent:
+        return None
+    coherent.sort(
+        key=lambda row: (
+            str(row.get("replay_version") or "") != REPLAY_VERSION,
+            int(row.get("horizon_minutes") or 0),
+            int(row.get("opportunity_id") or 0),
+        )
+    )
+    # SQL used to apply DISTINCT ON before the Python canonical checks below.
+    # Return only that same selected row so a malformed preferred current row
+    # cannot silently fall back to a legacy source.
+    selected = coherent[0]
+    return {field: selected.get(field) for field in _REFERENCE_OUTPUT_FIELDS}
+
+
 def load_canonical_reference_rows(
     conn,
     *,
@@ -726,52 +895,55 @@ def load_canonical_reference_rows(
     )
     if not normalized_symbols or _utc(end) <= _utc(start):
         return []
-    sibling_coherence = sibling_reference_coherence_sql("price_ref")
-    owner_scope, owner_params = _replay_owner_scope_sql(
-        "price_ref",
-        include_running_run_id=include_running_run_id,
-    )
-    rows = conn.execute(
-        f"""
-        SELECT DISTINCT ON (
-                   price_ref.symbol, price_ref.observation_time_utc
-               )
-               price_ref.symbol, price_ref.observation_time_utc,
+    if include_running_run_id is not None and (
+        type(include_running_run_id) is not int or include_running_run_id <= 0
+    ):
+        raise ValueError("include_running_run_id must be a positive integer")
+    query = """
+        SELECT price_ref.opportunity_id, price_ref.symbol,
+               price_ref.observation_time_utc,
                price_ref.source_observation_time_utc,
-               price_ref.reference_time_utc, price_ref.reference_price,
-               price_ref.exchange, price_ref.market, price_ref.pair,
+               price_ref.horizon_minutes, price_ref.reference_time_utc,
+               price_ref.reference_price, price_ref.exchange,
+               price_ref.market, price_ref.pair,
                price_ref.interval_seconds, price_ref.provenance,
                price_ref.data_quality_status,
-               price_ref.outcome_method_version, price_ref.replay_version
+               price_ref.outcome_method_version, price_ref.replay_version,
+               price_ref.replay_run_id,
+               price_ref.first_touch_replay_run_id,
+               price_ref.first_touch_method_version,
+               price_ref.first_touch_data_quality_status,
+               replay_owner.status AS replay_owner_status
         FROM research_historical_opportunity_outcomes price_ref
+        LEFT JOIN research_historical_replay_runs replay_owner
+          ON replay_owner.replay_run_id=price_ref.replay_run_id
+         AND replay_owner.replay_version=price_ref.replay_version
         WHERE price_ref.observation_time_utc >= %s
           AND price_ref.observation_time_utc < %s
           AND price_ref.symbol=ANY(%s)
-          AND price_ref.outcome_method_version=%s
-          AND price_ref.data_quality_status=ANY(%s)
-          AND (
-                price_ref.replay_version<>%s
-                OR ({owner_scope})
-              )
-          AND ({sibling_coherence})
         ORDER BY price_ref.symbol, price_ref.observation_time_utc,
-                 (price_ref.replay_version=%s) DESC,
-                 price_ref.horizon_minutes
-        """,
-        (
-            _utc(start),
-            _utc(end),
-            normalized_symbols,
-            canonical_price_path.METHOD_VERSION,
-            list(canonical_price_path.COMPLETE_QUALITIES),
-            REPLAY_VERSION,
-            *owner_params,
-            REPLAY_VERSION,
-        ),
-    ).fetchall()
+                 price_ref.horizon_minutes, price_ref.opportunity_id
+    """
+    rows = iter_query_rows(
+        conn,
+        query,
+        (_utc(start), _utc(end), normalized_symbols),
+        batch_size=_STREAM_BATCH_SIZE,
+    )
     deduplicated: Dict[tuple[str, datetime], Dict[str, Any]] = {}
-    for source in rows:
-        row = dict(source)
+    for _, anchor_group in itertools.groupby(
+        rows,
+        key=lambda source: (
+            str(source.get("symbol") or ""),
+            source.get("observation_time_utc"),
+        ),
+    ):
+        row = _select_reference_candidate(
+            list(anchor_group),
+            include_running_run_id=include_running_run_id,
+        )
+        if row is None:
+            continue
         if not canonical_price_path.persisted_reference_is_canonical(
             row, required_hype_replay_version=REPLAY_VERSION
         ):

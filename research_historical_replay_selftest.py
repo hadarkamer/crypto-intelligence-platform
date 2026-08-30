@@ -275,6 +275,13 @@ def run() -> None:
 
         def execute(self, query, params):
             assert "source_observation_time_utc" in query
+            assert "LEFT JOIN research_historical_replay_runs replay_owner" in query
+            assert "DISTINCT ON" not in query
+            assert "NOT EXISTS" not in query
+            assert "outcome_method_version=%s" not in query
+            assert "data_quality_status=ANY(%s)" not in query
+            assert query.count("%s") == 3
+            assert len(params) == 3
             return self
 
         def fetchall(self):
@@ -287,11 +294,21 @@ def run() -> None:
         reference_time=None,
         reference_price=100.0,
         quality=canonical_price_path.BINANCE_COMPLETE,
+        opportunity_id=1,
+        horizon_minutes=60,
+        replay_version=replay.REPLAY_VERSION,
+        replay_run_id=7,
+        first_touch_replay_run_id=7,
+        first_touch_method_version=no_dwell.METHOD_VERSION,
+        replay_owner_status="COMPLETED",
+        provenance=btc_provenance,
     ):
         return {
+            "opportunity_id": opportunity_id,
             "symbol": "BTC",
             "observation_time_utc": observed,
             "source_observation_time_utc": source_time,
+            "horizon_minutes": horizon_minutes,
             "reference_time_utc": (
                 replay._expected_reference_close(observed)
                 if reference_time is None
@@ -302,10 +319,15 @@ def run() -> None:
             "market": "spot",
             "pair": "BTCUSDT",
             "interval_seconds": 60,
-            "provenance": btc_provenance,
+            "provenance": provenance,
             "data_quality_status": quality,
+            "first_touch_data_quality_status": quality,
             "outcome_method_version": canonical_price_path.METHOD_VERSION,
-            "replay_version": replay.REPLAY_VERSION,
+            "replay_version": replay_version,
+            "replay_run_id": replay_run_id,
+            "first_touch_replay_run_id": first_touch_replay_run_id,
+            "first_touch_method_version": first_touch_method_version,
+            "replay_owner_status": replay_owner_status,
         }
 
     def _load_reference(row):
@@ -339,6 +361,276 @@ def run() -> None:
         _reference_row(quality=canonical_price_path.HYPERLIQUID_COMPLETE),
     ):
         assert _load_reference(malformed_reference) == []
+
+    # Canonical reference history uses a non-blocking index-ordered server
+    # cursor.  Every row is streamed, including siblings that are themselves
+    # ineligible candidates, and only one four-horizon anchor is materialized
+    # at a time for exact SQL-equivalent coherence checks.
+    class _ReferenceStreamCursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.offset = 0
+            self.closed = False
+
+        def execute(self, query, params):
+            normalized = " ".join(query.split())
+            assert (
+                "LEFT JOIN research_historical_replay_runs replay_owner"
+                in normalized
+            )
+            assert (
+                "replay_owner.replay_version=price_ref.replay_version"
+                in normalized
+            )
+            assert "DISTINCT ON" not in normalized
+            assert "NOT EXISTS" not in normalized
+            assert "outcome_method_version=%s" not in normalized
+            assert "data_quality_status=ANY(%s)" not in normalized
+            assert (
+                "ORDER BY price_ref.symbol, price_ref.observation_time_utc, "
+                "price_ref.horizon_minutes, price_ref.opportunity_id"
+            ) in normalized
+            assert params[2] == ["BTC"]
+            self.connection.queries.append(normalized)
+            return self
+
+        def fetchmany(self, size):
+            assert size == replay._STREAM_BATCH_SIZE
+            self.connection.fetchmany_calls += 1
+            start = self.offset
+            self.offset += size
+            return self.connection.rows[start : self.offset]
+
+        def fetchall(self):
+            self.connection.fetchall_calls += 1
+            raise AssertionError("canonical references must never use fetchall")
+
+        def close(self):
+            self.closed = True
+            self.connection.closed_cursors += 1
+
+    class _ReferenceStreamConnection:
+        def __init__(self, rows):
+            self.rows = rows
+            self.fetchmany_calls = 0
+            self.fetchall_calls = 0
+            self.closed_cursors = 0
+            self.cursor_names = []
+            self.queries = []
+
+        def cursor(self, *, name):
+            assert name.startswith("research_replay_stream_")
+            self.cursor_names.append(name)
+            return _ReferenceStreamCursor(self)
+
+        def execute(self, query, params):
+            raise AssertionError("named server cursor was not used")
+
+    streamed_rows = []
+    streamed_anchors = 376
+    opportunity_id = 1
+    for anchor_index in range(streamed_anchors):
+        observed = weekend_event + timedelta(minutes=anchor_index)
+        for horizon in replay._HORIZONS:
+            streamed_rows.append(
+                _reference_row(
+                    observed=observed,
+                    source_time=observed,
+                    opportunity_id=opportunity_id,
+                    horizon_minutes=horizon,
+                )
+            )
+            opportunity_id += 1
+    stream_conn = _ReferenceStreamConnection(streamed_rows)
+    original_selector = replay._select_reference_candidate
+    maximum_anchor_group = 0
+
+    def _tracked_reference_selector(rows, **kwargs):
+        nonlocal maximum_anchor_group
+        maximum_anchor_group = max(maximum_anchor_group, len(rows))
+        return original_selector(rows, **kwargs)
+
+    replay._select_reference_candidate = _tracked_reference_selector
+    try:
+        streamed_references = replay.load_canonical_reference_rows(
+            stream_conn,
+            start=weekend_event - timedelta(minutes=1),
+            end=weekend_event + timedelta(minutes=streamed_anchors + 1),
+            symbols=("BTC",),
+        )
+    finally:
+        replay._select_reference_candidate = original_selector
+    assert len(streamed_references) == streamed_anchors
+    assert maximum_anchor_group == len(replay._HORIZONS)
+    assert stream_conn.fetchall_calls == 0
+    assert stream_conn.fetchmany_calls >= 4
+    assert stream_conn.closed_cursors == 1
+    assert len(stream_conn.cursor_names) == 1
+    assert len(stream_conn.queries) == 1
+
+    completed = _reference_row()
+    assert replay._select_reference_candidate(
+        [completed], include_running_run_id=None
+    ) is not None
+    for rejected_owner in (
+        {**completed, "replay_owner_status": "FAILED"},
+        {**completed, "replay_owner_status": "RUNNING"},
+        {**completed, "first_touch_replay_run_id": 8},
+    ):
+        assert replay._select_reference_candidate(
+            [rejected_owner], include_running_run_id=None
+        ) is None
+    running = {**completed, "replay_owner_status": "RUNNING"}
+    assert replay._select_reference_candidate(
+        [running], include_running_run_id=7
+    ) is not None
+    assert replay._select_reference_candidate(
+        [running], include_running_run_id=8
+    ) is None
+    for invalid_running_id in (0, -1, True, 1.0):
+        try:
+            replay.load_canonical_reference_rows(
+                _ReferenceRows([]),
+                start=weekend_event - timedelta(minutes=1),
+                end=weekend_event + timedelta(minutes=1),
+                symbols=("BTC",),
+                include_running_run_id=invalid_running_id,
+            )
+        except ValueError:
+            pass
+        else:  # pragma: no cover - explicit fail-closed assertion
+            raise AssertionError("invalid running replay owner was accepted")
+
+    # Same-version siblings from different completed owners are related.  The
+    # exact eleven relational fields use IS DISTINCT FROM semantics, including
+    # case-insensitive exchange/market and pair comparisons.
+    cross_owner = _reference_row(
+        opportunity_id=2,
+        horizon_minutes=240,
+        replay_run_id=8,
+        first_touch_replay_run_id=8,
+    )
+    assert replay._select_reference_candidate(
+        [completed, cross_owner], include_running_run_id=None
+    ) is not None
+    case_only = {
+        **cross_owner,
+        "exchange": "BINANCE",
+        "market": "SPOT",
+        "pair": "btcusdt",
+    }
+    assert replay._select_reference_candidate(
+        [completed, case_only], include_running_run_id=None
+    ) is not None
+    distinct_values = {
+        "source_observation_time_utc": weekend_event + timedelta(seconds=1),
+        "reference_time_utc": weekend_event - timedelta(seconds=1),
+        "reference_price": 101.0,
+        "outcome_method_version": "wrong-method",
+        "exchange": "coinbase",
+        "market": "futures",
+        "pair": "BTC/USDC",
+        "interval_seconds": 300,
+        "provenance": "different",
+        "data_quality_status": canonical_price_path.BINANCE_PARTIAL,
+        "first_touch_data_quality_status": canonical_price_path.BINANCE_PARTIAL,
+    }
+    assert set(distinct_values) == set(replay._REFERENCE_COHERENCE_FIELDS)
+    for field, value in distinct_values.items():
+        assert replay._select_reference_candidate(
+            [completed, {**cross_owner, field: value}],
+            include_running_run_id=None,
+        ) is None, field
+
+    # Candidate filtering happens after the full sibling group is loaded: a
+    # related partial-quality or wrong-method sibling still poisons the good
+    # candidate through one of the eleven coherence fields.
+    assert replay._select_reference_candidate(
+        [
+            completed,
+            {
+                **completed,
+                "opportunity_id": 2,
+                "horizon_minutes": 240,
+                "data_quality_status": canonical_price_path.BINANCE_PARTIAL,
+            },
+        ],
+        include_running_run_id=None,
+    ) is None
+    assert replay._select_reference_candidate(
+        [
+            completed,
+            {
+                **completed,
+                "opportunity_id": 2,
+                "horizon_minutes": 240,
+                "outcome_method_version": "wrong-method",
+            },
+        ],
+        include_running_run_id=None,
+    ) is None
+
+    # Preserve ordinary SQL equality byte-for-byte: NULL first-touch methods
+    # are not related, even inside the same run.  A RUNNING row is likewise not
+    # cross-related to another completed run, but same-run siblings still are.
+    null_method = {**completed, "first_touch_method_version": None}
+    divergent_null_method = {
+        **null_method,
+        "opportunity_id": 2,
+        "horizon_minutes": 240,
+        "provenance": "different",
+    }
+    assert replay._select_reference_candidate(
+        [null_method, divergent_null_method], include_running_run_id=None
+    ) is not None
+    completed_other_run = {
+        **cross_owner,
+        "provenance": "different",
+    }
+    assert replay._select_reference_candidate(
+        [running, completed_other_run], include_running_run_id=7
+    ) is not None
+    running_same_run = {
+        **running,
+        "opportunity_id": 2,
+        "horizon_minutes": 240,
+        "provenance": "different",
+    }
+    assert replay._select_reference_candidate(
+        [running, running_same_run], include_running_run_id=7
+    ) is None
+
+    # Preserve DISTINCT ON ordering and fallback nuance.  Incoherent current
+    # siblings may expose a coherent legacy reference; a coherent current row
+    # selected first and rejected by later canonical validation must not fall
+    # back silently to that legacy row.
+    legacy = _reference_row(
+        opportunity_id=3,
+        horizon_minutes=720,
+        replay_version="historical-raw-opportunity-replay-v1",
+        replay_run_id=2,
+        first_touch_replay_run_id=None,
+        first_touch_method_version=None,
+        replay_owner_status="COMPLETED",
+    )
+    incoherent_current = {
+        **completed,
+        "opportunity_id": 2,
+        "horizon_minutes": 240,
+        "provenance": "different",
+    }
+    selected_legacy = replay._select_reference_candidate(
+        [completed, incoherent_current, legacy], include_running_run_id=None
+    )
+    assert selected_legacy is not None
+    assert selected_legacy["replay_version"] == legacy["replay_version"]
+    malformed_current = {**completed, "provenance": "{}"}
+    assert replay.load_canonical_reference_rows(
+        _ReferenceRows([malformed_current, legacy]),
+        start=weekend_event - timedelta(minutes=1),
+        end=weekend_event + timedelta(minutes=1),
+        symbols=("BTC",),
+    ) == []
 
     # A repeated bounded canary advances beyond already coherent v2 anchors.
     anchors = [
