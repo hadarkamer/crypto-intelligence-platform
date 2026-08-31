@@ -22,6 +22,7 @@ import research_evidence_contract
 import research_feature_matrix
 import research_formula_acceptance
 import research_formula_engine
+import research_formula_lab_comparison
 import research_formula_relevance
 import research_historical_replay
 import research_market_episode
@@ -2234,6 +2235,263 @@ def shadow_status(limit: int = 20) -> Dict[str, Any]:
             },
         }
     )
+
+
+def formula_lab_comparison(
+    *,
+    direction: Any = "LONG",
+    horizon_minutes: Any = 720,
+    max_formulas_per_cohort: int = 20,
+    max_anchors: int = 250,
+    max_snapshots: int = 20,
+) -> Dict[str, Any]:
+    """Run a bounded, read-only V7.1/V6.2 comparison on identical anchors."""
+
+    normalized_direction = str(direction or "").strip().upper()
+    if normalized_direction not in {"LONG", "SHORT"}:
+        raise ValueError("direction must be LONG or SHORT")
+    horizon = int(horizon_minutes)
+    if horizon not in {60, 240, 720, 1440}:
+        raise ValueError("invalid horizon_minutes")
+    formula_limit = max(1, min(int(max_formulas_per_cohort), 25))
+    anchor_limit = max(1, min(int(max_anchors), 250))
+    snapshot_limit = max(1, min(int(max_snapshots), 50))
+    status = schema_status()
+    if not status.get("schema_present"):
+        return {
+            "available": False,
+            "status": "WAITING_DATA",
+            "blockers": ["Formula Lab schema is unavailable"],
+            "schema": status,
+            "live_effect": "NONE",
+        }
+
+    with _connect(read_only=True) as conn:
+        current_formulas = conn.execute(
+            """
+            SELECT f.formula_id, f.formula_key, f.formula_version,
+                   f.formula_schema_version, f.engine_version,
+                   f.feature_schema_version, f.outcome_method_version,
+                   f.direction, f.horizon_minutes, f.conditions,
+                   f.formula_text, f.current_stage,
+                   e.ranking_score, e.holdout_metrics
+            FROM research_formulas f
+            LEFT JOIN research_formula_evaluations e
+              ON e.run_id=f.latest_evaluation_run_id
+             AND e.formula_id=f.formula_id
+            WHERE f.active=TRUE
+              AND f.current_stage IN (
+                    'DISCOVERED', 'BACKTESTED', 'HOLDOUT_PASSED',
+                    'SHADOW', 'LIVE'
+                  )
+              AND f.formula_schema_version=%s
+              AND f.engine_version=%s
+              AND f.feature_schema_version=%s
+              AND f.outcome_method_version=%s
+              AND f.direction=%s
+              AND f.horizon_minutes=%s
+            ORDER BY
+              CASE f.current_stage
+                WHEN 'LIVE' THEN 5 WHEN 'SHADOW' THEN 4
+                WHEN 'HOLDOUT_PASSED' THEN 3
+                WHEN 'BACKTESTED' THEN 2 ELSE 1
+              END DESC,
+              e.ranking_score DESC NULLS LAST,
+              f.formula_id
+            LIMIT %s
+            """,
+            (
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                normalized_direction,
+                horizon,
+                formula_limit,
+            ),
+        ).fetchall()
+        legacy_formulas = conn.execute(
+            """
+            SELECT f.formula_id, f.formula_key, f.formula_version,
+                   f.formula_schema_version, f.engine_version,
+                   f.feature_schema_version, f.outcome_method_version,
+                   f.direction, f.horizon_minutes, f.conditions,
+                   f.formula_text, f.current_stage,
+                   e.ranking_score, e.holdout_metrics
+            FROM research_formulas f
+            LEFT JOIN research_formula_evaluations e
+              ON e.run_id=f.latest_evaluation_run_id
+             AND e.formula_id=f.formula_id
+            WHERE f.active=TRUE
+              AND f.current_stage='SHADOW'
+              AND f.formula_schema_version=%s
+              AND f.engine_version=%s
+              AND f.feature_schema_version=%s
+              AND f.outcome_method_version=%s
+              AND f.direction=%s
+              AND f.horizon_minutes=%s
+            ORDER BY e.ranking_score DESC NULLS LAST, f.formula_id
+            LIMIT %s
+            """,
+            (
+                research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
+                research_formula_engine.LEGACY_V6_ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                normalized_direction,
+                horizon,
+                formula_limit,
+            ),
+        ).fetchall()
+        events = conn.execute(
+            """
+            SELECT * FROM (
+                SELECT candidate.event_id, candidate.alert_time_utc,
+                       candidate.symbol, candidate.direction,
+                       candidate.event_type, candidate.setup_key,
+                       candidate.source_side, candidate.timeframe,
+                       candidate.strategy_version, candidate.code_version,
+                       candidate.current_price,
+                       candidate.anchor_slot_id,
+                       candidate.input_fingerprint,
+                       candidate.feature_bundle_policy_version,
+                       candidate.feature_bundle_sha256,
+                       candidate.source_timestamps,
+                       candidate.source_provenance
+                FROM research_prospective_shadow_events candidate
+                WHERE candidate.direction=%s
+                  AND candidate.sampler_version=%s
+                  AND candidate.feature_bundle_policy_version=%s
+                ORDER BY candidate.alert_time_utc DESC,
+                         candidate.event_id DESC
+                LIMIT %s
+            ) recent
+            ORDER BY recent.alert_time_utc, recent.event_id
+            """,
+            (
+                normalized_direction,
+                _PROSPECTIVE_ANCHOR_SAMPLER_VERSION,
+                _FEATURE_BUNDLE_POLICY_VERSION,
+                anchor_limit,
+            ),
+        ).fetchall()
+        snapshots = conn.execute(
+            """
+            SELECT snapshot.snapshot_payload
+            FROM research_formula_evidence_snapshots snapshot
+            JOIN research_formulas formula
+              ON formula.formula_id=snapshot.formula_id
+            WHERE formula.direction=%s
+              AND formula.horizon_minutes=%s
+              AND (
+                    (
+                      formula.formula_schema_version=%s
+                      AND formula.engine_version=%s
+                    )
+                    OR
+                    (
+                      formula.formula_schema_version=%s
+                      AND formula.engine_version=%s
+                    )
+                  )
+            ORDER BY snapshot.assessed_at_utc DESC, snapshot.snapshot_id
+            LIMIT %s
+            """,
+            (
+                normalized_direction,
+                horizon,
+                research_formula_engine.FORMULA_SCHEMA_VERSION,
+                research_formula_engine.ENGINE_VERSION,
+                research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
+                research_formula_engine.LEGACY_V6_ENGINE_VERSION,
+                snapshot_limit,
+            ),
+        ).fetchall()
+        hype_attempts = conn.execute(
+            """
+            SELECT evaluation_status, COUNT(*)::bigint AS count,
+                   MAX(checked_at_utc) AS latest_checked_at_utc
+            FROM research_prospective_anchor_attempts
+            WHERE symbol='HYPE' AND sampler_version=%s
+            GROUP BY evaluation_status
+            ORDER BY evaluation_status
+            """,
+            (_PROSPECTIVE_ANCHOR_SAMPLER_VERSION,),
+        ).fetchall()
+        latest_hype_attempt = conn.execute(
+            """
+            SELECT evaluation_status, evaluation_reason, missing_sources,
+                   checked_at_utc, source_provenance
+            FROM research_prospective_anchor_attempts
+            WHERE symbol='HYPE' AND sampler_version=%s
+            ORDER BY checked_at_utc DESC, attempt_id DESC
+            LIMIT 1
+            """,
+            (_PROSPECTIVE_ANCHOR_SAMPLER_VERSION,),
+        ).fetchone()
+        hype_slots = conn.execute(
+            """
+            SELECT COUNT(*)::bigint AS count
+            FROM research_prospective_anchor_slots
+            WHERE symbol='HYPE' AND sampler_version=%s
+            """,
+            (_PROSPECTIVE_ANCHOR_SAMPLER_VERSION,),
+        ).fetchone()
+
+    event_ids = [int(event["event_id"]) for event in events]
+    verified_by_key = research_feature_matrix.load_shadow_feature_rows_by_horizon(
+        {horizon: event_ids}
+    )
+    event_by_id = {int(event["event_id"]): dict(event) for event in events}
+    anchor_rows = []
+    for event_id in event_ids:
+        verified = verified_by_key.get((event_id, horizon))
+        if verified is None:
+            continue
+        row = dict(verified)
+        event = dict(row.get("event") or {})
+        source_event = event_by_id[event_id]
+        event.update(
+            {
+                "current_price": source_event.get("current_price"),
+                "prospective_anchor_slot_id": source_event.get("anchor_slot_id"),
+            }
+        )
+        row["event"] = event
+        anchor_rows.append(row)
+
+    hype_status = {
+        "symbol": "HYPE",
+        "separate_from_other_symbols": True,
+        "blocks_other_symbols": False,
+        "anchor_slot_count": int((hype_slots or {}).get("count") or 0),
+        "attempt_counts": {
+            str(item["evaluation_status"]): int(item["count"] or 0)
+            for item in hype_attempts
+        },
+        "latest_attempt": dict(latest_hype_attempt) if latest_hype_attempt else None,
+    }
+    result = research_formula_lab_comparison.compare_same_anchors(
+        current_formulas=[dict(row) for row in current_formulas],
+        legacy_formulas=[dict(row) for row in legacy_formulas],
+        anchor_rows=anchor_rows,
+        evidence_snapshots=[row["snapshot_payload"] for row in snapshots],
+        hype_status=hype_status,
+        direction=normalized_direction,
+        horizon_minutes=horizon,
+    )
+    result["available"] = True
+    result["data_watermark"] = {
+        "requested_anchor_limit": anchor_limit,
+        "loaded_event_count": len(events),
+        "authoritative_verified_anchor_count": len(anchor_rows),
+        "latest_anchor_time_utc": (
+            max(event["alert_time_utc"] for event in events) if events else None
+        ),
+        "verified_snapshot_count": len(snapshots),
+        "formula_limit_per_cohort": formula_limit,
+    }
+    return _json_safe(result)
 
 
 def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:

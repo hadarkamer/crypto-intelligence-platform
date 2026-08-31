@@ -455,6 +455,52 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
+        "name": "research_formula_lab_comparison",
+        "description": (
+            "Run a bounded, read-only Formula Lab comparison of the exact current V7.1 runtime "
+            "and retained legacy V6.2 Shadow runtime on identical verified prospective anchors. "
+            "Reports evaluability, correlated match overlap, market-episode evidence units, "
+            "formula families, both research acceptance paths, HYPE isolation and Telegram Dry Run. "
+            "It never reads outcomes, writes research state, sends Telegram or changes LIVE."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["LONG", "SHORT"],
+                    "description": "Formula direction to compare on one shared anchor cohort.",
+                },
+                "horizon_minutes": {
+                    "type": "integer",
+                    "enum": [60, 240, 720, 1440],
+                    "description": "Exact formula horizon shared by both runtime cohorts.",
+                },
+                "max_formulas_per_cohort": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 25,
+                    "description": "Bounded number of ranked formulas loaded from each runtime.",
+                },
+                "max_anchors": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 250,
+                    "description": "Bounded number of recent verified same-anchor decision rows.",
+                },
+            },
+            "required": [
+                "direction",
+                "horizon_minutes",
+                "max_formulas_per_cohort",
+                "max_anchors",
+            ],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "get_ai_capabilities",
         "description": (
             "Return the tools currently approved for the production AI analysis layer and the current safety boundary. "
@@ -635,6 +681,17 @@ async def _research_formula_shadow(args: Dict[str, Any]) -> Any:
     return _bounded(result, max_chars=45000)
 
 
+async def _research_formula_lab_comparison(args: Dict[str, Any]) -> Any:
+    result = await asyncio.to_thread(
+        research_formula_store.formula_lab_comparison,
+        direction=str(args.get("direction")),
+        horizon_minutes=int(args.get("horizon_minutes")),
+        max_formulas_per_cohort=int(args.get("max_formulas_per_cohort")),
+        max_anchors=int(args.get("max_anchors")),
+    )
+    return _bounded(result, max_chars=55000)
+
+
 async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
     archive = await asyncio.to_thread(ai_alert_research.archive_status)
     return {
@@ -660,6 +717,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "research_historical_replay_status",
             "research_formula_registry",
             "research_formula_shadow",
+            "research_formula_lab_comparison",
             "get_ai_capabilities",
         ],
         "alert_archive": archive,
@@ -698,6 +756,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "wide-movement percentile, probability, MFE, MAE, speed, sample-size and q-value ranking",
                 "versioned formula lifecycle registry",
                 "future Shadow observation with a SHADOW_PENDING_EXPLICIT_APPROVAL ceiling",
+                "read-only same-anchor V7.1/V6.2 Formula Lab comparison with Telegram Dry Run",
                 "Telegram delivery support for explicitly human-approved LIVE formulas in opted-in chats",
             ],
             "next_required_stages": [
@@ -748,6 +807,7 @@ _EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
     "research_historical_replay_status": _research_historical_replay_status,
     "research_formula_registry": _research_formula_registry,
     "research_formula_shadow": _research_formula_shadow,
+    "research_formula_lab_comparison": _research_formula_lab_comparison,
     "get_ai_capabilities": _get_ai_capabilities,
 }
 

@@ -43,6 +43,7 @@ EXPECTED_TOOLS = [
     "research_historical_replay_status",
     "research_formula_registry",
     "research_formula_shadow",
+    "research_formula_lab_comparison",
     "get_ai_capabilities",
 ]
 
