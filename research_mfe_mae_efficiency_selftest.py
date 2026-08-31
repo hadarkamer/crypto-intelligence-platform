@@ -91,6 +91,16 @@ def _gate_metrics(*, mfe: object, mae: object) -> dict:
     }
 
 
+def _walk_forward_contract() -> dict:
+    return {
+        "policy_version": engine.WALK_FORWARD_POLICY_VERSION,
+        "purge_policy_version": engine.PURGE_POLICY_VERSION,
+        "embargo_policy_version": engine.EMBARGO_POLICY_VERSION,
+        "complete": True,
+        "outer_test_used": False,
+    }
+
+
 def _shadow_row(*, mfe: float, mae: float) -> dict:
     return {
         "event_id": 100,
@@ -206,6 +216,7 @@ def run() -> None:
         horizon_minutes=240,
         q_value=0.01,
         config=engine.DiscoveryConfig(),
+        walk_forward=_walk_forward_contract(),
     )
     assert stage == "SHADOW", reasons
     assert "MFE/MAE efficiency" not in reasons
@@ -255,6 +266,7 @@ def run() -> None:
         horizon_minutes=240,
         q_value=0.01,
         config=engine.DiscoveryConfig(),
+        walk_forward=_walk_forward_contract(),
     )
     assert "MFE/MAE efficiency" not in adverse_reasons
     assert adverse_stage == "SHADOW", adverse_reasons
@@ -274,6 +286,7 @@ def run() -> None:
         horizon_minutes=240,
         q_value=0.01,
         config=engine.DiscoveryConfig(),
+        walk_forward=_walk_forward_contract(),
     )
     assert undefined_stage != "SHADOW"
     assert "efficiency" in " ".join(undefined_reasons)

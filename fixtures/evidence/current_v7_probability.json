@@ -3,7 +3,7 @@
     "formula_key": "1111111111111111111111111111111111111111111111111111111111111111",
     "formula_version": 1,
     "formula_schema_version": "research-formula-v7-adaptive-evidence",
-    "engine_version": "formula-discovery-v7-adaptive-evidence-market-episodes",
+    "engine_version": "formula-discovery-v7.1-walk-forward-watermarked",
     "feature_schema_version": "research-feature-matrix-v8-prospective-max-pain-frozen",
     "outcome_method_version": "no-dwell-first-touch-v6",
     "direction": "LONG",
@@ -67,7 +67,7 @@
     "live_effect": "NONE; explicit owner approval and LIVE gates are unchanged"
   },
   "expected": {
-    "snapshot_id": "627449b4eca5494a916a6f35c63be477722c9b476f6ee348732c0b107a1a01e7",
+    "snapshot_id": "b7ced230183f1d6e4db3d3f9ceb36ed97b57c4631d12dc7f184cb2f273bf73b0",
     "assessment_id": "e999f9f783393550759cbe0bd3461aad8833948331589c268de1dd7a98e572b9",
     "compatibility": "CURRENT_V7",
     "research_ready": true

@@ -58,15 +58,18 @@ to reject an otherwise material edge.
 For each horizon and direction, the engine:
 
 1. sorts verified observations chronologically;
-2. freezes the earliest approximately 70% as discovery and latest 30% as
-   holdout without ever splitting rows that share the same timestamp;
-3. derives numeric thresholds from discovery quantiles only;
+2. freezes approximately 49% as initial Fit, 21% as three chronological
+   Walk-forward Selection folds and the latest 30% as untouched Test, without
+   ever splitting rows that share the same timestamp;
+3. learns candidate structures and quantile positions from Fit only, then
+   re-fits numeric thresholds on an expanding prior-only prefix before each
+   Selection fold;
 4. evaluates single, pair and triple conditions in a bounded search by default;
 5. only when `FORMULA_DISCOVERY_HIERARCHICAL_ENABLED=1`, expands a bounded
    beam of stable triple parents to four and then five conditions. A nested,
-   timestamp-safe chronological fit/screen split inside discovery selects that
-   hierarchy and requires incremental gain in both parts; the outer holdout is
-   not inspected until the complete hypothesis family has been frozen;
+   timestamp-safe Fit/Walk-forward Selection process selects that hierarchy
+   and requires incremental gain in both parts; the outer Test is not inspected
+   until the complete hypothesis family has been frozen;
 6. prevents correlated-family stacking without a frozen written exception and
    always forbids combining composite Max Pain evidence with its components;
 7. tests probability and asymmetry for every candidate, then corrects all
@@ -175,7 +178,12 @@ runtime contract.
   explicit immutable human LIVE approval and an opted-in chat; it never
   promotes a Shadow formula or bypasses the frozen prospective review.
 - `FORMULA_DISCOVERY_HORIZONS=60,240,720,1440`
-- `FORMULA_DISCOVERY_INTERVAL_SECONDS=21600`
+- Each horizon runs on its own UTC-aligned cadence equal to that horizon:
+  hourly, every four hours, every 12 hours and daily.
+- `FORMULA_DISCOVERY_SLOT_GRACE_SECONDS=300` waits five minutes after the UTC
+  slot before freezing the deterministic `analysis_as_of_utc`.
+- `FORMULA_DISCOVERY_IDLE_POLL_SECONDS=60` checks only durable scheduler state;
+  a terminal slot is never recomputed.
 - `FORMULA_DISCOVERY_LOOKBACK_DAYS=120` is the adaptive default. An explicit
   environment override remains bounded to 1–3650 days.
 - `FORMULA_DISCOVERY_HIERARCHICAL_ENABLED=1` explicitly enables the bounded
@@ -274,10 +282,9 @@ labelled, and every message contains “ניסיונית — אינה המלצת
 no command, subscription, scheduler, persistence writer, Telegram call or LIVE
 path.
 
-The scheduler is intentionally unchanged in this stage: after a complete
-multi-horizon Discovery cycle finishes, the worker sleeps six hours. Therefore
-the next cycle starts approximately `previous runtime + 6h`, not at a fixed UTC
-clock time. Fixed-time/adaptive scheduling is a separate operational stage.
+Stage 3A intentionally left the scheduler unchanged. Stage 4 replaces that
+legacy six-hour-after-runtime loop with the versioned per-horizon scheduler
+described below.
 
 ## Versioned rolling relevance hysteresis
 
@@ -315,3 +322,31 @@ Stage 3B writes no Telegram message, creates no subscription, changes no
 formula stage, and has `delivery_channel=NONE` and `live_effect=NONE` throughout.
 It does not change acceptance thresholds, HYPE/Max Pain rules, the scheduler,
 or the frozen prospective owner-approval path.
+
+## Discovery v7.1 Walk-forward and horizon scheduler
+
+Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
+the validation and operational execution around them:
+
+- `formula-walk-forward-v1-expanding-refit` learns a feature/operator structure
+  from initial Fit only, recalculates numeric quantile thresholds on an
+  expanding prior-only training prefix before each of three Selection folds,
+  and freezes the final formula before opening the outer Test.
+- `market-episode-boundary-purge-v1` removes the complete outcome-blind Market
+  Episode overlap at every boundary. `full-outcome-horizon-embargo-v1` then
+  adds the formula's full 1h/4h/12h/24h outcome horizon. Test cannot influence
+  identity, rank, family grouping or Walk-forward selection.
+- `formula-discovery-horizon-scheduler-v1` owns one fixed UTC clock per horizon.
+  A five-minute grace makes the as-of time deterministic and allows due closed
+  outcomes to be stored before Discovery reads them.
+- A session PostgreSQL advisory lock is held for the complete computation and
+  persistence of one horizon. The durable per-horizon schedule state makes
+  restart and overlap skips idempotent. No recurring path executes DDL.
+- The exact bounded dataset is content-hashed as
+  `formula-discovery-dataset-watermark-v1`. An unchanged watermark advances the
+  slot as `SKIPPED_UNCHANGED` without re-running formula search. Missing data is
+  recorded once for that natural horizon slot as `SKIPPED_UNAVAILABLE`.
+- Watermarks, schedule metadata and policy versions are operational/audit-only;
+  they are never formula predicates. Telegram, LIVE, owner approval, the legacy
+  72-hour/three-date contract, HYPE isolation and Max Pain cutover rules remain
+  unchanged.

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 import heapq
 import json
-from math import ceil
 import os
 from typing import Any, Dict, Mapping, Optional
 
@@ -26,11 +26,14 @@ _TRUE = {"1", "true", "yes", "on"}
 _DISCOVERY_ENABLED = os.getenv("FORMULA_DISCOVERY_ENABLED", "").strip().lower() in _TRUE
 _SHADOW_ENABLED = os.getenv("FORMULA_SHADOW_ENABLED", "").strip().lower() in _TRUE
 _LIVE_ALERTS_ENABLED = os.getenv("FORMULA_LIVE_ALERTS_ENABLED", "").strip().lower() in _TRUE
-_DISCOVERY_INTERVAL_SECONDS = max(
-    3600, int(os.getenv("FORMULA_DISCOVERY_INTERVAL_SECONDS", "21600"))
-)
 _DISCOVERY_STARTUP_DELAY_SECONDS = max(
-    15, int(os.getenv("FORMULA_DISCOVERY_STARTUP_DELAY_SECONDS", "180"))
+    15, int(os.getenv("FORMULA_DISCOVERY_STARTUP_DELAY_SECONDS", "30"))
+)
+_DISCOVERY_SLOT_GRACE_SECONDS = max(
+    60, int(os.getenv("FORMULA_DISCOVERY_SLOT_GRACE_SECONDS", "300"))
+)
+_DISCOVERY_IDLE_POLL_SECONDS = max(
+    15, int(os.getenv("FORMULA_DISCOVERY_IDLE_POLL_SECONDS", "60"))
 )
 _SHADOW_POLL_SECONDS = max(30, int(os.getenv("FORMULA_SHADOW_POLL_SECONDS", "60")))
 _LOOKBACK_DAYS = max(1, min(3650, int(os.getenv("FORMULA_DISCOVERY_LOOKBACK_DAYS", "120"))))
@@ -65,20 +68,85 @@ def _discovery_config() -> research_formula_engine.DiscoveryConfig:
     )
 
 
-def _discovery_startup_delay_seconds(
-    latest_runs: Mapping[int, Any], *, now: datetime
-) -> int:
-    """Preserve the six-hour cadence across restarts without skipping gaps."""
-    horizons = _horizons()
-    if any(horizon not in latest_runs for horizon in horizons):
-        return _DISCOVERY_STARTUP_DELAY_SECONDS
-    newest = max(_as_utc(latest_runs[horizon]) for horizon in horizons)
-    due_at = newest + timedelta(seconds=_DISCOVERY_INTERVAL_SECONDS)
-    remaining = ceil((due_at - _as_utc(now)).total_seconds())
-    return min(
-        _DISCOVERY_INTERVAL_SECONDS,
-        max(_DISCOVERY_STARTUP_DELAY_SECONDS, remaining),
+def _discovery_schedule(
+    horizon_minutes: int, *, now: datetime
+) -> tuple[datetime, datetime]:
+    """Return the newest fixed UTC horizon slot whose grace has elapsed."""
+
+    horizon = int(horizon_minutes)
+    if horizon not in {60, 240, 720, 1440}:
+        raise ValueError("unsupported Formula Discovery horizon")
+    current = _as_utc(now)
+    shifted = current - timedelta(seconds=_DISCOVERY_SLOT_GRACE_SECONDS)
+    cadence_seconds = horizon * 60
+    epoch_seconds = int(shifted.timestamp())
+    slot_seconds = (epoch_seconds // cadence_seconds) * cadence_seconds
+    slot = datetime.fromtimestamp(slot_seconds, tz=timezone.utc)
+    return slot, slot + timedelta(seconds=_DISCOVERY_SLOT_GRACE_SECONDS)
+
+
+def _next_discovery_due_at(*, now: datetime) -> datetime:
+    current = _as_utc(now)
+    next_due = []
+    for horizon in _horizons():
+        slot, due_at = _discovery_schedule(horizon, now=current)
+        if due_at <= current:
+            slot += timedelta(minutes=horizon)
+            due_at = slot + timedelta(seconds=_DISCOVERY_SLOT_GRACE_SECONDS)
+        next_due.append(due_at)
+    return min(next_due)
+
+
+def _dataset_watermark(
+    dataset: Mapping[str, Any], *, horizon_minutes: int
+) -> tuple[Dict[str, Any], str]:
+    """Hash the exact bounded dataset without exposing it as a predicate."""
+
+    rows = list(dataset.get("rows") or [])
+    rows_payload = json.dumps(
+        rows,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+        allow_nan=False,
     )
+    coverage = dataset.get("coverage")
+    coverage_payload = dict(coverage) if isinstance(coverage, Mapping) else {}
+    coverage_payload.pop("analysis_as_of_utc", None)
+    coverage_sha = hashlib.sha256(
+        json.dumps(
+            coverage_payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    watermark = {
+        "watermark_version": research_formula_store.DISCOVERY_WATERMARK_VERSION,
+        "horizon_minutes": int(horizon_minutes),
+        "dataset_kind": coverage_payload.get("dataset_kind"),
+        "feature_schema_version": dataset.get("feature_schema_version"),
+        "outcome_method_version": dataset.get("outcome_method_version"),
+        "replay_version": dataset.get("replay_version"),
+        "sample_size": int(dataset.get("sample_size") or 0),
+        "first_alert_time_utc": dataset.get("first_alert_time_utc"),
+        "last_alert_time_utc": dataset.get("last_alert_time_utc"),
+        "rows_sha256": hashlib.sha256(rows_payload.encode("utf-8")).hexdigest(),
+        "coverage_sha256": coverage_sha,
+        "predicate_effect": "NONE_OPERATIONAL_ONLY",
+    }
+    canonical = json.dumps(
+        watermark,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+        allow_nan=False,
+    )
+    return watermark, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _conditions(value: Any) -> list[Dict[str, Any]]:
@@ -294,6 +362,9 @@ def _decision_cohort(
 class FormulaWorkerMetrics:
     discovery_cycles: int = 0
     discovery_runs: int = 0
+    discovery_locked_skips: int = 0
+    discovery_unchanged_skips: int = 0
+    discovery_unavailable_skips: int = 0
     candidates_evaluated: int = 0
     formulas_persisted: int = 0
     shadow_cycles: int = 0
@@ -311,6 +382,8 @@ class FormulaWorkerMetrics:
     legacy_live_review_ready_formulas: int = 0
     failures: int = 0
     last_discovery_utc: Optional[str] = None
+    last_discovery_horizon_minutes: Optional[int] = None
+    last_discovery_slot_utc: Optional[str] = None
     last_shadow_utc: Optional[str] = None
     last_error: Optional[str] = None
 
@@ -355,7 +428,21 @@ class FormulaResearchWorker:
             "evidence_contract": research_evidence_contract.contract_descriptor(),
             "recent_window_days": _discovery_config().recent_window_days,
             "recency_half_life_days": _discovery_config().recency_half_life_days,
-            "discovery_interval_seconds": _DISCOVERY_INTERVAL_SECONDS,
+            "discovery_scheduler_version": (
+                research_formula_store.DISCOVERY_SCHEDULER_VERSION
+            ),
+            "discovery_cadence_minutes_by_horizon": {
+                str(horizon): horizon for horizon in _horizons()
+            },
+            "discovery_slot_grace_seconds": _DISCOVERY_SLOT_GRACE_SECONDS,
+            "discovery_idle_poll_seconds": _DISCOVERY_IDLE_POLL_SECONDS,
+            "walk_forward_policy_version": (
+                research_formula_engine.WALK_FORWARD_POLICY_VERSION
+            ),
+            "purge_policy_version": research_formula_engine.PURGE_POLICY_VERSION,
+            "embargo_policy_version": (
+                research_formula_engine.EMBARGO_POLICY_VERSION
+            ),
             "shadow_poll_seconds": _SHADOW_POLL_SECONDS,
             "shadow_evidence_policy_version": (
                 research_formula_store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
@@ -419,37 +506,41 @@ class FormulaResearchWorker:
         self._shadow_task = None
 
     async def _discovery_loop(self) -> None:
-        delay = _DISCOVERY_STARTUP_DELAY_SECONDS
-        try:
-            latest_runs = await asyncio.to_thread(
-                research_formula_store.latest_completed_discovery_runs,
-                _horizons(),
-                lookback_days=_LOOKBACK_DAYS,
-                config=asdict(_discovery_config()),
-            )
-            delay = _discovery_startup_delay_seconds(
-                latest_runs, now=datetime.now(timezone.utc)
-            )
-            print(
-                "[formula-discovery] restart-aware startup delay "
-                f"seconds={delay} compatible_horizons={sorted(latest_runs)}",
-                flush=True,
-            )
-        except Exception as exc:
-            print(
-                "[formula-discovery] startup cadence inspection failed open; "
-                f"using seconds={delay}: {exc!r}",
-                flush=True,
-            )
-        await asyncio.sleep(delay)
+        await asyncio.sleep(_DISCOVERY_STARTUP_DELAY_SECONDS)
         while not self._stopping:
+            now = datetime.now(timezone.utc)
             try:
-                await asyncio.to_thread(self.run_discovery_once)
+                due_work = []
+                for horizon in _horizons():
+                    slot, due_at = _discovery_schedule(horizon, now=now)
+                    state = await asyncio.to_thread(
+                        research_formula_store.load_discovery_schedule_state,
+                        horizon,
+                    )
+                    last_slot = (
+                        _as_utc(state["last_slot_utc"])
+                        if state and state.get("last_slot_utc") is not None
+                        else None
+                    )
+                    if last_slot is None or last_slot < slot:
+                        due_work.append((slot, horizon, due_at))
+                for slot, horizon, due_at in sorted(due_work):
+                    await asyncio.to_thread(
+                        self.run_discovery_horizon_once,
+                        horizon,
+                        schedule_slot_utc=slot,
+                        due_at_utc=due_at,
+                    )
             except Exception as exc:
                 self.metrics.failures += 1
                 self.metrics.last_error = f"{type(exc).__name__}: {exc}"
                 print(f"[formula-discovery] cycle failed open: {exc!r}", flush=True)
-            await asyncio.sleep(_DISCOVERY_INTERVAL_SECONDS)
+            next_due = _next_discovery_due_at(now=datetime.now(timezone.utc))
+            remaining = max(
+                1.0,
+                (next_due - datetime.now(timezone.utc)).total_seconds(),
+            )
+            await asyncio.sleep(min(_DISCOVERY_IDLE_POLL_SECONDS, remaining))
 
     async def _shadow_loop(self) -> None:
         await asyncio.sleep(20)
@@ -463,77 +554,279 @@ class FormulaResearchWorker:
                 print(f"[formula-shadow] cycle failed open: {exc!r}", flush=True)
             await asyncio.sleep(_SHADOW_POLL_SECONDS)
 
-    def run_discovery_once(self) -> Dict[str, Any]:
-        results = []
-        cycle_as_of = datetime.now(timezone.utc)
-        self.metrics.discovery_cycles += 1
-        for horizon in _horizons():
-            dataset = research_feature_matrix.load_formula_dataset(
-                lookback_days=_LOOKBACK_DAYS,
-                horizon_minutes=horizon,
-                limit=_DATASET_LIMIT,
-                analysis_as_of_utc=cycle_as_of,
+    def run_discovery_horizon_once(
+        self,
+        horizon: int,
+        *,
+        schedule_slot_utc: Any,
+        due_at_utc: Any,
+    ) -> Dict[str, Any]:
+        horizon = int(horizon)
+        if horizon not in _horizons():
+            raise ValueError("horizon is not enabled for Formula Discovery")
+        slot = _as_utc(schedule_slot_utc)
+        due_at = _as_utc(due_at_utc)
+        if due_at != slot + timedelta(seconds=_DISCOVERY_SLOT_GRACE_SECONDS):
+            raise ValueError("Discovery due time does not match the fixed slot grace")
+        watermark: Optional[Dict[str, Any]] = None
+        watermark_sha: Optional[str] = None
+        with research_formula_store.discovery_horizon_lock(horizon) as acquired:
+            if not acquired:
+                self.metrics.discovery_locked_skips += 1
+                return {
+                    "horizon_minutes": horizon,
+                    "schedule_slot_utc": slot.isoformat(),
+                    "skipped": True,
+                    "reason": "another worker holds the PostgreSQL horizon lock",
+                    "status": "SKIPPED_LOCKED",
+                }
+            state = research_formula_store.load_discovery_schedule_state(horizon)
+            if state and _as_utc(state["last_slot_utc"]) >= slot:
+                return {
+                    "horizon_minutes": horizon,
+                    "schedule_slot_utc": slot.isoformat(),
+                    "skipped": True,
+                    "reason": "schedule slot already reached a terminal state",
+                    "status": "SKIPPED_ALREADY_TERMINAL",
+                }
+            recovered = research_formula_store.load_scheduled_discovery_run(
+                horizon, schedule_slot_utc=slot
             )
-            if not dataset.get("available") or int(dataset.get("sample_size") or 0) < 2:
-                results.append(
-                    {
+            if recovered:
+                recovered_watermark = recovered.get("source_watermark")
+                recovered_sha = recovered.get("source_watermark_sha256")
+                research_formula_store.record_discovery_schedule_state(
+                    horizon_minutes=horizon,
+                    slot_utc=slot,
+                    due_at_utc=due_at,
+                    status="COMPLETED",
+                    source_watermark=(
+                        recovered_watermark
+                        if isinstance(recovered_watermark, Mapping)
+                        else None
+                    ),
+                    source_watermark_sha256=recovered_sha,
+                    discovery_run_id=int(recovered["run_id"]),
+                    reason="recovered committed run after scheduler-state gap",
+                )
+                return {
+                    "horizon_minutes": horizon,
+                    "schedule_slot_utc": slot.isoformat(),
+                    "skipped": True,
+                    "reason": "committed run recovered into scheduler state",
+                    "run_id": int(recovered["run_id"]),
+                    "status": "SKIPPED_RECOVERED_COMMITTED",
+                }
+            self.metrics.discovery_cycles += 1
+            try:
+                dataset = research_feature_matrix.load_formula_dataset(
+                    lookback_days=_LOOKBACK_DAYS,
+                    horizon_minutes=horizon,
+                    limit=_DATASET_LIMIT,
+                    analysis_as_of_utc=due_at,
+                )
+                watermark, watermark_sha = _dataset_watermark(
+                    dataset, horizon_minutes=horizon
+                )
+                if (
+                    not dataset.get("available")
+                    or int(dataset.get("sample_size") or 0) < 2
+                ):
+                    reason = dataset.get("reason") or "insufficient verified outcomes"
+                    research_formula_store.record_discovery_schedule_state(
+                        horizon_minutes=horizon,
+                        slot_utc=slot,
+                        due_at_utc=due_at,
+                        status="SKIPPED_UNAVAILABLE",
+                        source_watermark=watermark,
+                        source_watermark_sha256=watermark_sha,
+                        reason=reason,
+                    )
+                    self.metrics.discovery_unavailable_skips += 1
+                    return {
                         "horizon_minutes": horizon,
+                        "schedule_slot_utc": slot.isoformat(),
                         "skipped": True,
-                        "reason": dataset.get("reason") or "insufficient verified outcomes",
+                        "reason": reason,
                         "sample_size": int(dataset.get("sample_size") or 0),
                         "coverage": dataset.get("coverage") or {},
+                        "source_watermark_sha256": watermark_sha,
+                        "status": "SKIPPED_UNAVAILABLE",
                     }
-                )
-                continue
-            discovery = research_formula_engine.discover_formulas(
-                dataset["rows"],
-                horizon_minutes=horizon,
-                feature_schema_version=dataset["feature_schema_version"],
-                config=_discovery_config(),
-                analysis_as_of_utc=cycle_as_of,
-            )
-            if not discovery.get("available"):
-                results.append(
-                    {
+                if (
+                    state
+                    and state.get("last_source_watermark_sha256")
+                    == watermark_sha
+                ):
+                    research_formula_store.record_discovery_schedule_state(
+                        horizon_minutes=horizon,
+                        slot_utc=slot,
+                        due_at_utc=due_at,
+                        status="SKIPPED_UNCHANGED",
+                        source_watermark=watermark,
+                        source_watermark_sha256=watermark_sha,
+                        reason="bounded dataset watermark did not advance",
+                    )
+                    self.metrics.discovery_unchanged_skips += 1
+                    return {
                         "horizon_minutes": horizon,
+                        "schedule_slot_utc": slot.isoformat(),
                         "skipped": True,
-                        "reason": discovery.get("reason"),
-                        "sample_size": discovery.get("sample_size"),
+                        "reason": "bounded dataset watermark did not advance",
+                        "source_watermark_sha256": watermark_sha,
+                        "status": "SKIPPED_UNCHANGED",
                     }
+                discovery = research_formula_engine.discover_formulas(
+                    dataset["rows"],
+                    horizon_minutes=horizon,
+                    feature_schema_version=dataset["feature_schema_version"],
+                    config=_discovery_config(),
+                    analysis_as_of_utc=due_at,
                 )
-                continue
-            persisted = research_formula_store.persist_discovery_run(
-                dataset=dataset,
-                discovery=discovery,
-                lookback_days=_LOOKBACK_DAYS,
-            )
-            self.metrics.discovery_runs += 1
-            self.metrics.candidates_evaluated += int(
-                discovery.get("candidates_evaluated") or 0
-            )
-            self.metrics.formulas_persisted += int(
-                persisted.get("formulas_persisted") or 0
-            )
-            results.append(
-                {
-                    **persisted,
-                    "sample_size": discovery.get("sample_size"),
-                    "discovery_sample_size": discovery.get("discovery_sample_size"),
-                    "holdout_sample_size": discovery.get("holdout_sample_size"),
-                    "candidates_evaluated": discovery.get("candidates_evaluated"),
-                    "coverage": dataset.get("coverage") or {},
-                    "dataset_kind": (dataset.get("coverage") or {}).get(
-                        "dataset_kind"
-                    ),
-                }
-            )
+                if not discovery.get("available"):
+                    reason = discovery.get("reason") or "Discovery unavailable"
+                    research_formula_store.record_discovery_schedule_state(
+                        horizon_minutes=horizon,
+                        slot_utc=slot,
+                        due_at_utc=due_at,
+                        status="SKIPPED_UNAVAILABLE",
+                        source_watermark=watermark,
+                        source_watermark_sha256=watermark_sha,
+                        reason=reason,
+                    )
+                    self.metrics.discovery_unavailable_skips += 1
+                    return {
+                        "horizon_minutes": horizon,
+                        "schedule_slot_utc": slot.isoformat(),
+                        "skipped": True,
+                        "reason": reason,
+                        "sample_size": discovery.get("sample_size"),
+                        "source_watermark_sha256": watermark_sha,
+                        "status": "SKIPPED_UNAVAILABLE",
+                    }
+                persisted = research_formula_store.persist_discovery_run(
+                    dataset=dataset,
+                    discovery=discovery,
+                    lookback_days=_LOOKBACK_DAYS,
+                    scheduler_metadata={
+                        "scheduler_version": (
+                            research_formula_store.DISCOVERY_SCHEDULER_VERSION
+                        ),
+                        "schedule_slot_utc": slot,
+                        "source_watermark": watermark,
+                        "source_watermark_sha256": watermark_sha,
+                        "walk_forward_policy_version": (
+                            research_formula_engine.WALK_FORWARD_POLICY_VERSION
+                        ),
+                        "purge_policy_version": (
+                            research_formula_engine.PURGE_POLICY_VERSION
+                        ),
+                        "embargo_policy_version": (
+                            research_formula_engine.EMBARGO_POLICY_VERSION
+                        ),
+                    },
+                )
+                research_formula_store.record_discovery_schedule_state(
+                    horizon_minutes=horizon,
+                    slot_utc=slot,
+                    due_at_utc=due_at,
+                    status="COMPLETED",
+                    source_watermark=watermark,
+                    source_watermark_sha256=watermark_sha,
+                    discovery_run_id=int(persisted["run_id"]),
+                    reason="new bounded dataset watermark evaluated",
+                )
+            except Exception as exc:
+                try:
+                    committed = research_formula_store.load_scheduled_discovery_run(
+                        horizon, schedule_slot_utc=slot
+                    )
+                    if committed:
+                        committed_watermark = committed.get("source_watermark")
+                        research_formula_store.record_discovery_schedule_state(
+                            horizon_minutes=horizon,
+                            slot_utc=slot,
+                            due_at_utc=due_at,
+                            status="COMPLETED",
+                            source_watermark=(
+                                committed_watermark
+                                if isinstance(committed_watermark, Mapping)
+                                else watermark
+                            ),
+                            source_watermark_sha256=(
+                                committed.get("source_watermark_sha256")
+                                or watermark_sha
+                            ),
+                            discovery_run_id=int(committed["run_id"]),
+                            reason="recovered committed run after post-commit error",
+                        )
+                        return {
+                            "horizon_minutes": horizon,
+                            "schedule_slot_utc": slot.isoformat(),
+                            "run_id": int(committed["run_id"]),
+                            "status": "COMPLETED_RECOVERED_POST_COMMIT",
+                        }
+                    research_formula_store.record_discovery_schedule_state(
+                        horizon_minutes=horizon,
+                        slot_utc=slot,
+                        due_at_utc=due_at,
+                        status="FAILED",
+                        source_watermark=watermark,
+                        source_watermark_sha256=watermark_sha,
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception:
+                    pass
+                raise
+
+        self.metrics.discovery_runs += 1
+        self.metrics.candidates_evaluated += int(
+            discovery.get("candidates_evaluated") or 0
+        )
+        self.metrics.formulas_persisted += int(
+            persisted.get("formulas_persisted") or 0
+        )
         now = datetime.now(timezone.utc).isoformat()
         self.metrics.last_discovery_utc = now
+        self.metrics.last_discovery_horizon_minutes = horizon
+        self.metrics.last_discovery_slot_utc = slot.isoformat()
         self.metrics.last_error = None
-        print(f"[formula-discovery] completed: {results}", flush=True)
+        result = {
+            **persisted,
+            "sample_size": discovery.get("sample_size"),
+            "discovery_sample_size": discovery.get("discovery_sample_size"),
+            "selection_sample_size": discovery.get("selection_sample_size"),
+            "holdout_sample_size": discovery.get("holdout_sample_size"),
+            "candidates_evaluated": discovery.get("candidates_evaluated"),
+            "coverage": dataset.get("coverage") or {},
+            "dataset_kind": (dataset.get("coverage") or {}).get("dataset_kind"),
+            "schedule_slot_utc": slot.isoformat(),
+            "analysis_as_of_utc": due_at.isoformat(),
+            "source_watermark_sha256": watermark_sha,
+            "status": "COMPLETED",
+        }
+        print(f"[formula-discovery] completed horizon: {result}", flush=True)
+        return result
+
+    def run_discovery_once(self) -> Dict[str, Any]:
+        """Run the newest fixed slot for every enabled horizon, serially."""
+
+        cycle_started = datetime.now(timezone.utc)
+        results = []
+        for horizon in _horizons():
+            slot, due_at = _discovery_schedule(horizon, now=cycle_started)
+            results.append(
+                self.run_discovery_horizon_once(
+                    horizon,
+                    schedule_slot_utc=slot,
+                    due_at_utc=due_at,
+                )
+            )
+        now = datetime.now(timezone.utc).isoformat()
+        print(f"[formula-discovery] scheduled sweep: {results}", flush=True)
         return {
             "completed_at_utc": now,
-            "analysis_as_of_utc": cycle_as_of.isoformat(),
+            "scheduler_version": research_formula_store.DISCOVERY_SCHEDULER_VERSION,
             "results": results,
         }
 

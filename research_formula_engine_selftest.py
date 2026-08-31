@@ -984,6 +984,27 @@ def run() -> None:
         formula["condition_count"] <= hierarchy_config.hierarchical_max_conditions
         for formula in long_diagnostics["formulas"]
     )
+    assert hierarchy_result["walk_forward_policy_version"] == (
+        engine.WALK_FORWARD_POLICY_VERSION
+    )
+    assert hierarchy_result["purge_policy_version"] == engine.PURGE_POLICY_VERSION
+    assert hierarchy_result["embargo_policy_version"] == (
+        engine.EMBARGO_POLICY_VERSION
+    )
+    for formula in long_diagnostics["formulas"]:
+        walk_forward = formula["discovery_metrics"][
+            "walk_forward_validation"
+        ]
+        assert walk_forward["complete"] is True
+        assert walk_forward["completed_folds"] == 3
+        assert walk_forward["outer_test_used"] is False
+        assert walk_forward["purge_minutes"] == 1440
+        assert walk_forward["embargo_minutes"] == 240
+        assert all(
+            fold["training_cutoff_utc"] < fold["validation_start_utc"]
+            and fold["status"] == "COMPLETED"
+            for fold in walk_forward["folds"]
+        )
     assert any(formula["condition_count"] == 5 for formula in hierarchical_formulas)
     for formula in hierarchical_formulas:
         validation = formula["hierarchical_validation"]

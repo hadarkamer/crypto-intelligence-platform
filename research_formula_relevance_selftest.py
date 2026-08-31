@@ -293,7 +293,7 @@ def run() -> None:
 
     migration = ROOT / "migrations" / "016_formula_relevance_hysteresis_v1.sql"
     migration_text = migration.read_text(encoding="utf-8")
-    assert research_formula_schema_admin.MIGRATION_PATHS[-1] == migration
+    assert migration in research_formula_schema_admin.MIGRATION_PATHS
     assert "CREATE TABLE IF NOT EXISTS research_formula_relevance_assessments" in migration_text
     assert "research_formula_relevance_assessments is append-only" in migration_text
     assert "trg_formula_relevance_assessments_no_truncate" in migration_text

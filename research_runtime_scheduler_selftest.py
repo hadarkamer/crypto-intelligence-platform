@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import inspect
 import os
@@ -75,25 +76,148 @@ async def _archive_only_check() -> None:
 
 def run() -> None:
     formula_worker = main.research_formula_worker
-    formula_now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
-    recent_runs = {
-        horizon: formula_now - timedelta(hours=index + 1)
-        for index, horizon in enumerate(formula_worker._horizons())
+    formula_now = datetime(2026, 8, 29, 12, 4, 59, tzinfo=timezone.utc)
+    slot, due_at = formula_worker._discovery_schedule(60, now=formula_now)
+    assert slot == datetime(2026, 8, 29, 11, 0, tzinfo=timezone.utc)
+    assert due_at == datetime(2026, 8, 29, 11, 5, tzinfo=timezone.utc)
+    slot, due_at = formula_worker._discovery_schedule(
+        60, now=formula_now + timedelta(seconds=1)
+    )
+    assert slot == datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    assert due_at == datetime(2026, 8, 29, 12, 5, tzinfo=timezone.utc)
+    slot, due_at = formula_worker._discovery_schedule(
+        240, now=datetime(2026, 8, 29, 12, 5, tzinfo=timezone.utc)
+    )
+    assert slot == datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    assert due_at == datetime(2026, 8, 29, 12, 5, tzinfo=timezone.utc)
+    next_due = formula_worker._next_discovery_due_at(
+        now=datetime(2026, 8, 29, 12, 5, tzinfo=timezone.utc)
+    )
+    assert next_due == datetime(2026, 8, 29, 13, 5, tzinfo=timezone.utc)
+
+    watermark_dataset = {
+        "available": True,
+        "feature_schema_version": "selftest-features",
+        "outcome_method_version": "selftest-outcomes",
+        "sample_size": 2,
+        "first_alert_time_utc": "2026-08-28T00:00:00Z",
+        "last_alert_time_utc": "2026-08-28T01:00:00Z",
+        "coverage": {
+            "dataset_kind": "selftest",
+            "analysis_as_of_utc": "2026-08-29T12:05:00Z",
+        },
+        "rows": [{"event": {"event_id": 1}}, {"event": {"event_id": 2}}],
     }
-    assert formula_worker._discovery_startup_delay_seconds(
-        recent_runs, now=formula_now
-    ) == formula_worker._DISCOVERY_INTERVAL_SECONDS - 3600
-    assert formula_worker._discovery_startup_delay_seconds(
-        {next(iter(recent_runs)): formula_now}, now=formula_now
-    ) == formula_worker._DISCOVERY_STARTUP_DELAY_SECONDS
-    stale_runs = {
-        horizon: formula_now
-        - timedelta(seconds=formula_worker._DISCOVERY_INTERVAL_SECONDS + 1)
-        for horizon in formula_worker._horizons()
+    watermark_a, digest_a = formula_worker._dataset_watermark(
+        watermark_dataset, horizon_minutes=60
+    )
+    later_as_of = dict(watermark_dataset)
+    later_as_of["coverage"] = dict(watermark_dataset["coverage"])
+    later_as_of["coverage"]["analysis_as_of_utc"] = "2026-08-29T13:05:00Z"
+    watermark_b, digest_b = formula_worker._dataset_watermark(
+        later_as_of, horizon_minutes=60
+    )
+    assert watermark_a == watermark_b
+    assert digest_a == digest_b
+    changed = dict(watermark_dataset)
+    changed["rows"] = [*watermark_dataset["rows"], {"event": {"event_id": 3}}]
+    _, digest_c = formula_worker._dataset_watermark(changed, horizon_minutes=60)
+    assert digest_c != digest_a
+
+    worker = formula_worker.FormulaResearchWorker()
+    slot = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    due_at = slot + timedelta(
+        seconds=formula_worker._DISCOVERY_SLOT_GRACE_SECONDS
+    )
+    store = formula_worker.research_formula_store
+    original_lock = store.discovery_horizon_lock
+    original_state = store.load_discovery_schedule_state
+    original_recovered = store.load_scheduled_discovery_run
+    original_record = store.record_discovery_schedule_state
+    original_dataset = formula_worker.research_feature_matrix.load_formula_dataset
+    original_discover = formula_worker.research_formula_engine.discover_formulas
+    original_persist = store.persist_discovery_run
+
+    @contextmanager
+    def locked_elsewhere(_horizon):
+        yield False
+
+    store.discovery_horizon_lock = locked_elsewhere
+    try:
+        locked = worker.run_discovery_horizon_once(
+            60, schedule_slot_utc=slot, due_at_utc=due_at
+        )
+        assert locked["status"] == "SKIPPED_LOCKED"
+        assert worker.metrics.discovery_locked_skips == 1
+    finally:
+        store.discovery_horizon_lock = original_lock
+
+    @contextmanager
+    def acquired(_horizon):
+        yield True
+
+    records = []
+    store.discovery_horizon_lock = acquired
+    store.load_discovery_schedule_state = lambda _horizon: {
+        "last_slot_utc": slot - timedelta(hours=1),
+        "last_source_watermark_sha256": digest_a,
     }
-    assert formula_worker._discovery_startup_delay_seconds(
-        stale_runs, now=formula_now
-    ) == formula_worker._DISCOVERY_STARTUP_DELAY_SECONDS
+    store.load_scheduled_discovery_run = lambda *_args, **_kwargs: None
+    store.record_discovery_schedule_state = lambda **kwargs: records.append(kwargs)
+    formula_worker.research_feature_matrix.load_formula_dataset = (
+        lambda **_kwargs: watermark_dataset
+    )
+    store.persist_discovery_run = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("unchanged watermark entered persistence")
+    )
+    try:
+        unchanged = worker.run_discovery_horizon_once(
+            60, schedule_slot_utc=slot, due_at_utc=due_at
+        )
+        assert unchanged["status"] == "SKIPPED_UNCHANGED"
+        assert records[-1]["status"] == "SKIPPED_UNCHANGED"
+        assert records[-1]["slot_utc"] == slot
+
+        captured_persistence = []
+        formula_worker.research_feature_matrix.load_formula_dataset = (
+            lambda **_kwargs: changed
+        )
+        formula_worker.research_formula_engine.discover_formulas = (
+            lambda *_args, **_kwargs: {
+                "available": True,
+                "sample_size": 3,
+                "discovery_sample_size": 1,
+                "selection_sample_size": 1,
+                "holdout_sample_size": 1,
+                "candidates_evaluated": 1,
+            }
+        )
+        store.persist_discovery_run = lambda **kwargs: (
+            captured_persistence.append(kwargs)
+            or {"run_id": 77, "formulas_persisted": 0}
+        )
+        completed = worker.run_discovery_horizon_once(
+            60,
+            schedule_slot_utc=slot + timedelta(hours=1),
+            due_at_utc=due_at + timedelta(hours=1),
+        )
+        assert completed["status"] == "COMPLETED"
+        assert records[-1]["status"] == "COMPLETED"
+        scheduler_metadata = captured_persistence[-1]["scheduler_metadata"]
+        assert scheduler_metadata["scheduler_version"] == (
+            store.DISCOVERY_SCHEDULER_VERSION
+        )
+        assert scheduler_metadata["walk_forward_policy_version"] == (
+            formula_worker.research_formula_engine.WALK_FORWARD_POLICY_VERSION
+        )
+    finally:
+        store.discovery_horizon_lock = original_lock
+        store.load_discovery_schedule_state = original_state
+        store.load_scheduled_discovery_run = original_recovered
+        store.record_discovery_schedule_state = original_record
+        formula_worker.research_feature_matrix.load_formula_dataset = original_dataset
+        formula_worker.research_formula_engine.discover_formulas = original_discover
+        store.persist_discovery_run = original_persist
 
     original_grace = main.MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS
     main.MAX_PAIN_ARCHIVE_SYNC_GRACE_SECONDS = 180
@@ -143,6 +267,28 @@ def run() -> None:
     assert '"source": "RESEARCH_PASSIVE"' in passive_source
     assert "archive_only=True" in passive_source
     assert "async with scrape_lock" in passive_source
+
+    discovery_source = inspect.getsource(formula_worker.FormulaResearchWorker)
+    assert "discovery_horizon_lock" in discovery_source
+    assert "load_discovery_schedule_state" in discovery_source
+    assert "record_discovery_schedule_state" in discovery_source
+    assert "scheduler_metadata" in discovery_source
+    assert "send_message" not in inspect.getsource(
+        formula_worker.FormulaResearchWorker._discovery_loop
+    )
+    assert "FORMULA_DISCOVERY_INTERVAL_SECONDS" not in inspect.getsource(
+        formula_worker.FormulaResearchWorker._discovery_loop
+    )
+
+    migration = open(
+        "migrations/017_formula_discovery_scheduler_v1.sql", encoding="utf-8"
+    ).read()
+    assert "research_formula_discovery_schedule_state" in migration
+    assert "idx_formula_runs_scheduler_slot" in migration
+    assert "walk_forward_policy_version" in migration
+    assert "CREATE TABLE" not in inspect.getsource(
+        formula_worker.FormulaResearchWorker._discovery_loop
+    )
 
     startup_source = inspect.getsource(main.main)
     schema_index = startup_source.index("await _prepare_research_schema()")

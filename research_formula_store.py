@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -131,6 +132,9 @@ _LIVE_APPROVAL_TRIGGER_CONTRACTS = {
     },
 }
 _LIVE_APPROVAL_UNIQUE_INDEX = "idx_formula_live_approvals_exact_runtime"
+DISCOVERY_SCHEDULER_VERSION = "formula-discovery-horizon-scheduler-v1"
+DISCOVERY_WATERMARK_VERSION = "formula-discovery-dataset-watermark-v1"
+_DISCOVERY_LOCK_BASE_ID = 94837300
 
 
 def _shadow_executable_formula_contract(formula: Mapping[str, Any]) -> bool:
@@ -825,8 +829,18 @@ def schema_status() -> Dict[str, Any]:
         "research_outcome_event_rejections",
         "research_formula_evidence_snapshots",
         "research_formula_relevance_assessments",
+        "research_formula_discovery_schedule_state",
     )
     required_columns = {
+        "research_formula_runs": (
+            "scheduler_version",
+            "schedule_slot_utc",
+            "source_watermark",
+            "source_watermark_sha256",
+            "walk_forward_policy_version",
+            "purge_policy_version",
+            "embargo_policy_version",
+        ),
         "research_formula_shadow_checks": (
             "evaluation_status",
             "evaluation_reason",
@@ -968,6 +982,23 @@ def schema_status() -> Dict[str, Any]:
             "decision_payload",
             "created_at_utc",
         ),
+        "research_formula_discovery_schedule_state": (
+            "scheduler_version",
+            "engine_version",
+            "feature_schema_version",
+            "outcome_method_version",
+            "horizon_minutes",
+            "last_slot_utc",
+            "last_due_at_utc",
+            "last_analysis_as_of_utc",
+            "last_status",
+            "last_source_watermark",
+            "last_source_watermark_sha256",
+            "last_discovery_run_id",
+            "last_reason",
+            "checked_at_utc",
+            "updated_at_utc",
+        ),
     }
     base = {
         "configured": bool(_database_url()),
@@ -1009,7 +1040,8 @@ def schema_status() -> Dict[str, Any]:
               (SELECT COUNT(*) FROM research_formula_live_deliveries WHERE status='PENDING') AS pending_live_deliveries,
               (SELECT COUNT(*) FROM research_outcome_event_rejections) AS rejected_outcome_events,
               (SELECT COUNT(*) FROM research_formula_evidence_snapshots) AS evidence_snapshots,
-              (SELECT COUNT(*) FROM research_formula_relevance_assessments) AS relevance_assessments
+              (SELECT COUNT(*) FROM research_formula_relevance_assessments) AS relevance_assessments,
+              (SELECT COUNT(*) FROM research_formula_discovery_schedule_state) AS discovery_schedule_states
             """
         ).fetchone()
         base.update({key: int(counts[key] or 0) for key in counts})
@@ -1182,6 +1214,226 @@ def load_evidence_snapshot(
     return research_evidence_contract.EvidenceSnapshot.from_dict(
         row["snapshot_payload"]
     )
+
+
+def _discovery_horizon(value: Any) -> int:
+    horizon = _strict_int(value)
+    if horizon not in {60, 240, 720, 1440}:
+        raise ValueError("horizon_minutes must be 60, 240, 720 or 1440")
+    return int(horizon)
+
+
+@contextmanager
+def discovery_horizon_lock(horizon_minutes: int):
+    """Hold one session advisory lock for an entire horizon computation."""
+
+    horizon = _discovery_horizon(horizon_minutes)
+    lock_id = _DISCOVERY_LOCK_BASE_ID + horizon
+    conn = _connect(read_only=False)
+    acquired = False
+    try:
+        row = conn.execute(
+            "SELECT pg_try_advisory_lock(%s) AS acquired", (lock_id,)
+        ).fetchone()
+        acquired = bool(row and row.get("acquired") is True)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                conn.execute("SELECT pg_advisory_unlock(%s)", (lock_id,))
+            except Exception:
+                pass
+        conn.close()
+
+
+def load_discovery_schedule_state(
+    horizon_minutes: int,
+    *,
+    scheduler_version: str = DISCOVERY_SCHEDULER_VERSION,
+) -> Optional[Dict[str, Any]]:
+    horizon = _discovery_horizon(horizon_minutes)
+    version = str(scheduler_version or "").strip()
+    if not version:
+        raise ValueError("scheduler_version is required")
+    with _connect(read_only=True) as conn:
+        if not _table_exists(conn, "research_formula_discovery_schedule_state"):
+            raise RuntimeError("Formula Discovery scheduler schema is not installed")
+        row = conn.execute(
+            """
+            SELECT scheduler_version, engine_version, feature_schema_version,
+                   outcome_method_version, horizon_minutes, last_slot_utc,
+                   last_due_at_utc, last_analysis_as_of_utc, last_status,
+                   last_source_watermark, last_source_watermark_sha256,
+                   last_discovery_run_id, last_reason, checked_at_utc,
+                   updated_at_utc
+            FROM research_formula_discovery_schedule_state
+            WHERE scheduler_version=%s
+              AND engine_version=%s
+              AND feature_schema_version=%s
+              AND outcome_method_version=%s
+              AND horizon_minutes=%s
+            """,
+            (
+                version,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                horizon,
+            ),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def load_scheduled_discovery_run(
+    horizon_minutes: int,
+    *,
+    schedule_slot_utc: Any,
+    scheduler_version: str = DISCOVERY_SCHEDULER_VERSION,
+) -> Optional[Dict[str, Any]]:
+    """Recover a committed run if state persistence was interrupted."""
+
+    horizon = _discovery_horizon(horizon_minutes)
+    slot = _as_utc(schedule_slot_utc)
+    version = str(scheduler_version or "").strip()
+    with _connect(read_only=True) as conn:
+        row = conn.execute(
+            """
+            SELECT run_id, horizon_minutes, status, schedule_slot_utc,
+                   source_watermark, source_watermark_sha256,
+                   completed_at_utc
+            FROM research_formula_runs
+            WHERE scheduler_version=%s
+              AND engine_version=%s
+              AND feature_schema_version=%s
+              AND outcome_method_version=%s
+              AND horizon_minutes=%s
+              AND schedule_slot_utc=%s
+              AND status='COMPLETED'
+            ORDER BY run_id DESC
+            LIMIT 1
+            """,
+            (
+                version,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                horizon,
+                slot,
+            ),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def record_discovery_schedule_state(
+    *,
+    horizon_minutes: int,
+    slot_utc: Any,
+    due_at_utc: Any,
+    status: str,
+    source_watermark: Optional[Mapping[str, Any]],
+    source_watermark_sha256: Optional[str],
+    discovery_run_id: Optional[int] = None,
+    reason: Optional[str] = None,
+    checked_at_utc: Any = None,
+    scheduler_version: str = DISCOVERY_SCHEDULER_VERSION,
+) -> Dict[str, Any]:
+    """Advance one locked horizon state after a terminal scheduled attempt."""
+
+    horizon = _discovery_horizon(horizon_minutes)
+    version = str(scheduler_version or "").strip()
+    normalized_status = str(status or "").strip().upper()
+    allowed_statuses = {
+        "COMPLETED",
+        "SKIPPED_UNCHANGED",
+        "SKIPPED_UNAVAILABLE",
+        "FAILED",
+    }
+    if not version or normalized_status not in allowed_statuses:
+        raise ValueError("invalid Discovery scheduler state")
+    slot = _as_utc(slot_utc)
+    due_at = _as_utc(due_at_utc)
+    checked_at = _as_utc(checked_at_utc or datetime.now(timezone.utc))
+    if due_at < slot:
+        raise ValueError("due_at_utc cannot precede schedule slot")
+    watermark = (
+        dict(source_watermark)
+        if isinstance(source_watermark, Mapping)
+        else None
+    )
+    watermark_sha = str(source_watermark_sha256 or "").strip() or None
+    if (watermark is None) != (watermark_sha is None):
+        raise ValueError("watermark payload and SHA-256 must be supplied together")
+    if watermark_sha is not None and (
+        len(watermark_sha) != 64
+        or any(character not in "0123456789abcdef" for character in watermark_sha)
+    ):
+        raise ValueError("source_watermark_sha256 must be lowercase SHA-256")
+    run_id = _strict_int(discovery_run_id)
+    if normalized_status == "COMPLETED" and (run_id is None or run_id <= 0):
+        raise ValueError("COMPLETED scheduler state requires discovery_run_id")
+    with _connect(read_only=False) as conn:
+        row = conn.execute(
+            """
+            INSERT INTO research_formula_discovery_schedule_state (
+                scheduler_version, engine_version, feature_schema_version,
+                outcome_method_version, horizon_minutes, last_slot_utc,
+                last_due_at_utc, last_analysis_as_of_utc, last_status,
+                last_source_watermark, last_source_watermark_sha256,
+                last_discovery_run_id, last_reason, checked_at_utc,
+                updated_at_utc
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s::jsonb, %s, %s, %s, %s, NOW()
+            )
+            ON CONFLICT (
+                scheduler_version, engine_version, feature_schema_version,
+                outcome_method_version, horizon_minutes
+            ) DO UPDATE
+            SET last_slot_utc=EXCLUDED.last_slot_utc,
+                last_due_at_utc=EXCLUDED.last_due_at_utc,
+                last_analysis_as_of_utc=EXCLUDED.last_analysis_as_of_utc,
+                last_status=EXCLUDED.last_status,
+                last_source_watermark=EXCLUDED.last_source_watermark,
+                last_source_watermark_sha256=EXCLUDED.last_source_watermark_sha256,
+                last_discovery_run_id=EXCLUDED.last_discovery_run_id,
+                last_reason=EXCLUDED.last_reason,
+                checked_at_utc=EXCLUDED.checked_at_utc,
+                updated_at_utc=NOW()
+            WHERE research_formula_discovery_schedule_state.last_slot_utc
+                  <= EXCLUDED.last_slot_utc
+            RETURNING scheduler_version, engine_version, feature_schema_version,
+                      outcome_method_version, horizon_minutes, last_slot_utc,
+                      last_due_at_utc, last_analysis_as_of_utc, last_status,
+                      last_source_watermark, last_source_watermark_sha256,
+                      last_discovery_run_id, last_reason, checked_at_utc,
+                      updated_at_utc
+            """,
+            (
+                version,
+                research_formula_engine.ENGINE_VERSION,
+                research_feature_matrix.FEATURE_SCHEMA_VERSION,
+                research_feature_matrix.VERIFIED_OUTCOME_METHOD,
+                horizon,
+                slot,
+                due_at,
+                due_at,
+                normalized_status,
+                _json(watermark) if watermark is not None else None,
+                watermark_sha,
+                run_id,
+                str(reason or "")[:1000] or None,
+                checked_at,
+            ),
+        ).fetchone()
+        conn.commit()
+    if not row:
+        current = load_discovery_schedule_state(
+            horizon, scheduler_version=version
+        )
+        if current is None:
+            raise RuntimeError("Discovery scheduler state upsert failed")
+        return current
+    return dict(row)
 
 
 def latest_completed_discovery_runs(
@@ -1360,6 +1612,7 @@ def persist_discovery_run(
     dataset: Mapping[str, Any],
     discovery: Mapping[str, Any],
     lookback_days: int,
+    scheduler_metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Atomically store one completed run, immutable formulas and evaluations."""
     if not discovery.get("available"):
@@ -1391,6 +1644,42 @@ def persist_discovery_run(
         dataset.get("outcome_method_version")
         or research_feature_matrix.VERIFIED_OUTCOME_METHOD
     )
+    schedule = (
+        dict(scheduler_metadata)
+        if isinstance(scheduler_metadata, Mapping)
+        else {}
+    )
+    scheduler_version = str(schedule.get("scheduler_version") or "").strip() or None
+    schedule_slot = (
+        _as_utc(schedule["schedule_slot_utc"])
+        if schedule.get("schedule_slot_utc") not in (None, "")
+        else None
+    )
+    source_watermark = schedule.get("source_watermark")
+    source_watermark_sha = str(
+        schedule.get("source_watermark_sha256") or ""
+    ).strip() or None
+    if scheduler_version is not None:
+        if (
+            scheduler_version != DISCOVERY_SCHEDULER_VERSION
+            or schedule_slot is None
+            or not isinstance(source_watermark, Mapping)
+            or source_watermark_sha is None
+            or len(source_watermark_sha) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in source_watermark_sha
+            )
+            or schedule.get("walk_forward_policy_version")
+            != research_formula_engine.WALK_FORWARD_POLICY_VERSION
+            or schedule.get("purge_policy_version")
+            != research_formula_engine.PURGE_POLICY_VERSION
+            or schedule.get("embargo_policy_version")
+            != research_formula_engine.EMBARGO_POLICY_VERSION
+        ):
+            raise ValueError("invalid versioned Discovery scheduler metadata")
+    elif schedule:
+        raise ValueError("partial Discovery scheduler metadata is forbidden")
     with _connect(read_only=False) as conn:
         if not _table_exists(conn, "research_formulas"):
             raise RuntimeError("Formula Research schema is not installed")
@@ -1401,10 +1690,14 @@ def persist_discovery_run(
                 horizon_minutes, lookback_days, status,
                 dataset_start_utc, dataset_end_utc, holdout_start_utc,
                 sample_size, discovery_sample_size, holdout_sample_size,
-                candidates_evaluated, config, coverage
+                candidates_evaluated, config, coverage,
+                scheduler_version, schedule_slot_utc, source_watermark,
+                source_watermark_sha256, walk_forward_policy_version,
+                purge_policy_version, embargo_policy_version
             ) VALUES (
                 %s, %s, %s, %s, %s, 'RUNNING', %s, %s, %s,
-                %s, %s, %s, %s, %s::jsonb, %s::jsonb
+                %s, %s, %s, %s, %s::jsonb, %s::jsonb,
+                %s, %s, %s::jsonb, %s, %s, %s, %s
             ) RETURNING run_id
             """,
             (
@@ -1422,6 +1715,15 @@ def persist_discovery_run(
                 int(discovery.get("candidates_evaluated") or 0),
                 _json(discovery.get("config") or {}),
                 _json(coverage_for_run),
+                scheduler_version,
+                schedule_slot,
+                _json(source_watermark)
+                if isinstance(source_watermark, Mapping)
+                else None,
+                source_watermark_sha,
+                schedule.get("walk_forward_policy_version"),
+                schedule.get("purge_policy_version"),
+                schedule.get("embargo_policy_version"),
             ),
         ).fetchone()
         run_id = int(run["run_id"])
@@ -1623,7 +1925,7 @@ def persist_discovery_run(
                     run_id,
                     str(old_formula["current_stage"]),
                     (
-                        "superseded by hierarchical evidence-family formula schema v6 "
+                        "superseded by current versioned Formula Discovery cohort "
                         f"from {dataset_kind}"
                     ),
                 ),
@@ -1757,6 +2059,9 @@ def persist_discovery_run(
             replacement_verification["reasons"]
         ),
         "retirement_ready": retirement_ready,
+        "scheduler_version": scheduler_version,
+        "schedule_slot_utc": schedule_slot,
+        "source_watermark_sha256": source_watermark_sha,
     }
 
 

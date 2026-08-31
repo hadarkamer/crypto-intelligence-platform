@@ -497,7 +497,7 @@ def run() -> None:
     assert "MAE p75, p90 and p95 on three separate" in ai_agent.SYSTEM_INSTRUCTIONS
     formula_store_text = (root / "research_formula_store.py").read_text(encoding="utf-8")
     assert "superseded by newer same-horizon discovery cohort" in formula_store_text
-    assert "hierarchical evidence-family formula schema v6" in formula_store_text
+    assert "current versioned Formula Discovery cohort" in formula_store_text
     assert "replacement_ready" in formula_store_text
     assert "latest_evaluation_run_id IS DISTINCT FROM %s" in formula_store_text
     readiness_body = formula_store_text.split(

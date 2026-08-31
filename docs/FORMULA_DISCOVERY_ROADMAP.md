@@ -27,10 +27,13 @@ Automatic processing stops at the observational readiness state
 `SHADOW_PENDING_EXPLICIT_APPROVAL`. `APPROVED -> LIVE` is a separate human
 activation path, not an automatic continuation of the lifecycle.
 
-Runtime status (2026-08-30): neutral historical raw-opportunity replay,
+Runtime status (2026-08-31): neutral historical raw-opportunity replay,
 automatic discovery, chronological holdout, multiple-testing correction,
 wide-move ranking, adaptive v7 evidence, outcome-blind Market Episodes and
-future Shadow evaluation are implemented. The current contract accepts either
+future Shadow evaluation are implemented. Discovery uses expanding-refit
+Walk-forward Selection, versioned Market-Episode purge/full-horizon embargo,
+content watermarks, PostgreSQL horizon locks and fixed UTC per-horizon clocks.
+The current contract accepts either
 probability or asymmetry, weights recent evidence and reports maturity without
 promoting anything. GPT cannot approve a formula, and rolling Shadow evaluation
 never promotes one. After enough genuinely future evidence exists, a separate
@@ -183,10 +186,12 @@ aggregates, fetch alert paths, inspect raw/model feature rows, enumerate bounded
 single/pair/triple formulas plus opt-in bounded stable-parent four/five-condition
 expansion, jointly correct both acceptance routes, group overlapping evidence
 into deterministic champion families, rank historical/current relevance,
-validate chronologically and expose Shadow maturity with missing gates. The
+validate through expanding prior-only Walk-forward folds and an untouched Test,
+and expose Shadow maturity with missing gates. Fixed per-horizon UTC scheduling,
+durable watermarks and PostgreSQL overlap locking are active in the runtime
+contract. The
 runtime can deliver only separately reviewed and explicitly human-approved LIVE
 matches to opted-in Telegram chats. Stage 1 deliberately did not add an
 experimental Telegram route or activate LIVE. Remaining operational work
-includes bounded formula supersession, scheduler/caching efficiency, genuinely
-future evidence, a frozen review sample and explicit approval; optional context
-features remain listed above.
+includes genuinely future evidence, a frozen review sample and explicit
+approval; optional context features remain listed above.

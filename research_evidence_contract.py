@@ -26,7 +26,7 @@ LEGACY_ADAPTER_VERSION = "formula-evidence-legacy-read-adapter-v1"
 CURRENT_FORMULA_SCHEMA_VERSION = "research-formula-v7-adaptive-evidence"
 LEGACY_V5_FORMULA_SCHEMA_VERSION = "research-formula-v5-safe-replay"
 LEGACY_V6_FORMULA_SCHEMA_VERSION = "research-formula-v6-first-touch-maxpain"
-CURRENT_ENGINE_VERSION = "formula-discovery-v7-adaptive-evidence-market-episodes"
+CURRENT_ENGINE_VERSION = "formula-discovery-v7.1-walk-forward-watermarked"
 LEGACY_V6_ENGINE_VERSION = (
     "formula-discovery-v6.2-first-touch-maxpain-hierarchical-holdout-isolated"
 )

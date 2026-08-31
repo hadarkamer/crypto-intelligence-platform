@@ -5,6 +5,11 @@ are labels and are never exposed to a condition.  Thresholds are learned from
 the earlier chronological discovery partition, frozen, and then evaluated on
 the later holdout partition.
 
+Candidate structures are learned from the initial Fit partition. Numeric
+thresholds are re-fitted from expanding prior-only prefixes across versioned
+Walk-forward Selection folds before the final formula is frozen for the
+untouched outer Test.
+
 This module is pure computation: it does not write PostgreSQL, send Telegram
 messages, or alter any production score/threshold.
 """
@@ -27,13 +32,16 @@ import research_market_episode
 import research_mfe_mae_efficiency
 import research_no_dwell_outcome
 
-ENGINE_VERSION = "formula-discovery-v7-adaptive-evidence-market-episodes"
+ENGINE_VERSION = "formula-discovery-v7.1-walk-forward-watermarked"
 FORMULA_SCHEMA_VERSION = "research-formula-v7-adaptive-evidence"
 LEGACY_V6_ENGINE_VERSION = (
     "formula-discovery-v6.2-first-touch-maxpain-hierarchical-holdout-isolated"
 )
 LEGACY_V6_FORMULA_SCHEMA_VERSION = "research-formula-v6-first-touch-maxpain"
 ALLOWED_OPERATORS = {">=", "<=", "=="}
+WALK_FORWARD_POLICY_VERSION = "formula-walk-forward-v1-expanding-refit"
+PURGE_POLICY_VERSION = "market-episode-boundary-purge-v1"
+EMBARGO_POLICY_VERSION = "full-outcome-horizon-embargo-v1"
 
 # These values describe archive/runtime mechanics rather than market state.
 # They remain visible for diagnostics but may never become formula predicates.
@@ -139,6 +147,12 @@ class DiscoveryConfig:
     recent_window_days: int = 21
     recency_half_life_days: float = 14.0
     maximum_last_match_age_days: int = 21
+    # Candidate structures are learned only from Fit. Numeric thresholds are
+    # then re-fitted on an expanding, prior-only training prefix before each
+    # chronological Selection fold. The untouched outer Test is still opened
+    # only after formula identity, family and rank have been frozen.
+    walk_forward_folds: int = 3
+    walk_forward_min_completed_folds: int = 2
 
 
 def _utc(value: Any) -> datetime:
@@ -2074,8 +2088,18 @@ def _predicate_catalog(
                     continue
                 threshold = round(threshold, 8)
                 for operator in (">=", "<="):
-                    condition = {"feature": feature, "operator": operator, "value": threshold}
-                    key = json.dumps(condition, sort_keys=True, ensure_ascii=False)
+                    condition = {
+                        "feature": feature,
+                        "operator": operator,
+                        "value": threshold,
+                        "_source": "NUMERIC_QUANTILE",
+                        "_quantile_fraction": float(fraction),
+                    }
+                    key = json.dumps(
+                        _canonical_conditions([condition])[0],
+                        sort_keys=True,
+                        ensure_ascii=False,
+                    )
                     predicates[key] = condition
             continue
 
@@ -2086,10 +2110,98 @@ def _predicate_catalog(
         for value, count in sorted(counts.items(), key=lambda item: (-item[1], str(item[0])))[:16]:
             if count < non_missing_min or count >= len(rows):
                 continue
-            condition = {"feature": feature, "operator": "==", "value": value}
-            key = json.dumps(condition, sort_keys=True, ensure_ascii=False)
+            condition = {
+                "feature": feature,
+                "operator": "==",
+                "value": value,
+                "_source": "CATEGORICAL_EXACT",
+            }
+            key = json.dumps(
+                _canonical_conditions([condition])[0],
+                sort_keys=True,
+                ensure_ascii=False,
+            )
             predicates[key] = condition
     return list(predicates.values())
+
+
+def _refit_predicate_blueprints(
+    blueprints: Sequence[Mapping[str, Any]],
+    training_rows: Sequence[Mapping[str, Any]],
+) -> Optional[list[Dict[str, Any]]]:
+    """Materialize one frozen structure from prior-only training rows.
+
+    Numeric values retain only their quantile position and are recalculated on
+    the expanding training prefix. Categorical values were selected in the
+    original Fit partition and remain exact. Outcome fields are never read.
+    """
+
+    feature_rows = [extract_decision_features(row) for row in training_rows]
+    conditions: list[Dict[str, Any]] = []
+    for blueprint in blueprints:
+        feature = str(blueprint.get("feature") or "")
+        operator = str(blueprint.get("operator") or "")
+        source = str(blueprint.get("_source") or "")
+        if not feature or operator not in ALLOWED_OPERATORS:
+            return None
+        if source == "NUMERIC_QUANTILE":
+            fraction = _number(blueprint.get("_quantile_fraction"))
+            values = [
+                number
+                for features in feature_rows
+                if (number := _strict_json_number(features.get(feature)))
+                is not None
+            ]
+            if fraction is None or len(values) < 3:
+                return None
+            threshold = _quantile(values, fraction)
+            if threshold is None:
+                return None
+            value: Any = round(threshold, 8)
+        elif source == "CATEGORICAL_EXACT":
+            value = blueprint.get("value")
+            if not any(
+                feature in features and type(features.get(feature)) is type(value)
+                for features in feature_rows
+            ):
+                return None
+        else:
+            return None
+        conditions.append(
+            {"feature": feature, "operator": operator, "value": value}
+        )
+    return _canonical_conditions(conditions) if conditions else None
+
+
+def _walk_forward_selection_folds(
+    rows: Sequence[Mapping[str, Any]], *, fold_count: int
+) -> list[tuple[int, ...]]:
+    """Split chronological Selection rows without splitting a timestamp."""
+
+    ordered_times = sorted(
+        {research_market_episode.row_time_utc(row) for row in rows}
+    )
+    if not ordered_times:
+        return []
+    folds = max(1, min(int(fold_count), len(ordered_times)))
+    time_groups: list[list[datetime]] = [[] for _ in range(folds)]
+    for index, timestamp in enumerate(ordered_times):
+        bucket = min(folds - 1, (index * folds) // len(ordered_times))
+        time_groups[bucket].append(timestamp)
+    index_by_time: Dict[datetime, list[int]] = {}
+    for index, row in enumerate(rows):
+        index_by_time.setdefault(
+            research_market_episode.row_time_utc(row), []
+        ).append(index)
+    return [
+        tuple(
+            index
+            for timestamp in group
+            for index in index_by_time[timestamp]
+        )
+        for group in time_groups
+        if group
+    ]
 
 
 def _preliminary_score(
@@ -2513,6 +2625,7 @@ def _recommended_stage(
     config: DiscoveryConfig,
     asymmetry_q_value: Optional[float] = None,
     complexity: int = 1,
+    walk_forward: Optional[Mapping[str, Any]] = None,
 ) -> tuple[str, list[str]]:
     reasons: list[str] = []
     discovery_n = int(discovery.get("sample_size") or 0)
@@ -2539,6 +2652,17 @@ def _recommended_stage(
             holdout.get("session_baseline_complete")
         ),
         "wide movement percentile": movement_percentile >= 65.0,
+        "versioned walk-forward validation complete": bool(
+            isinstance(walk_forward, Mapping)
+            and walk_forward.get("policy_version")
+            == WALK_FORWARD_POLICY_VERSION
+            and walk_forward.get("purge_policy_version")
+            == PURGE_POLICY_VERSION
+            and walk_forward.get("embargo_policy_version")
+            == EMBARGO_POLICY_VERSION
+            and walk_forward.get("complete") is True
+            and walk_forward.get("outer_test_used") is False
+        ),
     }
     if int(complexity) >= 4:
         depth = int(complexity)
@@ -2620,19 +2744,15 @@ def _search_direction(
     holdout_as_of_utc: Any = None,
 ) -> Dict[str, Any]:
     discovery_features = [extract_decision_features(row) for row in discovery_rows]
-    selection_features: Optional[list[Dict[str, Any]]] = None
     holdout_features: Optional[list[Dict[str, Any]]] = None
+    purge_minutes = research_market_episode.episode_minutes(horizon_minutes)
+    embargo_minutes = int(horizon_minutes)
+    boundary_gap = timedelta(minutes=purge_minutes + embargo_minutes)
     # Formula construction sees Fit; identity/ranking and hierarchy see the
     # separate Selection partition; the final Test partition stays untouched
     # until champions and their order have been frozen.
     hierarchical_fit_rows = list(discovery_rows)
     hierarchical_selection_rows = list(selection_rows)
-    hierarchical_fit_features = [
-        extract_decision_features(row) for row in hierarchical_fit_rows
-    ]
-    hierarchical_selection_features = [
-        extract_decision_features(row) for row in hierarchical_selection_rows
-    ]
     predicates = _predicate_catalog(discovery_rows, discovery_features, config)
     predicate_matches: list[set[int]] = []
     usable_predicates: list[Dict[str, Any]] = []
@@ -2776,6 +2896,9 @@ def _search_direction(
         candidate = {
             "condition_indexes": normalized_indexes,
             "conditions": conditions,
+            "condition_blueprints": [
+                dict(usable_predicates[index]) for index in normalized_indexes
+            ],
             "condition_families": list(policy["families"]),
             "discovery_indices": observation_key,
             "discovery_metrics": metrics,
@@ -2805,29 +2928,114 @@ def _search_direction(
         )
 
     def attach_selection(candidate: Dict[str, Any]) -> None:
-        nonlocal selection_features
         if "selection_metrics" in candidate:
             return
-        if selection_features is None:
-            selection_features = [
-                extract_decision_features(row) for row in selection_rows
-            ]
-        matched_indexes = tuple(
-            index
-            for index, features in enumerate(selection_features)
-            if all(
-                condition_matches(features, condition)
-                for condition in candidate["conditions"]
-            )
+        selection_feature_rows = [
+            extract_decision_features(row) for row in selection_rows
+        ]
+        folds = _walk_forward_selection_folds(
+            selection_rows, fold_count=config.walk_forward_folds
         )
+        matched_index_set: set[int] = set()
+        evaluable_index_set: set[int] = set()
+        fold_reports: list[Dict[str, Any]] = []
+        completed_folds = 0
+        for fold_number, validation_indexes in enumerate(folds, start=1):
+            validation_start = min(
+                research_market_episode.row_time_utc(selection_rows[index])
+                for index in validation_indexes
+            )
+            validation_end = max(
+                research_market_episode.row_time_utc(selection_rows[index])
+                for index in validation_indexes
+            )
+            training_cutoff = validation_start - boundary_gap
+            expanding_training = list(discovery_rows) + [
+                row
+                for row in selection_rows
+                if research_market_episode.row_time_utc(row) < training_cutoff
+            ]
+            fold_conditions = _refit_predicate_blueprints(
+                candidate["condition_blueprints"], expanding_training
+            )
+            if not fold_conditions:
+                fold_reports.append(
+                    {
+                        "fold": fold_number,
+                        "status": "UNEVALUABLE",
+                        "reason": "predicate refit lacked prior-only training data",
+                        "training_rows": len(expanding_training),
+                        "training_cutoff_utc": training_cutoff,
+                        "validation_start_utc": validation_start,
+                        "validation_end_utc": validation_end,
+                        "validation_rows": len(validation_indexes),
+                    }
+                )
+                continue
+            fold_matched = tuple(
+                index
+                for index in validation_indexes
+                if all(
+                    condition_matches(
+                        selection_feature_rows[index], condition
+                    )
+                    for condition in fold_conditions
+                )
+            )
+            fold_evaluable = tuple(
+                index
+                for index in validation_indexes
+                if all(
+                    condition_is_evaluable(
+                        selection_feature_rows[index], condition
+                    )
+                    for condition in fold_conditions
+                )
+            )
+            fold_as_of = validation_end + timedelta(
+                minutes=research_market_episode.episode_minutes(horizon_minutes)
+            )
+            if selection_as_of_utc is not None:
+                fold_as_of = min(fold_as_of, _utc(selection_as_of_utc))
+            fold_metrics = _metrics(
+                [selection_rows[index] for index in fold_matched],
+                [selection_rows[index] for index in fold_evaluable],
+                recent_window_days=config.recent_window_days,
+                recency_half_life_days=config.recency_half_life_days,
+                evidence_as_of_utc=fold_as_of,
+                discard_boundary_episode=True,
+            )
+            matched_index_set.update(fold_matched)
+            evaluable_index_set.update(fold_evaluable)
+            completed_folds += 1
+            fold_reports.append(
+                {
+                    "fold": fold_number,
+                    "status": "COMPLETED",
+                    "training_rows": len(expanding_training),
+                    "training_cutoff_utc": training_cutoff,
+                    "validation_start_utc": validation_start,
+                    "validation_end_utc": validation_end,
+                    "validation_rows": len(validation_indexes),
+                    "conditions": fold_conditions,
+                    "metrics": {
+                        key: value
+                        for key, value in fold_metrics.items()
+                        if not str(key).startswith("_")
+                    },
+                }
+            )
+
+        final_conditions = _refit_predicate_blueprints(
+            candidate["condition_blueprints"],
+            [*discovery_rows, *selection_rows],
+        )
+        if final_conditions:
+            candidate["conditions"] = final_conditions
+        matched_indexes = tuple(sorted(matched_index_set))
         selected = [selection_rows[index] for index in matched_indexes]
         evaluable_universe = [
-            selection_rows[index]
-            for index, features in enumerate(selection_features)
-            if all(
-                condition_is_evaluable(features, condition)
-                for condition in candidate["conditions"]
-            )
+            selection_rows[index] for index in sorted(evaluable_index_set)
         ]
         metrics = _metrics(
             selected,
@@ -2852,6 +3060,24 @@ def _search_direction(
         candidate["selection_preliminary_score"] = _preliminary_score(
             metrics, len(candidate["conditions"])
         )
+        candidate["walk_forward_validation"] = {
+            "policy_version": WALK_FORWARD_POLICY_VERSION,
+            "purge_policy_version": PURGE_POLICY_VERSION,
+            "embargo_policy_version": EMBARGO_POLICY_VERSION,
+            "requested_folds": int(config.walk_forward_folds),
+            "completed_folds": completed_folds,
+            "minimum_completed_folds": int(
+                config.walk_forward_min_completed_folds
+            ),
+            "complete": completed_folds
+            >= int(config.walk_forward_min_completed_folds),
+            "purge_minutes": purge_minutes,
+            "embargo_minutes": embargo_minutes,
+            "boundary_gap_minutes": purge_minutes + embargo_minutes,
+            "threshold_refit": "expanding prior-only training prefix",
+            "outer_test_used": False,
+            "folds": fold_reports,
+        }
 
     def attach_holdout(candidate: Dict[str, Any]) -> None:
         nonlocal holdout_features
@@ -2891,48 +3117,16 @@ def _search_direction(
     def attach_hierarchical_screen(candidate: Dict[str, Any]) -> None:
         if "hierarchical_selection_metrics" in candidate:
             return
-        conditions = candidate["conditions"]
-        fit_indexes = tuple(
-            index
-            for index, features in enumerate(hierarchical_fit_features)
-            if all(condition_matches(features, condition) for condition in conditions)
-        )
-        selection_indexes = tuple(
-            index
-            for index, features in enumerate(hierarchical_selection_features)
-            if all(condition_matches(features, condition) for condition in conditions)
-        )
-        fit_metrics = _metrics(
-            [hierarchical_fit_rows[index] for index in fit_indexes],
-            [
-                hierarchical_fit_rows[index]
-                for index, features in enumerate(hierarchical_fit_features)
-                if all(condition_is_evaluable(features, condition) for condition in conditions)
-            ],
-            recent_window_days=config.recent_window_days,
-            recency_half_life_days=config.recency_half_life_days,
-            evidence_as_of_utc=discovery_as_of_utc,
-            discard_boundary_episode=True,
-        )
-        selection_metrics = _metrics(
-            [hierarchical_selection_rows[index] for index in selection_indexes],
-            [
-                hierarchical_selection_rows[index]
-                for index, features in enumerate(hierarchical_selection_features)
-                if all(condition_is_evaluable(features, condition) for condition in conditions)
-            ],
-            recent_window_days=config.recent_window_days,
-            recency_half_life_days=config.recency_half_life_days,
-            evidence_as_of_utc=selection_as_of_utc,
-            discard_boundary_episode=True,
-        )
+        attach_selection(candidate)
+        fit_metrics = candidate["discovery_metrics"]
+        selection_metrics = candidate["selection_metrics"]
         candidate["hierarchical_fit_metrics"] = fit_metrics
         candidate["hierarchical_selection_metrics"] = selection_metrics
         candidate["hierarchical_fit_preliminary_score"] = _preliminary_score(
-            fit_metrics, len(conditions)
+            fit_metrics, len(candidate["conditions"])
         )
         candidate["hierarchical_selection_preliminary_score"] = _preliminary_score(
-            selection_metrics, len(conditions)
+            selection_metrics, len(candidate["conditions"])
         )
 
     def stable_parent(candidate: Dict[str, Any]) -> bool:
@@ -3090,8 +3284,8 @@ def _search_direction(
             "final_test_used_for_selection": False,
             "outer_holdout_used_for_selection": False,
             "selection_note": (
-                "a purged chronological Selection partition chooses the hierarchy; "
-                "the final Test partition remains untouched"
+                "expanding-refit Walk-forward Selection chooses the hierarchy "
+                "under versioned purge/embargo; the final Test remains untouched"
             ),
         }
         return passed
@@ -3137,7 +3331,7 @@ def _search_direction(
 
     hierarchical_diagnostics: Dict[str, Any] = {
         "enabled": bool(config.hierarchical_search_enabled),
-        "selection_policy": "purged-fit-selection-test-v1",
+        "selection_policy": WALK_FORWARD_POLICY_VERSION,
         "fit_rows": len(hierarchical_fit_rows),
         "selection_rows": len(hierarchical_selection_rows),
         "selection_start_time_utc": (
@@ -3157,6 +3351,10 @@ def _search_direction(
         "quint_candidates_passed_gain": 0,
         "beam_width": int(config.hierarchical_beam_width),
         "family_exceptions": list(config.hierarchical_family_exceptions),
+        "purge_policy_version": PURGE_POLICY_VERSION,
+        "embargo_policy_version": EMBARGO_POLICY_VERSION,
+        "purge_minutes": purge_minutes,
+        "embargo_minutes": embargo_minutes,
     }
     if config.hierarchical_search_enabled and int(config.hierarchical_max_conditions) >= 4:
         beam_width = max(1, int(config.hierarchical_beam_width))
@@ -3348,6 +3546,9 @@ def _search_direction(
         )
         discovery_output = dict(discovery)
         discovery_output["selection_metrics"] = selection
+        discovery_output["walk_forward_validation"] = candidate.get(
+            "walk_forward_validation"
+        )
         development_results.append(
             {
                 "formula_key": key,
@@ -3386,11 +3587,15 @@ def _search_direction(
                     ),
                 },
                 "ranking_score": score,
-                "ranking_basis": "purged Fit+Selection only; final Test excluded",
+                "ranking_basis": (
+                    "Fit plus expanding-refit Walk-forward Selection only; "
+                    "final Test excluded"
+                ),
                 "recommended_stage": "BACKTESTED",
                 "gate_notes": ["identity and rank frozen before final Test"],
                 "live_alert_approved": False,
                 "hierarchical_validation": candidate.get("hierarchical_validation"),
+                "_candidate_ref": candidate,
                 "_evidence_keys": tuple(
                     sorted(
                         set(candidate.get("discovery_evidence_keys") or ())
@@ -3412,6 +3617,16 @@ def _search_direction(
         ),
         reverse=True,
     )
+    candidates_by_key: Dict[str, Dict[str, Any]] = {}
+    unique_development_results: list[Dict[str, Any]] = []
+    for item in development_results:
+        key = str(item["formula_key"])
+        if key in candidates_by_key:
+            continue
+        candidate = item.pop("_candidate_ref")
+        candidates_by_key[key] = candidate
+        unique_development_results.append(item)
+    development_results = unique_development_results
     grouped = research_formula_families.group_formula_evidence(
         development_results,
         overlap_threshold=config.evidence_family_overlap_threshold,
@@ -3419,15 +3634,6 @@ def _search_direction(
     results = grouped["champions"][: config.max_formulas_returned]
     for rank, result in enumerate(results, start=1):
         result["rank"] = rank
-    candidates_by_key = {
-        formula_key(
-            direction=direction,
-            horizon_minutes=horizon_minutes,
-            feature_schema_version=feature_schema_version,
-            conditions=candidate["conditions"],
-        ): candidate
-        for candidate in finalists
-    }
     for result in results:
         attach_holdout(candidates_by_key[result["formula_key"]])
 
@@ -3464,6 +3670,7 @@ def _search_direction(
             config=config,
             asymmetry_q_value=test_asymmetry_q[index],
             complexity=len(candidate["conditions"]),
+            walk_forward=candidate.get("walk_forward_validation"),
         )
         result["holdout_metrics"] = holdout
         result["recommended_stage"] = stage
@@ -3556,17 +3763,13 @@ def discover_formulas(
     holdout_start = research_market_episode.row_time_utc(ordered[test_index])
     if holdout_start == distinct_times[0]:
         holdout_start = distinct_times[1]
-    split_purge = timedelta(
-        minutes=max(
-            research_market_episode.MINIMUM_EPISODE_MINUTES,
-            int(horizon_minutes),
-        )
-        + int(horizon_minutes)
-    )
+    purge_minutes = research_market_episode.episode_minutes(horizon_minutes)
+    embargo_minutes = int(horizon_minutes)
+    boundary_gap = timedelta(minutes=purge_minutes + embargo_minutes)
     development_period = [
         row
         for row in ordered
-        if research_market_episode.row_time_utc(row) < holdout_start - split_purge
+        if research_market_episode.row_time_utc(row) < holdout_start - boundary_gap
     ]
     holdout_period = [
         row
@@ -3576,7 +3779,7 @@ def discover_formulas(
     if len(development_period) < 2:
         return {
             "available": False,
-            "reason": "insufficient purged Fit+Selection development rows",
+            "reason": "insufficient purged/embargoed Fit+Selection development rows",
             "sample_size": len(ordered),
             "formulas": [],
         }
@@ -3597,15 +3800,15 @@ def discover_formulas(
         row
         for row in development_period
         if research_market_episode.row_time_utc(row)
-        < selection_start - split_purge
+        < selection_start - boundary_gap
     ]
     selection_period = [
         row
         for row in development_period
         if research_market_episode.row_time_utc(row) >= selection_start
     ]
-    fit_boundary_end = selection_start - split_purge
-    selection_boundary_end = holdout_start - split_purge
+    fit_boundary_end = selection_start - boundary_gap
+    selection_boundary_end = holdout_start - boundary_gap
     discovery_as_of = (
         fit_boundary_end
         if discovery_period
@@ -3696,13 +3899,21 @@ def discover_formulas(
             "discovery_evidence_as_of_utc": discovery_as_of,
             "selection_evidence_as_of_utc": selection_as_of,
             "holdout_evidence_as_of_utc": holdout_as_of,
-            "split_purge_minutes": int(split_purge.total_seconds() // 60),
+            "walk_forward_policy_version": WALK_FORWARD_POLICY_VERSION,
+            "purge_policy_version": PURGE_POLICY_VERSION,
+            "embargo_policy_version": EMBARGO_POLICY_VERSION,
+            "purge_minutes": purge_minutes,
+            "embargo_minutes": embargo_minutes,
+            "boundary_gap_minutes": purge_minutes + embargo_minutes,
+            # Compatibility field retained for older read-only consumers.
+            "split_purge_minutes": purge_minutes + embargo_minutes,
             "last_alert_time_utc": ordered[-1]["event"]["alert_time_utc"],
             "split_policy": (
-                "approximately 49% Fit, 21% Selection and 30% untouched Test; "
-                "a Market-Episode plus outcome-horizon purge separates both "
-                "boundaries; identical timestamps never split; Test can change "
-                "acceptance only, never formula identity or rank"
+                "approximately 49% initial Fit, 21% expanding-refit "
+                "Walk-forward Selection and 30% untouched Test; a versioned "
+                "Market-Episode purge plus full outcome-horizon embargo "
+                "separates boundaries; identical timestamps never split; Test "
+                "can change acceptance only, never formula identity or rank"
             ),
             "directions": direction_results,
             "candidates_evaluated": sum(

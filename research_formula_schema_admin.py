@@ -55,6 +55,9 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "016_formula_relevance_hysteresis_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "017_formula_discovery_scheduler_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
