@@ -253,6 +253,25 @@ The canonical fixtures are
 `fixtures/evidence/legacy_v6_shadow.json`. They prove stable interpretation,
 content ids, event/family identifiers and legacy compatibility.
 
+## Experimental evidence rendering dry run
+
+Stage 3A adds the side-effect-free
+`research_evidence_telegram_renderer.py` consumer. It fingerprint-verifies every
+`EvidenceSnapshot`, renders deterministic plain Telegram text and returns audit
+metadata without importing Telegram, reading the database or calling a worker.
+The renderer displays only values already frozen in the snapshot; it does not
+recalculate acceptance, maturity, probability, asymmetry, recency or risk.
+
+Dry runs suppress repeated snapshot ids and emit one deterministic message for
+each `formula_family_id`. The newest assessed snapshot is the displayed family
+representative, while all member snapshot and formula ids remain in the dry-run
+metadata. Conflicting compatibility, direction or horizon inside one family
+fails closed. Both `CURRENT_V7` and `LEGACY_SHADOW_READ_ONLY` are explicitly
+labelled, and every message contains “ניסיונית — אינה המלצת מסחר”. Stage 3A has
+`delivery_channel=NONE`, `live_effect=NONE` and zero delivery attempts; it adds
+no command, subscription, scheduler, persistence writer, Telegram call or LIVE
+path.
+
 The scheduler is intentionally unchanged in this stage: after a complete
 multi-horizon Discovery cycle finishes, the worker sleeps six hours. Therefore
 the next cycle starts approximately `previous runtime + 6h`, not at a fixed UTC
