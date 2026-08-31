@@ -15,6 +15,7 @@ import research_feature_matrix
 import research_evidence_contract
 import research_formula_acceptance
 import research_formula_engine
+import research_formula_relevance
 import research_formula_store
 import research_market_episode
 import research_max_pain_archive
@@ -304,6 +305,9 @@ class FormulaWorkerMetrics:
     formulas_promoted_live: int = 0
     formulas_ready_for_review: int = 0
     research_ready_formulas: int = 0
+    experimentally_relevant_formulas: int = 0
+    suspended_relevance_formulas: int = 0
+    recovering_relevance_formulas: int = 0
     legacy_live_review_ready_formulas: int = 0
     failures: int = 0
     last_discovery_utc: Optional[str] = None
@@ -346,6 +350,7 @@ class FormulaResearchWorker:
             "research_acceptance_policy_version": (
                 research_formula_acceptance.POLICY_VERSION
             ),
+            "relevance_hysteresis": research_formula_relevance.descriptor(),
             "market_episode_policy_version": research_market_episode.POLICY_VERSION,
             "evidence_contract": research_evidence_contract.contract_descriptor(),
             "recent_window_days": _discovery_config().recent_window_days,
@@ -645,11 +650,21 @@ class FormulaResearchWorker:
         legacy_live_review_ready = len(
             validation.get("legacy_live_review_ready") or []
         )
+        relevance_states = validation.get("relevance_state_counts") or {}
         self.metrics.shadow_checks += checked
         self.metrics.shadow_hits += matched
         self.metrics.live_candidates_queued += queued
         self.metrics.formulas_ready_for_review = research_ready
         self.metrics.research_ready_formulas = research_ready
+        self.metrics.experimentally_relevant_formulas = len(
+            validation.get("experimentally_relevant") or []
+        )
+        self.metrics.suspended_relevance_formulas = int(
+            relevance_states.get(research_formula_relevance.SUSPENDED) or 0
+        )
+        self.metrics.recovering_relevance_formulas = int(
+            relevance_states.get(research_formula_relevance.RECOVERING) or 0
+        )
         self.metrics.legacy_live_review_ready_formulas = (
             legacy_live_review_ready
         )
@@ -660,6 +675,8 @@ class FormulaResearchWorker:
             print(
                 f"[formula-shadow] checked={checked}; matched={matched}; "
                 f"queued={queued}; research_ready={research_ready}; "
+                "experimentally_relevant="
+                f"{self.metrics.experimentally_relevant_formulas}; "
                 f"legacy_live_review_ready={legacy_live_review_ready}; "
                 "promoted_live=0",
                 flush=True,

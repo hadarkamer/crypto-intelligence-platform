@@ -21,6 +21,7 @@ import research_evidence_contract
 import research_feature_matrix
 import research_formula_acceptance
 import research_formula_engine
+import research_formula_relevance
 import research_historical_replay
 import research_market_episode
 import research_max_pain_archive
@@ -823,6 +824,7 @@ def schema_status() -> Dict[str, Any]:
         "research_prospective_shadow_events",
         "research_outcome_event_rejections",
         "research_formula_evidence_snapshots",
+        "research_formula_relevance_assessments",
     )
     required_columns = {
         "research_formula_shadow_checks": (
@@ -946,6 +948,26 @@ def schema_status() -> Dict[str, Any]:
             "snapshot_payload",
             "created_at_utc",
         ),
+        "research_formula_relevance_assessments": (
+            "formula_id",
+            "formula_version",
+            "relevance_policy_version",
+            "observation_fingerprint",
+            "evidence_fingerprint",
+            "snapshot_id",
+            "observed_at_utc",
+            "observation_utc_date",
+            "compatibility",
+            "observation",
+            "previous_state",
+            "relevance_state",
+            "transition",
+            "weak_observation_streak",
+            "recovery_evidence_streak",
+            "experimental_relevance_eligible",
+            "decision_payload",
+            "created_at_utc",
+        ),
     }
     base = {
         "configured": bool(_database_url()),
@@ -986,25 +1008,22 @@ def schema_status() -> Dict[str, Any]:
               (SELECT COUNT(*) FROM research_formula_alert_subscriptions WHERE active) AS active_subscriptions,
               (SELECT COUNT(*) FROM research_formula_live_deliveries WHERE status='PENDING') AS pending_live_deliveries,
               (SELECT COUNT(*) FROM research_outcome_event_rejections) AS rejected_outcome_events,
-              (SELECT COUNT(*) FROM research_formula_evidence_snapshots) AS evidence_snapshots
+              (SELECT COUNT(*) FROM research_formula_evidence_snapshots) AS evidence_snapshots,
+              (SELECT COUNT(*) FROM research_formula_relevance_assessments) AS relevance_assessments
             """
         ).fetchone()
         base.update({key: int(counts[key] or 0) for key in counts})
     return _json_safe(base)
 
 
-def persist_evidence_snapshot(
+def _persist_evidence_snapshot_conn(
+    conn: Any,
     snapshot: research_evidence_contract.EvidenceSnapshot | Mapping[str, Any],
     *,
     formula_id: int,
     source_run_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Persist one content-addressed snapshot without changing formula state.
-
-    No production worker calls this function in infrastructure stage 2.  It is
-    an idempotent storage boundary for later Discovery/Shadow integrations and
-    has no path to Telegram, approval or LIVE.
-    """
+    """Persist or verify one snapshot inside the caller's transaction."""
 
     resolved = (
         snapshot
@@ -1022,99 +1041,95 @@ def persist_evidence_snapshot(
     ):
         raise ValueError("source_run_id must be a positive integer when supplied")
 
-    with _connect(read_only=False) as conn:
-        formula_row = conn.execute(
-            """
-            SELECT formula_key, formula_version, formula_schema_version,
-                   engine_version, feature_schema_version,
-                   outcome_method_version, direction, horizon_minutes
-            FROM research_formulas
-            WHERE formula_id=%s
-            FOR SHARE
-            """,
-            (resolved_formula_id,),
-        ).fetchone()
-        if not formula_row:
-            raise ValueError("formula_id does not exist")
-        identity_fields = (
-            "formula_key",
-            "formula_version",
-            "formula_schema_version",
-            "engine_version",
-            "feature_schema_version",
-            "outcome_method_version",
-            "direction",
-            "horizon_minutes",
+    formula_row = conn.execute(
+        """
+        SELECT formula_key, formula_version, formula_schema_version,
+               engine_version, feature_schema_version,
+               outcome_method_version, direction, horizon_minutes
+        FROM research_formulas
+        WHERE formula_id=%s
+        FOR SHARE
+        """,
+        (resolved_formula_id,),
+    ).fetchone()
+    if not formula_row:
+        raise ValueError("formula_id does not exist")
+    identity_fields = (
+        "formula_key",
+        "formula_version",
+        "formula_schema_version",
+        "engine_version",
+        "feature_schema_version",
+        "outcome_method_version",
+        "direction",
+        "horizon_minutes",
+    )
+    mismatched = [
+        key for key in identity_fields if formula_row.get(key) != formula.get(key)
+    ]
+    if mismatched:
+        raise RuntimeError(
+            "snapshot formula identity mismatch: " + ", ".join(mismatched)
         )
-        mismatched = [
-            key
-            for key in identity_fields
-            if formula_row.get(key) != formula.get(key)
-        ]
-        if mismatched:
-            raise RuntimeError(
-                "snapshot formula identity mismatch: " + ", ".join(mismatched)
-            )
-        conn.execute(
-            """
-            INSERT INTO research_formula_evidence_snapshots (
-                snapshot_id, snapshot_schema_version,
-                assessment_schema_version, contract_version, compatibility,
-                formula_id, source_run_id, formula_key, formula_version,
-                formula_schema_version, phase, assessed_at_utc,
-                formula_family_id, matched_market_episode_ids,
-                control_market_episode_ids, matched_parent_market_episode_ids,
-                control_parent_market_episode_ids, raw_match_count,
-                raw_control_count, matched_n_eff, control_n_eff,
-                snapshot_payload
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
-                %s, %s, %s, %s, %s::jsonb
-            )
-            ON CONFLICT (snapshot_id) DO NOTHING
-            """,
-            (
-                resolved.snapshot_id,
-                payload["snapshot_schema_version"],
-                payload["assessment_schema_version"],
-                payload["contract_version"],
-                payload["compatibility"],
-                resolved_formula_id,
-                resolved_run_id,
-                formula["formula_key"],
-                int(formula["formula_version"]),
-                formula["formula_schema_version"],
-                payload["phase"],
-                payload["assessed_at_utc"],
-                payload["formula_family_id"],
-                _json(payload["matched_market_episode_ids"]),
-                _json(payload["control_market_episode_ids"]),
-                _json(payload["matched_parent_market_episode_ids"]),
-                _json(payload["control_parent_market_episode_ids"]),
-                int(payload["raw_match_count"]),
-                int(payload["raw_control_count"]),
-                float(payload["matched_n_eff"]),
-                float(payload["control_n_eff"]),
-                _json(payload),
-            ),
+    conn.execute(
+        """
+        INSERT INTO research_formula_evidence_snapshots (
+            snapshot_id, snapshot_schema_version,
+            assessment_schema_version, contract_version, compatibility,
+            formula_id, source_run_id, formula_key, formula_version,
+            formula_schema_version, phase, assessed_at_utc,
+            formula_family_id, matched_market_episode_ids,
+            control_market_episode_ids, matched_parent_market_episode_ids,
+            control_parent_market_episode_ids, raw_match_count,
+            raw_control_count, matched_n_eff, control_n_eff,
+            snapshot_payload
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
+            %s, %s, %s, %s, %s::jsonb
         )
-        stored = conn.execute(
-            """
-            SELECT formula_id, source_run_id, snapshot_payload
-            FROM research_formula_evidence_snapshots
-            WHERE snapshot_id=%s
-            """,
-            (resolved.snapshot_id,),
-        ).fetchone()
-        if (
-            not stored
-            or int(stored["formula_id"]) != resolved_formula_id
-            or stored.get("source_run_id") != resolved_run_id
-            or not _type_strict_json_equal(stored.get("snapshot_payload"), payload)
-        ):
-            raise RuntimeError("stored evidence snapshot conflicts with its content id")
-        conn.commit()
+        ON CONFLICT (snapshot_id) DO NOTHING
+        """,
+        (
+            resolved.snapshot_id,
+            payload["snapshot_schema_version"],
+            payload["assessment_schema_version"],
+            payload["contract_version"],
+            payload["compatibility"],
+            resolved_formula_id,
+            resolved_run_id,
+            formula["formula_key"],
+            int(formula["formula_version"]),
+            formula["formula_schema_version"],
+            payload["phase"],
+            payload["assessed_at_utc"],
+            payload["formula_family_id"],
+            _json(payload["matched_market_episode_ids"]),
+            _json(payload["control_market_episode_ids"]),
+            _json(payload["matched_parent_market_episode_ids"]),
+            _json(payload["control_parent_market_episode_ids"]),
+            int(payload["raw_match_count"]),
+            int(payload["raw_control_count"]),
+            float(payload["matched_n_eff"]),
+            float(payload["control_n_eff"]),
+            _json(payload),
+        ),
+    )
+    stored = conn.execute(
+        """
+        SELECT formula_id, source_run_id, snapshot_payload
+        FROM research_formula_evidence_snapshots
+        WHERE snapshot_id=%s
+        """,
+        (resolved.snapshot_id,),
+    ).fetchone()
+    if (
+        not stored
+        or int(stored["formula_id"]) != resolved_formula_id
+        or stored.get("source_run_id") != resolved_run_id
+        or not _type_strict_json_equal(stored.get("snapshot_payload"), payload)
+    ):
+        raise RuntimeError("stored evidence snapshot conflicts with its content id")
     return {
         "snapshot_id": resolved.snapshot_id,
         "formula_id": resolved_formula_id,
@@ -1122,6 +1137,25 @@ def persist_evidence_snapshot(
         "persisted_or_verified": True,
         "live_effect": "NONE",
     }
+
+
+def persist_evidence_snapshot(
+    snapshot: research_evidence_contract.EvidenceSnapshot | Mapping[str, Any],
+    *,
+    formula_id: int,
+    source_run_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Persist one content-addressed snapshot without changing formula state."""
+
+    with _connect(read_only=False) as conn:
+        result = _persist_evidence_snapshot_conn(
+            conn,
+            snapshot,
+            formula_id=formula_id,
+            source_run_id=source_run_id,
+        )
+        conn.commit()
+    return result
 
 
 def load_evidence_snapshot(
@@ -4343,6 +4377,12 @@ def _build_shadow_validation(
             }
         ).encode("utf-8")
     ).hexdigest()
+    matched_episode_ids = sorted(
+        str(episode["episode_key"]) for episode in complete_match_episodes
+    )
+    control_episode_ids = sorted(
+        str(episode["episode_key"]) for episode in complete_control_episodes
+    )
     return {
         "policy_version": _SHADOW_MONITORING_POLICY_VERSION,
         "input_snapshot_policy_version": _SHADOW_INPUT_SNAPSHOT_POLICY_VERSION,
@@ -4364,6 +4404,24 @@ def _build_shadow_validation(
         "metrics": metrics,
         "priority_ranking": priority,
         "research_acceptance": research_acceptance,
+        "evidence_snapshot_inputs": {
+            "matched_market_episode_ids": matched_episode_ids,
+            "control_market_episode_ids": control_episode_ids,
+            # The Market Episode policy already groups all symbols in one
+            # outcome-blind broad-move unit.  Until a separate cross-formula
+            # parent namespace is introduced, that same immutable key is the
+            # conservative parent identity and never increases N_eff.
+            "matched_parent_market_episode_ids": matched_episode_ids,
+            "control_parent_market_episode_ids": control_episode_ids,
+            "raw_match_count": int(raw_status_counts["MATCHED"]),
+            "raw_control_count": int(raw_status_counts["UNMATCHED"]),
+            "matched_n_eff": float(
+                metrics.get("recency_effective_sample_size") or 0.0
+            ),
+            "control_n_eff": float(
+                metrics.get("recency_control_effective_sample_size") or 0.0
+            ),
+        },
         "formula_contract": {
             "current_v7": _current_live_formula_contract(formula),
             "exact_retained_v5": bool(
@@ -4470,8 +4528,267 @@ def _build_shadow_validation(
     }
 
 
+def _formula_evidence_contract(formula: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "formula_key": str(formula.get("formula_key") or ""),
+        "formula_version": int(formula.get("formula_version") or 0),
+        "formula_schema_version": str(formula.get("formula_schema_version") or ""),
+        "engine_version": str(formula.get("engine_version") or ""),
+        "feature_schema_version": str(formula.get("feature_schema_version") or ""),
+        "outcome_method_version": str(formula.get("outcome_method_version") or ""),
+        "direction": str(formula.get("direction") or "").upper(),
+        "horizon_minutes": int(formula.get("horizon_minutes") or 0),
+    }
+
+
+def _formula_family_id(formula: Mapping[str, Any]) -> Optional[str]:
+    if not _current_live_formula_contract(formula):
+        return None
+    multiple_testing = _as_mapping(formula.get("latest_multiple_testing"))
+    family = _as_mapping(multiple_testing.get("evidence_family"))
+    identifier = str(family.get("family_id") or "").strip().lower()
+    if len(identifier) != 64 or any(
+        character not in "0123456789abcdef" for character in identifier
+    ):
+        raise RuntimeError("current v7 formula is missing its frozen evidence family id")
+    return identifier
+
+
+def _build_shadow_evidence_snapshot(
+    formula: Mapping[str, Any], validation: Mapping[str, Any]
+) -> research_evidence_contract.EvidenceSnapshot:
+    assessment = research_evidence_contract.FormulaAssessment.from_acceptance(
+        _as_mapping(validation.get("research_acceptance")),
+        phase="PROSPECTIVE",
+    )
+    inputs = _as_mapping(validation.get("evidence_snapshot_inputs"))
+    evidence = _as_mapping(validation.get("evidence"))
+    provenance = {
+        "shadow_monitoring_policy_version": validation.get("policy_version"),
+        "input_snapshot_policy_version": validation.get(
+            "input_snapshot_policy_version"
+        ),
+        "outcome_method_version": validation.get("outcome_method_version"),
+        "formula_contract": validation.get("formula_contract") or {},
+        "max_pain_provenance": evidence.get("max_pain_provenance") or {},
+        "live_effect": "NONE",
+        "delivery_channel": "NONE",
+    }
+    return research_evidence_contract.EvidenceSnapshot.build(
+        formula_contract=_formula_evidence_contract(formula),
+        assessment=assessment,
+        assessed_at_utc=validation["evaluated_at_utc"],
+        formula_family_id=_formula_family_id(formula),
+        matched_market_episode_ids=(
+            inputs.get("matched_market_episode_ids") or []
+        ),
+        control_market_episode_ids=(
+            inputs.get("control_market_episode_ids") or []
+        ),
+        matched_parent_market_episode_ids=(
+            inputs.get("matched_parent_market_episode_ids") or []
+        ),
+        control_parent_market_episode_ids=(
+            inputs.get("control_parent_market_episode_ids") or []
+        ),
+        raw_match_count=int(inputs.get("raw_match_count") or 0),
+        raw_control_count=int(inputs.get("raw_control_count") or 0),
+        matched_n_eff=float(inputs.get("matched_n_eff") or 0.0),
+        control_n_eff=float(inputs.get("control_n_eff") or 0.0),
+        metrics=_as_mapping(validation.get("metrics")),
+        evidence=evidence,
+        provenance=provenance,
+    )
+
+
+def _relevance_assessment_by_observation(
+    conn: Any, *, formula_id: int, formula_version: int, observation_fingerprint: str
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT snapshot_id, decision_payload
+        FROM research_formula_relevance_assessments
+        WHERE formula_id=%s
+          AND formula_version=%s
+          AND relevance_policy_version=%s
+          AND observation_fingerprint=%s
+        """,
+        (
+            int(formula_id),
+            int(formula_version),
+            research_formula_relevance.POLICY_VERSION,
+            observation_fingerprint,
+        ),
+    ).fetchone()
+    if not row:
+        return None
+    payload = dict(_as_mapping(row.get("decision_payload")))
+    if str(row.get("snapshot_id") or "") != str(payload.get("snapshot_id") or ""):
+        raise RuntimeError("stored relevance decision conflicts with its snapshot id")
+    return payload
+
+
+def _latest_relevance_assessment(
+    conn: Any, *, formula_id: int, formula_version: int
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT decision_payload
+        FROM research_formula_relevance_assessments
+        WHERE formula_id=%s
+          AND formula_version=%s
+          AND relevance_policy_version=%s
+        ORDER BY relevance_assessment_id DESC
+        LIMIT 1
+        """,
+        (
+            int(formula_id),
+            int(formula_version),
+            research_formula_relevance.POLICY_VERSION,
+        ),
+    ).fetchone()
+    return None if not row else dict(_as_mapping(row.get("decision_payload")))
+
+
+def _persist_relevance_assessment_conn(
+    conn: Any,
+    *,
+    formula_id: int,
+    formula_version: int,
+    decision: Mapping[str, Any],
+) -> Dict[str, Any]:
+    payload = dict(decision)
+    conn.execute(
+        """
+        INSERT INTO research_formula_relevance_assessments (
+            formula_id, formula_version, relevance_policy_version,
+            observation_fingerprint, evidence_fingerprint, snapshot_id,
+            observed_at_utc, observation_utc_date, compatibility, observation,
+            previous_state, relevance_state, transition,
+            weak_observation_streak, recovery_evidence_streak,
+            experimental_relevance_eligible, decision_payload
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s::jsonb
+        )
+        ON CONFLICT (
+            formula_id, formula_version, relevance_policy_version,
+            observation_fingerprint
+        ) DO NOTHING
+        """,
+        (
+            int(formula_id),
+            int(formula_version),
+            payload["policy_version"],
+            payload["observation_fingerprint"],
+            payload["evidence_fingerprint"],
+            payload["snapshot_id"],
+            payload["observed_at_utc"],
+            payload["observation_utc_date"],
+            payload["compatibility"],
+            payload["observation"],
+            payload.get("previous_state"),
+            payload["state"],
+            payload["transition"],
+            int(payload["weak_observation_streak"]),
+            int(payload["recovery_evidence_streak"]),
+            bool(payload["experimental_relevance_eligible"]),
+            _json(payload),
+        ),
+    )
+    stored = _relevance_assessment_by_observation(
+        conn,
+        formula_id=formula_id,
+        formula_version=formula_version,
+        observation_fingerprint=str(payload["observation_fingerprint"]),
+    )
+    if not stored or not _type_strict_json_equal(stored, payload):
+        raise RuntimeError(
+            "stored relevance assessment conflicts with its observation fingerprint"
+        )
+    return stored
+
+
+def _persist_shadow_evidence_and_relevance(
+    conn: Any,
+    *,
+    formula: Mapping[str, Any],
+    validation: Mapping[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    formula_id = int(formula["formula_id"])
+    formula_version = int(formula["formula_version"])
+    formula_contract = _formula_evidence_contract(formula)
+    assessment = research_evidence_contract.FormulaAssessment.from_acceptance(
+        _as_mapping(validation.get("research_acceptance")), phase="PROSPECTIVE"
+    )
+    compatibility = research_evidence_contract.compatibility_for_formula_schema(
+        formula_contract["formula_schema_version"]
+    )
+    evidence_fingerprint = str(
+        _as_mapping(validation.get("evidence")).get("market_episode_fingerprint")
+        or ""
+    )
+    observed_at_utc = validation["evaluated_at_utc"]
+    observation_fingerprint = research_formula_relevance.observation_fingerprint(
+        formula_contract=formula_contract,
+        assessment=assessment,
+        evidence_fingerprint=evidence_fingerprint,
+        observed_at_utc=observed_at_utc,
+    )
+    existing = _relevance_assessment_by_observation(
+        conn,
+        formula_id=formula_id,
+        formula_version=formula_version,
+        observation_fingerprint=observation_fingerprint,
+    )
+    if existing:
+        snapshot = conn.execute(
+            """
+            SELECT snapshot_payload
+            FROM research_formula_evidence_snapshots
+            WHERE snapshot_id=%s
+            """,
+            (existing["snapshot_id"],),
+        ).fetchone()
+        if not snapshot:
+            raise RuntimeError("relevance assessment references a missing snapshot")
+        resolved_snapshot = research_evidence_contract.EvidenceSnapshot.from_dict(
+            snapshot["snapshot_payload"]
+        )
+        current = dict(existing)
+        current["duplicate_observation"] = True
+        return resolved_snapshot.to_dict(), current
+
+    snapshot = _build_shadow_evidence_snapshot(formula, validation)
+    _persist_evidence_snapshot_conn(
+        conn,
+        snapshot,
+        formula_id=formula_id,
+        source_run_id=_strict_int(formula.get("latest_evaluation_run_id")),
+    )
+    previous = _latest_relevance_assessment(
+        conn, formula_id=formula_id, formula_version=formula_version
+    )
+    decision = research_formula_relevance.advance(
+        previous=previous,
+        formula_contract=formula_contract,
+        compatibility=compatibility,
+        assessment=assessment,
+        evidence_fingerprint=evidence_fingerprint,
+        observed_at_utc=observed_at_utc,
+        snapshot_id=snapshot.snapshot_id,
+    )
+    stored = _persist_relevance_assessment_conn(
+        conn,
+        formula_id=formula_id,
+        formula_version=formula_version,
+        decision=decision,
+    )
+    return snapshot.to_dict(), stored
+
+
 def evaluate_shadow_readiness() -> Dict[str, Any]:
-    """Persist rolling prospective metrics without changing a formula stage.
+    """Persist rolling evidence and relevance without changing a formula stage.
 
     These metrics are monitoring evidence only.  Controls are independent
     formula nonmatches drawn from delivered alerts and authoritative neutral
@@ -4481,7 +4798,10 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
     evaluated = 0
     thresholds_met: list[int] = []
     research_ready: list[int] = []
+    experimentally_relevant: list[int] = []
+    relevance_state_counts: Dict[str, int] = {}
     ranked: list[Dict[str, Any]] = []
+    evaluated_at_utc = datetime.now(timezone.utc)
     with _connect(read_only=False) as conn:
         formulas = conn.execute(
             """
@@ -4489,7 +4809,14 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
                    engine_version, feature_schema_version,
                    outcome_method_version, direction, conditions, horizon_minutes,
                    latest_evaluation_run_id, shadow_started_at_utc,
-                   last_shadow_event_id
+                   last_shadow_event_id,
+                   (
+                     SELECT evaluation.multiple_testing
+                     FROM research_formula_evaluations evaluation
+                     WHERE evaluation.formula_id=research_formulas.formula_id
+                       AND evaluation.run_id=research_formulas.latest_evaluation_run_id
+                     LIMIT 1
+                   ) AS latest_multiple_testing
             FROM research_formulas
             WHERE active=TRUE
               AND current_stage='SHADOW'
@@ -4521,14 +4848,28 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
                 research_feature_matrix.VERIFIED_OUTCOME_METHOD,
             ),
         ).fetchall()
-        for formula in formulas:
+        for formula_row in formulas:
+            formula = dict(formula_row)
             source_rows = _shadow_outcome_rows(conn, formula)
             horizon_minutes = int(formula["horizon_minutes"])
             validation = _build_shadow_validation(
                 formula,
                 source_rows,
-                evaluated_at_utc=datetime.now(timezone.utc),
+                evaluated_at_utc=evaluated_at_utc,
             )
+            snapshot, relevance = _persist_shadow_evidence_and_relevance(
+                conn,
+                formula=formula,
+                validation=validation,
+            )
+            validation["evidence_snapshot"] = {
+                "snapshot_id": snapshot["snapshot_id"],
+                "compatibility": snapshot["compatibility"],
+                "formula_family_id": snapshot["formula_family_id"],
+                "live_eligible": False,
+                "delivery_channel": "NONE",
+            }
+            validation["relevance"] = relevance
             priority = dict(validation["priority_ranking"])
             evaluated += 1
             formula_id = int(formula["formula_id"])
@@ -4536,6 +4877,10 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
                 {
                     "formula_id": formula_id,
                     "horizon_minutes": horizon_minutes,
+                    "relevance_state": relevance["state"],
+                    "experimental_relevance_eligible": bool(
+                        relevance["experimental_relevance_eligible"]
+                    ),
                     **priority,
                 }
             )
@@ -4555,6 +4900,12 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
                 )
             ):
                 research_ready.append(formula_id)
+            relevance_state = str(relevance["state"])
+            relevance_state_counts[relevance_state] = (
+                relevance_state_counts.get(relevance_state, 0) + 1
+            )
+            if bool(relevance["experimental_relevance_eligible"]):
+                experimentally_relevant.append(formula_id)
         conn.commit()
     ranked.sort(key=lambda item: (float(item["score"]), -int(item["formula_id"])), reverse=True)
     for rank, item in enumerate(ranked, start=1):
@@ -4567,6 +4918,9 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
         "legacy_live_review_ready": thresholds_met,
         "research_ready": research_ready,
         "research_ready_for_experimental_review": research_ready,
+        "experimentally_relevant": experimentally_relevant,
+        "relevance_policy_version": research_formula_relevance.POLICY_VERSION,
+        "relevance_state_counts": relevance_state_counts,
         "prospective_ranking": ranked,
         "promoted": [],
         "automatic_stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",

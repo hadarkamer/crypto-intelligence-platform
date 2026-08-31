@@ -1131,7 +1131,7 @@ def run() -> None:
                     [
                         {
                             "formula_id": 3153,
-                            "formula_key": "legacy-v6-shadow",
+                            "formula_key": "3" * 64,
                             "formula_version": 1,
                             "formula_text": "legacy formula",
                             "formula_schema_version": store.research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
@@ -1288,10 +1288,23 @@ def run() -> None:
 
     readiness_connection = _ReadinessConnection()
     store._connect = lambda *, read_only: readiness_connection
+    original_relevance_persist = store._persist_shadow_evidence_and_relevance
+    store._persist_shadow_evidence_and_relevance = lambda conn, *, formula, validation: (
+        {
+            "snapshot_id": "4" * 64,
+            "compatibility": "LEGACY_SHADOW_READ_ONLY",
+            "formula_family_id": "5" * 64,
+        },
+        {
+            "state": "LEGACY_READ_ONLY",
+            "experimental_relevance_eligible": False,
+        },
+    )
     try:
         readiness = store.evaluate_shadow_readiness()
     finally:
         store._connect = original_connect
+        store._persist_shadow_evidence_and_relevance = original_relevance_persist
     assert readiness["evaluated"] == 1
     assert readiness_connection.updated is True
 

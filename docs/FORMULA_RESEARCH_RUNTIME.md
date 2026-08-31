@@ -113,9 +113,11 @@ contract is explicitly redesigned and migrated.
   `SHADOW_PENDING_EXPLICIT_APPROVAL`. This is an observational readiness state;
   it never changes a formula to `APPROVED` or `LIVE`.
 - Registry and Shadow status expose `RESEARCH_READY`, `EARLY_CURRENT_EDGE`,
-  accepted route, missing gates, rolling metrics and episode counts. The old
-  LIVE-review readiness is reported separately and is not an alias for the new
-  research contract.
+  accepted route, missing gates, rolling metrics and episode counts. Current
+  relevance is a separate versioned axis with explicit hysteresis states; it
+  never mutates research maturity or delivery authority. The old LIVE-review
+  readiness is reported separately and is not an alias for the new research
+  contract.
 - After enough genuinely future evidence exists, a separate prospective review
   freezes a predeclared cutoff and evaluates that fixed sample. Only an
   explicit, immutable human approval may then activate `APPROVED` or `LIVE`.
@@ -276,3 +278,40 @@ The scheduler is intentionally unchanged in this stage: after a complete
 multi-horizon Discovery cycle finishes, the worker sleeps six hours. Therefore
 the next cycle starts approximately `previous runtime + 6h`, not at a fixed UTC
 clock time. Fixed-time/adaptive scheduling is a separate operational stage.
+
+## Versioned rolling relevance hysteresis
+
+Stage 3B adds the side-effect-free
+`formula-relevance-hysteresis-v1` policy and connects each distinct Shadow
+rolling assessment to one verified, content-addressed `EvidenceSnapshot`.
+Migration `016_formula_relevance_hysteresis_v1.sql` stores the resulting
+relevance decisions append-only. Repeated one-minute polling with the same
+assessment/evidence/day fingerprint is idempotent and cannot advance a streak.
+
+The relevance states are independent of `research_formulas.active`, lifecycle
+stage, owner approval and delivery:
+
+- `OBSERVING`: current v7 evidence has not yet established relevance.
+- `RELEVANT`: the frozen current acceptance contract passes.
+- `WEAKENING`: one distinct weak rolling observation; the formula is not
+  suspended yet.
+- `SUSPENDED`: two distinct weak rolling observations; future Experimental
+  consumers must block new indications while Shadow continues measuring.
+- `RECOVERING`: one new strong evidence version after suspension. Reactivation
+  requires another strong observation backed by a different Market Episode
+  evidence fingerprint.
+- `LEGACY_READ_ONLY`: retained v5/v6.2 Shadow formulas remain observable and
+  can never become current-v7 relevant through this policy.
+
+A UTC-day bucket permits recency decay to produce at most one new state
+decision per day when evidence does not advance. This does not increment raw
+matches, Market Episodes or `N_eff`. In particular, waiting on the same market
+rise cannot provide a second recovery proof: the evidence fingerprint must
+change. Formula-family and Market-Episode grouping remain the statistical
+source of independence. The separate legacy 72-hour/three-UTC-date owner/LIVE
+approval contract is unchanged.
+
+Stage 3B writes no Telegram message, creates no subscription, changes no
+formula stage, and has `delivery_channel=NONE` and `live_effect=NONE` throughout.
+It does not change acceptance thresholds, HYPE/Max Pain rules, the scheduler,
+or the frozen prospective owner-approval path.

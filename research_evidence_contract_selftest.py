@@ -246,13 +246,14 @@ def run() -> None:
 
     migration = ROOT / "migrations" / "015_formula_evidence_snapshots_v1.sql"
     migration_text = migration.read_text(encoding="utf-8")
-    assert research_formula_schema_admin.MIGRATION_PATHS[-1] == migration
+    assert migration in research_formula_schema_admin.MIGRATION_PATHS
     assert "CREATE TABLE IF NOT EXISTS research_formula_evidence_snapshots" in migration_text
     assert "research_formula_evidence_snapshots is append-only" in migration_text
     assert "snapshot_payload -> 'live_eligible' = 'false'::jsonb" in migration_text
     assert "snapshot_payload ->> 'delivery_channel' = 'NONE'" in migration_text
 
-    # Store is available and idempotent, but no production worker calls it yet.
+    # The public store remains idempotent; Stage 3B uses the same transactional
+    # helper when a distinct rolling relevance observation is persisted.
     store_source = (ROOT / "research_formula_store.py").read_text(encoding="utf-8")
     assert store_source.count("persist_evidence_snapshot(") == 1
     fake = _SnapshotConnection(current_fixture["formula_contract"])
