@@ -228,6 +228,31 @@ their frozen contracts. Only an exact current v7 runtime may satisfy the LIVE
 runtime identity check, and Stage 1 neither creates a Telegram experiment nor
 enables LIVE delivery.
 
+## Shared evidence envelope
+
+Infrastructure stage 2 defines one side-effect-free contract in
+`research_evidence_contract.py`:
+
+- `FormulaAssessment` freezes the already-computed acceptance interpretation.
+  It never reruns thresholds and rejects any payload that implies LIVE.
+- `EvidenceSnapshot` binds that assessment to an exact formula runtime tuple,
+  formula-family id, matched/control Market Episode ids, parent episode ids,
+  raw counts, `N_eff`, metrics and provenance. Its SHA-256 content id changes
+  whenever any bound input changes.
+- Current v7 snapshots are marked `CURRENT_V7`. Retained v5/v6.2 formulas use
+  a deterministic `LEGACY_SHADOW_READ_ONLY` adapter and are not rewritten.
+- Migration `015_formula_evidence_snapshots_v1.sql` adds an append-only storage
+  table. No production worker writes snapshots in stage 2; later integrations
+  must call the idempotent store explicitly.
+- The envelope always has `live_eligible=false` and
+  `delivery_channel=NONE`. Telegram rendering is a future consumer and may not
+  recalculate probability, maturity or relevance.
+
+The canonical fixtures are
+`fixtures/evidence/current_v7_probability.json` and
+`fixtures/evidence/legacy_v6_shadow.json`. They prove stable interpretation,
+content ids, event/family identifiers and legacy compatibility.
+
 The scheduler is intentionally unchanged in this stage: after a complete
 multi-horizon Discovery cycle finishes, the worker sleeps six hours. Therefore
 the next cycle starts approximately `previous runtime + 6h`, not at a fixed UTC

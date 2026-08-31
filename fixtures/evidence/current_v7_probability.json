@@ -1,0 +1,75 @@
+{
+  "formula_contract": {
+    "formula_key": "1111111111111111111111111111111111111111111111111111111111111111",
+    "formula_version": 1,
+    "formula_schema_version": "research-formula-v7-adaptive-evidence",
+    "engine_version": "formula-discovery-v7-adaptive-evidence-market-episodes",
+    "feature_schema_version": "research-feature-matrix-v8-prospective-max-pain-frozen",
+    "outcome_method_version": "no-dwell-first-touch-v6",
+    "direction": "LONG",
+    "horizon_minutes": 240
+  },
+  "phase": "PROSPECTIVE",
+  "assessed_at_utc": "2026-08-30T21:00:00Z",
+  "formula_family_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "matched_market_episode_ids": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  ],
+  "control_market_episode_ids": [
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  ],
+  "matched_parent_market_episode_ids": [
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  ],
+  "control_parent_market_episode_ids": [
+    "9999999999999999999999999999999999999999999999999999999999999999",
+    "8888888888888888888888888888888888888888888888888888888888888888"
+  ],
+  "raw_match_count": 7,
+  "raw_control_count": 9,
+  "matched_n_eff": 1.0,
+  "control_n_eff": 2.0,
+  "metrics": {
+    "sample_size": 2,
+    "control_sample_size": 2,
+    "recency_weighted_hit_rate_pct": 72.5,
+    "recency_weighted_median_mfe_pct": 1.8,
+    "recency_weighted_median_mae_pct": 0.7
+  },
+  "evidence": {
+    "raw_matches": 7,
+    "independent_matches": 2,
+    "parent_market_episodes": 1
+  },
+  "provenance": {
+    "market_episode_policy_version": "market-episode-v4-fixed-window-directional-price-reset-outcome-blind",
+    "formula_family_policy_version": "formula-evidence-family-v2-interval-duration-overlap",
+    "source": "fixture-current-v7"
+  },
+  "assessment": {
+    "policy_version": "research-acceptance-v1-probability-or-asymmetry",
+    "research_ready": true,
+    "accepted_paths": ["PROBABILITY"],
+    "early_current_paths": ["PROBABILITY"],
+    "maturity": "RESEARCH_READY",
+    "missing_by_path": {
+      "COMMON": [],
+      "PROBABILITY": [],
+      "ASYMMETRY": ["strong favorable/adverse efficiency"]
+    },
+    "metrics": {
+      "current_mae_p90_pct": 2.4,
+      "current_mae_p95_pct": 3.1
+    },
+    "tail_risk_treatment": "mandatory disclosure",
+    "live_effect": "NONE; explicit owner approval and LIVE gates are unchanged"
+  },
+  "expected": {
+    "snapshot_id": "627449b4eca5494a916a6f35c63be477722c9b476f6ee348732c0b107a1a01e7",
+    "assessment_id": "e999f9f783393550759cbe0bd3461aad8833948331589c268de1dd7a98e572b9",
+    "compatibility": "CURRENT_V7",
+    "research_ready": true
+  }
+}

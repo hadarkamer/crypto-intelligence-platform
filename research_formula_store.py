@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover
     dict_row = None
 
 import canonical_price_path
+import research_evidence_contract
 import research_feature_matrix
 import research_formula_acceptance
 import research_formula_engine
@@ -821,6 +822,7 @@ def schema_status() -> Dict[str, Any]:
         "research_prospective_anchor_slots",
         "research_prospective_shadow_events",
         "research_outcome_event_rejections",
+        "research_formula_evidence_snapshots",
     )
     required_columns = {
         "research_formula_shadow_checks": (
@@ -920,6 +922,30 @@ def schema_status() -> Dict[str, Any]:
             "event_snapshot",
             "rejected_at_utc",
         ),
+        "research_formula_evidence_snapshots": (
+            "snapshot_schema_version",
+            "assessment_schema_version",
+            "contract_version",
+            "compatibility",
+            "formula_id",
+            "source_run_id",
+            "formula_key",
+            "formula_version",
+            "formula_schema_version",
+            "phase",
+            "assessed_at_utc",
+            "formula_family_id",
+            "matched_market_episode_ids",
+            "control_market_episode_ids",
+            "matched_parent_market_episode_ids",
+            "control_parent_market_episode_ids",
+            "raw_match_count",
+            "raw_control_count",
+            "matched_n_eff",
+            "control_n_eff",
+            "snapshot_payload",
+            "created_at_utc",
+        ),
     }
     base = {
         "configured": bool(_database_url()),
@@ -959,11 +985,169 @@ def schema_status() -> Dict[str, Any]:
               (SELECT COUNT(*) FROM research_legacy_alert_messages) AS legacy_messages,
               (SELECT COUNT(*) FROM research_formula_alert_subscriptions WHERE active) AS active_subscriptions,
               (SELECT COUNT(*) FROM research_formula_live_deliveries WHERE status='PENDING') AS pending_live_deliveries,
-              (SELECT COUNT(*) FROM research_outcome_event_rejections) AS rejected_outcome_events
+              (SELECT COUNT(*) FROM research_outcome_event_rejections) AS rejected_outcome_events,
+              (SELECT COUNT(*) FROM research_formula_evidence_snapshots) AS evidence_snapshots
             """
         ).fetchone()
         base.update({key: int(counts[key] or 0) for key in counts})
     return _json_safe(base)
+
+
+def persist_evidence_snapshot(
+    snapshot: research_evidence_contract.EvidenceSnapshot | Mapping[str, Any],
+    *,
+    formula_id: int,
+    source_run_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Persist one content-addressed snapshot without changing formula state.
+
+    No production worker calls this function in infrastructure stage 2.  It is
+    an idempotent storage boundary for later Discovery/Shadow integrations and
+    has no path to Telegram, approval or LIVE.
+    """
+
+    resolved = (
+        snapshot
+        if isinstance(snapshot, research_evidence_contract.EvidenceSnapshot)
+        else research_evidence_contract.EvidenceSnapshot.from_dict(snapshot)
+    )
+    payload = resolved.to_dict()
+    formula = payload["formula"]
+    resolved_formula_id = _strict_int(formula_id)
+    resolved_run_id = None if source_run_id is None else _strict_int(source_run_id)
+    if resolved_formula_id is None or resolved_formula_id <= 0:
+        raise ValueError("formula_id must be a positive integer")
+    if source_run_id is not None and (
+        resolved_run_id is None or resolved_run_id <= 0
+    ):
+        raise ValueError("source_run_id must be a positive integer when supplied")
+
+    with _connect(read_only=False) as conn:
+        formula_row = conn.execute(
+            """
+            SELECT formula_key, formula_version, formula_schema_version,
+                   engine_version, feature_schema_version,
+                   outcome_method_version, direction, horizon_minutes
+            FROM research_formulas
+            WHERE formula_id=%s
+            FOR SHARE
+            """,
+            (resolved_formula_id,),
+        ).fetchone()
+        if not formula_row:
+            raise ValueError("formula_id does not exist")
+        identity_fields = (
+            "formula_key",
+            "formula_version",
+            "formula_schema_version",
+            "engine_version",
+            "feature_schema_version",
+            "outcome_method_version",
+            "direction",
+            "horizon_minutes",
+        )
+        mismatched = [
+            key
+            for key in identity_fields
+            if formula_row.get(key) != formula.get(key)
+        ]
+        if mismatched:
+            raise RuntimeError(
+                "snapshot formula identity mismatch: " + ", ".join(mismatched)
+            )
+        conn.execute(
+            """
+            INSERT INTO research_formula_evidence_snapshots (
+                snapshot_id, snapshot_schema_version,
+                assessment_schema_version, contract_version, compatibility,
+                formula_id, source_run_id, formula_key, formula_version,
+                formula_schema_version, phase, assessed_at_utc,
+                formula_family_id, matched_market_episode_ids,
+                control_market_episode_ids, matched_parent_market_episode_ids,
+                control_parent_market_episode_ids, raw_match_count,
+                raw_control_count, matched_n_eff, control_n_eff,
+                snapshot_payload
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
+                %s, %s, %s, %s, %s::jsonb
+            )
+            ON CONFLICT (snapshot_id) DO NOTHING
+            """,
+            (
+                resolved.snapshot_id,
+                payload["snapshot_schema_version"],
+                payload["assessment_schema_version"],
+                payload["contract_version"],
+                payload["compatibility"],
+                resolved_formula_id,
+                resolved_run_id,
+                formula["formula_key"],
+                int(formula["formula_version"]),
+                formula["formula_schema_version"],
+                payload["phase"],
+                payload["assessed_at_utc"],
+                payload["formula_family_id"],
+                _json(payload["matched_market_episode_ids"]),
+                _json(payload["control_market_episode_ids"]),
+                _json(payload["matched_parent_market_episode_ids"]),
+                _json(payload["control_parent_market_episode_ids"]),
+                int(payload["raw_match_count"]),
+                int(payload["raw_control_count"]),
+                float(payload["matched_n_eff"]),
+                float(payload["control_n_eff"]),
+                _json(payload),
+            ),
+        )
+        stored = conn.execute(
+            """
+            SELECT formula_id, source_run_id, snapshot_payload
+            FROM research_formula_evidence_snapshots
+            WHERE snapshot_id=%s
+            """,
+            (resolved.snapshot_id,),
+        ).fetchone()
+        if (
+            not stored
+            or int(stored["formula_id"]) != resolved_formula_id
+            or stored.get("source_run_id") != resolved_run_id
+            or not _type_strict_json_equal(stored.get("snapshot_payload"), payload)
+        ):
+            raise RuntimeError("stored evidence snapshot conflicts with its content id")
+        conn.commit()
+    return {
+        "snapshot_id": resolved.snapshot_id,
+        "formula_id": resolved_formula_id,
+        "source_run_id": resolved_run_id,
+        "persisted_or_verified": True,
+        "live_effect": "NONE",
+    }
+
+
+def load_evidence_snapshot(
+    snapshot_id: str,
+) -> Optional[research_evidence_contract.EvidenceSnapshot]:
+    """Load and fingerprint-verify one append-only EvidenceSnapshot."""
+
+    identifier = str(snapshot_id or "").strip().lower()
+    if len(identifier) != 64 or any(
+        character not in "0123456789abcdef" for character in identifier
+    ):
+        raise ValueError("snapshot_id must be a lowercase 64-character SHA-256 id")
+    with _connect(read_only=True) as conn:
+        row = conn.execute(
+            """
+            SELECT snapshot_payload
+            FROM research_formula_evidence_snapshots
+            WHERE snapshot_id=%s
+            """,
+            (identifier,),
+        ).fetchone()
+    if not row:
+        return None
+    return research_evidence_contract.EvidenceSnapshot.from_dict(
+        row["snapshot_payload"]
+    )
 
 
 def latest_completed_discovery_runs(

@@ -1,0 +1,60 @@
+{
+  "formula_contract": {
+    "formula_key": "2222222222222222222222222222222222222222222222222222222222222222",
+    "formula_version": 1,
+    "formula_schema_version": "research-formula-v6-first-touch-maxpain",
+    "engine_version": "formula-discovery-v6.2-first-touch-maxpain-hierarchical-holdout-isolated",
+    "feature_schema_version": "research-feature-matrix-v8-prospective-max-pain-frozen",
+    "outcome_method_version": "no-dwell-first-touch-v6",
+    "direction": "SHORT",
+    "horizon_minutes": 720
+  },
+  "phase": "PROSPECTIVE",
+  "assessed_at_utc": "2026-08-30T21:00:00Z",
+  "matched_market_episode_ids": [
+    "3333333333333333333333333333333333333333333333333333333333333333"
+  ],
+  "control_market_episode_ids": [
+    "4444444444444444444444444444444444444444444444444444444444444444"
+  ],
+  "matched_parent_market_episode_ids": [
+    "5555555555555555555555555555555555555555555555555555555555555555"
+  ],
+  "control_parent_market_episode_ids": [
+    "6666666666666666666666666666666666666666666666666666666666666666"
+  ],
+  "raw_match_count": 3,
+  "raw_control_count": 4,
+  "matched_n_eff": 1.0,
+  "control_n_eff": 1.0,
+  "metrics": {
+    "sample_size": 1,
+    "control_sample_size": 1
+  },
+  "evidence": {
+    "legacy_formula_preserved": true
+  },
+  "provenance": {
+    "source": "fixture-retained-v6.2"
+  },
+  "assessment": {
+    "policy_version": "research-acceptance-v1-probability-or-asymmetry",
+    "research_ready": false,
+    "accepted_paths": [],
+    "early_current_paths": [],
+    "maturity": "ACCUMULATING_EVIDENCE",
+    "missing_by_path": {
+      "COMMON": ["current v7 adaptive formula contract"],
+      "PROBABILITY": ["hit rate"],
+      "ASYMMETRY": ["strong favorable/adverse efficiency"]
+    },
+    "live_effect": "NONE; retained legacy formulas remain Shadow read-only"
+  },
+  "expected": {
+    "snapshot_id": "1ebddecce85996b5bcc5023481f8af6830875b4415abc29d7a8227480a9f75e0",
+    "assessment_id": "ede58db7e9266ff24528914b4369197a4a3f7374d5d54d9ed156b653b053d195",
+    "formula_family_id": "554e01c156ef6ba119b064001888aae20e396f914ceddebc3f08c94ccdb1a6ab",
+    "compatibility": "LEGACY_SHADOW_READ_ONLY",
+    "research_ready": false
+  }
+}

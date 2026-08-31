@@ -12,6 +12,7 @@ import os
 from typing import Any, Dict, Mapping, Optional
 
 import research_feature_matrix
+import research_evidence_contract
 import research_formula_acceptance
 import research_formula_engine
 import research_formula_store
@@ -346,6 +347,7 @@ class FormulaResearchWorker:
                 research_formula_acceptance.POLICY_VERSION
             ),
             "market_episode_policy_version": research_market_episode.POLICY_VERSION,
+            "evidence_contract": research_evidence_contract.contract_descriptor(),
             "recent_window_days": _discovery_config().recent_window_days,
             "recency_half_life_days": _discovery_config().recency_half_life_days,
             "discovery_interval_seconds": _DISCOVERY_INTERVAL_SECONDS,
