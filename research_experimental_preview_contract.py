@@ -166,6 +166,7 @@ def plan_preview_only(
     if gate_policy.get("cooldown_seconds") is None:
         global_blockers.append("source Experimental cooldown is not configured")
 
+    preview_route = "TEST_ALLOWLIST" if route == "TEST_ALLOWLIST" else "NONE"
     previews = []
     for record in verified["decision_records"]:
         payload = json.loads(record["decision_payload_json"])
@@ -198,7 +199,7 @@ def plan_preview_only(
             "status": status,
             "blockers": blockers,
             "chat_id": chat_id,
-            "route": "TEST_ALLOWLIST",
+            "route": preview_route,
             "formula_family_id": record["formula_family_id"],
             "representative_snapshot_id": record[
                 "representative_snapshot_id"
@@ -220,7 +221,12 @@ def plan_preview_only(
     batch_payload = {
         "policy_version": POLICY_VERSION,
         "source_audit_batch_id": batch["audit_batch_id"],
+        "stage5_status": stage5_status,
+        "chat_id": chat_id,
+        "route": preview_route,
         "policy": output_policy,
+        "public_opt_in": False,
+        "stage6_activated": False,
         "preview_decision_ids": [
             preview["preview_decision_id"] for preview in previews
         ],
@@ -233,7 +239,7 @@ def plan_preview_only(
         "source_audit_batch_id": batch["audit_batch_id"],
         "stage5_status": stage5_status,
         "chat_id": chat_id,
-        "route": "TEST_ALLOWLIST" if route == "TEST_ALLOWLIST" else "NONE",
+        "route": preview_route,
         "policy": output_policy,
         "families_considered": len(previews),
         "preview_simulated_eligible": sum(

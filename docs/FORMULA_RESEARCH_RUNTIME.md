@@ -375,6 +375,15 @@ normal Experimental review cannot be bypassed. Every preview is labelled
 zero delivery, database, research-evidence and LIVE effects. The contract is
 not imported by any production surface and adds no command or Telegram call.
 
+`research_experimental_preview_storage_contract.py` adds the matching pure
+storage boundary. It verifies every preview decision, message hash, separate
+idempotency key and enclosing batch id before returning canonical audit rows.
+The still-unregistered migration 018 now also defines separate append-only
+Preview batch and decision tables linked to the underlying Experimental audit
+ids and EvidenceSnapshot. Database constraints keep public opt-in and Stage-6
+activation false and keep `research_evidence_effect=NONE`. The contract performs
+no write, and neither it nor the extended schema is connected to production.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
