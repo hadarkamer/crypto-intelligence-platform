@@ -439,6 +439,17 @@ production entrypoint remains untouched. Merely starting staging therefore
 causes zero Preview delivery, API, database, research-evidence, Stage-6 or LIVE
 effects.
 
+`research_experimental_preview_staging_config.py` defines the only staging
+configuration names for a future activation: explicit enabled and kill-switch
+booleans, owner approval, one numeric private-chat id, a 40-character runtime
+commit and a 64-character activation-approval id. Defaults are disabled,
+kill-switched and unconfigured. `ai_candidate_main.py` resolves the mapping and
+exposes only sanitized readiness booleans and a chat-binding hash in health;
+the raw chat and approval ids are never logged or returned. This configuration
+version has `CONFIGURE_ONLY_ACTIVATION_FORBIDDEN` authority, so even setting all
+variables to an activation-shaped combination cannot register the connector or
+send. No Render values were added by this change.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions

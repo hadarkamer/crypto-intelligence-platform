@@ -20,6 +20,7 @@ import ai_alert_research
 import ai_telegram
 import research_outcome_worker
 import research_experimental_preview_staging_registration as preview_staging
+import research_experimental_preview_staging_config as preview_staging_config
 import research_formula_store
 import research_formula_worker
 
@@ -55,6 +56,7 @@ async def health(_: web.Request) -> web.Response:
                 research_formula_store.schema_status
             ),
             "formula_research": research_formula_worker.WORKER.status(),
+            "preview_staging": preview_staging.REGISTRATION.status(),
             "writers_started_by_this_process": False,
         }
     )
@@ -109,8 +111,14 @@ async def main() -> None:
 
     await bot_app.initialize()
     await bot_app.start()
+    preview_configuration = preview_staging_config.resolve_staging_configuration(
+        os.environ
+    )
     preview_registration = (
-        preview_staging.REGISTRATION.bind_disabled_runtime_bot(bot_app.bot)
+        preview_staging.REGISTRATION.bind_disabled_runtime_bot(
+            bot_app.bot,
+            configuration=preview_configuration,
+        )
     )
     print(
         "[ai-analytics-test] PREVIEW staging binding prepared; "

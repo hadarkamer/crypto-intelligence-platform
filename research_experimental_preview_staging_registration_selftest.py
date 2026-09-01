@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import research_experimental_preview_staging_registration as registration_module
+import research_experimental_preview_staging_config as staging_config
 import research_experimental_preview_telegram_dispatcher as dispatcher_module
 
 
@@ -29,7 +30,18 @@ def run() -> None:
     assert initial["kill_switch_engaged"] is True
 
     bot = FakeStagingBot()
-    bound = registration.bind_disabled_runtime_bot(bot)
+    configured = staging_config.resolve_staging_configuration(
+        {
+            staging_config.OWNER_APPROVED_ENV: "1",
+            staging_config.TEST_CHAT_ID_ENV: "-1001",
+            staging_config.RUNTIME_COMMIT_ENV: "9" * 40,
+            staging_config.ACTIVATION_APPROVAL_ENV: "a" * 64,
+        }
+    )
+    bound = registration.bind_disabled_runtime_bot(
+        bot,
+        configuration=configured,
+    )
     assert bound["mode"] == registration_module.MODE
     assert bound["owner"] == dispatcher_module.OWNER
     assert bound["lifecycle_status"] == registration_module.LIFECYCLE_STATUS
@@ -41,7 +53,11 @@ def run() -> None:
     )
     assert bound["enabled"] is False
     assert bound["kill_switch_engaged"] is True
-    assert bound["test_chat_configured"] is False
+    assert bound["test_chat_configured"] is True
+    assert len(bound["test_chat_binding_sha256"]) == 64
+    assert bound["runtime_commit_configured"] is True
+    assert bound["activation_approval_configured"] is True
+    assert bound["configuration_prerequisites_complete"] is True
     assert bound["connector_registered"] is False
     assert bound["activation_allowed"] is False
     assert bound["handler_registered"] is False
@@ -58,13 +74,19 @@ def run() -> None:
     assert bound["live_effect"] == "NONE"
     assert bot.calls == []
 
-    repeated = registration.bind_disabled_runtime_bot(bot)
+    repeated = registration.bind_disabled_runtime_bot(
+        bot,
+        configuration=configured,
+    )
     assert repeated == bound
     assert bot.calls == []
 
     other = FakeStagingBot()
     try:
-        registration.bind_disabled_runtime_bot(other)
+        registration.bind_disabled_runtime_bot(
+            other,
+            configuration=configured,
+        )
     except RuntimeError as exc:
         assert "different staging Bot" in str(exc)
     else:
