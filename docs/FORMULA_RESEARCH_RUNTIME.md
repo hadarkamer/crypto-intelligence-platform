@@ -450,6 +450,16 @@ version has `CONFIGURE_ONLY_ACTIVATION_FORBIDDEN` authority, so even setting all
 variables to an activation-shaped combination cannot register the connector or
 send. No Render values were added by this change.
 
+`research_experimental_preview_activation_record.py` prepares a deterministic,
+non-authoritative activation candidate for the dedicated candidate service. It
+binds the exact runtime commit and the sanitized hash of exactly one private
+`TEST_ALLOWLIST` chat. Preparation requires the feature flag to remain off, the
+kill switch engaged, owner approval absent and no activation-approval id. The
+candidate is explicitly `PREPARED_NOT_APPROVED`; its id cannot be used as an
+approval id, and the module has no connector, Bot, environment, database,
+scheduler, worker or delivery integration. Any change to the service target,
+commit, route or chat binding invalidates its fingerprint.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions

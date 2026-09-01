@@ -76,3 +76,23 @@ Changing the configuration-only state does not authorize a deployment, a Bot
 API call, a Telegram message, activation, or Stage 6. Each of those requires a
 later explicit decision. The Stage 5 READY/WAITING_DATA check remains independent
 and cannot activate this route automatically.
+
+Before requesting that later decision, prepare and fingerprint an activation
+candidate with `research_experimental_preview_activation_record.py`. The
+candidate must report all of the following:
+
+```text
+status=PREPARED_NOT_APPROVED
+scope=PRIVATE_TEST_CHAT_PREVIEW_ONLY
+route=TEST_ALLOWLIST
+test_chat_count=1
+approval_granted=false
+activation_approval_id=null
+connector_registration_allowed=false
+delivery_allowed=false
+```
+
+An activation candidate id is not an activation approval id. Do not copy it to
+Render. The approval record must be created in a later, explicit step and must
+bind the candidate, the exact commit actually intended for deployment and the
+same private-chat fingerprint.
