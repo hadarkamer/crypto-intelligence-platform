@@ -395,6 +395,17 @@ network path. Its transcript remains test data only: delivery attempts,
 Telegram API calls, database writes, research-evidence writes and LIVE effects
 all stay zero, and the module is not imported by a production surface.
 
+`research_experimental_preview_transport_contract.py` prepares the exact
+private-test-chat transport envelope behind a second fail-closed policy. The
+transport flag defaults off, its kill switch defaults on, owner transport
+approval is separate, and exactly one configured destination must equal the
+already-authorized Preview chat. A ready envelope preserves the Preview label,
+message fingerprint, family/snapshot/audit bindings and separate transport
+idempotency key. The contract enforces one decision per formula family and
+closes when Stage 5 becomes `READY`. It registers no connector, accepts no
+public opt-in, imports no Telegram client and performs no API call or delivery;
+database, research-evidence, Stage-6 and LIVE effects remain zero.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
