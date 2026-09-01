@@ -9,6 +9,7 @@ import json
 import ai_tools
 import research_evidence_contract as evidence_contract
 import research_formula_engine
+import research_formula_families
 import research_formula_lab_comparison as comparison
 import research_formula_store
 
@@ -16,10 +17,41 @@ import research_formula_store
 START = datetime(2026, 8, 30, 0, 0, tzinfo=timezone.utc)
 
 
-def _formula(*, current: bool, key: str, feature: str) -> dict:
+def _family_metadata(conditions: list[dict], exceptions=()) -> dict:
+    policy = research_formula_families.condition_family_policy(
+        conditions,
+        justified_exceptions=exceptions,
+        enforce_correlated_families=True,
+    )
     return {
+        "condition_family_policy": {
+            "policy_version": (
+                research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+            ),
+            "enforcement": "ALL_CONDITION_DEPTHS",
+            "families": list(policy["families"]),
+            "justified_exceptions": list(exceptions),
+        }
+    }
+
+
+def _formula(*, current: bool, key: str, feature: str) -> dict:
+    conditions = [{"feature": feature, "operator": ">=", "value": 1.0}]
+    formula_key = (
+        research_formula_engine.formula_key(
+            direction="LONG",
+            horizon_minutes=720,
+            feature_schema_version=(
+                evidence_contract.CURRENT_FEATURE_SCHEMA_VERSION
+            ),
+            conditions=conditions,
+        )
+        if current
+        else key * 64
+    )
+    formula = {
         "formula_id": 101 if current else 202,
-        "formula_key": key * 64,
+        "formula_key": formula_key,
         "formula_version": 1,
         "formula_schema_version": (
             research_formula_engine.FORMULA_SCHEMA_VERSION
@@ -39,11 +71,14 @@ def _formula(*, current: bool, key: str, feature: str) -> dict:
         ),
         "direction": "LONG",
         "horizon_minutes": 720,
-        "conditions": [{"feature": feature, "operator": ">=", "value": 1.0}],
+        "conditions": conditions,
         "current_stage": "HOLDOUT_PASSED" if current else "SHADOW",
         "ranking_score": 9.0 if current else 8.0,
         "holdout_metrics": {"sample_size": 10},
     }
+    if current:
+        formula["multiple_testing"] = _family_metadata(conditions)
+    return formula
 
 
 def _anchor(
@@ -91,6 +126,7 @@ def _snapshot(
     key: str,
     family: str | None,
     horizon_minutes: int = 720,
+    retained_v7_1: bool = False,
 ) -> dict:
     schema = (
         evidence_contract.CURRENT_FORMULA_SCHEMA_VERSION
@@ -98,7 +134,11 @@ def _snapshot(
         else evidence_contract.LEGACY_V6_FORMULA_SCHEMA_VERSION
     )
     engine = (
-        evidence_contract.CURRENT_ENGINE_VERSION
+        (
+            evidence_contract.RETAINED_V7_1_ENGINE_VERSION
+            if retained_v7_1
+            else evidence_contract.CURRENT_ENGINE_VERSION
+        )
         if current
         else evidence_contract.LEGACY_V6_ENGINE_VERSION
     )
@@ -124,7 +164,7 @@ def _snapshot(
             "early_current_paths": [],
             "maturity": "ACCUMULATING_EVIDENCE",
             "missing_by_path": {
-                "COMMON": ["current V7.1 contract"],
+                "COMMON": ["current V7.2 contract"],
                 "PROBABILITY": ["legacy read-only"],
                 "ASYMMETRY": ["legacy read-only"],
             },
@@ -325,7 +365,7 @@ def run() -> None:
     assert provenance["max_pain_status_counts"] == {"UNEVALUABLE": 4}
     assert provenance["later_snapshot_lookup"] is False
     assert provenance["runtime_evidence_mixed"] is False
-    current_result = ready["current_v7_1"]["formulas"][0]
+    current_result = ready["current_v7_2"]["formulas"][0]
     legacy_result = ready["legacy_v6_2"]["formulas"][0]
     assert current_result["raw_match_count"] == 4
     assert current_result["independent_market_episode_count"] == 2
@@ -344,6 +384,35 @@ def run() -> None:
     assert renderer["delivery_attempts"] == 0
     assert renderer["delivery_channel"] == "NONE"
     assert renderer["live_effect"] == "NONE"
+
+    retained_dry_run = comparison._dry_run_summary(
+        [
+            _snapshot(
+                current=True,
+                path="PROBABILITY",
+                key="8",
+                family="8" * 64,
+                retained_v7_1=True,
+            ),
+            _snapshot(
+                current=True,
+                path="ASYMMETRY",
+                key="9",
+                family="9" * 64,
+                retained_v7_1=True,
+            ),
+            snapshots[2],
+        ],
+        direction="LONG",
+        horizon_minutes=720,
+    )
+    assert retained_dry_run["both_acceptance_paths_exercised"] is False
+    assert (
+        retained_dry_run["both_runtime_compatibilities_rendered"] is False
+    )
+    assert evidence_contract.RETAINED_V7_1_READ_ONLY in (
+        retained_dry_run["accepted_path_counts_by_compatibility"]
+    )
     assert ready["hype_isolation"]["blocks_other_symbols"] is False
     assert ready["safety"] == {
         **ready["safety"],
@@ -353,6 +422,82 @@ def run() -> None:
         "delivery_channel": "NONE",
         "live_effect": "NONE",
     }
+
+    repeated_price_conditions = [
+        {
+            "feature": "aligned.60m.price_change_pct",
+            "operator": ">=",
+            "value": 1.0,
+        },
+        {
+            "feature": (
+                "historical.60m.price_change_pct_percentile_session_matched"
+            ),
+            "operator": ">=",
+            "value": 80.0,
+        },
+    ]
+    correlated = {
+        **current,
+        "formula_key": research_formula_engine.formula_key(
+            direction="LONG",
+            horizon_minutes=720,
+            feature_schema_version=(
+                evidence_contract.CURRENT_FEATURE_SCHEMA_VERSION
+            ),
+            conditions=repeated_price_conditions,
+        ),
+        "conditions": repeated_price_conditions,
+        "multiple_testing": _family_metadata(repeated_price_conditions),
+    }
+    correlated_result = comparison.compare_same_anchors(
+        current_formulas=[correlated],
+        legacy_formulas=[legacy],
+        anchor_rows=anchors,
+        evidence_snapshots=snapshots,
+        direction="LONG",
+        horizon_minutes=720,
+    )
+    assert correlated_result["status"] == "WAITING_DATA"
+    assert correlated["formula_key"] in correlated_result["current_v7_2"][
+        "invalid_condition_family_formula_keys"
+    ]
+    assert (
+        "current cohort contains an invalid correlated condition family"
+        in correlated_result["blockers"]
+    )
+
+    exception = (
+        "price: independent multi-window confirmation retained for audit"
+    )
+    excepted = {
+        **correlated,
+        "formula_key": research_formula_engine.formula_key(
+            direction="LONG",
+            horizon_minutes=720,
+            feature_schema_version=(
+                evidence_contract.CURRENT_FEATURE_SCHEMA_VERSION
+            ),
+            conditions=repeated_price_conditions,
+            condition_family_exceptions=(exception,),
+        ),
+        "multiple_testing": _family_metadata(
+            repeated_price_conditions, (exception,)
+        ),
+    }
+    excepted_summary = comparison._formula_summary(excepted, anchors)
+    assert excepted_summary["condition_family_policy"]["valid"] is True
+    stale_exception_key = {
+        **excepted,
+        "formula_key": correlated["formula_key"],
+    }
+    stale_exception_summary = comparison._formula_summary(
+        stale_exception_key, anchors
+    )
+    assert stale_exception_summary["condition_family_policy"]["valid"] is False
+    assert "formula_key does not bind" in " ".join(
+        stale_exception_summary["condition_family_policy"]["reasons"]
+    )
 
     waiting = comparison.compare_same_anchors(
         current_formulas=[],
@@ -369,13 +514,13 @@ def run() -> None:
         horizon_minutes=720,
     )
     assert waiting["status"] == "WAITING_DATA"
-    assert "exact current V7.1 formula cohort is unavailable" in waiting["blockers"]
+    assert "exact current V7.2 formula cohort is unavailable" in waiting["blockers"]
     assert (
         "legacy V6.2 cohort has no evaluable same-anchor rows"
         in waiting["blockers"]
     )
     assert any("both PROBABILITY and ASYMMETRY" in item for item in waiting["blockers"])
-    assert any("both current V7.1 and legacy V6.2" in item for item in waiting["blockers"])
+    assert any("both current V7.2 and legacy V6.2" in item for item in waiting["blockers"])
 
     drifted = {**current, "engine_version": "formula-discovery-v7-old"}
     _raises(
@@ -389,6 +534,23 @@ def run() -> None:
             horizon_minutes=720,
         ),
     )
+    for runtime_field, stale_value in (
+        ("formula_version", 2),
+        ("feature_schema_version", "stale-feature-schema"),
+        ("outcome_method_version", "stale-outcome-method"),
+    ):
+        stale_contract = {**current, runtime_field: stale_value}
+        _raises(
+            "another runtime",
+            lambda stale_contract=stale_contract: comparison.compare_same_anchors(
+                current_formulas=[stale_contract],
+                legacy_formulas=[legacy],
+                anchor_rows=anchors,
+                evidence_snapshots=snapshots,
+                direction="LONG",
+                horizon_minutes=720,
+            ),
+        )
     _raises(
         "duplicate anchors or events",
         lambda: comparison.compare_same_anchors(
@@ -502,9 +664,25 @@ def run() -> None:
     for index in range(25):
         current_formula = dict(current)
         current_formula["formula_id"] = 10000 + index
-        current_formula["formula_key"] = hashlib.sha256(
-            f"current-{index}".encode("utf-8")
-        ).hexdigest()
+        current_conditions = [
+            {
+                "feature": "signal.current",
+                "operator": ">=",
+                "value": 0.5 + index / 1000.0,
+            }
+        ]
+        current_formula["conditions"] = current_conditions
+        current_formula["multiple_testing"] = _family_metadata(
+            current_conditions
+        )
+        current_formula["formula_key"] = research_formula_engine.formula_key(
+            direction="LONG",
+            horizon_minutes=720,
+            feature_schema_version=(
+                evidence_contract.CURRENT_FEATURE_SCHEMA_VERSION
+            ),
+            conditions=current_conditions,
+        )
         legacy_formula = dict(legacy)
         legacy_formula["formula_id"] = 20000 + index
         legacy_formula["formula_key"] = hashlib.sha256(

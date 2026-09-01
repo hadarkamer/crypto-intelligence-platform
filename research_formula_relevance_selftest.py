@@ -207,6 +207,28 @@ def run() -> None:
     )
     assert legacy_duplicate["duplicate_observation"] is True
 
+    retained_v7_1 = _fixture("retained_v7_1_probability.json")
+    retained_assessment = _assessment(
+        retained_v7_1, maturity="RESEARCH_READY", research_ready=True
+    )
+    retained_state = relevance.advance(
+        previous=None,
+        formula_contract=retained_v7_1["formula_contract"],
+        compatibility=evidence_contract.CURRENT_V7,
+        assessment=retained_assessment,
+        evidence_fingerprint="a" * 64,
+        observed_at_utc=start,
+        snapshot_id="b" * 64,
+    )
+    assert retained_state["state"] == relevance.LEGACY_READ_ONLY
+    assert retained_state["compatibility"] == (
+        evidence_contract.LEGACY_SHADOW_READ_ONLY
+    )
+    assert retained_state["runtime_compatibility"] == (
+        evidence_contract.RETAINED_V7_1_READ_ONLY
+    )
+    assert retained_state["experimental_relevance_eligible"] is False
+
     # A policy-version change never carries an old streak into a new contract.
     prior_policy = {**weakening, "policy_version": "old-policy"}
     reset = _advance(

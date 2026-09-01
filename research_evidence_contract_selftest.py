@@ -137,9 +137,13 @@ def run() -> None:
     current_fixture = _fixture("current_v7_probability.json")
     current_assessment, current = _snapshot(current_fixture)
     expected = current_fixture["expected"]
+    assert current.snapshot_id == (
+        "7dcbea1191f423a6a64a756830621def7ef8a4cd27e9ace400ccf7475cf2333f"
+    )
     assert current.snapshot_id == expected["snapshot_id"]
     assert current_assessment.assessment_id == expected["assessment_id"]
     assert current.compatibility == expected["compatibility"]
+    assert current.runtime_compatibility == contract.CURRENT_V7
     assert current.assessment.research_ready is expected["research_ready"]
     assert current.assessment.accepted_paths == ("PROBABILITY",)
     assert current.to_dict()["live_eligible"] is False
@@ -167,6 +171,25 @@ def run() -> None:
     assert round_trip == current
     assert contract.interpret_snapshot(round_trip).to_dict() == (
         contract.interpret_snapshot(current.to_dict()).to_dict()
+    )
+
+    retained_v7_1_fixture = _fixture("retained_v7_1_probability.json")
+    retained_v7_1_assessment, retained_v7_1 = _snapshot(retained_v7_1_fixture)
+    assert retained_v7_1.snapshot_id == (
+        "b7ced230183f1d6e4db3d3f9ceb36ed97b57c4631d12dc7f184cb2f273bf73b0"
+    )
+    assert retained_v7_1.snapshot_id == (
+        retained_v7_1_fixture["expected"]["snapshot_id"]
+    )
+    assert retained_v7_1_assessment.assessment_id == current_assessment.assessment_id
+    assert retained_v7_1.compatibility == contract.CURRENT_V7
+    assert retained_v7_1.runtime_compatibility == (
+        contract.RETAINED_V7_1_READ_ONLY
+    )
+    assert retained_v7_1.snapshot_id != current.snapshot_id
+    assert (
+        contract.EvidenceSnapshot.from_dict(retained_v7_1.to_dict())
+        == retained_v7_1
     )
 
     detached = current.to_dict()
@@ -239,8 +262,26 @@ def run() -> None:
     )
     _raises("runtime versions do not match", lambda: _snapshot(mismatched_runtime))
 
+    invented_runtime = deepcopy(current_fixture)
+    invented_runtime["formula_contract"]["engine_version"] = (
+        "formula-discovery-v7.3-invented"
+    )
+    _raises("runtime versions do not match", lambda: _snapshot(invented_runtime))
+
     descriptor = contract.contract_descriptor()
     assert descriptor == research_formula_worker_descriptor()
+    assert descriptor["current_runtime"]["engine_version"] == (
+        research_formula_engine.ENGINE_VERSION
+    )
+    assert descriptor["retained_read_only_runtimes"] == [
+        {
+            "formula_schema_version": contract.CURRENT_FORMULA_SCHEMA_VERSION,
+            "engine_version": contract.RETAINED_V7_1_ENGINE_VERSION,
+            "feature_schema_version": contract.CURRENT_FEATURE_SCHEMA_VERSION,
+            "outcome_method_version": contract.CURRENT_OUTCOME_METHOD_VERSION,
+            "runtime_compatibility": contract.RETAINED_V7_1_READ_ONLY,
+        }
+    ]
     assert descriptor["live_effect"] == "NONE"
     assert descriptor["delivery_channel"] == "NONE"
 

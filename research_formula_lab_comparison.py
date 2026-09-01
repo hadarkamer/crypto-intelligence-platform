@@ -1,7 +1,7 @@
 """Pure same-anchor Replay/Shadow comparison for the Formula Lab.
 
 The comparison is deliberately read-only and outcome-blind.  Both the current
-V7.1 cohort and retained V6.2 Shadow cohort are evaluated against the exact
+V7.2 cohort and retained V6.2 Shadow cohort are evaluated against the exact
 same verified sampler-v4 decision rows.  Raw anchor matches remain auditable,
 while market episodes and evidence families prevent correlated observations
 from being presented as independent proof.
@@ -22,7 +22,7 @@ import research_formula_families
 import research_market_episode
 
 
-COMPARISON_VERSION = "formula-lab-same-anchor-comparison-v1"
+COMPARISON_VERSION = "formula-lab-same-anchor-comparison-v2"
 MAX_PAIR_DETAILS = 10
 
 
@@ -37,23 +37,38 @@ def _utc_iso(value: Any) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _runtime_contract(formula: Mapping[str, Any]) -> tuple[str, str]:
+def _runtime_contract(
+    formula: Mapping[str, Any],
+) -> tuple[int, str, str, str, str]:
+    raw_formula_version = formula.get("formula_version")
+    formula_version = (
+        raw_formula_version if type(raw_formula_version) is int else 0
+    )
     return (
+        formula_version,
         str(formula.get("formula_schema_version") or ""),
         str(formula.get("engine_version") or ""),
+        str(formula.get("feature_schema_version") or ""),
+        str(formula.get("outcome_method_version") or ""),
     )
 
 
-def _expected_contract(cohort: str) -> tuple[str, str]:
-    if cohort == "CURRENT_V7_1":
+def _expected_contract(cohort: str) -> tuple[int, str, str, str, str]:
+    if cohort == "CURRENT_V7_2":
         return (
+            1,
             research_formula_engine.FORMULA_SCHEMA_VERSION,
             research_formula_engine.ENGINE_VERSION,
+            research_evidence_contract.CURRENT_FEATURE_SCHEMA_VERSION,
+            research_evidence_contract.CURRENT_OUTCOME_METHOD_VERSION,
         )
     if cohort == "LEGACY_V6_2":
         return (
+            1,
             research_formula_engine.LEGACY_V6_FORMULA_SCHEMA_VERSION,
             research_formula_engine.LEGACY_V6_ENGINE_VERSION,
+            research_evidence_contract.CURRENT_FEATURE_SCHEMA_VERSION,
+            research_evidence_contract.CURRENT_OUTCOME_METHOD_VERSION,
         )
     raise ValueError(f"unsupported comparison cohort: {cohort}")
 
@@ -115,7 +130,82 @@ def _formula_summary(
         horizon_minutes=horizon,
     )
     episode_keys = [str(episode["episode_key"]) for episode in episodes]
-    family_policy = research_formula_families.condition_family_policy(conditions)
+    current_contract = _runtime_contract(formula) == _expected_contract(
+        "CURRENT_V7_2"
+    )
+    frozen_policy = None
+    frozen_exceptions: tuple[str, ...] = ()
+    frozen_policy_errors: list[str] = []
+    if current_contract:
+        multiple_testing = formula.get("multiple_testing")
+        frozen_policy = (
+            multiple_testing.get("condition_family_policy")
+            if isinstance(multiple_testing, Mapping)
+            else None
+        )
+        if not isinstance(frozen_policy, Mapping):
+            frozen_policy_errors.append("frozen condition-family metadata is missing")
+        else:
+            raw_exceptions = frozen_policy.get("justified_exceptions", ())
+            if not isinstance(raw_exceptions, (list, tuple)) or any(
+                not isinstance(value, str) for value in raw_exceptions
+            ):
+                frozen_policy_errors.append(
+                    "frozen condition-family exceptions are malformed"
+                )
+            else:
+                frozen_exceptions = tuple(
+                    str(value).strip() for value in raw_exceptions
+                )
+                if any(
+                    not value.partition(":")[1]
+                    or not value.partition(":")[0].strip()
+                    or len(value.partition(":")[2].strip()) < 8
+                    for value in frozen_exceptions
+                ):
+                    frozen_policy_errors.append(
+                        "frozen condition-family exception lacks a written justification"
+                    )
+    family_policy = research_formula_families.condition_family_policy(
+        conditions,
+        justified_exceptions=frozen_exceptions,
+        enforce_correlated_families=True,
+    )
+    if current_contract and isinstance(frozen_policy, Mapping):
+        expected_frozen = {
+            "policy_version": (
+                research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+            ),
+            "enforcement": "ALL_CONDITION_DEPTHS",
+            "families": list(family_policy["families"]),
+            "justified_exceptions": list(frozen_exceptions),
+        }
+        if dict(frozen_policy) != expected_frozen:
+            frozen_policy_errors.append("frozen condition-family metadata conflicts")
+    if current_contract:
+        try:
+            expected_formula_key = research_formula_engine.formula_key(
+                direction=direction,
+                horizon_minutes=horizon,
+                feature_schema_version=str(
+                    formula.get("feature_schema_version") or ""
+                ),
+                conditions=conditions,
+                condition_family_exceptions=frozen_exceptions,
+            )
+        except (KeyError, TypeError, ValueError):
+            frozen_policy_errors.append("formula identity inputs are malformed")
+        else:
+            if str(formula.get("formula_key") or "") != expected_formula_key:
+                frozen_policy_errors.append(
+                    "formula_key does not bind the frozen condition-family policy"
+                )
+    if frozen_policy_errors:
+        family_policy = {
+            **family_policy,
+            "valid": False,
+            "reasons": [*family_policy["reasons"], *frozen_policy_errors],
+        }
     evaluated = status_counts["MATCHED"] + status_counts["UNMATCHED"]
     unique_matched_anchor_ids = sorted(set(matched_anchor_ids))
     match_fingerprint = hashlib.sha256(
@@ -200,8 +290,11 @@ def _cohort_summary(
     return {
         "cohort": cohort,
         "runtime": {
-            "formula_schema_version": expected[0],
-            "engine_version": expected[1],
+            "formula_version": expected[0],
+            "formula_schema_version": expected[1],
+            "engine_version": expected[2],
+            "feature_schema_version": expected[3],
+            "outcome_method_version": expected[4],
         },
         "formula_count": len(summaries),
         "evaluable_formula_count": evaluable_formulas,
@@ -285,6 +378,8 @@ def _dry_run_summary(
     ]
     accepted_paths = Counter()
     by_compatibility: Dict[str, Counter[str]] = {}
+    exact_current_runtime_present = False
+    exact_legacy_runtime_present = False
     for snapshot in snapshots:
         formula = snapshot.to_dict()["formula"]
         if (
@@ -294,10 +389,15 @@ def _dry_run_summary(
             raise ValueError(
                 "EvidenceSnapshot direction/horizon does not match comparison filters"
             )
-        compatibility = snapshot.compatibility
+        compatibility = snapshot.runtime_compatibility
         paths = snapshot.assessment.accepted_paths
         by_compatibility.setdefault(compatibility, Counter()).update(paths)
-        accepted_paths.update(paths)
+        runtime_contract = _runtime_contract(formula)
+        if runtime_contract == _expected_contract("CURRENT_V7_2"):
+            exact_current_runtime_present = True
+            accepted_paths.update(paths)
+        elif runtime_contract == _expected_contract("LEGACY_V6_2"):
+            exact_legacy_runtime_present = True
     dry_run = research_evidence_telegram_renderer.dry_run_evidence_snapshots(
         snapshots
     )
@@ -310,12 +410,8 @@ def _dry_run_summary(
         "both_acceptance_paths_exercised": all(
             accepted_paths[path] > 0 for path in ("PROBABILITY", "ASYMMETRY")
         ),
-        "both_runtime_compatibilities_rendered": all(
-            compatibility in by_compatibility
-            for compatibility in (
-                research_evidence_contract.CURRENT_V7,
-                research_evidence_contract.LEGACY_SHADOW_READ_ONLY,
-            )
+        "both_runtime_compatibilities_rendered": bool(
+            exact_current_runtime_present and exact_legacy_runtime_present
         ),
         "renderer": dry_run,
     }
@@ -331,7 +427,7 @@ def compare_same_anchors(
     direction: str,
     horizon_minutes: int,
 ) -> Dict[str, Any]:
-    """Compare exact V7.1 and V6.2 cohorts without outcomes or writes."""
+    """Compare exact V7.2 and V6.2 cohorts without outcomes or writes."""
 
     normalized_direction = str(direction or "").upper()
     if normalized_direction not in {"LONG", "SHORT"}:
@@ -383,7 +479,7 @@ def compare_same_anchors(
         max_pain_status_counts[status] += 1
 
     current = _cohort_summary(
-        "CURRENT_V7_1",
+        "CURRENT_V7_2",
         current_formulas,
         rows,
         direction=normalized_direction,
@@ -403,9 +499,9 @@ def compare_same_anchors(
     )
     blockers = []
     if not current["formula_count"]:
-        blockers.append("exact current V7.1 formula cohort is unavailable")
+        blockers.append("exact current V7.2 formula cohort is unavailable")
     elif not current["operational"]:
-        blockers.append("current V7.1 cohort has no evaluable same-anchor rows")
+        blockers.append("current V7.2 cohort has no evaluable same-anchor rows")
     if not legacy["formula_count"]:
         blockers.append("exact legacy V6.2 Shadow cohort is unavailable")
     elif not legacy["operational"]:
@@ -426,7 +522,7 @@ def compare_same_anchors(
         )
     if not dry_run["both_runtime_compatibilities_rendered"]:
         blockers.append(
-            "Telegram Dry Run does not contain both current V7.1 and legacy V6.2 snapshots"
+            "Telegram Dry Run does not contain both current V7.2 and legacy V6.2 snapshots"
         )
     if current["invalid_condition_family_formula_keys"]:
         blockers.append("current cohort contains an invalid correlated condition family")
@@ -470,7 +566,7 @@ def compare_same_anchors(
                 "runtime_evidence_mixed": False,
             },
         },
-        "current_v7_1": current,
+        "current_v7_2": current,
         "legacy_v6_2": legacy,
         "cross_cohort_overlap": overlap,
         "telegram_dry_run": dry_run,
@@ -484,6 +580,9 @@ def compare_same_anchors(
             "market_episode_policy_version": research_market_episode.POLICY_VERSION,
             "evidence_family_policy_version": (
                 research_formula_families.EVIDENCE_FAMILY_VERSION
+            ),
+            "condition_family_policy_version": (
+                research_formula_families.CONDITION_FAMILY_POLICY_VERSION
             ),
         },
     }

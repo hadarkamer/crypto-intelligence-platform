@@ -680,6 +680,398 @@ def run() -> None:
     assert persist_source_raw.count("WHERE formula_id=ANY(%s)") == 2
     assert "rowcount != len(superseded_ids)" in persist_source_raw
     assert "rowcount != len(stale_candidate_ids)" in persist_source_raw
+    assert persist_source_raw.index(
+        "_validate_discovery_condition_families"
+    ) < persist_source_raw.index("with _connect(read_only=False)")
+
+    def _family_dataset() -> dict:
+        return {
+            "available": True,
+            "feature_schema_version": (
+                store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+            ),
+            "outcome_method_version": (
+                store.research_feature_matrix.VERIFIED_OUTCOME_METHOD
+            ),
+            "horizon_minutes": 240,
+            "coverage": {"dataset_kind": "condition-family-selftest"},
+        }
+
+    def _family_formula(conditions: list[dict], *, exceptions=()) -> dict:
+        policy = store.research_formula_families.condition_family_policy(
+            conditions,
+            justified_exceptions=exceptions,
+            enforce_correlated_families=True,
+        )
+        return {
+            "formula_key": store.research_formula_engine.formula_key(
+                direction="LONG",
+                horizon_minutes=240,
+                feature_schema_version=(
+                    store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+                ),
+                conditions=conditions,
+                condition_family_exceptions=exceptions,
+            ),
+            "formula_version": 1,
+            "formula_schema_version": (
+                store.research_formula_engine.FORMULA_SCHEMA_VERSION
+            ),
+            "engine_version": store.research_formula_engine.ENGINE_VERSION,
+            "feature_schema_version": (
+                store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+            ),
+            "direction": "LONG",
+            "horizon_minutes": 240,
+            "condition_count": len(conditions),
+            "conditions": conditions,
+            "formula_text": "LONG WHEN condition-family selftest",
+            "ranking_score": 1.0,
+            "discovery_metrics": {},
+            "holdout_metrics": {},
+            "recommended_stage": "DISCOVERED",
+            "gate_notes": [],
+            "multiple_testing": {
+                "condition_family_policy": {
+                    "policy_version": (
+                        store.research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+                    ),
+                    "enforcement": "ALL_CONDITION_DEPTHS",
+                    "families": list(policy["families"]),
+                    "justified_exceptions": list(exceptions),
+                }
+            },
+        }
+
+    def _family_discovery(formulas, *, exceptions=()) -> dict:
+        return {
+            "available": True,
+            "engine_version": store.research_formula_engine.ENGINE_VERSION,
+            "formula_schema_version": (
+                store.research_formula_engine.FORMULA_SCHEMA_VERSION
+            ),
+            "feature_schema_version": (
+                store.research_feature_matrix.FEATURE_SCHEMA_VERSION
+            ),
+            "horizon_minutes": 240,
+            "condition_family_policy_version": (
+                store.research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+            ),
+            "config": {"condition_family_exceptions": list(exceptions)},
+            "formulas": list(formulas),
+        }
+
+    valid_conditions = [
+        {
+            "feature": "aligned.60m.price_change_pct",
+            "operator": ">=",
+            "value": 1.0,
+        },
+        {"feature": "raw.60m.oi_change_pct", "operator": ">=", "value": 1.0},
+    ]
+    valid_formula = _family_formula(valid_conditions)
+    store._validate_discovery_condition_families(
+        dataset=_family_dataset(),
+        discovery=_family_discovery([valid_formula]),
+        formulas=[valid_formula],
+    )
+    repeated_price = [
+        valid_conditions[0],
+        {
+            "feature": "historical.60m.price_change_pct_percentile_session_matched",
+            "operator": ">=",
+            "value": 80.0,
+        },
+    ]
+    invalid_formula = _family_formula(repeated_price)
+    invalid_discovery = _family_discovery([invalid_formula])
+    try:
+        store._validate_discovery_condition_families(
+            dataset=_family_dataset(),
+            discovery=invalid_discovery,
+            formulas=[invalid_formula],
+        )
+    except ValueError as exc:
+        assert "correlated family repeated" in str(exc)
+        assert invalid_formula["formula_key"] in str(exc)
+    else:
+        raise AssertionError("repeated price family must fail closed")
+
+    written_exception = (
+        "price: independent multi-window confirmation retained for audit"
+    )
+    excepted_formula = _family_formula(
+        repeated_price, exceptions=(written_exception,)
+    )
+    store._validate_discovery_condition_families(
+        dataset=_family_dataset(),
+        discovery=_family_discovery(
+            [excepted_formula], exceptions=(written_exception,)
+        ),
+        formulas=[excepted_formula],
+    )
+    forged_formula = {
+        **invalid_formula,
+        "multiple_testing": excepted_formula["multiple_testing"],
+    }
+    try:
+        store._validate_discovery_condition_families(
+            dataset=_family_dataset(),
+            discovery=invalid_discovery,
+            formulas=[forged_formula],
+        )
+    except ValueError as exc:
+        assert "correlated family repeated" in str(exc)
+    else:
+        raise AssertionError("forged family metadata must not bypass recomputation")
+
+    stale_exception_key = {
+        **excepted_formula,
+        "formula_key": invalid_formula["formula_key"],
+    }
+    try:
+        store._validate_discovery_condition_families(
+            dataset=_family_dataset(),
+            discovery=_family_discovery(
+                [stale_exception_key], exceptions=(written_exception,)
+            ),
+            formulas=[stale_exception_key],
+        )
+    except ValueError as exc:
+        assert "formula_key does not bind" in str(exc)
+    else:
+        raise AssertionError("written exceptions must be bound into formula_key")
+
+    stale_runtime = {
+        **valid_formula,
+        "engine_version": "stale-engine",
+    }
+    try:
+        store._validate_discovery_condition_families(
+            dataset=_family_dataset(),
+            discovery=_family_discovery([stale_runtime]),
+            formulas=[stale_runtime],
+        )
+    except ValueError as exc:
+        assert "runtime contract mismatch" in str(exc)
+        assert "engine_version" in str(exc)
+    else:
+        raise AssertionError("non-current formula runtime must fail closed")
+
+    lowercase_direction = {**valid_formula, "direction": "long"}
+    try:
+        store._validate_discovery_condition_families(
+            dataset=_family_dataset(),
+            discovery=_family_discovery([lowercase_direction]),
+            formulas=[lowercase_direction],
+        )
+    except ValueError as exc:
+        assert "runtime contract mismatch direction" in str(exc)
+    else:
+        raise AssertionError("formula direction must already be canonical")
+
+    padded_formula_key = {
+        **valid_formula,
+        "formula_key": valid_formula["formula_key"] + " ",
+    }
+    try:
+        store._validate_discovery_condition_families(
+            dataset=_family_dataset(),
+            discovery=_family_discovery([padded_formula_key]),
+            formulas=[padded_formula_key],
+        )
+    except ValueError as exc:
+        assert "formula_key does not bind" in str(exc)
+    else:
+        raise AssertionError("formula_key must already be canonical")
+
+    stale_discovery = {
+        **_family_discovery([valid_formula]),
+        "engine_version": "stale-engine",
+    }
+    try:
+        store._validate_discovery_condition_families(
+            dataset=_family_dataset(),
+            discovery=stale_discovery,
+            formulas=[valid_formula],
+        )
+    except ValueError as exc:
+        assert "Discovery persistence runtime contract mismatch" in str(exc)
+    else:
+        raise AssertionError("non-current discovery runtime must fail closed")
+
+    max_pain_conflict = [
+        {
+            "feature": "model.snapshot.maxpain_confirmation.score",
+            "operator": ">=",
+            "value": 83.0,
+        },
+        {
+            "feature": "max_pain.aggregate.short_long_liquidity_ratio",
+            "operator": ">=",
+            "value": 1.5,
+        },
+    ]
+    max_pain_exceptions = (
+        "max_pain_composite: independently retained model verdict",
+        "max_pain_components: independently retained raw archive",
+    )
+    max_pain_formula = _family_formula(
+        max_pain_conflict, exceptions=max_pain_exceptions
+    )
+    try:
+        store._validate_discovery_condition_families(
+            dataset=_family_dataset(),
+            discovery=_family_discovery(
+                [max_pain_formula], exceptions=max_pain_exceptions
+            ),
+            formulas=[max_pain_formula],
+        )
+    except ValueError as exc:
+        assert "composite Max Pain" in str(exc)
+    else:
+        raise AssertionError("Max-Pain composite/component conflict is absolute")
+
+    original_family_connect = store._connect
+    family_connect_calls = 0
+
+    def _forbidden_family_connect(*, read_only):
+        nonlocal family_connect_calls
+        family_connect_calls += 1
+        raise AssertionError("invalid family cohort must not open PostgreSQL")
+
+    store._connect = _forbidden_family_connect
+    try:
+        try:
+            store.persist_discovery_run(
+                dataset=_family_dataset(),
+                discovery=invalid_discovery,
+                lookback_days=120,
+            )
+        except ValueError as exc:
+            assert "condition-family policy" in str(exc)
+        else:
+            raise AssertionError("invalid persisted cohort must fail closed")
+        malformed_collection = {
+            **_family_discovery([]),
+            "formulas": {},
+        }
+        try:
+            store.persist_discovery_run(
+                dataset=_family_dataset(),
+                discovery=malformed_collection,
+                lookback_days=120,
+            )
+        except ValueError as exc:
+            assert "formulas must be an explicit array" in str(exc)
+        else:
+            raise AssertionError("a malformed formula collection is not an empty run")
+    finally:
+        store._connect = original_family_connect
+    assert family_connect_calls == 0
+
+    class _PersistCursor:
+        def __init__(self, *, row=None):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return []
+
+    class _PersistConnection:
+        def __init__(self):
+            self.committed = False
+            self.formula_inserts = 0
+            self.evaluation_inserts = 0
+            self.completed_formulas = None
+            self.run_coverage = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params=()):
+            assert str(query).count("%s") == len(params)
+            normalized = " ".join(str(query).split())
+            if normalized.startswith("SELECT to_regclass"):
+                return _PersistCursor(row={"relation": "research_formulas"})
+            if normalized.startswith("INSERT INTO research_formula_runs"):
+                self.run_coverage = json.loads(params[13])
+                return _PersistCursor(row={"run_id": 71})
+            if (
+                normalized.startswith("SELECT formula_id")
+                and "WHERE formula_key=%s" in normalized
+            ):
+                return _PersistCursor(row=None)
+            if normalized.startswith("INSERT INTO research_formulas ("):
+                self.formula_inserts += 1
+                return _PersistCursor(row={"formula_id": 811})
+            if normalized.startswith(
+                "INSERT INTO research_formula_stage_history"
+            ):
+                return _PersistCursor()
+            if normalized.startswith("INSERT INTO research_formula_evaluations"):
+                self.evaluation_inserts += 1
+                return _PersistCursor()
+            if normalized.startswith("UPDATE research_formula_runs"):
+                self.completed_formulas = int(params[0])
+                return _PersistCursor()
+            raise AssertionError(f"unexpected persistence query: {normalized}")
+
+        def commit(self):
+            self.committed = True
+
+    valid_persist_connection = _PersistConnection()
+    def _valid_persist_connect(*, read_only):
+        assert read_only is False
+        return valid_persist_connection
+
+    store._connect = _valid_persist_connect
+    try:
+        persisted_family = store.persist_discovery_run(
+            dataset=_family_dataset(),
+            discovery=_family_discovery([valid_formula]),
+            lookback_days=120,
+        )
+    finally:
+        store._connect = original_family_connect
+    assert persisted_family["formulas_persisted"] == 1
+    assert valid_persist_connection.formula_inserts == 1
+    assert valid_persist_connection.evaluation_inserts == 1
+    assert valid_persist_connection.completed_formulas == 1
+    assert valid_persist_connection.committed is True
+    assert valid_persist_connection.run_coverage[
+        "condition_family_policy_version"
+    ] == store.research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+    assert valid_persist_connection.run_coverage[
+        "condition_family_enforcement"
+    ] == "ALL_CONDITION_DEPTHS"
+
+    empty_persist_connection = _PersistConnection()
+    def _empty_persist_connect(*, read_only):
+        assert read_only is False
+        return empty_persist_connection
+
+    store._connect = _empty_persist_connect
+    try:
+        empty_family = store.persist_discovery_run(
+            dataset=_family_dataset(),
+            discovery=_family_discovery([]),
+            lookback_days=120,
+        )
+    finally:
+        store._connect = original_family_connect
+    assert empty_family["formulas_persisted"] == 0
+    assert empty_persist_connection.formula_inserts == 0
+    assert empty_persist_connection.completed_formulas == 0
+    assert empty_persist_connection.committed is True
+    assert empty_persist_connection.run_coverage[
+        "condition_family_policy_version"
+    ] == store.research_formula_families.CONDITION_FAMILY_POLICY_VERSION
 
     valid_dataset, valid_discovery, valid_formulas = _replacement_contract()
     identity_formula = {

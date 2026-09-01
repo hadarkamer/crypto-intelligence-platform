@@ -75,6 +75,14 @@ def run() -> None:
     assert "MAE p95: 3.1%" in current_text
     assert "DRY RUN בלבד" in current_text
 
+    retained_v7_1 = _snapshot(_fixture("retained_v7_1_probability.json"))
+    retained_text = renderer.render_evidence_snapshot(retained_v7_1)
+    assert "חוזה: V7.1 שמור — קריאה בלבד" in retained_text
+    retained_dry_run = renderer.dry_run_evidence_snapshots([retained_v7_1])
+    assert retained_dry_run["messages"][0]["compatibility"] == (
+        contract.RETAINED_V7_1_READ_ONLY
+    )
+
     legacy = _snapshot(_fixture("legacy_v6_shadow.json"))
     legacy_text = renderer.render_evidence_snapshot(legacy)
     assert "חוזה: Legacy Shadow — קריאה בלבד" in legacy_text

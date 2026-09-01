@@ -26,7 +26,10 @@ LEGACY_ADAPTER_VERSION = "formula-evidence-legacy-read-adapter-v1"
 CURRENT_FORMULA_SCHEMA_VERSION = "research-formula-v7-adaptive-evidence"
 LEGACY_V5_FORMULA_SCHEMA_VERSION = "research-formula-v5-safe-replay"
 LEGACY_V6_FORMULA_SCHEMA_VERSION = "research-formula-v6-first-touch-maxpain"
-CURRENT_ENGINE_VERSION = "formula-discovery-v7.1-walk-forward-watermarked"
+CURRENT_ENGINE_VERSION = (
+    "formula-discovery-v7.2-walk-forward-watermarked-condition-family-fail-closed"
+)
+RETAINED_V7_1_ENGINE_VERSION = "formula-discovery-v7.1-walk-forward-watermarked"
 LEGACY_V6_ENGINE_VERSION = (
     "formula-discovery-v6.2-first-touch-maxpain-hierarchical-holdout-isolated"
 )
@@ -45,25 +48,43 @@ SUPPORTED_FORMULA_SCHEMA_VERSIONS = frozenset(
     }
 )
 SUPPORTED_RUNTIME_CONTRACTS = {
-    CURRENT_FORMULA_SCHEMA_VERSION: (
-        CURRENT_ENGINE_VERSION,
-        CURRENT_FEATURE_SCHEMA_VERSION,
-        CURRENT_OUTCOME_METHOD_VERSION,
+    CURRENT_FORMULA_SCHEMA_VERSION: frozenset(
+        {
+            (
+                CURRENT_ENGINE_VERSION,
+                CURRENT_FEATURE_SCHEMA_VERSION,
+                CURRENT_OUTCOME_METHOD_VERSION,
+            ),
+            (
+                RETAINED_V7_1_ENGINE_VERSION,
+                CURRENT_FEATURE_SCHEMA_VERSION,
+                CURRENT_OUTCOME_METHOD_VERSION,
+            ),
+        }
     ),
-    LEGACY_V6_FORMULA_SCHEMA_VERSION: (
-        LEGACY_V6_ENGINE_VERSION,
-        CURRENT_FEATURE_SCHEMA_VERSION,
-        CURRENT_OUTCOME_METHOD_VERSION,
+    LEGACY_V6_FORMULA_SCHEMA_VERSION: frozenset(
+        {
+            (
+                LEGACY_V6_ENGINE_VERSION,
+                CURRENT_FEATURE_SCHEMA_VERSION,
+                CURRENT_OUTCOME_METHOD_VERSION,
+            )
+        }
     ),
-    LEGACY_V5_FORMULA_SCHEMA_VERSION: (
-        LEGACY_V5_ENGINE_VERSION,
-        LEGACY_V5_FEATURE_SCHEMA_VERSION,
-        LEGACY_V5_OUTCOME_METHOD_VERSION,
+    LEGACY_V5_FORMULA_SCHEMA_VERSION: frozenset(
+        {
+            (
+                LEGACY_V5_ENGINE_VERSION,
+                LEGACY_V5_FEATURE_SCHEMA_VERSION,
+                LEGACY_V5_OUTCOME_METHOD_VERSION,
+            )
+        }
     ),
 }
 
 CURRENT_V7 = "CURRENT_V7"
 LEGACY_SHADOW_READ_ONLY = "LEGACY_SHADOW_READ_ONLY"
+RETAINED_V7_1_READ_ONLY = "RETAINED_V7_1_READ_ONLY"
 _COMPATIBILITY_STATES = frozenset({CURRENT_V7, LEGACY_SHADOW_READ_ONLY})
 _PHASES = frozenset({"HISTORICAL", "PROSPECTIVE"})
 _DIRECTIONS = frozenset({"LONG", "SHORT"})
@@ -346,11 +367,24 @@ def _validate_formula_contract(value: Mapping[str, Any]) -> Dict[str, Any]:
         formula["feature_schema_version"],
         formula["outcome_method_version"],
     )
-    if runtime != SUPPORTED_RUNTIME_CONTRACTS[formula["formula_schema_version"]]:
+    if runtime not in SUPPORTED_RUNTIME_CONTRACTS[formula["formula_schema_version"]]:
         raise ValueError(
             "formula runtime versions do not match the declared formula schema"
         )
     return formula
+
+
+def runtime_compatibility_for_formula_contract(
+    value: Mapping[str, Any],
+) -> str:
+    """Classify operational runtime without changing frozen snapshot payloads."""
+
+    formula = _validate_formula_contract(value)
+    if formula["formula_schema_version"] == CURRENT_FORMULA_SCHEMA_VERSION:
+        if formula["engine_version"] == CURRENT_ENGINE_VERSION:
+            return CURRENT_V7
+        return RETAINED_V7_1_READ_ONLY
+    return LEGACY_SHADOW_READ_ONLY
 
 
 @dataclass(frozen=True)
@@ -531,6 +565,12 @@ class EvidenceSnapshot:
     def compatibility(self) -> str:
         return str(json.loads(self._payload_json)["compatibility"])
 
+    @property
+    def runtime_compatibility(self) -> str:
+        return runtime_compatibility_for_formula_contract(
+            json.loads(self._payload_json)["formula"]
+        )
+
 
 def interpret_snapshot(value: EvidenceSnapshot | Mapping[str, Any]) -> FormulaAssessment:
     """Return the frozen assessment without rerunning acceptance calculations."""
@@ -551,6 +591,15 @@ def contract_descriptor() -> Dict[str, Any]:
             "feature_schema_version": CURRENT_FEATURE_SCHEMA_VERSION,
             "outcome_method_version": CURRENT_OUTCOME_METHOD_VERSION,
         },
+        "retained_read_only_runtimes": [
+            {
+                "formula_schema_version": CURRENT_FORMULA_SCHEMA_VERSION,
+                "engine_version": RETAINED_V7_1_ENGINE_VERSION,
+                "feature_schema_version": CURRENT_FEATURE_SCHEMA_VERSION,
+                "outcome_method_version": CURRENT_OUTCOME_METHOD_VERSION,
+                "runtime_compatibility": RETAINED_V7_1_READ_ONLY,
+            }
+        ],
         "legacy_formula_schema_versions": sorted(
             SUPPORTED_FORMULA_SCHEMA_VERSIONS - {CURRENT_FORMULA_SCHEMA_VERSION}
         ),

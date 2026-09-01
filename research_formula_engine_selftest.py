@@ -659,6 +659,142 @@ def run() -> None:
     assert result["formulas"]
     assert result["automatic_stage_ceiling"] == "SHADOW"
     assert "future-Shadow validation" in result["live_activation"]
+    assert result["condition_family_policy_version"] == (
+        engine.research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+    )
+    assert sum(
+        int(direction["family_policy_rejections"])
+        for direction in result["directions"]
+    ) > 0
+    assert all(
+        engine.research_formula_families.condition_family_policy(
+            candidate["conditions"],
+            justified_exceptions=(
+                candidate["multiple_testing"]["condition_family_policy"][
+                    "justified_exceptions"
+                ]
+            ),
+            enforce_correlated_families=True,
+        )["valid"]
+        for candidate in result["formulas"]
+    )
+    assert all(
+        candidate["multiple_testing"]["condition_family_policy"][
+            "policy_version"
+        ]
+        == engine.research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+        and candidate["multiple_testing"]["condition_family_policy"][
+            "enforcement"
+        ]
+        == "ALL_CONDITION_DEPTHS"
+        for candidate in result["formulas"]
+    )
+    assert any(
+        int(candidate["condition_count"]) > 1
+        for candidate in result["formulas"]
+    ), "strict family enforcement must preserve valid multi-condition formulas"
+
+    # Exercise every ordinary pair/triple family path deterministically.  The
+    # production-sized fixture above happens to expose correlated candidates,
+    # but its ranking must not be the only thing proving that all-depth
+    # enforcement reaches price and OI pairs and triples.
+    family_rows = []
+    for index in range(180):
+        row = _row(index)
+        row["model_features"]["snapshot_features"].update(
+            {
+                "snapshot.synthetic.price_change_a": float(index % 3),
+                "snapshot.synthetic.price_change_b": float(index % 5),
+                "snapshot.synthetic.price_change_c": float(index % 7),
+                "snapshot.synthetic.open_interest_a": float(index % 4),
+                "snapshot.synthetic.open_interest_b": float(index % 6),
+                "snapshot.synthetic.open_interest_c": float(index % 11),
+                "snapshot.synthetic.spot_cvd_guard": float(index % 13),
+            }
+        )
+        family_rows.append(row)
+    family_features = (
+        "model.snapshot.synthetic.price_change_a",
+        "model.snapshot.synthetic.price_change_b",
+        "model.snapshot.synthetic.price_change_c",
+        "model.snapshot.synthetic.open_interest_a",
+        "model.snapshot.synthetic.open_interest_b",
+        "model.snapshot.synthetic.open_interest_c",
+        "model.snapshot.synthetic.spot_cvd_guard",
+    )
+    family_catalog = [
+        {
+            "feature": feature,
+            "operator": ">=",
+            "value": 1.0,
+            "_source": "NUMERIC_QUANTILE",
+            "_quantile_fraction": 0.50,
+        }
+        for feature in family_features
+    ]
+    original_predicate_catalog = engine._predicate_catalog
+    original_family_policy = (
+        engine.research_formula_families.condition_family_policy
+    )
+    rejected_family_depths = set()
+
+    def _audited_family_policy(
+        conditions,
+        *,
+        justified_exceptions=(),
+        enforce_correlated_families=True,
+    ):
+        policy = original_family_policy(
+            conditions,
+            justified_exceptions=justified_exceptions,
+            enforce_correlated_families=enforce_correlated_families,
+        )
+        if policy["valid"] is False and enforce_correlated_families is True:
+            depth = len(conditions)
+            for family in ("price", "open_interest"):
+                if policy["families"].count(family) > 1:
+                    rejected_family_depths.add((family, depth))
+        return policy
+
+    engine._predicate_catalog = lambda rows, feature_rows, config: [
+        dict(predicate) for predicate in family_catalog
+    ]
+    engine.research_formula_families.condition_family_policy = (
+        _audited_family_policy
+    )
+    try:
+        family_result = engine.discover_formulas(
+            family_rows,
+            horizon_minutes=240,
+            feature_schema_version="condition-family-engine-selftest-v1",
+            config=engine.DiscoveryConfig(
+                numeric_quantiles=(0.50,),
+                max_single_predicates=7,
+                max_pair_candidates=30,
+                max_triple_candidates=100,
+                max_candidates_evaluated=200,
+                max_formulas_returned=40,
+            ),
+        )
+    finally:
+        engine._predicate_catalog = original_predicate_catalog
+        engine.research_formula_families.condition_family_policy = (
+            original_family_policy
+        )
+    assert {
+        ("price", 2),
+        ("price", 3),
+        ("open_interest", 2),
+        ("open_interest", 3),
+    }.issubset(rejected_family_depths)
+    assert all(
+        original_family_policy(candidate["conditions"])["valid"] is True
+        for candidate in family_result["formulas"]
+    )
+    assert any(
+        int(candidate["condition_count"]) > 1
+        for candidate in family_result["formulas"]
+    ), "all-depth rejection must retain independent multi-condition candidates"
 
     formula = result["formulas"][0]
     assert formula["conditions"]
@@ -741,6 +877,15 @@ def run() -> None:
         feature_schema_version="selftest-matrix-v2",
         conditions=list(reversed(formula["conditions"])),
     ) == formula["formula_key"]
+    assert engine.formula_key(
+        direction=formula["direction"],
+        horizon_minutes=240,
+        feature_schema_version="selftest-matrix-v2",
+        conditions=formula["conditions"],
+        condition_family_exceptions=(
+            "price: independent multi-window confirmation retained for audit",
+        ),
+    ) != formula["formula_key"]
 
     # A tiny 100%-hit move must not outrank a materially wider, still reliable
     # move. This guards the production issue observed in formula v1.

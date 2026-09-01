@@ -457,7 +457,7 @@ TOOL_SPECS = [
         "type": "function",
         "name": "research_formula_lab_comparison",
         "description": (
-            "Run a bounded, read-only Formula Lab comparison of the exact current V7.1 runtime "
+            "Run a bounded, read-only Formula Lab comparison of the exact current V7.2 runtime "
             "and retained legacy V6.2 Shadow runtime on identical verified prospective anchors. "
             "Reports evaluability, correlated match overlap, market-episode evidence units, "
             "formula families, both research acceptance paths, HYPE isolation and Telegram Dry Run. "
@@ -756,7 +756,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
                 "wide-movement percentile, probability, MFE, MAE, speed, sample-size and q-value ranking",
                 "versioned formula lifecycle registry",
                 "future Shadow observation with a SHADOW_PENDING_EXPLICIT_APPROVAL ceiling",
-                "read-only same-anchor V7.1/V6.2 Formula Lab comparison with Telegram Dry Run",
+                "read-only same-anchor V7.2/V6.2 Formula Lab comparison with Telegram Dry Run",
                 "Telegram delivery support for explicitly human-approved LIVE formulas in opted-in chats",
             ],
             "next_required_stages": [

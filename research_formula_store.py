@@ -22,6 +22,7 @@ import research_evidence_contract
 import research_feature_matrix
 import research_formula_acceptance
 import research_formula_engine
+import research_formula_families
 import research_formula_lab_comparison
 import research_formula_relevance
 import research_historical_replay
@@ -1608,6 +1609,185 @@ def _formula_identity_matches_discovery(
     )
 
 
+def _validate_discovery_condition_families(
+    *,
+    dataset: Mapping[str, Any],
+    discovery: Mapping[str, Any],
+    formulas: Sequence[Mapping[str, Any]],
+) -> None:
+    """Reject a corrupt current-engine cohort before opening PostgreSQL."""
+
+    discovery_horizon = _strict_int(discovery.get("horizon_minutes"))
+    dataset_horizon = _strict_int(dataset.get("horizon_minutes"))
+    runtime_mismatches: list[str] = []
+    if discovery.get("engine_version") != research_formula_engine.ENGINE_VERSION:
+        runtime_mismatches.append("discovery.engine_version")
+    if (
+        discovery.get("formula_schema_version")
+        != research_formula_engine.FORMULA_SCHEMA_VERSION
+    ):
+        runtime_mismatches.append("discovery.formula_schema_version")
+    if (
+        discovery.get("feature_schema_version")
+        != research_feature_matrix.FEATURE_SCHEMA_VERSION
+    ):
+        runtime_mismatches.append("discovery.feature_schema_version")
+    if discovery_horizon not in {60, 240, 720, 1440}:
+        runtime_mismatches.append("discovery.horizon_minutes")
+    if dataset.get("available") is not True:
+        runtime_mismatches.append("dataset.available")
+    if (
+        dataset.get("feature_schema_version")
+        != research_feature_matrix.FEATURE_SCHEMA_VERSION
+    ):
+        runtime_mismatches.append("dataset.feature_schema_version")
+    if (
+        dataset.get("outcome_method_version")
+        != research_feature_matrix.VERIFIED_OUTCOME_METHOD
+    ):
+        runtime_mismatches.append("dataset.outcome_method_version")
+    if dataset_horizon != discovery_horizon:
+        runtime_mismatches.append("dataset.horizon_minutes")
+    if runtime_mismatches:
+        raise ValueError(
+            "Discovery persistence runtime contract mismatch: "
+            + ", ".join(runtime_mismatches)
+        )
+
+    declared_policy = str(
+        discovery.get("condition_family_policy_version") or ""
+    ).strip()
+    expected_policy = (
+        research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+    )
+    if declared_policy != expected_policy:
+        raise ValueError(
+            "Discovery condition-family policy version mismatch: "
+            f"expected {expected_policy!r}, got {declared_policy!r}"
+        )
+    config = discovery.get("config")
+    if not isinstance(config, Mapping):
+        raise ValueError("Discovery config must freeze condition-family exceptions")
+    raw_exceptions = config.get("condition_family_exceptions", ())
+    if not isinstance(raw_exceptions, (list, tuple)) or any(
+        not isinstance(value, str) for value in raw_exceptions
+    ):
+        raise ValueError("condition_family_exceptions must be a string array")
+    exceptions = tuple(str(value).strip() for value in raw_exceptions)
+    for value in exceptions:
+        family, separator, reason = value.partition(":")
+        if not separator or not family.strip() or len(reason.strip()) < 8:
+            raise ValueError(
+                "condition-family exceptions require 'family: written justification'"
+            )
+
+    violations: list[str] = []
+    for rank, formula in enumerate(formulas, start=1):
+        if not isinstance(formula, Mapping):
+            violations.append(f"rank {rank}: formula must be an object")
+            continue
+        raw_formula_key = formula.get("formula_key")
+        formula_key = raw_formula_key if isinstance(raw_formula_key, str) else ""
+        formula_label = formula_key.strip() or f"rank-{rank}"
+        formula_horizon = _strict_int(formula.get("horizon_minutes"))
+        raw_formula_direction = formula.get("direction")
+        formula_direction = (
+            raw_formula_direction
+            if isinstance(raw_formula_direction, str)
+            else ""
+        )
+        formula_runtime_mismatches: list[str] = []
+        if _strict_int(formula.get("formula_version")) != 1:
+            formula_runtime_mismatches.append("formula_version")
+        if (
+            formula.get("formula_schema_version")
+            != research_formula_engine.FORMULA_SCHEMA_VERSION
+        ):
+            formula_runtime_mismatches.append("formula_schema_version")
+        if formula.get("engine_version") != research_formula_engine.ENGINE_VERSION:
+            formula_runtime_mismatches.append("engine_version")
+        if (
+            formula.get("feature_schema_version")
+            != research_feature_matrix.FEATURE_SCHEMA_VERSION
+        ):
+            formula_runtime_mismatches.append("feature_schema_version")
+        if formula_horizon != discovery_horizon:
+            formula_runtime_mismatches.append("horizon_minutes")
+        if formula_direction not in {"LONG", "SHORT"}:
+            formula_runtime_mismatches.append("direction")
+        if formula_runtime_mismatches:
+            violations.append(
+                f"{formula_label}: runtime contract mismatch "
+                + ", ".join(formula_runtime_mismatches)
+            )
+            continue
+        conditions = formula.get("conditions")
+        condition_count = _strict_int(formula.get("condition_count"))
+        if (
+            not isinstance(conditions, (list, tuple))
+            or not conditions
+            or any(not isinstance(item, Mapping) for item in conditions)
+            or condition_count != len(conditions)
+            or condition_count not in {1, 2, 3, 4, 5}
+        ):
+            violations.append(
+                f"{formula_label}: invalid conditions/condition_count contract"
+            )
+            continue
+        try:
+            expected_formula_key = research_formula_engine.formula_key(
+                direction=formula_direction,
+                horizon_minutes=int(formula_horizon),
+                feature_schema_version=str(formula["feature_schema_version"]),
+                conditions=conditions,
+                condition_family_exceptions=exceptions,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            violations.append(
+                f"{formula_label}: invalid formula-key inputs ({exc})"
+            )
+            continue
+        if formula_key != expected_formula_key:
+            violations.append(
+                f"{formula_label}: formula_key does not bind the exact "
+                "runtime, conditions and condition-family exceptions"
+            )
+            continue
+        policy = research_formula_families.condition_family_policy(
+            conditions,
+            justified_exceptions=exceptions,
+            enforce_correlated_families=True,
+        )
+        if policy["valid"] is not True:
+            violations.append(
+                f"{formula_label}: " + ", ".join(policy["reasons"])
+            )
+            continue
+        multiple_testing = formula.get("multiple_testing")
+        frozen_policy = (
+            multiple_testing.get("condition_family_policy")
+            if isinstance(multiple_testing, Mapping)
+            else None
+        )
+        expected_frozen = {
+            "policy_version": expected_policy,
+            "enforcement": "ALL_CONDITION_DEPTHS",
+            "families": list(policy["families"]),
+            "justified_exceptions": list(exceptions),
+        }
+        if not isinstance(frozen_policy, Mapping) or not _type_strict_json_equal(
+            frozen_policy, expected_frozen
+        ):
+            violations.append(
+                f"{formula_label}: frozen condition-family metadata mismatch"
+            )
+    if violations:
+        raise ValueError(
+            "Discovery cohort violates the fail-closed condition-family policy: "
+            + "; ".join(violations[:10])
+        )
+
+
 def persist_discovery_run(
     *,
     dataset: Mapping[str, Any],
@@ -1616,9 +1796,17 @@ def persist_discovery_run(
     scheduler_metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Atomically store one completed run, immutable formulas and evaluations."""
-    if not discovery.get("available"):
+    if discovery.get("available") is not True:
         raise ValueError("cannot persist an unavailable discovery result")
-    formulas = list(discovery.get("formulas") or [])
+    raw_formulas = discovery.get("formulas")
+    if not isinstance(raw_formulas, (list, tuple)):
+        raise ValueError("Discovery formulas must be an explicit array")
+    formulas = list(raw_formulas)
+    _validate_discovery_condition_families(
+        dataset=dataset,
+        discovery=discovery,
+        formulas=formulas,
+    )
     coverage_source = dataset.get("coverage")
     coverage = (
         dict(coverage_source) if isinstance(coverage_source, Mapping) else {}
@@ -1640,6 +1828,10 @@ def persist_discovery_run(
     coverage_for_run["analysis_as_of_utc"] = discovery.get(
         "analysis_as_of_utc"
     )
+    coverage_for_run["condition_family_policy_version"] = (
+        research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+    )
+    coverage_for_run["condition_family_enforcement"] = "ALL_CONDITION_DEPTHS"
     dataset_kind = str(coverage.get("dataset_kind") or "unknown")
     outcome_method_version = str(
         dataset.get("outcome_method_version")
@@ -2245,7 +2437,7 @@ def formula_lab_comparison(
     max_anchors: int = 250,
     max_snapshots: int = 20,
 ) -> Dict[str, Any]:
-    """Run a bounded, read-only V7.1/V6.2 comparison on identical anchors."""
+    """Run a bounded, read-only V7.2/V6.2 comparison on identical anchors."""
 
     normalized_direction = str(direction or "").strip().upper()
     if normalized_direction not in {"LONG", "SHORT"}:
@@ -2274,7 +2466,7 @@ def formula_lab_comparison(
                    f.feature_schema_version, f.outcome_method_version,
                    f.direction, f.horizon_minutes, f.conditions,
                    f.formula_text, f.current_stage,
-                   e.ranking_score, e.holdout_metrics
+                   e.ranking_score, e.holdout_metrics, e.multiple_testing
             FROM research_formulas f
             LEFT JOIN research_formula_evaluations e
               ON e.run_id=f.latest_evaluation_run_id
@@ -2317,7 +2509,7 @@ def formula_lab_comparison(
                    f.feature_schema_version, f.outcome_method_version,
                    f.direction, f.horizon_minutes, f.conditions,
                    f.formula_text, f.current_stage,
-                   e.ranking_score, e.holdout_metrics
+                   e.ranking_score, e.holdout_metrics, e.multiple_testing
             FROM research_formulas f
             LEFT JOIN research_formula_evaluations e
               ON e.run_id=f.latest_evaluation_run_id

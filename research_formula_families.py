@@ -3,8 +3,8 @@
 This module is deliberately independent from the discovery engine and storage
 layer.  It provides two bounded pieces of policy:
 
-* correlated decision features cannot be stacked in a hierarchical formula
-  unless the search configuration carries a non-empty written exception; and
+* correlated decision features cannot be stacked in any formula unless the
+  search configuration carries a non-empty written exception; and
 * formulas supported by the same prospective observations are collapsed into
   deterministic evidence families with one champion.
 
@@ -21,6 +21,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
 
+CONDITION_FAMILY_POLICY_VERSION = (
+    "formula-condition-family-policy-v1-all-depth-fail-closed"
+)
 EVIDENCE_FAMILY_VERSION = "formula-evidence-family-v2-interval-duration-overlap"
 
 _MAX_PAIN_COMPONENT_MARKERS = (
@@ -138,12 +141,12 @@ def condition_family_policy(
     features = [str(condition.get("feature") or "") for condition in conditions]
     families = [feature_correlation_family(feature) for feature in features]
     reasons: list[str] = []
+    exceptions = _justified_family_exceptions(justified_exceptions)
     if any(is_max_pain_composite(feature) for feature in features) and any(
         is_max_pain_component(feature) for feature in features
     ):
         reasons.append("composite Max Pain evidence cannot be combined with its components")
     if enforce_correlated_families:
-        exceptions = _justified_family_exceptions(justified_exceptions)
         counts: Dict[str, int] = {}
         for family in families:
             counts[family] = counts.get(family, 0) + 1

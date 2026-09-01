@@ -16,7 +16,7 @@ from typing import Any, Dict, Mapping
 import research_evidence_contract
 
 
-POLICY_VERSION = "formula-relevance-hysteresis-v1"
+POLICY_VERSION = "formula-relevance-hysteresis-v2-runtime-bound"
 WEAK_OBSERVATIONS_TO_SUSPEND = 2
 STRONG_EVIDENCE_ADVANCES_TO_REACTIVATE = 2
 
@@ -123,12 +123,14 @@ def observation_fingerprint(
         "assessment_id": resolved.assessment_id,
         "evidence_fingerprint": evidence_id,
     }
-    compatibility = research_evidence_contract.compatibility_for_formula_schema(
-        payload["formula_schema_version"]
+    runtime_compatibility = (
+        research_evidence_contract.runtime_compatibility_for_formula_contract(
+            formula_contract
+        )
     )
     payload["observation_epoch"] = (
         _utc(observed_at_utc).date().isoformat()
-        if compatibility == research_evidence_contract.CURRENT_V7
+        if runtime_compatibility == research_evidence_contract.CURRENT_V7
         else "LEGACY_EVIDENCE_ONLY"
     )
     return hashlib.sha256(
@@ -161,7 +163,27 @@ def advance(
         evidence_fingerprint=evidence_id,
         observed_at_utc=observed_at_utc,
     )
-    observation = classify_observation(resolved, compatibility=compatibility)
+    declared_compatibility = str(compatibility or "").strip().upper()
+    expected_payload_compatibility = (
+        research_evidence_contract.compatibility_for_formula_schema(
+            formula_contract.get("formula_schema_version")
+        )
+    )
+    if declared_compatibility != expected_payload_compatibility:
+        raise ValueError("relevance compatibility does not match formula schema")
+    runtime_compatibility = (
+        research_evidence_contract.runtime_compatibility_for_formula_contract(
+            formula_contract
+        )
+    )
+    relevance_compatibility = (
+        research_evidence_contract.CURRENT_V7
+        if runtime_compatibility == research_evidence_contract.CURRENT_V7
+        else research_evidence_contract.LEGACY_SHADOW_READ_ONLY
+    )
+    observation = classify_observation(
+        resolved, compatibility=relevance_compatibility
+    )
     formula_version = int(formula_contract["formula_version"])
 
     usable_previous: Mapping[str, Any] | None = previous
@@ -261,7 +283,7 @@ def advance(
         raise ValueError("unsupported previous relevance state")
 
     experimental_eligible = bool(
-        str(compatibility or "").upper() == research_evidence_contract.CURRENT_V7
+        relevance_compatibility == research_evidence_contract.CURRENT_V7
         and state in {RELEVANT, WEAKENING}
     )
     reason = {
@@ -280,7 +302,8 @@ def advance(
         "snapshot_id": resolved_snapshot_id,
         "observed_at_utc": _utc(observed_at_utc).isoformat(),
         "observation_utc_date": _utc(observed_at_utc).date().isoformat(),
-        "compatibility": str(compatibility or "").upper(),
+        "compatibility": relevance_compatibility,
+        "runtime_compatibility": runtime_compatibility,
         "observation": observation,
         "research_maturity": resolved.maturity,
         "research_ready": resolved.research_ready,

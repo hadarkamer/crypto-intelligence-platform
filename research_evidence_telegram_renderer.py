@@ -15,12 +15,13 @@ from typing import Any, Dict, Iterable, Mapping, Sequence
 import research_evidence_contract as evidence_contract
 
 
-RENDERER_VERSION = "evidence-telegram-renderer-v1-pure-dry-run"
+RENDERER_VERSION = "evidence-telegram-renderer-v2-runtime-bound-dry-run"
 FAMILY_AGGREGATION_POLICY_VERSION = "latest-assessed-snapshot-per-family-v1"
 EXPERIMENTAL_LABEL = "ניסיונית — אינה המלצת מסחר"
 
 _COMPATIBILITY_LABELS = {
     evidence_contract.CURRENT_V7: "V7 נוכחי",
+    evidence_contract.RETAINED_V7_1_READ_ONLY: "V7.1 שמור — קריאה בלבד",
     evidence_contract.LEGACY_SHADOW_READ_ONLY: "Legacy Shadow — קריאה בלבד",
 }
 _DIRECTION_LABELS = {
@@ -296,7 +297,7 @@ def _render_verified_snapshot(
 
     lines = [
         f"🧪 {EXPERIMENTAL_LABEL}",
-        f"חוזה: {_COMPATIBILITY_LABELS[snapshot.compatibility]}",
+        f"חוזה: {_COMPATIBILITY_LABELS[snapshot.runtime_compatibility]}",
         f"מטבע: {_symbol_label(payload)}",
         f"כיוון: {_DIRECTION_LABELS.get(direction, direction)} ({direction})",
         f"אופק: {_format_horizon(formula['horizon_minutes'])}",
@@ -358,7 +359,7 @@ def dry_run_evidence_snapshots(
         members = families[family_id]
         signatures = {
             (
-                member.compatibility,
+                member.runtime_compatibility,
                 member.to_dict()["formula"]["direction"],
                 int(member.to_dict()["formula"]["horizon_minutes"]),
             )
@@ -381,7 +382,7 @@ def dry_run_evidence_snapshots(
         messages.append(
             {
                 "formula_family_id": family_id,
-                "compatibility": representative.compatibility,
+                "compatibility": representative.runtime_compatibility,
                 "representative_snapshot_id": representative.snapshot_id,
                 "snapshot_ids": sorted(member.snapshot_id for member in members),
                 "formula_keys": formula_keys,

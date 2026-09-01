@@ -40,6 +40,22 @@ def run() -> None:
     rejected = families.condition_family_policy(repeated_price)
     assert rejected["valid"] is False
     assert rejected["families"] == ["price", "price"]
+    assert families.CONDITION_FAMILY_POLICY_VERSION == (
+        "formula-condition-family-policy-v1-all-depth-fail-closed"
+    )
+    repeated_price_triple = [
+        *repeated_price,
+        {
+            "feature": "aligned.240m.price_change_pct",
+            "operator": ">=",
+            "value": 2.0,
+        },
+    ]
+    rejected_price_triple = families.condition_family_policy(
+        repeated_price_triple
+    )
+    assert rejected_price_triple["valid"] is False
+    assert rejected_price_triple["families"] == ["price", "price", "price"]
     justified = families.condition_family_policy(
         repeated_price,
         justified_exceptions=(
@@ -47,6 +63,51 @@ def run() -> None:
         ),
     )
     assert justified["valid"] is True
+
+    repeated_open_interest = [
+        {"feature": "raw.60m.oi_change_pct", "operator": ">=", "value": 1.0},
+        {
+            "feature": "historical.240m.oi_change_pct_median_session_matched",
+            "operator": ">=",
+            "value": 2.0,
+        },
+        {
+            "feature": "historical.720m.oi_change_pct_percentile_session_matched",
+            "operator": ">=",
+            "value": 80.0,
+        },
+    ]
+    rejected_open_interest_pair = families.condition_family_policy(
+        repeated_open_interest[:2]
+    )
+    assert rejected_open_interest_pair["valid"] is False
+    assert rejected_open_interest_pair["families"] == [
+        "open_interest",
+        "open_interest",
+    ]
+    rejected_open_interest_triple = families.condition_family_policy(
+        repeated_open_interest
+    )
+    assert rejected_open_interest_triple["valid"] is False
+    assert rejected_open_interest_triple["families"] == [
+        "open_interest",
+        "open_interest",
+        "open_interest",
+    ]
+    independent_families = [
+        repeated_price[0],
+        repeated_open_interest[0],
+        {
+            "feature": "historical.60m.futures_cvd_change_pct_percentile_session_matched",
+            "operator": ">=",
+            "value": 80.0,
+        },
+    ]
+    independent_policy = families.condition_family_policy(independent_families)
+    assert independent_policy["valid"] is True
+    assert len(independent_policy["families"]) == len(
+        set(independent_policy["families"])
+    )
 
     max_pain_double_count = [
         {

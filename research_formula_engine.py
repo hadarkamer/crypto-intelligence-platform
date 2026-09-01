@@ -32,7 +32,9 @@ import research_market_episode
 import research_mfe_mae_efficiency
 import research_no_dwell_outcome
 
-ENGINE_VERSION = "formula-discovery-v7.1-walk-forward-watermarked"
+ENGINE_VERSION = (
+    "formula-discovery-v7.2-walk-forward-watermarked-condition-family-fail-closed"
+)
 FORMULA_SCHEMA_VERSION = "research-formula-v7-adaptive-evidence"
 LEGACY_V6_ENGINE_VERSION = (
     "formula-discovery-v6.2-first-touch-maxpain-hierarchical-holdout-isolated"
@@ -142,7 +144,7 @@ class DiscoveryConfig:
     hierarchical_max_parent_score_drop: float = 12.0
     # Entries use ``family: written justification``. Max Pain composite/component
     # conflicts remain forbidden even when a family exception is supplied.
-    hierarchical_family_exceptions: tuple[str, ...] = ()
+    condition_family_exceptions: tuple[str, ...] = ()
     evidence_family_overlap_threshold: float = 0.75
     recent_window_days: int = 21
     recency_half_life_days: float = 14.0
@@ -676,11 +678,22 @@ def _canonical_conditions(conditions: Sequence[Mapping[str, Any]]) -> list[Dict[
 
 
 def formula_key(
-    *, direction: str, horizon_minutes: int, feature_schema_version: str, conditions: Sequence[Mapping[str, Any]]
+    *,
+    direction: str,
+    horizon_minutes: int,
+    feature_schema_version: str,
+    conditions: Sequence[Mapping[str, Any]],
+    condition_family_exceptions: Sequence[str] = (),
 ) -> str:
     canonical = {
         "formula_schema_version": FORMULA_SCHEMA_VERSION,
         "engine_version": ENGINE_VERSION,
+        "condition_family_policy_version": (
+            research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+        ),
+        "condition_family_exceptions": sorted(
+            str(value).strip() for value in condition_family_exceptions
+        ),
         "direction": str(direction).upper(),
         "horizon_minutes": int(horizon_minutes),
         "feature_schema_version": str(feature_schema_version),
@@ -2825,15 +2838,30 @@ def _search_direction(
             for episode in complete
         )
 
-    def condition_policy(
-        condition_indexes: Sequence[int], *, hierarchical: bool
-    ) -> Dict[str, Any]:
+    def condition_policy(condition_indexes: Sequence[int]) -> Dict[str, Any]:
         conditions = [usable_predicates[index] for index in condition_indexes]
         return research_formula_families.condition_family_policy(
             conditions,
-            justified_exceptions=config.hierarchical_family_exceptions,
-            enforce_correlated_families=hierarchical,
+            justified_exceptions=config.condition_family_exceptions,
+            enforce_correlated_families=True,
         )
+
+    def reject_family_policy_before_budget(
+        condition_indexes: Sequence[int],
+    ) -> bool:
+        """Keep policy-invalid combinations from exhausting search budgets."""
+
+        nonlocal family_policy_rejections
+        normalized_indexes = tuple(
+            sorted({int(index) for index in condition_indexes})
+        )
+        if normalized_indexes in tested_condition_sets:
+            return True
+        if condition_policy(normalized_indexes)["valid"]:
+            return False
+        tested_condition_sets.add(normalized_indexes)
+        family_policy_rejections += 1
+        return True
 
     def add_candidate(
         condition_indexes: Sequence[int],
@@ -2849,7 +2877,7 @@ def _search_direction(
         if normalized_indexes in tested_condition_sets:
             return None
         tested_condition_sets.add(normalized_indexes)
-        policy = condition_policy(normalized_indexes, hierarchical=hierarchical)
+        policy = condition_policy(normalized_indexes)
         if not policy["valid"]:
             family_policy_rejections += 1
             return None
@@ -3307,6 +3335,8 @@ def _search_direction(
             right_index = int(right["condition_indexes"][0])
             if usable_predicates[left_index]["feature"] == usable_predicates[right_index]["feature"]:
                 continue
+            if reject_family_policy_before_budget((left_index, right_index)):
+                continue
             pair_count += 1
             add_candidate((left_index, right_index))
         if pair_count >= config.max_pair_candidates or evaluated >= config.max_candidates_evaluated:
@@ -3324,8 +3354,11 @@ def _search_direction(
             index = int(single["condition_indexes"][0])
             if index in used or usable_predicates[index]["feature"] in used_features:
                 continue
+            condition_indexes = (*pair["condition_indexes"], index)
+            if reject_family_policy_before_budget(condition_indexes):
+                continue
             triple_count += 1
-            add_candidate((*pair["condition_indexes"], index))
+            add_candidate(condition_indexes)
         if triple_count >= config.max_triple_candidates or evaluated >= config.max_candidates_evaluated:
             break
 
@@ -3350,7 +3383,7 @@ def _search_direction(
         "quint_candidates_tested": 0,
         "quint_candidates_passed_gain": 0,
         "beam_width": int(config.hierarchical_beam_width),
-        "family_exceptions": list(config.hierarchical_family_exceptions),
+        "family_exceptions": list(config.condition_family_exceptions),
         "purge_policy_version": PURGE_POLICY_VERSION,
         "embargo_policy_version": EMBARGO_POLICY_VERSION,
         "purge_minutes": purge_minutes,
@@ -3366,7 +3399,7 @@ def _search_direction(
                 if len(candidate["conditions"]) == 3
                 and research_formula_families.condition_family_policy(
                     candidate["conditions"],
-                    justified_exceptions=config.hierarchical_family_exceptions,
+                    justified_exceptions=config.condition_family_exceptions,
                     enforce_correlated_families=True,
                 )["valid"]
             ),
@@ -3406,10 +3439,13 @@ def _search_direction(
                 index = int(single["condition_indexes"][0])
                 if index in used or usable_predicates[index]["feature"] in used_features:
                     continue
+                condition_indexes = (*parent["condition_indexes"], index)
+                if reject_family_policy_before_budget(condition_indexes):
+                    continue
                 quad_attempts += 1
                 required_discovery, _ = hierarchical_samples(4)
                 child = add_candidate(
-                    (*parent["condition_indexes"], index),
+                    condition_indexes,
                     minimum_discovery_samples=required_discovery,
                     hierarchical=True,
                 )
@@ -3452,10 +3488,13 @@ def _search_direction(
                     index = int(single["condition_indexes"][0])
                     if index in used or usable_predicates[index]["feature"] in used_features:
                         continue
+                    condition_indexes = (*parent["condition_indexes"], index)
+                    if reject_family_policy_before_budget(condition_indexes):
+                        continue
                     quint_attempts += 1
                     required_discovery, _ = hierarchical_samples(5)
                     child = add_candidate(
-                        (*parent["condition_indexes"], index),
+                        condition_indexes,
                         minimum_discovery_samples=required_discovery,
                         hierarchical=True,
                     )
@@ -3543,6 +3582,7 @@ def _search_direction(
             horizon_minutes=horizon_minutes,
             feature_schema_version=feature_schema_version,
             conditions=conditions,
+            condition_family_exceptions=config.condition_family_exceptions,
         )
         discovery_output = dict(discovery)
         discovery_output["selection_metrics"] = selection
@@ -3582,6 +3622,16 @@ def _search_direction(
                     "hypothesis_routes": ["PROBABILITY", "ASYMMETRY"],
                     "candidate_combinations_evaluated": evaluated,
                     "condition_families": list(candidate["condition_families"]),
+                    "condition_family_policy": {
+                        "policy_version": (
+                            research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+                        ),
+                        "enforcement": "ALL_CONDITION_DEPTHS",
+                        "families": list(candidate["condition_families"]),
+                        "justified_exceptions": list(
+                            config.condition_family_exceptions
+                        ),
+                    },
                     "hierarchical_validation": candidate.get(
                         "hierarchical_validation"
                     ),
@@ -3702,6 +3752,9 @@ def _search_direction(
         "statistical_hypotheses_tested": len(candidates),
         "unique_candidate_observation_sets": len(dedup_observations),
         "family_policy_rejections": family_policy_rejections,
+        "condition_family_policy_version": (
+            research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+        ),
         "insufficient_sample_rejections": insufficient_sample_rejections,
         "correlated_sample_rejections": correlated_sample_rejections,
         "hierarchical_search": hierarchical_diagnostics,
@@ -3900,6 +3953,9 @@ def discover_formulas(
             "selection_evidence_as_of_utc": selection_as_of,
             "holdout_evidence_as_of_utc": holdout_as_of,
             "walk_forward_policy_version": WALK_FORWARD_POLICY_VERSION,
+            "condition_family_policy_version": (
+                research_formula_families.CONDITION_FAMILY_POLICY_VERSION
+            ),
             "purge_policy_version": PURGE_POLICY_VERSION,
             "embargo_policy_version": EMBARGO_POLICY_VERSION,
             "purge_minutes": purge_minutes,

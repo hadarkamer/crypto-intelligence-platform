@@ -249,8 +249,13 @@ Infrastructure stage 2 defines one side-effect-free contract in
   formula-family id, matched/control Market Episode ids, parent episode ids,
   raw counts, `N_eff`, metrics and provenance. Its SHA-256 content id changes
   whenever any bound input changes.
-- Current v7 snapshots are marked `CURRENT_V7`. Retained v5/v6.2 formulas use
-  a deterministic `LEGACY_SHADOW_READ_ONLY` adapter and are not rewritten.
+- V7.2 snapshots are marked `CURRENT_V7`. The exact V7.1 runtime remains
+  decodable under that shared v7 schema so append-only historical fingerprints
+  stay readable, but consumers derive `RETAINED_V7_1_READ_ONLY` from the exact
+  engine tuple: it is labeled retained, cannot become relevance-eligible and
+  cannot satisfy Formula Lab's V7.2 evidence gates.
+  Retained v5/v6.2 formulas use a deterministic `LEGACY_SHADOW_READ_ONLY`
+  adapter and are not rewritten.
 - Migration `015_formula_evidence_snapshots_v1.sql` adds an append-only storage
   table. No production worker writes snapshots in stage 2; later integrations
   must call the idempotent store explicitly.
@@ -260,6 +265,7 @@ Infrastructure stage 2 defines one side-effect-free contract in
 
 The canonical fixtures are
 `fixtures/evidence/current_v7_probability.json` and
+`fixtures/evidence/retained_v7_1_probability.json`, plus
 `fixtures/evidence/legacy_v6_shadow.json`. They prove stable interpretation,
 content ids, event/family identifiers and legacy compatibility.
 
@@ -289,8 +295,9 @@ described below.
 ## Versioned rolling relevance hysteresis
 
 Stage 3B adds the side-effect-free
-`formula-relevance-hysteresis-v1` policy and connects each distinct Shadow
-rolling assessment to one verified, content-addressed `EvidenceSnapshot`.
+`formula-relevance-hysteresis-v2-runtime-bound` policy and connects each
+distinct Shadow rolling assessment to one verified, content-addressed
+`EvidenceSnapshot`.
 Migration `016_formula_relevance_hysteresis_v1.sql` stores the resulting
 relevance decisions append-only. Repeated one-minute polling with the same
 assessment/evidence/day fingerprint is idempotent and cannot advance a streak.
@@ -323,10 +330,11 @@ formula stage, and has `delivery_channel=NONE` and `live_effect=NONE` throughout
 It does not change acceptance thresholds, HYPE/Max Pain rules, the scheduler,
 or the frozen prospective owner-approval path.
 
-## Discovery v7.1 Walk-forward and horizon scheduler
+## Discovery v7.2 Walk-forward, family guard and horizon scheduler
 
-Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
-the validation and operational execution around them:
+Stage 4 introduced the versioned Walk-forward scheduler below. Stage 5A keeps
+its probability/asymmetry thresholds and scheduling unchanged, versions the
+engine as v7.2, and adds the all-depth family guard:
 
 - `formula-walk-forward-v1-expanding-refit` learns a feature/operator structure
   from initial Fit only, recalculates numeric quantile thresholds on an
@@ -336,6 +344,17 @@ the validation and operational execution around them:
   Episode overlap at every boundary. `full-outcome-horizon-embargo-v1` then
   adds the formula's full 1h/4h/12h/24h outcome horizon. Test cannot influence
   identity, rank, family grouping or Walk-forward selection.
+- `formula-condition-family-policy-v1-all-depth-fail-closed` rejects correlated
+  feature-family stacking at every candidate depth, including ordinary pairs
+  and triples, unless the run freezes a syntactically valid written exception.
+  The policy version and written exceptions are bound into `formula_key`; the
+  same frozen metadata is replayed and identity-checked by Formula Lab.
+- Persistence verifies the exact current dataset/runtime tuple, recomputes each
+  `formula_key` and replays the family policy for the complete cohort before
+  opening a PostgreSQL connection. A malformed or conflicting formula therefore
+  creates no run, evaluation, stage transition or retirement side effect. The
+  run coverage audit also retains the policy version and enforcement mode when
+  a valid run finds zero formulas.
 - `formula-discovery-horizon-scheduler-v1` owns one fixed UTC clock per horizon.
   A five-minute grace makes the as-of time deterministic and allows due closed
   outcomes to be stored before Discovery reads them.
