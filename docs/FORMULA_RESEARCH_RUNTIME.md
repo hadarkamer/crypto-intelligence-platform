@@ -429,6 +429,16 @@ release prevent duplicate fake dispatch. It remains absent from production,
 the worker and scheduler, with no database, research-evidence, Stage-6 or LIVE
 effect. Its lifecycle is `PREPARED_FAKE_BOT_ONLY_NOT_RUNTIME_VERIFIED`.
 
+`research_experimental_preview_staging_registration.py` is wired only into the
+dedicated `ai_candidate_main.py` staging entrypoint. After the staging Bot
+starts, it retains that Bot interface under `RUNTIME_BOT_UNREGISTERED`; shutdown
+removes the binding. The registration exposes status only—no dispatch method,
+handler, command or scheduled task—and is hard-coded disabled with an engaged
+kill switch, no test-chat destination and no activation authority. The main
+production entrypoint remains untouched. Merely starting staging therefore
+causes zero Preview delivery, API, database, research-evidence, Stage-6 or LIVE
+effects.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
