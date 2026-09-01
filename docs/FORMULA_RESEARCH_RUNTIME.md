@@ -406,6 +406,16 @@ closes when Stage 5 becomes `READY`. It registers no connector, accepts no
 public opt-in, imports no Telegram client and performs no API call or delivery;
 database, research-evidence, Stage-6 and LIVE effects remain zero.
 
+`research_experimental_preview_telegram_adapter.py` maps ready envelopes to
+the exact keyword arguments supported by the pinned `python-telegram-bot 21.9`
+`Bot.send_message` interface. Messages are deterministically split below the
+Telegram limit, with content-addressed per-chunk request keys. The adapter is
+explicitly `UNREGISTERED`: it accepts neither a Bot nor a token, contains no
+API invocation and returns every prepared request as
+`BLOCKED_CONNECTOR_UNREGISTERED`. It is not imported by the production bot,
+worker or scheduler; connector registration, activation, actual delivery,
+public opt-in, Stage 6, LIVE and research-evidence effects all remain absent.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
