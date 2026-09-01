@@ -38,6 +38,7 @@ except Exception:  # pragma: no cover
 
 import binance_spot_price_path
 import canonical_price_path
+import research_feature_matrix
 import research_no_dwell_outcome
 import research_session_width
 
@@ -50,6 +51,7 @@ _OPEN_FIRST_TOUCH_EVENT_LIMIT = max(
     1,
     min(200, int(os.getenv("RESEARCH_OPEN_FIRST_TOUCH_EVENT_LIMIT", "32"))),
 )
+_SLOT_THRESHOLD_AUTHORITY_BATCH_SIZE = 50
 _METHOD_VERSION = canonical_price_path.METHOD_VERSION
 _FIRST_TOUCH_METHOD_VERSION = research_no_dwell_outcome.METHOD_VERSION
 _STRICT_FROZEN_EVIDENCE_POLICY_VERSION = (
@@ -57,6 +59,9 @@ _STRICT_FROZEN_EVIDENCE_POLICY_VERSION = (
 )
 _STRICT_FROZEN_SNAPSHOT_POLICY_VERSION = (
     "formula-shadow-input-snapshot-v5-frozen-decision-features"
+)
+_STRICT_SLOT_THRESHOLD_AUTHORITY_VERSION = (
+    "prospective-anchor-slot-threshold-authority-v1"
 )
 _STRICT_FEATURE_BUNDLE_POLICY_VERSION = (
     "prospective-decision-feature-bundle-v1"
@@ -165,6 +170,64 @@ def _prospective_sampler_version(event: Mapping[str, Any]) -> str:
     return str(anchor.get("sampler_version") or "").strip()
 
 
+def _slot_threshold_record(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Normalize one verified slot row into the threshold evidence contract.
+
+    ``load_shadow_feature_rows_by_horizon`` has already validated the
+    migration-013 authority view, the event/slot fingerprints and the hashed
+    decision-time bundle.  This adapter deliberately carries no formula
+    identity: the slot is the sampler-v4 threshold authority, while Formula
+    Shadow checks remain formula-evaluation evidence only.
+    """
+    event = _mapping(row.get("event"))
+    label = _mapping(row.get("outcome_label"))
+    prospective = _mapping(row.get("prospective_evidence"))
+    horizon = _strict_positive_int(label.get("horizon_minutes")) or 0
+    event_id = _strict_positive_int(event.get("event_id")) or 0
+    evidence_policy = str(
+        row.get("decision_input_policy_version") or ""
+    ).strip()
+    snapshot = {
+        "snapshot_policy_version": _STRICT_SLOT_THRESHOLD_AUTHORITY_VERSION,
+        "evidence_policy_version": evidence_policy,
+        "decision_input_policy_version": evidence_policy,
+        "horizon_minutes": horizon,
+        "event": dict(event),
+        "prospective_evidence": dict(prospective),
+        "outcome_window_session": {
+            key: label.get(key)
+            for key in (
+                "session_active_ratio",
+                "session_weekend_ratio",
+                "session_segments",
+                "session_composition",
+            )
+        },
+        "movement_width_reference": (
+            dict(label.get("movement_width_reference"))
+            if isinstance(label.get("movement_width_reference"), Mapping)
+            else {}
+        ),
+    }
+    return {
+        "event_id": event_id,
+        "horizon_minutes": horizon,
+        "threshold_authority_version": (
+            _STRICT_SLOT_THRESHOLD_AUTHORITY_VERSION
+        ),
+        "input_snapshot": snapshot,
+        "evidence_policy_version": evidence_policy,
+        "prospective_anchor_slot_id": row.get(
+            "prospective_anchor_slot_id"
+        ),
+        "prospective_input_fingerprint": row.get(
+            "prospective_input_fingerprint"
+        ),
+        "feature_bundle_sha256": row.get("feature_bundle_sha256"),
+        "authoritative_verified": row.get("authoritative_verified") is True,
+    }
+
+
 def _is_current_frozen_evidence_record(record: Mapping[str, Any]) -> bool:
     """Recognize every marker that makes a row subject to the v4 contract.
 
@@ -175,7 +238,8 @@ def _is_current_frozen_evidence_record(record: Mapping[str, Any]) -> bool:
     snapshot = _mapping(record.get("input_snapshot"))
     evidence = _mapping(snapshot.get("prospective_evidence"))
     return (
-        str(record.get("evidence_policy_version") or "").strip()
+        bool(str(record.get("threshold_authority_version") or "").strip())
+        or str(record.get("evidence_policy_version") or "").strip()
         == _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
         or str(snapshot.get("evidence_policy_version") or "").strip()
         == _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
@@ -200,7 +264,7 @@ def _strict_frozen_threshold_policy(
         _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
     ):
         raise FrozenThresholdPolicyConflict(
-            "current Shadow check evidence policy is missing or incompatible"
+            "current frozen evidence policy is missing or incompatible"
         )
     if str(snapshot.get("evidence_policy_version") or "").strip() != (
         _STRICT_FROZEN_EVIDENCE_POLICY_VERSION
@@ -208,8 +272,22 @@ def _strict_frozen_threshold_policy(
         raise FrozenThresholdPolicyConflict(
             "current frozen snapshot evidence policy is missing or incompatible"
         )
+    authority_version = str(
+        record.get("threshold_authority_version") or ""
+    ).strip()
+    if authority_version and authority_version != (
+        _STRICT_SLOT_THRESHOLD_AUTHORITY_VERSION
+    ):
+        raise FrozenThresholdPolicyConflict(
+            "current threshold authority is missing or incompatible"
+        )
+    expected_snapshot_policy = (
+        _STRICT_SLOT_THRESHOLD_AUTHORITY_VERSION
+        if authority_version == _STRICT_SLOT_THRESHOLD_AUTHORITY_VERSION
+        else _STRICT_FROZEN_SNAPSHOT_POLICY_VERSION
+    )
     if str(snapshot.get("snapshot_policy_version") or "").strip() != (
-        _STRICT_FROZEN_SNAPSHOT_POLICY_VERSION
+        expected_snapshot_policy
     ):
         raise FrozenThresholdPolicyConflict(
             "current frozen snapshot policy is missing or incompatible"
@@ -222,13 +300,13 @@ def _strict_frozen_threshold_policy(
         )
     if record.get("authoritative_verified") is not True:
         raise FrozenThresholdPolicyConflict(
-            "current Shadow evidence was not authoritatively verified"
+            "current frozen evidence was not authoritatively verified"
         )
     if str(evidence.get("sampler_version") or "").strip() != (
         _STRICT_PROSPECTIVE_SAMPLER_VERSION
     ):
         raise FrozenThresholdPolicyConflict(
-            "current Shadow evidence is not bound to the exact sampler v4"
+            "current frozen evidence is not bound to the exact sampler v4"
         )
     event_anchor = _prospective_anchor_evidence(event)
     event_sampler = str(event_anchor.get("sampler_version") or "").strip()
@@ -267,7 +345,7 @@ def _strict_frozen_threshold_policy(
         )
     if _strict_sha256(event_anchor.get("input_fingerprint")) != input_fingerprint:
         raise FrozenThresholdPolicyConflict(
-            "outcome event input fingerprint differs from frozen Shadow evidence"
+            "outcome event input fingerprint differs from frozen evidence"
         )
     if str(
         event_anchor.get("feature_bundle_policy_version") or ""
@@ -279,7 +357,7 @@ def _strict_frozen_threshold_policy(
         event_anchor.get("feature_bundle_sha256")
     ) != bundle_sha256:
         raise FrozenThresholdPolicyConflict(
-            "outcome event feature-bundle hash differs from frozen Shadow evidence"
+            "outcome event feature-bundle hash differs from frozen evidence"
         )
     if not isinstance(evidence.get("source_timestamps"), Mapping):
         raise FrozenThresholdPolicyConflict(
@@ -309,6 +387,12 @@ def _strict_frozen_threshold_policy(
     ).strip().upper():
         raise FrozenThresholdPolicyConflict(
             "current frozen symbol differs from the outcome event"
+        )
+    if str(frozen_event.get("direction") or "").strip().upper() != str(
+        event.get("direction") or ""
+    ).strip().upper():
+        raise FrozenThresholdPolicyConflict(
+            "current frozen direction differs from the outcome event"
         )
     try:
         if _utc(frozen_event.get("alert_time_utc")) != decision_time:
@@ -421,13 +505,13 @@ def _frozen_threshold_policy(
     horizon_minutes: int,
     snapshot_records: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """Build one deterministic threshold from immutable Shadow snapshots.
+    """Build one deterministic threshold from immutable decision evidence.
 
-    Multiple formulas can evaluate the same event and horizon, while the
-    canonical first-touch table has one row for that event/horizon.  Any
-    relaxed references must therefore agree exactly.  Ambiguity is rejected
-    instead of silently falling back to a static threshold and mislabelling a
-    weekend outcome.
+    A sampler-v4 slot is the direct authority for current events.  Legacy
+    formulas can still carry earlier snapshot references.  The canonical
+    first-touch table has one row for an event/horizon, so multiple applicable
+    authorities must agree exactly.  Ambiguity is rejected instead of silently
+    falling back to a static threshold and mislabelling a weekend outcome.
     """
     horizon = int(horizon_minutes)
     decision_time = _utc(event["alert_time_utc"])
@@ -470,13 +554,13 @@ def _frozen_threshold_policy(
         ]
         if len({item[0] for item in normalized_current}) != 1:
             raise FrozenThresholdPolicyConflict(
-                "current formula snapshots disagree on the frozen "
+                "current threshold authorities disagree on the frozen "
                 "event/horizon feature bundle"
             )
         return normalized_current[0][1]
 
     # Earlier formula/sampler snapshots remain readable for historical audit,
-    # but they are never treated as current frozen Shadow evidence. Their
+    # but they are never treated as current frozen threshold evidence. Their
     # compatibility bridge below cannot authorize readiness or replace a
     # missing v4 decision bundle.
     relevant = raw_relevant
@@ -985,7 +1069,7 @@ class ResearchOutcomeWorker:
     def _load_frozen_threshold_references(
         conn, event_ids: Sequence[int]
     ) -> list[Dict[str, Any]]:
-        """Load immutable width evidence for matches and prospective controls."""
+        """Load legacy formula-snapshot width evidence for non-v4 events."""
         normalized = sorted(
             {int(event_id) for event_id in event_ids if int(event_id) > 0}
         )
@@ -1014,6 +1098,98 @@ class ResearchOutcomeWorker:
             (normalized,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _load_current_slot_threshold_references(
+        events: Sequence[Mapping[str, Any]], *, now: datetime
+    ) -> Dict[int, list[Dict[str, Any]]]:
+        """Load canonical sampler-v4 threshold authority by event and horizon.
+
+        Formula checks are intentionally not an input.  The migration-013
+        slot owns the immutable decision feature bundle for every authorized
+        sampler-v4 event.  The shared loader validates that authority before
+        returning its exact per-horizon session and movement-width context.
+        Requests are chunked well below the shared loader's 250-event hard
+        limit because its verified rows briefly contain the full frozen bundle
+        before this worker reduces them to compact threshold evidence.
+        """
+        requested_by_event: Dict[int, set[int]] = {}
+        for event in events:
+            if (
+                _prospective_sampler_version(event)
+                != _STRICT_PROSPECTIVE_SAMPLER_VERSION
+            ):
+                continue
+            event_id = _strict_positive_int(event.get("event_id"))
+            if event_id is None:
+                continue
+            first_touch_enabled = str(
+                event.get("direction") or ""
+            ).strip().upper() in {"LONG", "SHORT"}
+            if not first_touch_enabled:
+                continue
+            try:
+                event_time = _utc(event.get("alert_time_utc"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            first_touch_versions = _versions(
+                event.get("first_touch_versions")
+            )
+            due_horizons = _due_horizons(
+                event_time,
+                _versions(event.get("outcome_versions")),
+                first_touch_versions,
+                now=_utc(now),
+                first_touch_enabled=True,
+                open_first_touch_horizons=(
+                    event.get("open_first_touch_horizons") or ()
+                ),
+            )
+            requested = {
+                horizon
+                for horizon in due_horizons
+                if first_touch_versions.get(horizon)
+                != _FIRST_TOUCH_METHOD_VERSION
+            }
+            if requested:
+                requested_by_event[event_id] = requested
+
+        references_by_event: Dict[int, list[Dict[str, Any]]] = {}
+        event_ids = sorted(requested_by_event)
+        batch_size = _SLOT_THRESHOLD_AUTHORITY_BATCH_SIZE
+        for offset in range(0, len(event_ids), batch_size):
+            chunk = event_ids[offset : offset + batch_size]
+            requested_by_horizon = {
+                horizon: [
+                    event_id
+                    for event_id in chunk
+                    if horizon in requested_by_event[event_id]
+                ]
+                for horizon in _HORIZONS
+            }
+            requested_by_horizon = {
+                horizon: requested_ids
+                for horizon, requested_ids in requested_by_horizon.items()
+                if requested_ids
+            }
+            loaded = (
+                research_feature_matrix.load_shadow_feature_rows_by_horizon(
+                    requested_by_horizon
+                )
+            )
+            expected = {
+                (event_id, horizon)
+                for event_id in chunk
+                for horizon in requested_by_event[event_id]
+            }
+            for key, row in sorted(loaded.items()):
+                event_id, horizon = int(key[0]), int(key[1])
+                if (event_id, horizon) not in expected:
+                    continue
+                references_by_event.setdefault(event_id, []).append(
+                    _slot_threshold_record(row)
+                )
+        return references_by_event
 
     @staticmethod
     def _load_due_events(conn, limit: int) -> list[Dict[str, Any]]:
@@ -1614,17 +1790,35 @@ class ResearchOutcomeWorker:
                     }
                 )
             events = [events_by_id[event_id] for event_id in event_order]
+            legacy_event_ids = [
+                event_id
+                for event_id in event_order
+                if _prospective_sampler_version(events_by_id[event_id])
+                != _STRICT_PROSPECTIVE_SAMPLER_VERSION
+            ]
             frozen_references = self._load_frozen_threshold_references(
-                conn, event_order
+                conn, legacy_event_ids
             )
             references_by_event: Dict[int, list[Dict[str, Any]]] = {}
             for reference in frozen_references:
                 references_by_event.setdefault(
                     int(reference["event_id"]), []
                 ).append(reference)
-            for event in events:
-                event["frozen_threshold_references"] = references_by_event.get(
-                    int(event["event_id"]), []
+        slot_references_by_event = (
+            self._load_current_slot_threshold_references(events, now=now)
+        )
+        for event in events:
+            event_id = int(event["event_id"])
+            if (
+                _prospective_sampler_version(event)
+                == _STRICT_PROSPECTIVE_SAMPLER_VERSION
+            ):
+                event["frozen_threshold_references"] = (
+                    slot_references_by_event.get(event_id, [])
+                )
+            else:
+                event["frozen_threshold_references"] = (
+                    references_by_event.get(event_id, [])
                 )
         # Do not hold a PostgreSQL connection or transaction while waiting for
         # Binance. This keeps outcome research isolated from the live bot load.
@@ -1665,7 +1859,57 @@ class ResearchOutcomeWorker:
                 unavailable_event_counts[symbol] += 1
                 continue
 
-            max_horizon = max(horizons)
+            # Threshold authority is decision-time evidence, so validate it
+            # before downloading any future price path.  A permanently
+            # malformed/missing authority must not trigger an expensive API
+            # fetch when first-touch is the event's only remaining work.
+            legacy_horizons: set[int] = set()
+            threshold_policies: Dict[int, Dict[str, Any]] = {}
+            first_touch_enabled = str(
+                event.get("direction") or ""
+            ).upper() in {"LONG", "SHORT"}
+            for horizon in horizons:
+                horizon_closed = now >= (
+                    event_time + timedelta(minutes=horizon)
+                )
+                if (
+                    horizon_closed
+                    and versions.get(horizon) != _METHOD_VERSION
+                ):
+                    legacy_horizons.add(horizon)
+                if (
+                    not first_touch_enabled
+                    or first_touch_versions.get(horizon)
+                    == _FIRST_TOUCH_METHOD_VERSION
+                ):
+                    continue
+                try:
+                    threshold_policies[horizon] = _frozen_threshold_policy(
+                        event=event,
+                        horizon_minutes=horizon,
+                        snapshot_records=(
+                            event.get("frozen_threshold_references") or ()
+                        ),
+                    )
+                except FrozenThresholdPolicyConflict as exc:
+                    first_touch_policy_conflicts += 1
+                    print(
+                        "[research-outcomes] frozen first-touch threshold "
+                        f"conflict event={event['event_id']} horizon={horizon}: "
+                        f"{exc}",
+                        flush=True,
+                    )
+
+            path_horizons = [
+                horizon
+                for horizon in horizons
+                if horizon in legacy_horizons
+                or horizon in threshold_policies
+            ]
+            if not path_horizons:
+                continue
+
+            max_horizon = max(path_horizons)
             horizon_time = min(
                 event_time + timedelta(minutes=max_horizon),
                 latest_closed_cutoff,
@@ -1727,7 +1971,7 @@ class ResearchOutcomeWorker:
                 )
                 continue
 
-            for horizon in horizons:
+            for horizon in path_horizons:
                 horizon_cutoff = event_time + timedelta(minutes=horizon)
                 observed_cutoff = min(horizon_cutoff, latest_closed_cutoff)
                 candles = _candles_for_horizon(full_path, observed_cutoff)
@@ -1742,9 +1986,7 @@ class ResearchOutcomeWorker:
                     and len(candles) == _expected_candles(event_time, horizon_cutoff)
                 )
                 partial_paths += int(not observed_complete)
-                legacy_needed = (
-                    horizon_closed and versions.get(horizon) != _METHOD_VERSION
-                )
+                legacy_needed = horizon in legacy_horizons
                 metrics = (
                     binance_spot_price_path.calculate_path_metrics(
                         reference_price=reference_price,
@@ -1756,55 +1998,34 @@ class ResearchOutcomeWorker:
                     if legacy_needed
                     else None
                 )
-                first_touch_needed = (
-                    str(event.get("direction") or "").upper() in {"LONG", "SHORT"}
-                    and first_touch_versions.get(horizon)
-                    != _FIRST_TOUCH_METHOD_VERSION
-                )
+                first_touch_needed = horizon in threshold_policies
                 first_touch = None
                 first_touch_write_safe = False
                 if first_touch_needed:
-                    try:
-                        threshold_policy = _frozen_threshold_policy(
-                            event=event,
-                            horizon_minutes=horizon,
-                            snapshot_records=(
-                                event.get("frozen_threshold_references") or ()
+                    first_touch = (
+                        research_no_dwell_outcome.calculate_first_touch_outcome(
+                            reference_price=reference_price,
+                            direction=str(
+                                event.get("direction") or "NEUTRAL"
                             ),
+                            event_time=event_time,
+                            candles=candles,
+                            horizon_minutes=horizon,
+                            horizon_closed=full_complete,
+                            threshold_policy=threshold_policies[horizon],
                         )
-                    except FrozenThresholdPolicyConflict as exc:
-                        first_touch_policy_conflicts += 1
-                        print(
-                            "[research-outcomes] frozen first-touch threshold "
-                            f"conflict event={event['event_id']} horizon={horizon}: "
-                            f"{exc}",
-                            flush=True,
-                        )
-                    else:
-                        first_touch = (
-                            research_no_dwell_outcome.calculate_first_touch_outcome(
-                                reference_price=reference_price,
-                                direction=str(
-                                    event.get("direction") or "NEUTRAL"
-                                ),
-                                event_time=event_time,
-                                candles=candles,
-                                horizon_minutes=horizon,
-                                horizon_closed=full_complete,
-                                threshold_policy=threshold_policy,
-                            )
-                        )
-                        # ``first_qualifying_move_time_utc`` preserves the
-                        # exact earlier touch.  ``observed_through_utc`` tracks
-                        # the complete prefix used for this recalculation so a
-                        # corrected PENDING -> HIT write remains monotonic.
-                        first_touch["observed_through_utc"] = _utc(
-                            candles[-1].close_time_utc
-                        )
-                        first_touch_write_safe = _first_touch_write_is_safe(
-                            first_touch,
-                            observed_prefix_complete=observed_complete,
-                        )
+                    )
+                    # ``first_qualifying_move_time_utc`` preserves the exact
+                    # earlier touch. ``observed_through_utc`` tracks the
+                    # complete prefix used for this recalculation so a
+                    # corrected PENDING -> HIT write remains monotonic.
+                    first_touch["observed_through_utc"] = _utc(
+                        candles[-1].close_time_utc
+                    )
+                    first_touch_write_safe = _first_touch_write_is_safe(
+                        first_touch,
+                        observed_prefix_complete=observed_complete,
+                    )
                 if (
                     first_touch is not None
                     and first_touch.get("status") in {"HIT", "MISS"}

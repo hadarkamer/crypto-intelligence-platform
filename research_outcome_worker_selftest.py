@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -135,6 +136,34 @@ def _strict_record(
     }
 
 
+def _slot_authority_row(event, horizon):
+    """Build the compact shape returned by the verified slot loader."""
+    record = _strict_record(event, horizon)
+    snapshot = record["input_snapshot"]
+    return {
+        "event": dict(snapshot["event"]),
+        "outcome_label": {
+            "horizon_minutes": horizon,
+            **dict(snapshot["outcome_window_session"]),
+            "movement_width_reference": dict(
+                snapshot["movement_width_reference"]
+            ),
+        },
+        "decision_input_policy_version": (
+            worker._STRICT_FROZEN_EVIDENCE_POLICY_VERSION
+        ),
+        "prospective_evidence": dict(snapshot["prospective_evidence"]),
+        "prospective_anchor_slot_id": record[
+            "prospective_anchor_slot_id"
+        ],
+        "prospective_input_fingerprint": record[
+            "prospective_input_fingerprint"
+        ],
+        "feature_bundle_sha256": record["feature_bundle_sha256"],
+        "authoritative_verified": True,
+    }
+
+
 def _run_once_with_path(
     candles,
     *,
@@ -175,11 +204,13 @@ def _run_once_with_path(
                 "feature_bundle_sha256": "d" * 64,
             },
         }
-        strict_record = _strict_record(event, horizon)
+        slot_row = _slot_authority_row(event, horizon)
         if omit_strict_width:
-            strict_record["input_snapshot"].pop("movement_width_reference")
-        frozen_records = [strict_record]
+            slot_row["outcome_label"].pop("movement_width_reference")
+        slot_records = [worker._slot_threshold_record(slot_row)]
+        frozen_records = []
     else:
+        slot_records = []
         frozen_records = [
             {
                 "event_id": event["event_id"],
@@ -212,6 +243,11 @@ def _run_once_with_path(
     service._load_frozen_threshold_references = (
         lambda conn, event_ids: frozen_records
     )
+    service._load_current_slot_threshold_references = (
+        lambda events, now: (
+            {event["event_id"]: slot_records} if slot_records else {}
+        )
+    )
     service._write_first_touch_outcome = (
         lambda conn, **kwargs: captured_writes.append(kwargs) or True
     )
@@ -242,6 +278,127 @@ def _run_once_with_path(
         worker._database_url = original_database_url
         worker.canonical_price_path.fetch_closed_candles = original_fetch
     return result, captured_writes
+
+
+def _run_closed_current_slot_once(*, slot_authority, legacy_complete=True):
+    """Exercise the closed queue through the real slot-authority method."""
+    now = datetime.now(timezone.utc)
+    event_time = now.replace(second=0, microsecond=0) - timedelta(minutes=61)
+    event = {
+        "event_id": 9101,
+        "alert_time_utc": event_time,
+        "symbol": "BTC",
+        "direction": "LONG",
+        "event_type": "SELFTEST",
+        "setup_key": "SELFTEST",
+        "event_kind": "DECISION_SAMPLE",
+        "delivery_status": "NOT_APPLICABLE",
+        "current_price": 100.0,
+        "target_price": None,
+        "engine_snapshot": {
+            "prospective_anchor": {
+                "sampler_version": worker._STRICT_PROSPECTIVE_SAMPLER_VERSION,
+                "input_fingerprint": "e" * 64,
+                "feature_bundle_policy_version": (
+                    worker._STRICT_FEATURE_BUNDLE_POLICY_VERSION
+                ),
+                "feature_bundle_sha256": "d" * 64,
+            }
+        },
+        "outcome_versions": (
+            {60: canonical_price_path.METHOD_VERSION}
+            if legacy_complete
+            else {}
+        ),
+        "first_touch_versions": {},
+        "open_first_touch_horizons": [],
+    }
+    slot_row = _slot_authority_row(event, 60)
+    loader_calls = []
+    formula_event_id_calls = []
+    fetch_calls = []
+    first_touch_writes = []
+    legacy_writes = []
+
+    def load_slots(requested_by_horizon):
+        loader_calls.append(
+            {
+                int(horizon): list(event_ids)
+                for horizon, event_ids in requested_by_horizon.items()
+            }
+        )
+        if not slot_authority:
+            return {}
+        return {(event["event_id"], 60): slot_row}
+
+    def load_formula_references(conn, event_ids):
+        formula_event_id_calls.append(list(event_ids))
+        return []
+
+    def fetch_path(*args):
+        fetch_calls.append(args)
+        candles = [
+            _candle(
+                event_time + timedelta(minutes=index),
+                high=100.6 if index == 0 else 100.0,
+                low=99.8 if index == 0 else 100.0,
+                close=99.9 if index == 0 else 100.0,
+            )
+            for index in range(60)
+        ]
+        return {
+            "symbol": "BTC",
+            "pair": "BTCUSDT",
+            "exchange": "binance",
+            "market": "spot",
+            "interval": "1m",
+            "provenance": "SELFTEST",
+            "candles": candles,
+        }
+
+    service = worker.ResearchOutcomeWorker()
+    service._load_open_first_touch_events = lambda conn, limit: []
+    service._load_due_events = lambda conn, limit: [event]
+    service._load_frozen_threshold_references = load_formula_references
+    service._write_first_touch_outcome = (
+        lambda conn, **kwargs: first_touch_writes.append(kwargs) or True
+    )
+    service._write_outcome = (
+        lambda conn, **kwargs: legacy_writes.append(kwargs) or True
+    )
+    service._write_alert_reference_rejections = (
+        lambda conn, rejections: len(rejections)
+    )
+
+    original_psycopg = worker.psycopg
+    original_enabled = worker._ENABLED
+    original_database_url = worker._database_url
+    original_fetch = worker.canonical_price_path.fetch_closed_candles
+    original_slot_loader = (
+        worker.research_feature_matrix.load_shadow_feature_rows_by_horizon
+    )
+    worker.psycopg = _PsycopgStub()
+    worker._ENABLED = True
+    worker._database_url = lambda: "postgresql://selftest"
+    worker.canonical_price_path.fetch_closed_candles = fetch_path
+    worker.research_feature_matrix.load_shadow_feature_rows_by_horizon = load_slots
+    try:
+        result = service.run_once(limit_per_horizon=10)
+    finally:
+        worker.psycopg = original_psycopg
+        worker._ENABLED = original_enabled
+        worker._database_url = original_database_url
+        worker.canonical_price_path.fetch_closed_candles = original_fetch
+        worker.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+            original_slot_loader
+        )
+    return result, {
+        "loader_calls": loader_calls,
+        "formula_event_id_calls": formula_event_id_calls,
+        "fetch_calls": fetch_calls,
+        "first_touch_writes": first_touch_writes,
+        "legacy_writes": legacy_writes,
+    }
 
 
 def run() -> None:
@@ -332,6 +489,7 @@ def run() -> None:
         "authorized.input_fingerprint",
         "authorized.feature_bundle_sha256",
         "open_formula.current_stage='SHADOW'",
+        "open_formula.active=TRUE",
         "open_ft.status IN ('HIT', 'MISS')",
         "open_first_touch_horizons",
         "DISTINCT open_formula.horizon_minutes",
@@ -594,6 +752,176 @@ def run() -> None:
     )
     assert strict_policy["threshold_reference_hash"]
 
+    # Sampler-v4 threshold authority comes directly from the canonical slot,
+    # without a Formula identity or Formula evaluation status in the record.
+    slot_record = worker._slot_threshold_record(
+        _slot_authority_row(strict_event, 240)
+    )
+    assert slot_record["threshold_authority_version"] == (
+        worker._STRICT_SLOT_THRESHOLD_AUTHORITY_VERSION
+    )
+    assert "formula_id" not in slot_record
+    slot_policy = worker._frozen_threshold_policy(
+        event=strict_event,
+        horizon_minutes=240,
+        snapshot_records=[slot_record],
+    )
+    assert slot_policy["threshold_reference_hash"] == (
+        strict_policy["threshold_reference_hash"]
+    )
+
+    tampered_slot_records = []
+
+    wrong_slot = copy.deepcopy(slot_record)
+    wrong_slot["prospective_anchor_slot_id"] = 24
+    tampered_slot_records.append(("anchor slot", wrong_slot))
+
+    wrong_hash = copy.deepcopy(slot_record)
+    wrong_hash["feature_bundle_sha256"] = "c" * 64
+    wrong_hash["input_snapshot"]["prospective_evidence"][
+        "feature_bundle_sha256"
+    ] = "c" * 64
+    tampered_slot_records.append(("feature-bundle hash", wrong_hash))
+
+    wrong_fingerprint = copy.deepcopy(slot_record)
+    wrong_fingerprint["prospective_input_fingerprint"] = "f" * 64
+    wrong_fingerprint["input_snapshot"]["prospective_evidence"][
+        "input_fingerprint"
+    ] = "f" * 64
+    tampered_slot_records.append(("input fingerprint", wrong_fingerprint))
+
+    wrong_session = copy.deepcopy(slot_record)
+    session = wrong_session["input_snapshot"]["outcome_window_session"]
+    active_ratio = 0.0 if float(session["session_active_ratio"]) else 1.0
+    session["session_active_ratio"] = active_ratio
+    session["session_weekend_ratio"] = 1.0 - active_ratio
+    session["session_composition"] = (
+        worker.research_session_width.session_composition_label(active_ratio)
+    )
+    tampered_slot_records.append(("session context", wrong_session))
+
+    future_reference = copy.deepcopy(slot_record)
+    future_reference["input_snapshot"]["movement_width_reference"][
+        "as_of_utc"
+    ] = START + timedelta(seconds=1)
+    tampered_slot_records.append(("future as-of", future_reference))
+
+    wrong_direction = copy.deepcopy(slot_record)
+    wrong_direction["input_snapshot"]["event"]["direction"] = "SHORT"
+    tampered_slot_records.append(("direction", wrong_direction))
+
+    for tamper_name, tampered_record in tampered_slot_records:
+        try:
+            worker._frozen_threshold_policy(
+                event=strict_event,
+                horizon_minutes=240,
+                snapshot_records=[tampered_record],
+            )
+        except worker.FrozenThresholdPolicyConflict:
+            pass
+        else:
+            raise AssertionError(
+                f"tampered sampler-v4 slot authority accepted: {tamper_name}"
+            )
+
+    # More than the shared loader's 250-ID cap is split by distinct events.
+    # Each chunk requests only First-Touch-due horizons, retains separate
+    # per-horizon contexts, and excludes neutral or legacy-sampler events.
+    batch_now = START + timedelta(minutes=61)
+    batch_events = []
+    batch_events_by_id = {}
+    for index in range(251):
+        event_id = 10_000 + index
+        event = {
+            **strict_event,
+            "event_id": event_id,
+            "engine_snapshot": copy.deepcopy(strict_event["engine_snapshot"]),
+            "outcome_versions": {60: canonical_price_path.METHOD_VERSION},
+            "first_touch_versions": (
+                {60: research_no_dwell_outcome.METHOD_VERSION}
+                if index % 2 == 0
+                else {}
+            ),
+            "open_first_touch_horizons": [240],
+        }
+        batch_events.append(event)
+        batch_events_by_id[event_id] = event
+    neutral_event = {
+        **batch_events[0],
+        "event_id": 20_001,
+        "direction": "NEUTRAL",
+        "first_touch_versions": {},
+    }
+    legacy_sampler_event = {
+        **batch_events[0],
+        "event_id": 20_002,
+        "engine_snapshot": {
+            "prospective_anchor": {
+                "sampler_version": "prospective-neutral-anchor-v3-max-pain-frozen"
+            }
+        },
+    }
+    loader_calls = []
+
+    def batch_slot_loader(requested_by_horizon):
+        request = {
+            int(horizon): list(event_ids)
+            for horizon, event_ids in requested_by_horizon.items()
+        }
+        loader_calls.append(request)
+        return {
+            (event_id, horizon): _slot_authority_row(
+                batch_events_by_id[event_id], horizon
+            )
+            for horizon, event_ids in request.items()
+            for event_id in event_ids
+        }
+
+    original_slot_loader = (
+        worker.research_feature_matrix.load_shadow_feature_rows_by_horizon
+    )
+    worker.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+        batch_slot_loader
+    )
+    try:
+        batch_references = (
+            worker.ResearchOutcomeWorker._load_current_slot_threshold_references(
+                [*batch_events, neutral_event, legacy_sampler_event],
+                now=batch_now,
+            )
+        )
+    finally:
+        worker.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+            original_slot_loader
+        )
+    distinct_call_sizes = [
+        len(
+            {
+                event_id
+                for event_ids in request.values()
+                for event_id in event_ids
+            }
+        )
+        for request in loader_calls
+    ]
+    assert distinct_call_sizes == [50, 50, 50, 50, 50, 1]
+    assert len(batch_references) == 251
+    assert neutral_event["event_id"] not in batch_references
+    assert legacy_sampler_event["event_id"] not in batch_references
+    assert sorted(
+        record["horizon_minutes"]
+        for record in batch_references[batch_events[0]["event_id"]]
+    ) == [240]
+    assert sorted(
+        record["horizon_minutes"]
+        for record in batch_references[batch_events[1]["event_id"]]
+    ) == [60, 240]
+    assert all(
+        "formula_id" not in record
+        for records in batch_references.values()
+        for record in records
+    )
+
     missing_width = {
         **strict_record,
         "input_snapshot": {
@@ -731,6 +1059,48 @@ def run() -> None:
             raise AssertionError(
                 "relaxed reference with a missing/mismatched horizon was accepted"
             )
+
+    # Reproduce the closed-backlog failure mode: no open authorization and no
+    # Formula references, but a direct canonical slot is enough to write the
+    # terminal sampler-v4 label after 60 complete candles.
+    closed_slot, closed_slot_trace = _run_closed_current_slot_once(
+        slot_authority=True
+    )
+    assert closed_slot_trace["loader_calls"] == [{60: [9101]}]
+    assert closed_slot_trace["formula_event_id_calls"] == [[]]
+    assert len(closed_slot_trace["fetch_calls"]) == 1
+    assert len(closed_slot_trace["first_touch_writes"]) == 1
+    assert closed_slot_trace["legacy_writes"] == []
+    assert closed_slot["first_touch_hits"] == 1
+    assert closed_slot["first_touch_rows_written"] == 1
+    assert closed_slot["first_touch_threshold_policy_conflicts"] == 0
+    assert closed_slot_trace["first_touch_writes"][0]["first_touch"][
+        "status"
+    ] == "HIT"
+
+    # Missing slot authority fails closed before any price-path request when
+    # First-Touch is the event's only remaining work.
+    missing_slot, missing_slot_trace = _run_closed_current_slot_once(
+        slot_authority=False
+    )
+    assert missing_slot_trace["loader_calls"] == [{60: [9101]}]
+    assert missing_slot_trace["fetch_calls"] == []
+    assert missing_slot_trace["first_touch_writes"] == []
+    assert missing_slot_trace["legacy_writes"] == []
+    assert missing_slot["first_touch_threshold_policy_conflicts"] == 1
+    assert missing_slot["missing_price_paths"] == 0
+
+    # The same First-Touch conflict must not block an independently due legacy
+    # outcome.  Its canonical path is still fetched and its upsert still runs.
+    legacy_due, legacy_due_trace = _run_closed_current_slot_once(
+        slot_authority=False,
+        legacy_complete=False,
+    )
+    assert len(legacy_due_trace["fetch_calls"]) == 1
+    assert legacy_due_trace["first_touch_writes"] == []
+    assert len(legacy_due_trace["legacy_writes"]) == 1
+    assert legacy_due["inserted"] == 1
+    assert legacy_due["first_touch_threshold_policy_conflicts"] == 1
 
     # The exact v4 bundle produces a label without waiting for candle dwell.
     # Removing only its frozen width fails closed even with the same favorable
