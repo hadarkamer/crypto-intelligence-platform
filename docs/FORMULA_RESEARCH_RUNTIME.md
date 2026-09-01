@@ -361,6 +361,20 @@ therefore cannot be applied by the existing schema command. Neither file is
 imported by a production surface. No subscription, queue or delivery table was
 added, and the preparation still reports `database_writes=0`.
 
+`research_experimental_preview_contract.py` defines a separate, disconnected
+`PREVIEW_ONLY` authorization simulation for a test chat while Stage 5 is
+`WAITING_DATA`. It first fingerprint-verifies the complete normal Experimental
+gate through the storage contract and can be simulated as eligible only when
+that gate is suppressed solely by `Stage 5 is not READY`. Any relevance,
+compatibility, idempotency, cooldown or authorization blocker remains fatal.
+The preview requires a separate disabled-by-default flag, engaged-by-default
+kill switch, explicit owner approval and its own test-chat allowlist. Public
+opt-in is forbidden, and the route closes once Stage 5 becomes `READY` so the
+normal Experimental review cannot be bypassed. Every preview is labelled
+“PREVIEW טרום־אימות”, has separate content-addressed idempotency, and reports
+zero delivery, database, research-evidence and LIVE effects. The contract is
+not imported by any production surface and adds no command or Telegram call.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
