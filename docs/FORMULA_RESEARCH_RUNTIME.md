@@ -351,6 +351,16 @@ simulating an Experimental indication cannot add a match, Market Episode or
 independent proof, so several alerts from one rise cannot validate one another.
 These records remain returned values only; no persistence was added.
 
+`research_experimental_storage_contract.py` is the next disabled preparation.
+It fingerprint-verifies the full gate batch and every family decision, enforces
+the zero-delivery/zero-evidence invariants again, and returns canonical batch
+and decision rows without opening a database connection. The additive schema
+artifact `018_formula_experimental_audit_v1.sql` defines append-only audit
+tables, but is deliberately absent from `research_formula_schema_admin.py` and
+therefore cannot be applied by the existing schema command. Neither file is
+imported by a production surface. No subscription, queue or delivery table was
+added, and the preparation still reports `database_writes=0`.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
