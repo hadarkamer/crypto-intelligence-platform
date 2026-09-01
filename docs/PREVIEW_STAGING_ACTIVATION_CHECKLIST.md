@@ -268,9 +268,11 @@ live_effect=NONE
 ## Unregistered storage adapter
 
 The isolated migration prepares two append-only tables and is listed only in
-the explicit one-shot schema installer. Registration does not apply it: the
-installer still requires both `FORMULA_SCHEMA_APPLY=1` and a permitted database
-URL. Reservation uses unique approval, one-shot, request and reservation keys.
+the existing broad schema installer. Registration does not apply it. The broad
+installer must not be used for the dedicated staging database: it includes 18
+migrations and does not pin the exact staging target. A reviewed 019-only
+runner is now prepared locally, but is neither registered nor executed.
+Reservation uses unique approval, one-shot, request and reservation keys.
 Consumption must reference the exact reservation binding, fall inside its
 approval window and win an insert-only compare-and-set; concurrent or repeated
 claims return no row rather than updating existing state.
@@ -284,6 +286,18 @@ transaction, dispatch a message or integrate with the candidate service.
 migration=019_preview_first_message_reservation_consumption_v1.sql
 migration_registered=true
 migration_applied=false
+dedicated_installer=research_preview_staging_migration_019_admin.py
+dedicated_installer_prepared=true
+dedicated_installer_executed=false
+migration_workflow_entrypoint=research_preview_staging_migration_019_workflow.py
+migration_workflow_entrypoint_prepared=true
+migration_workflow_runbook=docs/PREVIEW_STAGING_MIGRATION_019_WORKFLOW_RUNBOOK.md
+migration_workflow_runbook_prepared=true
+migration_workflow_task_count=1
+migration_workflow_task_max_retries=0
+migration_workflow_resource_created=false
+migration_workflow_runs=0
+postcommit_readonly_verifier_prepared=false
 database_registered=false
 default_execution_scope=DATABASE_UNREGISTERED
 transaction_scope_required=true
@@ -296,6 +310,10 @@ telegram_api_calls=0
 research_evidence_effect=NONE
 live_effect=NONE
 ```
+
+The static audit and the required isolated execution sequence are recorded in
+`docs/PREVIEW_STAGING_MIGRATION_019_EXECUTION_PLAN.md`. Its current state is
+`RUNBOOK_READY_POSTCOMMIT_VERIFIER_REQUIRED_APPLY_FORBIDDEN`.
 
 ## Read-only database preflight — 2026-09-01
 
@@ -533,12 +551,14 @@ production_database_changed=false
 database_writes=0
 ```
 
-## Render-internal read-only preflight runner — prepared locally
+## Render-internal read-only preflight runner — completed and closed
 
 The external CLI route cannot resolve the Render Postgres hostname from the
 current execution environment. A separate one-shot runner is therefore
-prepared for a later, explicitly approved Render-internal execution. It is not
-imported by the candidate service and is not deployed or configured yet.
+prepared for a separately approved Render-internal execution. It is not
+imported by the candidate service. The isolated Workflow ran exactly once,
+returned a ready result, rolled back its read-only transaction, then had the
+preflight flag disabled and the dedicated database URL removed.
 
 The runner accepts only the dedicated variable below and never reads the
 generic `DATABASE_URL`. It rejects the Production database, Render's external
@@ -558,20 +578,22 @@ or activate PREVIEW delivery.
 runner=research_preview_staging_readonly_preflight.py
 runner_scope=ONE_SHOT_RENDER_INTERNAL_READ_ONLY
 runtime_imported=false
-render_configuration_applied=false
-deployed=false
-executed=false
-selftests_passed=48
+render_configuration_applied=true
+deployed=true
+executed=true
+preflight_result=READY_FOR_SEPARATE_MIGRATION_019_DECISION
+selftests_passed=49
 project_compilation_passed=true
 schema_mutation_allowed=false
 migration_apply_allowed=false
 candidate_service_connected=false
-database_connections=0
-sql_queries_executed=0
+database_connections=1
+read_only_queries_executed=1
+transaction_rolled_back=true
 database_writes=0
 ```
 
-## Isolated Render Workflow path — prepared locally
+## Isolated Render Workflow path — executed once, closed and deleted
 
 The selected later execution path is a dedicated, manually triggered Render
 Workflow. Its only task wraps the existing fail-closed runner with the `flex`
@@ -582,6 +604,10 @@ The exact configuration, temporary internal-URL sequence, cleanup requirements
 and rejected alternatives are recorded in
 `docs/PREVIEW_STAGING_INTERNAL_WORKFLOW_RUNBOOK.md`.
 
+After the safe result and cleanup were recorded, the temporary Workflow was
+deleted. Render now returns `404` for its ID and lists no Workflow with the
+recorded ID or name. The staging database and candidate service remain present.
+
 ```text
 workflow_name=preview-staging-readonly-preflight
 workflow_task=preview_staging_readonly_preflight_once
@@ -590,19 +616,45 @@ workflow_timeout_seconds=30
 workflow_max_retries=0
 workflow_auto_deploy=false
 workflow_source_branch=preview-staging-preflight-workflow
+workflow_source_commit=120c49d3d7c085da44535b207d61ef64e0982ea5
+workflow_id=wfl-dab91ek9v7es73ce1pm0
+workflow_version_id=wfv-dab99rvavr4c73f74u1g
+workflow_task_id=tsk-dab9ai0put7g008coa20
+workflow_execution_version_id=wfv-dab96l3tqb8s73f72jd0
+workflow_execution_task_id=tsk-dab96u0put7g008coa1g
+workflow_execution_run_id=trn-08l4gdab992favr4c73f72smg
 candidate_auto_deploy_branch=ai-production-analytics
 source_branch_overlap=false
 remote_history_mode=GITHUB_API_SQUASHED_SNAPSHOT
 local_commit_history_preserved=true
 manual_trigger_only=true
-workflow_resource_created=false
+workflow_resource_created=true
 workflow_deployed=false
-workflow_task_runs=0
+workflow_ever_deployed=true
+workflow_task_registered=false
+workflow_task_was_registered=true
+workflow_task_runs=1
+workflow_execution_attempts=1
+workflow_execution_retries=0
+workflow_execution_status=completed
+workflow_result=READY_FOR_SEPARATE_MIGRATION_019_DECISION
+workflow_current_version_task_runs=0
+workflow_database_url_configured=false
+workflow_database_url_committed=false
+workflow_preflight_enabled=false
+workflow_schema_apply_flags_disabled=true
+workflow_cleanup_completed=true
+workflow_resource_present=false
+workflow_resource_deleted=true
+workflow_deletion_verified_404=true
 remote_push_performed=true
+render_configuration_changed=true
 candidate_service_changed=false
-database_connections=0
-sql_queries_executed=0
+database_connections=1
+read_only_queries_executed=1
+transaction_rolled_back=true
 database_writes=0
+migration_019_objects_present=false
 migration_019_applied=false
 telegram_api_calls=0
 ```

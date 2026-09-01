@@ -1,13 +1,14 @@
 # PREVIEW staging internal preflight Workflow runbook
 
-This runbook defines a later, separately approved, one-time read-only preflight
-against the dedicated staging database. Nothing in this document authorizes a
-push, Workflow creation, deployment, task run, database migration, candidate
-service change, Telegram call, or PREVIEW activation.
+This runbook records a separately approved, one-time read-only preflight
+against the dedicated staging database. The isolated Workflow was created,
+executed once, safely closed and deleted. Nothing in this document authorizes
+recreating it, running another task, applying a database migration, changing
+the candidate service, calling Telegram or activating PREVIEW.
 
 ## Selected execution path
 
-Use a dedicated Render Workflow named
+The selected path used a dedicated Render Workflow named
 `preview-staging-readonly-preflight`. It registers exactly one manually
 triggered task:
 
@@ -39,13 +40,13 @@ the candidate branch.
 | Scheduling | None; manual trigger only |
 
 Render Workflows are not currently compatible with Blueprints, so do not add
-this service to `render.yaml`. Create it only in a later explicitly approved
-Dashboard or CLI step.
+this service to `render.yaml`. The resource was created through the CLI under
+explicit approval and retains auto-deploy off.
 
 ## Fail-closed configuration sequence
 
-Create and register the Workflow initially with no database URL and with the
-preflight flag disabled:
+The Workflow was created and registered initially with no database URL and
+with the preflight flag disabled:
 
 ```text
 FORMULA_PREVIEW_STAGING_DATABASE_PREFLIGHT=0
@@ -55,7 +56,18 @@ RESEARCH_SCHEMA_APPLY=0
 RESEARCH_USE_PRIMARY_DATABASE=0
 ```
 
-Registration must show exactly one task. Do not trigger it in this state.
+Registration shows exactly one task. Do not trigger it in this state.
+
+Under a later, separately approved configuration step, the dedicated internal
+URL was stored directly as a Render secret and the preflight flag was enabled.
+The configuration was released from the same approved source commit. No task
+run, database connection or SQL statement occurred during configuration.
+
+Under a further explicit execution approval, the task ran exactly once and
+returned `READY_FOR_SEPARATE_MIGRATION_019_DECISION`. It opened one connection,
+executed one read-only query, rolled the transaction back and performed zero
+writes. The preflight flag was then returned to `0`, the database URL was
+removed and a closed Workflow version was released from the same commit.
 
 Only after a separate execution approval, add the dedicated database's
 **Internal URL** as a secret named
@@ -74,7 +86,7 @@ Database: crypto_intelligence_staging_db
 Port: 5432 or omitted
 ```
 
-## Separately approved one-time run
+## Separately approved one-time run — completed
 
 The later execution step must perform these actions in order:
 
@@ -93,6 +105,10 @@ The later execution step must perform these actions in order:
 7. Set the preflight flag back to `0`, remove the database URL, and verify the
    secret is absent.
 8. Delete the temporary Workflow after its logs and result have been reviewed.
+
+All eight actions were completed. Deletion was accepted by Render and verified
+both by a `404` lookup for the recorded Workflow ID and by an empty Workflow
+list. The dedicated staging database was not deleted.
 
 There is no automatic retry after an infrastructure failure, timeout or
 uncertain result. A second trigger requires a new explicit approval.
@@ -135,20 +151,44 @@ workflow_entrypoint_prepared=true
 workflow_requirements_isolated=true
 workflow_auto_deploy=false
 workflow_source_branch=preview-staging-preflight-workflow
+workflow_source_commit=120c49d3d7c085da44535b207d61ef64e0982ea5
+workflow_id=wfl-dab91ek9v7es73ce1pm0
+workflow_version_id=wfv-dab99rvavr4c73f74u1g
+workflow_task_id=tsk-dab9ai0put7g008coa20
+workflow_execution_version_id=wfv-dab96l3tqb8s73f72jd0
+workflow_execution_task_id=tsk-dab96u0put7g008coa1g
+workflow_execution_run_id=trn-08l4gdab992favr4c73f72smg
 candidate_auto_deploy_branch=ai-production-analytics
 source_branch_overlap=false
 remote_history_mode=GITHUB_API_SQUASHED_SNAPSHOT
 local_commit_history_preserved=true
-workflow_resource_created=false
+workflow_resource_created=true
 workflow_deployed=false
+workflow_ever_deployed=true
 workflow_task_registered=false
-workflow_task_runs=0
+workflow_task_was_registered=true
+workflow_task_runs=1
+workflow_execution_attempts=1
+workflow_execution_retries=0
+workflow_execution_status=completed
+workflow_result=READY_FOR_SEPARATE_MIGRATION_019_DECISION
+workflow_current_version_task_runs=0
+workflow_database_url_configured=false
+workflow_database_url_committed=false
+workflow_preflight_enabled=false
+workflow_schema_apply_flags_disabled=true
+workflow_cleanup_completed=true
+workflow_resource_present=false
+workflow_resource_deleted=true
+workflow_deletion_verified_404=true
 remote_push_performed=true
-render_configuration_changed=false
+render_configuration_changed=true
 candidate_service_changed=false
-database_connections=0
-sql_queries_executed=0
+database_connections=1
+read_only_queries_executed=1
+transaction_rolled_back=true
 database_writes=0
+migration_019_objects_present=false
 migration_019_applied=false
 telegram_api_calls=0
 ```

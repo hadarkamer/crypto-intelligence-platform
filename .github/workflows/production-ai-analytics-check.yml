@@ -29,16 +29,39 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile every tracked Python module
         run: git ls-files -z '*.py' | xargs -0 python -m py_compile
-      - name: Run every tracked self-test
+      - name: Run tracked core self-tests
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t selftests < <(git ls-files '*_selftest.py' | sort)
+          mapfile -t selftests < <(
+            git ls-files '*_selftest.py' |
+              sort |
+              awk '!/_workflow_selftest\.py$/'
+          )
           test "${#selftests[@]}" -gt 0
-          printf 'Running %s self-tests\n' "${#selftests[@]}"
+          printf 'Running %s core self-tests\n' "${#selftests[@]}"
           for selftest in "${selftests[@]}"; do
             echo "::group::$selftest"
             python "$selftest"
+            echo "::endgroup::"
+          done
+      - name: Run tracked Workflow self-tests in isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t workflow_selftests < <(
+            git ls-files '*_workflow_selftest.py' | sort
+          )
+          test "${#workflow_selftests[@]}" -gt 0
+          workflow_venv="$RUNNER_TEMP/preview-staging-workflow-venv"
+          python -m venv "$workflow_venv"
+          "$workflow_venv/bin/python" -m pip install \
+            -r requirements.preview-staging-workflow.txt
+          printf 'Running %s isolated Workflow self-tests\n' \
+            "${#workflow_selftests[@]}"
+          for selftest in "${workflow_selftests[@]}"; do
+            echo "::group::$selftest"
+            "$workflow_venv/bin/python" "$selftest"
             echo "::endgroup::"
           done
       - name: Source integrity
