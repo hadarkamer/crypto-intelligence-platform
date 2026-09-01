@@ -384,6 +384,17 @@ ids and EvidenceSnapshot. Database constraints keep public opt-in and Stage-6
 activation false and keep `research_evidence_effect=NONE`. The contract performs
 no write, and neither it nor the extended schema is connected to production.
 
+`research_experimental_preview_delivery_simulator.py` exercises the next
+boundary with a sealed in-memory Telegram double. It re-verifies the complete
+Preview storage contract, records only `PREVIEW_SIMULATED_ELIGIBLE` decisions
+for the `TEST_ALLOWLIST` route while Stage 5 is `WAITING_DATA`, and suppresses
+all other decisions. Replaying the same preview key is recorded as a duplicate
+rather than a second message. The double has no Telegram-compatible sending
+method and the simulator accepts no substitute client, token, environment or
+network path. Its transcript remains test data only: delivery attempts,
+Telegram API calls, database writes, research-evidence writes and LIVE effects
+all stay zero, and the module is not imported by a production surface.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
