@@ -155,6 +155,17 @@ def run() -> None:
     # Thirty low-width WEEKEND points and thirty wider ACTIVE points produce
     # the hard 0.50 floor.  A future extreme point must not change the result.
     weekend_event = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
+    hype_replay_now = datetime(2026, 8, 31, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenReplayDateTime(datetime):
+        """Keep end-to-end HYPE fixtures inside the official rolling path."""
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return hype_replay_now.replace(tzinfo=None)
+            return hype_replay_now.astimezone(tz)
+
     reference_time = weekend_event - timedelta(microseconds=1)
     samples = []
     for index in range(15):
@@ -1528,6 +1539,14 @@ def run() -> None:
 
     write_conn = _WriteConnection()
     hype_anchor = replay.Anchor("HYPE", weekend_event, weekend_event)
+    assert hype_anchor.observation_time_utc >= (
+        replay._hype_one_minute_observation_floor(hype_replay_now)
+    )
+    assert replay._hype_anchor_path_is_available(
+        hype_anchor.observation_time_utc,
+        horizon_minutes=60,
+        now=hype_replay_now,
+    )
     hype_reference = _candle(weekend_event - timedelta(minutes=1), 100.0)
     hype_future = [
         _candle(
@@ -1758,6 +1777,7 @@ def run() -> None:
     original_fetch_range = replay._fetch_range
     original_write_outcome = replay._write_outcome
     original_coverage = replay._coverage
+    original_datetime = replay.datetime
     old_backfill_flag = replay.os.environ.get("HISTORICAL_REPLAY_BACKFILL")
 
     def _resume_connect(url, *, read_only):
@@ -1785,6 +1805,7 @@ def run() -> None:
     replay._write_outcome = lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("adopted anchor was rewritten")
     )
+    replay.datetime = _FrozenReplayDateTime
     replay._coverage = lambda *args, **kwargs: {
         "HYPE:60": {
             "outcomes": 1,
@@ -1815,6 +1836,7 @@ def run() -> None:
         replay._fetch_range = original_fetch_range
         replay._write_outcome = original_write_outcome
         replay._coverage = original_coverage
+        replay.datetime = original_datetime
         if old_backfill_flag is None:
             replay.os.environ.pop("HISTORICAL_REPLAY_BACKFILL", None)
         else:
@@ -1841,6 +1863,11 @@ def run() -> None:
         weekend_event + timedelta(minutes=120),
         weekend_event + timedelta(minutes=120),
     )
+    assert replay._hype_anchor_path_is_available(
+        fresh_hype_anchor.observation_time_utc,
+        horizon_minutes=60,
+        now=hype_replay_now,
+    )
     mixed_anchors = [hype_anchor, fresh_hype_anchor]
     mixed_raw_conn = _ResumeConnection(run_id=903)
     mixed_research_conn = _ResumeConnection(run_id=903)
@@ -1863,6 +1890,7 @@ def run() -> None:
     original_validated_route = replay.canonical_price_path.validated_route
     original_persisted_contract = replay._persisted_selected_anchor_contract
     original_coverage = replay._coverage
+    original_datetime = replay.datetime
     old_backfill_flag = replay.os.environ.get("HISTORICAL_REPLAY_BACKFILL")
 
     def _mixed_connect(url, *, read_only):
@@ -1922,6 +1950,7 @@ def run() -> None:
     replay._persisted_selected_anchor_contract = (
         lambda *args, **kwargs: mixed_contract
     )
+    replay.datetime = _FrozenReplayDateTime
     replay._coverage = lambda *args, **kwargs: mixed_coverage
     try:
         mixed_result = replay.run_backfill(
@@ -1949,6 +1978,7 @@ def run() -> None:
         replay.canonical_price_path.validated_route = original_validated_route
         replay._persisted_selected_anchor_contract = original_persisted_contract
         replay._coverage = original_coverage
+        replay.datetime = original_datetime
         if old_backfill_flag is None:
             replay.os.environ.pop("HISTORICAL_REPLAY_BACKFILL", None)
         else:
