@@ -341,6 +341,16 @@ the preparation: a positive value must be supplied by the future, explicitly
 approved Stage-6 integration. Legacy Shadow remains read-only, and Stage 5 must
 report `READY` before a current-v7 family can even be simulated as eligible.
 
+Each simulated family decision and its enclosing batch now receive a canonical
+SHA-256 audit id bound to the exact snapshot family, relevance decision, gate
+policy, blockers, rendered-message hash and evaluation time. Replaying identical
+inputs produces identical ids; changing a relevance decision or gate outcome
+changes them. The audit contract explicitly reports
+`research_evidence_writes=0` and `research_evidence_effect=NONE`: displaying or
+simulating an Experimental indication cannot add a match, Market Episode or
+independent proof, so several alerts from one rise cannot validate one another.
+These records remain returned values only; no persistence was added.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions

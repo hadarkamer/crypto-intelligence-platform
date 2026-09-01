@@ -98,12 +98,33 @@ def run() -> None:
     assert ready["delivery_attempts"] == 0
     assert ready["telegram_api_calls"] == 0
     assert ready["database_writes"] == 0
+    assert ready["research_evidence_writes"] == 0
+    assert ready["research_evidence_effect"] == "NONE"
     assert ready["delivery_channel"] == "NONE"
     assert ready["live_effect"] == "NONE"
+    assert ready["audit_contract_version"] == gate.AUDIT_CONTRACT_VERSION
+    assert len(ready["audit_batch_id"]) == 64
     audit = ready["audits"][0]
     assert audit["status"] == gate.SIMULATED_ELIGIBLE
     assert audit["route"] == "TEST_ALLOWLIST"
     assert len(audit["aggregated_snapshot_ids"]) == 1
+    assert len(audit["audit_decision_id"]) == 64
+    assert len(audit["relevance_decision_sha256"]) == 64
+    assert audit["research_evidence_effect"] == "NONE"
+
+    identical = gate.plan_experimental_dry_run(
+        [current, current.to_dict()],
+        relevance_by_snapshot={current.snapshot_id: relevance},
+        chat_id=-1001,
+        stage5_status="READY",
+        policy=_policy(),
+        now_utc=NOW,
+    )
+    assert identical["audit_batch_id"] == ready["audit_batch_id"]
+    assert (
+        identical["audits"][0]["audit_decision_id"]
+        == audit["audit_decision_id"]
+    )
 
     waiting = gate.plan_experimental_dry_run(
         [current],
@@ -204,6 +225,10 @@ def run() -> None:
     assert "relevance decision blocks Experimental delivery" in suspended_result[
         "audits"
     ][0]["blockers"]
+    assert (
+        suspended_result["audits"][0]["audit_decision_id"]
+        != audit["audit_decision_id"]
+    )
 
     legacy = _snapshot(_fixture("legacy_v6_shadow.json"))
     legacy_relevance = _relevance(legacy)
@@ -274,6 +299,7 @@ def run() -> None:
         "reply_text(",
         "research_formula_store",
         "research_formula_worker",
+        ".advance(",
         "os.getenv",
         "requests.",
         "aiohttp.",

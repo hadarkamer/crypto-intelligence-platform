@@ -28,6 +28,7 @@ import research_formula_relevance
 POLICY_VERSION = "formula-experimental-delivery-gate-v1-disabled-preparation"
 IDEMPOTENCY_POLICY_VERSION = "experimental-chat-family-snapshot-v1"
 COOLDOWN_POLICY_VERSION = "experimental-chat-family-cooldown-v1"
+AUDIT_CONTRACT_VERSION = "experimental-gate-audit-v1-content-addressed"
 MODE = "EXPERIMENTAL_GATE_DRY_RUN_ONLY"
 
 SIMULATED_ELIGIBLE = "SIMULATED_ELIGIBLE"
@@ -215,6 +216,33 @@ def _delivery_key(
     )
 
 
+def _audit_decision(
+    *,
+    evaluated_at_utc: str,
+    stage5_status: str,
+    policy: Mapping[str, Any],
+    relevance: Mapping[str, Any] | None,
+    decision: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Bind one simulated gate result to its exact, immutable audit inputs."""
+
+    relevance_sha256 = _hash(dict(relevance)) if relevance is not None else None
+    payload = {
+        "audit_contract_version": AUDIT_CONTRACT_VERSION,
+        "gate_policy_version": POLICY_VERSION,
+        "evaluated_at_utc": evaluated_at_utc,
+        "stage5_status": stage5_status,
+        "policy": dict(policy),
+        "relevance_decision_sha256": relevance_sha256,
+        **dict(decision),
+        "research_evidence_effect": "NONE",
+    }
+    return {
+        **payload,
+        "audit_decision_id": _hash(payload),
+    }
+
+
 def plan_experimental_dry_run(
     values: Iterable[evidence_contract.EvidenceSnapshot | Mapping[str, Any]],
     *,
@@ -251,6 +279,12 @@ def plan_experimental_dry_run(
     rendered = evidence_renderer.dry_run_evidence_snapshots(snapshots)
     snapshot_by_id = {snapshot.snapshot_id: snapshot for snapshot in snapshots}
     route = _route(identifier, resolved_policy)
+    evaluated_at = _iso(now, name="now_utc")
+    audit_policy = {
+        **resolved_policy,
+        "test_chat_ids": list(resolved_policy["test_chat_ids"]),
+        "opted_in_chat_ids": list(resolved_policy["opted_in_chat_ids"]),
+    }
     global_blockers = []
     if not resolved_policy["enabled"]:
         global_blockers.append("Experimental feature flag is disabled")
@@ -300,37 +334,51 @@ def plan_experimental_dry_run(
         blockers = list(dict.fromkeys(blockers))
         status = SIMULATED_ELIGIBLE if not blockers else SUPPRESSED
         audits.append(
-            {
-                "status": status,
-                "blockers": blockers,
-                "route": route,
-                "chat_id": identifier,
-                "formula_family_id": family_id,
-                "representative_snapshot_id": snapshot_id,
-                "aggregated_snapshot_ids": list(message["snapshot_ids"]),
-                "delivery_key": key,
-                "rendered_message_sha256": hashlib.sha256(
-                    str(message["text"]).encode("utf-8")
-                ).hexdigest(),
-                "cooldown_remaining_seconds": cooldown_remaining,
-                "text": message["text"],
-            }
+            _audit_decision(
+                evaluated_at_utc=evaluated_at,
+                stage5_status=normalized_stage5,
+                policy=audit_policy,
+                relevance=relevance_by_snapshot.get(snapshot_id),
+                decision={
+                    "status": status,
+                    "blockers": blockers,
+                    "route": route,
+                    "chat_id": identifier,
+                    "formula_family_id": family_id,
+                    "representative_snapshot_id": snapshot_id,
+                    "aggregated_snapshot_ids": list(message["snapshot_ids"]),
+                    "delivery_key": key,
+                    "rendered_message_sha256": hashlib.sha256(
+                        str(message["text"]).encode("utf-8")
+                    ).hexdigest(),
+                    "cooldown_remaining_seconds": cooldown_remaining,
+                    "text": message["text"],
+                },
+            )
         )
 
+    audit_batch_payload = {
+        "audit_contract_version": AUDIT_CONTRACT_VERSION,
+        "gate_policy_version": POLICY_VERSION,
+        "evaluated_at_utc": evaluated_at,
+        "stage5_status": normalized_stage5,
+        "chat_id": identifier,
+        "route": route,
+        "policy": audit_policy,
+        "audit_decision_ids": [audit["audit_decision_id"] for audit in audits],
+    }
     return {
         "policy_version": POLICY_VERSION,
         "idempotency_policy_version": IDEMPOTENCY_POLICY_VERSION,
         "cooldown_policy_version": COOLDOWN_POLICY_VERSION,
+        "audit_contract_version": AUDIT_CONTRACT_VERSION,
+        "audit_batch_id": _hash(audit_batch_payload),
         "mode": MODE,
-        "evaluated_at_utc": _iso(now, name="now_utc"),
+        "evaluated_at_utc": evaluated_at,
         "stage5_status": normalized_stage5,
         "chat_id": identifier,
         "route": route,
-        "policy": {
-            **resolved_policy,
-            "test_chat_ids": list(resolved_policy["test_chat_ids"]),
-            "opted_in_chat_ids": list(resolved_policy["opted_in_chat_ids"]),
-        },
+        "policy": audit_policy,
         "families_considered": len(audits),
         "simulated_eligible": sum(
             1 for audit in audits if audit["status"] == SIMULATED_ELIGIBLE
@@ -339,6 +387,8 @@ def plan_experimental_dry_run(
         "delivery_attempts": 0,
         "telegram_api_calls": 0,
         "database_writes": 0,
+        "research_evidence_writes": 0,
+        "research_evidence_effect": "NONE",
         "delivery_channel": "NONE",
         "live_effect": "NONE",
         "audits": audits,
