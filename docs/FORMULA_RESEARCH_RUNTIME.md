@@ -416,6 +416,19 @@ API invocation and returns every prepared request as
 worker or scheduler; connector registration, activation, actual delivery,
 public opt-in, Stage 6, LIVE and research-evidence effects all remain absent.
 
+`research_experimental_preview_telegram_dispatcher.py` adds the isolated async
+dispatch boundary. It can accept the same Bot interface as production, but a
+runtime Bot is structurally restricted to `RUNTIME_BOT_UNREGISTERED` and can
+never reach the method call in this version. Only an explicitly registered
+`TEST_DOUBLE` can exercise `send_message`; the result is counted as fake test
+evidence, never as a Telegram API call or delivery. The dispatcher is
+disabled-by-default, kill-switched, single-test-chat bound and requires owner,
+commit and activation-approval fingerprints. Per-request single-flight,
+in-memory idempotency, caller-supplied restart keys and cancellation-safe lock
+release prevent duplicate fake dispatch. It remains absent from production,
+the worker and scheduler, with no database, research-evidence, Stage-6 or LIVE
+effect. Its lifecycle is `PREPARED_FAKE_BOT_ONLY_NOT_RUNTIME_VERIFIED`.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
