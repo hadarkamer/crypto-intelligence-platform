@@ -1,29 +1,35 @@
 # PREVIEW staging migration 019 Workflow runbook
 
-Status: `RUNBOOK_READY_POSTCOMMIT_VERIFIER_REQUIRED_APPLY_FORBIDDEN`
+Status: `ROTATED_USER_SOURCE_PUBLICATION_PENDING_WORKFLOW_REDEPLOY_REQUIRED_APPLY_FORBIDDEN`
 
-This runbook defines a future, separately approved application of migration
-019 to the dedicated PREVIEW staging database. It is documentation only. It
-does not authorize a push, Render resource creation, environment change,
-deployment, task run, database connection, SQL statement or migration.
+This runbook defines a separately approved application of migration 019 to the
+dedicated PREVIEW staging database. The closed Workflow resource and its task
+are now registered as recorded below. The remaining instructions do not
+authorize a write-capable configuration, task run, database connection, SQL
+statement or migration.
 
 ## Fixed source and target
 
-The future Workflow must use a new dedicated source branch and the already
-verified code commit below. It must never use either Production deployment
-branch or recreate the deleted read-only preflight Workflow.
+The registered Workflow remains closed on the previously verified commit. A
+new source snapshot pins the separately scoped rotation user below and is
+pending exact publication. It must never be moved to either Production
+deployment branch or used to recreate the deleted read-only preflight Workflow.
 
 | Field | Required value |
 | --- | --- |
 | Repository | Repository containing the approved source commit |
 | Dedicated branch | `preview-staging-migration-019` |
-| Approved code commit | `ad99529d7bc05e2cbd422457cbb877bd69015a73` |
+| Currently deployed remote commit | `861554d914f21089457d5ee91147260d050efddb` |
+| Currently deployed source tree | `14eb4dd1106f398284a363b6feed4e37206171ec` |
+| Rotated-user remote commit | `PENDING_EXACT_TREE_PUBLICATION` |
+| Rotated-user audited local commit | `PENDING_LOCAL_COMMIT` |
+| Rotated-user identical source tree | `PENDING_LOCAL_COMMIT` |
 | Workflow name | `preview-staging-migration-019` |
 | Workflow entry point | `research_preview_staging_migration_019_workflow.py` |
 | Registered task | `preview_staging_migration_019_once` |
 | Render Postgres ID | `dpg-dab7rc2d0e5s73dkb9l0-a` |
 | Database name | `crypto_intelligence_staging_db` |
-| Database user | `crypto_intelligence_staging_db_user` |
+| Rotated database user | `crypto_intelligence_staging_migration_019` |
 | Migration SHA-256 | `81690a298a029b3bb131f7906e496d17748dbfb32124d87f438882e14e7e9c05` |
 
 If any source or migration byte changes, stop. Do not update the commit or hash
@@ -31,8 +37,8 @@ inside an execution step; repeat the local audit and obtain a new approval.
 
 ## Exact Workflow creation fields
 
-Render Workflows are not Blueprint-compatible. Create the future resource only
-through the Render Workflow flow under a separate approval, with these fields:
+Render Workflows are not Blueprint-compatible. The resource was created through
+the Render Workflow flow under a separate approval with these fields:
 
 | Field | Required value |
 | --- | --- |
@@ -79,13 +85,18 @@ service-level secret on this temporary Workflow.
 
 ## Separate authorization gates
 
-The future operation has four boundaries:
+The operation has four boundaries:
 
 1. Push the exact approved code commit to the new dedicated branch.
 2. Create and register the closed Workflow with no database URL.
 3. Configure and release one write-capable Workflow version.
 4. Manually trigger exactly one task run and immediately close the
    write-capable configuration.
+
+The original boundaries 1 and 2 are complete for the closed, currently
+deployed version. Rotated-user source publication and a closed redeploy must
+now complete before boundary 3 can be considered. Boundaries 3 and 4 remain
+unauthorized.
 
 Each of the first three boundaries requires a separate explicit approval. The
 fourth approval must authorize both the single trigger and its mandatory
@@ -106,7 +117,7 @@ scheme=postgresql or postgres
 host=dpg-dab7rc2d0e5s73dkb9l0-a
 port=5432 or omitted
 database=crypto_intelligence_staging_db
-user=crypto_intelligence_staging_db_user
+user=crypto_intelligence_staging_migration_019
 password=present
 query=<absent>
 fragment=<absent>
@@ -230,27 +241,49 @@ Task-level automatic retries are zero. A Render run showing one attempt is
 required. A second attempt or retry count above zero invalidates the execution
 record and requires reconciliation.
 
-## Required read-only verifier before execution
+## Prepared read-only verifier
 
 The existing `research_preview_staging_readonly_preflight.py` proves absence
 before migration and intentionally blocks when migration objects exist. It does
 not verify every post-commit constraint or trigger mapping and therefore cannot
-serve as the uncertain-result reconciler.
+serve as the uncertain-result reconciler. A dedicated replacement is now
+prepared locally:
 
-Before creating a write-capable Workflow version, prepare a separate read-only
-verifier that:
+| Field | Required value |
+| --- | --- |
+| Source commit | `PENDING_EXACT_TREE_PUBLICATION` |
+| Runner | `research_preview_staging_migration_019_readonly_verifier.py` |
+| Workflow entry point | `research_preview_staging_migration_019_readonly_verifier_workflow.py` |
+| Workflow name | `preview-staging-migration-019-readonly-verifier` |
+| Task name | `preview_staging_migration_019_readonly_verify_once` |
+| Plan | `flex` |
+| Timeout | 30 seconds |
+| Automatic retries | 0 |
+| Trigger | Manual only, empty input `[]` |
+
+The verifier:
 
 - pins the same exact internal target and rejects Production/external URLs;
 - forces a read-only session and explicit read-only transaction;
 - verifies the two tables, two functions, five trigger mappings, constraint
   bindings and zero application rows;
-- classifies the catalog as `APPLIED_VERIFIED`, `NOT_APPLIED`, or
+- classifies one repeatable-read snapshot as `APPLIED_VERIFIED`, `NOT_APPLIED`, or
   `PARTIAL_OR_CONFLICTING`;
 - always rolls back, performs zero writes and exposes no secret;
-- has its own manual, zero-retry execution boundary and cleanup.
+- has its own manual, zero-retry Workflow boundary and remains disconnected
+  from the candidate service.
 
-Until that verifier and its tests exist, migration application remains
-forbidden.
+Its future service-level configuration must set only
+`FORMULA_PREVIEW_STAGING_MIGRATION_019_VERIFY=1` and the exact dedicated
+internal database URL. The migration apply flag, preflight flag and all generic
+mutation flags must remain `0`; generic database URLs must remain absent. After
+one result, remove the database URL, set the verifier flag to `0`, release the
+closed version and delete the temporary verifier Workflow after the result is
+recorded.
+
+All 53 local tests pass: 50 core tests and three isolated Workflow tests. This
+preparation still does not authorize Workflow creation, configuration,
+database connection or migration application.
 
 ## Final cleanup after reconciliation
 
@@ -285,27 +318,62 @@ reconfigure the resource while cleanup is unresolved.
 
 ```text
 runbook_ready=true
-approved_code_commit=ad99529d7bc05e2cbd422457cbb877bd69015a73
-dedicated_remote_branch_created=false
-remote_push_performed=false
-workflow_resource_created=false
-workflow_task_registered_on_render=false
+approved_remote_commit=PENDING_EXACT_TREE_PUBLICATION
+audited_local_commit=PENDING_LOCAL_COMMIT
+approved_source_tree=PENDING_LOCAL_COMMIT
+remote_parent_commit=861554d914f21089457d5ee91147260d050efddb
+dedicated_remote_branch_created=true
+remote_source_published=false
+remote_source_transport=GITHUB_GIT_DATA_API
+direct_git_push_performed=false
+rotated_database_user=crypto_intelligence_staging_migration_019
+credential_rotation_source_ready=true
+new_database_credential_created=false
+old_database_credential_revoked=false
+workflow_id=wfl-dabaq0740ujc73abpcg0
+workflow_version_id=wfv-dabaq0740ujc73abpct0
+workflow_task_id=tsk-dabaqsqj0c7s738afm0g
+workflow_build_succeeded=true
+workflow_resource_created=true
+workflow_task_registered_on_render=true
+workflow_task_count=1
+workflow_task_plan=flex
+workflow_task_timeout_seconds=60
+workflow_task_max_retries=0
+workflow_auto_deploy=false
+workflow_schedule_configured=false
+workflow_deployed_source_commit=861554d914f21089457d5ee91147260d050efddb
+workflow_source_redeploy_required=true
 workflow_database_url_configured=false
 workflow_apply_enabled=false
 workflow_runs=0
-postcommit_readonly_verifier_prepared=false
+database_external_allowlist_empty=true
+workspace_wide_allow_rule_present=true
+database_specific_allow_rule_count=0
+database_specific_temporary_allow_rule_present=false
+effective_external_traffic_allowed=false
+network_reconciliation_completed=true
+network_reconciliation_required=false
+postcommit_readonly_verifier_prepared=true
+postcommit_verifier_workflow_resource_created=false
+postcommit_verifier_workflow_runs=0
 migration_019_apply_authorized=false
 migration_019_applied=false
 database_connections_this_step=0
 sql_queries_executed_this_step=0
 database_writes_this_step=0
-render_configuration_changed_this_step=false
+render_configuration_changed_this_step=true
+render_network_configuration_changed_this_step=false
 candidate_service_changed_this_step=false
 telegram_api_calls_this_step=0
 research_evidence_effect=NONE
 live_effect=NONE
 ```
 
-The next bounded step is local implementation and self-testing of the dedicated
-read-only post-commit/uncertain-result verifier. It must not push, create a
-Render resource, configure a database URL, connect to PostgreSQL or apply SQL.
+The closed Workflow exists and the database-specific external allow list is
+empty. Render's API and Dashboard independently confirm that external traffic
+to the staging database is blocked; the workspace-wide allow rule does not
+override the empty PostgreSQL rule set. The next bounded step is exact source
+publication only. A later separate step must redeploy the Workflow closed from
+that commit, with no database URL and apply flag `0`, before credential rotation
+or any write-capable configuration can be considered.

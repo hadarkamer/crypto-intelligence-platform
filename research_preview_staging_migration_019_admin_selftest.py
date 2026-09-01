@@ -129,6 +129,10 @@ def _raises(error_type, fragment: str, callback) -> BaseException:
 
 
 def run() -> None:
+    assert (
+        installer.EXPECTED_DATABASE_USER
+        == "crypto_intelligence_staging_migration_019"
+    )
     _raises(RuntimeError, "set", lambda: installer.resolve_configuration({}))
     _raises(
         RuntimeError,

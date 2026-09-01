@@ -129,6 +129,10 @@ def _run(connection):
 
 
 def run() -> None:
+    assert (
+        verifier.EXPECTED_DATABASE_USER
+        == "crypto_intelligence_staging_migration_019"
+    )
     assert verifier.MIGRATION_FILENAME == installer.MIGRATION_FILENAME
     assert verifier.MIGRATION_SHA256 == installer.MIGRATION_SHA256
     assert verifier.EXPECTED_RENDER_POSTGRES_ID == installer.EXPECTED_RENDER_POSTGRES_ID

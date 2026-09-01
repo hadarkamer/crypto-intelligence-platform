@@ -271,7 +271,7 @@ The isolated migration prepares two append-only tables and is listed only in
 the existing broad schema installer. Registration does not apply it. The broad
 installer must not be used for the dedicated staging database: it includes 18
 migrations and does not pin the exact staging target. A reviewed 019-only
-runner is now prepared locally, but is neither registered nor executed.
+runner is prepared, and its closed Render task is registered but has never run.
 Reservation uses unique approval, one-shot, request and reservation keys.
 Consumption must reference the exact reservation binding, fall inside its
 approval window and win an insert-only compare-and-set; concurrent or repeated
@@ -295,9 +295,25 @@ migration_workflow_runbook=docs/PREVIEW_STAGING_MIGRATION_019_WORKFLOW_RUNBOOK.m
 migration_workflow_runbook_prepared=true
 migration_workflow_task_count=1
 migration_workflow_task_max_retries=0
-migration_workflow_resource_created=false
+migration_workflow_source_branch=preview-staging-migration-019
+migration_workflow_source_commit=861554d914f21089457d5ee91147260d050efddb
+migration_workflow_source_tree=14eb4dd1106f398284a363b6feed4e37206171ec
+migration_workflow_source_published=true
+migration_workflow_resource_created=true
+migration_workflow_id=wfl-dabaq0740ujc73abpcg0
+migration_workflow_version_id=wfv-dabaq0740ujc73abpct0
+migration_workflow_task_id=tsk-dabaqsqj0c7s738afm0g
+migration_workflow_task_registered=true
+migration_workflow_auto_deploy=false
+migration_workflow_database_url_configured=false
+migration_workflow_apply_enabled=false
 migration_workflow_runs=0
-postcommit_readonly_verifier_prepared=false
+postcommit_readonly_verifier=research_preview_staging_migration_019_readonly_verifier.py
+postcommit_readonly_verifier_prepared=true
+postcommit_verifier_workflow_entrypoint=research_preview_staging_migration_019_readonly_verifier_workflow.py
+postcommit_verifier_workflow_entrypoint_prepared=true
+postcommit_verifier_workflow_resource_created=false
+postcommit_verifier_workflow_runs=0
 database_registered=false
 default_execution_scope=DATABASE_UNREGISTERED
 transaction_scope_required=true
@@ -313,7 +329,7 @@ live_effect=NONE
 
 The static audit and the required isolated execution sequence are recorded in
 `docs/PREVIEW_STAGING_MIGRATION_019_EXECUTION_PLAN.md`. Its current state is
-`RUNBOOK_READY_POSTCOMMIT_VERIFIER_REQUIRED_APPLY_FORBIDDEN`.
+`ROTATED_USER_SOURCE_PUBLICATION_PENDING_WORKFLOW_REDEPLOY_REQUIRED_APPLY_FORBIDDEN`.
 
 ## Read-only database preflight — 2026-09-01
 
@@ -658,3 +674,125 @@ migration_019_objects_present=false
 migration_019_applied=false
 telegram_api_calls=0
 ```
+
+## Migration 019 closed Workflow — registered, not run
+
+The dedicated migration Workflow was created from the separately published
+branch and exact approved commit. Render completed the build and registered
+exactly one task. Auto-deploy is off, the Workflow has no schedule, and the
+task catalog and Runs page both report zero runs. No Start Task action was
+used.
+
+The service-level environment contains only the five closed control variables
+listed below, each set to the string `0`. No environment group is linked, and
+neither the dedicated nor either generic database URL variable is present.
+
+```text
+workflow_name=preview-staging-migration-019
+workflow_id=wfl-dabaq0740ujc73abpcg0
+workflow_version_id=wfv-dabaq0740ujc73abpct0
+workflow_task=preview_staging_migration_019_once
+workflow_task_id=tsk-dabaqsqj0c7s738afm0g
+workflow_source_branch=preview-staging-migration-019
+workflow_source_commit=861554d914f21089457d5ee91147260d050efddb
+workflow_plan=flex
+workflow_timeout_seconds=60
+workflow_max_retries=0
+workflow_auto_deploy=false
+workflow_schedule_configured=false
+workflow_build_succeeded=true
+workflow_task_registered=true
+workflow_runs=0
+FORMULA_PREVIEW_STAGING_MIGRATION_019_APPLY=0
+FORMULA_PREVIEW_STAGING_DATABASE_PREFLIGHT=0
+FORMULA_SCHEMA_APPLY=0
+RESEARCH_SCHEMA_APPLY=0
+RESEARCH_USE_PRIMARY_DATABASE=0
+FORMULA_PREVIEW_STAGING_DATABASE_URL_present=false
+DATABASE_URL_present=false
+RESEARCH_DATABASE_URL_present=false
+environment_group_linked=false
+database_connections_this_step=0
+sql_queries_executed_this_step=0
+database_writes_this_step=0
+migration_019_applied=false
+candidate_service_changed=false
+production_service_changed=false
+telegram_api_calls=0
+```
+
+An initial dashboard review treated a workspace-level rule and an earlier
+temporary database rule as simultaneously active. A dedicated reconciliation
+corrected that interpretation: Render's Postgres API reports an empty
+database-specific `ipAllowList`, the current database table has zero rule rows,
+and the Info page explicitly reports both `External traffic not allowed` and
+`All internet traffic is blocked by PostgreSQL inbound IP rules`.
+
+The workspace-level `0.0.0.0/0` rule remains visible under `Affected by`, but
+Render combines rule levels as an intersection: an inbound address must be
+allowed at every applicable level. The empty PostgreSQL rule set therefore
+blocks external access despite the permissive workspace rule. No `/32` rule is
+active and no network configuration was changed during reconciliation. Render
+does not expose rule-author metadata in either readback.
+
+```text
+render_api_database_ip_allow_list_count=0
+dashboard_database_specific_rule_count=0
+database_external_allowlist_empty=true
+workspace_wide_allow_rule_present=true
+workspace_wide_allow_rule_scope=0.0.0.0/0
+database_specific_temporary_allow_rule_present=false
+dashboard_external_traffic_not_allowed=true
+effective_external_traffic_allowed=false
+network_rules_changed_this_step=0
+network_rule_author_metadata_available=false
+network_reconciliation_completed=true
+network_reconciliation_required=false
+write_capable_configuration_allowed=false
+task_trigger_allowed=false
+```
+
+The network gate is satisfied, but it does not itself authorize write-capable
+configuration. Credential rotation preparation found that the deployed
+installer and verifier pin the original database user. No new credential was
+created and the credential dialog was closed before any change.
+
+## Migration 019 credential-rotation source — publication pending
+
+The installer and independent verifier now pin one new, separately scoped
+database user. Both self-tests assert the exact value so a future user mismatch
+fails before any database connection. The existing Workflow remains closed on
+the previous source version and cannot use this change until a separately
+approved closed redeploy.
+
+```text
+rotated_database_user=crypto_intelligence_staging_migration_019
+installer_user_pin_updated=true
+readonly_verifier_user_pin_updated=true
+exact_user_selftest_added=true
+approved_remote_commit=PENDING_EXACT_TREE_PUBLICATION
+audited_local_commit=PENDING_LOCAL_COMMIT
+approved_source_tree=PENDING_LOCAL_COMMIT
+remote_parent_commit=861554d914f21089457d5ee91147260d050efddb
+remote_source_published=false
+workflow_deployed_source_commit=861554d914f21089457d5ee91147260d050efddb
+workflow_source_redeploy_required=true
+workflow_database_url_configured=false
+workflow_apply_enabled=false
+workflow_runs=0
+new_database_credential_created=false
+old_database_credential_revoked=false
+database_connections_this_step=0
+sql_queries_executed_this_step=0
+database_writes_this_step=0
+render_configuration_changed_this_step=false
+candidate_service_changed_this_step=false
+production_service_changed_this_step=false
+telegram_api_calls_this_step=0
+```
+
+The next bounded step is exact publication to
+`preview-staging-migration-019`. After that, a separate step must redeploy the
+Workflow closed from the new commit with no database URL, apply flag `0`, no
+schedule and no task run. Credential creation remains forbidden until that
+closed version is verified.

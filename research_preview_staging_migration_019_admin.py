@@ -30,7 +30,7 @@ DATABASE_URL_ENV = "FORMULA_PREVIEW_STAGING_DATABASE_URL"
 EXPECTED_RENDER_POSTGRES_ID = "dpg-dab7rc2d0e5s73dkb9l0-a"
 EXPECTED_INTERNAL_HOST = EXPECTED_RENDER_POSTGRES_ID
 EXPECTED_DATABASE_NAME = "crypto_intelligence_staging_db"
-EXPECTED_DATABASE_USER = "crypto_intelligence_staging_db_user"
+EXPECTED_DATABASE_USER = "crypto_intelligence_staging_migration_019"
 EXPECTED_POSTGRES_MAJOR = 18
 
 ROOT = Path(__file__).resolve().parent

@@ -1,12 +1,12 @@
 # PREVIEW staging migration 019 execution plan
 
-Status: `RUNBOOK_READY_POSTCOMMIT_VERIFIER_REQUIRED_APPLY_FORBIDDEN`
+Status: `ROTATED_USER_SOURCE_PUBLICATION_PENDING_WORKFLOW_REDEPLOY_REQUIRED_APPLY_FORBIDDEN`
 
 This document records the final static audit and the bounded execution plan for
 `migrations/019_preview_first_message_reservation_consumption_v1.sql`. It does
-not authorize a database connection, SQL execution, migration application,
-runtime persistence, candidate-service configuration, deployment or Telegram
-delivery.
+not authorize any further deployment, database connection, SQL execution,
+migration application, runtime persistence, candidate-service configuration or
+Telegram delivery.
 
 ## Exact target and source
 
@@ -119,15 +119,40 @@ task_retry_wait_ms=1000
 task_retry_backoff_scaling=1.0
 task_external_arguments=0
 sdk_registry_verified=true
-workflow_resource_created=false
-workflow_task_registered_on_render=false
-workflow_runs=0
+render_workflow_resource_created_during_local_test=false
+render_workflow_task_registered_during_local_test=false
+render_workflow_runs_during_local_test=0
 ```
 
 The standalone Render CLI required for a local dev-server task listing is not
 present in the current temporary environment. No CLI was installed or replaced
 for this check. Direct inspection of the installed SDK registry and task
 options passed without executing the task.
+
+## Local post-commit verifier
+
+The dedicated reconciler was originally audited locally at commit
+`43d02acb472851365314683ebb2dcbdc4ae9804f`. GitHub commit
+`861554d914f21089457d5ee91147260d050efddb` publishes that complete tree,
+`14eb4dd1106f398284a363b6feed4e37206171ec`, on the dedicated branch and remains
+the source deployed on Render. A new snapshot now pins the installer and
+verifier to the rotated user `crypto_intelligence_staging_migration_019`; its
+exact local and remote fingerprints are pending publication.
+
+`research_preview_staging_migration_019_readonly_verifier.py` pins the same
+internal host, database, user, PostgreSQL major version, migration filename and
+SHA-256. It refuses every migration-apply/preflight flag and both generic
+database URLs. Its single repeatable-read, read-only transaction checks target
+identity, two tables, two trigger functions, table and constraint counts, the
+two exact composite bindings, five enabled trigger mappings and zero
+application rows. It always rolls back and returns exactly one reconciliation
+classification: `APPLIED_VERIFIED`, `NOT_APPLIED`, or
+`PARTIAL_OR_CONFLICTING`.
+
+The separate Workflow entry point registers one `flex` task with a 30-second
+timeout, zero retries, no schedule and no caller arguments. Neither module is
+imported by the candidate or Production runtime. No database connection or
+Render resource was created while testing it.
 
 ## Separately authorized application sequence
 
@@ -197,10 +222,19 @@ migration_019_dedicated_installer_prepared=true
 migration_019_dedicated_installer_executed=false
 migration_019_workflow_entrypoint_prepared=true
 migration_019_workflow_runbook_prepared=true
-migration_019_workflow_resource_created=false
-migration_019_workflow_task_registered_on_render=false
+migration_019_workflow_resource_created=true
+migration_019_workflow_id=wfl-dabaq0740ujc73abpcg0
+migration_019_workflow_version_id=wfv-dabaq0740ujc73abpct0
+migration_019_workflow_task_id=tsk-dabaqsqj0c7s738afm0g
+migration_019_workflow_build_succeeded=true
+migration_019_workflow_task_registered_on_render=true
+migration_019_workflow_auto_deploy=false
+migration_019_workflow_schedule_configured=false
 migration_019_workflow_runs=0
-migration_019_postcommit_readonly_verifier_prepared=false
+migration_019_postcommit_readonly_verifier_prepared=true
+migration_019_postcommit_verifier_workflow_entrypoint_prepared=true
+migration_019_postcommit_verifier_workflow_resource_created=false
+migration_019_postcommit_verifier_workflow_runs=0
 migration_019_apply_authorized=false
 migration_019_applied=false
 candidate_service_connected=false
@@ -208,21 +242,47 @@ runtime_database_registered=false
 database_connections_this_step=0
 sql_queries_executed_this_step=0
 database_writes_this_step=0
-render_configuration_changed_this_step=false
+render_configuration_changed_this_step=true
+render_network_configuration_changed_this_step=false
 candidate_service_changed_this_step=false
 telegram_api_calls_this_step=0
-selftests_passed=51
-core_selftests_passed=49
-isolated_workflow_selftests_passed=2
+selftests_passed=53
+core_selftests_passed=50
+isolated_workflow_selftests_passed=3
 workflow_dependency_scope_isolated=true
 project_compilation_passed=true
 remote_ci_ready=true
-remote_push_performed=false
+dedicated_remote_branch=preview-staging-migration-019
+dedicated_remote_branch_created=true
+approved_remote_commit=PENDING_EXACT_TREE_PUBLICATION
+audited_local_commit=PENDING_LOCAL_COMMIT
+approved_source_tree=PENDING_LOCAL_COMMIT
+remote_parent_commit=861554d914f21089457d5ee91147260d050efddb
+remote_source_published=false
+remote_source_transport=GITHUB_GIT_DATA_API
+direct_git_push_performed=false
+rotated_database_user=crypto_intelligence_staging_migration_019
+credential_rotation_source_ready=true
+new_database_credential_created=false
+old_database_credential_revoked=false
+workflow_deployed_source_commit=861554d914f21089457d5ee91147260d050efddb
+workflow_source_redeploy_required=true
+workflow_database_url_configured=false
+workflow_apply_enabled=false
+database_external_allowlist_empty=true
+workspace_wide_allow_rule_present=true
+database_specific_allow_rule_count=0
+database_specific_temporary_allow_rule_present=false
+effective_external_traffic_allowed=false
+network_reconciliation_completed=true
+network_reconciliation_required=false
 research_evidence_effect=NONE
 live_effect=NONE
 ```
 
-The next bounded step is local implementation and self-testing of a dedicated
-read-only post-commit/uncertain-result verifier. It must not push a commit,
-create a Render resource, configure a database URL, connect to PostgreSQL or
-apply the migration.
+The closed Workflow and its one task remain registered from exact remote commit
+`861554d914f21089457d5ee91147260d050efddb`; no task has run. Render's API
+reports an empty database-specific allow list, and the Dashboard reports that
+external traffic is blocked. The next bounded step is exact publication of the
+rotated-user source. A later separate step must redeploy it closed, without a
+database URL or task trigger, before credential rotation.
