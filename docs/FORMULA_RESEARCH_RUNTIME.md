@@ -323,6 +323,24 @@ formula stage, and has `delivery_channel=NONE` and `live_effect=NONE` throughout
 It does not change acceptance thresholds, HYPE/Max Pain rules, the scheduler,
 or the frozen prospective owner-approval path.
 
+## Disabled Experimental gate preparation
+
+`research_experimental_delivery_gate.py` is a side-effect-free preparation for
+Stage 6. It consumes fingerprint-verified `EvidenceSnapshot` values, the exact
+snapshot-bound relevance decision and the existing deterministic family Dry
+Run. It simulates the independent Experimental gates for Stage-5 readiness,
+current relevance, test-chat allowlisting/separate opt-in, an engaged-by-default
+kill switch, idempotency and a caller-supplied cooldown.
+
+The module is deliberately not imported by `main.py`, `ai_telegram.py` or the
+Formula worker. It reads no environment variable or database, imports no
+Telegram client, creates no subscription and performs no delivery. Even a
+simulated eligible result reports `delivery_channel=NONE`, `delivery_attempts=0`,
+`database_writes=0` and `live_effect=NONE`. No cooldown duration is invented by
+the preparation: a positive value must be supplied by the future, explicitly
+approved Stage-6 integration. Legacy Shadow remains read-only, and Stage 5 must
+report `READY` before a current-v7 family can even be simulated as eligible.
+
 ## Discovery v7.1 Walk-forward and horizon scheduler
 
 Stage 4 keeps the v7 probability/asymmetry thresholds unchanged and versions
