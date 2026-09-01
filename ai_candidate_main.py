@@ -19,6 +19,7 @@ import ai_agent
 import ai_alert_research
 import ai_telegram
 import research_outcome_worker
+import research_experimental_preview_staging_activation_gate as preview_gate
 import research_experimental_preview_staging_registration as preview_staging
 import research_experimental_preview_staging_config as preview_staging_config
 import research_formula_store
@@ -30,7 +31,7 @@ PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
 PORT = int(os.getenv("PORT", "10000"))
 
 
-async def health(_: web.Request) -> web.Response:
+async def health(request: web.Request) -> web.Response:
     state = ai_agent.status()
     try:
         archive = await asyncio.to_thread(ai_alert_research.archive_status)
@@ -57,6 +58,9 @@ async def health(_: web.Request) -> web.Response:
             ),
             "formula_research": research_formula_worker.WORKER.status(),
             "preview_staging": preview_staging.REGISTRATION.status(),
+            "preview_staging_activation_gate": request.app[
+                "preview_staging_activation_gate"
+            ],
             "writers_started_by_this_process": False,
         }
     )
@@ -75,9 +79,10 @@ async def telegram_webhook(request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
-async def start_web_server(bot_app) -> web.AppRunner:
+async def start_web_server(bot_app, activation_gate_status) -> web.AppRunner:
     app = web.Application()
     app["bot_app"] = bot_app
+    app["preview_staging_activation_gate"] = activation_gate_status
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     app.router.add_post("/telegram", telegram_webhook)
@@ -127,13 +132,41 @@ async def main() -> None:
         f"chat_configured={preview_registration['test_chat_configured']}",
         flush=True,
     )
+    activation_gate_status = preview_gate.observe_activation_gate(
+        preview_configuration,
+        actual_runtime_commit=os.getenv(preview_gate.ACTUAL_RUNTIME_COMMIT_ENV),
+        approval_record_json=os.getenv(preview_gate.APPROVAL_RECORD_ENV),
+    )
+    preview_registration = (
+        preview_staging.REGISTRATION.prepare_runtime_connector_candidate(
+            activation_gate_status
+        )
+    )
+    preview_registration = (
+        preview_staging.REGISTRATION.register_runtime_connector_no_dispatch(
+            activation_gate_status
+        )
+    )
+    print(
+        "[ai-analytics-test] PREVIEW activation gate observe-only; "
+        f"approval_record_valid="
+        f"{activation_gate_status['approval_record_valid']} "
+        f"prerequisites="
+        f"{activation_gate_status['activation_prerequisites_satisfied']} "
+        f"connector_candidate="
+        f"{preview_registration['runtime_connector_candidate_prepared']} "
+        f"connector_registered_no_dispatch="
+        f"{preview_registration['runtime_connector_registered_no_dispatch']} "
+        f"activation_allowed={activation_gate_status['activation_allowed']}",
+        flush=True,
+    )
 
     webhook_url = f"{PUBLIC_URL}/telegram"
     await bot_app.bot.delete_webhook(drop_pending_updates=False)
     await bot_app.bot.set_webhook(url=webhook_url, drop_pending_updates=False)
     print(f"[ai-analytics-test] staging webhook set to {webhook_url}", flush=True)
 
-    runner = await start_web_server(bot_app)
+    runner = await start_web_server(bot_app, activation_gate_status)
     try:
         while True:
             await asyncio.sleep(3600)

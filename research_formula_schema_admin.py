@@ -58,6 +58,10 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "017_formula_discovery_scheduler_v1.sql",
+    # 018 remains deliberately unregistered while Experimental audit is disabled.
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "019_preview_first_message_reservation_consumption_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

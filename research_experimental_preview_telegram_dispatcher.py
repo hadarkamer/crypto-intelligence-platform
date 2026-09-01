@@ -1,10 +1,10 @@
-"""Isolated async dispatcher preparation for PREVIEW_ONLY Telegram requests.
+"""Fail-closed async dispatcher preparation for PREVIEW_ONLY requests.
 
 The dispatcher exercises the real ``Bot.send_message`` interface only against
-an explicitly classified test double.  A runtime Bot may be injected for
-interface preparation, but runtime connector registration is structurally
-forbidden in this stage and therefore cannot reach the method call.  The module
-is not imported by production, a worker or a scheduler.
+an explicitly classified test double.  A runtime Bot may now be classified as
+connector-registered, but runtime dispatch remains structurally forbidden and
+therefore cannot reach the method call.  The module is not imported by
+production, a worker or a scheduler.
 """
 
 from __future__ import annotations
@@ -18,13 +18,14 @@ from typing import Any, Dict, Iterable, Mapping
 import research_experimental_preview_telegram_adapter as telegram_adapter
 
 
-DISPATCHER_VERSION = "preview-telegram-dispatcher-v1-fake-bot-only"
-MODE = "PREVIEW_TELEGRAM_DISPATCHER_ISOLATED_FAKE_BOT_ONLY"
+DISPATCHER_VERSION = "preview-telegram-dispatcher-v2-runtime-no-dispatch"
+MODE = "PREVIEW_TELEGRAM_DISPATCHER_RUNTIME_DISPATCH_FORBIDDEN"
 OWNER = "Hadar Kamar"
-LIFECYCLE_STATUS = "PREPARED_FAKE_BOT_ONLY_NOT_RUNTIME_VERIFIED"
+LIFECYCLE_STATUS = "RUNTIME_CONNECTOR_SUPPORTED_DISPATCH_FORBIDDEN"
 
 TEST_DOUBLE = "TEST_DOUBLE"
 RUNTIME_BOT_UNREGISTERED = "RUNTIME_BOT_UNREGISTERED"
+RUNTIME_BOT_REGISTERED_NO_DISPATCH = "RUNTIME_BOT_REGISTERED_NO_DISPATCH"
 
 FAKE_RECORDED = "FAKE_DISPATCH_RECORDED"
 SUPPRESSED = "DISPATCH_SUPPRESSED"
@@ -145,7 +146,11 @@ class PreviewTelegramDispatcher:
     ) -> None:
         if bot is None or not callable(getattr(bot, "send_message", None)):
             raise ValueError("dispatcher bot must expose an async send_message method")
-        if client_classification not in {TEST_DOUBLE, RUNTIME_BOT_UNREGISTERED}:
+        if client_classification not in {
+            TEST_DOUBLE,
+            RUNTIME_BOT_UNREGISTERED,
+            RUNTIME_BOT_REGISTERED_NO_DISPATCH,
+        }:
             raise ValueError("dispatcher client classification is invalid")
         if type(connector_registered) is not bool:
             raise ValueError("connector_registered must be boolean")
@@ -154,6 +159,11 @@ class PreviewTelegramDispatcher:
             and connector_registered
         ):
             raise ValueError("runtime connector registration is forbidden")
+        if (
+            client_classification == RUNTIME_BOT_REGISTERED_NO_DISPATCH
+            and not connector_registered
+        ):
+            raise ValueError("registered runtime connector flag is required")
         self._bot = bot
         self._client_classification = client_classification
         self._connector_registered = connector_registered
@@ -281,11 +291,12 @@ class PreviewTelegramDispatcher:
                 decision["dispatch_decision_id"] for decision in decisions
             ],
         }
-        runtime_evidence = (
-            "FAKE_BOT_ASYNC_ONLY"
-            if self._client_classification == TEST_DOUBLE
-            else "NONE"
-        )
+        if self._client_classification == TEST_DOUBLE:
+            runtime_evidence = "FAKE_BOT_ASYNC_ONLY"
+        elif self._client_classification == RUNTIME_BOT_REGISTERED_NO_DISPATCH:
+            runtime_evidence = "RUNTIME_CONNECTOR_REGISTERED_NO_DISPATCH"
+        else:
+            runtime_evidence = "NONE"
         checklist_metadata = {
             "owner": OWNER,
             "lifecycle_status": LIFECYCLE_STATUS,

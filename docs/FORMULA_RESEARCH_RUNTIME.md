@@ -418,26 +418,101 @@ public opt-in, Stage 6, LIVE and research-evidence effects all remain absent.
 
 `research_experimental_preview_telegram_dispatcher.py` adds the isolated async
 dispatch boundary. It can accept the same Bot interface as production, but a
-runtime Bot is structurally restricted to `RUNTIME_BOT_UNREGISTERED` and can
-never reach the method call in this version. Only an explicitly registered
-`TEST_DOUBLE` can exercise `send_message`; the result is counted as fake test
-evidence, never as a Telegram API call or delivery. The dispatcher is
+runtime Bot is restricted to either `RUNTIME_BOT_UNREGISTERED` or
+`RUNTIME_BOT_REGISTERED_NO_DISPATCH`; both are structurally blocked before the
+method call. Only an explicitly registered `TEST_DOUBLE` can exercise
+`send_message`; the result is counted as fake test evidence, never as a
+Telegram API call or delivery. The dispatcher is
 disabled-by-default, kill-switched, single-test-chat bound and requires owner,
 commit and activation-approval fingerprints. Per-request single-flight,
 in-memory idempotency, caller-supplied restart keys and cancellation-safe lock
 release prevent duplicate fake dispatch. It remains absent from production,
 the worker and scheduler, with no database, research-evidence, Stage-6 or LIVE
-effect. Its lifecycle is `PREPARED_FAKE_BOT_ONLY_NOT_RUNTIME_VERIFIED`.
+effect. Its lifecycle is `RUNTIME_CONNECTOR_SUPPORTED_DISPATCH_FORBIDDEN`.
 
 `research_experimental_preview_staging_registration.py` is wired only into the
 dedicated `ai_candidate_main.py` staging entrypoint. After the staging Bot
 starts, it retains that Bot interface under `RUNTIME_BOT_UNREGISTERED`; shutdown
 removes the binding. The registration exposes status only—no dispatch method,
-handler, command or scheduled task—and is hard-coded disabled with an engaged
-kill switch, no test-chat destination and no activation authority. The main
-production entrypoint remains untouched. Merely starting staging therefore
-causes zero Preview delivery, API, database, research-evidence, Stage-6 or LIVE
-effects.
+handler, command or scheduled task. Its v4 boundary first fingerprints a runtime
+connector candidate after verifying the complete observe-only gate status, then
+may idempotently transition that exact candidate to
+`RUNTIME_BOT_REGISTERED_NO_DISPATCH`. Registration does not grant activation or
+dispatch: the dispatcher rejects the registered runtime Bot before
+`send_message`, and the registration continues to report zero delivery attempts
+and Telegram API calls. The v4 status adds a fingerprint-verifiable receipt that
+binds the registration to the exact activation gate without exposing the chat
+id. Missing prerequisites produce blockers, retain no candidate id and leave
+the connector unregistered. The main production entrypoint remains untouched.
+Merely starting staging therefore causes zero Preview delivery, API, database,
+research-evidence, Stage-6 or LIVE effects.
+
+`research_experimental_preview_first_message_authorization.py` prepares the
+next local-only boundary. It requires the fingerprint-verified registered-no-
+dispatch receipt, the same unchanged activation gate and exactly one prepared
+private-chat request. The resulting one-shot key binds the registration,
+request, message hash and test-chat hash; replay of that key is blocked. The
+output is only `PREPARED_NOT_AUTHORIZED`: its candidate id is explicitly not an
+authorization id, no raw chat id or message text is exposed, and authorization,
+dispatch, delivery, handlers, schedulers, workers, Telegram calls, database
+writes, Stage 6, research evidence and LIVE all remain false or zero. This
+module is not wired into the candidate service or any production surface.
+
+`research_experimental_preview_first_message_owner_approval.py` defines the
+separate owner-approval record for that candidate. It requires the full
+fingerprint-verified candidate, the exact owner identity, an explicit approval
+statement, authorization of a single Telegram PREVIEW message, and a UTC expiry
+no more than 15 minutes after approval. The approval id is a new fingerprint,
+distinct from the candidate id. Production, public opt-in, Stage 6, research
+evidence and LIVE authorization are forbidden. Even a valid record remains
+`APPROVED_NOT_APPLIED`: runtime application, consumption, dispatch and delivery
+stay false; handlers, schedulers and workers remain absent; all external-call
+and write counters remain zero. The module is not imported by the candidate
+service, dispatcher or any production surface, and no real owner approval is
+created merely by adding the contract.
+
+`research_experimental_preview_first_message_application_gate.py` adds the
+observe-only application-readiness gate. It fingerprint-verifies the full
+candidate and owner-approval record, checks an explicit UTC observation time,
+and independently rejects a previously consumed approval id or one-shot key.
+The approval is current from its approval timestamp up to—but not including—its
+expiry timestamp. A complete result is `READY_NOT_APPLIED`, never applied: the
+signed status keeps application, consumption, dispatch and delivery false,
+registers no handler, scheduler or worker, performs no Telegram or database
+operation and has no Stage-6, research-evidence or LIVE effect. The gate is not
+wired into the candidate service, dispatcher or production. Persistent
+consumption and atomic application remain separate future boundaries.
+
+`research_experimental_preview_first_message_consumption_contract.py` defines
+those future append-only state transitions without implementing storage. A
+reservation candidate binds the ready application gate, owner approval,
+one-shot key and exact adapter request, while declaring mandatory atomic insert,
+unique owner-approval/one-shot constraints and compare-and-set semantics. A
+consumption candidate can be prepared only from a reservation reported as
+atomically persisted plus a confirmed delivery receipt inside the approval
+window. Both outputs remain `NOT_PERSISTED` and perform zero writes or calls.
+Duplicate reservation or consumption keys are blocked. An uncertain delivery
+outcome prepares no consumption record, forbids automatic retry and requires
+manual reconciliation, preventing a crash between delivery and persistence
+from silently sending the same message again. The module is disconnected from
+the database, candidate service, dispatcher and production.
+
+`migrations/019_preview_first_message_reservation_consumption_v1.sql` and
+`research_experimental_preview_first_message_storage_adapter.py` prepare the
+next persistence boundary without applying it. The migration
+defines separate append-only reservation and consumption tables. Unique keys
+claim the approval, one-shot request and delivery attempt once; consumption is
+bound by a composite foreign key and a current-reservation validation trigger.
+The adapter's reservation SQL uses an insert-only compare-and-set, while its
+consumption SQL locks the exact reservation and inserts only inside the approval
+window when no prior consumption exists. `ON CONFLICT DO NOTHING` resolves
+concurrent duplicates without an update. The migration is registered only in
+the explicit one-shot schema installer, which remains disabled unless
+`FORMULA_SCHEMA_APPLY=1` and a permitted database URL are both present. It has
+not been applied. The adapter still defaults to `DATABASE_UNREGISTERED`. This
+version executes only against an explicitly marked transaction double; it
+opens no connection, commits no transaction and is not imported by staging,
+the dispatcher or production.
 
 `research_experimental_preview_staging_config.py` defines the only staging
 configuration names for a future activation: explicit enabled and kill-switch
@@ -459,6 +534,20 @@ candidate is explicitly `PREPARED_NOT_APPROVED`; its id cannot be used as an
 approval id, and the module has no connector, Bot, environment, database,
 scheduler, worker or delivery integration. Any change to the service target,
 commit, route or chat binding invalidates its fingerprint.
+
+`research_experimental_preview_staging_activation_gate.py` adds the next pure,
+local-only boundary. It fingerprint-verifies the complete owner approval record
+and binds it to the actual deployed commit plus the same single private-chat
+hash. Kill-switch release, connector, dispatch and first-message authority are
+independent required bits; production, public opt-in, Stage 6, research-evidence
+and LIVE authority remain structurally forbidden. Even when a hypothetical
+record satisfies every prerequisite, this version reports registration still
+required and forces activation, connector registration and delivery off. The
+dedicated candidate entrypoint imports only its sanitized observe-only function
+and exposes that result in health; no Bot is passed to the gate. The gate remains
+absent from every production surface and performs no Telegram, database,
+scheduler or worker operation. Missing or malformed runtime-commit metadata and
+approval-record JSON become health blockers rather than activation authority.
 
 ## Discovery v7.1 Walk-forward and horizon scheduler
 

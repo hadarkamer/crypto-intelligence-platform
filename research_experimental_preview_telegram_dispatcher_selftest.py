@@ -99,6 +99,35 @@ async def _run_async() -> None:
         runtime_blocked["decisions"][0]["blockers"]
     )
 
+    registered_runtime_bot = FakeBot()
+    registered_runtime_dispatcher = dispatcher_module.PreviewTelegramDispatcher(
+        registered_runtime_bot,
+        client_classification=(
+            dispatcher_module.RUNTIME_BOT_REGISTERED_NO_DISPATCH
+        ),
+        connector_registered=True,
+    )
+    registered_runtime_blocked = await registered_runtime_dispatcher.dispatch(
+        plan,
+        transport_policy=_transport_policy(),
+        dispatcher_policy=_dispatcher_policy(),
+    )
+    assert registered_runtime_blocked["client_classification"] == (
+        dispatcher_module.RUNTIME_BOT_REGISTERED_NO_DISPATCH
+    )
+    assert registered_runtime_blocked["connector_registered"] is True
+    assert registered_runtime_blocked["runtime_evidence"] == (
+        "RUNTIME_CONNECTOR_REGISTERED_NO_DISPATCH"
+    )
+    assert registered_runtime_blocked["suppressed"] == 1
+    assert registered_runtime_blocked["fake_bot_calls"] == 0
+    assert registered_runtime_blocked["delivery_attempts"] == 0
+    assert registered_runtime_blocked["telegram_api_calls"] == 0
+    assert "runtime Bot dispatch is forbidden in this stage" in (
+        registered_runtime_blocked["decisions"][0]["blockers"]
+    )
+    assert registered_runtime_bot.calls == []
+
     fake_bot = FakeBot()
     dispatcher = dispatcher_module.PreviewTelegramDispatcher(
         fake_bot,
@@ -236,6 +265,19 @@ def run() -> None:
         assert "runtime connector registration is forbidden" in str(exc)
     else:
         raise AssertionError("runtime Bot registration must be forbidden")
+
+    try:
+        dispatcher_module.PreviewTelegramDispatcher(
+            FakeBot(),
+            client_classification=(
+                dispatcher_module.RUNTIME_BOT_REGISTERED_NO_DISPATCH
+            ),
+            connector_registered=False,
+        )
+    except ValueError as exc:
+        assert "registered runtime connector flag is required" in str(exc)
+    else:
+        raise AssertionError("registered runtime Bot requires connector flag")
 
     source = (
         ROOT / "research_experimental_preview_telegram_dispatcher.py"
