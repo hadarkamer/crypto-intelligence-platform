@@ -62,6 +62,22 @@ _OPEN_FIRST_TOUCH_EVENT_LIMIT = max(
 )
 _SLOT_THRESHOLD_AUTHORITY_BATCH_SIZE = 50
 _STAGE4_DUE_CANDIDATE_PAGE_SIZE = 256
+_STAGE4_DUE_SCAN_STATE_KEY = "STAGE4_SIGNAL_DUE_V1"
+_STAGE4_DUE_SCAN_STATE_VERSION = "stage4-signal-due-scan-state-v1"
+_STAGE4_DUE_SCAN_LOCK_ID = 94837244
+_STAGE4_DUE_SCAN_MAX_EVENT_ID = 9223372036854775807
+_STAGE4_DUE_RESERVED_QUEUE_DIVISOR = 4
+_STAGE4_DUE_SCAN_MAX_PAGES = max(
+    1,
+    min(16, int(os.getenv("RESEARCH_STAGE4_DUE_SCAN_MAX_PAGES", "4"))),
+)
+_STAGE4_DUE_SCAN_BUDGET_MS = max(
+    30_000,
+    min(
+        600_000,
+        int(os.getenv("RESEARCH_STAGE4_DUE_SCAN_BUDGET_MS", "240000")),
+    ),
+)
 _METHOD_VERSION = canonical_price_path.METHOD_VERSION
 _FIRST_TOUCH_METHOD_VERSION = research_no_dwell_outcome.METHOD_VERSION
 _STRICT_FROZEN_EVIDENCE_POLICY_VERSION = (
@@ -1413,6 +1429,16 @@ class OutcomeMetrics:
     stage4_no_signal_missing_price_paths: int = 0
     stage4_no_signal_failures: int = 0
     stage4_no_signal_last_error: Optional[str] = None
+    stage4_signal_scan_pages: int = 0
+    stage4_signal_scan_candidates: int = 0
+    stage4_signal_scan_budget_exhaustions: int = 0
+    stage4_signal_scan_laps_completed: int = 0
+    stage4_signal_scan_failures: int = 0
+    stage4_signal_scan_last_error: Optional[str] = None
+    legacy_due_load_failures: int = 0
+    legacy_due_load_last_error: Optional[str] = None
+    open_first_touch_load_failures: int = 0
+    open_first_touch_load_last_error: Optional[str] = None
     failures: int = 0
     current_phase: str = "IDLE"
     current_phase_started_at_utc: Optional[str] = None
@@ -1430,6 +1456,10 @@ class ResearchOutcomeWorker:
         self._task: Optional[asyncio.Task] = None
         self._stopping = False
         self._stage4_no_signal_projection_cursor: Optional[tuple[datetime, int]] = None
+        self._last_stage4_due_scan: Dict[str, Any] = {
+            "state_version": _STAGE4_DUE_SCAN_STATE_VERSION,
+            "stop_reason": "NOT_RUN",
+        }
 
     @contextmanager
     def _phase(self, name: str):
@@ -1454,6 +1484,24 @@ class ResearchOutcomeWorker:
             self.metrics.current_phase = "IDLE"
             self.metrics.current_phase_started_at_utc = None
 
+    @contextmanager
+    def _outcome_read_transaction(self, database_url: str):
+        """Publish scan telemetry only after the read transaction commits."""
+
+        try:
+            with psycopg.connect(
+                database_url,
+                row_factory=dict_row,
+                connect_timeout=5,
+                options=_database_connection_options(),
+            ) as conn:
+                yield conn
+        except Exception:
+            self._discard_stage4_due_scan_telemetry()
+            raise
+        else:
+            self._commit_stage4_due_scan_telemetry()
+
     @property
     def enabled(self) -> bool:
         return _ENABLED
@@ -1477,6 +1525,25 @@ class ResearchOutcomeWorker:
                 _STAGE4_FROZEN_REFERENCE_POLICY_VERSION
             ),
             "stage4_signal_semantics": _STAGE4_OUTCOME_SEMANTICS,
+            "stage4_signal_due_scan": {
+                "state_version": _STAGE4_DUE_SCAN_STATE_VERSION,
+                "page_size": _STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+                "max_pages_per_cycle": _STAGE4_DUE_SCAN_MAX_PAGES,
+                "max_heavy_statements_per_cycle": (
+                    _STAGE4_DUE_SCAN_MAX_PAGES * 2
+                ),
+                "wall_time_budget_ms": _STAGE4_DUE_SCAN_BUDGET_MS,
+                "per_statement_timeout_ceiling_ms": (
+                    research_database_timeout.heavy_statement_timeout_ms()
+                ),
+                "durable_cursor": True,
+                "frozen_lap_high_water": True,
+                "minimum_reserved_queue_fraction": (
+                    f"1/{_STAGE4_DUE_RESERVED_QUEUE_DIVISOR}"
+                ),
+                "bidirectional_reservation_minimum_limit": 2,
+                "last_scan": dict(self._last_stage4_due_scan),
+            },
             "stage4_no_signal": {
                 "configured": bool(_stage4_no_signal_database_url()),
                 "database_env": _STAGE4_NO_SIGNAL_DATABASE_URL_ENV,
@@ -2250,6 +2317,7 @@ class ResearchOutcomeWorker:
         conn,
         *,
         cursor: Optional[tuple[Any, int]] = None,
+        upper_cursor: Optional[tuple[Any, int]] = None,
         page_size: int = _STAGE4_DUE_CANDIDATE_PAGE_SIZE,
     ) -> list[Dict[str, Any]]:
         """Load one cheap keyset page before Stage-4 projection validation."""
@@ -2287,6 +2355,15 @@ class ResearchOutcomeWorker:
                 "AND (e.alert_time_utc, e.event_id) > (%s, %s)"
             )
             cursor_params.extend((_utc(cursor[0]), int(cursor[1])))
+        upper_cursor_clause = ""
+        upper_cursor_params: list[Any] = []
+        if upper_cursor is not None:
+            upper_cursor_clause = (
+                "AND (e.alert_time_utc, e.event_id) <= (%s, %s)"
+            )
+            upper_cursor_params.extend(
+                (_utc(upper_cursor[0]), int(upper_cursor[1]))
+            )
         bounded_page = max(
             1, min(int(page_size), _STAGE4_DUE_CANDIDATE_PAGE_SIZE)
         )
@@ -2329,6 +2406,7 @@ class ResearchOutcomeWorker:
               )
               AND ({' OR '.join(due_clauses)})
               {cursor_clause}
+              {upper_cursor_clause}
             ORDER BY e.alert_time_utc ASC, e.event_id ASC
             LIMIT %s
         """
@@ -2340,6 +2418,7 @@ class ResearchOutcomeWorker:
             _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
             *due_params,
             *cursor_params,
+            *upper_cursor_params,
             bounded_page,
         ]
         return [dict(row) for row in conn.execute(query, params).fetchall()]
@@ -2532,57 +2611,581 @@ class ResearchOutcomeWorker:
         ]
         return [dict(row) for row in conn.execute(query, params).fetchall()]
 
+    @staticmethod
+    def _stage4_due_cursor_from_row(
+        row: Mapping[str, Any], *, prefix: str
+    ) -> Optional[tuple[datetime, int]]:
+        time_value = row.get(f"{prefix}_alert_time_utc")
+        event_id = row.get(f"{prefix}_event_id")
+        if (time_value is None) != (event_id is None):
+            raise RuntimeError("Stage-4 due scan cursor pair is inconsistent")
+        if time_value is None:
+            return None
+        normalized_id = int(event_id)
+        if normalized_id <= 0:
+            raise RuntimeError("Stage-4 due scan cursor event_id is invalid")
+        return (_utc(time_value), normalized_id)
+
     @classmethod
+    def _acquire_stage4_due_scan_state(
+        cls, conn
+    ) -> Optional[Dict[str, Any]]:
+        """Lock and load the singleton durable Stage-4 signal scan state."""
+
+        lock_row = conn.execute(
+            "SELECT pg_catalog.pg_try_advisory_xact_lock(%s) AS acquired",
+            (_STAGE4_DUE_SCAN_LOCK_ID,),
+        ).fetchone()
+        if not lock_row or lock_row.get("acquired") is not True:
+            return None
+        conn.execute(
+            """
+            INSERT INTO public.research_stage4_signal_scan_state_v1 (
+                scan_key, state_version
+            ) VALUES (%s, %s)
+            ON CONFLICT (scan_key) DO NOTHING
+            """,
+            (_STAGE4_DUE_SCAN_STATE_KEY, _STAGE4_DUE_SCAN_STATE_VERSION),
+        )
+        row = conn.execute(
+            """
+            SELECT scan_key, state_version,
+                   cursor_alert_time_utc, cursor_event_id,
+                   lap_upper_alert_time_utc, lap_upper_event_id,
+                   completed_laps, pages_scanned, candidates_scanned,
+                   updated_at_utc
+              FROM public.research_stage4_signal_scan_state_v1
+             WHERE scan_key=%s
+             FOR UPDATE
+            """,
+            (_STAGE4_DUE_SCAN_STATE_KEY,),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("Stage-4 due scan state row is unavailable")
+        state = dict(row)
+        if state.get("state_version") != _STAGE4_DUE_SCAN_STATE_VERSION:
+            raise RuntimeError("Stage-4 due scan state version is incompatible")
+        cursor = cls._stage4_due_cursor_from_row(state, prefix="cursor")
+        upper = cls._stage4_due_cursor_from_row(state, prefix="lap_upper")
+        if cursor is not None and upper is None:
+            raise RuntimeError("Stage-4 due scan cursor has no lap high-water")
+        if cursor is not None and cursor > upper:
+            raise RuntimeError("Stage-4 due scan cursor exceeds lap high-water")
+        if upper is None:
+            row = conn.execute(
+                """
+                UPDATE public.research_stage4_signal_scan_state_v1
+                   SET lap_upper_alert_time_utc=(
+                           pg_catalog.transaction_timestamp()
+                           - (%s * INTERVAL '1 minute')
+                       ),
+                       lap_upper_event_id=%s,
+                       updated_at_utc=pg_catalog.transaction_timestamp()
+                 WHERE scan_key=%s AND state_version=%s
+                 RETURNING scan_key, state_version,
+                           cursor_alert_time_utc, cursor_event_id,
+                           lap_upper_alert_time_utc, lap_upper_event_id,
+                           completed_laps, pages_scanned,
+                           candidates_scanned, updated_at_utc
+                """,
+                (
+                    min(_HORIZONS),
+                    _STAGE4_DUE_SCAN_MAX_EVENT_ID,
+                    _STAGE4_DUE_SCAN_STATE_KEY,
+                    _STAGE4_DUE_SCAN_STATE_VERSION,
+                ),
+            ).fetchone()
+            if not row:
+                raise RuntimeError("Stage-4 due scan high-water initialization failed")
+            state = dict(row)
+            upper = cls._stage4_due_cursor_from_row(
+                state, prefix="lap_upper"
+            )
+        if upper is None:
+            raise RuntimeError("Stage-4 due scan lap high-water is unavailable")
+        state["cursor"] = cursor
+        state["lap_upper"] = upper
+        return state
+
+    @staticmethod
+    def _record_stage4_due_scan_state(
+        conn,
+        *,
+        cursor: Optional[tuple[Any, int]],
+        lap_complete: bool,
+        pages_scanned: int,
+        candidates_scanned: int,
+    ) -> None:
+        """Persist one acknowledged scan prefix inside the caller transaction."""
+
+        cursor_time = None if cursor is None else _utc(cursor[0])
+        cursor_event_id = None if cursor is None else int(cursor[1])
+        if lap_complete:
+            cursor_time = None
+            cursor_event_id = None
+        row = conn.execute(
+            """
+            UPDATE public.research_stage4_signal_scan_state_v1
+               SET cursor_alert_time_utc=%s,
+                   cursor_event_id=%s,
+                   lap_upper_alert_time_utc=(
+                       CASE WHEN %s THEN NULL ELSE lap_upper_alert_time_utc END
+                   ),
+                   lap_upper_event_id=(
+                       CASE WHEN %s THEN NULL ELSE lap_upper_event_id END
+                   ),
+                   completed_laps=completed_laps+(
+                       CASE WHEN %s THEN 1 ELSE 0 END
+                   ),
+                   pages_scanned=pages_scanned+%s,
+                   candidates_scanned=candidates_scanned+%s,
+                   updated_at_utc=pg_catalog.transaction_timestamp()
+             WHERE scan_key=%s AND state_version=%s
+             RETURNING scan_key
+            """,
+            (
+                cursor_time,
+                cursor_event_id,
+                bool(lap_complete),
+                bool(lap_complete),
+                bool(lap_complete),
+                max(0, int(pages_scanned)),
+                max(0, int(candidates_scanned)),
+                _STAGE4_DUE_SCAN_STATE_KEY,
+                _STAGE4_DUE_SCAN_STATE_VERSION,
+            ),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("Stage-4 due scan state acknowledgement failed")
+
+    @staticmethod
+    def _set_stage4_due_statement_timeout(conn, remaining_ms: int) -> int:
+        """Bound the next heavy statement by both query and cycle budgets."""
+
+        bounded = max(
+            1,
+            min(
+                int(remaining_ms),
+                research_database_timeout.heavy_statement_timeout_ms(),
+            ),
+        )
+        conn.execute(
+            "SELECT pg_catalog.set_config('statement_timeout', %s, true)",
+            (f"{bounded}ms",),
+        )
+        return bounded
+
+    @staticmethod
+    def _stage4_due_scan_remaining_ms(deadline: float) -> int:
+        return max(0, int(math.ceil((deadline - time.monotonic()) * 1000)))
+
+    @staticmethod
+    def _stage4_due_cursor_receipt(
+        cursor: Optional[tuple[Any, int]],
+    ) -> Optional[Dict[str, Any]]:
+        if cursor is None:
+            return None
+        return {
+            "alert_time_utc": _utc(cursor[0]).isoformat(),
+            "event_id": int(cursor[1]),
+        }
+
     def _load_due_stage4_events(
-        cls, conn, limit: int
+        self, conn, limit: int
     ) -> list[Dict[str, Any]]:
-        """Keyset through Stage-4 candidates without invalid-row starvation."""
+        """Run one restart-safe, finite lap segment over Stage-4 signals."""
 
         bounded_limit = max(1, min(int(limit), 1000))
+        self._active_stage4_due_scan = {
+            "lock_acquired": False,
+            "pages_scanned": 0,
+            "heavy_statements": 0,
+            "candidates_scanned": 0,
+        }
+        state = self._acquire_stage4_due_scan_state(conn)
+        if state is None:
+            del self._active_stage4_due_scan
+            self._last_stage4_due_scan = {
+                "state_version": _STAGE4_DUE_SCAN_STATE_VERSION,
+                "stop_reason": "LOCK_BUSY",
+                "lock_acquired": False,
+                "pages_scanned": 0,
+                "heavy_statements": 0,
+                "candidates_scanned": 0,
+                "accepted": 0,
+            }
+            return []
+        self._active_stage4_due_scan["lock_acquired"] = True
+
+        initial_cursor = state["cursor"]
+        cursor = initial_cursor
+        upper = state["lap_upper"]
         accepted: list[Dict[str, Any]] = []
-        cursor: Optional[tuple[Any, int]] = None
-        while len(accepted) < bounded_limit:
-            page = cls._load_due_stage4_candidate_page(
+        accepted_keys: list[tuple[datetime, int]] = []
+        zero_result_cursor = initial_cursor
+        pages_scanned = 0
+        heavy_statements = 0
+        candidates_scanned = 0
+        lap_complete = False
+        stop_reason = "PAGE_BUDGET"
+        started = time.monotonic()
+        deadline = started + (_STAGE4_DUE_SCAN_BUDGET_MS / 1000.0)
+
+        for _ in range(_STAGE4_DUE_SCAN_MAX_PAGES):
+            remaining_ms = self._stage4_due_scan_remaining_ms(deadline)
+            if remaining_ms <= 0:
+                stop_reason = "WALL_TIME_BUDGET"
+                break
+            self._set_stage4_due_statement_timeout(conn, remaining_ms)
+            page = self._load_due_stage4_candidate_page(
                 conn,
                 cursor=cursor,
+                upper_cursor=upper,
                 page_size=_STAGE4_DUE_CANDIDATE_PAGE_SIZE,
             )
+            pages_scanned += 1
+            heavy_statements += 1
+            candidates_scanned += len(page)
+            self._active_stage4_due_scan.update(
+                pages_scanned=pages_scanned,
+                heavy_statements=heavy_statements,
+                candidates_scanned=candidates_scanned,
+            )
             if not page:
+                lap_complete = True
+                stop_reason = "LAP_COMPLETE"
                 break
-            last = page[-1]
-            cursor = (last["alert_time_utc"], int(last["event_id"]))
-            accepted.extend(
-                cls._validate_and_hydrate_due_stage4_events(
-                    conn, [int(row["event_id"]) for row in page]
+
+            page_keys: Dict[int, tuple[datetime, int]] = {}
+            for candidate in page:
+                event_id = int(candidate["event_id"])
+                if event_id in page_keys:
+                    raise RuntimeError("Stage-4 candidate page contains duplicates")
+                key = (_utc(candidate["alert_time_utc"]), event_id)
+                if key > upper or (cursor is not None and key <= cursor):
+                    raise RuntimeError("Stage-4 candidate page escaped its keyset")
+                page_keys[event_id] = key
+
+            remaining_ms = self._stage4_due_scan_remaining_ms(deadline)
+            if remaining_ms <= 0:
+                stop_reason = "WALL_TIME_BUDGET"
+                break
+            self._set_stage4_due_statement_timeout(conn, remaining_ms)
+            hydrated = self._validate_and_hydrate_due_stage4_events(
+                conn, list(page_keys)
+            )
+            heavy_statements += 1
+            self._active_stage4_due_scan["heavy_statements"] = heavy_statements
+            hydrated_by_id: Dict[int, Dict[str, Any]] = {}
+            for raw in hydrated:
+                event = dict(raw)
+                event_id = int(event["event_id"])
+                if event_id not in page_keys or event_id in hydrated_by_id:
+                    raise RuntimeError(
+                        "Stage-4 hydration returned an invalid candidate identity"
+                    )
+                hydrated_by_id[event_id] = event
+            ordered_hydrated = [
+                hydrated_by_id[event_id]
+                for event_id, _key in sorted(
+                    page_keys.items(), key=lambda item: item[1]
                 )
-            )
-            if len(page) < _STAGE4_DUE_CANDIDATE_PAGE_SIZE:
+                if event_id in hydrated_by_id
+            ]
+            capacity = bounded_limit - len(accepted)
+            retained = ordered_hydrated[:capacity]
+            for event in retained:
+                event_id = int(event["event_id"])
+                accepted.append(event)
+                accepted_keys.append(page_keys[event_id])
+
+            if len(ordered_hydrated) > len(retained):
+                cursor = accepted_keys[-1]
+                stop_reason = "RESULT_LIMIT"
                 break
-        accepted.sort(
-            key=lambda row: (
-                _utc(row["alert_time_utc"]),
-                int(row["event_id"]),
+
+            cursor = (
+                _utc(page[-1]["alert_time_utc"]),
+                int(page[-1]["event_id"]),
             )
+            if not accepted:
+                zero_result_cursor = cursor
+            if len(accepted) >= bounded_limit:
+                stop_reason = "RESULT_LIMIT"
+                break
+
+        elapsed_ms = max(0, int(round((time.monotonic() - started) * 1000)))
+        self._set_stage4_due_statement_timeout(
+            conn, research_database_timeout.heavy_statement_timeout_ms()
         )
-        return accepted[:bounded_limit]
+        self._pending_stage4_due_scan = {
+            "initial_cursor": initial_cursor,
+            "zero_result_cursor": zero_result_cursor,
+            "final_cursor": cursor,
+            "lap_upper": upper,
+            "lap_complete": lap_complete,
+            "accepted_ids": [int(row["event_id"]) for row in accepted],
+            "accepted_keys": accepted_keys,
+            "pages_scanned": pages_scanned,
+            "heavy_statements": heavy_statements,
+            "candidates_scanned": candidates_scanned,
+            "elapsed_ms": elapsed_ms,
+            "stop_reason": stop_reason,
+        }
+        del self._active_stage4_due_scan
+        return accepted
+
+    def _acknowledge_stage4_due_scan(
+        self, conn, included_event_ids: Sequence[int]
+    ) -> None:
+        pending = getattr(self, "_pending_stage4_due_scan", None)
+        if not isinstance(pending, dict):
+            return
+        accepted_ids = list(pending["accepted_ids"])
+        included_id_set = {int(value) for value in included_event_ids}
+        included = [
+            event_id
+            for event_id in accepted_ids
+            if int(event_id) in included_id_set
+        ]
+        if included != accepted_ids[: len(included)]:
+            raise RuntimeError("Stage-4 merge retained a non-prefix scan result")
+        retained_count = len(included)
+        all_retained = retained_count == len(accepted_ids)
+        if all_retained:
+            acknowledged_cursor = pending["final_cursor"]
+            lap_complete = bool(pending["lap_complete"])
+        elif retained_count:
+            acknowledged_cursor = pending["accepted_keys"][retained_count - 1]
+            lap_complete = False
+        else:
+            acknowledged_cursor = pending["zero_result_cursor"]
+            lap_complete = False
+        if not accepted_ids:
+            lap_complete = bool(pending["lap_complete"])
+
+        self._record_stage4_due_scan_state(
+            conn,
+            cursor=acknowledged_cursor,
+            lap_complete=lap_complete,
+            pages_scanned=int(pending["pages_scanned"]),
+            candidates_scanned=int(pending["candidates_scanned"]),
+        )
+        budget_exhausted = pending["stop_reason"] in {
+            "PAGE_BUDGET",
+            "WALL_TIME_BUDGET",
+        }
+        self._pending_stage4_due_telemetry = {
+            "state_version": _STAGE4_DUE_SCAN_STATE_VERSION,
+            "stop_reason": pending["stop_reason"],
+            "lock_acquired": True,
+            "pages_scanned": int(pending["pages_scanned"]),
+            "heavy_statements": int(pending["heavy_statements"]),
+            "candidates_scanned": int(pending["candidates_scanned"]),
+            "accepted": len(accepted_ids),
+            "retained_by_merge": retained_count,
+            "elapsed_ms": int(pending["elapsed_ms"]),
+            "budget_exhausted": budget_exhausted,
+            "lap_completed": lap_complete,
+            "cursor": self._stage4_due_cursor_receipt(
+                None if lap_complete else acknowledged_cursor
+            ),
+            "lap_upper": self._stage4_due_cursor_receipt(
+                None if lap_complete else pending["lap_upper"]
+            ),
+        }
+        del self._pending_stage4_due_scan
+
+    def _commit_stage4_due_scan_telemetry(self) -> None:
+        """Publish cursor telemetry only after its DB transaction commits."""
+
+        pending = getattr(self, "_pending_stage4_due_telemetry", None)
+        if not isinstance(pending, dict):
+            return
+        self.metrics.stage4_signal_scan_pages += int(pending["pages_scanned"])
+        self.metrics.stage4_signal_scan_candidates += int(
+            pending["candidates_scanned"]
+        )
+        self.metrics.stage4_signal_scan_budget_exhaustions += int(
+            bool(pending["budget_exhausted"])
+        )
+        self.metrics.stage4_signal_scan_laps_completed += int(
+            bool(pending["lap_completed"])
+        )
+        self.metrics.stage4_signal_scan_last_error = None
+        self._last_stage4_due_scan = dict(pending)
+        del self._pending_stage4_due_telemetry
+
+    def _discard_stage4_due_scan_telemetry(self) -> None:
+        if hasattr(self, "_pending_stage4_due_telemetry"):
+            del self._pending_stage4_due_telemetry
+
+    @staticmethod
+    def _due_queue_order_key(row: Mapping[str, Any]) -> tuple[int, datetime, int]:
+        return (
+            int(row.get("due_queue_priority") or 0),
+            _utc(row["alert_time_utc"]),
+            int(row["event_id"]),
+        )
 
     @classmethod
-    def _load_due_events(cls, conn, limit: int) -> list[Dict[str, Any]]:
-        """Merge independently bounded due queues under the original order."""
+    def _merge_due_queue_rows(
+        cls,
+        legacy_rows: Sequence[Mapping[str, Any]],
+        stage4_rows: Sequence[Mapping[str, Any]],
+        *,
+        limit: int,
+    ) -> list[Dict[str, Any]]:
+        """Keep global order while reserving progress for both due queues."""
 
         bounded_limit = max(1, min(int(limit), 1000))
-        rows = [
-            *cls._load_due_legacy_and_prospective_events(conn, bounded_limit),
-            *cls._load_due_stage4_events(conn, bounded_limit),
-        ]
-        ordered = sorted(
-            (dict(row) for row in rows),
-            key=lambda row: (
-                int(row.get("due_queue_priority") or 0),
-                _utc(row["alert_time_utc"]),
-                int(row["event_id"]),
-            ),
-        )[:bounded_limit]
+        legacy = sorted(
+            (dict(row) for row in legacy_rows), key=cls._due_queue_order_key
+        )
+        stage4 = sorted(
+            (dict(row) for row in stage4_rows), key=cls._due_queue_order_key
+        )
+        legacy_ids = {int(row["event_id"]) for row in legacy}
+        stage4_ids = {int(row["event_id"]) for row in stage4}
+        if len(legacy_ids) != len(legacy) or len(stage4_ids) != len(stage4):
+            raise RuntimeError("due queue contains duplicate event identities")
+        if legacy_ids & stage4_ids:
+            raise RuntimeError("legacy and Stage-4 due queues overlap")
+        combined = sorted([*legacy, *stage4], key=cls._due_queue_order_key)
+        if len(combined) <= bounded_limit or not legacy or not stage4:
+            return combined[:bounded_limit]
+
+        reserve = max(
+            1, bounded_limit // _STAGE4_DUE_RESERVED_QUEUE_DIVISOR
+        )
+        stage4_quota = min(len(stage4), reserve, bounded_limit)
+        legacy_quota = min(
+            len(legacy), reserve, bounded_limit - stage4_quota
+        )
+        selected = [*stage4[:stage4_quota], *legacy[:legacy_quota]]
+        selected_ids = {int(row["event_id"]) for row in selected}
+        for row in combined:
+            if len(selected) >= bounded_limit:
+                break
+            event_id = int(row["event_id"])
+            if event_id in selected_ids:
+                continue
+            selected.append(row)
+            selected_ids.add(event_id)
+        return sorted(selected, key=cls._due_queue_order_key)
+
+    def _load_open_first_touch_events_isolated(
+        self, conn, limit: int
+    ) -> list[Dict[str, Any]]:
+        """Keep an open-horizon timeout from starving both closed queues."""
+
+        savepoint = "research_open_first_touch_load"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            rows = self._load_open_first_touch_events(conn, limit)
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            self.metrics.open_first_touch_load_failures += 1
+            self.metrics.open_first_touch_load_last_error = (
+                f"{type(exc).__name__}: {str(exc)[:500]}"
+            )
+            if "statement timeout" in str(exc).lower():
+                self.metrics.last_timeout_phase = "LOAD_OPEN_FIRST_TOUCH"
+            print(
+                "[research-outcomes] isolated open First-Touch load "
+                f"failure: {exc!r}",
+                flush=True,
+            )
+            return []
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        self.metrics.open_first_touch_load_last_error = None
+        return rows
+
+    def _load_due_events(self, conn, limit: int) -> list[Dict[str, Any]]:
+        """Merge bounded queues and isolate a fail-closed Stage-4 scan."""
+
+        bounded_limit = max(1, min(int(limit), 1000))
+        legacy_savepoint = "research_legacy_due_load"
+        conn.execute(f"SAVEPOINT {legacy_savepoint}")
+        try:
+            legacy_rows = self._load_due_legacy_and_prospective_events(
+                conn, bounded_limit
+            )
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {legacy_savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {legacy_savepoint}")
+            self.metrics.legacy_due_load_failures += 1
+            self.metrics.legacy_due_load_last_error = (
+                f"{type(exc).__name__}: {str(exc)[:500]}"
+            )
+            if "statement timeout" in str(exc).lower():
+                self.metrics.last_timeout_phase = "LOAD_DUE_LEGACY"
+            print(
+                "[research-outcomes] isolated legacy/prospective due load "
+                f"failure: {exc!r}",
+                flush=True,
+            )
+            legacy_rows = []
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {legacy_savepoint}")
+            self.metrics.legacy_due_load_last_error = None
+        savepoint = "research_stage4_signal_due_scan"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            stage4_rows = self._load_due_stage4_events(conn, bounded_limit)
+            ordered = self._merge_due_queue_rows(
+                legacy_rows, stage4_rows, limit=bounded_limit
+            )
+            stage4_ids = {int(row["event_id"]) for row in stage4_rows}
+            self._acknowledge_stage4_due_scan(
+                conn,
+                [
+                    int(row["event_id"])
+                    for row in ordered
+                    if int(row["event_id"]) in stage4_ids
+                ],
+            )
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            if hasattr(self, "_pending_stage4_due_scan"):
+                del self._pending_stage4_due_scan
+            self._discard_stage4_due_scan_telemetry()
+            active_scan = getattr(self, "_active_stage4_due_scan", {})
+            if hasattr(self, "_active_stage4_due_scan"):
+                del self._active_stage4_due_scan
+            self.metrics.stage4_signal_scan_failures += 1
+            self.metrics.stage4_signal_scan_last_error = (
+                f"{type(exc).__name__}: {str(exc)[:500]}"
+            )
+            if "statement timeout" in str(exc).lower():
+                self.metrics.last_timeout_phase = "LOAD_DUE_STAGE4_SIGNAL"
+            self._last_stage4_due_scan = {
+                "state_version": _STAGE4_DUE_SCAN_STATE_VERSION,
+                "stop_reason": "FAILED_CLOSED",
+                "lock_acquired": bool(active_scan.get("lock_acquired")),
+                "pages_scanned": int(active_scan.get("pages_scanned") or 0),
+                "heavy_statements": int(
+                    active_scan.get("heavy_statements") or 0
+                ),
+                "candidates_scanned": int(
+                    active_scan.get("candidates_scanned") or 0
+                ),
+                "accepted": 0,
+                "error_type": type(exc).__name__,
+            }
+            print(
+                "[research-outcomes] isolated Stage-4 signal due scan "
+                f"failure: {exc!r}",
+                flush=True,
+            )
+            ordered = sorted(
+                (dict(row) for row in legacy_rows),
+                key=self._due_queue_order_key,
+            )[:bounded_limit]
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         for row in ordered:
             row.pop("due_queue_priority", None)
         return ordered
@@ -3196,14 +3799,9 @@ class ResearchOutcomeWorker:
             no_signal_result["missing_price_paths"]
         )
 
-        with psycopg.connect(
-            url,
-            row_factory=dict_row,
-            connect_timeout=5,
-            options=_database_connection_options(),
-        ) as conn:
+        with self._outcome_read_transaction(url) as conn:
             with self._phase("LOAD_OPEN_FIRST_TOUCH"):
-                open_events = self._load_open_first_touch_events(
+                open_events = self._load_open_first_touch_events_isolated(
                     conn, limit_per_horizon
                 )
             with self._phase("LOAD_DUE_EVENTS"):
@@ -3649,6 +4247,7 @@ class ResearchOutcomeWorker:
                 symbol: unavailable_event_counts[symbol]
                 for symbol in sorted(unavailable_symbols)
             },
+            "stage4_signal_due_scan": dict(self._last_stage4_due_scan),
             "stage4_no_signal": no_signal_result,
         }
 

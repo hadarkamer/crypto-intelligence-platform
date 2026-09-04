@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import canonical_price_path
@@ -38,11 +40,138 @@ class _ConnectionContext:
     def __exit__(self, exc_type, exc, traceback):
         return False
 
+    def execute(self, query, params=()):
+        return self
+
 
 class _PsycopgStub:
     @staticmethod
     def connect(*args, **kwargs):
         return _ConnectionContext()
+
+
+class _CommandConnection:
+    """Minimal connection for SAVEPOINT-only scan orchestration tests."""
+
+    def __init__(self) -> None:
+        self.commands = []
+
+    def execute(self, query, params=()):
+        self.commands.append((" ".join(str(query).split()), tuple(params)))
+        return self
+
+
+class _OneRowResult:
+    def __init__(self, row=None) -> None:
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class _Stage4StateConnection:
+    """Script the actual advisory-lock and durable-state SQL helpers."""
+
+    def __init__(self, *, acquired, state_row=None, initialized_row=None) -> None:
+        self.acquired = bool(acquired)
+        self.state_row = state_row
+        self.initialized_row = initialized_row
+        self.commands = []
+
+    def execute(self, query, params=()):
+        normalized = " ".join(str(query).split())
+        self.commands.append((normalized, tuple(params)))
+        if "pg_try_advisory_xact_lock" in normalized:
+            return _OneRowResult({"acquired": self.acquired})
+        if normalized.startswith(
+            "INSERT INTO public.research_stage4_signal_scan_state_v1"
+        ):
+            return _OneRowResult()
+        if normalized.startswith(
+            "SELECT scan_key, state_version, cursor_alert_time_utc"
+        ):
+            return _OneRowResult(self.state_row)
+        if normalized.startswith(
+            "UPDATE public.research_stage4_signal_scan_state_v1 SET "
+            "lap_upper_alert_time_utc="
+        ):
+            return _OneRowResult(self.initialized_row)
+        raise AssertionError(f"unexpected Stage-4 state SQL: {normalized}")
+
+
+class _DurableStage4ScanState:
+    """Shared fake state that survives replacement worker instances."""
+
+    def __init__(self, *, cursor=None) -> None:
+        self.cursor = cursor
+        self.default_upper = (
+            START + timedelta(days=365),
+            worker._STAGE4_DUE_SCAN_MAX_EVENT_ID,
+        )
+        self.lap_upper = self.default_upper
+        self.records = []
+        self.acquire_calls = 0
+
+    def acquire(self, _conn):
+        self.acquire_calls += 1
+        if self.lap_upper is None:
+            self.lap_upper = self.default_upper
+        return {
+            "cursor": self.cursor,
+            "lap_upper": self.lap_upper,
+        }
+
+    def record(
+        self,
+        _conn,
+        *,
+        cursor,
+        lap_complete,
+        pages_scanned,
+        candidates_scanned,
+    ):
+        receipt = {
+            "cursor": cursor,
+            "lap_complete": bool(lap_complete),
+            "pages_scanned": int(pages_scanned),
+            "candidates_scanned": int(candidates_scanned),
+        }
+        self.records.append(receipt)
+        if lap_complete:
+            self.cursor = None
+            self.lap_upper = None
+        else:
+            self.cursor = cursor
+
+
+def _stage4_scan_row(event_id, *, priority=0):
+    return {
+        "event_id": int(event_id),
+        "alert_time_utc": START + timedelta(seconds=int(event_id)),
+        "due_queue_priority": int(priority),
+    }
+
+
+def _configure_stage4_scan(
+    service,
+    state,
+    *,
+    candidate_page,
+    validator,
+    timeout_calls=None,
+):
+    service._acquire_stage4_due_scan_state = state.acquire
+    service._record_stage4_due_scan_state = state.record
+    service._load_due_stage4_candidate_page = candidate_page
+    service._validate_and_hydrate_due_stage4_events = validator
+    calls = timeout_calls if timeout_calls is not None else []
+
+    def set_timeout(_conn, remaining_ms):
+        calls.append(int(remaining_ms))
+        return int(remaining_ms)
+
+    service._set_stage4_due_statement_timeout = set_timeout
+    return calls
 
 
 def _candle(open_time, *, high=100.0, low=100.0, close=100.0):
@@ -424,6 +553,632 @@ def _run_closed_current_slot_once(
     }
 
 
+def _check_stage4_signal_state_helpers() -> None:
+    assigned_lock_ids = set()
+    for path in Path(__file__).resolve().parent.glob("*.py"):
+        if path.name in {"research_outcome_worker.py", Path(__file__).name}:
+            continue
+        assigned_lock_ids.update(
+            int(value)
+            for value in re.findall(
+                r"(?:^|\n)[A-Z_]*LOCK_ID\s*=\s*(\d+)",
+                path.read_text(encoding="utf-8"),
+            )
+        )
+    assert worker._STAGE4_DUE_SCAN_LOCK_ID not in assigned_lock_ids
+
+    busy = _Stage4StateConnection(acquired=False)
+    assert worker.ResearchOutcomeWorker._acquire_stage4_due_scan_state(busy) is None
+    assert len(busy.commands) == 1
+    assert "pg_try_advisory_xact_lock" in busy.commands[0][0]
+    assert busy.commands[0][1] == (worker._STAGE4_DUE_SCAN_LOCK_ID,)
+
+    upper = (
+        START + timedelta(days=1),
+        worker._STAGE4_DUE_SCAN_MAX_EVENT_ID,
+    )
+    empty_state = {
+        "scan_key": worker._STAGE4_DUE_SCAN_STATE_KEY,
+        "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+        "cursor_alert_time_utc": None,
+        "cursor_event_id": None,
+        "lap_upper_alert_time_utc": None,
+        "lap_upper_event_id": None,
+        "completed_laps": 0,
+        "pages_scanned": 0,
+        "candidates_scanned": 0,
+        "updated_at_utc": START,
+    }
+    initialized_state = {
+        **empty_state,
+        "lap_upper_alert_time_utc": upper[0],
+        "lap_upper_event_id": upper[1],
+    }
+    ready = _Stage4StateConnection(
+        acquired=True,
+        state_row=empty_state,
+        initialized_row=initialized_state,
+    )
+    acquired = worker.ResearchOutcomeWorker._acquire_stage4_due_scan_state(ready)
+    assert acquired is not None
+    assert acquired["cursor"] is None
+    assert acquired["lap_upper"] == upper
+    assert len(ready.commands) == 4
+    assert ready.commands[1][1] == (
+        worker._STAGE4_DUE_SCAN_STATE_KEY,
+        worker._STAGE4_DUE_SCAN_STATE_VERSION,
+    )
+    assert ready.commands[2][0].endswith("FOR UPDATE")
+    assert ready.commands[3][1] == (
+        min(worker._HORIZONS),
+        worker._STAGE4_DUE_SCAN_MAX_EVENT_ID,
+        worker._STAGE4_DUE_SCAN_STATE_KEY,
+        worker._STAGE4_DUE_SCAN_STATE_VERSION,
+    )
+
+    record_capture = _CaptureResult()
+    cursor = (START + timedelta(seconds=7), 7)
+    worker.ResearchOutcomeWorker._record_stage4_due_scan_state(
+        record_capture,
+        cursor=cursor,
+        lap_complete=False,
+        pages_scanned=-5,
+        candidates_scanned=17,
+    )
+    assert "UPDATE public.research_stage4_signal_scan_state_v1" in (
+        record_capture.query
+    )
+    assert record_capture.params == [
+        cursor[0],
+        cursor[1],
+        False,
+        False,
+        False,
+        0,
+        17,
+        worker._STAGE4_DUE_SCAN_STATE_KEY,
+        worker._STAGE4_DUE_SCAN_STATE_VERSION,
+    ]
+
+    timeout_capture = _CaptureResult()
+    ceiling = worker.research_database_timeout.heavy_statement_timeout_ms()
+    assert worker.ResearchOutcomeWorker._set_stage4_due_statement_timeout(
+        timeout_capture, ceiling + 1
+    ) == ceiling
+    assert timeout_capture.params == [f"{ceiling}ms"]
+    assert "set_config('statement_timeout', %s, true)" in timeout_capture.query
+    assert worker.ResearchOutcomeWorker._set_stage4_due_statement_timeout(
+        timeout_capture, 0
+    ) == 1
+    assert timeout_capture.params == ["1ms"]
+
+
+def _check_stage4_signal_scan_budget_and_restart_resume() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    max_pages = worker._STAGE4_DUE_SCAN_MAX_PAGES
+    state = _DurableStage4ScanState()
+    seen_cursors = []
+    seen_uppers = []
+    validation_batches = []
+    timeout_calls = []
+
+    def candidate_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=page_size,
+    ):
+        assert page_size == worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+        seen_cursors.append(cursor)
+        seen_uppers.append(upper_cursor)
+        first_id = 1 if cursor is None else int(cursor[1]) + 1
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in range(first_id, first_id + page_size)
+        ]
+
+    def validate(_conn, event_ids):
+        validation_batches.append(list(event_ids))
+        return []
+
+    first = worker.ResearchOutcomeWorker()
+    _configure_stage4_scan(
+        first,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+        timeout_calls=timeout_calls,
+    )
+    assert first._load_due_stage4_events(object(), 1) == []
+    first._acknowledge_stage4_due_scan(object(), [])
+    first._commit_stage4_due_scan_telemetry()
+
+    first_cursor = (
+        START + timedelta(seconds=page_size * max_pages),
+        page_size * max_pages,
+    )
+    assert state.cursor == first_cursor
+    assert len(seen_cursors) == max_pages
+    assert len(validation_batches) == max_pages
+    assert all(len(batch) == page_size for batch in validation_batches)
+    assert all(upper == state.default_upper for upper in seen_uppers)
+    assert state.records[-1] == {
+        "cursor": first_cursor,
+        "lap_complete": False,
+        "pages_scanned": max_pages,
+        "candidates_scanned": page_size * max_pages,
+    }
+    first_scan = first.status()["stage4_signal_due_scan"]["last_scan"]
+    assert first_scan["stop_reason"] == "PAGE_BUDGET"
+    assert first_scan["pages_scanned"] == max_pages
+    assert first_scan["heavy_statements"] == max_pages * 2
+    assert first_scan["candidates_scanned"] == page_size * max_pages
+    assert first_scan["budget_exhausted"] is True
+    # Two bounded heavy statements per page plus one restoration of the
+    # connection-level timeout.  The backlog size cannot widen this count.
+    assert len(timeout_calls) == max_pages * 2 + 1
+
+    second_start = len(seen_cursors)
+    second = worker.ResearchOutcomeWorker()
+    _configure_stage4_scan(
+        second,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+        timeout_calls=timeout_calls,
+    )
+    assert second._load_due_stage4_events(object(), 1) == []
+    assert seen_cursors[second_start] == first_cursor
+    second._acknowledge_stage4_due_scan(object(), [])
+    second._commit_stage4_due_scan_telemetry()
+    assert state.acquire_calls == 2
+    assert state.cursor == (
+        START + timedelta(seconds=page_size * max_pages * 2),
+        page_size * max_pages * 2,
+    )
+    assert len(seen_cursors) - second_start == max_pages
+    assert len(validation_batches) == max_pages * 2
+
+
+def _check_stage4_signal_result_limit_resume_boundary() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    state = _DurableStage4ScanState()
+    seen_cursors = []
+
+    def candidate_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=page_size,
+    ):
+        assert upper_cursor == state.default_upper
+        seen_cursors.append(cursor)
+        first_id = 1 if cursor is None else int(cursor[1]) + 1
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in range(first_id, first_id + page_size)
+        ]
+
+    def validate(_conn, event_ids):
+        # Reverse order proves the retained prefix follows candidate key order,
+        # not whatever order the validator happens to return.
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in (4, 2)
+            if event_id in event_ids
+        ]
+
+    first = worker.ResearchOutcomeWorker()
+    _configure_stage4_scan(
+        first,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+    )
+    first_rows = first._load_due_stage4_events(object(), 1)
+    assert [row["event_id"] for row in first_rows] == [2]
+    first._acknowledge_stage4_due_scan(object(), [2])
+    first._commit_stage4_due_scan_telemetry()
+    key_two = (START + timedelta(seconds=2), 2)
+    assert state.cursor == key_two
+    assert state.records[-1]["cursor"] == key_two
+    assert state.records[-1]["lap_complete"] is False
+
+    second = worker.ResearchOutcomeWorker()
+    _configure_stage4_scan(
+        second,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+    )
+    second_rows = second._load_due_stage4_events(object(), 1)
+    assert seen_cursors == [None, key_two]
+    assert [row["event_id"] for row in second_rows] == [4]
+
+
+def _check_stage4_signal_merge_acknowledges_retained_prefix() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    state = _DurableStage4ScanState()
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+
+    def candidate_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=page_size,
+    ):
+        assert cursor is None
+        assert upper_cursor == state.default_upper
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in range(1, page_size + 1)
+        ]
+
+    def validate(_conn, event_ids):
+        assert 2 in event_ids and 4 in event_ids
+        return [_stage4_scan_row(2), _stage4_scan_row(4)]
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+    )
+    service._load_due_legacy_and_prospective_events = lambda _conn, _limit: [
+        {
+            "event_id": 900,
+            "event_kind": "ALERT",
+            "event_type": "LEGACY",
+            "alert_time_utc": START,
+            "due_queue_priority": 0,
+        }
+    ]
+    merged = service._load_due_events(connection, 2)
+    service._commit_stage4_due_scan_telemetry()
+    assert [row["event_id"] for row in merged] == [900, 2]
+    assert all("due_queue_priority" not in row for row in merged)
+    assert state.records[-1]["cursor"] == (
+        START + timedelta(seconds=2),
+        2,
+    )
+    assert state.records[-1]["lap_complete"] is False
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan["accepted"] == 2
+    assert scan["retained_by_merge"] == 1
+    assert scan["cursor"]["event_id"] == 2
+    assert [command for command, _params in connection.commands] == [
+        "SAVEPOINT research_legacy_due_load",
+        "RELEASE SAVEPOINT research_legacy_due_load",
+        "SAVEPOINT research_stage4_signal_due_scan",
+        "RELEASE SAVEPOINT research_stage4_signal_due_scan",
+    ]
+
+
+def _check_stage4_signal_has_reserved_progress_under_legacy_backlog() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    state = _DurableStage4ScanState()
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+
+    def candidate_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=page_size,
+    ):
+        assert cursor is None
+        assert upper_cursor == state.default_upper
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in range(1, page_size + 1)
+        ]
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=candidate_page,
+        validator=lambda _conn, _ids: [
+            _stage4_scan_row(event_id) for event_id in (2, 4, 6)
+        ],
+    )
+    service._load_due_legacy_and_prospective_events = lambda _conn, _limit: [
+        {
+            "event_id": 900 + index,
+            "alert_time_utc": START - timedelta(minutes=10 - index),
+            "due_queue_priority": 0,
+        }
+        for index in range(3)
+    ]
+    merged = service._load_due_events(connection, 3)
+    service._commit_stage4_due_scan_telemetry()
+    merged_ids = {int(row["event_id"]) for row in merged}
+    assert 2 in merged_ids
+    assert len(merged_ids & {900, 901, 902}) == 2
+    assert state.cursor == (START + timedelta(seconds=2), 2)
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan["accepted"] == 3
+    assert scan["retained_by_merge"] == 1
+    assert service.status()["stage4_signal_due_scan"][
+        "bidirectional_reservation_minimum_limit"
+    ] == 2
+
+
+def _check_legacy_timeout_cannot_starve_stage4_signal_scan() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    state = _DurableStage4ScanState()
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=lambda _conn, **_kwargs: [
+            _stage4_scan_row(event_id)
+            for event_id in range(1, page_size + 1)
+        ],
+        validator=lambda _conn, _ids: [
+            _stage4_scan_row(event_id) for event_id in (2, 4, 6)
+        ],
+    )
+    service._load_due_legacy_and_prospective_events = (
+        lambda _conn, _limit: (_ for _ in ()).throw(
+            RuntimeError("canceling statement due to statement timeout")
+        )
+    )
+    rows = service._load_due_events(connection, 3)
+    service._commit_stage4_due_scan_telemetry()
+    assert [row["event_id"] for row in rows] == [2, 4, 6]
+    assert state.cursor == (
+        START + timedelta(seconds=page_size),
+        page_size,
+    )
+    assert service.metrics.legacy_due_load_failures == 1
+    assert service.metrics.last_timeout_phase == "LOAD_DUE_LEGACY"
+    assert service.status()["stage4_signal_due_scan"]["last_scan"][
+        "retained_by_merge"
+    ] == 3
+    assert [command for command, _params in connection.commands] == [
+        "SAVEPOINT research_legacy_due_load",
+        "ROLLBACK TO SAVEPOINT research_legacy_due_load",
+        "RELEASE SAVEPOINT research_legacy_due_load",
+        "SAVEPOINT research_stage4_signal_due_scan",
+        "RELEASE SAVEPOINT research_stage4_signal_due_scan",
+    ]
+
+
+def _check_open_first_touch_timeout_is_fail_closed() -> None:
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+    service._load_open_first_touch_events = (
+        lambda _conn, _limit: (_ for _ in ()).throw(
+            RuntimeError("canceling statement due to statement timeout")
+        )
+    )
+    assert service._load_open_first_touch_events_isolated(connection, 5) == []
+    assert service.metrics.open_first_touch_load_failures == 1
+    assert service.metrics.last_timeout_phase == "LOAD_OPEN_FIRST_TOUCH"
+    assert "statement timeout" in (
+        service.metrics.open_first_touch_load_last_error or ""
+    )
+    assert [command for command, _params in connection.commands] == [
+        "SAVEPOINT research_open_first_touch_load",
+        "ROLLBACK TO SAVEPOINT research_open_first_touch_load",
+        "RELEASE SAVEPOINT research_open_first_touch_load",
+    ]
+
+
+def _check_stage4_signal_lock_busy_is_bounded() -> None:
+    service = worker.ResearchOutcomeWorker()
+    service._acquire_stage4_due_scan_state = lambda _conn: None
+    service._load_due_stage4_candidate_page = lambda *_args, **_kwargs: (
+        _ for _ in ()
+    ).throw(AssertionError("lock-busy scan reached the candidate query"))
+    service._record_stage4_due_scan_state = lambda *_args, **_kwargs: (
+        _ for _ in ()
+    ).throw(AssertionError("lock-busy scan attempted acknowledgement"))
+    service._set_stage4_due_statement_timeout = lambda *_args, **_kwargs: (
+        _ for _ in ()
+    ).throw(AssertionError("lock-busy scan changed statement_timeout"))
+    assert service._load_due_stage4_events(object(), 50) == []
+    assert not hasattr(service, "_pending_stage4_due_scan")
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan == {
+        "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+        "stop_reason": "LOCK_BUSY",
+        "lock_acquired": False,
+        "pages_scanned": 0,
+        "heavy_statements": 0,
+        "candidates_scanned": 0,
+        "accepted": 0,
+    }
+
+
+def _check_stage4_signal_empty_page_completes_lap() -> None:
+    initial_cursor = (START + timedelta(seconds=50), 50)
+    state = _DurableStage4ScanState(cursor=initial_cursor)
+    service = worker.ResearchOutcomeWorker()
+    seen = []
+
+    def empty_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+    ):
+        seen.append((cursor, upper_cursor, page_size))
+        return []
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=empty_page,
+        validator=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("empty candidate page reached validation")
+        ),
+    )
+    assert service._load_due_stage4_events(object(), 5) == []
+    service._acknowledge_stage4_due_scan(object(), [])
+    service._commit_stage4_due_scan_telemetry()
+    assert seen == [
+        (
+            initial_cursor,
+            state.default_upper,
+            worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+        )
+    ]
+    assert state.records[-1] == {
+        "cursor": initial_cursor,
+        "lap_complete": True,
+        "pages_scanned": 1,
+        "candidates_scanned": 0,
+    }
+    assert state.cursor is None
+    assert state.lap_upper is None
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan["stop_reason"] == "LAP_COMPLETE"
+    assert scan["lap_completed"] is True
+    assert scan["heavy_statements"] == 1
+    assert service.metrics.stage4_signal_scan_laps_completed == 1
+
+
+def _check_stage4_signal_short_page_requires_empty_proof() -> None:
+    state = _DurableStage4ScanState()
+    service = worker.ResearchOutcomeWorker()
+    seen_cursors = []
+    validation_batches = []
+
+    def page_then_empty(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+    ):
+        assert upper_cursor == state.default_upper
+        seen_cursors.append(cursor)
+        return [_stage4_scan_row(1)] if cursor is None else []
+
+    def validate(_conn, event_ids):
+        validation_batches.append(list(event_ids))
+        return []
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=page_then_empty,
+        validator=validate,
+    )
+    assert service._load_due_stage4_events(object(), 5) == []
+    service._acknowledge_stage4_due_scan(object(), [])
+    service._commit_stage4_due_scan_telemetry()
+    assert seen_cursors == [None, (START + timedelta(seconds=1), 1)]
+    assert validation_batches == [[1]]
+    assert state.records[-1]["lap_complete"] is True
+    assert state.records[-1]["pages_scanned"] == 2
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan["stop_reason"] == "LAP_COMPLETE"
+    assert scan["heavy_statements"] == 3
+
+
+def _check_stage4_signal_failure_rolls_back_to_legacy() -> None:
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+    legacy = {
+        "event_id": 77,
+        "event_kind": "ALERT",
+        "event_type": "LEGACY",
+        "alert_time_utc": START,
+        "due_queue_priority": 1,
+    }
+    acknowledgements = []
+    service._load_due_legacy_and_prospective_events = (
+        lambda _conn, _limit: [legacy]
+    )
+    service._acquire_stage4_due_scan_state = lambda _conn: (
+        _ for _ in ()
+    ).throw(RuntimeError("incompatible Stage-4 state version"))
+    service._record_stage4_due_scan_state = (
+        lambda *_args, **_kwargs: acknowledgements.append(_kwargs)
+    )
+    result = service._load_due_events(connection, 5)
+    assert [row["event_id"] for row in result] == [77]
+    assert "due_queue_priority" not in result[0]
+    assert acknowledgements == []
+    assert not hasattr(service, "_pending_stage4_due_scan")
+    assert [command for command, _params in connection.commands] == [
+        "SAVEPOINT research_legacy_due_load",
+        "RELEASE SAVEPOINT research_legacy_due_load",
+        "SAVEPOINT research_stage4_signal_due_scan",
+        "ROLLBACK TO SAVEPOINT research_stage4_signal_due_scan",
+        "RELEASE SAVEPOINT research_stage4_signal_due_scan",
+    ]
+    assert service.metrics.stage4_signal_scan_failures == 1
+    assert "incompatible Stage-4 state version" in (
+        service.metrics.stage4_signal_scan_last_error or ""
+    )
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan == {
+        "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+        "stop_reason": "FAILED_CLOSED",
+        "lock_acquired": False,
+        "pages_scanned": 0,
+        "heavy_statements": 0,
+        "candidates_scanned": 0,
+        "accepted": 0,
+        "error_type": "RuntimeError",
+    }
+
+
+def _check_stage4_signal_telemetry_follows_transaction() -> None:
+    telemetry = {
+        "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+        "stop_reason": "PAGE_BUDGET",
+        "pages_scanned": 2,
+        "candidates_scanned": 512,
+        "budget_exhausted": True,
+        "lap_completed": False,
+    }
+    original_psycopg = worker.psycopg
+    worker.psycopg = _PsycopgStub()
+    try:
+        committed = worker.ResearchOutcomeWorker()
+        committed._pending_stage4_due_telemetry = dict(telemetry)
+        with committed._outcome_read_transaction("postgresql://selftest"):
+            assert committed.status()["stage4_signal_due_scan"][
+                "last_scan"
+            ]["stop_reason"] == "NOT_RUN"
+        assert committed.status()["stage4_signal_due_scan"]["last_scan"] == (
+            telemetry
+        )
+        assert committed.metrics.stage4_signal_scan_pages == 2
+
+        rolled_back = worker.ResearchOutcomeWorker()
+        rolled_back._pending_stage4_due_telemetry = dict(telemetry)
+        try:
+            with rolled_back._outcome_read_transaction(
+                "postgresql://selftest"
+            ):
+                raise RuntimeError("later threshold load failed")
+        except RuntimeError as exc:
+            assert "threshold" in str(exc)
+        else:
+            raise AssertionError("synthetic read-transaction failure was hidden")
+        assert not hasattr(rolled_back, "_pending_stage4_due_telemetry")
+        assert rolled_back.status()["stage4_signal_due_scan"]["last_scan"] == {
+            "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+            "stop_reason": "NOT_RUN",
+        }
+        assert rolled_back.metrics.stage4_signal_scan_pages == 0
+    finally:
+        worker.psycopg = original_psycopg
+
+
 def run() -> None:
     # An open horizon is never polled merely because an event exists.  It must
     # be explicitly supplied by the read-side authorization query, which only
@@ -551,6 +1306,7 @@ def run() -> None:
     assert worker.ResearchOutcomeWorker._load_due_stage4_candidate_page(
         paged_candidate_capture,
         cursor=(START, 99),
+        upper_cursor=(START + timedelta(days=1), 999),
         page_size=9999,
     ) == []
     assert paged_candidate_capture.query.count("%s") == len(
@@ -559,7 +1315,14 @@ def run() -> None:
     assert "(e.alert_time_utc, e.event_id) > (%s, %s)" in (
         paged_candidate_capture.query
     )
-    assert paged_candidate_capture.params[-3:-1] == [START, 99]
+    assert "(e.alert_time_utc, e.event_id) <= (%s, %s)" in (
+        paged_candidate_capture.query
+    )
+    assert paged_candidate_capture.params[-5:-3] == [START, 99]
+    assert paged_candidate_capture.params[-3:-1] == [
+        START + timedelta(days=1),
+        999,
+    ]
     assert paged_candidate_capture.params[-1] == (
         worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
     )
@@ -654,77 +1417,22 @@ def run() -> None:
         closed_capture.query
     )
 
-    # Keyset paging must continue past a complete invalid page instead of
-    # starving the first later valid Stage-4 event.
-    original_candidate_page = worker.ResearchOutcomeWorker.__dict__[
-        "_load_due_stage4_candidate_page"
-    ]
-    original_stage4_validator = worker.ResearchOutcomeWorker.__dict__[
-        "_validate_and_hydrate_due_stage4_events"
-    ]
-    candidate_pages = [
-        [
-            {
-                "event_id": event_id,
-                "alert_time_utc": START + timedelta(seconds=event_id),
-            }
-            for event_id in range(1, 257)
-        ],
-        [
-            {
-                "event_id": 257,
-                "alert_time_utc": START + timedelta(seconds=257),
-            }
-        ],
-    ]
-    seen_cursors = []
-
-    def fake_candidate_page(_conn, *, cursor=None, page_size=256):
-        seen_cursors.append(cursor)
-        assert page_size == worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
-        return candidate_pages[len(seen_cursors) - 1]
-
-    def fake_stage4_validation(_conn, event_ids):
-        if 257 not in event_ids:
-            return []
-        return [
-            {
-                "event_id": 257,
-                "alert_time_utc": START + timedelta(seconds=257),
-                "due_queue_priority": 0,
-            }
-        ]
-
-    try:
-        worker.ResearchOutcomeWorker._load_due_stage4_candidate_page = staticmethod(
-            fake_candidate_page
-        )
-        worker.ResearchOutcomeWorker._validate_and_hydrate_due_stage4_events = (
-            staticmethod(fake_stage4_validation)
-        )
-        paged = worker.ResearchOutcomeWorker._load_due_stage4_events(object(), 1)
-    finally:
-        worker.ResearchOutcomeWorker._load_due_stage4_candidate_page = (
-            original_candidate_page
-        )
-        worker.ResearchOutcomeWorker._validate_and_hydrate_due_stage4_events = (
-            original_stage4_validator
-        )
-    assert [row["event_id"] for row in paged] == [257]
-    assert seen_cursors == [
-        None,
-        (START + timedelta(seconds=256), 256),
-    ]
+    _check_stage4_signal_state_helpers()
+    _check_stage4_signal_scan_budget_and_restart_resume()
+    _check_stage4_signal_result_limit_resume_boundary()
+    _check_stage4_signal_merge_acknowledges_retained_prefix()
+    _check_stage4_signal_has_reserved_progress_under_legacy_backlog()
+    _check_legacy_timeout_cannot_starve_stage4_signal_scan()
+    _check_open_first_touch_timeout_is_fail_closed()
+    _check_stage4_signal_lock_busy_is_bounded()
+    _check_stage4_signal_empty_page_completes_lap()
+    _check_stage4_signal_short_page_requires_empty_proof()
+    _check_stage4_signal_failure_rolls_back_to_legacy()
+    _check_stage4_signal_telemetry_follows_transaction()
 
     # The final merge retains the original global queue ordering.  Delivered
     # Alerts stay on the legacy path even if their event_type text resembles a
     # Stage-4 type, and the internal priority column is not exposed downstream.
-    original_legacy_loader = worker.ResearchOutcomeWorker.__dict__[
-        "_load_due_legacy_and_prospective_events"
-    ]
-    original_stage4_loader = worker.ResearchOutcomeWorker.__dict__[
-        "_load_due_stage4_events"
-    ]
     legacy_rows = [
         {
             "event_id": 10,
@@ -757,24 +1465,22 @@ def run() -> None:
             "due_queue_priority": 0,
         },
     ]
-    try:
-        worker.ResearchOutcomeWorker._load_due_legacy_and_prospective_events = (
-            staticmethod(lambda _conn, _limit: legacy_rows)
-        )
-        worker.ResearchOutcomeWorker._load_due_stage4_events = classmethod(
-            lambda _cls, _conn, _limit: stage4_rows
-        )
-        merged = worker.ResearchOutcomeWorker._load_due_events(object(), 3)
-    finally:
-        worker.ResearchOutcomeWorker._load_due_legacy_and_prospective_events = (
-            original_legacy_loader
-        )
-        worker.ResearchOutcomeWorker._load_due_stage4_events = (
-            original_stage4_loader
-        )
+    merge_service = worker.ResearchOutcomeWorker()
+    merge_service._load_due_legacy_and_prospective_events = (
+        lambda _conn, _limit: legacy_rows
+    )
+    merge_service._load_due_stage4_events = lambda _conn, _limit: stage4_rows
+    merge_connection = _CommandConnection()
+    merged = merge_service._load_due_events(merge_connection, 3)
     assert [row["event_id"] for row in merged] == [12, 10, 13]
     assert merged[1]["event_kind"] == "ALERT"
     assert all("due_queue_priority" not in row for row in merged)
+    assert [command for command, _params in merge_connection.commands] == [
+        "SAVEPOINT research_legacy_due_load",
+        "RELEASE SAVEPOINT research_legacy_due_load",
+        "SAVEPOINT research_stage4_signal_due_scan",
+        "RELEASE SAVEPOINT research_stage4_signal_due_scan",
+    ]
 
     # Even a sampler-shaped Stage-4 event must not ask the current-slot loader
     # for First-Touch authority.

@@ -858,6 +858,7 @@ def schema_status() -> Dict[str, Any]:
         "research_formula_evidence_snapshots",
         "research_formula_relevance_assessments",
         "research_formula_discovery_schedule_state",
+        "research_stage4_signal_scan_state_v1",
     )
     required_columns = {
         "research_formula_runs": (
@@ -1025,6 +1026,18 @@ def schema_status() -> Dict[str, Any]:
             "last_discovery_run_id",
             "last_reason",
             "checked_at_utc",
+            "updated_at_utc",
+        ),
+        "research_stage4_signal_scan_state_v1": (
+            "scan_key",
+            "state_version",
+            "cursor_alert_time_utc",
+            "cursor_event_id",
+            "lap_upper_alert_time_utc",
+            "lap_upper_event_id",
+            "completed_laps",
+            "pages_scanned",
+            "candidates_scanned",
             "updated_at_utc",
         ),
     }

@@ -76,6 +76,14 @@ changing delivery authority:
   is both `COMPLETED`/`EVALUABLE` and proven to contain no signal. Its reference
   price comes from the frozen decision-time archive, and its future fields come
   only from a complete closed canonical one-minute path.
+- Migration `027_stage4_signal_outcome_scan_state_v1.sql` adds owner-only,
+  mutable operational cursor state for the Stage-4 signal outcome due queue.
+  Each finite lap freezes an upper `(decision time, event id)` key, survives a
+  process restart and revisits invalid candidates on the next lap. The state is
+  an examined-position cursor, not proof that an outcome was written: a crash
+  after scanning can delay an idempotent retry only until the next finite lap.
+  It is neither evidence nor Formula, delivery, LIVE, Telegram or trading
+  authority.
 - The carrier writer must connect directly as the unprivileged, `NOINHERIT`
   login role `research_stage4_no_signal_outcome_writer_v1`, using only
   `RESEARCH_STAGE4_NO_SIGNAL_OUTCOME_DATABASE_URL`. The authoritative corpus
@@ -244,6 +252,17 @@ runtime contract.
   Research reads and the explicit Discovery/Shadow heavy scopes. It is always
   finite and clamped to 30–300 seconds; Formula control paths remain at 20
   seconds, and heavy Formula writes retain a three-second lock timeout.
+- `RESEARCH_STAGE4_DUE_SCAN_MAX_PAGES=4` bounds the Stage-4 signal due scan to
+  1–16 candidate pages per worker cycle. Each page has at most 256 candidates
+  and at most two heavy statements (candidate plus authoritative hydration).
+- `RESEARCH_STAGE4_DUE_SCAN_BUDGET_MS=240000` bounds the same scan's monotonic
+  wall-time budget to 30–600 seconds. Before every heavy statement PostgreSQL's
+  timeout is reduced to the smaller of the remaining cycle budget and
+  `RESEARCH_HEAVY_STATEMENT_TIMEOUT_MS`.
+- When both closed due queues have work and the cycle limit is at least two,
+  the merge reserves at least one quarter of the configured capacity for each
+  queue. The Production default is 200; a diagnostic caller that explicitly
+  requests a one-row cycle cannot provide bidirectional fairness.
 - `PROSPECTIVE_ANCHORS_ENABLED=1` opts the production service into the silent,
   UTC-minute-aligned prospective sampler. Each eligible 30-minute slot is
   idempotent and persists an atomic LONG/SHORT `DECISION_SAMPLE` pair only when
@@ -261,9 +280,9 @@ runtime contract.
   read-only Stage-4 corpus credentials. `FORMULA_STAGE4_CORPUS_PROJECTION_LIMIT`
   bounds the locally wired corpus page to 128 projections by default.
 
-Migration `026` remains unapplied until its deployment preflight passes. Apply
-it only after migrations `024` and `025`, on PostgreSQL 15 or newer, as the
-trusted owner of all source relations. Provision the writer and reader roles
+Migrations `026` and `027` remain unapplied until their deployment preflight
+passes. Apply `026` after `024`/`025`, then `027`, on PostgreSQL 15 or newer as
+the trusted owner of all source relations. Provision the writer and reader roles
 out of band as unprivileged `NOINHERIT LOGIN` roles with no memberships and no
 database/schema ownership; leave the new writer URL disabled until the schema
 and ACL attestations pass. Before enabling it, preserve an export/backup, run
@@ -272,10 +291,13 @@ confirm runtime health. The reader normalizes out only `026`'s exact delegated,
 non-grantable writer ACL entries from the older `024` catalog receipt; `026`
 attests those entries independently, so any extra privilege still fails closed.
 Rollback begins by disabling
-`RESEARCH_STAGE4_NO_SIGNAL_OUTCOME_DATABASE_URL`; after preserving any desired
-research history, use the explicit revoke/drop sequence at the end of migration
-`026`. Rollback verification requires the writer's direct schema ACL to be
-absent and all source-table access to be ineffective; inherited `PUBLIC` schema
+`RESEARCH_STAGE4_NO_SIGNAL_OUTCOME_DATABASE_URL` and stopping or first deploying
+a Research Outcome worker version that does not require migration `027`. Drop
+the owner-only `027` scan-state table first; this loses only pagination progress.
+After preserving any desired research history, use the explicit revoke/drop
+sequence at the end of migration `026`. Rollback verification requires the
+writer's direct schema ACL to be absent and all source-table access to be
+ineffective; inherited `PUBLIC` schema
 `USAGE` may remain because it conveys no table authority. A rollback never
 promotes, delivers or trades a formula.
 

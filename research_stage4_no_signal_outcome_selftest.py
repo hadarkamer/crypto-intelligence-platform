@@ -378,12 +378,24 @@ def _check_canonical_hash_contract() -> None:
 
 
 def _check_carrier_failure_isolated_from_legacy_run() -> None:
+    transaction_commands = []
+
     class _Connection:
         def __enter__(self):
             return self
 
         def __exit__(self, exc_type, exc, traceback):
             return False
+
+        def execute(self, query, params=()):
+            assert not params
+            command = " ".join(str(query).split())
+            assert command in {
+                "SAVEPOINT research_open_first_touch_load",
+                "RELEASE SAVEPOINT research_open_first_touch_load",
+            }
+            transaction_commands.append(command)
+            return self
 
     class _Psycopg:
         @staticmethod
@@ -418,6 +430,10 @@ def _check_carrier_failure_isolated_from_legacy_run() -> None:
     assert "isolated carrier failure" in (
         instance.metrics.stage4_no_signal_last_error or ""
     )
+    assert transaction_commands == [
+        "SAVEPOINT research_open_first_touch_load",
+        "RELEASE SAVEPOINT research_open_first_touch_load",
+    ]
 
 
 def _check_legacy_failure_cannot_starve_carrier() -> None:

@@ -76,6 +76,9 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "026_stage4_no_signal_outcomes_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "027_stage4_signal_outcome_scan_state_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
