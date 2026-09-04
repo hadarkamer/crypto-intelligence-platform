@@ -23,6 +23,7 @@ import math
 import os
 import re
 import struct
+import time
 from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -35,6 +36,7 @@ except Exception:  # pragma: no cover - optional in pure/self-test environments
 
 import research_market_movement as movement
 import research_signal_formula_exploration as exploration
+import research_stage4_candidate_search as stage4_candidate_search
 
 
 SOURCE_CONTRACT_VERSION = "stage4-wave-v5-authoritative-source-v1"
@@ -127,6 +129,14 @@ MAX_PROJECTION_LIMIT = 128
 MAX_LOOKBACK_DAYS = 365
 MAX_CORPUS_STAGE4_ROWS = 32768
 MAX_CORPUS_WAVE_ROWS = 32768
+MAX_FULL_CORPUS_LOOKBACK_DAYS = 120
+MAX_FULL_CORPUS_PAGES = 64
+MAX_FULL_CORPUS_PROJECTIONS = 8192
+MAX_FULL_CORPUS_OBSERVATIONS = 131072
+DEFAULT_FULL_CORPUS_WALL_BUDGET_MS = 240000
+MIN_FULL_CORPUS_WALL_BUDGET_MS = 30000
+MAX_FULL_CORPUS_WALL_BUDGET_MS = 600000
+MAX_READER_STATEMENT_TIMEOUT_MS = 20000
 CANDIDATE_SEARCH_BLOCKERS: tuple[str, ...] = ()
 CONNECTION_OPTIONS = (
     "-c default_transaction_read_only=on "
@@ -3305,7 +3315,7 @@ class AuthoritativeStage4WaveResult:
 
 @dataclass(frozen=True)
 class AuthoritativeStage4CorpusResult:
-    """Immutable bounded corpus page from one authoritative DB snapshot."""
+    """Immutable bounded corpus page or traversal from one DB snapshot."""
 
     attestation_receipt_sha256: str
     _payload_json: str
@@ -3377,6 +3387,112 @@ class AuthoritativeStage4CorpusResult:
             exploration.ExplorationObservation.from_dict(row)
             for row in self.to_dict()["observations"]
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CompleteAuthoritativeStage4CorpusResult:
+    """Small attested receipt plus detached immutable candidate rows."""
+
+    attestation_receipt_sha256: str
+    _receipt_json: str
+    _candidate_observations: tuple[
+        stage4_candidate_search.CompactStage4CandidateObservation, ...
+    ]
+
+    def __post_init__(self) -> None:
+        if type(self._candidate_observations) is not tuple:
+            raise ValueError(
+                "complete corpus observations must be an immutable tuple"
+            )
+        try:
+            body = json.loads(self._receipt_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("complete corpus receipt is invalid JSON") from exc
+        if _canonical_json(body) != self._receipt_json:
+            raise ValueError("complete corpus receipt is not canonical")
+        if body.get("source_contract_version") != CORPUS_SOURCE_CONTRACT_VERSION:
+            raise ValueError("complete corpus source contract mismatch")
+        if "observations" in body:
+            raise ValueError("complete corpus receipt embeds observation rows")
+        storage = body.get("observation_storage")
+        if not isinstance(storage, Mapping) or storage != {
+            "format": "DETACHED_IMMUTABLE_COMPACT_TUPLE",
+            "schema_version": (
+                stage4_candidate_search.COMPACT_OBSERVATION_SCHEMA_VERSION
+            ),
+            "hash_contract_version": (
+                stage4_candidate_search
+                .COMPACT_OBSERVATION_CHAIN_HASH_VERSION
+            ),
+            "count": len(self._candidate_observations),
+            "ordered_chain_sha256": (
+                stage4_candidate_search.compact_observation_chain_sha256(
+                    self._candidate_observations
+                )
+            ),
+        }:
+            raise ValueError("complete corpus detached observation receipt mismatch")
+        if self.attestation_receipt_sha256 != _corpus_attestation_receipt(body):
+            raise ValueError("complete corpus attestation receipt mismatch")
+
+    @classmethod
+    def _from_payload(
+        cls,
+        payload: Mapping[str, Any],
+        observations: Sequence[
+            stage4_candidate_search.CompactStage4CandidateObservation
+        ],
+    ) -> "CompleteAuthoritativeStage4CorpusResult":
+        if not isinstance(observations, (list, tuple)) or any(
+            type(row)
+            is not stage4_candidate_search.CompactStage4CandidateObservation
+            for row in observations
+        ):
+            raise ValueError("complete corpus observations are not immutable compact rows")
+        frozen_observations = tuple(observations)
+        body = _json_value(payload, field="complete corpus receipt")
+        if not isinstance(body, Mapping):
+            raise ValueError("complete corpus receipt must be an object")
+        normalized = dict(body)
+        normalized.pop("attestation_receipt_sha256", None)
+        if "observations" in normalized:
+            raise ValueError("complete corpus receipt embeds observation rows")
+        return cls(
+            _corpus_attestation_receipt(normalized),
+            _canonical_json(normalized),
+            frozen_observations,
+        )
+
+    def receipt_dict(self) -> Dict[str, Any]:
+        return {
+            "attestation_receipt_sha256": self.attestation_receipt_sha256,
+            **json.loads(self._receipt_json),
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            **self.receipt_dict(),
+            "observations": _json_value(
+                self._candidate_observations,
+                field="complete corpus observations",
+            ),
+        }
+
+    @property
+    def candidate_observations(
+        self,
+    ) -> tuple[
+        stage4_candidate_search.CompactStage4CandidateObservation, ...
+    ]:
+        return self._candidate_observations
+
+    @property
+    def observations(
+        self,
+    ) -> tuple[
+        stage4_candidate_search.CompactStage4CandidateObservation, ...
+    ]:
+        return self._candidate_observations
 
 
 def _attestation_receipt(body: Mapping[str, Any]) -> str:
@@ -3520,6 +3636,55 @@ def _bounded_configuration_int(
             f"{field} must be an integer from 1 through {maximum}"
         )
     return value
+
+
+def _full_corpus_wall_budget_ms(value: Any) -> int:
+    if type(value) is not int or not (
+        MIN_FULL_CORPUS_WALL_BUDGET_MS
+        <= value
+        <= MAX_FULL_CORPUS_WALL_BUDGET_MS
+    ):
+        raise ReaderConfigurationError(
+            "wall_budget_ms must be an integer from "
+            f"{MIN_FULL_CORPUS_WALL_BUDGET_MS} through "
+            f"{MAX_FULL_CORPUS_WALL_BUDGET_MS}"
+        )
+    return value
+
+
+def _assert_full_corpus_deadline(
+    deadline_monotonic: float, *, phase: str
+) -> float:
+    remaining_seconds = deadline_monotonic - time.monotonic()
+    if remaining_seconds <= 0:
+        raise AuthoritativeReaderError(
+            "authoritative full corpus wall-clock budget exhausted during "
+            f"{phase}"
+        )
+    return remaining_seconds
+
+
+def _deadline_execute(
+    conn: Any,
+    sql: str,
+    params: Optional[Sequence[Any]],
+    *,
+    deadline_monotonic: float,
+) -> Any:
+    remaining_seconds = _assert_full_corpus_deadline(
+        deadline_monotonic, phase="statement execution"
+    )
+    remaining_ms = max(1, int(remaining_seconds * 1000))
+    statement_timeout_ms = max(
+        1, min(MAX_READER_STATEMENT_TIMEOUT_MS, remaining_ms)
+    )
+    conn.execute(
+        "SET LOCAL statement_timeout = "
+        f"'{statement_timeout_ms}ms'"
+    )
+    if params is None:
+        return conn.execute(sql)
+    return conn.execute(sql, params)
 
 
 def _normalized_before_cursor(
@@ -5175,13 +5340,16 @@ def load_authoritative_stage4_wave(
     return result
 
 
-def load_authoritative_stage4_corpus(
+def _load_authoritative_stage4_corpus_page(
     *,
     horizon_minutes: int,
     lookback_days: int = 120,
     projection_limit: int = 128,
     before_cursor: Optional[Mapping[str, Any]] = None,
     database_url: Optional[str] = None,
+    _connection: Any = None,
+    _attested_context: Optional[Mapping[str, Any]] = None,
+    _execute: Any = None,
 ) -> AuthoritativeStage4CorpusResult:
     """Load one bounded, causally closed Stage-4 exploration corpus page.
 
@@ -5207,51 +5375,68 @@ def load_authoritative_stage4_corpus(
     )
     initial_cursor = _normalized_before_cursor(before_cursor)
     url = _configured_database_url(database_url)
-    conn: Any = None
+    owns_connection = _connection is None
+    conn: Any = _connection
     result: Optional[AuthoritativeStage4CorpusResult] = None
     primary_error: Optional[BaseException] = None
     primary_traceback: Any = None
     try:
-        conn = psycopg.connect(
-            url,
-            row_factory=dict_row,
-            connect_timeout=5,
-            autocommit=True,
-            options=CONNECTION_OPTIONS,
-        )
-        conn.execute(_BEGIN_SQL)
-        conn.execute(_SCHEMA_LOCK_SQL, (SCHEMA_LOCK_ID,))
-        as_of, session_attestation = _validate_session(
-            _fetchone(conn.execute(_SESSION_SQL)),
-            expected_database_name=_database_target(url)[3],
-        )
-        normalized_cursor = _normalized_before_cursor(
-            initial_cursor, analysis_as_of_utc=as_of
-        )
+        if owns_connection:
+            conn = psycopg.connect(
+                url,
+                row_factory=dict_row,
+                connect_timeout=5,
+                autocommit=True,
+                options=CONNECTION_OPTIONS,
+            )
+            conn.execute(_BEGIN_SQL)
+            conn.execute(_SCHEMA_LOCK_SQL, (SCHEMA_LOCK_ID,))
+            as_of, session_attestation = _validate_session(
+                _fetchone(conn.execute(_SESSION_SQL)),
+                expected_database_name=_database_target(url)[3],
+            )
 
-        # Probe all four relations first so their AccessShare locks close the
-        # migration/DDL TOCTOU window before either catalog attestation.
-        conn.execute(_PROBE_STAGE4_SQL)
-        conn.execute(_PROBE_WAVE_SQL)
-        conn.execute(_PROBE_OUTCOMES_SQL)
-        conn.execute(_PROBE_NO_SIGNAL_OUTCOMES_SQL)
-        schema_attestation = _validate_attestation(
-            _fetchone(conn.execute(_ATTESTATION_SQL))
-        )
-        outcome_attestation = _validate_outcomes_attestation(
-            _fetchone(conn.execute(_OUTCOMES_ATTESTATION_SQL)),
-            expected_source_catalog_sha256=schema_attestation[
-                "source_catalog_sha256"
-            ],
-        )
-        no_signal_outcome_attestation = (
-            _validate_no_signal_outcomes_attestation(
-                _fetchone(conn.execute(_NO_SIGNAL_OUTCOMES_ATTESTATION_SQL)),
+            # Probe all four relations first so their AccessShare locks close
+            # the migration/DDL TOCTOU window before either catalog
+            # attestation.
+            conn.execute(_PROBE_STAGE4_SQL)
+            conn.execute(_PROBE_WAVE_SQL)
+            conn.execute(_PROBE_OUTCOMES_SQL)
+            conn.execute(_PROBE_NO_SIGNAL_OUTCOMES_SQL)
+            schema_attestation = _validate_attestation(
+                _fetchone(conn.execute(_ATTESTATION_SQL))
+            )
+            outcome_attestation = _validate_outcomes_attestation(
+                _fetchone(conn.execute(_OUTCOMES_ATTESTATION_SQL)),
                 expected_source_catalog_sha256=schema_attestation[
                     "source_catalog_sha256"
                 ],
             )
+            no_signal_outcome_attestation = (
+                _validate_no_signal_outcomes_attestation(
+                    _fetchone(conn.execute(_NO_SIGNAL_OUTCOMES_ATTESTATION_SQL)),
+                    expected_source_catalog_sha256=schema_attestation[
+                        "source_catalog_sha256"
+                    ],
+                )
+            )
+        else:
+            if _attested_context is None:
+                raise AuthoritativeReaderError(
+                    "preconnected corpus page lacks attested context"
+                )
+            as_of = _attested_context["as_of"]
+            session_attestation = _attested_context["session_attestation"]
+            schema_attestation = _attested_context["schema_attestation"]
+            outcome_attestation = _attested_context["outcome_attestation"]
+            no_signal_outcome_attestation = _attested_context[
+                "no_signal_outcome_attestation"
+            ]
+
+        normalized_cursor = _normalized_before_cursor(
+            initial_cursor, analysis_as_of_utc=as_of
         )
+        execute = _execute or conn.execute
 
         lower_bound = as_of - timedelta(days=normalized_lookback)
         maturity_cutoff = as_of - timedelta(minutes=horizon_minutes)
@@ -5266,7 +5451,7 @@ def load_authoritative_stage4_corpus(
             else normalized_cursor["projection_event_id"]
         )
         projection_key_rows = _fetchall(
-            conn.execute(
+            execute(
                 _LOAD_PROJECTION_KEYS_SQL,
                 (
                     lower_bound,
@@ -5296,7 +5481,7 @@ def load_authoritative_stage4_corpus(
         if projection_keys:
             snapshot_keys = [row["snapshot_key"] for row in projection_keys]
             raw_stage4_rows = _fetchall(
-                conn.execute(
+                execute(
                     _LOAD_CORPUS_STAGE4_SQL,
                     (
                         snapshot_keys,
@@ -5382,7 +5567,7 @@ def load_authoritative_stage4_corpus(
 
             ordered_slots = sorted(expected_slots)
             raw_wave_rows = _fetchall(
-                conn.execute(
+                execute(
                     _LOAD_CORPUS_WAVE_SQL,
                     (
                         ordered_slots,
@@ -5470,7 +5655,7 @@ def load_authoritative_stage4_corpus(
             }
             if bounded_source_ids:
                 raw_outcomes = _fetchall(
-                    conn.execute(
+                    execute(
                         _LOAD_CORPUS_OUTCOMES_SQL,
                         (
                             bounded_source_ids,
@@ -5490,7 +5675,7 @@ def load_authoritative_stage4_corpus(
                     {key[0] for key in no_signal_cells}
                 )
                 raw_no_signal_outcomes = _fetchall(
-                    conn.execute(
+                    execute(
                         _LOAD_CORPUS_NO_SIGNAL_OUTCOMES_SQL,
                         (
                             projection_event_ids,
@@ -5620,7 +5805,7 @@ def load_authoritative_stage4_corpus(
         primary_traceback = exc.__traceback__
 
     cleanup_errors: list[BaseException] = []
-    if conn is not None:
+    if owns_connection and conn is not None:
         try:
             conn.rollback()
         except BaseException as exc:
@@ -5656,6 +5841,696 @@ def load_authoritative_stage4_corpus(
     return result
 
 
+def load_authoritative_stage4_corpus(
+    *,
+    horizon_minutes: int,
+    lookback_days: int = 120,
+    projection_limit: int = 128,
+    before_cursor: Optional[Mapping[str, Any]] = None,
+    database_url: Optional[str] = None,
+) -> AuthoritativeStage4CorpusResult:
+    """Load one bounded authoritative corpus page.
+
+    This compatibility API deliberately retains its original one-page,
+    one-transaction behavior.  Call
+    :func:`load_complete_authoritative_stage4_corpus` when candidate search
+    requires a terminal traversal of the complete bounded lookback.
+    """
+
+    return _load_authoritative_stage4_corpus_page(
+        horizon_minutes=horizon_minutes,
+        lookback_days=lookback_days,
+        projection_limit=projection_limit,
+        before_cursor=before_cursor,
+        database_url=database_url,
+    )
+
+
+def load_complete_authoritative_stage4_corpus(
+    *,
+    horizon_minutes: int,
+    lookback_days: int = 120,
+    projection_limit: int = 128,
+    wall_budget_ms: int = DEFAULT_FULL_CORPUS_WALL_BUDGET_MS,
+    database_url: Optional[str] = None,
+) -> CompleteAuthoritativeStage4CorpusResult:
+    """Load a terminal bounded corpus traversal from one database snapshot.
+
+    All keyset pages are consumed on one connection inside one read-only
+    repeatable-read transaction.  Any page, row, observation, timeout, or EOF
+    proof failure rolls the transaction back and returns no partial payload.
+    """
+
+    if type(horizon_minutes) is not int or horizon_minutes not in {
+        60, 240, 720, 1440
+    }:
+        raise ReaderConfigurationError(
+            "horizon_minutes must be 60, 240, 720 or 1440"
+        )
+    normalized_lookback = _bounded_configuration_int(
+        lookback_days,
+        field="lookback_days",
+        maximum=MAX_FULL_CORPUS_LOOKBACK_DAYS,
+    )
+    normalized_limit = _bounded_configuration_int(
+        projection_limit,
+        field="projection_limit",
+        maximum=MAX_PROJECTION_LIMIT,
+    )
+    normalized_budget_ms = _full_corpus_wall_budget_ms(wall_budget_ms)
+    url = _configured_database_url(database_url)
+    deadline = time.monotonic() + (normalized_budget_ms / 1000.0)
+    conn: Any = None
+    transaction_open = False
+    result: Optional[CompleteAuthoritativeStage4CorpusResult] = None
+    primary_error: Optional[BaseException] = None
+    primary_traceback: Any = None
+    try:
+        conn = psycopg.connect(
+            url,
+            row_factory=dict_row,
+            connect_timeout=5,
+            autocommit=True,
+            options=CONNECTION_OPTIONS,
+        )
+        conn.execute(_BEGIN_SQL)
+        transaction_open = True
+
+        def execute(sql: str, params: Optional[Sequence[Any]] = None) -> Any:
+            return _deadline_execute(
+                conn,
+                sql,
+                params,
+                deadline_monotonic=deadline,
+            )
+
+        execute(_SCHEMA_LOCK_SQL, (SCHEMA_LOCK_ID,))
+        as_of, session_attestation = _validate_session(
+            _fetchone(execute(_SESSION_SQL)),
+            expected_database_name=_database_target(url)[3],
+        )
+
+        # One lock/attestation boundary covers every page in this traversal.
+        execute(_PROBE_STAGE4_SQL)
+        execute(_PROBE_WAVE_SQL)
+        execute(_PROBE_OUTCOMES_SQL)
+        execute(_PROBE_NO_SIGNAL_OUTCOMES_SQL)
+        schema_attestation = _validate_attestation(
+            _fetchone(execute(_ATTESTATION_SQL))
+        )
+        outcome_attestation = _validate_outcomes_attestation(
+            _fetchone(execute(_OUTCOMES_ATTESTATION_SQL)),
+            expected_source_catalog_sha256=schema_attestation[
+                "source_catalog_sha256"
+            ],
+        )
+        no_signal_outcome_attestation = (
+            _validate_no_signal_outcomes_attestation(
+                _fetchone(execute(_NO_SIGNAL_OUTCOMES_ATTESTATION_SQL)),
+                expected_source_catalog_sha256=schema_attestation[
+                    "source_catalog_sha256"
+                ],
+            )
+        )
+        attested_context = {
+            "as_of": as_of,
+            "session_attestation": session_attestation,
+            "schema_attestation": schema_attestation,
+            "outcome_attestation": outcome_attestation,
+            "no_signal_outcome_attestation": no_signal_outcome_attestation,
+        }
+
+        before: Optional[Dict[str, Any]] = None
+        previous_cursor_order: Optional[tuple[datetime, int]] = None
+        page_provenance: list[Dict[str, Any]] = []
+        page_receipts: list[str] = []
+        observations: list[
+            stage4_candidate_search.CompactStage4CandidateObservation
+        ] = []
+        seen_observation_ids: set[str] = set()
+        projection_snapshot_keys: Dict[int, str] = {}
+        available_outcomes = 0
+        no_signal_observations = 0
+        wave_bound_observations = 0
+        btc_parent_movement_ids: set[str] = set()
+        effect_parent_movement_ids: set[str] = set()
+        outcome_horizons: set[int] = set()
+        readiness_blockers: set[str] = set()
+        page_structural_coverage_complete = True
+        aggregate_counts = {
+            "projections": 0,
+            "stage4_events": 0,
+            "signal_events": 0,
+            "wave_rows": 0,
+            "outcome_rows": 0,
+            "signal_outcome_rows": 0,
+            "no_signal_outcome_rows": 0,
+        }
+        first_source_attestation: Optional[Dict[str, Any]] = None
+        eof_proven = False
+
+        for page_number in range(1, MAX_FULL_CORPUS_PAGES + 1):
+            _assert_full_corpus_deadline(
+                deadline, phase="page traversal"
+            )
+            page = _load_authoritative_stage4_corpus_page(
+                horizon_minutes=horizon_minutes,
+                lookback_days=normalized_lookback,
+                projection_limit=normalized_limit,
+                before_cursor=before,
+                database_url=url,
+                _connection=conn,
+                _attested_context=attested_context,
+                _execute=execute,
+            )
+            _assert_full_corpus_deadline(
+                deadline, phase="page validation"
+            )
+            payload = page.to_dict()
+            source_attestation = payload.get("source_attestation")
+            if not isinstance(source_attestation, Mapping):
+                raise CohortIntegrityError(
+                    "full corpus source attestation is invalid"
+                )
+            if first_source_attestation is None:
+                first_source_attestation = dict(source_attestation)
+            elif _canonical_json(payload.get("source_attestation")) != (
+                _canonical_json(first_source_attestation)
+            ):
+                raise CohortIntegrityError(
+                    "full corpus source attestation changed between pages"
+                )
+            if (
+                payload.get("analysis_as_of_utc")
+                != session_attestation["analysis_as_of_utc"]
+                or payload.get("database_snapshot_id")
+                != session_attestation["database_snapshot_id"]
+            ):
+                raise CohortIntegrityError(
+                    "full corpus page escaped its database snapshot"
+                )
+            if payload.get("request") != {
+                "horizon_minutes": horizon_minutes,
+                "lookback_days": normalized_lookback,
+                "projection_limit": normalized_limit,
+            }:
+                raise CohortIntegrityError(
+                    "full corpus page request contract changed"
+                )
+            cursor = payload.get("cursor")
+            if not isinstance(cursor, Mapping):
+                raise CohortIntegrityError("full corpus page cursor is invalid")
+            cursor = dict(cursor)
+            if cursor.get("order") != (
+                "projection_decision_time_utc DESC, projection_event_id DESC"
+            ):
+                raise CohortIntegrityError(
+                    "full corpus page cursor order changed"
+                )
+            if cursor.get("before") != before:
+                raise CohortIntegrityError(
+                    "full corpus page does not continue its prior cursor"
+                )
+            has_more = cursor.get("has_more")
+            if type(has_more) is not bool:
+                raise CohortIntegrityError(
+                    "full corpus page has_more is not boolean"
+                )
+            next_cursor = cursor.get("next")
+            if has_more:
+                normalized_next = _normalized_before_cursor(
+                    next_cursor, analysis_as_of_utc=as_of
+                )
+                if normalized_next is None:
+                    raise CohortIntegrityError(
+                        "full corpus continuation lacks next_cursor"
+                    )
+                next_order = (
+                    _utc(
+                        normalized_next["projection_decision_time_utc"],
+                        field="next projection_decision_time_utc",
+                    ),
+                    _positive_int(
+                        normalized_next["projection_event_id"],
+                        field="next projection_event_id",
+                    ),
+                )
+                if (
+                    previous_cursor_order is not None
+                    and not next_order < previous_cursor_order
+                ):
+                    raise CohortIntegrityError(
+                        "full corpus cursor did not advance strictly"
+                    )
+            elif next_cursor is not None:
+                raise CohortIntegrityError(
+                    "terminal full corpus page exposes a next_cursor"
+                )
+            else:
+                normalized_next = None
+                next_order = None
+
+            counts = payload.get("counts")
+            if not isinstance(counts, Mapping):
+                raise CohortIntegrityError("full corpus page counts are invalid")
+            for name in aggregate_counts:
+                _assert_full_corpus_deadline(
+                    deadline, phase="page count aggregation"
+                )
+                value = counts.get(name)
+                if type(value) is not int or value < 0:
+                    raise CohortIntegrityError(
+                        f"full corpus page {name} count is invalid"
+                    )
+                aggregate_counts[name] += value
+            if aggregate_counts["projections"] > MAX_FULL_CORPUS_PROJECTIONS:
+                raise CohortIntegrityError(
+                    "authoritative full corpus projection cap exceeded"
+                )
+
+            page_observations = payload.get("observations")
+            if not isinstance(page_observations, Sequence) or isinstance(
+                page_observations, (str, bytes, bytearray)
+            ):
+                raise CohortIntegrityError(
+                    "full corpus page observations are invalid"
+                )
+            if counts["observations"] != len(page_observations):
+                raise CohortIntegrityError(
+                    "full corpus page observation count is inconsistent"
+                )
+            if counts["projections"] > normalized_limit:
+                raise CohortIntegrityError(
+                    "full corpus page projection count exceeded page size"
+                )
+            page_readiness = payload.get("dataset_readiness")
+            if not isinstance(page_readiness, Mapping):
+                raise CohortIntegrityError(
+                    "full corpus page readiness is invalid"
+                )
+            raw_page_blockers = page_readiness.get("blockers")
+            if not isinstance(raw_page_blockers, Sequence) or isinstance(
+                raw_page_blockers, (str, bytes, bytearray)
+            ) or any(
+                type(blocker) is not str or not blocker
+                for blocker in raw_page_blockers
+            ):
+                raise CohortIntegrityError(
+                    "full corpus page readiness blockers are invalid"
+                )
+            if counts["observations"]:
+                if any(
+                    type(page_readiness.get(name)) is not bool
+                    for name in (
+                        "cohort_structurally_complete",
+                        "source_authority_attested",
+                        "statistical_label_contract_implemented",
+                        "wave_identity_candidate_search_implemented",
+                    )
+                ):
+                    raise CohortIntegrityError(
+                        "full corpus page readiness flags are invalid"
+                    )
+                if not all(
+                    page_readiness.get(name) is True
+                    for name in (
+                        "source_authority_attested",
+                        "statistical_label_contract_implemented",
+                        "wave_identity_candidate_search_implemented",
+                    )
+                ):
+                    raise CohortIntegrityError(
+                        "full corpus page readiness authority regressed"
+                    )
+                page_structural_coverage_complete = bool(
+                    page_structural_coverage_complete
+                    and page_readiness["cohort_structurally_complete"]
+                )
+                readiness_blockers.update(raw_page_blockers)
+            for raw_observation in page_observations:
+                _assert_full_corpus_deadline(
+                    deadline, phase="page observation validation"
+                )
+                validated_observation = (
+                    exploration.ExplorationObservation.from_dict(
+                        raw_observation
+                    )
+                )
+                observation = validated_observation.to_dict()
+                observation_id = observation["observation_id"]
+                if observation_id in seen_observation_ids:
+                    raise CohortIntegrityError(
+                        "authoritative full corpus duplicated an observation"
+                    )
+                projection_event_id = _positive_int(
+                    observation.get("projection_event_id"),
+                    field="full corpus projection_event_id",
+                )
+                snapshot_key = _hash(
+                    observation.get("snapshot_key"),
+                    field="full corpus snapshot_key",
+                )
+                prior_snapshot_key = projection_snapshot_keys.get(
+                    projection_event_id
+                )
+                if (
+                    prior_snapshot_key is not None
+                    and prior_snapshot_key != snapshot_key
+                ):
+                    raise CohortIntegrityError(
+                        "full corpus projection identity forked"
+                    )
+                projection_snapshot_keys[projection_event_id] = snapshot_key
+                seen_observation_ids.add(observation_id)
+                compact_observation = (
+                    stage4_candidate_search.compact_authoritative_observation(
+                        validated_observation
+                    )
+                )
+                observations.append(compact_observation)
+                binding = observation["wave_binding"]
+                outcome = observation["outcome"]
+                if binding.get("status") == "BOUND":
+                    wave_bound_observations += 1
+                    parent_id = str(binding["btc_parent_movement_id"])
+                    btc_parent_movement_ids.add(parent_id)
+                    if outcome.get("status") == "AVAILABLE":
+                        effect_parent_movement_ids.add(parent_id)
+                if outcome.get("status") == "AVAILABLE":
+                    available_outcomes += 1
+                if outcome.get("status") != "UNBOUND":
+                    outcome_horizon = outcome.get("horizon_minutes")
+                    if type(outcome_horizon) is int:
+                        outcome_horizons.add(outcome_horizon)
+                if observation.get("explicit_no_signal") is True:
+                    no_signal_observations += 1
+            if len(observations) > MAX_FULL_CORPUS_OBSERVATIONS:
+                raise CohortIntegrityError(
+                    "authoritative full corpus observation cap exceeded"
+                )
+
+            page_receipts.append(page.attestation_receipt_sha256)
+            page_provenance.append(
+                {
+                    "page_number": page_number,
+                    "before": before,
+                    "next": normalized_next,
+                    "has_more": has_more,
+                    "projections": counts["projections"],
+                    "observations": counts["observations"],
+                    "page_attestation_receipt_sha256": (
+                        page.attestation_receipt_sha256
+                    ),
+                }
+            )
+            if not has_more:
+                _assert_full_corpus_deadline(
+                    deadline, phase="terminal page validation"
+                )
+                eof_proven = True
+                break
+            if counts["projections"] <= 0:
+                raise CohortIntegrityError(
+                    "full corpus continuation page contains no projections"
+                )
+            before = normalized_next
+            previous_cursor_order = next_order
+
+        if not eof_proven:
+            raise AuthoritativeReaderError(
+                "authoritative full corpus page cap exhausted before EOF"
+            )
+        if first_source_attestation is None:  # pragma: no cover
+            raise AuthoritativeReaderError(
+                "authoritative full corpus traversal produced no page"
+            )
+        _assert_full_corpus_deadline(
+            deadline, phase="terminal traversal validation"
+        )
+
+        # All source rows and per-page attestations are now captured.  End the
+        # database snapshot before global in-memory aggregation so a large
+        # result cannot sit idle inside the read transaction.
+        del payload
+        del page
+        conn.rollback()
+        transaction_open = False
+
+        _assert_full_corpus_deadline(
+            deadline, phase="local aggregation"
+        )
+        distinct_btc_parent_movements = len(btc_parent_movement_ids)
+        if not observations:
+            readiness_blockers.add("EMPTY_COHORT")
+        label_contract_complete = len(outcome_horizons) <= 1
+        if not label_contract_complete:
+            readiness_blockers.add("MIXED_OUTCOME_HORIZONS")
+        structurally_complete = bool(
+            observations and page_structural_coverage_complete
+        )
+        wave_complete = bool(
+            structurally_complete
+            and wave_bound_observations == len(observations)
+        )
+        label_complete = bool(
+            structurally_complete
+            and label_contract_complete
+            and available_outcomes == len(observations)
+        )
+        technically_ready = bool(
+            structurally_complete and wave_complete and label_complete
+        )
+        descriptive_effect_count = len(effect_parent_movement_ids)
+        readiness = {
+            "policy_version": exploration.POLICY_VERSION,
+            "observation_count": len(observations),
+            "explicit_no_signal_count": no_signal_observations,
+            "wave_bound_count": wave_bound_observations,
+            "outcome_available_count": available_outcomes,
+            "outcome_horizons_minutes": sorted(outcome_horizons),
+            "distinct_bound_btc_parent_movements": (
+                distinct_btc_parent_movements
+            ),
+            "descriptive_distinct_labeled_btc_parent_movements": (
+                descriptive_effect_count
+            ),
+            "distinct_effect_btc_parent_movements": (
+                descriptive_effect_count if technically_ready else 0
+            ),
+            "exploration_parent_floor": (
+                exploration.EXPLORATION_MIN_BTC_PARENT_MOVEMENTS
+            ),
+            "maturity_parent_floor": (
+                exploration.MATURITY_MIN_BTC_PARENT_MOVEMENTS
+            ),
+            "descriptive_reaches_exploration_parent_floor": bool(
+                structurally_complete
+                and wave_complete
+                and label_complete
+                and descriptive_effect_count
+                >= exploration.EXPLORATION_MIN_BTC_PARENT_MOVEMENTS
+            ),
+            "descriptive_reaches_maturity_parent_floor": bool(
+                structurally_complete
+                and wave_complete
+                and label_complete
+                and descriptive_effect_count
+                >= exploration.MATURITY_MIN_BTC_PARENT_MOVEMENTS
+            ),
+            "meets_exploration_parent_floor": bool(
+                technically_ready
+                and descriptive_effect_count
+                >= exploration.EXPLORATION_MIN_BTC_PARENT_MOVEMENTS
+            ),
+            "meets_maturity_parent_floor": bool(
+                technically_ready
+                and descriptive_effect_count
+                >= exploration.MATURITY_MIN_BTC_PARENT_MOVEMENTS
+            ),
+            "cohort_structurally_complete": structurally_complete,
+            "wave_coverage_complete": wave_complete,
+            "label_coverage_complete": label_complete,
+            "source_authority_attested": True,
+            "statistical_label_contract_implemented": True,
+            "wave_identity_candidate_search_implemented": True,
+            "ready_for_formula_effect_research": technically_ready,
+            "blockers": sorted(readiness_blockers),
+            "edge_established": False,
+            "maturity_established": False,
+            "formula_registry_effect": "NONE",
+            "authority_effect": exploration.AUTHORITY_EFFECT,
+            "delivery_channel": exploration.DELIVERY_CHANNEL,
+            "live_eligible": False,
+            "telegram_delivery_allowed": False,
+            "trade_execution_allowed": False,
+        }
+        _assert_full_corpus_deadline(
+            deadline, phase="aggregate receipt construction"
+        )
+        aggregate_counts.update(
+            {
+                "observations": len(observations),
+                "available_outcomes": available_outcomes,
+                "unavailable_outcomes": (
+                    len(observations) - available_outcomes
+                ),
+                "explicit_no_signal_observations": no_signal_observations,
+                "distinct_btc_parent_movements": (
+                    distinct_btc_parent_movements
+                ),
+            }
+        )
+        page_receipts_sha256 = hashlib.sha256(
+            _canonical_json(
+                {
+                    "kind": "authoritative-full-corpus-page-chain-v1",
+                    "database_snapshot_id": session_attestation[
+                        "database_snapshot_id"
+                    ],
+                    "page_attestation_receipts": page_receipts,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        lower_bound = as_of - timedelta(days=normalized_lookback)
+        maturity_cutoff = as_of - timedelta(minutes=horizon_minutes)
+        source_attestation = dict(first_source_attestation)
+        compact_observations = tuple(observations)
+        compact_chain_sha256 = (
+            stage4_candidate_search.compact_observation_chain_sha256(
+                compact_observations
+            )
+        )
+        _assert_full_corpus_deadline(
+            deadline, phase="compact observation chain hashing"
+        )
+        payload = {
+            "source_contract_version": CORPUS_SOURCE_CONTRACT_VERSION,
+            "analysis_as_of_utc": session_attestation[
+                "analysis_as_of_utc"
+            ],
+            "database_snapshot_id": session_attestation[
+                "database_snapshot_id"
+            ],
+            "request": {
+                "horizon_minutes": horizon_minutes,
+                "lookback_days": normalized_lookback,
+                "projection_limit": normalized_limit,
+            },
+            "cursor": {
+                "order": (
+                    "projection_decision_time_utc DESC, projection_event_id DESC"
+                ),
+                "before": None,
+                "next": None,
+                "has_more": False,
+            },
+            "traversal": {
+                "status": "COMPLETE",
+                "single_database_snapshot": True,
+                "eof_proven": True,
+                "analysis_as_of_utc": session_attestation[
+                    "analysis_as_of_utc"
+                ],
+                "database_snapshot_id": session_attestation[
+                    "database_snapshot_id"
+                ],
+                "page_count": len(page_provenance),
+                "page_size": normalized_limit,
+                "max_pages": MAX_FULL_CORPUS_PAGES,
+                "max_projections": MAX_FULL_CORPUS_PROJECTIONS,
+                "max_observations": MAX_FULL_CORPUS_OBSERVATIONS,
+                "wall_budget_ms": normalized_budget_ms,
+                "bounds": {
+                    "projection_decision_time_lower_inclusive_utc": _iso(
+                        lower_bound, field="full corpus lower bound"
+                    ),
+                    "projection_decision_time_upper_inclusive_utc": _iso(
+                        maturity_cutoff, field="full corpus maturity cutoff"
+                    ),
+                },
+                "page_receipts_sha256": page_receipts_sha256,
+                "aggregate_page_sha256": page_receipts_sha256,
+                "pages": page_provenance,
+            },
+            "counts": aggregate_counts,
+            "source_attestation": source_attestation,
+            "observation_storage": {
+                "format": "DETACHED_IMMUTABLE_COMPACT_TUPLE",
+                "schema_version": (
+                    stage4_candidate_search
+                    .COMPACT_OBSERVATION_SCHEMA_VERSION
+                ),
+                "hash_contract_version": (
+                    stage4_candidate_search
+                    .COMPACT_OBSERVATION_CHAIN_HASH_VERSION
+                ),
+                "count": len(compact_observations),
+                "ordered_chain_sha256": compact_chain_sha256,
+            },
+            "dataset_readiness": readiness,
+            "ready_for_candidate_search": readiness[
+                "ready_for_formula_effect_research"
+            ],
+            "blockers": list(readiness["blockers"]),
+            "formula_registry_effect": "NONE",
+            "authority_effect": "NONE",
+            "delivery_channel": "NONE",
+            "live_eligible": False,
+            "telegram_delivery_allowed": False,
+            "trade_execution_allowed": False,
+        }
+        _assert_full_corpus_deadline(
+            deadline, phase="authoritative result validation"
+        )
+        result = CompleteAuthoritativeStage4CorpusResult._from_payload(
+            payload,
+            compact_observations,
+        )
+        _assert_full_corpus_deadline(
+            deadline, phase="authoritative result validation"
+        )
+    except BaseException as exc:
+        primary_error = exc
+        primary_traceback = exc.__traceback__
+
+    cleanup_errors: list[BaseException] = []
+    if conn is not None:
+        if transaction_open:
+            try:
+                conn.rollback()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        try:
+            conn.close()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    if primary_error is not None:
+        if isinstance(primary_error, AuthoritativeReaderError):
+            raise primary_error.with_traceback(primary_traceback)
+        if isinstance(primary_error, Exception):
+            raise AuthoritativeReaderError(
+                "authoritative full Stage-4 corpus read failed: "
+                f"{type(primary_error).__name__}: {primary_error}"
+            ) from primary_error
+        raise primary_error.with_traceback(primary_traceback)
+
+    if cleanup_errors:
+        cleanup_error = cleanup_errors[0]
+        if not isinstance(cleanup_error, Exception):
+            raise cleanup_error.with_traceback(cleanup_error.__traceback__)
+        kinds = ", ".join(type(item).__name__ for item in cleanup_errors)
+        raise AuthoritativeReaderError(
+            f"authoritative full corpus reader cleanup failed: {kinds}"
+        ) from cleanup_error
+
+    if result is None:  # pragma: no cover - every path assigns or raises
+        raise AuthoritativeReaderError(
+            "authoritative full Stage-4 corpus read produced no result"
+        )
+    return result
+
+
 def descriptor() -> Dict[str, Any]:
     return {
         "source_contract_version": SOURCE_CONTRACT_VERSION,
@@ -5677,6 +6552,11 @@ def descriptor() -> Dict[str, Any]:
         "outcomes_loaded_capability": True,
         "runtime_wired": True,
         "runtime_wiring_scope": "DISCOVERY_INGESTION_OBSERVABILITY_ONLY",
+        "complete_corpus_single_snapshot": True,
+        "complete_corpus_max_lookback_days": MAX_FULL_CORPUS_LOOKBACK_DAYS,
+        "complete_corpus_max_pages": MAX_FULL_CORPUS_PAGES,
+        "complete_corpus_max_projections": MAX_FULL_CORPUS_PROJECTIONS,
+        "complete_corpus_max_observations": MAX_FULL_CORPUS_OBSERVATIONS,
         "candidate_search_runtime_wired": True,
         "candidate_search_readiness_evaluated_per_corpus": True,
         "ready_for_candidate_search": False,

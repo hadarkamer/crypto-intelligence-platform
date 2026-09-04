@@ -265,6 +265,108 @@ def _check_probability_gate_and_no_time_spacing() -> None:
     )
 
 
+def _check_compact_observation_equivalence() -> None:
+    rows = [
+        _observation(
+            10 + index,
+            parent=f"compact-parent-{index}",
+            decision=BASE + timedelta(minutes=index * 4),
+            mfe=0.60,
+            mae=0.50,
+            symbol="eth-perp" if index == 0 else "ETH",
+        )
+        for index in range(5)
+    ]
+    compact = [search.compact_authoritative_observation(row) for row in rows]
+    assert all(
+        row["_schema"] == search.COMPACT_OBSERVATION_SCHEMA_VERSION
+        for row in compact
+    )
+    assert all(not hasattr(row, "__dict__") for row in compact)
+    compact_chain = search.compact_observation_chain_sha256(tuple(compact))
+    assert len(compact_chain) == 64
+    assert search.compact_observation_chain_sha256(
+        tuple(reversed(compact))
+    ) != compact_chain
+    full_result = search.search_experimental_candidates(
+        rows,
+        horizon_minutes=HORIZON,
+        analysis_as_of_utc=AS_OF,
+    )
+    compact_result = search.search_experimental_candidates(
+        compact,
+        horizon_minutes=HORIZON,
+        analysis_as_of_utc=AS_OF,
+    )
+    assert compact_result == full_result
+
+    unbound_body = rows[0].to_dict()
+    unbound_body["wave_binding"] = {
+        "status": "UNBOUND",
+        "reason": None,
+        "role": "INDEPENDENCE_ONLY_NOT_FORMULA_PREDICATE",
+    }
+    unbound_body["outcome"] = {
+        "status": "UNBOUND",
+        "reason": None,
+        "label_fields_exposed_as_features": False,
+    }
+    unbound = exploration.ExplorationObservation._from_payload(unbound_body)
+    compact_unbound = search.compact_authoritative_observation(unbound)
+    assert compact_unbound.wave_binding.reason is None
+    assert compact_unbound.outcome.reason == "OUTCOME_UNAVAILABLE"
+    assert search.search_experimental_candidates(
+        [compact_unbound],
+        horizon_minutes=HORIZON,
+        analysis_as_of_utc=AS_OF,
+    ) == search.search_experimental_candidates(
+        [unbound],
+        horizon_minutes=HORIZON,
+        analysis_as_of_utc=AS_OF,
+    )
+
+    malformed = dict(compact[0])
+    malformed["features"] = dict(compact[0]["features"])
+    malformed["features"][
+        exploration.FEATURE_MAX_PAIN_CONFIRMED
+    ] = False
+    try:
+        search.search_experimental_candidates(
+            [malformed],
+            horizon_minutes=HORIZON,
+            analysis_as_of_utc=AS_OF,
+        )
+    except ValueError as exc:
+        assert "observation policy mismatch" in str(exc)
+    else:
+        raise AssertionError("malformed compact observation was accepted")
+
+    valid = compact[0]
+    boolean_mask = search.CompactStage4CandidateObservation(
+        observation_id=valid.observation_id,
+        projection_event_id=valid.projection_event_id,
+        projection_decision_time_utc=valid.projection_decision_time_utc,
+        symbol=valid.symbol,
+        direction=valid.direction,
+        features=search._CompactFeatureMapping(
+            true_mask=True,
+            combined_vote_count=valid.features.combined_vote_count,
+        ),
+        wave_binding=valid.wave_binding,
+        outcome=valid.outcome,
+    )
+    try:
+        search.search_experimental_candidates(
+            [boolean_mask],
+            horizon_minutes=HORIZON,
+            analysis_as_of_utc=AS_OF,
+        )
+    except ValueError as exc:
+        assert "feature shape mismatch" in str(exc)
+    else:
+        raise AssertionError("boolean compact feature mask was accepted")
+
+
 def _check_one_wave_is_one_occurrence() -> None:
     rows = [
         _observation(
@@ -305,7 +407,11 @@ def _check_one_wave_is_one_occurrence() -> None:
     assert candidate["raw_match_count"] == 8
     assert candidate["occurrence_counts"]["completed"] == 1
     assert candidate["experimental_formula_eligible"] is False
-    occurrence = candidate["completed_occurrences"][0]
+    assert "completed_occurrences" not in candidate
+    assert "pending_occurrences" not in candidate
+    assert "unavailable_occurrences" not in candidate
+    assert len(candidate["occurrence_evidence_sha256"]) == 64
+    occurrence = candidate["occurrence_audit_sample"]["completed"][0]
     assert occurrence["evidence_symbols"] == ["ETH", "SOL"]
     assert occurrence["favorable_move_member_hits"] == 1
     assert occurrence["favorable_move_member_count"] == 2
@@ -356,7 +462,9 @@ def _check_first_match_is_frozen_before_outcome() -> None:
     assert candidate["occurrence_counts"]["completed"] == 4
     assert candidate["occurrence_counts"]["mature_outcome_unavailable"] == 1
     assert candidate["experimental_formula_eligible"] is False
-    unavailable = candidate["unavailable_occurrences"][0]
+    unavailable = candidate["occurrence_audit_sample"][
+        "mature_outcome_unavailable"
+    ][0]
     assert unavailable["first_match_time_utc"] == BASE.isoformat()
     assert unavailable["evidence_observation_ids"] == [
         rows[0].observation_id
@@ -444,6 +552,26 @@ def _check_combined_dependencies_and_disclosure_only_q() -> None:
                 }
             )
 
+    original_freeze = search._freeze_occurrence_membership
+    freeze_calls = 0
+
+    def _counted_freeze(*args, **kwargs):
+        nonlocal freeze_calls
+        freeze_calls += 1
+        return original_freeze(*args, **kwargs)
+
+    try:
+        search._freeze_occurrence_membership = _counted_freeze
+        cached = search.search_experimental_candidates(
+            [*winning, *losing],
+            horizon_minutes=HORIZON,
+            analysis_as_of_utc=AS_OF,
+        )
+    finally:
+        search._freeze_occurrence_membership = original_freeze
+    assert freeze_calls == cached["counts"]["evidence_match_sets_evaluated"]
+    assert freeze_calls < cached["counts"]["candidates_evaluated"]
+
 
 def _check_bounds_and_pure_boundary() -> None:
     row = _observation(
@@ -499,7 +627,82 @@ def _check_bounds_and_pure_boundary() -> None:
     else:
         raise AssertionError("experimental floor below five was accepted")
 
+    original_monotonic = search.time.monotonic
+
+    class _ExpiringClock:
+        def __init__(self) -> None:
+            self.value = -2.0
+
+        def __call__(self) -> float:
+            self.value += 2.0
+            return self.value
+
+    try:
+        search.time.monotonic = _ExpiringClock()
+        search.search_experimental_candidates(
+            [row],
+            horizon_minutes=HORIZON,
+            analysis_as_of_utc=AS_OF,
+            config=search.Stage4SearchConfig(
+                wall_budget_ms=search.MIN_SEARCH_WALL_BUDGET_MS
+            ),
+        )
+    except TimeoutError as exc:
+        assert "wall budget exhausted" in str(exc)
+    else:
+        raise AssertionError("candidate search returned a partial timed-out result")
+    finally:
+        search.time.monotonic = original_monotonic
+
+    assert search.MAX_OBSERVATIONS == 131_072
+    assert search.Stage4SearchConfig().max_observations == 32_768
+    maximum = search.search_experimental_candidates(
+        [],
+        horizon_minutes=HORIZON,
+        analysis_as_of_utc=AS_OF,
+        config=search.Stage4SearchConfig(
+            max_observations=search.MAX_OBSERVATIONS,
+        ),
+    )
+    assert maximum["config"]["max_observations"] == search.MAX_OBSERVATIONS
+    try:
+        search.search_experimental_candidates(
+            [],
+            horizon_minutes=HORIZON,
+            analysis_as_of_utc=AS_OF,
+            config=search.Stage4SearchConfig(
+                max_observations=search.MAX_OBSERVATIONS + 1,
+            ),
+        )
+    except ValueError as exc:
+        assert str(search.MAX_OBSERVATIONS) in str(exc)
+    else:
+        raise AssertionError("hard observation input ceiling was not enforced")
+    try:
+        search.search_experimental_candidates(
+            [],
+            horizon_minutes=HORIZON,
+            analysis_as_of_utc=AS_OF,
+            config=search.Stage4SearchConfig(wall_budget_ms=4_999),
+        )
+    except ValueError as exc:
+        assert "wall_budget_ms" in str(exc)
+    else:
+        raise AssertionError("candidate search accepted an unsafe wall budget")
+
     descriptor = search.descriptor()
+    assert descriptor["engine_version"].endswith("-v2")
+    assert descriptor["candidate_schema_version"].endswith("-v2")
+    assert descriptor["compact_observation_schema_version"] == (
+        search.COMPACT_OBSERVATION_SCHEMA_VERSION
+    )
+    assert descriptor["default_max_observations"] == 32_768
+    assert descriptor["max_observations_hard_limit"] == search.MAX_OBSERVATIONS
+    assert descriptor["default_wall_budget_ms"] == 60_000
+    assert descriptor["minimum_wall_budget_ms"] == 5_000
+    assert descriptor["maximum_wall_budget_ms"] == 300_000
+    assert descriptor["occurrence_audit_sample_per_status"] == 2
+    assert descriptor["occurrence_audit_member_limit"] == 8
     assert descriptor["fixed_time_spacing_rule"] is None
     assert descriptor["outcome_fields_allowed_as_predicates"] is False
     assert descriptor["formula_registry_effect"] == "NONE"
@@ -519,6 +722,7 @@ def _check_bounds_and_pure_boundary() -> None:
 
 def main() -> None:
     _check_probability_gate_and_no_time_spacing()
+    _check_compact_observation_equivalence()
     _check_one_wave_is_one_occurrence()
     _check_first_match_is_frozen_before_outcome()
     _check_asymmetry_route_is_independent_of_probability_route()

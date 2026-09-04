@@ -29,6 +29,27 @@ import research_stage4_candidate_search
 
 
 _TRUE = {"1", "true", "yes", "on"}
+
+
+def _bounded_int_environment(
+    name: str, *, default: int, minimum: int, maximum: int
+) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 _DISCOVERY_ENABLED = os.getenv("FORMULA_DISCOVERY_ENABLED", "").strip().lower() in _TRUE
 _SHADOW_ENABLED = os.getenv("FORMULA_SHADOW_ENABLED", "").strip().lower() in _TRUE
 _LIVE_ALERTS_ENABLED = os.getenv("FORMULA_LIVE_ALERTS_ENABLED", "").strip().lower() in _TRUE
@@ -56,7 +77,7 @@ _DECISION_COHORT_POLICY_VERSION = (
 )
 _STAGE4_CORPUS_DATASET_KIND = "authoritative_stage4_wave_closed_path_v1"
 _STAGE4_CORPUS_LOOKBACK_DAYS = min(
-    research_signal_formula_exploration_reader.MAX_LOOKBACK_DAYS,
+    research_signal_formula_exploration_reader.MAX_FULL_CORPUS_LOOKBACK_DAYS,
     _LOOKBACK_DAYS,
 )
 _STAGE4_CORPUS_PROJECTION_LIMIT = max(
@@ -65,6 +86,27 @@ _STAGE4_CORPUS_PROJECTION_LIMIT = max(
         research_signal_formula_exploration_reader.MAX_PROJECTION_LIMIT,
         int(os.getenv("FORMULA_STAGE4_CORPUS_PROJECTION_LIMIT", "128")),
     ),
+)
+_STAGE4_CORPUS_WALL_BUDGET_MS = _bounded_int_environment(
+    "FORMULA_STAGE4_CORPUS_WALL_BUDGET_MS",
+    default=(
+        research_signal_formula_exploration_reader
+        .DEFAULT_FULL_CORPUS_WALL_BUDGET_MS
+    ),
+    minimum=(
+        research_signal_formula_exploration_reader
+        .MIN_FULL_CORPUS_WALL_BUDGET_MS
+    ),
+    maximum=(
+        research_signal_formula_exploration_reader
+        .MAX_FULL_CORPUS_WALL_BUDGET_MS
+    ),
+)
+_STAGE4_CANDIDATE_SEARCH_WALL_BUDGET_MS = _bounded_int_environment(
+    "FORMULA_STAGE4_CANDIDATE_SEARCH_WALL_BUDGET_MS",
+    default=research_stage4_candidate_search.DEFAULT_SEARCH_WALL_BUDGET_MS,
+    minimum=research_stage4_candidate_search.MIN_SEARCH_WALL_BUDGET_MS,
+    maximum=research_stage4_candidate_search.MAX_SEARCH_WALL_BUDGET_MS,
 )
 _STAGE4_MIN_INDEPENDENT_OCCURRENCES = (
     research_signal_formula_exploration.EXPLORATION_MIN_BTC_PARENT_MOVEMENTS
@@ -185,19 +227,28 @@ def _dataset_watermark(
 def _stage4_corpus_observability_receipt(
     payload: Mapping[str, Any],
     *,
+    observations: tuple[
+        research_stage4_candidate_search.CompactStage4CandidateObservation,
+        ...,
+    ],
     horizon_minutes: int,
     schedule_slot_utc: datetime,
     due_at_utc: datetime,
     duration_ms: int,
 ) -> Dict[str, Any]:
-    """Reduce an authoritative corpus page to non-predicate telemetry."""
+    """Reduce one complete authoritative corpus traversal to telemetry."""
 
-    raw_rows = payload.get("observations")
-    if not isinstance(raw_rows, (list, tuple)) or any(
-        not isinstance(row, Mapping) for row in raw_rows
+    if not isinstance(observations, tuple) or any(
+        type(row)
+        is not research_stage4_candidate_search.CompactStage4CandidateObservation
+        for row in observations
     ):
-        raise ValueError("authoritative corpus observations are not mappings")
-    rows = [dict(row) for row in raw_rows]
+        raise ValueError(
+            "authoritative corpus observations are not immutable compact rows"
+        )
+    if "observations" in payload:
+        raise ValueError("authoritative corpus receipt embeds observation rows")
+    rows = observations
     source_counts = payload.get("counts")
     if not isinstance(source_counts, Mapping):
         raise ValueError("authoritative corpus counts are not a mapping")
@@ -210,6 +261,35 @@ def _stage4_corpus_observability_receipt(
     if not isinstance(cursor, Mapping):
         raise ValueError("authoritative corpus cursor is not a mapping")
     cursor = dict(cursor)
+    traversal = payload.get("traversal")
+    if not isinstance(traversal, Mapping):
+        raise ValueError("authoritative corpus traversal is not a mapping")
+    traversal = dict(traversal)
+    observation_storage = payload.get("observation_storage")
+    if not isinstance(observation_storage, Mapping):
+        raise ValueError("authoritative corpus observation storage is malformed")
+    expected_observation_storage = {
+        "format": "DETACHED_IMMUTABLE_COMPACT_TUPLE",
+        "schema_version": (
+            research_stage4_candidate_search
+            .COMPACT_OBSERVATION_SCHEMA_VERSION
+        ),
+        "hash_contract_version": (
+            research_stage4_candidate_search
+            .COMPACT_OBSERVATION_CHAIN_HASH_VERSION
+        ),
+        "count": len(rows),
+        "ordered_chain_sha256": (
+            research_stage4_candidate_search
+            .compact_observation_chain_sha256(rows)
+        ),
+    }
+    if dict(observation_storage) != expected_observation_storage:
+        raise ValueError("authoritative corpus observation storage is inconsistent")
+    request = payload.get("request")
+    if not isinstance(request, Mapping):
+        raise ValueError("authoritative corpus request is not a mapping")
+    request = dict(request)
     raw_source_blockers = payload.get("blockers")
     if not isinstance(raw_source_blockers, (list, tuple)) or any(
         type(item) is not str or not item.strip()
@@ -245,15 +325,196 @@ def _stage4_corpus_observability_receipt(
         raise ValueError(
             "authoritative corpus payload exceeds the ingestion authority boundary"
         )
+    analysis_as_of_utc = payload.get("analysis_as_of_utc")
+    database_snapshot_id = payload.get("database_snapshot_id")
+    try:
+        analysis_as_of = _as_utc(analysis_as_of_utc)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("authoritative corpus analysis_as_of is invalid") from exc
+    if type(database_snapshot_id) is not str or not database_snapshot_id.strip():
+        raise ValueError("authoritative corpus database snapshot is invalid")
+    if (
+        request.get("horizon_minutes") != int(horizon_minutes)
+        or request.get("lookback_days") != _STAGE4_CORPUS_LOOKBACK_DAYS
+        or request.get("projection_limit") != _STAGE4_CORPUS_PROJECTION_LIMIT
+    ):
+        raise ValueError("authoritative corpus request does not match ingestion")
+    cursor_order = (
+        "projection_decision_time_utc DESC, projection_event_id DESC"
+    )
+    if (
+        cursor.get("order") != cursor_order
+        or cursor.get("has_more") is not False
+        or cursor.get("next") is not None
+        or cursor.get("before") is not None
+        or traversal.get("status") != "COMPLETE"
+        or traversal.get("single_database_snapshot") is not True
+        or traversal.get("eof_proven") is not True
+        or traversal.get("analysis_as_of_utc") != analysis_as_of_utc
+        or traversal.get("database_snapshot_id") != database_snapshot_id
+        or traversal.get("page_size") != _STAGE4_CORPUS_PROJECTION_LIMIT
+        or traversal.get("max_pages")
+        != research_signal_formula_exploration_reader.MAX_FULL_CORPUS_PAGES
+        or traversal.get("max_projections")
+        != research_signal_formula_exploration_reader.MAX_FULL_CORPUS_PROJECTIONS
+        or traversal.get("max_observations")
+        != research_signal_formula_exploration_reader.MAX_FULL_CORPUS_OBSERVATIONS
+        or traversal.get("wall_budget_ms") != _STAGE4_CORPUS_WALL_BUDGET_MS
+    ):
+        raise ValueError("authoritative corpus traversal contract is incomplete")
+    bounds = traversal.get("bounds")
+    if not isinstance(bounds, Mapping):
+        raise ValueError("authoritative corpus traversal bounds are malformed")
+    expected_lower = analysis_as_of - timedelta(
+        days=_STAGE4_CORPUS_LOOKBACK_DAYS
+    )
+    expected_upper = analysis_as_of - timedelta(minutes=int(horizon_minutes))
+    try:
+        lower_bound = _as_utc(
+            bounds.get("projection_decision_time_lower_inclusive_utc")
+        )
+        upper_bound = _as_utc(
+            bounds.get("projection_decision_time_upper_inclusive_utc")
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("authoritative corpus traversal bounds are invalid") from exc
+    if lower_bound != expected_lower or upper_bound != expected_upper:
+        raise ValueError("authoritative corpus traversal bounds are inconsistent")
+    page_count = traversal.get("page_count")
+    raw_pages = traversal.get("pages")
+    if (
+        type(page_count) is not int
+        or not (
+            1
+            <= page_count
+            <= research_signal_formula_exploration_reader.MAX_FULL_CORPUS_PAGES
+        )
+        or not isinstance(raw_pages, (list, tuple))
+        or len(raw_pages) != page_count
+        or any(not isinstance(page, Mapping) for page in raw_pages)
+    ):
+        raise ValueError("authoritative corpus traversal pages are malformed")
+
+    def normalized_page_cursor(value: Any, *, field: str) -> tuple[datetime, int]:
+        if not isinstance(value, Mapping) or set(value) != {
+            "projection_decision_time_utc",
+            "projection_event_id",
+        }:
+            raise ValueError(f"authoritative corpus {field} cursor is malformed")
+        event_id = value.get("projection_event_id")
+        if type(event_id) is not int or event_id <= 0:
+            raise ValueError(f"authoritative corpus {field} cursor is malformed")
+        try:
+            decision_time = _as_utc(value.get("projection_decision_time_utc"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"authoritative corpus {field} cursor is malformed"
+            ) from exc
+        if decision_time > analysis_as_of:
+            raise ValueError(f"authoritative corpus {field} cursor is malformed")
+        return decision_time, event_id
+
+    previous_cursor: Optional[tuple[datetime, int]] = None
+    page_receipts: list[str] = []
+    page_projection_total = 0
+    page_observation_total = 0
+    for index, raw_page in enumerate(raw_pages, start=1):
+        page = dict(raw_page)
+        if page.get("page_number") != index:
+            raise ValueError("authoritative corpus page continuity is invalid")
+        before_value = page.get("before")
+        if index == 1:
+            if before_value is not None:
+                raise ValueError("authoritative corpus page continuity is invalid")
+        else:
+            before_cursor = normalized_page_cursor(before_value, field="before")
+            if before_cursor != previous_cursor:
+                raise ValueError("authoritative corpus page continuity is invalid")
+        has_more = page.get("has_more")
+        next_cursor = page.get("next")
+        if type(has_more) is not bool or has_more != (next_cursor is not None):
+            raise ValueError("authoritative corpus page cursor is inconsistent")
+        projections = page.get("projections")
+        observations = page.get("observations")
+        if (
+            type(projections) is not int
+            or not 0 <= projections <= _STAGE4_CORPUS_PROJECTION_LIMIT
+            or type(observations) is not int
+            or not (
+                0
+                <= observations
+                <= research_signal_formula_exploration_reader
+                .MAX_FULL_CORPUS_OBSERVATIONS
+            )
+            or (has_more and projections != _STAGE4_CORPUS_PROJECTION_LIMIT)
+        ):
+            raise ValueError("authoritative corpus page counts are malformed")
+        page_projection_total += projections
+        page_observation_total += observations
+        page_receipt = page.get("page_attestation_receipt_sha256")
+        if not _is_sha256(page_receipt):
+            raise ValueError("authoritative corpus page receipt is malformed")
+        page_receipts.append(page_receipt)
+        if has_more:
+            normalized_next = normalized_page_cursor(next_cursor, field="next")
+            if previous_cursor is not None and normalized_next >= previous_cursor:
+                raise ValueError("authoritative corpus cursor did not descend")
+            previous_cursor = normalized_next
+        else:
+            previous_cursor = None
+    if previous_cursor is not None:
+        raise ValueError("authoritative corpus traversal did not prove EOF")
+    if (
+        page_projection_total
+        > research_signal_formula_exploration_reader.MAX_FULL_CORPUS_PROJECTIONS
+        or page_observation_total
+        > research_signal_formula_exploration_reader.MAX_FULL_CORPUS_OBSERVATIONS
+    ):
+        raise ValueError("authoritative corpus traversal exceeds its limits")
+    chain_body = {
+        "kind": "authoritative-full-corpus-page-chain-v1",
+        "database_snapshot_id": database_snapshot_id,
+        "page_attestation_receipts": page_receipts,
+    }
+    chain_json = json.dumps(
+        chain_body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    expected_chain_sha256 = hashlib.sha256(
+        chain_json.encode("utf-8")
+    ).hexdigest()
+    if (
+        traversal.get("page_receipts_sha256") != expected_chain_sha256
+        or traversal.get("aggregate_page_sha256") != expected_chain_sha256
+    ):
+        raise ValueError("authoritative corpus page receipt chain is invalid")
+    if (
+        not _is_sha256(payload.get("attestation_receipt_sha256"))
+        or source_attestation.get("analysis_as_of_utc") != analysis_as_of_utc
+        or source_attestation.get("database_snapshot_id") != database_snapshot_id
+    ):
+        raise ValueError("authoritative corpus source provenance is inconsistent")
 
     bound_parent_ids: set[str] = set()
     labeled_parent_ids: set[str] = set()
     source_event_ids: set[int] = set()
     projection_event_ids: set[int] = set()
     projection_decision_times: list[str] = []
+    observation_ids: set[str] = set()
     wave_bound_observations = 0
     labeled_observations = 0
     for row in rows:
+        observation_id = row.get("observation_id")
+        if (
+            type(observation_id) is not str
+            or not observation_id.strip()
+            or observation_id in observation_ids
+        ):
+            raise ValueError("authoritative corpus observation identity is invalid")
+        observation_ids.add(observation_id)
         binding = row.get("wave_binding")
         binding = dict(binding) if isinstance(binding, Mapping) else {}
         outcome = row.get("outcome")
@@ -277,8 +538,27 @@ def _stage4_corpus_observability_receipt(
             if type(event_id) is int:
                 source_event_ids.add(event_id)
 
-    reported_observations = int(source_counts.get("observations") or 0)
-    reported_labels = int(source_counts.get("available_outcomes") or 0)
+    required_count_names = (
+        "projections",
+        "stage4_events",
+        "signal_events",
+        "wave_rows",
+        "outcome_rows",
+        "signal_outcome_rows",
+        "no_signal_outcome_rows",
+        "observations",
+        "available_outcomes",
+        "unavailable_outcomes",
+        "explicit_no_signal_observations",
+        "distinct_btc_parent_movements",
+    )
+    if any(
+        type(source_counts.get(name)) is not int or source_counts[name] < 0
+        for name in required_count_names
+    ):
+        raise ValueError("authoritative corpus counts are malformed")
+    reported_observations = source_counts["observations"]
+    reported_labels = source_counts["available_outcomes"]
     if reported_observations != len(rows):
         raise ValueError("authoritative corpus observation count is inconsistent")
     if reported_labels != labeled_observations:
@@ -291,6 +571,20 @@ def _stage4_corpus_observability_receipt(
         raise ValueError(
             "authoritative corpus distinct parent-movement count is inconsistent"
         )
+    if (
+        page_projection_total != source_counts["projections"]
+        or page_observation_total != reported_observations
+        or source_counts["available_outcomes"]
+        + source_counts["unavailable_outcomes"]
+        != reported_observations
+        or source_counts["signal_outcome_rows"]
+        + source_counts["no_signal_outcome_rows"]
+        != source_counts["outcome_rows"]
+        or source_counts["signal_events"] > source_counts["stage4_events"]
+        or source_counts["explicit_no_signal_observations"]
+        > reported_observations
+    ):
+        raise ValueError("authoritative corpus aggregate counts are inconsistent")
 
     blockers = list(
         dict.fromkeys(
@@ -320,6 +614,8 @@ def _stage4_corpus_observability_receipt(
             key: source_attestation.get(key)
             for key in (
                 "source_contract_version",
+                "analysis_as_of_utc",
+                "database_snapshot_id",
                 "source_catalog_sha256",
                 "outcomes_view_definition_sha256",
                 "outcomes_stage4_source_catalog_sha256",
@@ -345,6 +641,8 @@ def _stage4_corpus_observability_receipt(
             "outcome_rows": int(source_counts.get("outcome_rows") or 0),
         },
         "cursor": cursor,
+        "traversal": traversal,
+        "observation_storage": dict(observation_storage),
         "source_bounds": {
             "max_projection_event_id": (
                 max(projection_event_ids) if projection_event_ids else None
@@ -375,6 +673,71 @@ def _bounded_stage4_candidate_search_receipt(
         raise ValueError("Stage-4 candidate search result is not a mapping")
     if type(result.get("ready_for_candidate_search")) is not bool:
         raise ValueError("Stage-4 candidate search readiness must be boolean")
+    result_horizon = result.get("horizon_minutes")
+    if type(result_horizon) is not int or result_horizon not in {
+        60,
+        240,
+        720,
+        1440,
+    }:
+        raise ValueError("Stage-4 candidate search horizon is invalid")
+    try:
+        _as_utc(result.get("analysis_as_of_utc"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Stage-4 candidate search analysis time is invalid") from exc
+    if not _is_sha256(result.get("search_receipt_sha256")):
+        raise ValueError("Stage-4 candidate search receipt is invalid")
+    if result["search_receipt_sha256"] != (
+        research_stage4_candidate_search.candidate_search_receipt_sha256(
+            result
+        )
+    ):
+        raise ValueError("Stage-4 candidate search receipt hash mismatch")
+    expected_versions = {
+        "engine_version": research_stage4_candidate_search.ENGINE_VERSION,
+        "candidate_schema_version": (
+            research_stage4_candidate_search.CANDIDATE_SCHEMA_VERSION
+        ),
+        "feature_schema_version": (
+            research_signal_formula_exploration.FEATURE_SCHEMA_VERSION
+        ),
+        "label_policy_version": (
+            research_stage4_candidate_search.LABEL_POLICY_VERSION
+        ),
+        "independence_policy_version": (
+            research_stage4_candidate_search.INDEPENDENCE_POLICY_VERSION
+        ),
+        "multiple_testing_policy_version": (
+            research_stage4_candidate_search.MULTIPLE_TESTING_POLICY_VERSION
+        ),
+        "compact_observation_schema_version": (
+            research_stage4_candidate_search.COMPACT_OBSERVATION_SCHEMA_VERSION
+        ),
+        "historical_threshold_source_policy_version": (
+            research_formula_acceptance.POLICY_VERSION
+        ),
+    }
+    if any(result.get(key) != value for key, value in expected_versions.items()):
+        raise ValueError("Stage-4 candidate search version mismatch")
+    if (
+        result.get("input_observation_schema_version")
+        != research_stage4_candidate_search.COMPACT_OBSERVATION_SCHEMA_VERSION
+        or result.get("input_observation_hash_contract_version")
+        != research_stage4_candidate_search.COMPACT_OBSERVATION_CHAIN_HASH_VERSION
+        or type(result.get("input_observation_count")) is not int
+        or not _is_sha256(result.get("input_observation_chain_sha256"))
+    ):
+        raise ValueError("Stage-4 candidate search input binding is malformed")
+    search_config = result.get("config")
+    if not isinstance(search_config, Mapping) or (
+        type(search_config.get("wall_budget_ms")) is not int
+        or not (
+            research_stage4_candidate_search.MIN_SEARCH_WALL_BUDGET_MS
+            <= search_config["wall_budget_ms"]
+            <= research_stage4_candidate_search.MAX_SEARCH_WALL_BUDGET_MS
+        )
+    ):
+        raise ValueError("Stage-4 candidate search wall budget is malformed")
     expected_boundary = {
         "formula_registry_effect": "NONE",
         "authority_effect": "NONE",
@@ -402,6 +765,20 @@ def _bounded_stage4_candidate_search_receipt(
     counts = result.get("counts")
     if not isinstance(counts, Mapping):
         raise ValueError("Stage-4 candidate search counts are malformed")
+    if (
+        type(counts.get("observations")) is not int
+        or not (
+            0
+            <= counts["observations"]
+            <= research_stage4_candidate_search.MAX_OBSERVATIONS
+        )
+        or type(counts.get("eligible_experimental_candidates")) is not int
+        or counts["eligible_experimental_candidates"] < 0
+        or type(counts.get("display_candidates")) is not int
+        or counts["display_candidates"] != len(raw_candidates)
+        or result["input_observation_count"] != counts["observations"]
+    ):
+        raise ValueError("Stage-4 candidate search counts are malformed")
 
     compact_candidates: list[Dict[str, Any]] = []
     eligible_count = 0
@@ -414,11 +791,46 @@ def _bounded_stage4_candidate_search_receipt(
             raise ValueError(
                 "Stage-4 candidate exceeded its authority boundary"
             )
+        if candidate.get("horizon_minutes") != result_horizon:
+            raise ValueError("Stage-4 candidate horizon is inconsistent")
+        if any(
+            candidate.get(key) != expected_versions[key]
+            for key in (
+                "engine_version",
+                "candidate_schema_version",
+                "feature_schema_version",
+                "label_policy_version",
+                "independence_policy_version",
+            )
+        ):
+            raise ValueError("Stage-4 candidate version mismatch")
+        if not _is_sha256(candidate.get("match_set_sha256")) or not _is_sha256(
+            candidate.get("occurrence_evidence_sha256")
+        ):
+            raise ValueError("Stage-4 candidate evidence hash is malformed")
+        if any(
+            field in candidate
+            for field in (
+                "completed_occurrences",
+                "pending_occurrences",
+                "unavailable_occurrences",
+            )
+        ):
+            raise ValueError("Stage-4 candidate retained unbounded occurrences")
         conditions = candidate.get("conditions")
         if not isinstance(conditions, (list, tuple)) or not (
             1 <= len(conditions) <= 3
         ):
             raise ValueError("Stage-4 candidate conditions are malformed")
+        if candidate.get("direction") not in {"LONG", "SHORT"} or (
+            candidate.get("candidate_key")
+            != research_stage4_candidate_search.candidate_key_sha256(
+                direction=candidate.get("direction"),
+                horizon_minutes=result_horizon,
+                conditions=conditions,
+            )
+        ):
+            raise ValueError("Stage-4 candidate key is invalid")
         metrics = candidate.get("metrics")
         gate = candidate.get("eligibility_gate")
         occurrence_counts = candidate.get("occurrence_counts")
@@ -456,7 +868,10 @@ def _bounded_stage4_candidate_search_receipt(
                 )
         if multiple_testing.get("decision_effect") != (
             "DISCLOSURE_ONLY_EXPERIMENTAL"
-        ) or multiple_testing.get("eligibility_changed") is not False:
+        ) or multiple_testing.get("eligibility_changed") is not False or (
+            multiple_testing.get("policy_version")
+            != research_stage4_candidate_search.MULTIPLE_TESTING_POLICY_VERSION
+        ):
             raise ValueError(
                 "Stage-4 candidate multiple-testing boundary is malformed"
             )
@@ -478,6 +893,7 @@ def _bounded_stage4_candidate_search_receipt(
                     "condition_evidence_sources",
                     "raw_match_count",
                     "match_set_sha256",
+                    "occurrence_evidence_sha256",
                     "occurrence_counts",
                     "metrics",
                     "accepted_paths",
@@ -496,7 +912,7 @@ def _bounded_stage4_candidate_search_receipt(
                 )
             }
         )
-    reported_eligible = int(counts.get("eligible_experimental_candidates") or 0)
+    reported_eligible = counts["eligible_experimental_candidates"]
     if reported_eligible != eligible_count:
         raise ValueError("Stage-4 candidate eligible count is inconsistent")
     return {
@@ -513,6 +929,17 @@ def _bounded_stage4_candidate_search_receipt(
         ),
         "analysis_as_of_utc": result.get("analysis_as_of_utc"),
         "horizon_minutes": result.get("horizon_minutes"),
+        "input_observation_schema_version": result.get(
+            "input_observation_schema_version"
+        ),
+        "input_observation_hash_contract_version": result.get(
+            "input_observation_hash_contract_version"
+        ),
+        "input_observation_count": result.get("input_observation_count"),
+        "input_observation_chain_sha256": result.get(
+            "input_observation_chain_sha256"
+        ),
+        "config": dict(search_config),
         "qualifying_favorable_move_pct": result.get(
             "qualifying_favorable_move_pct"
         ),
@@ -534,6 +961,41 @@ def _attach_stage4_candidate_search(
     receipt: Mapping[str, Any], result: Mapping[str, Any]
 ) -> Dict[str, Any]:
     candidate_search = _bounded_stage4_candidate_search_receipt(result)
+    receipt_counts = receipt.get("counts")
+    search_counts = candidate_search.get("counts")
+    if not isinstance(receipt_counts, Mapping) or not isinstance(
+        search_counts, Mapping
+    ):
+        raise ValueError("Stage-4 candidate search corpus binding is malformed")
+    corpus_observations = receipt_counts.get("observations")
+    search_observations = search_counts.get("observations")
+    observation_storage = receipt.get("observation_storage")
+    if (
+        type(corpus_observations) is not int
+        or type(search_observations) is not int
+        or search_observations != corpus_observations
+        or candidate_search.get("horizon_minutes")
+        != receipt.get("horizon_minutes")
+        or not isinstance(observation_storage, Mapping)
+        or candidate_search.get("input_observation_count")
+        != corpus_observations
+        or candidate_search.get("input_observation_schema_version")
+        != observation_storage.get("schema_version")
+        or candidate_search.get("input_observation_hash_contract_version")
+        != observation_storage.get("hash_contract_version")
+        or candidate_search.get("input_observation_chain_sha256")
+        != observation_storage.get("ordered_chain_sha256")
+    ):
+        raise ValueError("Stage-4 candidate search does not match its corpus")
+    try:
+        corpus_as_of = _as_utc(receipt.get("analysis_as_of_utc"))
+        search_as_of = _as_utc(candidate_search.get("analysis_as_of_utc"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Stage-4 candidate search analysis time is invalid"
+        ) from exc
+    if search_as_of != corpus_as_of:
+        raise ValueError("Stage-4 candidate search does not match its corpus")
     source_ready = receipt.get("reader_ready_for_candidate_search") is True
     search_ready = candidate_search["ready_for_candidate_search"] is True
     ready_for_candidate_search = source_ready and search_ready
@@ -1002,10 +1464,24 @@ class FormulaResearchWorker:
             "dataset_kind": _STAGE4_CORPUS_DATASET_KIND,
             "bounded_request": {
                 "lookback_days": _STAGE4_CORPUS_LOOKBACK_DAYS,
-                "projection_limit_per_horizon_slot": (
-                    _STAGE4_CORPUS_PROJECTION_LIMIT
+                "projection_page_limit": _STAGE4_CORPUS_PROJECTION_LIMIT,
+                "max_pages": (
+                    research_signal_formula_exploration_reader
+                    .MAX_FULL_CORPUS_PAGES
                 ),
-                "pagination": "FIRST_PAGE_ONLY_PER_HORIZON_SLOT",
+                "max_projections": (
+                    research_signal_formula_exploration_reader
+                    .MAX_FULL_CORPUS_PROJECTIONS
+                ),
+                "max_observations": (
+                    research_signal_formula_exploration_reader
+                    .MAX_FULL_CORPUS_OBSERVATIONS
+                ),
+                "wall_budget_ms": _STAGE4_CORPUS_WALL_BUDGET_MS,
+                "candidate_search_wall_budget_ms": (
+                    _STAGE4_CANDIDATE_SEARCH_WALL_BUDGET_MS
+                ),
+                "pagination": "FULL_SNAPSHOT_KEYSET",
             },
             "receipts_by_horizon": receipts,
             **boundary,
@@ -1018,7 +1494,7 @@ class FormulaResearchWorker:
         schedule_slot_utc: datetime,
         due_at_utc: datetime,
     ) -> Dict[str, Any]:
-        """Read one bounded corpus page and expose only a non-authoritative receipt."""
+        """Read one complete bounded corpus snapshot for observational search."""
 
         slot = _as_utc(schedule_slot_utc)
         due_at = _as_utc(due_at_utc)
@@ -1045,6 +1521,26 @@ class FormulaResearchWorker:
                 "outcome_rows": 0,
             },
             "cursor": {},
+            "traversal": {
+                "status": "LOADING",
+                "single_database_snapshot": False,
+                "page_count": 0,
+                "page_size": _STAGE4_CORPUS_PROJECTION_LIMIT,
+                "max_pages": (
+                    research_signal_formula_exploration_reader
+                    .MAX_FULL_CORPUS_PAGES
+                ),
+                "max_projections": (
+                    research_signal_formula_exploration_reader
+                    .MAX_FULL_CORPUS_PROJECTIONS
+                ),
+                "max_observations": (
+                    research_signal_formula_exploration_reader
+                    .MAX_FULL_CORPUS_OBSERVATIONS
+                ),
+                "wall_budget_ms": _STAGE4_CORPUS_WALL_BUDGET_MS,
+                "pages": [],
+            },
             "source_bounds": {
                 "max_projection_event_id": None,
                 "max_projection_decision_time_utc": None,
@@ -1093,19 +1589,28 @@ class FormulaResearchWorker:
         try:
             corpus = (
                 research_signal_formula_exploration_reader
-                .load_authoritative_stage4_corpus(
+                .load_complete_authoritative_stage4_corpus(
                     horizon_minutes=int(horizon),
                     lookback_days=_STAGE4_CORPUS_LOOKBACK_DAYS,
                     projection_limit=_STAGE4_CORPUS_PROJECTION_LIMIT,
-                    before_cursor=None,
+                    wall_budget_ms=_STAGE4_CORPUS_WALL_BUDGET_MS,
                     database_url=database_url,
                 )
             )
-            payload = corpus.to_dict()
+            if type(corpus) is not (
+                research_signal_formula_exploration_reader
+                .CompleteAuthoritativeStage4CorpusResult
+            ):
+                raise TypeError(
+                    "authoritative Stage-4 complete corpus type is invalid"
+                )
+            payload = corpus.receipt_dict()
+            observations = corpus.candidate_observations
             if not isinstance(payload, Mapping):
                 raise TypeError("authoritative Stage-4 corpus payload is not a mapping")
             receipt = _stage4_corpus_observability_receipt(
                 payload,
+                observations=observations,
                 horizon_minutes=int(horizon),
                 schedule_slot_utc=slot,
                 due_at_utc=due_at,
@@ -1141,9 +1646,18 @@ class FormulaResearchWorker:
         try:
             search_result = (
                 research_stage4_candidate_search.search_experimental_candidates(
-                    payload["observations"],
+                    observations,
                     horizon_minutes=int(horizon),
                     analysis_as_of_utc=payload["analysis_as_of_utc"],
+                    config=research_stage4_candidate_search.Stage4SearchConfig(
+                        max_observations=(
+                            research_signal_formula_exploration_reader
+                            .MAX_FULL_CORPUS_OBSERVATIONS
+                        ),
+                        wall_budget_ms=(
+                            _STAGE4_CANDIDATE_SEARCH_WALL_BUDGET_MS
+                        ),
+                    ),
                 )
             )
             receipt = _attach_stage4_candidate_search(receipt, search_result)

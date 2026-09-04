@@ -15,6 +15,7 @@ import hashlib
 from pathlib import Path
 import os
 import re
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import research_formula_schema_admin
@@ -438,7 +439,9 @@ class _FakeConnection:
             raise AssertionError(f"authoritative reader attempted SQL write: {operation}")
         if operation == "LOCK" and "access share" not in lowered:
             raise AssertionError("authoritative reader used a stronger-than-read lock")
-        if operation == "SET" and "transaction" not in lowered:
+        if operation == "SET" and not (
+            "transaction" in lowered or "statement_timeout" in lowered
+        ):
             raise AssertionError("authoritative reader changed a non-transaction setting")
 
         marker = None
@@ -466,12 +469,15 @@ class _FakeConnection:
                 marker = candidate
                 break
         if marker is None:
-            if operation == "ROLLBACK":
+            if operation == "SET" and "statement_timeout" in lowered:
+                marker = "statement_timeout"
+            elif operation == "ROLLBACK":
                 marker = "rollback"
             else:
                 raise AssertionError(f"unexpected reader SQL: {normalized}")
         self.driver.calls.append(marker)
         self.driver.params.append((marker, deepcopy(params)))
+        self.driver.sql_statements.append((marker, normalized))
 
         if marker == "session":
             return _Rows(self.driver.session)
@@ -556,6 +562,7 @@ class _FakeDriver:
         )
         self.calls: list[str] = []
         self.params: list[tuple[str, object]] = []
+        self.sql_statements: list[tuple[str, str]] = []
         self.connect_args = None
         self.connect_kwargs = None
         self.rollback_error = None
@@ -627,7 +634,33 @@ class _FakeDriver:
         return _FakeConnection(self)
 
 
-def _stage4_view_rows(signals=None):
+class _PagedFakeConnection(_FakeConnection):
+    def execute(self, sql, params=None):
+        if "formula_exploration_reader:load_projection_keys" in str(sql).lower():
+            index = self.driver.projection_page_index
+            if index >= len(self.driver.projection_pages):
+                raise AssertionError("full corpus requested an unexpected page")
+            self.driver.projection_rows = list(
+                self.driver.projection_pages[index]
+            )
+            self.driver.projection_page_index += 1
+        return super().execute(sql, params)
+
+
+class _PagedFakeDriver(_FakeDriver):
+    def __init__(self, projection_pages, **kwargs):
+        super().__init__(**kwargs)
+        self.projection_pages = [list(page) for page in projection_pages]
+        self.projection_page_index = 0
+
+    def connect(self, *args, **kwargs):
+        self.connect_args = args
+        self.connect_kwargs = dict(kwargs)
+        self.calls.append("connect")
+        return _PagedFakeConnection(self)
+
+
+def _stage4_view_rows(signals=None, *, evaluations=None):
     supplied = list(
         signals
         if signals is not None
@@ -636,7 +669,7 @@ def _stage4_view_rows(signals=None):
             fixtures._signal(102, exploration.MAGNET_EVENT_TYPE),
         )
     )
-    projection = fixtures._projection(supplied)
+    projection = fixtures._projection(supplied, evaluations=evaluations)
     archive = fixtures._archive_set()
     rows = []
     for event in (*supplied, projection):
@@ -1447,6 +1480,37 @@ def _load_corpus(
         )
 
 
+def _load_complete_corpus(
+    driver: _FakeDriver,
+    *,
+    horizon_minutes: int = 60,
+    lookback_days: int = 120,
+    projection_limit: int = 128,
+    wall_budget_ms: int = reader.DEFAULT_FULL_CORPUS_WALL_BUDGET_MS,
+):
+    database_url = "postgresql://exploration-reader@db.example/research"
+    with patch.dict(
+        os.environ,
+        {
+            "RESEARCH_DATABASE_URL": database_url,
+            "RESEARCH_SIGNAL_SNAPSHOT_DATABASE_URL": database_url,
+            "RESEARCH_MARKET_MOVEMENT_DATABASE_URL": database_url,
+            "RESEARCH_USE_PRIMARY_DATABASE": "0",
+        },
+        clear=False,
+    ):
+        return _with_driver(
+            driver,
+            lambda: reader.load_complete_authoritative_stage4_corpus(
+                horizon_minutes=horizon_minutes,
+                lookback_days=lookback_days,
+                projection_limit=projection_limit,
+                wall_budget_ms=wall_budget_ms,
+                database_url=database_url,
+            ),
+        )
+
+
 def _load_with_target(
     driver: _FakeDriver,
     database_url: str,
@@ -1476,7 +1540,7 @@ def _load_with_target(
 def _expect_call_failure(callback, contains: str = "") -> None:
     try:
         callback()
-    except (RuntimeError, ValueError) as exc:
+    except (RuntimeError, TypeError, ValueError) as exc:
         if contains:
             assert contains.lower() in str(exc).lower(), (contains, str(exc))
     else:
@@ -1487,7 +1551,411 @@ def _expect_failure(driver: _FakeDriver, contains: str = "") -> None:
     _expect_call_failure(lambda: _load(driver), contains)
 
 
+def _check_complete_corpus_single_snapshot_traversal() -> None:
+    first_key = _projection_key_rows()[0]
+    older_unreturned_key = deepcopy(first_key)
+    older_unreturned_key["projection_event_id"] = 899
+    older_unreturned_key["snapshot_key"] = fixtures._h(
+        "full-corpus-older-snapshot"
+    )
+    older_unreturned_key["projection_decision_time_utc"] = (
+        fixtures.DECISION - timedelta(minutes=30)
+    )
+    older_unreturned_key["projection_created_at_utc"] = (
+        fixtures.DECISION - timedelta(minutes=30) + timedelta(seconds=1)
+    )
+    driver = _PagedFakeDriver(
+        projection_pages=[
+            [first_key, older_unreturned_key],
+            [],
+        ]
+    )
+    complete = _load_complete_corpus(driver, projection_limit=1)
+    receipt_only = complete.receipt_dict()
+    assert "observations" not in receipt_only
+    assert type(complete.candidate_observations) is tuple
+    assert all(
+        type(row)
+        is reader.stage4_candidate_search.CompactStage4CandidateObservation
+        and not hasattr(row, "__dict__")
+        for row in complete.candidate_observations
+    )
+    storage = receipt_only["observation_storage"]
+    assert storage["count"] == len(complete.candidate_observations)
+    assert storage["ordered_chain_sha256"] == (
+        reader.stage4_candidate_search.compact_observation_chain_sha256(
+            complete.candidate_observations
+        )
+    )
+    _expect_call_failure(
+        lambda: reader.CompleteAuthoritativeStage4CorpusResult(
+            complete.attestation_receipt_sha256,
+            complete._receipt_json,
+            list(complete.candidate_observations),
+        ),
+        "immutable tuple",
+    )
+    embedded = complete.receipt_dict()
+    embedded["observations"] = []
+    _expect_call_failure(
+        lambda: reader.CompleteAuthoritativeStage4CorpusResult._from_payload(
+            embedded, complete.candidate_observations
+        ),
+        "embeds observation rows",
+    )
+    if complete.candidate_observations:
+        valid = complete.candidate_observations[0]
+        mutable_nested = reader.stage4_candidate_search.CompactStage4CandidateObservation(
+            observation_id=valid.observation_id,
+            projection_event_id=valid.projection_event_id,
+            projection_decision_time_utc=valid.projection_decision_time_utc,
+            symbol=valid.symbol,
+            direction=valid.direction,
+            features=SimpleNamespace(
+                true_mask=valid.features.true_mask,
+                combined_vote_count=valid.features.combined_vote_count,
+            ),
+            wave_binding=valid.wave_binding,
+            outcome=valid.outcome,
+        )
+        _expect_call_failure(
+            lambda: reader.stage4_candidate_search.compact_observation_chain_sha256(
+                (mutable_nested,)
+            ),
+            "type is invalid",
+        )
+    payload = complete.to_dict()
+    traversal = payload["traversal"]
+    expected_next = {
+        "projection_decision_time_utc": fixtures._iso(fixtures.DECISION),
+        "projection_event_id": first_key["projection_event_id"],
+    }
+    assert driver.calls.count("connect") == 1
+    assert driver.calls.count("begin") == 1
+    assert driver.calls.count("session") == 1
+    assert driver.calls.count("attestation") == 1
+    assert driver.calls.count("outcomes_attestation") == 1
+    assert driver.calls.count("no_signal_outcomes_attestation") == 1
+    assert driver.calls.count("load_projection_keys") == 2
+    assert driver.calls[-2:] == ["rollback", "close"]
+    assert "commit" not in driver.calls
+    significant = {
+        "schema_lock",
+        "session",
+        "probe_stage4",
+        "probe_wave",
+        "probe_outcomes",
+        "probe_no_signal_outcomes",
+        "attestation",
+        "outcomes_attestation",
+        "no_signal_outcomes_attestation",
+        "load_projection_keys",
+        "load_corpus_stage4",
+        "load_corpus_wave",
+        "load_corpus_outcomes",
+        "load_corpus_no_signal_outcomes",
+    }
+    for index, call in enumerate(driver.calls):
+        if call in significant:
+            assert driver.calls[index - 1] == "statement_timeout", (
+                call,
+                driver.calls,
+            )
+    timeout_statements = [
+        sql
+        for marker, sql in driver.sql_statements
+        if marker == "statement_timeout"
+    ]
+    assert timeout_statements
+    timeout_values = [
+        int(re.search(r"'([0-9]+)ms'", sql).group(1))
+        for sql in timeout_statements
+    ]
+    assert all(
+        1 <= value <= reader.MAX_READER_STATEMENT_TIMEOUT_MS
+        for value in timeout_values
+    )
+
+    assert payload["analysis_as_of_utc"] == fixtures._iso(AS_OF)
+    assert payload["database_snapshot_id"] == "900:900:"
+    assert payload["cursor"] == {
+        "order": "projection_decision_time_utc DESC, projection_event_id DESC",
+        "before": None,
+        "next": None,
+        "has_more": False,
+    }
+    assert traversal["status"] == "COMPLETE"
+    assert traversal["single_database_snapshot"] is True
+    assert traversal["eof_proven"] is True
+    assert traversal["analysis_as_of_utc"] == payload["analysis_as_of_utc"]
+    assert traversal["database_snapshot_id"] == payload["database_snapshot_id"]
+    assert traversal["page_count"] == 2
+    assert traversal["page_size"] == 1
+    assert traversal["max_pages"] == reader.MAX_FULL_CORPUS_PAGES
+    assert traversal["max_projections"] == reader.MAX_FULL_CORPUS_PROJECTIONS
+    assert traversal["max_observations"] == reader.MAX_FULL_CORPUS_OBSERVATIONS
+    assert traversal["pages"][0]["before"] is None
+    assert traversal["pages"][0]["next"] == expected_next
+    assert traversal["pages"][0]["has_more"] is True
+    assert traversal["pages"][1]["before"] == expected_next
+    assert traversal["pages"][1]["next"] is None
+    assert traversal["pages"][1]["has_more"] is False
+    assert all(
+        page["page_attestation_receipt_sha256"]
+        for page in traversal["pages"]
+    )
+    expected_chain_hash = hashlib.sha256(
+        reader._canonical_json(
+            {
+                "kind": "authoritative-full-corpus-page-chain-v1",
+                "database_snapshot_id": payload["database_snapshot_id"],
+                "page_attestation_receipts": [
+                    page["page_attestation_receipt_sha256"]
+                    for page in traversal["pages"]
+                ],
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    assert traversal["page_receipts_sha256"] == expected_chain_hash
+    assert traversal["aggregate_page_sha256"] == expected_chain_hash
+    assert payload["counts"]["projections"] == 1
+    assert payload["counts"]["observations"] == len(
+        payload["observations"]
+    )
+    assert payload["ready_for_candidate_search"] is True
+
+    unevaluable_stage4_rows = _stage4_view_rows(
+        signals=[],
+        evaluations=[
+            {
+                "symbol": "ETH",
+                "status": "UNEVALUABLE",
+                "reason": "PRICE_OI_UNAVAILABLE",
+            }
+        ],
+    )
+    unevaluable_driver = _FakeDriver(
+        projection_rows=_projection_key_rows(unevaluable_stage4_rows),
+        corpus_stage4_rows=unevaluable_stage4_rows,
+        corpus_wave_rows=[],
+        outcome_rows=[],
+        no_signal_outcome_rows=[],
+    )
+    unevaluable = _load_complete_corpus(unevaluable_driver).to_dict()
+    assert unevaluable["counts"]["projections"] == 1
+    assert unevaluable["counts"]["stage4_events"] == 1
+    assert unevaluable["counts"]["signal_events"] == 0
+    assert unevaluable["counts"]["observations"] == 0
+    assert unevaluable["observations"] == []
+    assert unevaluable["traversal"]["eof_proven"] is True
+    assert unevaluable["traversal"]["page_count"] == 1
+    assert unevaluable_driver.calls.count("load_projection_keys") == 1
+    assert unevaluable_driver.calls[-2:] == ["rollback", "close"]
+
+    capped_driver = _PagedFakeDriver(
+        projection_pages=[[first_key, older_unreturned_key]]
+    )
+    with patch.object(reader, "MAX_FULL_CORPUS_PAGES", 1):
+        _expect_call_failure(
+            lambda: _load_complete_corpus(
+                capped_driver, projection_limit=1
+            ),
+            "before EOF",
+        )
+    assert capped_driver.calls[-2:] == ["rollback", "close"]
+    assert capped_driver.calls.count("connect") == 1
+
+    projection_capped_driver = _FakeDriver()
+    with patch.object(reader, "MAX_FULL_CORPUS_PROJECTIONS", 0):
+        _expect_call_failure(
+            lambda: _load_complete_corpus(projection_capped_driver),
+            "projection cap",
+        )
+    assert projection_capped_driver.calls[-2:] == ["rollback", "close"]
+
+    observation_capped_driver = _FakeDriver()
+    with patch.object(reader, "MAX_FULL_CORPUS_OBSERVATIONS", 1):
+        _expect_call_failure(
+            lambda: _load_complete_corpus(observation_capped_driver),
+            "observation cap",
+        )
+    assert observation_capped_driver.calls[-2:] == ["rollback", "close"]
+
+    stalled_driver = _PagedFakeDriver(
+        projection_pages=[
+            [first_key, older_unreturned_key],
+            [first_key],
+        ]
+    )
+    _expect_call_failure(
+        lambda: _load_complete_corpus(stalled_driver, projection_limit=1),
+        "before_cursor",
+    )
+    assert stalled_driver.calls[-2:] == ["rollback", "close"]
+
+    base_payload = _load_corpus(_FakeDriver()).to_dict()
+    inconsistent_payload = deepcopy(base_payload)
+    inconsistent_payload["counts"]["observations"] += 1
+    inconsistent_page = reader.AuthoritativeStage4CorpusResult._from_payload(
+        inconsistent_payload
+    )
+    count_driver = _FakeDriver()
+    with patch.object(
+        reader,
+        "_load_authoritative_stage4_corpus_page",
+        return_value=inconsistent_page,
+    ):
+        _expect_call_failure(
+            lambda: _load_complete_corpus(count_driver),
+            "observation count",
+        )
+    assert count_driver.calls[-2:] == ["rollback", "close"]
+
+    duplicate_cursor = {
+        "projection_decision_time_utc": fixtures._iso(fixtures.DECISION),
+        "projection_event_id": first_key["projection_event_id"],
+    }
+    duplicate_first_payload = deepcopy(base_payload)
+    duplicate_first_payload["cursor"] = {
+        "order": "projection_decision_time_utc DESC, projection_event_id DESC",
+        "before": None,
+        "next": duplicate_cursor,
+        "has_more": True,
+    }
+    duplicate_second_payload = deepcopy(base_payload)
+    duplicate_second_payload["cursor"] = {
+        "order": "projection_decision_time_utc DESC, projection_event_id DESC",
+        "before": duplicate_cursor,
+        "next": None,
+        "has_more": False,
+    }
+    duplicate_pages = [
+        reader.AuthoritativeStage4CorpusResult._from_payload(
+            duplicate_first_payload
+        ),
+        reader.AuthoritativeStage4CorpusResult._from_payload(
+            duplicate_second_payload
+        ),
+    ]
+    duplicate_driver = _FakeDriver()
+
+    def duplicate_page(**_kwargs):
+        return duplicate_pages.pop(0)
+
+    with patch.object(
+        reader,
+        "_load_authoritative_stage4_corpus_page",
+        side_effect=duplicate_page,
+    ):
+        _expect_call_failure(
+            lambda: _load_complete_corpus(duplicate_driver),
+            "duplicated an observation",
+        )
+    assert duplicate_driver.calls[-2:] == ["rollback", "close"]
+
+    stalled_first_payload = deepcopy(duplicate_first_payload)
+    stalled_second_payload = deepcopy(duplicate_first_payload)
+    stalled_second_payload["cursor"]["before"] = duplicate_cursor
+    stalled_pages = [
+        reader.AuthoritativeStage4CorpusResult._from_payload(
+            stalled_first_payload
+        ),
+        reader.AuthoritativeStage4CorpusResult._from_payload(
+            stalled_second_payload
+        ),
+    ]
+    stalled_receipt_driver = _FakeDriver()
+
+    def stalled_page(**_kwargs):
+        return stalled_pages.pop(0)
+
+    with patch.object(
+        reader,
+        "_load_authoritative_stage4_corpus_page",
+        side_effect=stalled_page,
+    ):
+        _expect_call_failure(
+            lambda: _load_complete_corpus(stalled_receipt_driver),
+            "did not advance strictly",
+        )
+    assert stalled_receipt_driver.calls[-2:] == ["rollback", "close"]
+
+    deadline_driver = _PagedFakeDriver(
+        projection_pages=[[first_key, older_unreturned_key]]
+    )
+
+    def traversal_deadline_clock():
+        if "load_corpus_no_signal_outcomes" in deadline_driver.calls:
+            return 31.0
+        return 0.0
+
+    with patch.object(
+        reader.time,
+        "monotonic",
+        side_effect=traversal_deadline_clock,
+    ):
+        _expect_call_failure(
+            lambda: _load_complete_corpus(
+                deadline_driver,
+                projection_limit=1,
+                wall_budget_ms=reader.MIN_FULL_CORPUS_WALL_BUDGET_MS,
+            ),
+            "budget exhausted",
+        )
+    assert deadline_driver.calls[-2:] == ["rollback", "close"]
+    assert deadline_driver.calls.count("load_projection_keys") == 1
+
+    postprocessing_driver = _FakeDriver()
+
+    def postprocessing_deadline_clock():
+        if (
+            postprocessing_driver.calls
+            and postprocessing_driver.calls[-1] == "rollback"
+        ):
+            return 31.0
+        return 0.0
+
+    with patch.object(
+        reader.time,
+        "monotonic",
+        side_effect=postprocessing_deadline_clock,
+    ):
+        _expect_call_failure(
+            lambda: _load_complete_corpus(
+                postprocessing_driver,
+                wall_budget_ms=reader.MIN_FULL_CORPUS_WALL_BUDGET_MS,
+            ),
+            "local aggregation",
+        )
+    assert postprocessing_driver.calls[-2:] == ["rollback", "close"]
+    assert postprocessing_driver.calls.count("load_projection_keys") == 1
+
+    for invalid_budget in (
+        reader.MIN_FULL_CORPUS_WALL_BUDGET_MS - 1,
+        reader.MAX_FULL_CORPUS_WALL_BUDGET_MS + 1,
+    ):
+        invalid_driver = _FakeDriver()
+        _expect_call_failure(
+            lambda value=invalid_budget, fake=invalid_driver: (
+                _load_complete_corpus(fake, wall_budget_ms=value)
+            ),
+            "wall_budget_ms",
+        )
+        assert "connect" not in invalid_driver.calls
+
+    invalid_lookback_driver = _FakeDriver()
+    _expect_call_failure(
+        lambda: _load_complete_corpus(
+            invalid_lookback_driver,
+            lookback_days=reader.MAX_FULL_CORPUS_LOOKBACK_DAYS + 1,
+        ),
+        "lookback_days",
+    )
+    assert "connect" not in invalid_lookback_driver.calls
+
+
 def run() -> None:
+    _check_complete_corpus_single_snapshot_traversal()
     assert reader._tagged_sha256(("tag",), ("₪",), field="fixture") == (
         hashlib.sha256("tag=3:₪".encode("utf-8")).hexdigest()
     )

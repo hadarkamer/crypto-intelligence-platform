@@ -95,16 +95,25 @@ changing delivery authority:
   horizon. A wick touch is enough; there is no dwell or later-survival
   requirement. `stage4-btc-parent-first-opportunity-v1` freezes the first
   matching opportunity per BTC parent movement before inspecting its outcome.
-- `stage4-experimental-candidate-search-v1` applies the atomic gate above to
+- `stage4-experimental-candidate-search-v2` applies the atomic gate above to
   the same completed sample: at least five independent parent-wave occurrences
   and probability and/or favorable/adverse asymmetry already passing on those
   occurrences. It makes no control-relative or holdout claim. Exact-binomial
   and Benjamini-Hochberg values are disclosure-only for this experimental path.
 - The search is bounded to three conditions, 256 evaluated candidates and 40
-  returned candidates per invocation. Formula Worker runs it only over the
-  bounded, attested Stage-4 corpus page and exposes its compact result only in
-  in-memory health/runtime observability receipts. It does not write the
-  Formula registry, Shadow state or a delivery queue.
+  returned candidates per invocation. Formula Worker first consumes the full
+  120-day Stage-4 keyset traversal in one read-only `REPEATABLE READ` database
+  snapshot, then runs candidate search exactly once over the resulting corpus.
+  The traversal fails closed unless EOF is proven. It is capped at 64 pages,
+  8,192 projections, 131,072 observations and a 240-second default wall-clock
+  budget; no partial corpus enters search. Validated rows are detached from the
+  receipt as frozen slot-based compact observations, bound by an ordered chain
+  hash. Candidate output retains only occurrence counts, a streaming evidence
+  hash and a fixed audit sample; it never retains full occurrence arrays.
+  Equivalent match sets share one evidence calculation while remaining
+  separate hypotheses for multiple-testing disclosure. The compact result
+  remains only in in-memory health/runtime observability receipts. It does not
+  write the Formula registry, Shadow state or a delivery queue.
 
 This stage has `formula_registry_effect=NONE`, `delivery_channel=NONE`,
 `live_eligible=false`, `telegram_delivery_allowed=false` and
@@ -278,7 +287,15 @@ runtime contract.
   legacy Research writer connection.
 - `RESEARCH_FORMULA_EXPLORATION_DATABASE_URL` contains the dedicated
   read-only Stage-4 corpus credentials. `FORMULA_STAGE4_CORPUS_PROJECTION_LIMIT`
-  bounds the locally wired corpus page to 128 projections by default.
+  bounds each full-traversal keyset page to 128 projections by default.
+- `FORMULA_STAGE4_CORPUS_WALL_BUDGET_MS=240000` bounds the full Stage-4 corpus
+  traversal and local aggregation to 30–600 seconds. Before every source query,
+  PostgreSQL `statement_timeout` is reduced to the smaller of 20 seconds and
+  the remaining traversal budget. Page, projection, observation, cursor, hash,
+  snapshot, deadline or EOF failure yields no candidate-search input.
+- `FORMULA_STAGE4_CANDIDATE_SEARCH_WALL_BUDGET_MS=60000` independently bounds
+  local candidate search to 5–300 seconds. Expiry raises a timeout and discards
+  the entire search result; no partial candidate set is exposed.
 
 Migrations `026` and `027` remain unapplied until their deployment preflight
 passes. Apply `026` after `024`/`025`, then `027`, on PostgreSQL 15 or newer as
