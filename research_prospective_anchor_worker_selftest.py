@@ -71,6 +71,12 @@ class _FakeService:
         return sampling
 
 
+class _TimeoutService(_FakeService):
+    async def run_once_async(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("canceling statement due to statement timeout")
+
+
 class _SequenceService(_FakeService):
     def __init__(self, store, *, samplings, **kwargs):
         super().__init__(store, **kwargs)
@@ -668,6 +674,31 @@ async def _exercise_start_guards() -> None:
     await worker.stop()
 
 
+async def _exercise_timeout_telemetry() -> None:
+    fixed_now = datetime(2026, 8, 29, 12, 34, 5, tzinfo=UTC)
+    worker = worker_module.ProspectiveAnchorWorker(
+        symbols=("BTC", "HYPE"),
+        price_fetcher=lambda symbols, **kwargs: _price_result(),
+        store_factory=_FakeStore,
+        service_factory=_TimeoutService,
+        now_provider=lambda: fixed_now,
+    )
+    assert await worker.start(schema_ready=True) is True
+    try:
+        await worker.run_once(
+            scheduled_at_utc=datetime(2026, 8, 29, 12, 34, tzinfo=UTC)
+        )
+    except RuntimeError as exc:
+        assert "statement timeout" in str(exc)
+    else:
+        raise AssertionError("anchor timeout probe must preserve the failure")
+    status = worker.status()
+    assert status["last_error_phase"] == "PERSISTING"
+    assert status["last_timeout_phase"] == "PERSISTING"
+    assert status["last_phase_duration_ms"] is not None
+    await worker.stop()
+
+
 def run() -> None:
     previous = os.environ.get(worker_module.ENV_ENABLED)
     try:
@@ -767,6 +798,7 @@ def run() -> None:
         asyncio.run(_exercise_slot_rollover())
         asyncio.run(_exercise_conflict_block())
         asyncio.run(_exercise_start_guards())
+        asyncio.run(_exercise_timeout_telemetry())
 
         os.environ[worker_module.ENV_ENABLED] = "0"
         disabled = worker_module.ProspectiveAnchorWorker(

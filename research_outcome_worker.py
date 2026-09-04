@@ -10,8 +10,12 @@ that match a Shadow formula are polled while their relevant horizon is still
 open, so a verified first touch can be frozen without waiting for the horizon
 to close. Current prospective Shadow labels require the exact decision-time
 per-horizon session and movement-width bundle; no static fallback or later
-reconstruction is allowed. Existing legacy rows and method versions remain
-available for audit only.
+reconstruction is allowed. Exact Stage-4 signal snapshots with a matching
+completed projection receipt are admitted only after a fixed horizon closes;
+they never enter First-Touch processing. Their metrics are post-decision path
+measurements relative to the frozen archive input price, not trade-entry
+returns, and use a distinct outcome method. Existing legacy rows and method
+versions remain available for audit only.
 
 Binance Spot USDT is the default route. HYPE is explicitly routed to the
 Hyperliquid HYPE/USDT spot market. Historical candles may be imported from
@@ -21,23 +25,28 @@ those exchange APIs as long as their provenance and quality remain attached.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import math
 import os
 import re
+import time
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 try:
     import psycopg
+    from psycopg.conninfo import conninfo_to_dict
     from psycopg.rows import dict_row
 except Exception:  # pragma: no cover
     psycopg = None
+    conninfo_to_dict = None
     dict_row = None
 
 import binance_spot_price_path
 import canonical_price_path
+import research_database_timeout
 import research_feature_matrix
 import research_no_dwell_outcome
 import research_session_width
@@ -52,6 +61,7 @@ _OPEN_FIRST_TOUCH_EVENT_LIMIT = max(
     min(200, int(os.getenv("RESEARCH_OPEN_FIRST_TOUCH_EVENT_LIMIT", "32"))),
 )
 _SLOT_THRESHOLD_AUTHORITY_BATCH_SIZE = 50
+_STAGE4_DUE_CANDIDATE_PAGE_SIZE = 256
 _METHOD_VERSION = canonical_price_path.METHOD_VERSION
 _FIRST_TOUCH_METHOD_VERSION = research_no_dwell_outcome.METHOD_VERSION
 _STRICT_FROZEN_EVIDENCE_POLICY_VERSION = (
@@ -71,6 +81,51 @@ _STRICT_PROSPECTIVE_SAMPLER_VERSION = (
 )
 _ALERT_REFERENCE_REJECTION_POLICY_VERSION = "alert-reference-provenance-v1"
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_STAGE4_SIGNAL_OUTCOME_EVENT_TYPES = (
+    "MAX_PAIN_CONFIRMATION_STATE",
+    "MAGNET_CONFIRMATION_STATE",
+    "SILENT_COMBINED_CONFIRMATION_SNAPSHOT",
+)
+_STAGE4_SIGNAL_SNAPSHOT_CONTRACT_VERSION = "research-signal-snapshot-v1"
+_STAGE4_SIGNAL_SNAPSHOT_CAPTURE_STAGE = "SILENT_SIGNAL_SNAPSHOT"
+_STAGE4_SIGNAL_SNAPSHOT_STRATEGY_VERSION = "signal-snapshot-v1"
+_STAGE4_DERIVED_ADMISSION_POLICY_VERSION = (
+    "stage4-signal-completed-projection-derived-admission-v1"
+)
+_STAGE4_FROZEN_REFERENCE_POLICY_VERSION = (
+    "stage4-signal-frozen-archive-price-reference-v1"
+)
+_STAGE4_OUTCOME_METHOD_VERSION = (
+    f"{canonical_price_path.METHOD_VERSION}+stage4-frozen-archive-input-v1"
+)
+# Frozen source freshness (45m) plus the maximum projection lag (15m).
+_STAGE4_MAX_REFERENCE_AGE_SECONDS = (45 + 15) * 60
+_STAGE4_OUTCOME_SEMANTICS = (
+    "post_decision_path_metrics_relative_to_frozen_archive_input_price;"
+    "not_trade_entry_return"
+)
+_STAGE4_NO_SIGNAL_DATABASE_URL_ENV = (
+    "RESEARCH_STAGE4_NO_SIGNAL_OUTCOME_DATABASE_URL"
+)
+_STAGE4_NO_SIGNAL_CARRIER_CONTRACT_VERSION = (
+    "stage4-explicit-no-signal-outcome-carrier-v1"
+)
+_STAGE4_NO_SIGNAL_OUTCOME_METHOD_VERSION = (
+    f"{canonical_price_path.METHOD_VERSION}"
+    "+stage4-no-signal-frozen-archive-input-v1"
+)
+_STAGE4_NO_SIGNAL_ADMISSION_POLICY_VERSION = (
+    "stage4-no-signal-completed-projection-evaluable-cell-admission-v1"
+)
+_STAGE4_NO_SIGNAL_REFERENCE_RECEIPT_VERSION = (
+    "stage4-no-signal-frozen-archive-price-reference-v1"
+)
+_STAGE4_NO_SIGNAL_ABSENCE_BASIS = (
+    "COMPLETED_PROJECTION_EVALUABLE_SYMBOL_WITHOUT_SIGNAL"
+)
+_STAGE4_NO_SIGNAL_PROJECTION_PAGE_SIZE = 64
+_STAGE4_NO_SIGNAL_MAX_PROJECTION_PAGES = 4
+_STAGE4_NO_SIGNAL_MAX_CELL_ROWS = 32768
 
 
 class FrozenThresholdPolicyConflict(ValueError):
@@ -85,6 +140,79 @@ def _database_url() -> str:
     if use_primary:
         return os.getenv("DATABASE_URL", "").strip()
     return ""
+
+
+def _stage4_no_signal_database_url() -> str:
+    """Return only the dedicated append-only no-signal writer URL."""
+
+    return os.getenv(_STAGE4_NO_SIGNAL_DATABASE_URL_ENV, "").strip()
+
+
+def _database_target_identity(database_url: str) -> tuple[str, ...]:
+    """Return a credential-free, fail-closed PostgreSQL target identity."""
+
+    if conninfo_to_dict is None:
+        raise RuntimeError("psycopg conninfo parser is unavailable")
+    try:
+        values = conninfo_to_dict(database_url)
+    except Exception as exc:
+        raise RuntimeError("database target configuration is invalid") from exc
+    database = str(values.get("dbname") or "").strip()
+    service = str(values.get("service") or "").strip()
+    if service:
+        if not database:
+            raise RuntimeError("database target must name an explicit database")
+        return (
+            "service",
+            service,
+            str(values.get("servicefile") or "").strip(),
+            database,
+        )
+    host = str(values.get("host") or "").strip()
+    hostaddr = str(values.get("hostaddr") or "").strip()
+    if not database or not (host or hostaddr):
+        raise RuntimeError(
+            "database target must name an explicit host and database"
+        )
+    return (
+        "direct",
+        host,
+        hostaddr,
+        str(values.get("port") or "5432").strip(),
+        database,
+    )
+
+
+def _assert_stage4_no_signal_database_target(database_url: str) -> None:
+    """Require the least-privilege writer URL to target the research DB."""
+
+    source_url = _database_url()
+    if not source_url:
+        raise RuntimeError("research database target is not configured")
+    if _database_target_identity(database_url) != _database_target_identity(
+        source_url
+    ):
+        raise RuntimeError(
+            "Stage-4 no-signal writer target differs from the research database"
+        )
+
+
+def _database_connection_options() -> str:
+    return (
+        "-c statement_timeout="
+        f"{research_database_timeout.heavy_statement_timeout_ms()} "
+        "-c lock_timeout=1000"
+    )
+
+
+def _stage4_no_signal_connection_options() -> str:
+    return (
+        f"{_database_connection_options()} "
+        "-c idle_in_transaction_session_timeout=30000 "
+        "-c search_path=pg_catalog,public -c timezone=UTC "
+        "-c DateStyle=ISO,YMD -c IntervalStyle=postgres "
+        "-c extra_float_digits=3 -c row_security=on"
+    )
 
 
 def _utc(value: Any) -> datetime:
@@ -116,6 +244,27 @@ def _first_touch_write_is_safe(
     if status in {"HIT", "MISS"}:
         return bool(observed_prefix_complete)
     return False
+
+
+def _first_touch_enabled_for_event(event: Mapping[str, Any]) -> bool:
+    """Keep Stage-4 signal snapshots on fixed, closed horizons only."""
+    direction = str(event.get("direction") or "").strip().upper()
+    event_type = str(event.get("event_type") or "").strip().upper()
+    return (
+        direction in {"LONG", "SHORT"}
+        and event_type not in _STAGE4_SIGNAL_OUTCOME_EVENT_TYPES
+    )
+
+
+def _is_stage4_signal_outcome_event(event: Mapping[str, Any]) -> bool:
+    event_type = str(event.get("event_type") or "").strip().upper()
+    return event_type in _STAGE4_SIGNAL_OUTCOME_EVENT_TYPES
+
+
+def _outcome_method_version_for_event(event: Mapping[str, Any]) -> str:
+    if _is_stage4_signal_outcome_event(event):
+        return _STAGE4_OUTCOME_METHOD_VERSION
+    return _METHOD_VERSION
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -706,12 +855,16 @@ def _snapshot_price_provenance(value: Any) -> Dict[str, str]:
     """Return archived decision-price provenance without inventing defaults."""
     snapshot = _mapping(value)
     market_evidence = _mapping(snapshot.get("market_evidence"))
+    signal_snapshot = _mapping(snapshot.get("signal_snapshot"))
+    archive_reference = _mapping(signal_snapshot.get("archive_reference"))
+    archived_official_price = _mapping(archive_reference.get("official_price"))
 
     def field(name: str) -> str:
         return str(
             snapshot.get(f"price_{name}")
             or snapshot.get(f"top_item_price_{name}")
             or market_evidence.get(f"price_{name}")
+            or archived_official_price.get(name)
             or ""
         ).strip()
 
@@ -722,6 +875,296 @@ def _snapshot_price_provenance(value: Any) -> Dict[str, str]:
         "pair": field("pair"),
         "instrument": field("instrument"),
     }
+
+
+def _stage4_frozen_price_reference(
+    event: Mapping[str, Any],
+) -> tuple[float, str]:
+    """Validate and serialize the immutable Stage-4 archive price reference.
+
+    These metrics describe the post-decision path relative to an input price
+    already frozen in the passive archive. They are not trade-entry returns.
+    """
+    if not _is_stage4_signal_outcome_event(event):
+        raise ValueError("event is not an authorized Stage-4 signal type")
+    snapshot = _mapping(event.get("engine_snapshot"))
+    signal_snapshot = _mapping(snapshot.get("signal_snapshot"))
+    archive_reference = _mapping(signal_snapshot.get("archive_reference"))
+    official_price = _mapping(archive_reference.get("official_price"))
+
+    frozen_price = _strict_json_number(official_price.get("price"))
+    event_price = _finite_number(event.get("current_price"))
+    if (
+        frozen_price is None
+        or frozen_price <= 0
+        or event_price is None
+        or event_price <= 0
+        or frozen_price != event_price
+    ):
+        raise ValueError("Stage-4 frozen official price does not match event price")
+
+    snapshot_set_id = _strict_positive_int(
+        archive_reference.get("snapshot_set_id")
+    )
+    snapshot_key = _strict_sha256(archive_reference.get("snapshot_key"))
+    if snapshot_set_id is None or snapshot_key is None:
+        raise ValueError("Stage-4 frozen snapshot identity is invalid")
+
+    raw_event_time = event.get("alert_time_utc")
+    raw_observed = official_price.get("observed_at_utc")
+    raw_fetched = official_price.get("fetched_at_utc")
+    for name, raw_value in (
+        ("decision", raw_event_time),
+        ("observed", raw_observed),
+        ("fetched", raw_fetched),
+    ):
+        if isinstance(raw_value, datetime):
+            if raw_value.tzinfo is None or raw_value.utcoffset() is None:
+                raise ValueError(f"Stage-4 {name} time lacks timezone")
+        elif not isinstance(raw_value, str) or re.search(
+            r"(Z|[+-][0-9]{2}:[0-9]{2})$", raw_value.strip()
+        ) is None:
+            raise ValueError(f"Stage-4 {name} time lacks timezone")
+    try:
+        decision_time = _utc(raw_event_time)
+        observed_at = _utc(raw_observed)
+        fetched_at = _utc(raw_fetched)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Stage-4 frozen price timestamp is invalid") from exc
+    if observed_at > fetched_at or fetched_at > decision_time:
+        raise ValueError("Stage-4 frozen price reference is post-decision")
+    observed_age = (decision_time - observed_at).total_seconds()
+    fetched_age = (decision_time - fetched_at).total_seconds()
+    if (
+        observed_age < 0
+        or fetched_age < 0
+        or observed_age > _STAGE4_MAX_REFERENCE_AGE_SECONDS
+        or fetched_age > _STAGE4_MAX_REFERENCE_AGE_SECONDS
+    ):
+        raise ValueError("Stage-4 frozen price reference is stale")
+
+    provenance = {
+        key: str(official_price.get(key) or "").strip()
+        for key in ("source", "exchange", "market", "pair", "instrument")
+    }
+    symbol = str(event.get("symbol") or "").strip().upper()
+    source = provenance["source"].lower()
+    exchange = provenance["exchange"].lower()
+    market = provenance["market"].lower()
+    pair = provenance["pair"].upper()
+    instrument = provenance["instrument"]
+    if symbol == "HYPE":
+        canonical_route = (
+            source == "hyperliquid"
+            and exchange == "hyperliquid"
+            and market == "spot"
+            and pair == "HYPE/USDT"
+            and instrument == "@107"
+        )
+    else:
+        canonical_route = (
+            bool(symbol)
+            and source == "binance_spot"
+            and exchange == "binance"
+            and market == "spot"
+            and pair == f"{symbol}USDT"
+        )
+    if not canonical_route:
+        raise ValueError("Stage-4 frozen official price source is non-canonical")
+
+    reference_source = "|".join(
+        (
+            f"reference_policy={_STAGE4_FROZEN_REFERENCE_POLICY_VERSION}",
+            f"admission_policy={_STAGE4_DERIVED_ADMISSION_POLICY_VERSION}",
+            f"semantics={_STAGE4_OUTCOME_SEMANTICS}",
+            f"source={provenance['source']}",
+            f"exchange={provenance['exchange']}",
+            f"market={provenance['market']}",
+            f"pair={provenance['pair']}",
+            f"instrument={provenance['instrument']}",
+            f"observed_at_utc={observed_at.isoformat()}",
+            f"fetched_at_utc={fetched_at.isoformat()}",
+            f"observed_age_seconds={observed_age:.6f}",
+            f"fetched_age_seconds={fetched_age:.6f}",
+            f"snapshot_set_id={snapshot_set_id}",
+            f"snapshot_key={snapshot_key}",
+        )
+    )
+    return frozen_price, reference_source
+
+
+def _explicit_utc(value: Any, *, field: str) -> datetime:
+    """Parse a provenance time without repairing a missing timezone."""
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{field} lacks timezone")
+        return value.astimezone(timezone.utc)
+    if not isinstance(value, str) or re.search(
+        r"(Z|[+-][0-9]{2}:[0-9]{2})$", value.strip()
+    ) is None:
+        raise ValueError(f"{field} lacks timezone")
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).astimezone(
+            timezone.utc
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field} is invalid") from exc
+
+
+def _iso_utc(value: Any, *, field: str) -> str:
+    return _explicit_utc(value, field=field).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+
+
+def _optional_iso_utc(value: Any, *, field: str) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    return _iso_utc(value, field=field)
+
+
+def _stage4_no_signal_frozen_price_reference(
+    cell: Mapping[str, Any],
+) -> tuple[float, str, Dict[str, Any]]:
+    """Validate one no-signal cell's pre-decision archive price receipt."""
+
+    symbol = str(cell.get("symbol") or "").strip().upper()
+    direction = str(cell.get("direction") or "").strip().upper()
+    projection_fingerprint = _strict_sha256(
+        str(cell.get("projection_event_fingerprint") or "").strip()
+    )
+    snapshot_key = _strict_sha256(str(cell.get("snapshot_key") or "").strip())
+    set_payload_sha256 = _strict_sha256(
+        str(cell.get("set_payload_sha256") or "").strip()
+    )
+    manifest_payload_sha256 = _strict_sha256(
+        str(cell.get("manifest_payload_sha256") or "").strip()
+    )
+    row_payload_sha256 = _strict_sha256(
+        str(cell.get("reference_row_payload_sha256") or "").strip()
+    )
+    projection_event_id = _strict_positive_int(cell.get("projection_event_id"))
+    snapshot_set_id = _strict_positive_int(cell.get("snapshot_set_id"))
+    reference_row_id = _strict_positive_int(cell.get("reference_snapshot_row_id"))
+    if (
+        not re.fullmatch(r"[A-Z0-9-]{1,20}", symbol)
+        or direction not in {"LONG", "SHORT"}
+        or projection_fingerprint is None
+        or snapshot_key is None
+        or set_payload_sha256 is None
+        or manifest_payload_sha256 is None
+        or row_payload_sha256 is None
+        or projection_event_id is None
+        or snapshot_set_id is None
+        or reference_row_id is None
+    ):
+        raise ValueError("Stage-4 no-signal cell identity is invalid")
+    if int(cell.get("archive_row_count") or 0) != 7 or int(
+        cell.get("archive_price_signature_count") or 0
+    ) != 1:
+        raise ValueError(
+            "Stage-4 no-signal archive price is not coherent across 7 rows"
+        )
+
+    decision_time = _explicit_utc(
+        cell.get("decision_time_utc"), field="no-signal decision time"
+    )
+    fetched_at = _explicit_utc(
+        cell.get("price_fetched_at_utc"), field="no-signal fetched time"
+    )
+    raw_provenance = _mapping(cell.get("raw_provenance"))
+    observed_at = _explicit_utc(
+        raw_provenance.get("price_observed_at_utc"),
+        field="no-signal observed time",
+    )
+    if observed_at > fetched_at or fetched_at > decision_time:
+        raise ValueError("Stage-4 no-signal price reference is post-decision")
+    observed_age = (decision_time - observed_at).total_seconds()
+    fetched_age = (decision_time - fetched_at).total_seconds()
+    if max(observed_age, fetched_age) > _STAGE4_MAX_REFERENCE_AGE_SECONDS:
+        raise ValueError("Stage-4 no-signal price reference is stale")
+
+    price = _finite_number(cell.get("reference_price"))
+    source = str(cell.get("price_source") or "").strip()
+    exchange = str(cell.get("price_exchange") or "").strip()
+    market = str(cell.get("price_market") or "").strip()
+    pair = str(cell.get("price_pair") or "").strip()
+    instrument = str(cell.get("price_instrument") or "").strip()
+    interval = str(raw_provenance.get("price_interval") or "").strip()
+    policy_status = str(cell.get("price_source_policy_status") or "").strip()
+    if price is None or price <= 0 or interval != "1m" or policy_status != "PASS":
+        raise ValueError("Stage-4 no-signal official price is incomplete")
+    if symbol == "HYPE":
+        route_ok = (
+            source.lower() == "hyperliquid"
+            and exchange.lower() == "hyperliquid"
+            and market.lower() == "spot"
+            and pair.upper() == "HYPE/USDT"
+            and instrument == "@107"
+        )
+    else:
+        route_ok = (
+            source.lower() == "binance_spot"
+            and exchange.lower() == "binance"
+            and market.lower() == "spot"
+            and pair.replace("/", "").upper() == f"{symbol}USDT"
+        )
+    if not route_ok:
+        raise ValueError("Stage-4 no-signal official price route is non-canonical")
+
+    receipt = {
+        "contract_version": _STAGE4_NO_SIGNAL_REFERENCE_RECEIPT_VERSION,
+        "projection_event_id": projection_event_id,
+        "projection_event_fingerprint": projection_fingerprint,
+        "snapshot_set_id": snapshot_set_id,
+        "snapshot_key": snapshot_key,
+        "set_payload_sha256": set_payload_sha256,
+        "symbol": symbol,
+        "symbol_manifest_payload_sha256": manifest_payload_sha256,
+        "source_timeframe": "12h",
+        "snapshot_row_id": reference_row_id,
+        "snapshot_row_payload_sha256": row_payload_sha256,
+        "official_price": {
+            "price": price,
+            "source": source,
+            "exchange": exchange,
+            "market": market,
+            "pair": pair,
+            "instrument": instrument,
+            "interval": interval,
+            "fetched_at_utc": _iso_utc(fetched_at, field="no-signal fetched time"),
+            "observed_at_utc": _iso_utc(observed_at, field="no-signal observed time"),
+            "candle_open_time_utc": _optional_iso_utc(
+                raw_provenance.get("price_candle_open_time_utc"),
+                field="no-signal candle open time",
+            ),
+            "candle_close_time_utc": _optional_iso_utc(
+                raw_provenance.get("price_candle_close_time_utc"),
+                field="no-signal candle close time",
+            ),
+            "policy_status": policy_status,
+        },
+    }
+    reference_source = "|".join(
+        (
+            f"reference_policy={_STAGE4_NO_SIGNAL_REFERENCE_RECEIPT_VERSION}",
+            f"admission_policy={_STAGE4_NO_SIGNAL_ADMISSION_POLICY_VERSION}",
+            f"semantics={_STAGE4_OUTCOME_SEMANTICS}",
+            f"source={source}",
+            f"exchange={exchange}",
+            f"market={market}",
+            f"pair={pair}",
+            f"instrument={instrument}",
+            f"observed_at_utc={observed_at.isoformat()}",
+            f"fetched_at_utc={fetched_at.isoformat()}",
+            f"observed_age_seconds={observed_age:.6f}",
+            f"fetched_age_seconds={fetched_age:.6f}",
+            f"snapshot_set_id={snapshot_set_id}",
+            f"snapshot_key={snapshot_key}",
+        )
+    )
+    return price, reference_source, receipt
 
 
 def _alert_reference_provenance_error(event: Mapping[str, Any]) -> Optional[str]:
@@ -880,6 +1323,7 @@ def _due_horizons(
     existing_first_touch_versions: Optional[Dict[int, str]] = None,
     *,
     now: datetime,
+    outcome_method_version: str = _METHOD_VERSION,
     first_touch_enabled: bool = True,
     open_first_touch_horizons: Iterable[int] = (),
 ) -> list[int]:
@@ -902,7 +1346,7 @@ def _due_horizons(
         horizon_closed = horizon_end <= now
         legacy_due = (
             horizon_closed
-            and existing_versions.get(horizon) != _METHOD_VERSION
+            and existing_versions.get(horizon) != outcome_method_version
         )
         first_touch_due = (
             first_touch_enabled
@@ -964,7 +1408,18 @@ class OutcomeMetrics:
     first_touch_threshold_policy_conflicts: int = 0
     alert_reference_provenance_rejections: int = 0
     first_touch_terminal_rows_deferred_for_incomplete_prefix: int = 0
+    stage4_no_signal_cells_checked: int = 0
+    stage4_no_signal_outcomes_inserted: int = 0
+    stage4_no_signal_missing_price_paths: int = 0
+    stage4_no_signal_failures: int = 0
+    stage4_no_signal_last_error: Optional[str] = None
     failures: int = 0
+    current_phase: str = "IDLE"
+    current_phase_started_at_utc: Optional[str] = None
+    last_phase: Optional[str] = None
+    last_phase_duration_ms: Optional[int] = None
+    last_error_phase: Optional[str] = None
+    last_timeout_phase: Optional[str] = None
     last_run_utc: Optional[str] = None
     last_error: Optional[str] = None
 
@@ -974,6 +1429,30 @@ class ResearchOutcomeWorker:
         self.metrics = OutcomeMetrics()
         self._task: Optional[asyncio.Task] = None
         self._stopping = False
+        self._stage4_no_signal_projection_cursor: Optional[tuple[datetime, int]] = None
+
+    @contextmanager
+    def _phase(self, name: str):
+        phase = str(name or "UNKNOWN").strip().upper()
+        started = time.monotonic()
+        self.metrics.current_phase = phase
+        self.metrics.current_phase_started_at_utc = datetime.now(
+            timezone.utc
+        ).isoformat()
+        try:
+            yield
+        except Exception as exc:
+            self.metrics.last_error_phase = phase
+            if "statement timeout" in str(exc).lower():
+                self.metrics.last_timeout_phase = phase
+            raise
+        finally:
+            self.metrics.last_phase = phase
+            self.metrics.last_phase_duration_ms = max(
+                0, int(round((time.monotonic() - started) * 1000))
+            )
+            self.metrics.current_phase = "IDLE"
+            self.metrics.current_phase_started_at_utc = None
 
     @property
     def enabled(self) -> bool:
@@ -986,7 +1465,39 @@ class ResearchOutcomeWorker:
             "running": bool(self._task and not self._task.done()),
             "horizons_minutes": list(_HORIZONS),
             "poll_seconds": _POLL_SECONDS,
+            "heavy_query_timeout": (
+                research_database_timeout.heavy_timeout_status()
+            ),
             "method": _METHOD_VERSION,
+            "stage4_signal_method": _STAGE4_OUTCOME_METHOD_VERSION,
+            "stage4_signal_admission_policy": (
+                _STAGE4_DERIVED_ADMISSION_POLICY_VERSION
+            ),
+            "stage4_signal_reference_policy": (
+                _STAGE4_FROZEN_REFERENCE_POLICY_VERSION
+            ),
+            "stage4_signal_semantics": _STAGE4_OUTCOME_SEMANTICS,
+            "stage4_no_signal": {
+                "configured": bool(_stage4_no_signal_database_url()),
+                "database_env": _STAGE4_NO_SIGNAL_DATABASE_URL_ENV,
+                "carrier_contract_version": (
+                    _STAGE4_NO_SIGNAL_CARRIER_CONTRACT_VERSION
+                ),
+                "outcome_method_version": (
+                    _STAGE4_NO_SIGNAL_OUTCOME_METHOD_VERSION
+                ),
+                "admission_policy_version": (
+                    _STAGE4_NO_SIGNAL_ADMISSION_POLICY_VERSION
+                ),
+                "reference_policy_version": (
+                    _STAGE4_NO_SIGNAL_REFERENCE_RECEIPT_VERSION
+                ),
+                "absence_basis": _STAGE4_NO_SIGNAL_ABSENCE_BASIS,
+                "formula_registry_effect": "NONE",
+                "telegram_delivery_allowed": False,
+                "live_eligible": False,
+                "trade_execution_allowed": False,
+            },
             "first_touch_method": _FIRST_TOUCH_METHOD_VERSION,
             "open_first_touch_event_limit": _OPEN_FIRST_TOUCH_EVENT_LIMIT,
             "first_touch_policy": {
@@ -1123,9 +1634,7 @@ class ResearchOutcomeWorker:
             event_id = _strict_positive_int(event.get("event_id"))
             if event_id is None:
                 continue
-            first_touch_enabled = str(
-                event.get("direction") or ""
-            ).strip().upper() in {"LONG", "SHORT"}
+            first_touch_enabled = _first_touch_enabled_for_event(event)
             if not first_touch_enabled:
                 continue
             try:
@@ -1192,7 +1701,415 @@ class ResearchOutcomeWorker:
         return references_by_event
 
     @staticmethod
-    def _load_due_events(conn, limit: int) -> list[Dict[str, Any]]:
+    def _load_due_stage4_no_signal_projection_page(
+        conn,
+        *,
+        cursor: Optional[tuple[Any, int]] = None,
+        page_size: int = _STAGE4_NO_SIGNAL_PROJECTION_PAGE_SIZE,
+    ) -> list[Dict[str, Any]]:
+        """Select one bounded projection keyset page before JSON expansion."""
+
+        cursor_clause = ""
+        params: list[Any] = [
+            _STAGE4_SIGNAL_SNAPSHOT_CAPTURE_STAGE,
+            _STAGE4_SIGNAL_SNAPSHOT_STRATEGY_VERSION,
+            _STAGE4_SIGNAL_SNAPSHOT_CONTRACT_VERSION,
+        ]
+        if cursor is not None:
+            cursor_clause = "AND (e.alert_time_utc, e.event_id) > (%s, %s)"
+            params.extend((_utc(cursor[0]), int(cursor[1])))
+        params.append(
+            max(1, min(int(page_size), _STAGE4_NO_SIGNAL_PROJECTION_PAGE_SIZE))
+        )
+        query = f"""
+            /* research_outcomes:due_stage4_no_signal_projection_page */
+            SELECT e.event_id AS projection_event_id,
+                   e.alert_time_utc AS decision_time_utc
+              FROM public.research_events e
+             WHERE e.event_kind='DECISION_SAMPLE'
+               AND e.event_type='SIGNAL_SNAPSHOT_PROJECTION'
+               AND e.capture_stage=%s
+               AND e.strategy_version=%s
+               AND e.delivery_status='NOT_APPLICABLE'
+               AND e.symbol='RESEARCH'
+               AND e.direction='NEUTRAL'
+               AND e.delivery_attempted_at_utc IS NULL
+               AND e.delivered_at_utc IS NULL
+               AND e.categories @>
+                   '["DECISION_SAMPLE","SILENT","COMPLETED"]'::jsonb
+               AND e.engine_snapshot->'signal_snapshot'->>'contract_version'=%s
+               AND e.engine_snapshot->'signal_snapshot'->>'signal_family'='PROJECTION'
+               AND e.engine_snapshot->'signal_snapshot'->>'tier'='COMPLETED'
+               AND e.engine_snapshot->'projection'->>'status'='COMPLETED'
+               AND e.alert_time_utc <= NOW() - INTERVAL '60 minutes'
+               {cursor_clause}
+             ORDER BY e.alert_time_utc ASC, e.event_id ASC
+             LIMIT %s
+        """
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    @staticmethod
+    def _load_stage4_no_signal_cells_for_projection_page(
+        conn, projection_event_ids: Sequence[int]
+    ) -> list[Dict[str, Any]]:
+        """Expand only a previously bounded page into explicit no-signal cells."""
+
+        normalized = sorted(
+            {
+                int(event_id)
+                for event_id in projection_event_ids
+                if int(event_id) > 0
+            }
+        )
+        if not normalized:
+            return []
+        if len(normalized) > _STAGE4_NO_SIGNAL_PROJECTION_PAGE_SIZE:
+            raise ValueError("Stage-4 no-signal projection page exceeds its hard bound")
+        rows = conn.execute(
+            """
+            /* research_outcomes:hydrate_stage4_no_signal_cells */
+            WITH projection AS MATERIALIZED (
+                SELECT e.*,
+                       (e.engine_snapshot->'projection'->>'snapshot_set_id')::bigint
+                           AS snapshot_set_id,
+                       e.engine_snapshot->'projection'->>'snapshot_key'
+                           AS snapshot_key,
+                       e.engine_snapshot->'projection'->>'set_payload_sha256'
+                           AS set_payload_sha256
+                  FROM public.research_events e
+                 WHERE e.event_id=ANY(%s)
+                   AND e.event_kind='DECISION_SAMPLE'
+                   AND e.event_type='SIGNAL_SNAPSHOT_PROJECTION'
+                   AND e.capture_stage=%s
+                   AND e.strategy_version=%s
+                   AND e.delivery_status='NOT_APPLICABLE'
+                   AND e.symbol='RESEARCH'
+                   AND e.direction='NEUTRAL'
+                   AND e.delivery_attempted_at_utc IS NULL
+                   AND e.delivered_at_utc IS NULL
+                   AND e.categories @>
+                       '["DECISION_SAMPLE","SILENT","COMPLETED"]'::jsonb
+                   AND e.engine_snapshot->'signal_snapshot'->>'contract_version'=%s
+                   AND e.engine_snapshot->'signal_snapshot'->>'signal_family'='PROJECTION'
+                   AND e.engine_snapshot->'signal_snapshot'->>'tier'='COMPLETED'
+                   AND e.engine_snapshot->'projection'->>'status'='COMPLETED'
+                   AND (e.engine_snapshot->'projection'->>'decision_time_utc')
+                       ::timestamptz=e.alert_time_utc
+            ), cell AS MATERIALIZED (
+                SELECT p.*,
+                       evaluation.item->>'symbol' AS cell_symbol,
+                       direction.value AS cell_direction
+                  FROM projection p
+                  CROSS JOIN LATERAL jsonb_array_elements(
+                      p.engine_snapshot->'projection'->'symbol_evaluations'
+                  ) evaluation(item)
+                  CROSS JOIN (VALUES ('LONG'), ('SHORT')) direction(value)
+                 WHERE evaluation.item->>'status'='EVALUABLE'
+                   AND evaluation.item->'reason'
+                       IS NOT DISTINCT FROM 'null'::jsonb
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM public.research_events signal
+                        WHERE signal.capture_stage=%s
+                          AND signal.event_type=ANY(%s)
+                          AND signal.symbol=evaluation.item->>'symbol'
+                          AND signal.direction=direction.value
+                          AND signal.engine_snapshot #>>
+                              '{signal_snapshot,archive_reference,snapshot_key}'=
+                              p.snapshot_key
+                   )
+            )
+            SELECT
+                cell.event_id AS projection_event_id,
+                BTRIM(cell.event_fingerprint) AS projection_event_fingerprint,
+                cell.alert_time_utc AS decision_time_utc,
+                cell.snapshot_set_id,
+                cell.snapshot_key,
+                cell.set_payload_sha256,
+                cell.cell_symbol AS symbol,
+                cell.cell_direction AS direction,
+                BTRIM(manifest.payload_sha256) AS manifest_payload_sha256,
+                reference.snapshot_row_id AS reference_snapshot_row_id,
+                BTRIM(reference.payload_sha256)
+                    AS reference_row_payload_sha256,
+                reference.current_price AS reference_price,
+                reference.price_source,
+                reference.price_exchange,
+                reference.price_market,
+                reference.price_pair,
+                reference.price_instrument,
+                reference.price_fetched_at_utc,
+                reference.price_source_policy_status,
+                reference.raw_provenance,
+                archive_check.row_count AS archive_row_count,
+                archive_check.price_signature_count
+                    AS archive_price_signature_count,
+                COALESCE((
+                    SELECT jsonb_object_agg(
+                               existing.horizon_minutes,
+                               existing.outcome_method_version
+                           )
+                      FROM public.research_stage4_no_signal_outcomes_v1 existing
+                     WHERE existing.projection_event_id=cell.event_id
+                       AND existing.symbol=cell.cell_symbol
+                       AND existing.direction=cell.cell_direction
+                ), '{}'::jsonb) AS outcome_versions
+              FROM cell
+              JOIN public.research_max_pain_snapshot_sets set_row
+                ON set_row.snapshot_set_id=cell.snapshot_set_id
+               AND BTRIM(set_row.snapshot_key)=cell.snapshot_key
+               AND BTRIM(set_row.payload_sha256)=cell.set_payload_sha256
+               AND set_row.research_eligible=TRUE
+               AND set_row.source='RESEARCH_PASSIVE'
+              JOIN public.research_max_pain_snapshot_symbols manifest
+                ON manifest.snapshot_set_id=cell.snapshot_set_id
+               AND manifest.symbol=cell.cell_symbol
+               AND manifest.research_eligible=TRUE
+               AND manifest.complete_7of7=TRUE
+               AND manifest.price_overlay_coherent=TRUE
+              JOIN public.research_max_pain_snapshot_rows reference
+                ON reference.snapshot_set_id=cell.snapshot_set_id
+               AND reference.symbol=cell.cell_symbol
+               AND reference.timeframe='12h'
+               AND reference.row_valid=TRUE
+               AND reference.freshness_status='FRESH'
+              CROSS JOIN LATERAL (
+                  SELECT COUNT(*)::integer AS row_count,
+                         COUNT(DISTINCT ROW(
+                             archive_row.current_price,
+                             COALESCE(archive_row.price_source, ''),
+                             COALESCE(archive_row.price_exchange, ''),
+                             COALESCE(archive_row.price_market, ''),
+                             COALESCE(archive_row.price_pair, ''),
+                             COALESCE(archive_row.price_instrument, ''),
+                             archive_row.price_fetched_at_utc
+                         ))::integer AS price_signature_count
+                    FROM public.research_max_pain_snapshot_rows archive_row
+                   WHERE archive_row.snapshot_set_id=cell.snapshot_set_id
+                     AND archive_row.symbol=cell.cell_symbol
+                     AND archive_row.row_valid=TRUE
+                     AND archive_row.freshness_status='FRESH'
+              ) archive_check
+             ORDER BY cell.alert_time_utc, cell.event_id,
+                      cell.cell_symbol, cell.cell_direction
+             LIMIT %s
+            """,
+            (
+                normalized,
+                _STAGE4_SIGNAL_SNAPSHOT_CAPTURE_STAGE,
+                _STAGE4_SIGNAL_SNAPSHOT_STRATEGY_VERSION,
+                _STAGE4_SIGNAL_SNAPSHOT_CONTRACT_VERSION,
+                _STAGE4_SIGNAL_SNAPSHOT_CAPTURE_STAGE,
+                list(_STAGE4_SIGNAL_OUTCOME_EVENT_TYPES),
+                _STAGE4_NO_SIGNAL_MAX_CELL_ROWS + 1,
+            ),
+        ).fetchall()
+        if len(rows) > _STAGE4_NO_SIGNAL_MAX_CELL_ROWS:
+            raise ValueError("Stage-4 no-signal cell hydration exceeded its hard bound")
+        return [dict(row) for row in rows]
+
+    def _load_due_stage4_no_signal_cells(
+        self, conn, *, limit: int, now: datetime
+    ) -> list[Dict[str, Any]]:
+        """Advance a bounded in-memory keyset scan without invalid-row starvation."""
+
+        bounded_limit = max(1, min(int(limit), 1000))
+        selected: list[Dict[str, Any]] = []
+        cursor = self._stage4_no_signal_projection_cursor
+        wrapped = False
+        for _ in range(_STAGE4_NO_SIGNAL_MAX_PROJECTION_PAGES):
+            page = self._load_due_stage4_no_signal_projection_page(
+                conn, cursor=cursor
+            )
+            if not page:
+                if cursor is not None and not wrapped:
+                    cursor = None
+                    wrapped = True
+                    continue
+                self._stage4_no_signal_projection_cursor = None
+                break
+            last = page[-1]
+            cursor = (_utc(last["decision_time_utc"]), int(last["projection_event_id"]))
+            self._stage4_no_signal_projection_cursor = cursor
+            hydrated = self._load_stage4_no_signal_cells_for_projection_page(
+                conn, [int(row["projection_event_id"]) for row in page]
+            )
+            page_groups: Dict[tuple[int, str], list[Dict[str, Any]]] = {}
+            for cell in hydrated:
+                versions = _versions(cell.get("outcome_versions"))
+                event_time = _utc(cell["decision_time_utc"])
+                due = [
+                    horizon
+                    for horizon in _HORIZONS
+                    if event_time + timedelta(minutes=horizon) <= now
+                    and versions.get(horizon)
+                    != _STAGE4_NO_SIGNAL_OUTCOME_METHOD_VERSION
+                ]
+                if not due:
+                    continue
+                normalized_cell = dict(cell)
+                normalized_cell["due_horizons"] = due
+                page_groups.setdefault(
+                    (
+                        int(normalized_cell["projection_event_id"]),
+                        str(normalized_cell["symbol"]).strip().upper(),
+                    ),
+                    [],
+                ).append(normalized_cell)
+            for group in page_groups.values():
+                # Keep an exact projection+symbol pair atomic.  A caller limit
+                # of one may therefore return two directions, but never split
+                # them and refetch the same canonical path on the next scan.
+                if selected and len(selected) + len(group) > bounded_limit:
+                    return selected
+                selected.extend(group)
+                if len(selected) >= bounded_limit:
+                    return selected
+            if len(page) < _STAGE4_NO_SIGNAL_PROJECTION_PAGE_SIZE:
+                self._stage4_no_signal_projection_cursor = None
+                break
+        return selected
+
+    @staticmethod
+    def _write_stage4_no_signal_outcome(
+        conn,
+        *,
+        cell: Mapping[str, Any],
+        horizon: int,
+        reference_receipt: Mapping[str, Any],
+        reference_price: float,
+        reference_source: str,
+        path_result: Mapping[str, Any],
+        path_metrics: Mapping[str, Any],
+    ) -> bool:
+        """Insert one immutable carrier; fail if the identity already differs."""
+
+        source = _path_source(reference_source, dict(path_result))
+        quality = canonical_price_path.quality_status(path_result, complete=True)
+        values = (
+            int(cell["projection_event_id"]),
+            str(cell["projection_event_fingerprint"]).strip(),
+            int(cell["snapshot_set_id"]),
+            str(cell["snapshot_key"]).strip(),
+            str(cell["symbol"]).strip().upper(),
+            str(cell["direction"]).strip().upper(),
+            int(horizon),
+            _utc(cell["decision_time_utc"]),
+            _STAGE4_NO_SIGNAL_ABSENCE_BASIS,
+            json.dumps(
+                reference_receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            path_metrics["measured_at_utc"],
+            reference_price,
+            path_metrics["price_at_horizon"],
+            path_metrics["raw_return_pct"],
+            path_metrics["directional_return_pct"],
+            path_metrics["max_favorable_price"],
+            path_metrics["max_adverse_price"],
+            path_metrics["mfe_pct"],
+            path_metrics["mae_pct"],
+            path_metrics["time_to_first_progress_seconds"],
+            path_metrics["time_to_mfe_seconds"],
+            canonical_price_path.INTERVAL_SECONDS,
+            len(path_result["candles"]),
+            _STAGE4_NO_SIGNAL_OUTCOME_METHOD_VERSION,
+            source,
+            quality,
+        )
+        inserted = conn.execute(
+            """
+            /* research_outcomes:write_stage4_no_signal_outcome */
+            INSERT INTO public.research_stage4_no_signal_outcomes_v1 (
+                projection_event_id, projection_event_fingerprint,
+                snapshot_set_id, snapshot_key, symbol, direction,
+                horizon_minutes, decision_time_utc, absence_basis,
+                reference_receipt, measured_at_utc, reference_price,
+                price_at_horizon, raw_return_pct, directional_return_pct,
+                max_favorable_price, max_adverse_price, mfe_pct, mae_pct,
+                time_to_first_progress_seconds, time_to_mfe_seconds,
+                path_resolution_seconds, path_samples,
+                outcome_method_version, price_source, data_quality_status
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s
+            )
+            ON CONFLICT (
+                projection_event_id, symbol, direction, horizon_minutes
+            ) DO NOTHING
+            RETURNING outcome_payload_sha256
+            """,
+            values,
+        ).fetchone()
+        if inserted:
+            return True
+        existing = conn.execute(
+            """
+            SELECT projection_event_fingerprint, snapshot_set_id, snapshot_key,
+                   decision_time_utc, absence_basis, reference_receipt,
+                   measured_at_utc, reference_price, price_at_horizon,
+                   raw_return_pct, directional_return_pct,
+                   max_favorable_price, max_adverse_price, mfe_pct, mae_pct,
+                   time_to_first_progress_seconds, time_to_mfe_seconds,
+                   path_resolution_seconds, path_samples,
+                   outcome_method_version, price_source, data_quality_status
+              FROM public.research_stage4_no_signal_outcomes_v1
+             WHERE projection_event_id=%s AND symbol=%s
+               AND direction=%s AND horizon_minutes=%s
+            """,
+            (values[0], values[4], values[5], values[6]),
+        ).fetchone()
+        if existing is None:
+            raise RuntimeError("no-signal outcome conflict disappeared")
+        expected = {
+            "projection_event_fingerprint": values[1],
+            "snapshot_set_id": values[2],
+            "snapshot_key": values[3],
+            "decision_time_utc": _utc(values[7]),
+            "absence_basis": values[8],
+            "reference_receipt": dict(reference_receipt),
+            "measured_at_utc": _utc(values[10]),
+            "reference_price": values[11],
+            "price_at_horizon": values[12],
+            "raw_return_pct": values[13],
+            "directional_return_pct": values[14],
+            "max_favorable_price": values[15],
+            "max_adverse_price": values[16],
+            "mfe_pct": values[17],
+            "mae_pct": values[18],
+            "time_to_first_progress_seconds": values[19],
+            "time_to_mfe_seconds": values[20],
+            "path_resolution_seconds": values[21],
+            "path_samples": values[22],
+            "outcome_method_version": values[23],
+            "price_source": values[24],
+            "data_quality_status": values[25],
+        }
+        actual = dict(existing)
+        actual["projection_event_fingerprint"] = str(
+            actual["projection_event_fingerprint"]
+        ).strip()
+        actual["snapshot_key"] = str(actual["snapshot_key"]).strip()
+        actual["decision_time_utc"] = _utc(actual["decision_time_utc"])
+        actual["measured_at_utc"] = _utc(actual["measured_at_utc"])
+        actual["reference_receipt"] = dict(_mapping(actual["reference_receipt"]))
+        if actual != expected:
+            raise RuntimeError("conflicting immutable Stage-4 no-signal outcome")
+        return False
+
+    @staticmethod
+    def _load_due_legacy_and_prospective_events(
+        conn, limit: int
+    ) -> list[Dict[str, Any]]:
+        """Load due delivered Alerts and authorized neutral anchors.
+
+        Stage-4 signal snapshots use a separate paged validator below so their
+        projection JSON cannot make this bounded legacy query scan the whole
+        archive before applying its limit.
+        """
         clauses = []
         condition_params: list[Any] = []
         for horizon in _HORIZONS:
@@ -1205,11 +2122,17 @@ class ResearchOutcomeWorker:
                             SELECT 1 FROM research_alert_outcomes current_o
                             WHERE current_o.event_id=e.event_id
                               AND current_o.horizon_minutes=%s
-                              AND current_o.outcome_method_version=%s
+                              AND current_o.outcome_method_version=(
+                                  CASE
+                                      WHEN e.event_type=ANY(%s) THEN %s
+                                      ELSE %s
+                                  END
+                              )
                               AND current_o.data_quality_status=ANY(%s)
                         )
                         OR (
                             e.direction IN ('LONG', 'SHORT')
+                            AND NOT (e.event_type=ANY(%s))
                             AND NOT EXISTS (
                                 SELECT 1 FROM research_first_touch_outcomes current_ft
                                 WHERE current_ft.event_id=e.event_id
@@ -1227,14 +2150,18 @@ class ResearchOutcomeWorker:
                 (
                     horizon,
                     horizon,
+                    list(_STAGE4_SIGNAL_OUTCOME_EVENT_TYPES),
+                    _STAGE4_OUTCOME_METHOD_VERSION,
                     _METHOD_VERSION,
                     list(canonical_price_path.COMPLETE_QUALITIES),
+                    list(_STAGE4_SIGNAL_OUTCOME_EVENT_TYPES),
                     horizon,
                     _FIRST_TOUCH_METHOD_VERSION,
                     list(canonical_price_path.COMPLETE_QUALITIES),
                 )
             )
         query = f"""
+            /* research_outcomes:due_legacy_and_prospective */
             SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
                    e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status,
@@ -1243,7 +2170,12 @@ class ResearchOutcomeWorker:
                        jsonb_object_agg(
                            o.horizon_minutes,
                            CASE
-                               WHEN o.outcome_method_version=%s
+                               WHEN o.outcome_method_version=(
+                                    CASE
+                                        WHEN e.event_type=ANY(%s) THEN %s
+                                        ELSE %s
+                                    END
+                               )
                                 AND o.data_quality_status=ANY(%s)
                                THEN o.outcome_method_version
                                ELSE COALESCE(o.outcome_method_version, '') || ':incomplete'
@@ -1270,7 +2202,9 @@ class ResearchOutcomeWorker:
                        '{{}}'::jsonb
                    ) AS first_touch_versions,
                    ARRAY[]::integer[] AS open_first_touch_horizons,
-                   NULL::timestamptz AS open_first_touch_observed_utc
+                   NULL::timestamptz AS open_first_touch_observed_utc,
+                   {_alert_reference_queue_priority_sql("e")}
+                       AS due_queue_priority
             FROM research_events e
             LEFT JOIN research_alert_outcomes o ON o.event_id=e.event_id
             WHERE (
@@ -1278,6 +2212,7 @@ class ResearchOutcomeWorker:
                 OR (
                     e.event_kind='DECISION_SAMPLE'
                     AND e.delivery_status='NOT_APPLICABLE'
+                    AND NOT (e.event_type=ANY(%s))
                     AND EXISTS (
                         SELECT 1
                         FROM research_prospective_shadow_events authorized
@@ -1293,22 +2228,364 @@ class ResearchOutcomeWorker:
               )
               AND ({' OR '.join(clauses)})
             GROUP BY e.event_id
-            ORDER BY
-                {_alert_reference_queue_priority_sql("e")} ASC,
-                e.alert_time_utc ASC,
-                e.event_id ASC
+            ORDER BY due_queue_priority ASC, e.alert_time_utc ASC, e.event_id ASC
             LIMIT %s
         """
         params: list[Any] = [
+            list(_STAGE4_SIGNAL_OUTCOME_EVENT_TYPES),
+            _STAGE4_OUTCOME_METHOD_VERSION,
             _METHOD_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),
             list(canonical_price_path.COMPLETE_QUALITIES),
             _FIRST_TOUCH_METHOD_VERSION,
+            list(_STAGE4_SIGNAL_OUTCOME_EVENT_TYPES),
             _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
             *condition_params,
             max(1, min(int(limit), 1000)),
         ]
         return conn.execute(query, params).fetchall()
+
+    @staticmethod
+    def _load_due_stage4_candidate_page(
+        conn,
+        *,
+        cursor: Optional[tuple[Any, int]] = None,
+        page_size: int = _STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+    ) -> list[Dict[str, Any]]:
+        """Load one cheap keyset page before Stage-4 projection validation."""
+
+        due_clauses: list[str] = []
+        due_params: list[Any] = []
+        for horizon in _HORIZONS:
+            due_clauses.append(
+                """
+                (
+                    e.alert_time_utc <= NOW() - (%s * INTERVAL '1 minute')
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM research_alert_outcomes current_o
+                        WHERE current_o.event_id=e.event_id
+                          AND current_o.horizon_minutes=%s
+                          AND current_o.outcome_method_version=%s
+                          AND current_o.data_quality_status=ANY(%s)
+                    )
+                )
+                """
+            )
+            due_params.extend(
+                (
+                    horizon,
+                    horizon,
+                    _STAGE4_OUTCOME_METHOD_VERSION,
+                    list(canonical_price_path.COMPLETE_QUALITIES),
+                )
+            )
+        cursor_clause = ""
+        cursor_params: list[Any] = []
+        if cursor is not None:
+            cursor_clause = (
+                "AND (e.alert_time_utc, e.event_id) > (%s, %s)"
+            )
+            cursor_params.extend((_utc(cursor[0]), int(cursor[1])))
+        bounded_page = max(
+            1, min(int(page_size), _STAGE4_DUE_CANDIDATE_PAGE_SIZE)
+        )
+        query = f"""
+            /* research_outcomes:due_stage4_candidate_page */
+            SELECT e.event_id, e.alert_time_utc
+            FROM research_events e
+            WHERE e.event_kind='DECISION_SAMPLE'
+              AND e.delivery_status='NOT_APPLICABLE'
+              AND e.capture_stage=%s
+              AND e.strategy_version=%s
+              AND e.event_type=ANY(%s)
+              AND e.direction IN ('LONG', 'SHORT')
+              AND e.delivery_attempted_at_utc IS NULL
+              AND e.delivered_at_utc IS NULL
+              AND BTRIM(e.code_version)<>''
+              AND BTRIM(e.runtime_session_id)<>''
+              AND jsonb_typeof(e.categories)='array'
+              AND e.categories @> '["DECISION_SAMPLE","SILENT"]'::jsonb
+              AND e.engine_snapshot->'signal_snapshot'->>'contract_version'=%s
+              AND e.engine_snapshot->'signal_snapshot'->>'signal_family'=
+                    CASE e.event_type
+                        WHEN 'MAX_PAIN_CONFIRMATION_STATE' THEN 'MAX_PAIN'
+                        WHEN 'MAGNET_CONFIRMATION_STATE' THEN 'MAGNET'
+                        WHEN 'SILENT_COMBINED_CONFIRMATION_SNAPSHOT' THEN 'COMBINED'
+                    END
+              AND e.engine_snapshot->'signal_snapshot'->'formula_authorized'
+                    IS NOT DISTINCT FROM 'false'::jsonb
+              AND e.engine_snapshot->'signal_snapshot'->'outcome_authorized'
+                    IS NOT DISTINCT FROM 'false'::jsonb
+              AND e.engine_snapshot->'signal_snapshot'->'telegram_delivery_allowed'
+                    IS NOT DISTINCT FROM 'false'::jsonb
+              AND e.engine_snapshot->'signal_snapshot'->'trade_execution_allowed'
+                    IS NOT DISTINCT FROM 'false'::jsonb
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM research_outcome_event_rejections rejected
+                    WHERE rejected.event_id=e.event_id
+                      AND rejected.rejection_policy_version=%s
+              )
+              AND ({' OR '.join(due_clauses)})
+              {cursor_clause}
+            ORDER BY e.alert_time_utc ASC, e.event_id ASC
+            LIMIT %s
+        """
+        params: list[Any] = [
+            _STAGE4_SIGNAL_SNAPSHOT_CAPTURE_STAGE,
+            _STAGE4_SIGNAL_SNAPSHOT_STRATEGY_VERSION,
+            list(_STAGE4_SIGNAL_OUTCOME_EVENT_TYPES),
+            _STAGE4_SIGNAL_SNAPSHOT_CONTRACT_VERSION,
+            _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
+            *due_params,
+            *cursor_params,
+            bounded_page,
+        ]
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    @staticmethod
+    def _validate_and_hydrate_due_stage4_events(
+        conn, event_ids: Sequence[int]
+    ) -> list[Dict[str, Any]]:
+        """Validate only one bounded Stage-4 candidate page and hydrate it."""
+
+        normalized = sorted(
+            {int(event_id) for event_id in event_ids if int(event_id) > 0}
+        )
+        if not normalized:
+            return []
+        if len(normalized) > _STAGE4_DUE_CANDIDATE_PAGE_SIZE:
+            raise ValueError("Stage-4 due validation page exceeds its hard bound")
+        due_clauses: list[str] = []
+        due_params: list[Any] = []
+        for horizon in _HORIZONS:
+            due_clauses.append(
+                """
+                (
+                    e.alert_time_utc <= NOW() - (%s * INTERVAL '1 minute')
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM research_alert_outcomes current_o
+                        WHERE current_o.event_id=e.event_id
+                          AND current_o.horizon_minutes=%s
+                          AND current_o.outcome_method_version=%s
+                          AND current_o.data_quality_status=ANY(%s)
+                    )
+                )
+                """
+            )
+            due_params.extend(
+                (
+                    horizon,
+                    horizon,
+                    _STAGE4_OUTCOME_METHOD_VERSION,
+                    list(canonical_price_path.COMPLETE_QUALITIES),
+                )
+            )
+        query = """
+            /* research_outcomes:validate_due_stage4_page */
+            WITH candidate AS MATERIALIZED (
+                SELECT *
+                FROM research_events
+                WHERE event_id=ANY(%s)
+            )
+            SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+                   e.event_type, e.setup_key,
+                   e.event_kind, e.delivery_status,
+                   e.current_price, e.target_price, e.engine_snapshot,
+                   COALESCE(
+                       (
+                           SELECT jsonb_object_agg(
+                               o.horizon_minutes,
+                               CASE
+                                   WHEN o.outcome_method_version=%s
+                                    AND o.data_quality_status=ANY(%s)
+                                   THEN o.outcome_method_version
+                                   ELSE COALESCE(o.outcome_method_version, '')
+                                        || ':incomplete'
+                               END
+                           )
+                           FROM research_alert_outcomes o
+                           WHERE o.event_id=e.event_id
+                       ),
+                       '{}'::jsonb
+                   ) AS outcome_versions,
+                   '{}'::jsonb AS first_touch_versions,
+                   ARRAY[]::integer[] AS open_first_touch_horizons,
+                   NULL::timestamptz AS open_first_touch_observed_utc,
+                   0::integer AS due_queue_priority
+            FROM candidate e
+            WHERE e.event_kind='DECISION_SAMPLE'
+              AND e.delivery_status='NOT_APPLICABLE'
+              AND e.capture_stage=%s
+              AND e.strategy_version=%s
+              AND e.event_type=ANY(%s)
+              AND e.direction IN ('LONG', 'SHORT')
+              AND e.delivery_attempted_at_utc IS NULL
+              AND e.delivered_at_utc IS NULL
+              AND BTRIM(e.code_version)<>''
+              AND BTRIM(e.runtime_session_id)<>''
+              AND jsonb_typeof(e.categories)='array'
+              AND e.categories @> '["DECISION_SAMPLE","SILENT"]'::jsonb
+              AND e.engine_snapshot->'signal_snapshot'->>'contract_version'=%s
+              AND e.engine_snapshot->'signal_snapshot'->>'signal_family'=
+                    CASE e.event_type
+                        WHEN 'MAX_PAIN_CONFIRMATION_STATE' THEN 'MAX_PAIN'
+                        WHEN 'MAGNET_CONFIRMATION_STATE' THEN 'MAGNET'
+                        WHEN 'SILENT_COMBINED_CONFIRMATION_SNAPSHOT' THEN 'COMBINED'
+                    END
+              AND e.engine_snapshot->'signal_snapshot'->'formula_authorized'
+                    IS NOT DISTINCT FROM 'false'::jsonb
+              AND e.engine_snapshot->'signal_snapshot'->'outcome_authorized'
+                    IS NOT DISTINCT FROM 'false'::jsonb
+              AND e.engine_snapshot->'signal_snapshot'->'telegram_delivery_allowed'
+                    IS NOT DISTINCT FROM 'false'::jsonb
+              AND e.engine_snapshot->'signal_snapshot'->'trade_execution_allowed'
+                    IS NOT DISTINCT FROM 'false'::jsonb
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM research_outcome_event_rejections rejected
+                    WHERE rejected.event_id=e.event_id
+                      AND rejected.rejection_policy_version=%s
+              )
+              AND (__STAGE4_DUE_CLAUSES__)
+              AND EXISTS (
+                    SELECT 1
+                    FROM research_events projection
+                    CROSS JOIN LATERAL (
+                        SELECT
+                            COUNT(*) FILTER (
+                                WHERE symbol_evaluation->>'symbol'=e.symbol
+                            ) AS symbol_count,
+                            COUNT(*) FILTER (
+                                WHERE symbol_evaluation->>'symbol'=e.symbol
+                                  AND symbol_evaluation->>'status'='EVALUABLE'
+                                  AND symbol_evaluation->'reason'
+                                        IS NOT DISTINCT FROM 'null'::jsonb
+                            ) AS evaluable_symbol_count
+                        FROM jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(
+                                    projection.engine_snapshot->'projection'->'symbol_evaluations'
+                                )='array'
+                                THEN projection.engine_snapshot->'projection'->'symbol_evaluations'
+                                ELSE '[]'::jsonb
+                            END
+                        ) symbol_evaluation
+                    ) evaluation_partition
+                    WHERE projection.event_kind='DECISION_SAMPLE'
+                      AND projection.delivery_status='NOT_APPLICABLE'
+                      AND projection.capture_stage=%s
+                      AND projection.strategy_version=%s
+                      AND projection.event_type='SIGNAL_SNAPSHOT_PROJECTION'
+                      AND projection.symbol='RESEARCH'
+                      AND projection.direction='NEUTRAL'
+                      AND projection.delivery_attempted_at_utc IS NULL
+                      AND projection.delivered_at_utc IS NULL
+                      AND jsonb_typeof(projection.categories)='array'
+                      AND jsonb_array_length(projection.categories)=3
+                      AND projection.categories @>
+                            '["DECISION_SAMPLE","SILENT","COMPLETED"]'::jsonb
+                      AND projection.alert_time_utc=e.alert_time_utc
+                      AND projection.code_version=e.code_version
+                      AND projection.runtime_session_id=e.runtime_session_id
+                      AND projection.engine_snapshot->'signal_snapshot'->>'contract_version'=%s
+                      AND projection.engine_snapshot->'signal_snapshot'->>'signal_family'='PROJECTION'
+                      AND projection.engine_snapshot->'signal_snapshot'->>'tier'='COMPLETED'
+                      AND projection.engine_snapshot->'signal_snapshot'->'formula_authorized'
+                            IS NOT DISTINCT FROM 'false'::jsonb
+                      AND projection.engine_snapshot->'signal_snapshot'->'outcome_authorized'
+                            IS NOT DISTINCT FROM 'false'::jsonb
+                      AND projection.engine_snapshot->'signal_snapshot'->'telegram_delivery_allowed'
+                            IS NOT DISTINCT FROM 'false'::jsonb
+                      AND projection.engine_snapshot->'signal_snapshot'->'trade_execution_allowed'
+                            IS NOT DISTINCT FROM 'false'::jsonb
+                      AND projection.engine_snapshot->'projection'->>'status'='COMPLETED'
+                      AND projection.engine_snapshot->'projection'->>'decision_time_utc'=
+                            e.engine_snapshot->'signal_snapshot'->>'decision_time_utc'
+                      AND projection.engine_snapshot->'projection'->>'snapshot_key'
+                            ~ '^[0-9a-f]{64}$'
+                      AND projection.engine_snapshot->'projection'->>'snapshot_key'=
+                            e.engine_snapshot->'signal_snapshot'->'archive_reference'->>'snapshot_key'
+                      AND evaluation_partition.symbol_count=1
+                      AND evaluation_partition.evaluable_symbol_count=1
+              )
+            ORDER BY e.alert_time_utc ASC, e.event_id ASC
+        """
+        query = query.replace(
+            "__STAGE4_DUE_CLAUSES__", " OR ".join(due_clauses)
+        )
+        params: list[Any] = [
+            normalized,
+            _STAGE4_OUTCOME_METHOD_VERSION,
+            list(canonical_price_path.COMPLETE_QUALITIES),
+            _STAGE4_SIGNAL_SNAPSHOT_CAPTURE_STAGE,
+            _STAGE4_SIGNAL_SNAPSHOT_STRATEGY_VERSION,
+            list(_STAGE4_SIGNAL_OUTCOME_EVENT_TYPES),
+            _STAGE4_SIGNAL_SNAPSHOT_CONTRACT_VERSION,
+            _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
+            *due_params,
+            _STAGE4_SIGNAL_SNAPSHOT_CAPTURE_STAGE,
+            _STAGE4_SIGNAL_SNAPSHOT_STRATEGY_VERSION,
+            _STAGE4_SIGNAL_SNAPSHOT_CONTRACT_VERSION,
+        ]
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    @classmethod
+    def _load_due_stage4_events(
+        cls, conn, limit: int
+    ) -> list[Dict[str, Any]]:
+        """Keyset through Stage-4 candidates without invalid-row starvation."""
+
+        bounded_limit = max(1, min(int(limit), 1000))
+        accepted: list[Dict[str, Any]] = []
+        cursor: Optional[tuple[Any, int]] = None
+        while len(accepted) < bounded_limit:
+            page = cls._load_due_stage4_candidate_page(
+                conn,
+                cursor=cursor,
+                page_size=_STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+            )
+            if not page:
+                break
+            last = page[-1]
+            cursor = (last["alert_time_utc"], int(last["event_id"]))
+            accepted.extend(
+                cls._validate_and_hydrate_due_stage4_events(
+                    conn, [int(row["event_id"]) for row in page]
+                )
+            )
+            if len(page) < _STAGE4_DUE_CANDIDATE_PAGE_SIZE:
+                break
+        accepted.sort(
+            key=lambda row: (
+                _utc(row["alert_time_utc"]),
+                int(row["event_id"]),
+            )
+        )
+        return accepted[:bounded_limit]
+
+    @classmethod
+    def _load_due_events(cls, conn, limit: int) -> list[Dict[str, Any]]:
+        """Merge independently bounded due queues under the original order."""
+
+        bounded_limit = max(1, min(int(limit), 1000))
+        rows = [
+            *cls._load_due_legacy_and_prospective_events(conn, bounded_limit),
+            *cls._load_due_stage4_events(conn, bounded_limit),
+        ]
+        ordered = sorted(
+            (dict(row) for row in rows),
+            key=lambda row: (
+                int(row.get("due_queue_priority") or 0),
+                _utc(row["alert_time_utc"]),
+                int(row["event_id"]),
+            ),
+        )[:bounded_limit]
+        for row in ordered:
+            row.pop("due_queue_priority", None)
+        return ordered
 
     @staticmethod
     def _load_open_first_touch_events(conn, limit: int) -> list[Dict[str, Any]]:
@@ -1527,6 +2804,7 @@ class ResearchOutcomeWorker:
         complete: bool,
     ) -> bool:
         source = _path_source(reference_source, path_result)
+        outcome_method_version = _outcome_method_version_for_event(event)
         quality = canonical_price_path.quality_status(path_result, complete=complete)
         row = conn.execute(
             """
@@ -1598,7 +2876,7 @@ class ResearchOutcomeWorker:
                 path_metrics["target_reached"],
                 canonical_price_path.INTERVAL_SECONDS,
                 len(path_result["candles"]),
-                _METHOD_VERSION,
+                outcome_method_version,
                 source,
                 quality,
             ),
@@ -1721,6 +2999,142 @@ class ResearchOutcomeWorker:
         ).fetchone()
         return bool(row)
 
+    def _run_stage4_no_signal_once(
+        self, *, limit: int, now: datetime
+    ) -> Dict[str, Any]:
+        """Close missing no-signal labels without sharing legacy authority."""
+
+        database_url = _stage4_no_signal_database_url()
+        if not database_url:
+            return {
+                "configured": False,
+                "checked": 0,
+                "inserted": 0,
+                "missing_price_paths": 0,
+            }
+        if psycopg is None:
+            raise RuntimeError("psycopg is unavailable for no-signal outcomes")
+        _assert_stage4_no_signal_database_target(database_url)
+        with psycopg.connect(
+            database_url,
+            row_factory=dict_row,
+            connect_timeout=5,
+            options=_stage4_no_signal_connection_options(),
+        ) as conn:
+            cells = self._load_due_stage4_no_signal_cells(
+                conn, limit=limit, now=now
+            )
+
+        groups: Dict[tuple[int, str], list[Dict[str, Any]]] = {}
+        for raw in cells:
+            cell = dict(raw)
+            groups.setdefault(
+                (int(cell["projection_event_id"]), str(cell["symbol"]).upper()),
+                [],
+            ).append(cell)
+
+        prepared: list[Dict[str, Any]] = []
+        failures = 0
+        for (projection_event_id, symbol), group in sorted(groups.items()):
+            try:
+                references = [
+                    _stage4_no_signal_frozen_price_reference(cell)
+                    for cell in group
+                ]
+                first_price, first_source, first_receipt = references[0]
+                if any(
+                    price != first_price
+                    or source != first_source
+                    or receipt != first_receipt
+                    for price, source, receipt in references[1:]
+                ):
+                    raise ValueError("no-signal direction cells disagree on reference")
+                event_time = _utc(group[0]["decision_time_utc"])
+                horizons = sorted(
+                    {
+                        int(horizon)
+                        for cell in group
+                        for horizon in cell.get("due_horizons") or ()
+                    }
+                )
+                if not horizons:
+                    continue
+                maximum_cutoff = event_time + timedelta(minutes=max(horizons))
+                if maximum_cutoff > now:
+                    raise ValueError("no-signal horizon is not fully closed")
+                path_result = canonical_price_path.fetch_closed_candles(
+                    symbol, event_time, maximum_cutoff
+                )
+                route = canonical_price_path.validated_route(
+                    symbol, path_result, require_complete=True
+                )
+                if route.get("provider_provenance") != (
+                    "EXCHANGE_API_HISTORICAL_CANDLES_IMPORTED"
+                ):
+                    raise ValueError("no-signal path provenance is not canonical")
+                provenance_error = _canonical_path_provenance_error(
+                    symbol, path_result
+                )
+                if provenance_error is not None:
+                    raise ValueError(provenance_error)
+                full_path = list(path_result.get("candles") or ())
+                full_expected = _expected_candles(event_time, maximum_cutoff)
+                if full_expected <= 0 or len(full_path) != full_expected:
+                    raise ValueError("incomplete closed-candle path")
+                for cell in group:
+                    for horizon in cell.get("due_horizons") or ():
+                        horizon_cutoff = event_time + timedelta(minutes=int(horizon))
+                        candles = _candles_for_horizon(full_path, horizon_cutoff)
+                        expected = _expected_candles(event_time, horizon_cutoff)
+                        if expected <= 0 or len(candles) != expected:
+                            failures += 1
+                            continue
+                        metrics = binance_spot_price_path.calculate_path_metrics(
+                            reference_price=first_price,
+                            direction=str(cell["direction"]),
+                            event_time=event_time,
+                            candles=candles,
+                            target_price=None,
+                        )
+                        bounded_path = dict(path_result)
+                        bounded_path["candles"] = candles
+                        prepared.append(
+                            {
+                                "cell": cell,
+                                "horizon": int(horizon),
+                                "reference_price": first_price,
+                                "reference_source": first_source,
+                                "reference_receipt": first_receipt,
+                                "path_result": bounded_path,
+                                "path_metrics": metrics,
+                            }
+                        )
+            except Exception as exc:
+                failures += len(group)
+                print(
+                    "[research-outcomes] Stage-4 no-signal path unavailable "
+                    f"projection={projection_event_id} symbol={symbol}: {exc!r}",
+                    flush=True,
+                )
+
+        inserted = 0
+        if prepared:
+            with psycopg.connect(
+                database_url,
+                row_factory=dict_row,
+                connect_timeout=5,
+                options=_stage4_no_signal_connection_options(),
+            ) as conn:
+                for outcome in prepared:
+                    if self._write_stage4_no_signal_outcome(conn, **outcome):
+                        inserted += 1
+        return {
+            "configured": True,
+            "checked": len(cells),
+            "inserted": inserted,
+            "missing_price_paths": failures,
+        }
+
     def run_once(self, *, limit_per_horizon: int = 200) -> Dict[str, Any]:
         url = _database_url()
         if not _ENABLED:
@@ -1745,17 +3159,57 @@ class ResearchOutcomeWorker:
         prepared: list[Dict[str, Any]] = []
         unavailable_symbols: Dict[str, str] = {}
         unavailable_event_counts: Dict[str, int] = {}
+        self.metrics.last_error = None
+        self.metrics.last_error_phase = None
+
+        # Keep this bounded carrier ahead of the legacy queue: a timeout in a
+        # legacy load must not starve explicit no-signal outcome progress.
+        no_signal_result = {
+            "configured": bool(_stage4_no_signal_database_url()),
+            "checked": 0,
+            "inserted": 0,
+            "missing_price_paths": 0,
+        }
+        try:
+            no_signal_result = self._run_stage4_no_signal_once(
+                limit=limit_per_horizon,
+                now=now,
+            )
+            self.metrics.stage4_no_signal_last_error = None
+        except Exception as exc:
+            self.metrics.stage4_no_signal_failures += 1
+            self.metrics.stage4_no_signal_last_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            print(
+                "[research-outcomes] isolated Stage-4 no-signal carrier "
+                f"failure: {exc!r}",
+                flush=True,
+            )
+        self.metrics.stage4_no_signal_cells_checked += int(
+            no_signal_result["checked"]
+        )
+        self.metrics.stage4_no_signal_outcomes_inserted += int(
+            no_signal_result["inserted"]
+        )
+        self.metrics.stage4_no_signal_missing_price_paths += int(
+            no_signal_result["missing_price_paths"]
+        )
 
         with psycopg.connect(
             url,
             row_factory=dict_row,
             connect_timeout=5,
-            options="-c statement_timeout=15000 -c lock_timeout=1000",
+            options=_database_connection_options(),
         ) as conn:
-            open_events = self._load_open_first_touch_events(
-                conn, limit_per_horizon
-            )
-            closed_events = self._load_due_events(conn, limit_per_horizon)
+            with self._phase("LOAD_OPEN_FIRST_TOUCH"):
+                open_events = self._load_open_first_touch_events(
+                    conn, limit_per_horizon
+                )
+            with self._phase("LOAD_DUE_EVENTS"):
+                closed_events = self._load_due_events(
+                    conn, limit_per_horizon
+                )
             # The reserved open queue is intentionally first.  Merge a rare
             # boundary duplicate so one event still causes one canonical path
             # fetch even if another horizon closed in the same minute.
@@ -1793,20 +3247,25 @@ class ResearchOutcomeWorker:
             legacy_event_ids = [
                 event_id
                 for event_id in event_order
-                if _prospective_sampler_version(events_by_id[event_id])
+                if not _is_stage4_signal_outcome_event(
+                    events_by_id[event_id]
+                )
+                and _prospective_sampler_version(events_by_id[event_id])
                 != _STRICT_PROSPECTIVE_SAMPLER_VERSION
             ]
-            frozen_references = self._load_frozen_threshold_references(
-                conn, legacy_event_ids
-            )
+            with self._phase("LOAD_FROZEN_THRESHOLDS"):
+                frozen_references = self._load_frozen_threshold_references(
+                    conn, legacy_event_ids
+                )
             references_by_event: Dict[int, list[Dict[str, Any]]] = {}
             for reference in frozen_references:
                 references_by_event.setdefault(
                     int(reference["event_id"]), []
                 ).append(reference)
-        slot_references_by_event = (
-            self._load_current_slot_threshold_references(events, now=now)
-        )
+        with self._phase("LOAD_CURRENT_SLOT_THRESHOLDS"):
+            slot_references_by_event = (
+                self._load_current_slot_threshold_references(events, now=now)
+            )
         for event in events:
             event_id = int(event["event_id"])
             if (
@@ -1828,13 +3287,14 @@ class ResearchOutcomeWorker:
             event_time = _utc(event["alert_time_utc"])
             versions = _versions(event.get("outcome_versions"))
             first_touch_versions = _versions(event.get("first_touch_versions"))
+            outcome_method_version = _outcome_method_version_for_event(event)
             horizons = _due_horizons(
                 event_time,
                 versions,
                 first_touch_versions,
                 now=now,
-                first_touch_enabled=str(event.get("direction") or "").upper()
-                in {"LONG", "SHORT"},
+                outcome_method_version=outcome_method_version,
+                first_touch_enabled=_first_touch_enabled_for_event(event),
                 open_first_touch_horizons=(
                     event.get("open_first_touch_horizons") or ()
                 ),
@@ -1865,16 +3325,14 @@ class ResearchOutcomeWorker:
             # fetch when first-touch is the event's only remaining work.
             legacy_horizons: set[int] = set()
             threshold_policies: Dict[int, Dict[str, Any]] = {}
-            first_touch_enabled = str(
-                event.get("direction") or ""
-            ).upper() in {"LONG", "SHORT"}
+            first_touch_enabled = _first_touch_enabled_for_event(event)
             for horizon in horizons:
                 horizon_closed = now >= (
                     event_time + timedelta(minutes=horizon)
                 )
                 if (
                     horizon_closed
-                    and versions.get(horizon) != _METHOD_VERSION
+                    and versions.get(horizon) != outcome_method_version
                 ):
                     legacy_horizons.add(horizon)
                 if (
@@ -1907,6 +3365,30 @@ class ResearchOutcomeWorker:
                 or horizon in threshold_policies
             ]
             if not path_horizons:
+                continue
+
+            try:
+                if _is_stage4_signal_outcome_event(event):
+                    reference_price, reference_source = (
+                        _stage4_frozen_price_reference(event)
+                    )
+                else:
+                    reference_value = event.get("current_price")
+                    reference_price = float(reference_value)
+                    if reference_price <= 0:
+                        raise ValueError
+                    reference_source = _snapshot_price_source(
+                        event.get("engine_snapshot")
+                    )
+            except (TypeError, ValueError, OverflowError) as exc:
+                # A later path cannot repair missing, stale or mismatched
+                # immutable decision-time evidence.
+                path_failures += 1
+                print(
+                    "[research-outcomes] immutable decision price unavailable "
+                    f"event={event['event_id']} symbol={symbol}; skipped: {exc}",
+                    flush=True,
+                )
                 continue
 
             max_horizon = max(path_horizons)
@@ -1950,25 +3432,6 @@ class ResearchOutcomeWorker:
                 path_failures += 1
                 unavailable_symbols[symbol] = "empty closed-candle path"
                 unavailable_event_counts[symbol] = 1
-                continue
-
-            reference_value = event.get("current_price")
-            reference_source = _snapshot_price_source(event.get("engine_snapshot"))
-            try:
-                reference_price = float(reference_value)
-                if reference_price <= 0:
-                    raise ValueError
-            except (TypeError, ValueError):
-                # The first full candle opens after the decision and therefore
-                # cannot replace a missing immutable decision-time price.
-                # Skipping is the only look-ahead-safe behavior; a later retry
-                # may succeed only if the archived event itself is complete.
-                path_failures += 1
-                print(
-                    "[research-outcomes] immutable decision price unavailable "
-                    f"event={event['event_id']} symbol={symbol}; skipped",
-                    flush=True,
-                )
                 continue
 
             for horizon in path_horizons:
@@ -2053,15 +3516,16 @@ class ResearchOutcomeWorker:
                 )
 
         if rejected_alerts:
-            with psycopg.connect(
-                url,
-                row_factory=dict_row,
-                connect_timeout=5,
-                options="-c statement_timeout=15000 -c lock_timeout=1000",
-            ) as conn:
-                newly_quarantined = self._write_alert_reference_rejections(
-                    conn, rejected_alerts
-                )
+            with self._phase("WRITE_REJECTIONS"):
+                with psycopg.connect(
+                    url,
+                    row_factory=dict_row,
+                    connect_timeout=5,
+                    options=_database_connection_options(),
+                ) as conn:
+                    newly_quarantined = self._write_alert_reference_rejections(
+                        conn, rejected_alerts
+                    )
             by_route: Dict[str, int] = {}
             for rejected in rejected_alerts:
                 route = (
@@ -2093,52 +3557,53 @@ class ResearchOutcomeWorker:
             )
 
         if prepared:
-            with psycopg.connect(
-                url,
-                row_factory=dict_row,
-                connect_timeout=5,
-                options="-c statement_timeout=15000 -c lock_timeout=1000",
-            ) as conn:
-                for outcome in prepared:
-                    if (
-                        outcome["first_touch_needed"]
-                        and outcome["first_touch_write_safe"]
-                    ):
-                        touch_written = self._write_first_touch_outcome(
-                            conn,
-                            event=outcome["event"],
-                            horizon=outcome["horizon"],
-                            reference_price=outcome["reference_price"],
-                            reference_source=outcome["reference_source"],
-                            path_result=outcome["path_result"],
-                            first_touch=outcome["first_touch"],
-                            complete=outcome["complete"],
-                        )
-                        if touch_written:
-                            first_touch_written += 1
-                            first_touch_hits += int(
-                                outcome["first_touch"]["status"] == "HIT"
+            with self._phase("WRITE_OUTCOMES"):
+                with psycopg.connect(
+                    url,
+                    row_factory=dict_row,
+                    connect_timeout=5,
+                    options=_database_connection_options(),
+                ) as conn:
+                    for outcome in prepared:
+                        if (
+                            outcome["first_touch_needed"]
+                            and outcome["first_touch_write_safe"]
+                        ):
+                            touch_written = self._write_first_touch_outcome(
+                                conn,
+                                event=outcome["event"],
+                                horizon=outcome["horizon"],
+                                reference_price=outcome["reference_price"],
+                                reference_source=outcome["reference_source"],
+                                path_result=outcome["path_result"],
+                                first_touch=outcome["first_touch"],
+                                complete=outcome["complete"],
                             )
-                            first_touch_pending += int(
-                                outcome["first_touch"]["status"] == "PENDING"
+                            if touch_written:
+                                first_touch_written += 1
+                                first_touch_hits += int(
+                                    outcome["first_touch"]["status"] == "HIT"
+                                )
+                                first_touch_pending += int(
+                                    outcome["first_touch"]["status"] == "PENDING"
+                                )
+                        if outcome["legacy_needed"]:
+                            written = self._write_outcome(
+                                conn,
+                                event=outcome["event"],
+                                horizon=outcome["horizon"],
+                                reference_price=outcome["reference_price"],
+                                reference_source=outcome["reference_source"],
+                                path_result=outcome["path_result"],
+                                path_metrics=outcome["path_metrics"],
+                                complete=outcome["full_complete"],
                             )
-                    if outcome["legacy_needed"]:
-                        written = self._write_outcome(
-                            conn,
-                            event=outcome["event"],
-                            horizon=outcome["horizon"],
-                            reference_price=outcome["reference_price"],
-                            reference_source=outcome["reference_source"],
-                            path_result=outcome["path_result"],
-                            path_metrics=outcome["path_metrics"],
-                            complete=outcome["full_complete"],
-                        )
-                        if not written:
-                            continue
-                        if outcome["upgrade"]:
-                            upgraded += 1
-                        else:
-                            inserted += 1
+                            if not written:
+                                continue
+                            if outcome["upgrade"]:
+                                upgraded += 1
+                            else:
+                                inserted += 1
 
         self.metrics.runs += 1
         self.metrics.events_checked += checked
@@ -2160,6 +3625,7 @@ class ResearchOutcomeWorker:
         )
         self.metrics.last_run_utc = datetime.now(timezone.utc).isoformat()
         self.metrics.last_error = None
+        self.metrics.last_error_phase = None
         return {
             "enabled": True,
             "checked": checked,
@@ -2183,6 +3649,7 @@ class ResearchOutcomeWorker:
                 symbol: unavailable_event_counts[symbol]
                 for symbol in sorted(unavailable_symbols)
             },
+            "stage4_no_signal": no_signal_result,
         }
 
 

@@ -280,7 +280,13 @@ def _run_once_with_path(
     return result, captured_writes
 
 
-def _run_closed_current_slot_once(*, slot_authority, legacy_complete=True):
+def _run_closed_current_slot_once(
+    *,
+    slot_authority,
+    legacy_complete=True,
+    event_type="SELFTEST",
+    stage4_reference_price=100.0,
+):
     """Exercise the closed queue through the real slot-authority method."""
     now = datetime.now(timezone.utc)
     event_time = now.replace(second=0, microsecond=0) - timedelta(minutes=61)
@@ -289,7 +295,7 @@ def _run_closed_current_slot_once(*, slot_authority, legacy_complete=True):
         "alert_time_utc": event_time,
         "symbol": "BTC",
         "direction": "LONG",
-        "event_type": "SELFTEST",
+        "event_type": event_type,
         "setup_key": "SELFTEST",
         "event_kind": "DECISION_SAMPLE",
         "delivery_status": "NOT_APPLICABLE",
@@ -313,6 +319,23 @@ def _run_closed_current_slot_once(*, slot_authority, legacy_complete=True):
         "first_touch_versions": {},
         "open_first_touch_horizons": [],
     }
+    if event_type in worker._STAGE4_SIGNAL_OUTCOME_EVENT_TYPES:
+        event["engine_snapshot"]["signal_snapshot"] = {
+            "archive_reference": {
+                "snapshot_set_id": 17,
+                "snapshot_key": "a" * 64,
+                "official_price": {
+                    "price": stage4_reference_price,
+                    "source": "binance_spot",
+                    "exchange": "binance",
+                    "market": "spot",
+                    "pair": "BTCUSDT",
+                    "instrument": "BTC",
+                    "observed_at_utc": event_time - timedelta(minutes=20),
+                    "fetched_at_utc": event_time - timedelta(minutes=10),
+                },
+            }
+        }
     slot_row = _slot_authority_row(event, 60)
     loader_calls = []
     formula_event_id_calls = []
@@ -446,6 +469,31 @@ def run() -> None:
         {60: research_no_dwell_outcome.METHOD_VERSION},
         now=after_one_hour,
     ) == []
+    assert worker._STAGE4_OUTCOME_METHOD_VERSION != canonical_price_path.METHOD_VERSION
+    stage4_method_event = {
+        "event_type": "MAX_PAIN_CONFIRMATION_STATE",
+        "direction": "LONG",
+    }
+    assert worker._outcome_method_version_for_event(stage4_method_event) == (
+        worker._STAGE4_OUTCOME_METHOD_VERSION
+    )
+    assert worker._outcome_method_version_for_event(
+        {"event_type": "ALERT", "direction": "LONG"}
+    ) == canonical_price_path.METHOD_VERSION
+    assert worker._due_horizons(
+        START,
+        {60: worker._STAGE4_OUTCOME_METHOD_VERSION},
+        now=after_one_hour,
+        outcome_method_version=worker._STAGE4_OUTCOME_METHOD_VERSION,
+        first_touch_enabled=False,
+    ) == []
+    assert worker._due_horizons(
+        START,
+        {60: canonical_price_path.METHOD_VERSION},
+        now=after_one_hour,
+        outcome_method_version=worker._STAGE4_OUTCOME_METHOD_VERSION,
+        first_touch_enabled=False,
+    ) == [60]
 
     assert worker._latest_closed_candle_cutoff(
         datetime(2026, 8, 29, 18, 51, 0, tzinfo=timezone.utc)
@@ -459,17 +507,311 @@ def run() -> None:
     assert worker._first_touch_write_is_safe(
         {"status": "HIT"}, observed_prefix_complete=True
     )
+    for stage4_type in worker._STAGE4_SIGNAL_OUTCOME_EVENT_TYPES:
+        assert not worker._first_touch_enabled_for_event(
+            {"event_type": stage4_type, "direction": "LONG"}
+        )
+        assert not worker._first_touch_enabled_for_event(
+            {"event_type": stage4_type, "direction": "SHORT"}
+        )
+    assert worker._first_touch_enabled_for_event(
+        {"event_type": "PROSPECTIVE_SHADOW_SAMPLE", "direction": "LONG"}
+    )
+    assert not worker._first_touch_enabled_for_event(
+        {"event_type": "PROSPECTIVE_SHADOW_SAMPLE", "direction": "NEUTRAL"}
+    )
+
+    legacy_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._load_due_legacy_and_prospective_events(
+        legacy_capture, 200
+    ) == []
+    assert legacy_capture.query.count("%s") == len(legacy_capture.params)
+    assert "ARRAY[]::integer[] AS open_first_touch_horizons" in legacy_capture.query
+    assert "e.event_kind, e.delivery_status" in legacy_capture.query
+    assert "research_formula_shadow_checks open_check" not in legacy_capture.query
+    assert "research_outcome_event_rejections rejected" in legacy_capture.query
+    assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in legacy_capture.params
+    assert "research_outcomes:due_legacy_and_prospective" in legacy_capture.query
+    assert "jsonb_array_elements" not in legacy_capture.query
+    assert "SIGNAL_SNAPSHOT_PROJECTION" not in legacy_capture.query
+    assert "due_queue_priority" in legacy_capture.query
+
+    candidate_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._load_due_stage4_candidate_page(
+        candidate_capture
+    ) == []
+    assert candidate_capture.query.count("%s") == len(candidate_capture.params)
+    assert "research_outcomes:due_stage4_candidate_page" in candidate_capture.query
+    assert "jsonb_array_elements" not in candidate_capture.query
+    assert "SIGNAL_SNAPSHOT_PROJECTION" not in candidate_capture.query
+    assert "(e.alert_time_utc, e.event_id) >" not in candidate_capture.query
+    assert candidate_capture.params[-1] == worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+
+    paged_candidate_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._load_due_stage4_candidate_page(
+        paged_candidate_capture,
+        cursor=(START, 99),
+        page_size=9999,
+    ) == []
+    assert paged_candidate_capture.query.count("%s") == len(
+        paged_candidate_capture.params
+    )
+    assert "(e.alert_time_utc, e.event_id) > (%s, %s)" in (
+        paged_candidate_capture.query
+    )
+    assert paged_candidate_capture.params[-3:-1] == [START, 99]
+    assert paged_candidate_capture.params[-1] == (
+        worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    )
 
     closed_capture = _CaptureResult()
-    assert worker.ResearchOutcomeWorker._load_due_events(
-        closed_capture, 200
+    assert worker.ResearchOutcomeWorker._validate_and_hydrate_due_stage4_events(
+        closed_capture, [2, 1, 2]
     ) == []
     assert closed_capture.query.count("%s") == len(closed_capture.params)
-    assert "ARRAY[]::integer[] AS open_first_touch_horizons" in closed_capture.query
-    assert "e.event_kind, e.delivery_status" in closed_capture.query
-    assert "research_formula_shadow_checks open_check" not in closed_capture.query
+    assert "research_outcomes:validate_due_stage4_page" in closed_capture.query
+    assert closed_capture.params[0] == [1, 2]
+    assert closed_capture.query.count("jsonb_array_elements(") == 1
+    assert "COUNT(*) FILTER" in closed_capture.query
+    assert "evaluation_partition.symbol_count=1" in closed_capture.query
+    assert "evaluation_partition.evaluable_symbol_count=1" in closed_capture.query
     assert "research_outcome_event_rejections rejected" in closed_capture.query
     assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in closed_capture.params
+    assert closed_capture.query.count(
+        "FROM research_alert_outcomes current_o"
+    ) == len(worker._HORIZONS)
+    assert closed_capture.query.count(
+        "e.alert_time_utc <= NOW() - (%s * INTERVAL '1 minute')"
+    ) == len(worker._HORIZONS)
+    for required in (
+        "e.capture_stage=%s",
+        "e.strategy_version=%s",
+        "e.event_type=ANY(%s)",
+        "e.delivery_attempted_at_utc IS NULL",
+        "e.delivered_at_utc IS NULL",
+        "BTRIM(e.code_version)<>''",
+        "BTRIM(e.runtime_session_id)<>''",
+        "jsonb_typeof(e.categories)='array'",
+        "e.categories @> '[\"DECISION_SAMPLE\",\"SILENT\"]'::jsonb",
+        "e.engine_snapshot->'signal_snapshot'->>'contract_version'=%s",
+        "WHEN 'MAX_PAIN_CONFIRMATION_STATE' THEN 'MAX_PAIN'",
+        "WHEN 'MAGNET_CONFIRMATION_STATE' THEN 'MAGNET'",
+        "WHEN 'SILENT_COMBINED_CONFIRMATION_SNAPSHOT' THEN 'COMBINED'",
+        "projection.event_type='SIGNAL_SNAPSHOT_PROJECTION'",
+        "projection.symbol='RESEARCH'",
+        "projection.direction='NEUTRAL'",
+        "projection.delivery_attempted_at_utc IS NULL",
+        "projection.delivered_at_utc IS NULL",
+        "jsonb_typeof(projection.categories)='array'",
+        "jsonb_array_length(projection.categories)=3",
+        "'[\"DECISION_SAMPLE\",\"SILENT\",\"COMPLETED\"]'::jsonb",
+        "projection.alert_time_utc=e.alert_time_utc",
+        "projection.code_version=e.code_version",
+        "projection.runtime_session_id=e.runtime_session_id",
+        "projection.engine_snapshot->'projection'->>'status'='COMPLETED'",
+        "projection.engine_snapshot->'signal_snapshot'->>'tier'='COMPLETED'",
+        "projection.engine_snapshot->'projection'->>'decision_time_utc'=",
+        "e.engine_snapshot->'signal_snapshot'->>'decision_time_utc'",
+        "projection.engine_snapshot->'projection'->>'snapshot_key'",
+        "~ '^[0-9a-f]{64}$'",
+        "e.engine_snapshot->'signal_snapshot'->'archive_reference'->>'snapshot_key'",
+        "projection.engine_snapshot->'projection'->'symbol_evaluations'",
+        "symbol_evaluation->>'symbol'=e.symbol",
+        "symbol_evaluation->>'status'='EVALUABLE'",
+        "symbol_evaluation->'reason'",
+        "IS NOT DISTINCT FROM 'null'::jsonb",
+    ):
+        assert required in closed_capture.query
+    # Both the signal and its receipt are independently required to carry
+    # every downstream authority flag as exact JSON false.
+    for authority_flag in (
+        "formula_authorized",
+        "outcome_authorized",
+        "telegram_delivery_allowed",
+        "trade_execution_allowed",
+    ):
+        assert closed_capture.query.count(
+            f"->'{authority_flag}'"
+        ) == 2
+    assert closed_capture.query.count("IS NOT DISTINCT FROM 'false'::jsonb") == 8
+    # Closed-horizon admission is an exact three-type allowlist.  Projection,
+    # arbitrary Decision Samples and incomplete receipts cannot widen it.
+    stage4_type_params = [
+        value
+        for value in closed_capture.params
+        if value == list(worker._STAGE4_SIGNAL_OUTCOME_EVENT_TYPES)
+    ]
+    assert len(stage4_type_params) == 1
+    assert worker._STAGE4_OUTCOME_METHOD_VERSION in closed_capture.params
+    assert "WHEN e.event_type=ANY(%s) THEN %s" in legacy_capture.query
+    assert legacy_capture.query.count(
+        "AND NOT (e.event_type=ANY(%s))"
+    ) == len(worker._HORIZONS) + 1
+    assert "SIGNAL_SNAPSHOT_PROJECTION" not in stage4_type_params[0]
+    assert "PROSPECTIVE_SHADOW_SAMPLE" not in stage4_type_params[0]
+    assert "MISSED_CAUSAL_WINDOW" not in closed_capture.query
+    assert "projection.engine_snapshot->'projection'->>'status'='UNEVALUABLE'" not in (
+        closed_capture.query
+    )
+
+    # Keyset paging must continue past a complete invalid page instead of
+    # starving the first later valid Stage-4 event.
+    original_candidate_page = worker.ResearchOutcomeWorker.__dict__[
+        "_load_due_stage4_candidate_page"
+    ]
+    original_stage4_validator = worker.ResearchOutcomeWorker.__dict__[
+        "_validate_and_hydrate_due_stage4_events"
+    ]
+    candidate_pages = [
+        [
+            {
+                "event_id": event_id,
+                "alert_time_utc": START + timedelta(seconds=event_id),
+            }
+            for event_id in range(1, 257)
+        ],
+        [
+            {
+                "event_id": 257,
+                "alert_time_utc": START + timedelta(seconds=257),
+            }
+        ],
+    ]
+    seen_cursors = []
+
+    def fake_candidate_page(_conn, *, cursor=None, page_size=256):
+        seen_cursors.append(cursor)
+        assert page_size == worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+        return candidate_pages[len(seen_cursors) - 1]
+
+    def fake_stage4_validation(_conn, event_ids):
+        if 257 not in event_ids:
+            return []
+        return [
+            {
+                "event_id": 257,
+                "alert_time_utc": START + timedelta(seconds=257),
+                "due_queue_priority": 0,
+            }
+        ]
+
+    try:
+        worker.ResearchOutcomeWorker._load_due_stage4_candidate_page = staticmethod(
+            fake_candidate_page
+        )
+        worker.ResearchOutcomeWorker._validate_and_hydrate_due_stage4_events = (
+            staticmethod(fake_stage4_validation)
+        )
+        paged = worker.ResearchOutcomeWorker._load_due_stage4_events(object(), 1)
+    finally:
+        worker.ResearchOutcomeWorker._load_due_stage4_candidate_page = (
+            original_candidate_page
+        )
+        worker.ResearchOutcomeWorker._validate_and_hydrate_due_stage4_events = (
+            original_stage4_validator
+        )
+    assert [row["event_id"] for row in paged] == [257]
+    assert seen_cursors == [
+        None,
+        (START + timedelta(seconds=256), 256),
+    ]
+
+    # The final merge retains the original global queue ordering.  Delivered
+    # Alerts stay on the legacy path even if their event_type text resembles a
+    # Stage-4 type, and the internal priority column is not exposed downstream.
+    original_legacy_loader = worker.ResearchOutcomeWorker.__dict__[
+        "_load_due_legacy_and_prospective_events"
+    ]
+    original_stage4_loader = worker.ResearchOutcomeWorker.__dict__[
+        "_load_due_stage4_events"
+    ]
+    legacy_rows = [
+        {
+            "event_id": 10,
+            "event_kind": "ALERT",
+            "event_type": "MAX_PAIN_CONFIRMATION_STATE",
+            "alert_time_utc": START + timedelta(seconds=10),
+            "due_queue_priority": 0,
+        },
+        {
+            "event_id": 11,
+            "event_kind": "ALERT",
+            "event_type": "LEGACY",
+            "alert_time_utc": START,
+            "due_queue_priority": 1,
+        },
+    ]
+    stage4_rows = [
+        {
+            "event_id": 12,
+            "event_kind": "DECISION_SAMPLE",
+            "event_type": "MAX_PAIN_CONFIRMATION_STATE",
+            "alert_time_utc": START + timedelta(seconds=5),
+            "due_queue_priority": 0,
+        },
+        {
+            "event_id": 13,
+            "event_kind": "DECISION_SAMPLE",
+            "event_type": "MAGNET_CONFIRMATION_STATE",
+            "alert_time_utc": START + timedelta(seconds=20),
+            "due_queue_priority": 0,
+        },
+    ]
+    try:
+        worker.ResearchOutcomeWorker._load_due_legacy_and_prospective_events = (
+            staticmethod(lambda _conn, _limit: legacy_rows)
+        )
+        worker.ResearchOutcomeWorker._load_due_stage4_events = classmethod(
+            lambda _cls, _conn, _limit: stage4_rows
+        )
+        merged = worker.ResearchOutcomeWorker._load_due_events(object(), 3)
+    finally:
+        worker.ResearchOutcomeWorker._load_due_legacy_and_prospective_events = (
+            original_legacy_loader
+        )
+        worker.ResearchOutcomeWorker._load_due_stage4_events = (
+            original_stage4_loader
+        )
+    assert [row["event_id"] for row in merged] == [12, 10, 13]
+    assert merged[1]["event_kind"] == "ALERT"
+    assert all("due_queue_priority" not in row for row in merged)
+
+    # Even a sampler-shaped Stage-4 event must not ask the current-slot loader
+    # for First-Touch authority.
+    no_first_touch_loader_calls = []
+    original_slot_loader = (
+        worker.research_feature_matrix.load_shadow_feature_rows_by_horizon
+    )
+    worker.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+        lambda requested: no_first_touch_loader_calls.append(requested) or {}
+    )
+    try:
+        assert worker.ResearchOutcomeWorker._load_current_slot_threshold_references(
+            [
+                {
+                    "event_id": 42,
+                    "event_type": "MAX_PAIN_CONFIRMATION_STATE",
+                    "direction": "LONG",
+                    "alert_time_utc": START,
+                    "engine_snapshot": {
+                        "prospective_anchor": {
+                            "sampler_version": (
+                                worker._STRICT_PROSPECTIVE_SAMPLER_VERSION
+                            )
+                        }
+                    },
+                    "outcome_versions": {},
+                    "first_touch_versions": {},
+                    "open_first_touch_horizons": [60],
+                }
+            ],
+            now=START + timedelta(minutes=61),
+        ) == {}
+    finally:
+        worker.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+            original_slot_loader
+        )
+    assert no_first_touch_loader_calls == []
 
     captured = _CaptureResult()
     assert worker.ResearchOutcomeWorker._load_open_first_touch_events(
@@ -588,6 +930,214 @@ def run() -> None:
         }
     ) is None
 
+    combined_archive_snapshot = {
+        "signal_snapshot": {
+            "archive_reference": {
+                "official_price": {
+                    "source": "binance_spot",
+                    "exchange": "binance",
+                    "market": "spot",
+                    "pair": "BTCUSDT",
+                    "instrument": "BTC",
+                }
+            }
+        }
+    }
+    assert worker._snapshot_price_provenance(combined_archive_snapshot) == {
+        "source": "binance_spot",
+        "exchange": "binance",
+        "market": "spot",
+        "pair": "BTCUSDT",
+        "instrument": "BTC",
+    }
+    assert worker._snapshot_price_source(combined_archive_snapshot) == (
+        "binance_spot:BTCUSDT"
+    )
+    hype_archive_snapshot = copy.deepcopy(combined_archive_snapshot)
+    hype_archive_snapshot["signal_snapshot"]["archive_reference"][
+        "official_price"
+    ] = {
+        "source": "hyperliquid",
+        "exchange": "hyperliquid",
+        "market": "spot",
+        "pair": "HYPE/USDT",
+        "instrument": "@107",
+    }
+    assert worker._snapshot_price_provenance(hype_archive_snapshot) == {
+        "source": "hyperliquid",
+        "exchange": "hyperliquid",
+        "market": "spot",
+        "pair": "HYPE/USDT",
+        "instrument": "@107",
+    }
+    # The nested archive is fallback-only: established public fields retain
+    # precedence for older event shapes.
+    assert worker._snapshot_price_provenance(
+        {
+            **combined_archive_snapshot,
+            "price_source": "top_level_source",
+            "price_pair": "TOPUSDT",
+            "market_evidence": {"price_market": "public_spot"},
+        }
+    ) == {
+        "source": "top_level_source",
+        "exchange": "binance",
+        "market": "public_spot",
+        "pair": "TOPUSDT",
+        "instrument": "BTC",
+    }
+
+    stage4_reference_event = {
+        "event_id": 808,
+        "event_type": "SILENT_COMBINED_CONFIRMATION_SNAPSHOT",
+        "symbol": "BTC",
+        "direction": "LONG",
+        "alert_time_utc": START,
+        "current_price": 100.0,
+        "engine_snapshot": {
+            "signal_snapshot": {
+                "archive_reference": {
+                    "snapshot_set_id": 17,
+                    "snapshot_key": "a" * 64,
+                    "official_price": {
+                        "price": 100.0,
+                        "source": "binance_spot",
+                        "exchange": "binance",
+                        "market": "spot",
+                        "pair": "BTCUSDT",
+                        "instrument": "BTC",
+                        "observed_at_utc": START - timedelta(minutes=50),
+                        "fetched_at_utc": START - timedelta(minutes=10),
+                    },
+                }
+            }
+        },
+    }
+    frozen_price, frozen_source = worker._stage4_frozen_price_reference(
+        stage4_reference_event
+    )
+    assert frozen_price == 100.0
+    for exact_fragment in (
+        f"reference_policy={worker._STAGE4_FROZEN_REFERENCE_POLICY_VERSION}",
+        f"admission_policy={worker._STAGE4_DERIVED_ADMISSION_POLICY_VERSION}",
+        f"semantics={worker._STAGE4_OUTCOME_SEMANTICS}",
+        "source=binance_spot",
+        "exchange=binance",
+        "market=spot",
+        "pair=BTCUSDT",
+        "observed_at_utc=2026-08-29T17:51:00+00:00",
+        "fetched_at_utc=2026-08-29T18:31:00+00:00",
+        "observed_age_seconds=3000.000000",
+        "fetched_age_seconds=600.000000",
+        "snapshot_set_id=17",
+        f"snapshot_key={'a' * 64}",
+    ):
+        assert exact_fragment in frozen_source
+
+    hype_reference_event = copy.deepcopy(stage4_reference_event)
+    hype_reference_event["symbol"] = "HYPE"
+    hype_official = hype_reference_event["engine_snapshot"]["signal_snapshot"][
+        "archive_reference"
+    ]["official_price"]
+    hype_official.update(
+        {
+            "source": "hyperliquid",
+            "exchange": "hyperliquid",
+            "market": "spot",
+            "pair": "HYPE/USDT",
+            "instrument": "@107",
+        }
+    )
+    assert "instrument=@107" in worker._stage4_frozen_price_reference(
+        hype_reference_event
+    )[1]
+
+    invalid_stage4_references = []
+    mismatched = copy.deepcopy(stage4_reference_event)
+    mismatched["current_price"] = 101.0
+    invalid_stage4_references.append(mismatched)
+    stale = copy.deepcopy(stage4_reference_event)
+    stale["engine_snapshot"]["signal_snapshot"]["archive_reference"][
+        "official_price"
+    ]["observed_at_utc"] = START - timedelta(minutes=61)
+    invalid_stage4_references.append(stale)
+    post_decision = copy.deepcopy(stage4_reference_event)
+    post_decision["engine_snapshot"]["signal_snapshot"]["archive_reference"][
+        "official_price"
+    ]["fetched_at_utc"] = START + timedelta(seconds=1)
+    invalid_stage4_references.append(post_decision)
+    wrong_exchange = copy.deepcopy(stage4_reference_event)
+    wrong_exchange["engine_snapshot"]["signal_snapshot"]["archive_reference"][
+        "official_price"
+    ]["exchange"] = ""
+    invalid_stage4_references.append(wrong_exchange)
+    for invalid_reference in invalid_stage4_references:
+        try:
+            worker._stage4_frozen_price_reference(invalid_reference)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid Stage-4 frozen reference was accepted")
+
+    outcome_capture = _CaptureResult()
+    outcome_metrics = {
+        "measured_at_utc": START + timedelta(minutes=60),
+        "price_at_horizon": 101.0,
+        "raw_return_pct": 1.0,
+        "directional_return_pct": 1.0,
+        "max_favorable_price": 102.0,
+        "max_adverse_price": 99.0,
+        "mfe_pct": 2.0,
+        "mae_pct": 1.0,
+        "time_to_first_progress_seconds": 60,
+        "time_to_mfe_seconds": 120,
+        "time_to_closest_target_seconds": None,
+        "time_to_target_seconds": None,
+        "closest_target_price": None,
+        "closest_target_distance_pct": None,
+        "target_progress_ratio": None,
+        "target_reached": None,
+    }
+    assert worker.ResearchOutcomeWorker._write_outcome(
+        outcome_capture,
+        event=stage4_reference_event,
+        horizon=60,
+        reference_price=frozen_price,
+        reference_source=frozen_source,
+        path_result={
+            "exchange": "binance",
+            "market": "spot",
+            "pair": "BTCUSDT",
+            "interval": "1m",
+            "provenance": "SELFTEST",
+            "candles": [_candle(START)],
+        },
+        path_metrics=outcome_metrics,
+        complete=True,
+    )
+    assert outcome_capture.params[-3] == worker._STAGE4_OUTCOME_METHOD_VERSION
+    assert f"reference={frozen_source}" in outcome_capture.params[-2]
+    assert "not_trade_entry_return" in outcome_capture.params[-2]
+    generic_outcome_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._write_outcome(
+        generic_outcome_capture,
+        event={"event_id": 809, "event_type": "DELIVERED_ALERT"},
+        horizon=60,
+        reference_price=100.0,
+        reference_source="binance_spot:BTCUSDT",
+        path_result={
+            "exchange": "binance",
+            "market": "spot",
+            "pair": "BTCUSDT",
+            "interval": "1m",
+            "provenance": "SELFTEST",
+            "candles": [_candle(START)],
+        },
+        path_metrics=outcome_metrics,
+        complete=True,
+    )
+    assert generic_outcome_capture.params[-3] == canonical_price_path.METHOD_VERSION
+
     rejection_capture = _CaptureResult()
     inserted = worker.ResearchOutcomeWorker._write_alert_reference_rejections(
         rejection_capture,
@@ -622,7 +1172,7 @@ def run() -> None:
     assert "binance_spot" in queue_priority
     assert "HYPE/USDT" in queue_priority
     assert "@107" in queue_priority
-    for queue_query in (captured.query, closed_capture.query):
+    for queue_query in (captured.query, legacy_capture.query):
         assert "e.event_kind<>'ALERT'" in queue_query
         assert queue_query.index("e.event_kind<>'ALERT'") < queue_query.index("LIMIT %s")
     assert "open_ft.status IN ('HIT', 'MISS')" in captured.query
@@ -1102,6 +1652,35 @@ def run() -> None:
     assert legacy_due["inserted"] == 1
     assert legacy_due["first_touch_threshold_policy_conflicts"] == 1
 
+    # Stage-4 signals are endpoint-outcome evidence only.  Directionality does
+    # not activate First-Touch loading, calculation or writes for these types.
+    stage4_closed, stage4_closed_trace = _run_closed_current_slot_once(
+        slot_authority=True,
+        legacy_complete=False,
+        event_type="MAX_PAIN_CONFIRMATION_STATE",
+    )
+    assert stage4_closed_trace["loader_calls"] == []
+    assert stage4_closed_trace["formula_event_id_calls"] == [[]]
+    assert len(stage4_closed_trace["fetch_calls"]) == 1
+    assert stage4_closed_trace["first_touch_writes"] == []
+    assert len(stage4_closed_trace["legacy_writes"]) == 1
+    assert stage4_closed["inserted"] == 1
+    assert stage4_closed["first_touch_rows_written"] == 0
+    assert stage4_closed["first_touch_threshold_policy_conflicts"] == 0
+
+    stage4_bad_reference, stage4_bad_trace = _run_closed_current_slot_once(
+        slot_authority=True,
+        legacy_complete=False,
+        event_type="MAX_PAIN_CONFIRMATION_STATE",
+        stage4_reference_price=101.0,
+    )
+    assert stage4_bad_trace["loader_calls"] == []
+    assert stage4_bad_trace["formula_event_id_calls"] == [[]]
+    assert stage4_bad_trace["fetch_calls"] == []
+    assert stage4_bad_trace["first_touch_writes"] == []
+    assert stage4_bad_trace["legacy_writes"] == []
+    assert stage4_bad_reference["missing_price_paths"] == 1
+
     # The exact v4 bundle produces a label without waiting for candle dwell.
     # Removing only its frozen width fails closed even with the same favorable
     # canonical wick: no HIT/PENDING row is written.
@@ -1285,6 +1864,25 @@ def run() -> None:
     )
 
     status = worker.ResearchOutcomeWorker().status()
+    assert status["heavy_query_timeout"]["statement_timeout_ms"] == (
+        worker.research_database_timeout.heavy_statement_timeout_ms()
+    )
+    phase_worker = worker.ResearchOutcomeWorker()
+    try:
+        with phase_worker._phase("load_due_events"):
+            raise RuntimeError("canceling statement due to statement timeout")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("phase probe must preserve the original failure")
+    phase_metrics = phase_worker.metrics
+    assert phase_metrics.current_phase == "IDLE"
+    assert phase_metrics.current_phase_started_at_utc is None
+    assert phase_metrics.last_phase == "LOAD_DUE_EVENTS"
+    assert phase_metrics.last_error_phase == "LOAD_DUE_EVENTS"
+    assert phase_metrics.last_timeout_phase == "LOAD_DUE_EVENTS"
+    assert phase_metrics.last_phase_duration_ms is not None
+    assert phase_metrics.last_phase_duration_ms >= 0
     policy = status["first_touch_policy"]
     assert policy["success"] == "first favorable width touch; zero dwell"
     assert policy["post_hit_reversal"] == "does not cancel success"

@@ -282,9 +282,10 @@ def fetch_aggregated_oi(symbol):
 
 def _history(symbol):
     init_db(); symbol=str(symbol or "").upper()
-    sql="SELECT collected_at,price,open_interest_usd,price_fetched_at,oi_fetched_at,time_gap_seconds,data_quality_status,price_source,oi_source FROM oi_regime_snapshots WHERE symbol=? ORDER BY collected_at ASC"
+    sql="SELECT id,collected_at,price,open_interest_usd,price_fetched_at,oi_fetched_at,time_gap_seconds,data_quality_status,price_source,oi_source FROM oi_regime_snapshots WHERE symbol=? ORDER BY collected_at ASC"
     if _use_postgres():
-        with psycopg.connect(DATABASE_URL,row_factory=dict_row) as conn: rows=conn.execute(sql.replace("?","%s"),(symbol,)).fetchall()
+        with psycopg.connect(DATABASE_URL,row_factory=dict_row) as conn:
+            rows=conn.execute(sql.replace("?","%s"),(symbol,)).fetchall()
     else:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory=sqlite3.Row; rows=conn.execute(sql,(symbol,)).fetchall()
@@ -548,7 +549,7 @@ def latest(symbol):
     else:
         windows=_window_results(symbol,float(current["price"]),float(current["open_interest_usd"]),now,history_before)
         weighted=time_family_engine.aggregate(windows,time_family_engine.oi_window_evaluator); overall=_overall(windows); overall.update({"weighted_direction":weighted["direction"],"weighted_score":weighted["score"],"weighted_quality":weighted["quality"]}); early=_early_transition(windows,overall); observations=_significance_observations(windows)
-    return {"symbol":symbol,"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"time_families":weighted["families"],"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,
+    return {"symbol":symbol,"source_snapshot_id":current.get("id"),"collected_at":_as_utc(current["collected_at"]).isoformat(),"price":float(current["price"]),"open_interest_usd":float(current["open_interest_usd"]),"windows":windows,"time_families":weighted["families"],"overall":overall,"early_transition":early,"significance_observations":observations,"available":any(w.get("available") for w in windows.values()),"collection_interval_minutes":COLLECTION_INTERVAL_MINUTES,
             "price_fetched_at":current.get("price_fetched_at"),"oi_fetched_at":current.get("oi_fetched_at"),
             "time_gap_seconds":current.get("time_gap_seconds"),"data_quality_status":current.get("data_quality_status"),
             "price_source":current.get("price_source"),"oi_source":current.get("oi_source")}

@@ -53,6 +53,56 @@ to reject an otherwise material edge.
   cutoff learned from a large market from being treated as equivalent evidence
   for a smaller market.
 
+### Stage-4 experimental eligibility contract
+
+The Stage-4 experimental path uses one atomic eligibility gate. A pattern may
+create an experimental formula only when the outcomes of at least five
+independent occurrences of that same pattern already show good directional
+probability and/or clear favorable directional asymmetry. The occurrences are
+the sample base for that probability/asymmetry decision; probability is not a
+separate later promotion gate.
+
+An independent occurrence is one opportunity from an independent parent market
+wave. Multiple symbols or timestamps from the same wave are not separate
+evidence, and this path does not use a fixed 24-hour spacing rule.
+
+### Local Stage-4 no-signal carrier and candidate search
+
+The current local-only stage completes the missing evidence path without
+changing delivery authority:
+
+- Migration `026_stage4_no_signal_outcomes_v1.sql` adds one append-only outcome
+  carrier for each exact `projection × symbol × direction × horizon` cell that
+  is both `COMPLETED`/`EVALUABLE` and proven to contain no signal. Its reference
+  price comes from the frozen decision-time archive, and its future fields come
+  only from a complete closed canonical one-minute path.
+- The carrier writer must connect directly as the unprivileged, `NOINHERIT`
+  login role `research_stage4_no_signal_outcome_writer_v1`, using only
+  `RESEARCH_STAGE4_NO_SIGNAL_OUTCOME_DATABASE_URL`. The authoritative corpus
+  reader remains isolated behind `research_formula_exploration_reader_v1` and
+  `RESEARCH_FORMULA_EXPLORATION_DATABASE_URL`; it attests the view shape,
+  ownership, dependencies, triggers, ACLs and source receipts before reading.
+- `stage4-static-no-dwell-favorable-movement-label-v1` labels a completed parent
+  occurrence when directional MFE reaches the versioned static floor for its
+  horizon. A wick touch is enough; there is no dwell or later-survival
+  requirement. `stage4-btc-parent-first-opportunity-v1` freezes the first
+  matching opportunity per BTC parent movement before inspecting its outcome.
+- `stage4-experimental-candidate-search-v1` applies the atomic gate above to
+  the same completed sample: at least five independent parent-wave occurrences
+  and probability and/or favorable/adverse asymmetry already passing on those
+  occurrences. It makes no control-relative or holdout claim. Exact-binomial
+  and Benjamini-Hochberg values are disclosure-only for this experimental path.
+- The search is bounded to three conditions, 256 evaluated candidates and 40
+  returned candidates per invocation. Formula Worker runs it only over the
+  bounded, attested Stage-4 corpus page and exposes its compact result only in
+  in-memory health/runtime observability receipts. It does not write the
+  Formula registry, Shadow state or a delivery queue.
+
+This stage has `formula_registry_effect=NONE`, `delivery_channel=NONE`,
+`live_eligible=false`, `telegram_delivery_allowed=false` and
+`trade_execution_allowed=false`. It therefore creates no Telegram message,
+LIVE formula or automated trade, even when an experimental candidate passes.
+
 ## Discovery
 
 For each horizon and direction, the engine:
@@ -190,6 +240,10 @@ runtime contract.
   stable-parent four/five-condition beam; absent/false preserves the default
   single/pair/triple search.
 - `FORMULA_SHADOW_POLL_SECONDS=60`
+- `RESEARCH_HEAVY_STATEMENT_TIMEOUT_MS=120000` controls only bounded heavy
+  Research reads and the explicit Discovery/Shadow heavy scopes. It is always
+  finite and clamped to 30–300 seconds; Formula control paths remain at 20
+  seconds, and heavy Formula writes retain a three-second lock timeout.
 - `PROSPECTIVE_ANCHORS_ENABLED=1` opts the production service into the silent,
   UTC-minute-aligned prospective sampler. Each eligible 30-minute slot is
   idempotent and persists an atomic LONG/SHORT `DECISION_SAMPLE` pair only when
@@ -199,6 +253,31 @@ runtime contract.
 - `FORMULA_DISCOVERY_DATASET_MODE=auto` prefers the neutral historical replay
   only after its minimum coverage gate; `alerts` and `historical_replay` are
   explicit bounded operator overrides.
+- `RESEARCH_STAGE4_NO_SIGNAL_OUTCOME_DATABASE_URL` must contain credentials for
+  the dedicated `research_stage4_no_signal_outcome_writer_v1` role. When it is
+  absent, no-signal enrichment is skipped without borrowing the primary or
+  legacy Research writer connection.
+- `RESEARCH_FORMULA_EXPLORATION_DATABASE_URL` contains the dedicated
+  read-only Stage-4 corpus credentials. `FORMULA_STAGE4_CORPUS_PROJECTION_LIMIT`
+  bounds the locally wired corpus page to 128 projections by default.
+
+Migration `026` remains unapplied until its deployment preflight passes. Apply
+it only after migrations `024` and `025`, on PostgreSQL 15 or newer, as the
+trusted owner of all source relations. Provision the writer and reader roles
+out of band as unprivileged `NOINHERIT LOGIN` roles with no memberships and no
+database/schema ownership; leave the new writer URL disabled until the schema
+and ACL attestations pass. Before enabling it, preserve an export/backup, run
+the full self-test and compile suites, verify the reader/schema receipts and
+confirm runtime health. The reader normalizes out only `026`'s exact delegated,
+non-grantable writer ACL entries from the older `024` catalog receipt; `026`
+attests those entries independently, so any extra privilege still fails closed.
+Rollback begins by disabling
+`RESEARCH_STAGE4_NO_SIGNAL_OUTCOME_DATABASE_URL`; after preserving any desired
+research history, use the explicit revoke/drop sequence at the end of migration
+`026`. Rollback verification requires the writer's direct schema ACL to be
+absent and all source-table access to be ineffective; inherited `PUBLIC` schema
+`USAGE` may remain because it conveys no table authority. A rollback never
+promotes, delivers or trades a formula.
 
 The one-shot replay is separate from the Watch loop:
 

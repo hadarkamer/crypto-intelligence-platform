@@ -11,6 +11,15 @@ import market_session_baseline
 import research_formula_store as store
 
 
+def _guarded_heavy_connect(connection, *, expected_read_only: bool):
+    def connect(*, read_only: bool, heavy: bool):
+        assert read_only is expected_read_only
+        assert heavy is True
+        return connection
+
+    return connect
+
+
 def _shadow_row(
     event_id: int,
     *,
@@ -682,7 +691,9 @@ def run() -> None:
     assert "rowcount != len(stale_candidate_ids)" in persist_source_raw
     assert persist_source_raw.index(
         "_validate_discovery_condition_families"
-    ) < persist_source_raw.index("with _connect(read_only=False)")
+    ) < persist_source_raw.index(
+        "with _connect(read_only=False, heavy=True)"
+    )
 
     def _family_dataset() -> dict:
         return {
@@ -935,7 +946,7 @@ def run() -> None:
     original_family_connect = store._connect
     family_connect_calls = 0
 
-    def _forbidden_family_connect(*, read_only):
+    def _forbidden_family_connect(*, read_only, **_kwargs):
         nonlocal family_connect_calls
         family_connect_calls += 1
         raise AssertionError("invalid family cohort must not open PostgreSQL")
@@ -1026,8 +1037,9 @@ def run() -> None:
             self.committed = True
 
     valid_persist_connection = _PersistConnection()
-    def _valid_persist_connect(*, read_only):
+    def _valid_persist_connect(*, read_only, heavy):
         assert read_only is False
+        assert heavy is True
         return valid_persist_connection
 
     store._connect = _valid_persist_connect
@@ -1052,8 +1064,9 @@ def run() -> None:
     ] == "ALL_CONDITION_DEPTHS"
 
     empty_persist_connection = _PersistConnection()
-    def _empty_persist_connect(*, read_only):
+    def _empty_persist_connect(*, read_only, heavy):
         assert read_only is False
+        assert heavy is True
         return empty_persist_connection
 
     store._connect = _empty_persist_connect
@@ -1152,7 +1165,7 @@ def run() -> None:
             return _PendingRows()
 
     original_pending_connect = store._connect
-    store._connect = lambda *, read_only: _PendingConnection()
+    store._connect = lambda *, read_only, **_kwargs: _PendingConnection()
     try:
         assert store.load_pending_live_deliveries(limit=5) == []
     finally:
@@ -1575,7 +1588,9 @@ def run() -> None:
 
     shadow_connection = _ShadowConnection()
     original_connect = store._connect
-    store._connect = lambda *, read_only: shadow_connection
+    store._connect = _guarded_heavy_connect(
+        shadow_connection, expected_read_only=True
+    )
     try:
         legacy_work = store.load_shadow_work(max_events_per_formula=5)
     finally:
@@ -1679,7 +1694,9 @@ def run() -> None:
             return None
 
     readiness_connection = _ReadinessConnection()
-    store._connect = lambda *, read_only: readiness_connection
+    store._connect = _guarded_heavy_connect(
+        readiness_connection, expected_read_only=False
+    )
     original_relevance_persist = store._persist_shadow_evidence_and_relevance
     store._persist_shadow_evidence_and_relevance = lambda conn, *, formula, validation: (
         {
@@ -2421,7 +2438,9 @@ def run() -> None:
             RuntimeError("selftest frozen-slot archive unavailable")
         )
     )
-    store._connect = lambda *, read_only: write_connection
+    store._connect = _guarded_heavy_connect(
+        write_connection, expected_read_only=False
+    )
     try:
         write_result = store.record_shadow_results(
             formula=max_pain_formula,
@@ -2474,7 +2493,9 @@ def run() -> None:
             ): authoritative_row
         }
     )
-    store._connect = lambda *, read_only: successful_connection
+    store._connect = _guarded_heavy_connect(
+        successful_connection, expected_read_only=False
+    )
     try:
         successful_write = store.record_shadow_results(
             formula=max_pain_formula,
@@ -2514,7 +2535,9 @@ def run() -> None:
     store.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
         lambda _requested: {}
     )
-    store._connect = lambda *, read_only: missing_authority_connection
+    store._connect = _guarded_heavy_connect(
+        missing_authority_connection, expected_read_only=False
+    )
     try:
         missing_authority_write = store.record_shadow_results(
             formula=max_pain_formula,

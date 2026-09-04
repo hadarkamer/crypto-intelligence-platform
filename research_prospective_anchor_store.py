@@ -15,12 +15,15 @@ accepted by ``ON CONFLICT``.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import hashlib
 import json
 import math
 import os
+import time
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 try:
@@ -32,6 +35,7 @@ except Exception:  # pragma: no cover - optional in unit-only environments
 
 import research_event_store
 import canonical_price_path
+import research_database_timeout
 import research_feature_matrix
 import research_historical_replay
 import research_max_pain_archive
@@ -64,6 +68,21 @@ _PRIOR_FROZEN_SOURCE_SAMPLERS: tuple[str, ...] = (
     "prospective-neutral-anchor-v3-max-pain-frozen",
     anchors.SAMPLER_VERSION,
 )
+
+
+def _tracked_database_operation(name: str):
+    """Attach precise timeout telemetry without changing store call sites."""
+
+    def decorate(method):
+        @wraps(method)
+        def wrapped(self, *args, **kwargs):
+            with self._database_operation(name):
+                return method(self, *args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
 
 _COVERAGE_SQL = """
 SELECT replay_run_id, replay_version, outcome_method_version,
@@ -584,6 +603,42 @@ class ProspectiveAnchorStore:
         if mode not in {"open", "close"}:
             raise ValueError("flow_timestamp_mode must be open or close")
         self.flow_timestamp_mode = mode
+        self._database_runtime: Dict[str, Any] = {
+            "current_operation": "IDLE",
+            "last_operation": None,
+            "last_operation_duration_ms": None,
+            "last_error_operation": None,
+            "last_timeout_operation": None,
+            "last_timeout_at_utc": None,
+        }
+
+    @contextmanager
+    def _database_operation(self, name: str):
+        operation = str(name or "UNKNOWN").strip().upper()
+        started = time.monotonic()
+        self._database_runtime["current_operation"] = operation
+        self._database_runtime["last_error_operation"] = None
+        try:
+            yield
+        except Exception as exc:
+            self._database_runtime["last_error_operation"] = operation
+            if "statement timeout" in str(exc).lower():
+                self._database_runtime["last_timeout_operation"] = operation
+                self._database_runtime["last_timeout_at_utc"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
+            raise
+        finally:
+            self._database_runtime.update(
+                {
+                    "current_operation": "IDLE",
+                    "last_operation": operation,
+                    "last_operation_duration_ms": max(
+                        0,
+                        int(round((time.monotonic() - started) * 1000)),
+                    ),
+                }
+            )
 
     def _connect(self) -> Any:
         if self._connection_factory is not None:
@@ -599,7 +654,11 @@ class ProspectiveAnchorStore:
             self.database_url,
             row_factory=dict_row,
             connect_timeout=5,
-            options="-c statement_timeout=15000 -c lock_timeout=3000",
+            options=(
+                "-c statement_timeout="
+                f"{research_database_timeout.heavy_statement_timeout_ms()} "
+                "-c lock_timeout=3000"
+            ),
         )
 
     def status(self) -> Dict[str, Any]:
@@ -612,10 +671,18 @@ class ProspectiveAnchorStore:
             "schema_auto_create": False,
             "atomic_pair_transaction": True,
             "idempotent_conflict_verification": True,
+            "database_connection_options_enforced": (
+                self._connection_factory is None and bool(self.database_url)
+            ),
+            "heavy_query_timeout": (
+                research_database_timeout.heavy_timeout_status()
+            ),
+            "database_operation": dict(self._database_runtime),
             "telegram_alerts": 0,
             "live_delivery_allowed": False,
         }
 
+    @_tracked_database_operation("LOAD_COVERAGE")
     def load_coverage(
         self,
         *,
@@ -730,6 +797,7 @@ class ProspectiveAnchorStore:
             snapshot["eligible"] = not failures
         return coverage
 
+    @_tracked_database_operation("LOAD_EXISTING_SLOTS")
     def existing_captured_symbols(
         self, *, symbols: Sequence[str], slot_open_utc: Any
     ) -> Dict[str, str]:
@@ -752,6 +820,7 @@ class ProspectiveAnchorStore:
             for row in rows
         }
 
+    @_tracked_database_operation("LOAD_SOURCE_INPUTS")
     def load_source_inputs(
         self,
         *,
@@ -849,6 +918,7 @@ class ProspectiveAnchorStore:
             output[symbol] = families
         return SourceInputBatch(output, checked, read_completed)
 
+    @_tracked_database_operation("LOAD_FROZEN_HISTORY")
     def build_decision_feature_bundles(
         self,
         *,
@@ -1070,6 +1140,7 @@ class ProspectiveAnchorStore:
             ),
         }
 
+    @_tracked_database_operation("PERSIST_BUNDLE")
     def persist_bundle(self, bundle: Mapping[str, Any]) -> PersistResult:
         if not bundle.get("atomic_transaction_required"):
             raise ValueError("prospective persistence requires an atomic bundle")

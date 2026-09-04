@@ -74,6 +74,121 @@ async def _archive_only_check() -> None:
     assert len(archive_calls) == 1
 
 
+async def _archive_enrichment_failure_capture_handoff_check() -> None:
+    archive_capture = {"selftest": "failed-enrichment-capture"}
+    archive_calls = []
+    original_dom = main.collect_coinglass_dom_snapshot
+    original_official = main.live_price_provider.enrich_research_snapshot_rows
+    original_archive = main._archive_max_pain_collection_attempt
+
+    async def fake_dom(**kwargs):
+        return {
+            "ok": True,
+            "missing_timeframes": [],
+            "rows": [
+                {
+                    "symbol": "BTC",
+                    "rank": 1,
+                    "timeframe": timeframe,
+                    "price": 100.0,
+                    "max_short_price": 110.0,
+                    "max_long_price": 95.0,
+                    "short_amount_usd": 200.0,
+                    "long_amount_usd": 100.0,
+                    "collected_at_utc": "2026-08-29T12:00:00Z",
+                }
+                for timeframe in main.TIMEFRAMES
+            ],
+        }
+
+    def failed_official(*_args, **_kwargs):
+        raise RuntimeError("official enrichment unavailable")
+
+    async def fake_archive(**kwargs):
+        archive_calls.append(kwargs)
+        return archive_capture
+
+    main.collect_coinglass_dom_snapshot = fake_dom
+    main.live_price_provider.enrich_research_snapshot_rows = failed_official
+    main._archive_max_pain_collection_attempt = fake_archive
+    try:
+        rows, result = await main.collect_live_rows_for_watch(
+            archive_context={
+                "cycle_id": "failure-selftest",
+                "cycle_time_utc": "2026-08-29T12:00:00Z",
+                "source": "RESEARCH_PASSIVE",
+            },
+            archive_only=True,
+        )
+    finally:
+        main.collect_coinglass_dom_snapshot = original_dom
+        main.live_price_provider.enrich_research_snapshot_rows = original_official
+        main._archive_max_pain_collection_attempt = original_archive
+
+    assert rows == []
+    assert result["rows"] == []
+    assert result["_research_archive_capture"] is archive_capture
+    assert result["timeframe_integrity"]["counts"] == {
+        timeframe: 0 for timeframe in main.TIMEFRAMES
+    }
+    assert "official enrichment unavailable" in result["price_result"]["error"]
+    assert len(archive_calls) == 1
+    assert archive_calls[0]["enriched_rows"] == []
+    assert "OfficialResearchPriceError" in archive_calls[0]["failure_reason"]
+
+
+async def _projection_capture_handoff_check() -> None:
+    archive_capture = {"selftest": "archive-capture-sentinel"}
+    submitted_captures = []
+    reconciliation_calls = []
+    enabled_results = iter((True, True, False))
+
+    class FakeProjector:
+        def submit_reconciliation(self):
+            reconciliation_calls.append(True)
+            return {"submitted": True}
+
+        def submit(self, capture):
+            submitted_captures.append(capture)
+            return {"submitted": True}
+
+    async def fake_collect(**kwargs):
+        assert kwargs["archive_only"] is True
+        return [], {"_research_archive_capture": archive_capture}
+
+    original_projector = main.research_signal_snapshot_runtime.PROJECTOR
+    original_enabled = main.research_max_pain_archive.archive_enabled
+    original_schedule = main._next_max_pain_archive_schedule
+    original_collect = main.collect_live_rows_for_watch
+    original_scrape_lock = main.SCRAPE_LOCK
+    original_archive_runtime = dict(main.MAX_PAIN_ARCHIVE_RUNTIME)
+    original_scan_owner = main.WATCH_RUNTIME.get("scan_owner")
+    main.research_signal_snapshot_runtime.PROJECTOR = FakeProjector()
+    main.research_max_pain_archive.archive_enabled = lambda: next(
+        enabled_results, False
+    )
+    main._next_max_pain_archive_schedule = lambda: (
+        datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc),
+        datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    main.collect_live_rows_for_watch = fake_collect
+    main.SCRAPE_LOCK = asyncio.Lock()
+    try:
+        await main._max_pain_archive_loop()
+    finally:
+        main.research_signal_snapshot_runtime.PROJECTOR = original_projector
+        main.research_max_pain_archive.archive_enabled = original_enabled
+        main._next_max_pain_archive_schedule = original_schedule
+        main.collect_live_rows_for_watch = original_collect
+        main.SCRAPE_LOCK = original_scrape_lock
+        main.MAX_PAIN_ARCHIVE_RUNTIME.clear()
+        main.MAX_PAIN_ARCHIVE_RUNTIME.update(original_archive_runtime)
+        main.WATCH_RUNTIME["scan_owner"] = original_scan_owner
+    assert len(reconciliation_calls) == 2
+    assert submitted_captures == [archive_capture]
+    assert submitted_captures[0] is archive_capture
+
+
 def run() -> None:
     formula_worker = main.research_formula_worker
     formula_now = datetime(2026, 8, 29, 12, 4, 59, tzinfo=timezone.utc)
@@ -125,6 +240,28 @@ def run() -> None:
     assert digest_c != digest_a
 
     worker = formula_worker.FormulaResearchWorker()
+    feature_timeout = formula_worker.research_feature_matrix.runtime_status()[
+        "heavy_query_timeout"
+    ]["statement_timeout_ms"]
+    assert (
+        worker.status()["heavy_query_timeout"]["statement_timeout_ms"]
+        == feature_timeout
+    )
+    telemetry_worker = formula_worker.FormulaResearchWorker()
+    try:
+        with telemetry_worker._phase("shadow", "load_features"):
+            raise RuntimeError("canceling statement due to statement timeout")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("formula phase probe must preserve failures")
+    assert telemetry_worker.metrics.shadow_phase == "IDLE"
+    assert telemetry_worker.metrics.last_shadow_phase == "LOAD_FEATURES"
+    assert telemetry_worker.metrics.last_shadow_error_phase == "LOAD_FEATURES"
+    assert telemetry_worker.metrics.last_shadow_timeout_phase == "LOAD_FEATURES"
+    assert telemetry_worker.metrics.last_shadow_timeout_at_utc is not None
+    assert telemetry_worker.metrics.last_timeout_phase == "SHADOW:LOAD_FEATURES"
+    assert telemetry_worker.metrics.last_shadow_phase_duration_ms is not None
     slot = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
     due_at = slot + timedelta(
         seconds=formula_worker._DISCOVERY_SLOT_GRACE_SECONDS
@@ -243,6 +380,8 @@ def run() -> None:
         assert main._start_max_pain_archive_task(schema_ready=False) is False
         assert main.MAX_PAIN_ARCHIVE_RUNTIME["status"] == "blocked_schema"
         asyncio.run(_archive_only_check())
+        asyncio.run(_archive_enrichment_failure_capture_handoff_check())
+        asyncio.run(_projection_capture_handoff_check())
 
         os.environ["FIRST_TOUCH_BACKFILL_ENABLED"] = "1"
         os.environ["HISTORICAL_REPLAY_BACKFILL"] = "0"
@@ -267,6 +406,13 @@ def run() -> None:
     assert '"source": "RESEARCH_PASSIVE"' in passive_source
     assert "archive_only=True" in passive_source
     assert "async with scrape_lock" in passive_source
+    assert passive_source.count("submit_reconciliation") == 2
+    assert passive_source.index("submit_reconciliation") < passive_source.index(
+        "while research_max_pain_archive.archive_enabled()"
+    )
+    assert passive_source.rindex("submit_reconciliation") < passive_source.index(
+        "collect_live_rows_for_watch("
+    )
 
     discovery_source = inspect.getsource(formula_worker.FormulaResearchWorker)
     assert "discovery_horizon_lock" in discovery_source
@@ -297,6 +443,10 @@ def run() -> None:
     assert schema_index < startup_source.index("research_formula_worker.WORKER.start()")
     assert schema_index < startup_source.index("_start_max_pain_archive_task")
     assert schema_index < startup_source.index("_start_first_touch_backfill_task")
+
+    # Production health must identify the exact Render build before any
+    # runtime/schema receipt is treated as evidence for the current code.
+    assert 'os.getenv("RENDER_GIT_COMMIT")' in inspect.getsource(main.health)
 
     print("Research background scheduler self-test: PASS")
 

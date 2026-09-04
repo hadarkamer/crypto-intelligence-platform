@@ -44,7 +44,9 @@ import research_formula_schema_admin
 import research_formula_store
 import research_formula_worker
 import research_max_pain_archive
+import research_market_movement_worker
 import research_prospective_anchor_worker
+import research_signal_snapshot_runtime
 from collections import defaultdict
 
 try:
@@ -1080,7 +1082,7 @@ async def _archive_max_pain_collection_attempt(
     enriched_rows: Sequence[Mapping[str, Any]],
     live_result: Mapping[str, Any],
     failure_reason: Optional[str] = None,
-) -> None:
+) -> Dict[str, Any]:
     """Best-effort archive write; collection and alerts remain fail-open."""
     try:
         payload = research_max_pain_archive.build_snapshot_payload(
@@ -1108,8 +1110,14 @@ async def _archive_max_pain_collection_attempt(
             f"rows={set_record['row_count']} persistence={result}",
             flush=True,
         )
+        return {"payload": payload, "persistence": result, "error": None}
     except Exception as exc:
         print(f"[maxpain-archive] failed open: {exc!r}", flush=True)
+        return {
+            "payload": None,
+            "persistence": {"persisted": False},
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 async def collect_live_rows_for_watch(
@@ -1193,7 +1201,7 @@ async def collect_live_rows_for_watch(
                     dict(row) for row in archive_live_result.get("rows", [])
                 ]
                 archive_attempted = True
-                await _archive_max_pain_collection_attempt(
+                archive_capture = await _archive_max_pain_collection_attempt(
                     archive_context=archive_context,
                     collection_started_at_utc=collection_started_at,
                     collection_completed_at_utc=datetime.now(timezone.utc),
@@ -1204,6 +1212,10 @@ async def collect_live_rows_for_watch(
             except asyncio.CancelledError:
                 raise
             except Exception as archive_exc:
+                # Do not retain or depend on a partially assigned enrichment
+                # result.  The failure capture must be self-contained so the
+                # passive scheduler can still hand it to the projector.
+                archive_rows = []
                 archive_live_result = {
                     "rows": [],
                     "skipped_symbols": sorted(
@@ -1219,12 +1231,12 @@ async def collect_live_rows_for_watch(
                     },
                 }
                 archive_attempted = True
-                await _archive_max_pain_collection_attempt(
+                archive_capture = await _archive_max_pain_collection_attempt(
                     archive_context=archive_context,
                     collection_started_at_utc=collection_started_at,
                     collection_completed_at_utc=datetime.now(timezone.utc),
                     snapshot=snapshot,
-                    enriched_rows=[],
+                    enriched_rows=archive_rows,
                     live_result=archive_live_result,
                     failure_reason=(
                         "OfficialResearchPriceError: " f"{archive_exc!r}"
@@ -1233,6 +1245,7 @@ async def collect_live_rows_for_watch(
             archive_live_result["timeframe_integrity"] = _timeframe_integrity(
                 archive_rows
             )
+            archive_live_result["_research_archive_capture"] = archive_capture
             return archive_rows, archive_live_result
 
         live_result = live_price_provider.enrich_snapshot_rows(
@@ -4624,6 +4637,20 @@ async def _max_pain_archive_loop() -> None:
         {"running": True, "status": "starting", "last_error": None}
     )
     try:
+        try:
+            reconciliation = (
+                research_signal_snapshot_runtime.PROJECTOR.submit_reconciliation()
+            )
+            print(
+                "[signal-snapshot] startup reconciliation "
+                f"submission={reconciliation}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[signal-snapshot] startup reconciliation failed open: {exc!r}",
+                flush=True,
+            )
         while research_max_pain_archive.archive_enabled():
             slot, run_at = _next_max_pain_archive_schedule()
             MAX_PAIN_ARCHIVE_RUNTIME.update(
@@ -4641,6 +4668,21 @@ async def _max_pain_archive_loop() -> None:
             if not research_max_pain_archive.archive_enabled():
                 break
 
+            try:
+                reconciliation = (
+                    research_signal_snapshot_runtime.PROJECTOR.submit_reconciliation()
+                )
+                print(
+                    "[signal-snapshot] cycle reconciliation "
+                    f"submission={reconciliation}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    "[signal-snapshot] cycle reconciliation failed open: "
+                    f"{exc!r}",
+                    flush=True,
+                )
             MAX_PAIN_ARCHIVE_RUNTIME.update(
                 {
                     "status": "collecting",
@@ -4659,7 +4701,7 @@ async def _max_pain_archive_loop() -> None:
                     owner = "Research Max-Pain archive"
                     WATCH_RUNTIME["scan_owner"] = owner
                     try:
-                        await collect_live_rows_for_watch(
+                        _archive_rows, archive_result = await collect_live_rows_for_watch(
                             archive_context={
                                 "cycle_id": f"research-passive:{slot.isoformat()}",
                                 "cycle_time_utc": slot,
@@ -4678,6 +4720,21 @@ async def _max_pain_archive_loop() -> None:
                     finally:
                         if WATCH_RUNTIME.get("scan_owner") == owner:
                             WATCH_RUNTIME["scan_owner"] = None
+                try:
+                    projection = research_signal_snapshot_runtime.PROJECTOR.submit(
+                        archive_result.get("_research_archive_capture")
+                    )
+                    print(
+                        "[signal-snapshot] passive projection "
+                        f"submission={projection}",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(
+                        "[signal-snapshot] passive projection failed open: "
+                        f"{exc!r}",
+                        flush=True,
+                    )
                 MAX_PAIN_ARCHIVE_RUNTIME.update(
                     {
                         "status": "completed",
@@ -5780,6 +5837,7 @@ async def health(request):
     return web.json_response({
         "status": "ok",
         "service": "crypto-intelligence-v1",
+        "build_commit": os.getenv("RENDER_GIT_COMMIT") or None,
         "ai": ai_agent.status(),
         "research_capture": research_event_runtime.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
@@ -5788,6 +5846,8 @@ async def health(request):
         "max_pain_archive": max_pain_archive_status(),
         "first_touch_backfill": first_touch_backfill_status(),
         "prospective_anchors": research_prospective_anchor_worker.WORKER.status(),
+        "market_movements": research_market_movement_worker.WORKER.status(),
+        "signal_snapshots": research_signal_snapshot_runtime.PROJECTOR.status(),
     })
 
 async def telegram_webhook(request):
@@ -7028,6 +7088,15 @@ async def main():
     await start_web_server(bot_app)
 
     try:
+        market_movements_started = (
+            await research_market_movement_worker.WORKER.start()
+        )
+        print(
+            f"[market-movement] "
+            f"{'started' if market_movements_started else 'not started'}; "
+            f"status={research_market_movement_worker.WORKER.status()}",
+            flush=True,
+        )
         while True:
             await asyncio.sleep(3600)
     finally:
@@ -7068,7 +7137,9 @@ async def main():
                     pass
 
         await _stop_max_pain_archive_task()
+        await research_signal_snapshot_runtime.PROJECTOR.stop()
         await _stop_first_touch_backfill_task()
+        await research_market_movement_worker.WORKER.stop()
         await research_prospective_anchor_worker.WORKER.stop()
         await research_formula_worker.WORKER.stop()
         await research_outcome_worker.WORKER.stop()

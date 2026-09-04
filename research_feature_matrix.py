@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 import canonical_price_path
 import market_session_baseline
+import research_database_timeout
 import research_formula_engine
 import research_historical_replay
 import research_max_pain_archive
@@ -88,7 +89,7 @@ REPLAY_MIN_SPAN_HOURS_PER_SYMBOL = 336.0
 REPLAY_MIN_ELIGIBLE_SYMBOLS = 4
 REPLAY_COVERAGE_STREAM_BATCH_SIZE = 500
 # The opportunity query includes a per-symbol WindowAgg.  Keep each FETCH
-# below one symbol partition so the 12-second read-only statement timeout is
+# below one symbol partition so the bounded read-only statement timeout is
 # applied to bounded work rather than several partitions at once.
 REPLAY_OPPORTUNITY_STREAM_BATCH_SIZE = 50
 _TRUE = {"1", "true", "yes", "on"}
@@ -182,8 +183,22 @@ def _connect(url: str):
         url,
         row_factory=dict_row,
         connect_timeout=5,
-        options="-c statement_timeout=12000 -c default_transaction_read_only=on",
+        options=(
+            "-c statement_timeout="
+            f"{research_database_timeout.heavy_statement_timeout_ms()} "
+            "-c default_transaction_read_only=on"
+        ),
     )
+
+
+def runtime_status() -> Dict[str, Any]:
+    """Return the bounded database-read configuration used by this matrix."""
+
+    return {
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "database_read_only": True,
+        "heavy_query_timeout": research_database_timeout.heavy_timeout_status(),
+    }
 
 
 def _table_exists(conn, table_name: str) -> bool:

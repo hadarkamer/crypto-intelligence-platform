@@ -61,6 +61,21 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "018_prospective_shadow_view_indexed_union_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "022_neutral_price_market_movements_v5.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "023_signal_snapshot_freeze_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "024_formula_exploration_authoritative_reader_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "025_formula_exploration_outcomes_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "026_stage4_no_signal_outcomes_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
