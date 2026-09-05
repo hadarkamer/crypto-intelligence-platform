@@ -61,6 +61,9 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "018_prospective_shadow_view_indexed_union_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "019_outcome_worker_queue_indexes_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
