@@ -524,6 +524,31 @@ def _check_migration_contract() -> None:
     assert "do not\n-- revoke schema USAGE from PUBLIC" in migration
     assert "Effective SELECT on every source relation" in migration
     assert "pg_catalog.pg_get_constraintdef" in migration
+    assert "constraint_row.contype IN ('c', 'f', 'p', 'u')" in migration
+    assert "constraint_row.contype NOT IN ('c', 'f', 'p', 'u', 'n')" in migration
+    assert "PostgreSQL 18 represents column NOT NULL state" in migration
+    assert "Names are intentionally non-contractual" in migration
+    assert "SET LOCAL lock_timeout = '3s'" in migration
+    assert "SET LOCAL statement_timeout = '300s'" in migration
+    assert "server_version_num')::INTEGER>=180000" in migration
+    assert "->> 'conenforced'" in migration
+    assert "constraint_row.convalidated" in migration
+    assert "constraint_row.conislocal" in migration
+    assert "constraint_row.coninhcount<>0" in migration
+    assert "constraint_row.conparentid<>0" in migration
+    assert "'NOT NULL %I'" in migration
+    assert "FROM pg_catalog.pg_inherits inheritance" in migration
+    assert migration.count(
+        "LOCK TABLE public.research_stage4_no_signal_outcomes_v1"
+    ) == 2
+    assert "Stage-4 no-signal carrier changed while acquiring its lock" in migration
+    assert "research.migration_026_validated_raw_oid" in migration
+    assert "SELECT relation.xmin" in migration
+    assert "pg_catalog.pg_current_xact_id()::XID" in migration
+    assert "lacks a locked receipt or current-transaction identity" in migration
+    assert migration.count(
+        "constraint_row.contype IN ('c', 'f', 'p', 'u')"
+    ) >= 3
     assert "pg_catalog.pg_get_indexdef" in migration
     assert "function_row.prosrc" in migration
     assert migration.count("relation.relrowsecurity") >= 2

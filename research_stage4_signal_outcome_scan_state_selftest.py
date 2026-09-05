@@ -129,12 +129,34 @@ def run() -> None:
         "not relation_row.relrowsecurity",
         "not relation_row.relforcerowsecurity",
         "constraint_count <> pg_catalog.cardinality(expected_constraints)",
+        "constraint_row.contype not in ('c', 'p', 'n')",
+        "postgresql 18 materializes not null constraints as contype='n'",
+        "server_version_num')::integer >= 180000",
+        "->> 'conenforced'",
+        "constraint_row.convalidated",
+        "constraint_row.conislocal",
+        "constraint_row.coninhcount <> 0",
+        "constraint_row.conparentid <> 0",
+        "'not null %i'",
         "pg_catalog.pg_get_constraintdef",
         "from pg_catalog.pg_trigger",
         "from pg_catalog.pg_policy",
         "from pg_catalog.pg_rewrite",
+        "from pg_catalog.pg_inherits inheritance",
+        "attribute.attcollation::regcollation::text",
     ):
         assert guard in lowered, guard
+    assert "scan_key:text:not-null:\"default\"" in lowered
+    assert "check (((completed_laps >= 0) and (pages_scanned >= 0)" in lowered
+    assert "constraint_row.contype::text || '|'" in lowered
+    assert "constraint_row.connoinherit::text" in lowered
+    assert "rewrite_row.rulename <> '_return'" not in lowered
+    assert "set local quote_all_identifiers = off" in lowered
+    assert "pg18-generated/truncated not null names are deliberately" in lowered
+    assert (
+        "lock table public.research_stage4_signal_scan_state_v1\n"
+        "    in share row exclusive mode"
+    ) in lowered
 
     # The state is explicitly non-authoritative and rollback can only discard
     # pagination progress, never source events or outcome rows.

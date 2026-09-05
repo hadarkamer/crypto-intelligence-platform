@@ -7,6 +7,10 @@
 
 SET LOCAL search_path = pg_catalog;
 SET LOCAL TIME ZONE 'UTC';
+SET LOCAL DateStyle = 'ISO, YMD';
+SET LOCAL IntervalStyle = 'postgres';
+SET LOCAL extra_float_digits = 3;
+SET LOCAL quote_all_identifiers = off;
 SET LOCAL lock_timeout = '3s';
 SET LOCAL statement_timeout = '30s';
 
@@ -97,6 +101,11 @@ CREATE TABLE IF NOT EXISTS
         )
     );
 
+-- Hold the target against concurrent owner DDL while its complete catalog,
+-- singleton row and owner-only ACL are attested below.
+LOCK TABLE public.research_stage4_signal_scan_state_v1
+    IN SHARE ROW EXCLUSIVE MODE;
+
 COMMENT ON TABLE
     public.research_stage4_signal_scan_state_v1 IS
     'contract_version=stage4-signal-due-scan-state-v1;scope=stage4_signal_only;authority=operational_cursor_only;lap_upper=frozen';
@@ -186,28 +195,28 @@ DECLARE
     );
     owner_oid OID;
     expected_columns TEXT[] := ARRAY[
-        'scan_key:text:not-null',
-        'state_version:text:not-null',
-        'cursor_alert_time_utc:timestamp with time zone:nullable',
-        'cursor_event_id:bigint:nullable',
-        'lap_upper_alert_time_utc:timestamp with time zone:nullable',
-        'lap_upper_event_id:bigint:nullable',
-        'completed_laps:bigint:not-null',
-        'pages_scanned:bigint:not-null',
-        'candidates_scanned:bigint:not-null',
-        'updated_at_utc:timestamp with time zone:not-null'
+        'scan_key:text:not-null:"default"',
+        'state_version:text:not-null:"default"',
+        'cursor_alert_time_utc:timestamp with time zone:nullable:-',
+        'cursor_event_id:bigint:nullable:-',
+        'lap_upper_alert_time_utc:timestamp with time zone:nullable:-',
+        'lap_upper_event_id:bigint:nullable:-',
+        'completed_laps:bigint:not-null:-',
+        'pages_scanned:bigint:not-null:-',
+        'candidates_scanned:bigint:not-null:-',
+        'updated_at_utc:timestamp with time zone:not-null:-'
     ]::TEXT[];
     actual_columns TEXT[];
     expected_constraints TEXT[] := ARRAY[
-        'research_stage4_signal_scan_counters_ck',
-        'research_stage4_signal_scan_cursor_pair_ck',
-        'research_stage4_signal_scan_cursor_requires_upper_ck',
-        'research_stage4_signal_scan_cursor_within_lap_ck',
-        'research_stage4_signal_scan_key_ck',
-        'research_stage4_signal_scan_positive_ids_ck',
-        'research_stage4_signal_scan_state_v1_pkey',
-        'research_stage4_signal_scan_state_version_ck',
-        'research_stage4_signal_scan_upper_pair_ck'
+        'research_stage4_signal_scan_counters_ck|c|CHECK (((completed_laps >= 0) AND (pages_scanned >= 0) AND (candidates_scanned >= 0)))|false',
+        'research_stage4_signal_scan_cursor_pair_ck|c|CHECK (((cursor_alert_time_utc IS NULL) = (cursor_event_id IS NULL)))|false',
+        'research_stage4_signal_scan_cursor_requires_upper_ck|c|CHECK (((cursor_alert_time_utc IS NULL) OR (lap_upper_alert_time_utc IS NOT NULL)))|false',
+        'research_stage4_signal_scan_cursor_within_lap_ck|c|CHECK (((cursor_alert_time_utc IS NULL) OR (ROW(cursor_alert_time_utc, cursor_event_id) <= ROW(lap_upper_alert_time_utc, lap_upper_event_id))))|false',
+        'research_stage4_signal_scan_key_ck|c|CHECK ((scan_key = ''STAGE4_SIGNAL_DUE_V1''::text))|false',
+        'research_stage4_signal_scan_positive_ids_ck|c|CHECK ((((cursor_event_id IS NULL) OR (cursor_event_id > 0)) AND ((lap_upper_event_id IS NULL) OR (lap_upper_event_id > 0))))|false',
+        'research_stage4_signal_scan_state_v1_pkey|p|PRIMARY KEY (scan_key)|true',
+        'research_stage4_signal_scan_state_version_ck|c|CHECK ((state_version = ''stage4-signal-due-scan-state-v1''::text))|false',
+        'research_stage4_signal_scan_upper_pair_ck|c|CHECK (((lap_upper_alert_time_utc IS NULL) = (lap_upper_event_id IS NULL)))|false'
     ]::TEXT[];
     actual_constraints TEXT[];
     actual_defaults TEXT[];
@@ -240,7 +249,8 @@ BEGIN
                    attribute.atttypid, attribute.atttypmod
                ) || ':' ||
                CASE WHEN attribute.attnotnull
-                    THEN 'not-null' ELSE 'nullable' END
+                    THEN 'not-null' ELSE 'nullable' END || ':' ||
+               attribute.attcollation::REGCOLLATION::TEXT
                ORDER BY attribute.attnum
            )
       INTO actual_columns
@@ -252,28 +262,138 @@ BEGIN
         RAISE EXCEPTION 'Stage-4 signal scan state columns changed';
     END IF;
 
-    SELECT ARRAY_AGG(constraint_row.conname::TEXT ORDER BY constraint_row.conname)
+    SELECT ARRAY_AGG(
+               constraint_row.conname::TEXT || '|' ||
+               constraint_row.contype::TEXT || '|' ||
+               pg_catalog.pg_get_constraintdef(
+                   constraint_row.oid, FALSE
+               ) || '|' || constraint_row.connoinherit::TEXT
+               ORDER BY constraint_row.conname
+           )
       INTO actual_constraints
       FROM pg_catalog.pg_constraint constraint_row
      WHERE constraint_row.conrelid = state_oid
        AND constraint_row.contype IN ('c', 'p')
        AND constraint_row.convalidated
-       AND NOT constraint_row.condeferrable;
+       AND NOT constraint_row.condeferrable
+       AND NOT constraint_row.condeferred
+       AND constraint_row.conislocal
+       AND constraint_row.coninhcount = 0
+       AND constraint_row.conparentid = 0
+       AND (
+           pg_catalog.current_setting('server_version_num')::INTEGER < 180000
+           OR (
+               pg_catalog.to_jsonb(constraint_row)
+                   ->> 'conenforced'
+           )::BOOLEAN IS TRUE
+       );
     SELECT COUNT(*) INTO constraint_count
       FROM pg_catalog.pg_constraint constraint_row
-     WHERE constraint_row.conrelid = state_oid;
+     WHERE constraint_row.conrelid = state_oid
+       AND constraint_row.contype IN ('c', 'p');
     IF actual_constraints IS DISTINCT FROM expected_constraints THEN
         RAISE EXCEPTION 'Stage-4 signal scan state constraints changed';
     ELSIF constraint_count <> pg_catalog.cardinality(expected_constraints)
-       OR (
-           SELECT pg_catalog.pg_get_constraintdef(
-                      constraint_row.oid, FALSE
-                  )
+       OR EXISTS (
+           SELECT 1
              FROM pg_catalog.pg_constraint constraint_row
             WHERE constraint_row.conrelid = state_oid
-              AND constraint_row.conname =
-                  'research_stage4_signal_scan_state_v1_pkey'
-       ) IS DISTINCT FROM 'PRIMARY KEY (scan_key)' THEN
+              AND constraint_row.contype NOT IN ('c', 'p', 'n')
+       )
+       OR (
+           -- PostgreSQL 18 materializes NOT NULL constraints as contype='n';
+           -- supported older majors keep only pg_attribute.attnotnull.
+           pg_catalog.current_setting('server_version_num')::INTEGER >= 180000
+           AND (
+               -- PG18-generated/truncated NOT NULL names are deliberately
+               -- non-contractual.  Their columns and every semantic property
+               -- remain exact, so a rename alone cannot change authority.
+               (SELECT COUNT(*)
+                  FROM pg_catalog.pg_constraint constraint_row
+                 WHERE constraint_row.conrelid = state_oid
+                   AND constraint_row.contype = 'n') <>
+               (SELECT COUNT(*)
+                  FROM pg_catalog.pg_attribute attribute
+                 WHERE attribute.attrelid = state_oid
+                   AND attribute.attnum > 0
+                   AND NOT attribute.attisdropped
+                   AND attribute.attnotnull)
+               OR (
+                   SELECT ARRAY_AGG(
+                              constrained.attname ORDER BY constrained.attnum
+                          )
+                     FROM (
+                         SELECT attribute.attnum,
+                                attribute.attname::TEXT AS attname
+                           FROM pg_catalog.pg_constraint constraint_row
+                           CROSS JOIN LATERAL pg_catalog.unnest(
+                               constraint_row.conkey
+                           ) constrained_key(attnum)
+                           JOIN pg_catalog.pg_attribute attribute
+                             ON attribute.attrelid =
+                                constraint_row.conrelid
+                            AND attribute.attnum = constrained_key.attnum
+                          WHERE constraint_row.conrelid = state_oid
+                            AND constraint_row.contype = 'n'
+                     ) constrained
+               ) IS DISTINCT FROM (
+                   SELECT ARRAY_AGG(
+                              attribute.attname::TEXT ORDER BY attribute.attnum
+                          )
+                     FROM pg_catalog.pg_attribute attribute
+                    WHERE attribute.attrelid = state_oid
+                      AND attribute.attnum > 0
+                      AND NOT attribute.attisdropped
+                      AND attribute.attnotnull
+               )
+               OR EXISTS (
+                   SELECT 1
+                     FROM pg_catalog.pg_constraint constraint_row
+                     LEFT JOIN LATERAL (
+                         SELECT attribute.attname
+                           FROM pg_catalog.unnest(
+                               constraint_row.conkey
+                           ) constrained_key(attnum)
+                           JOIN pg_catalog.pg_attribute attribute
+                             ON attribute.attrelid =
+                                constraint_row.conrelid
+                            AND attribute.attnum = constrained_key.attnum
+                     ) constrained ON TRUE
+                    WHERE constraint_row.conrelid = state_oid
+                      AND constraint_row.contype = 'n'
+                      AND (
+                          pg_catalog.cardinality(
+                              constraint_row.conkey
+                          ) <> 1
+                          OR constrained.attname IS NULL
+                          OR constraint_row.convalidated IS DISTINCT FROM TRUE
+                          OR constraint_row.condeferrable
+                          OR constraint_row.condeferred
+                          OR constraint_row.connoinherit
+                          OR NOT constraint_row.conislocal
+                          OR constraint_row.coninhcount <> 0
+                          OR constraint_row.conparentid <> 0
+                          OR (
+                              pg_catalog.to_jsonb(constraint_row)
+                                  ->> 'conenforced'
+                          )::BOOLEAN IS DISTINCT FROM TRUE
+                          OR pg_catalog.pg_get_constraintdef(
+                              constraint_row.oid, FALSE
+                          ) IS DISTINCT FROM pg_catalog.format(
+                              'NOT NULL %I', constrained.attname
+                          )
+                      )
+               )
+           )
+       )
+       OR (
+           pg_catalog.current_setting('server_version_num')::INTEGER < 180000
+           AND EXISTS (
+               SELECT 1 FROM pg_catalog.pg_constraint constraint_row
+                WHERE constraint_row.conrelid = state_oid
+                  AND constraint_row.contype = 'n'
+           )
+       ) THEN
         RAISE EXCEPTION 'Stage-4 signal scan state constraint shape changed';
     END IF;
 
@@ -347,7 +467,11 @@ BEGIN
         SELECT 1
           FROM pg_catalog.pg_rewrite rewrite_row
          WHERE rewrite_row.ev_class = state_oid
-           AND rewrite_row.rulename <> '_RETURN'
+    ) OR EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_inherits inheritance
+         WHERE inheritance.inhrelid = state_oid
+            OR inheritance.inhparent = state_oid
     ) THEN
         RAISE EXCEPTION 'Stage-4 signal scan state has unsafe enforcement';
     END IF;

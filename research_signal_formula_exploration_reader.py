@@ -2471,6 +2471,136 @@ WITH carrier_view AS (
         ON attribute.attrelid = target.oid
        AND attribute.attnum > 0
        AND NOT attribute.attisdropped
+), raw_constraint_status AS (
+    SELECT (
+               SELECT pg_catalog.count(*) = 27
+                 FROM pg_catalog.pg_constraint constraint_row
+                WHERE constraint_row.conrelid = raw.oid
+                  AND constraint_row.contype IN ('c', 'f', 'p', 'u')
+           )
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM pg_catalog.pg_constraint constraint_row
+                WHERE constraint_row.conrelid = raw.oid
+                  AND constraint_row.contype NOT IN ('c', 'f', 'p', 'u', 'n')
+           )
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM pg_catalog.pg_constraint constraint_row
+                WHERE constraint_row.conrelid = raw.oid
+                  AND (
+                      constraint_row.convalidated IS DISTINCT FROM TRUE
+                      OR constraint_row.condeferrable
+                      OR constraint_row.condeferred
+                      OR NOT constraint_row.conislocal
+                      OR constraint_row.coninhcount <> 0
+                      OR constraint_row.conparentid <> 0
+                      OR (
+                          pg_catalog.current_setting(
+                              'server_version_num'
+                          )::integer >= 180000
+                          AND (
+                              pg_catalog.to_jsonb(constraint_row)
+                                  ->> 'conenforced'
+                          )::boolean IS DISTINCT FROM TRUE
+                      )
+                  )
+           )
+           AND (
+               (
+                   pg_catalog.current_setting(
+                       'server_version_num'
+                   )::integer < 180000
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM pg_catalog.pg_constraint constraint_row
+                        WHERE constraint_row.conrelid = raw.oid
+                          AND constraint_row.contype = 'n'
+                   )
+               )
+               OR (
+                   pg_catalog.current_setting(
+                       'server_version_num'
+                   )::integer >= 180000
+                   AND (
+                       -- PostgreSQL-generated NOT NULL names are not authority;
+                       -- exact mapped columns and semantics are asserted below.
+                       SELECT pg_catalog.count(*)
+                         FROM pg_catalog.pg_constraint constraint_row
+                        WHERE constraint_row.conrelid = raw.oid
+                          AND constraint_row.contype = 'n'
+                   ) = (
+                       SELECT pg_catalog.count(*)
+                         FROM pg_catalog.pg_attribute attribute
+                        WHERE attribute.attrelid = raw.oid
+                          AND attribute.attnum > 0
+                          AND NOT attribute.attisdropped
+                          AND attribute.attnotnull
+                   )
+                   AND (
+                       SELECT pg_catalog.array_agg(
+                                  constrained.attname
+                                  ORDER BY constrained.attnum
+                              )
+                         FROM (
+                             SELECT attribute.attnum,
+                                    attribute.attname::text AS attname
+                               FROM pg_catalog.pg_constraint constraint_row
+                               CROSS JOIN LATERAL pg_catalog.unnest(
+                                   constraint_row.conkey
+                               ) constrained_key(attnum)
+                               JOIN pg_catalog.pg_attribute attribute
+                                 ON attribute.attrelid =
+                                    constraint_row.conrelid
+                                AND attribute.attnum =
+                                    constrained_key.attnum
+                              WHERE constraint_row.conrelid = raw.oid
+                                AND constraint_row.contype = 'n'
+                         ) constrained
+                   ) IS NOT DISTINCT FROM (
+                       SELECT pg_catalog.array_agg(
+                                  attribute.attname::text
+                                  ORDER BY attribute.attnum
+                              )
+                         FROM pg_catalog.pg_attribute attribute
+                        WHERE attribute.attrelid = raw.oid
+                          AND attribute.attnum > 0
+                          AND NOT attribute.attisdropped
+                          AND attribute.attnotnull
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM pg_catalog.pg_constraint constraint_row
+                         LEFT JOIN LATERAL (
+                             SELECT attribute.attname
+                               FROM pg_catalog.unnest(
+                                   constraint_row.conkey
+                               ) constrained_key(attnum)
+                               JOIN pg_catalog.pg_attribute attribute
+                                 ON attribute.attrelid =
+                                    constraint_row.conrelid
+                                AND attribute.attnum =
+                                    constrained_key.attnum
+                         ) constrained ON TRUE
+                        WHERE constraint_row.conrelid = raw.oid
+                          AND constraint_row.contype = 'n'
+                          AND (
+                              pg_catalog.cardinality(
+                                  constraint_row.conkey
+                              ) <> 1
+                              OR constrained.attname IS NULL
+                              OR constraint_row.connoinherit
+                              OR constraint_row.conparentid <> 0
+                              OR pg_catalog.pg_get_constraintdef(
+                                  constraint_row.oid, false
+                              ) IS DISTINCT FROM pg_catalog.format(
+                                  'NOT NULL %I', constrained.attname
+                              )
+                          )
+                   )
+               )
+           ) AS ready
+      FROM raw_carrier raw
 ), raw_catalog_payload AS (
     SELECT pg_catalog.jsonb_build_object(
         'columns', COALESCE((
@@ -2511,6 +2641,7 @@ WITH carrier_view AS (
                    ) ORDER BY constraint_row.conname)
               FROM pg_catalog.pg_constraint constraint_row
              WHERE constraint_row.conrelid = raw.oid
+               AND constraint_row.contype IN ('c', 'f', 'p', 'u')
         ), '[]'::jsonb),
         'indexes', COALESCE((
             SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
@@ -3050,7 +3181,9 @@ SELECT COALESCE((
              CROSS JOIN raw_catalog_digest raw_digest
              CROSS JOIN trigger_catalog_digest trigger_digest
              CROSS JOIN source_hardening hardening
+             CROSS JOIN raw_constraint_status constraints
             WHERE hardening.ready
+              AND constraints.ready
        ), false) AS no_signal_outcomes_view_attested,
        COALESCE((
            SELECT raw.relkind = 'r'
@@ -3096,6 +3229,8 @@ SELECT COALESCE((
              CROSS JOIN source_hardening hardening
              CROSS JOIN raw_catalog_digest raw_digest
              CROSS JOIN trigger_catalog_digest trigger_digest
+             CROSS JOIN raw_constraint_status constraints
+            WHERE constraints.ready
        ), false) AS no_signal_outcomes_table_attested,
        COALESCE((
            SELECT writer.ready

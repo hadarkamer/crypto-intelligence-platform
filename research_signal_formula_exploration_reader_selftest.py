@@ -314,6 +314,7 @@ def _assert_no_signal_attestation_contract(sql: str) -> None:
         "order by attribute.attnum",
         "order by constraint_row.conname",
         "order by index_relation.relname",
+        "constraint_row.contype in ('c', 'f', 'p', 'u')",
     ):
         assert token in raw_catalog, token
     raw_digest = cte("raw_catalog_digest", "trigger_catalog_payload")
@@ -363,10 +364,30 @@ def _assert_no_signal_attestation_contract(sql: str) -> None:
         assert trigger_name in triggers
 
     view_columns = cte("carrier_columns", "raw_carrier")
-    raw_columns = cte("raw_columns", "raw_catalog_payload")
+    raw_columns = cte("raw_columns", "raw_constraint_status")
     for block in (view_columns, raw_columns):
         assert "attribute.attacl" in block
         assert "pg_catalog.cardinality(attribute.attacl)" in block
+
+    raw_constraints = cte("raw_constraint_status", "raw_catalog_payload")
+    for token in (
+        "pg_catalog.count(*) = 27",
+        "constraint_row.contype in ('c', 'f', 'p', 'u')",
+        "constraint_row.contype not in ('c', 'f', 'p', 'u', 'n')",
+        "constraint_row.convalidated is distinct from true",
+        "constraint_row.conislocal",
+        "constraint_row.coninhcount <> 0",
+        "server_version_num",
+        "->> 'conenforced'",
+        "constraint_row.conparentid <> 0",
+        "'not null %i'",
+        "postgresql-generated not null names are not authority",
+    ):
+        assert token in raw_constraints, token
+    assert normalized.count(
+        "cross join raw_constraint_status constraints"
+    ) == 2
+    assert normalized.count("constraints.ready") == 2
 
     writer_role = cte("writer_role", "writer_source_authority")
     for token in (

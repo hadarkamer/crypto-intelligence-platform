@@ -11,6 +11,8 @@ SET LOCAL DateStyle = 'ISO, YMD';
 SET LOCAL IntervalStyle = 'postgres';
 SET LOCAL extra_float_digits = 3;
 SET LOCAL quote_all_identifiers = off;
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '300s';
 
 DO $preflight$
 DECLARE
@@ -27,6 +29,9 @@ DECLARE
     actual_raw_catalog_sha256 TEXT;
     raw_catalog JSONB;
 BEGIN
+    PERFORM pg_catalog.set_config(
+        'research.migration_026_validated_raw_oid', '0', TRUE
+    );
     IF pg_catalog.current_setting('server_version_num')::INTEGER < 150000 THEN
         RAISE EXCEPTION 'Stage-4 no-signal outcomes require PostgreSQL 15+';
     END IF;
@@ -137,6 +142,28 @@ BEGIN
             RAISE EXCEPTION
                 'Existing Stage-4 no-signal carrier has an unsafe kind or owner';
         END IF;
+        EXECUTE
+            'LOCK TABLE public.research_stage4_no_signal_outcomes_v1 '
+            || 'IN SHARE ROW EXCLUSIVE MODE';
+        IF pg_catalog.to_regclass(
+               'public.research_stage4_no_signal_outcomes_v1'
+           ) IS DISTINCT FROM existing_raw_oid THEN
+            RAISE EXCEPTION
+                'Stage-4 no-signal carrier changed while acquiring its lock';
+        END IF;
+        -- Re-read every value under the transaction-held lock.  DDL that won
+        -- a race before the lock must never inherit a previously checked
+        -- receipt.
+        SELECT relation.relkind::TEXT, relation.relowner,
+               pg_catalog.obj_description(relation.oid, 'pg_class')
+          INTO existing_raw_kind, existing_raw_owner, existing_raw_comment
+          FROM pg_catalog.pg_class relation
+         WHERE relation.oid=existing_raw_oid;
+        IF existing_raw_kind IS DISTINCT FROM 'r'
+           OR existing_raw_owner IS DISTINCT FROM trusted_owner THEN
+            RAISE EXCEPTION
+                'Locked Stage-4 no-signal carrier has an unsafe kind or owner';
+        END IF;
         SELECT JSONB_BUILD_OBJECT(
             'columns', COALESCE((
                 SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
@@ -174,6 +201,7 @@ BEGIN
                        ) ORDER BY constraint_row.conname)
                   FROM pg_catalog.pg_constraint constraint_row
                  WHERE constraint_row.conrelid=existing_raw_oid
+                   AND constraint_row.contype IN ('c', 'f', 'p', 'u')
             ), '[]'::JSONB),
             'indexes', COALESCE((
                 SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
@@ -213,6 +241,11 @@ BEGIN
             RAISE EXCEPTION
                 'Existing Stage-4 no-signal carrier catalog receipt is invalid';
         END IF;
+        PERFORM pg_catalog.set_config(
+            'research.migration_026_validated_raw_oid',
+            existing_raw_oid::TEXT,
+            TRUE
+        );
     END IF;
 END;
 $preflight$;
@@ -297,6 +330,38 @@ CREATE TABLE IF NOT EXISTS public.research_stage4_no_signal_outcomes_v1 (
     )
 );
 
+-- Existing carriers were locked before their receipt was validated.  A fresh
+-- carrier is locked here immediately after CREATE.  If another transaction
+-- won a concurrent CREATE IF NOT EXISTS race, its pg_class row cannot be
+-- treated as migration-authored or be sealed with a new receipt.
+LOCK TABLE public.research_stage4_no_signal_outcomes_v1
+    IN SHARE ROW EXCLUSIVE MODE;
+
+DO $creation_identity$
+DECLARE
+    raw_oid OID :=
+        'public.research_stage4_no_signal_outcomes_v1'::REGCLASS;
+    raw_xmin XID;
+    validated_raw_oid OID;
+BEGIN
+    SELECT relation.xmin
+      INTO raw_xmin
+      FROM pg_catalog.pg_class relation
+     WHERE relation.oid=raw_oid;
+    validated_raw_oid := COALESCE(pg_catalog.current_setting(
+        'research.migration_026_validated_raw_oid', TRUE
+    ), '0')::OID;
+    IF validated_raw_oid IS DISTINCT FROM raw_oid
+       AND NOT (
+           validated_raw_oid=0
+           AND raw_xmin=pg_catalog.pg_current_xact_id()::XID
+       ) THEN
+        RAISE EXCEPTION
+            'Stage-4 no-signal carrier lacks a locked receipt or current-transaction identity';
+    END IF;
+END;
+$creation_identity$;
+
 DO $raw_shape_assertions$
 DECLARE
     raw_oid OID := 'public.research_stage4_no_signal_outcomes_v1'::REGCLASS;
@@ -354,9 +419,14 @@ BEGIN
        AND default_row.adnum=attribute.attnum
      WHERE attribute.attrelid=raw_oid
        AND attribute.attnum>0 AND NOT attribute.attisdropped;
+    -- PostgreSQL 18 represents column NOT NULL state in pg_constraint with
+    -- contype='n'; older supported majors expose the same truth only through
+    -- pg_attribute.attnotnull.  Count the portable semantic inventory here,
+    -- then attest any PG18 NOT NULL rows against the already exact columns.
     SELECT COUNT(*) INTO constraint_count
       FROM pg_catalog.pg_constraint constraint_row
-     WHERE constraint_row.conrelid=raw_oid;
+     WHERE constraint_row.conrelid=raw_oid
+       AND constraint_row.contype IN ('c', 'f', 'p', 'u');
     IF actual_columns IS DISTINCT FROM expected_columns
        OR NOT EXISTS (
             SELECT 1 FROM pg_catalog.pg_class relation
@@ -375,13 +445,129 @@ BEGIN
             SELECT 1 FROM pg_catalog.pg_rewrite rewrite_row
              WHERE rewrite_row.ev_class=raw_oid
        )
+       OR EXISTS (
+            SELECT 1 FROM pg_catalog.pg_inherits inheritance
+             WHERE inheritance.inhrelid=raw_oid
+                OR inheritance.inhparent=raw_oid
+       )
        OR constraint_count<>27
+       OR EXISTS (
+            SELECT 1 FROM pg_catalog.pg_constraint constraint_row
+             WHERE constraint_row.conrelid=raw_oid
+               AND constraint_row.contype NOT IN ('c', 'f', 'p', 'u', 'n')
+       )
        OR EXISTS (
             SELECT 1 FROM pg_catalog.pg_constraint constraint_row
              WHERE constraint_row.conrelid=raw_oid
                AND (NOT constraint_row.convalidated
                     OR constraint_row.condeferrable
-                    OR constraint_row.condeferred)
+                    OR constraint_row.condeferred
+                    OR NOT constraint_row.conislocal
+                    OR constraint_row.coninhcount<>0
+                    OR constraint_row.conparentid<>0
+                    OR (
+                        pg_catalog.current_setting(
+                            'server_version_num'
+                        )::INTEGER>=180000
+                        AND (
+                            pg_catalog.to_jsonb(constraint_row)
+                                ->> 'conenforced'
+                        )::BOOLEAN IS DISTINCT FROM TRUE
+                    ))
+       )
+       OR (
+            pg_catalog.current_setting('server_version_num')::INTEGER>=180000
+            AND (
+                -- PG18 generates and may truncate NOT NULL constraint names.
+                -- Names are intentionally non-contractual; column mapping,
+                -- definition, validation, locality and enforcement are exact.
+                (SELECT COUNT(*)
+                   FROM pg_catalog.pg_constraint constraint_row
+                  WHERE constraint_row.conrelid=raw_oid
+                    AND constraint_row.contype='n')<>
+                (SELECT COUNT(*)
+                   FROM pg_catalog.pg_attribute attribute
+                  WHERE attribute.attrelid=raw_oid
+                    AND attribute.attnum>0
+                    AND NOT attribute.attisdropped
+                    AND attribute.attnotnull)
+                OR (
+                    SELECT ARRAY_AGG(
+                               constrained.attname
+                               ORDER BY constrained.attnum
+                           )
+                      FROM (
+                          SELECT attribute.attnum,
+                                 attribute.attname::TEXT AS attname
+                            FROM pg_catalog.pg_constraint constraint_row
+                            CROSS JOIN LATERAL pg_catalog.unnest(
+                                constraint_row.conkey
+                            ) constrained_key(attnum)
+                            JOIN pg_catalog.pg_attribute attribute
+                              ON attribute.attrelid=
+                                 constraint_row.conrelid
+                             AND attribute.attnum=constrained_key.attnum
+                           WHERE constraint_row.conrelid=raw_oid
+                             AND constraint_row.contype='n'
+                      ) constrained
+                ) IS DISTINCT FROM (
+                    SELECT ARRAY_AGG(
+                               attribute.attname::TEXT
+                               ORDER BY attribute.attnum
+                           )
+                      FROM pg_catalog.pg_attribute attribute
+                     WHERE attribute.attrelid=raw_oid
+                       AND attribute.attnum>0
+                       AND NOT attribute.attisdropped
+                       AND attribute.attnotnull
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM pg_catalog.pg_constraint constraint_row
+                      LEFT JOIN LATERAL (
+                          SELECT attribute.attname
+                            FROM pg_catalog.unnest(
+                                constraint_row.conkey
+                            ) constrained_key(attnum)
+                            JOIN pg_catalog.pg_attribute attribute
+                              ON attribute.attrelid=
+                                 constraint_row.conrelid
+                             AND attribute.attnum=constrained_key.attnum
+                      ) constrained ON TRUE
+                     WHERE constraint_row.conrelid=raw_oid
+                       AND constraint_row.contype='n'
+                       AND (
+                           pg_catalog.cardinality(
+                               constraint_row.conkey
+                           )<>1
+                           OR constrained.attname IS NULL
+                           OR (
+                               SELECT attribute.attnotnull
+                                 FROM pg_catalog.pg_attribute attribute
+                                WHERE attribute.attrelid=
+                                      constraint_row.conrelid
+                                  AND attribute.attname=constrained.attname
+                                  AND attribute.attnum>0
+                                  AND NOT attribute.attisdropped
+                           ) IS DISTINCT FROM TRUE
+                           OR pg_catalog.pg_get_constraintdef(
+                               constraint_row.oid, FALSE
+                           ) IS DISTINCT FROM pg_catalog.format(
+                               'NOT NULL %I', constrained.attname
+                           )
+                           OR constraint_row.connoinherit
+                           OR constraint_row.conparentid<>0
+                       )
+                )
+            )
+       )
+       OR (
+            pg_catalog.current_setting('server_version_num')::INTEGER<180000
+            AND EXISTS (
+                SELECT 1 FROM pg_catalog.pg_constraint constraint_row
+                 WHERE constraint_row.conrelid=raw_oid
+                   AND constraint_row.contype='n'
+            )
        )
        OR (SELECT COUNT(*) FROM pg_catalog.pg_constraint constraint_row
             WHERE constraint_row.conrelid=raw_oid
@@ -1544,6 +1730,7 @@ BEGIN
                    ) ORDER BY constraint_row.conname)
               FROM pg_catalog.pg_constraint constraint_row
              WHERE constraint_row.conrelid=raw_oid
+               AND constraint_row.contype IN ('c', 'f', 'p', 'u')
         ), '[]'::JSONB),
         'indexes', COALESCE((
             SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
@@ -1895,3 +2082,5 @@ RESET DateStyle;
 RESET IntervalStyle;
 RESET extra_float_digits;
 RESET quote_all_identifiers;
+RESET lock_timeout;
+RESET statement_timeout;
