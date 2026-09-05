@@ -490,12 +490,10 @@ def run() -> None:
         "authorized.feature_bundle_sha256",
         "open_formula.current_stage='SHADOW'",
         "open_formula.active=TRUE",
-        "open_ft.status IN ('HIT', 'MISS')",
         "open_first_touch_horizons",
         "WITH open_match AS MATERIALIZED",
         "DISTINCT open_match.horizon_minutes",
         "date_trunc('minute', NOW())",
-        "INTERVAL '1 millisecond'",
         "e.event_kind='ALERT'",
         "e.delivery_status='DELIVERED'",
         "e.event_kind='DECISION_SAMPLE'",
@@ -626,8 +624,6 @@ def run() -> None:
     for queue_query in (captured.query, closed_capture.query):
         assert "e.event_kind<>'ALERT'" in queue_query
         assert queue_query.index("e.event_kind<>'ALERT'") < queue_query.index("LIMIT %s")
-    assert "open_ft.status IN ('HIT', 'MISS')" in captured.query
-
     canonical_binance_path = {
         "symbol": "ZEC",
         "exchange": "binance",

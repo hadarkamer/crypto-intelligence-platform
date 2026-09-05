@@ -1522,26 +1522,6 @@ class ResearchOutcomeWorker:
                         ELSE INTERVAL '0 minutes'
                       END
                   <= date_trunc('minute', NOW())
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM research_first_touch_outcomes open_ft
-                  WHERE open_ft.event_id=e.event_id
-                    AND open_ft.horizon_minutes=open_match.horizon_minutes
-                    AND open_ft.method_version=%s
-                    AND (
-                        (
-                            open_ft.status IN ('HIT', 'MISS')
-                            AND open_ft.data_quality_status=ANY(%s)
-                        )
-                        OR (
-                            open_ft.status='PENDING'
-                            AND open_ft.data_quality_status=ANY(%s)
-                            AND open_ft.observed_through_utc >=
-                                date_trunc('minute', NOW())
-                                - INTERVAL '1 millisecond'
-                        )
-                    )
-              )
             GROUP BY e.event_id
             ORDER BY
                 {_alert_reference_queue_priority_sql("e")} ASC,
@@ -1557,9 +1537,6 @@ class ResearchOutcomeWorker:
             _FIRST_TOUCH_METHOD_VERSION,
             _FIRST_TOUCH_METHOD_VERSION,
             _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
-            _FIRST_TOUCH_METHOD_VERSION,
-            list(canonical_price_path.COMPLETE_QUALITIES),
-            list(canonical_price_path.COMPLETE_QUALITIES),
             max(1, min(int(limit), _OPEN_FIRST_TOUCH_EVENT_LIMIT)),
         ]
         return conn.execute(query, params).fetchall()
