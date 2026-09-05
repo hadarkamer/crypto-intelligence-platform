@@ -492,7 +492,8 @@ def run() -> None:
         "open_formula.active=TRUE",
         "open_ft.status IN ('HIT', 'MISS')",
         "open_first_touch_horizons",
-        "DISTINCT open_formula.horizon_minutes",
+        "WITH open_match AS MATERIALIZED",
+        "DISTINCT open_match.horizon_minutes",
         "date_trunc('minute', NOW())",
         "INTERVAL '1 millisecond'",
         "e.event_kind='ALERT'",
@@ -503,7 +504,7 @@ def run() -> None:
     ):
         assert required in captured.query
     assert "e.event_kind, e.delivery_status" in captured.query
-    assert "FROM research_events e" in captured.query
+    assert "JOIN research_events e ON e.event_id=open_match.event_id" in captured.query
     assert "research_formula_live_deliveries" not in captured.query
     assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in captured.params
 

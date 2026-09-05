@@ -1322,6 +1322,30 @@ class ResearchOutcomeWorker:
         admitted event classes; this query never reads any delivery queue.
         """
         query = f"""
+            WITH open_match AS MATERIALIZED (
+                SELECT
+                    open_check.event_id,
+                    open_check.prospective_anchor_slot_id,
+                    BTRIM(open_check.prospective_input_fingerprint)
+                        AS prospective_input_fingerprint,
+                    BTRIM(open_check.feature_bundle_sha256)
+                        AS feature_bundle_sha256,
+                    open_formula.horizon_minutes
+                FROM research_formula_shadow_checks open_check
+                JOIN research_formulas open_formula
+                  ON open_formula.formula_id=open_check.formula_id
+                 AND open_formula.active=TRUE
+                 AND open_formula.current_stage='SHADOW'
+                WHERE open_check.matched=TRUE
+                  AND open_check.evaluation_status='MATCHED'
+                  AND open_check.evidence_policy_version=%s
+                  AND open_check.authoritative_verified=TRUE
+                  AND open_check.prospective_anchor_slot_id IS NOT NULL
+                  AND BTRIM(open_check.prospective_input_fingerprint)
+                        ~ '^[0-9a-f]{{64}}$'
+                  AND BTRIM(open_check.feature_bundle_sha256)
+                        ~ '^[0-9a-f]{{64}}$'
+            )
             SELECT e.event_id, e.event_fingerprint, e.alert_time_utc, e.symbol, e.direction,
                    e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status,
@@ -1345,30 +1369,16 @@ class ResearchOutcomeWorker:
                        '{{}}'::jsonb
                    ) AS first_touch_versions,
                    ARRAY_AGG(
-                       DISTINCT open_formula.horizon_minutes
-                       ORDER BY open_formula.horizon_minutes
+                       DISTINCT open_match.horizon_minutes
+                       ORDER BY open_match.horizon_minutes
                    ) AS open_first_touch_horizons,
                    MIN(open_pending.observed_through_utc)
                        AS open_first_touch_observed_utc
-            FROM research_events e
-            JOIN research_formula_shadow_checks open_check
-              ON open_check.event_id=e.event_id
-             AND open_check.matched=TRUE
-             AND open_check.evaluation_status='MATCHED'
-             AND open_check.evidence_policy_version=%s
-             AND open_check.authoritative_verified=TRUE
-             AND open_check.prospective_anchor_slot_id IS NOT NULL
-             AND BTRIM(open_check.prospective_input_fingerprint)
-                    ~ '^[0-9a-f]{{64}}$'
-             AND BTRIM(open_check.feature_bundle_sha256)
-                    ~ '^[0-9a-f]{{64}}$'
-            JOIN research_formulas open_formula
-              ON open_formula.formula_id=open_check.formula_id
-             AND open_formula.active=TRUE
-             AND open_formula.current_stage='SHADOW'
+            FROM open_match
+            JOIN research_events e ON e.event_id=open_match.event_id
             LEFT JOIN research_first_touch_outcomes open_pending
               ON open_pending.event_id=e.event_id
-             AND open_pending.horizon_minutes=open_formula.horizon_minutes
+             AND open_pending.horizon_minutes=open_match.horizon_minutes
              AND open_pending.method_version=%s
              AND open_pending.status='PENDING'
             WHERE e.direction IN ('LONG', 'SHORT')
@@ -1385,12 +1395,12 @@ class ResearchOutcomeWorker:
                             FROM research_prospective_shadow_events authorized
                             WHERE authorized.event_id=e.event_id
                               AND authorized.anchor_slot_id=
-                                  open_check.prospective_anchor_slot_id
+                                  open_match.prospective_anchor_slot_id
                               AND BTRIM(authorized.input_fingerprint)=
-                                  BTRIM(open_check.prospective_input_fingerprint)
+                                  open_match.prospective_input_fingerprint
                               AND BTRIM(
                                   authorized.feature_bundle_sha256
-                              )=BTRIM(open_check.feature_bundle_sha256)
+                              )=open_match.feature_bundle_sha256
                         )
                     )
                   )
@@ -1401,7 +1411,7 @@ class ResearchOutcomeWorker:
                     AND rejected.rejection_policy_version=%s
               )
               AND e.alert_time_utc
-                    + (open_formula.horizon_minutes * INTERVAL '1 minute')
+                    + (open_match.horizon_minutes * INTERVAL '1 minute')
                   > NOW()
               AND date_trunc('minute', e.alert_time_utc)
                     + INTERVAL '1 minute'
@@ -1416,7 +1426,7 @@ class ResearchOutcomeWorker:
                   SELECT 1
                   FROM research_first_touch_outcomes open_ft
                   WHERE open_ft.event_id=e.event_id
-                    AND open_ft.horizon_minutes=open_formula.horizon_minutes
+                    AND open_ft.horizon_minutes=open_match.horizon_minutes
                     AND open_ft.method_version=%s
                     AND (
                         (
@@ -1442,9 +1452,9 @@ class ResearchOutcomeWorker:
             LIMIT %s
         """
         params = [
+            _STRICT_FROZEN_EVIDENCE_POLICY_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),
             _FIRST_TOUCH_METHOD_VERSION,
-            _STRICT_FROZEN_EVIDENCE_POLICY_VERSION,
             _FIRST_TOUCH_METHOD_VERSION,
             _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
             _FIRST_TOUCH_METHOD_VERSION,
