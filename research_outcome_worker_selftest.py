@@ -477,7 +477,7 @@ def run() -> None:
     ) == []
     assert captured.query.count("%s") == len(captured.params)
     for required in (
-        "research_prospective_shadow_events authorized",
+        "research_prospective_anchor_slots authorized",
         "research_formula_shadow_checks open_check",
         "open_check.evaluation_status='MATCHED'",
         "open_check.evidence_policy_version=%s",
