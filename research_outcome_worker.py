@@ -1854,10 +1854,20 @@ class ResearchOutcomeWorker:
             connect_timeout=5,
             options="-c statement_timeout=15000 -c lock_timeout=1000",
         ) as conn:
+            print("[research-outcomes] loading open queue", flush=True)
             open_events = self._load_open_first_touch_events(
                 conn, limit_per_horizon
             )
+            print(
+                f"[research-outcomes] open queue loaded rows={len(open_events)}",
+                flush=True,
+            )
+            print("[research-outcomes] loading due queue", flush=True)
             closed_events = self._load_due_events(conn, limit_per_horizon)
+            print(
+                f"[research-outcomes] due queue loaded rows={len(closed_events)}",
+                flush=True,
+            )
             # The reserved open queue is intentionally first.  Merge a rare
             # boundary duplicate so one event still causes one canonical path
             # fetch even if another horizon closed in the same minute.
