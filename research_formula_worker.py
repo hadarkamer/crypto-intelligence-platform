@@ -23,9 +23,11 @@ import research_formula_store
 import research_market_episode
 import research_max_pain_archive
 import research_mfe_mae_efficiency
+import research_experimental_formula_alert
 import research_signal_formula_exploration
 import research_signal_formula_exploration_reader
 import research_stage4_candidate_search
+import research_stage4_experimental_store
 
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -53,6 +55,10 @@ def _is_sha256(value: Any) -> bool:
 _DISCOVERY_ENABLED = os.getenv("FORMULA_DISCOVERY_ENABLED", "").strip().lower() in _TRUE
 _SHADOW_ENABLED = os.getenv("FORMULA_SHADOW_ENABLED", "").strip().lower() in _TRUE
 _LIVE_ALERTS_ENABLED = os.getenv("FORMULA_LIVE_ALERTS_ENABLED", "").strip().lower() in _TRUE
+_EXPERIMENTAL_ALERTS_ENABLED = (
+    os.getenv("FORMULA_EXPERIMENTAL_ALERTS_ENABLED", "").strip().lower()
+    in _TRUE
+)
 _DISCOVERY_STARTUP_DELAY_SECONDS = max(
     15, int(os.getenv("FORMULA_DISCOVERY_STARTUP_DELAY_SECONDS", "30"))
 )
@@ -63,6 +69,18 @@ _DISCOVERY_IDLE_POLL_SECONDS = max(
     15, int(os.getenv("FORMULA_DISCOVERY_IDLE_POLL_SECONDS", "60"))
 )
 _SHADOW_POLL_SECONDS = max(30, int(os.getenv("FORMULA_SHADOW_POLL_SECONDS", "60")))
+_EXPERIMENTAL_POLL_SECONDS = _bounded_int_environment(
+    "FORMULA_EXPERIMENTAL_POLL_SECONDS",
+    default=60,
+    minimum=30,
+    maximum=900,
+)
+_EXPERIMENTAL_CLAIM_BATCH = _bounded_int_environment(
+    "FORMULA_EXPERIMENTAL_CLAIM_BATCH",
+    default=20,
+    minimum=1,
+    maximum=50,
+)
 _LOOKBACK_DAYS = max(1, min(3650, int(os.getenv("FORMULA_DISCOVERY_LOOKBACK_DAYS", "120"))))
 _DATASET_LIMIT = max(100, min(5000, int(os.getenv("FORMULA_DISCOVERY_DATASET_LIMIT", "2000"))))
 _DATASET_MODE = os.getenv("FORMULA_DISCOVERY_DATASET_MODE", "auto").strip().lower()
@@ -1302,6 +1320,27 @@ class FormulaWorkerMetrics:
     stage4_candidate_search_failures: int = 0
     last_stage4_candidate_search_utc: Optional[str] = None
     last_stage4_candidate_search_error: Optional[str] = None
+    experimental_cycles: int = 0
+    experimental_current_reads: int = 0
+    experimental_search_runs_persisted: int = 0
+    experimental_search_persistence_failures: int = 0
+    experimental_alerts_built: int = 0
+    experimental_alerts_persisted: int = 0
+    experimental_same_wave_duplicates: int = 0
+    experimental_deliveries_queued: int = 0
+    experimental_deliveries_claimed: int = 0
+    experimental_deliveries_sent: int = 0
+    experimental_deliveries_ambiguous: int = 0
+    experimental_failures: int = 0
+    experimental_phase: str = "IDLE"
+    last_experimental_phase: Optional[str] = None
+    last_experimental_phase_duration_ms: Optional[int] = None
+    last_experimental_error: Optional[str] = None
+    last_experimental_error_phase: Optional[str] = None
+    last_experimental_timeout_phase: Optional[str] = None
+    last_experimental_timeout_at_utc: Optional[str] = None
+    last_experimental_utc: Optional[str] = None
+    last_experimental_current_receipt_sha256: Optional[str] = None
 
 
 class FormulaResearchWorker:
@@ -1309,16 +1348,19 @@ class FormulaResearchWorker:
         self.metrics = FormulaWorkerMetrics()
         self._discovery_task: Optional[asyncio.Task] = None
         self._shadow_task: Optional[asyncio.Task] = None
+        self._experimental_task: Optional[asyncio.Task] = None
         self._stopping = False
         self._schema_ready = False
+        self._experimental_schema_ready = False
         self._telegram_bot: Any = None
+        self._telegram_delivery_lock = asyncio.Lock()
         self._stage4_ingestion_lock = threading.Lock()
         self._stage4_ingestion_attempted_slots: set[tuple[int, str]] = set()
         self._stage4_ingestion_receipts: Dict[int, Dict[str, Any]] = {}
 
     def _begin_lane_attempt(self, lane: str) -> None:
         normalized_lane = str(lane or "").strip().lower()
-        if normalized_lane not in {"discovery", "shadow"}:
+        if normalized_lane not in {"discovery", "shadow", "experimental"}:
             raise ValueError("formula worker phase lane is invalid")
         setattr(self.metrics, f"last_{normalized_lane}_error", None)
         setattr(self.metrics, f"last_{normalized_lane}_error_phase", None)
@@ -1342,7 +1384,7 @@ class FormulaResearchWorker:
     @contextmanager
     def _phase(self, lane: str, name: str):
         normalized_lane = str(lane or "").strip().lower()
-        if normalized_lane not in {"discovery", "shadow"}:
+        if normalized_lane not in {"discovery", "shadow", "experimental"}:
             raise ValueError("formula worker phase lane is invalid")
         phase = str(name or "UNKNOWN").strip().upper()
         started = time.monotonic()
@@ -1373,7 +1415,7 @@ class FormulaResearchWorker:
             setattr(self.metrics, f"{normalized_lane}_phase", "IDLE")
 
     def bind_telegram(self, bot: Any) -> None:
-        """Bind the initialized Telegram bot used for durable live delivery."""
+        """Bind one transport used by separate LIVE and experimental queues."""
         self._telegram_bot = bot
 
     @staticmethod
@@ -1666,6 +1708,59 @@ class FormulaResearchWorker:
                 0, int(round((time.monotonic() - search_started) * 1000))
             )
             receipt["candidate_search"] = candidate_search
+            if _EXPERIMENTAL_ALERTS_ENABLED and self._experimental_schema_ready:
+                try:
+                    persisted_search = (
+                        research_stage4_experimental_store.persist_search_run(
+                            search_result,
+                            source_corpus_receipt_sha256=payload[
+                                "attestation_receipt_sha256"
+                            ],
+                            schedule_slot_utc=slot,
+                        )
+                    )
+                except Exception as persistence_exc:
+                    self.metrics.experimental_search_persistence_failures += 1
+                    receipt["experimental_persistence"] = {
+                        "status": "FAILED_OPEN",
+                        "error": (
+                            f"{type(persistence_exc).__name__}: "
+                            f"{persistence_exc}"
+                        )[:1000],
+                        "formula_registry_effect": "NONE",
+                        "live_eligible": False,
+                        "trade_execution_allowed": False,
+                    }
+                else:
+                    self.metrics.experimental_search_runs_persisted += int(
+                        persisted_search.get("inserted") is True
+                    )
+                    receipt["experimental_persistence"] = {
+                        "status": (
+                            "INSERTED"
+                            if persisted_search.get("inserted") is True
+                            else "VERIFIED_EXISTING"
+                        ),
+                        "search_run_id": persisted_search.get("search_run_id"),
+                        "eligible_candidate_count": persisted_search.get(
+                            "eligible_candidate_count"
+                        ),
+                        "formula_registry_effect": "NONE",
+                        "live_eligible": False,
+                        "trade_execution_allowed": False,
+                    }
+            else:
+                receipt["experimental_persistence"] = {
+                    "status": "DISABLED",
+                    "reason": (
+                        "runtime disabled"
+                        if not _EXPERIMENTAL_ALERTS_ENABLED
+                        else "experimental schema unavailable"
+                    ),
+                    "formula_registry_effect": "NONE",
+                    "live_eligible": False,
+                    "trade_execution_allowed": False,
+                }
         except Exception as exc:
             self.metrics.stage4_candidate_search_failures += 1
             error = f"{type(exc).__name__}: {exc}"[:1000]
@@ -1715,19 +1810,34 @@ class FormulaResearchWorker:
         return self._store_stage4_ingestion_receipt(horizon, receipt)
 
     def status(self) -> Dict[str, Any]:
+        reader_configured = bool(
+            os.getenv(
+                research_signal_formula_exploration_reader.DATABASE_URL_ENV,
+                "",
+            ).strip()
+        )
+        dispatcher_configured = bool(
+            os.getenv(research_stage4_experimental_store.DATABASE_URL_ENV, "").strip()
+        )
         return {
             "discovery_enabled": _DISCOVERY_ENABLED,
             "shadow_enabled": _SHADOW_ENABLED,
             "live_alerts_enabled": _LIVE_ALERTS_ENABLED,
+            "experimental_alerts_enabled": _EXPERIMENTAL_ALERTS_ENABLED,
             "running": bool(
                 (self._discovery_task and not self._discovery_task.done())
                 or (self._shadow_task and not self._shadow_task.done())
+                or (self._experimental_task and not self._experimental_task.done())
             ),
             "schema_ready": self._schema_ready,
+            "experimental_schema_ready": self._experimental_schema_ready,
             "discovery_running": bool(
                 self._discovery_task and not self._discovery_task.done()
             ),
             "shadow_running": bool(self._shadow_task and not self._shadow_task.done()),
+            "experimental_running": bool(
+                self._experimental_task and not self._experimental_task.done()
+            ),
             "horizons_minutes": list(_horizons()),
             "lookback_days": _LOOKBACK_DAYS,
             "dataset_limit": _DATASET_LIMIT,
@@ -1763,6 +1873,7 @@ class FormulaResearchWorker:
                 research_formula_engine.EMBARGO_POLICY_VERSION
             ),
             "shadow_poll_seconds": _SHADOW_POLL_SECONDS,
+            "experimental_poll_seconds": _EXPERIMENTAL_POLL_SECONDS,
             "shadow_evidence_policy_version": (
                 research_formula_store._PROSPECTIVE_EVIDENCE_POLICY_VERSION
             ),
@@ -1780,6 +1891,26 @@ class FormulaResearchWorker:
                     "stage, runtime enablement and /ai_alerts_on in the destination chat"
                 ),
             },
+            "experimental_delivery_gate": {
+                "environment_enabled": _EXPERIMENTAL_ALERTS_ENABLED,
+                "schema_ready": self._experimental_schema_ready,
+                "reader_configured": reader_configured,
+                "dispatcher_configured": dispatcher_configured,
+                "telegram_delivery_connected": self._telegram_bot is not None,
+                "separate_chat_opt_in_required": True,
+                "per_formula_human_approval_required": False,
+                "delivery_channel": "TELEGRAM_EXPERIMENTAL_ONLY",
+                "formula_registry_effect": "NONE",
+                "live_eligible": False,
+                "trade_execution_allowed": False,
+                "disclaimer": research_experimental_formula_alert.EXPERIMENTAL_LABEL,
+                "stale_in_flight_policy": "AMBIGUOUS_NO_AUTOMATIC_RETRY",
+                "reason": (
+                    "delivery requires the isolated dispatcher schema, a fresh "
+                    "current Stage-4 match, the atomic five-wave evidence gate, "
+                    "and explicit /ai_experimental_on consent"
+                ),
+            },
             "canonical_outcomes": (
                 "Binance Spot USDT 1m; HYPE via Hyperliquid HYPE/USDT spot (@107) 1m"
             ),
@@ -1788,33 +1919,132 @@ class FormulaResearchWorker:
         }
 
     async def start(self) -> bool:
-        if not (_DISCOVERY_ENABLED or _SHADOW_ENABLED):
+        if not (
+            _DISCOVERY_ENABLED
+            or _SHADOW_ENABLED
+            or _EXPERIMENTAL_ALERTS_ENABLED
+        ):
             return False
-        schema = await asyncio.to_thread(research_formula_store.schema_status)
-        if not schema.get("schema_present"):
+        if _DISCOVERY_ENABLED or _SHADOW_ENABLED:
+            try:
+                schema = await asyncio.to_thread(
+                    research_formula_store.schema_status
+                )
+                self._schema_ready = bool(schema.get("schema_present"))
+                if not self._schema_ready:
+                    missing = (
+                        schema.get("missing_tables")
+                        or schema.get("missing_columns")
+                        or schema.get("missing_enforcement")
+                    )
+                    legacy_schema_error = (
+                        "Formula Research schema is unavailable: "
+                        f"{missing}"
+                    )[:1000]
+            except Exception as exc:
+                self._schema_ready = False
+                legacy_schema_error = (
+                    "Formula Research schema attestation failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:1000]
+            if not self._schema_ready:
+                self.metrics.failures += 1
+                self.metrics.last_error = legacy_schema_error
+                for lane, enabled in (
+                    ("discovery", _DISCOVERY_ENABLED),
+                    ("shadow", _SHADOW_ENABLED),
+                ):
+                    if enabled:
+                        setattr(
+                            self.metrics,
+                            f"last_{lane}_error",
+                            legacy_schema_error,
+                        )
+                        setattr(
+                            self.metrics,
+                            f"last_{lane}_error_phase",
+                            "SCHEMA_ATTESTATION",
+                        )
+                print(
+                    "[formula-research] legacy discovery/shadow disabled "
+                    f"fail-closed: {legacy_schema_error}",
+                    flush=True,
+                )
+        else:
             self._schema_ready = False
-            raise RuntimeError(
-                f"Formula Research schema is not installed: {schema.get('missing_tables')}"
-            )
-        self._schema_ready = True
+
+        if _EXPERIMENTAL_ALERTS_ENABLED:
+            try:
+                experimental_schema = await asyncio.to_thread(
+                    research_stage4_experimental_store.schema_status
+                )
+                self._experimental_schema_ready = (
+                    experimental_schema.get("ready") is True
+                )
+                missing = experimental_schema.get(
+                    "missing"
+                ) or experimental_schema.get("missing_tables")
+                experimental_schema_error = (
+                    "experimental schema unavailable: "
+                    f"{missing}"
+                )[:1000]
+            except Exception as exc:
+                self._experimental_schema_ready = False
+                experimental_schema_error = (
+                    "experimental schema attestation failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:1000]
+            if not self._experimental_schema_ready:
+                self.metrics.experimental_failures += 1
+                self.metrics.last_experimental_error = experimental_schema_error
+                self.metrics.last_experimental_error_phase = "SCHEMA_ATTESTATION"
+                print(
+                    "[formula-experimental] disabled fail-closed: "
+                    f"{self.metrics.last_experimental_error}",
+                    flush=True,
+                )
+        else:
+            self._experimental_schema_ready = False
         self._stopping = False
-        if _DISCOVERY_ENABLED and not (
+        if _DISCOVERY_ENABLED and self._schema_ready and not (
             self._discovery_task and not self._discovery_task.done()
         ):
             self._discovery_task = asyncio.create_task(
                 self._discovery_loop(), name="formula-discovery-worker"
             )
-        if _SHADOW_ENABLED and not (
+        if _SHADOW_ENABLED and self._schema_ready and not (
             self._shadow_task and not self._shadow_task.done()
         ):
             self._shadow_task = asyncio.create_task(
                 self._shadow_loop(), name="formula-shadow-worker"
             )
-        return True
+        if (
+            _EXPERIMENTAL_ALERTS_ENABLED
+            and self._experimental_schema_ready
+            and not (
+                self._experimental_task and not self._experimental_task.done()
+            )
+        ):
+            self._experimental_task = asyncio.create_task(
+                self._experimental_loop(), name="formula-experimental-worker"
+            )
+        return bool(
+            (self._discovery_task and not self._discovery_task.done())
+            or (self._shadow_task and not self._shadow_task.done())
+            or (self._experimental_task and not self._experimental_task.done())
+        )
 
     async def stop(self) -> None:
         self._stopping = True
-        tasks = [task for task in (self._discovery_task, self._shadow_task) if task]
+        tasks = [
+            task
+            for task in (
+                self._discovery_task,
+                self._shadow_task,
+                self._experimental_task,
+            )
+            if task
+        ]
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -1824,6 +2054,7 @@ class FormulaResearchWorker:
                 pass
         self._discovery_task = None
         self._shadow_task = None
+        self._experimental_task = None
 
     async def _discovery_loop(self) -> None:
         await asyncio.sleep(_DISCOVERY_STARTUP_DELAY_SECONDS)
@@ -1885,6 +2116,191 @@ class FormulaResearchWorker:
                     self._record_lane_timeout("shadow", phase)
                 print(f"[formula-shadow] cycle failed open: {exc!r}", flush=True)
             await asyncio.sleep(_SHADOW_POLL_SECONDS)
+
+    async def _experimental_loop(self) -> None:
+        await asyncio.sleep(20)
+        while not self._stopping:
+            await self._experimental_cycle_once()
+            await asyncio.sleep(_EXPERIMENTAL_POLL_SECONDS)
+
+    def _run_experimental_evaluation_once(self) -> Dict[str, Any]:
+        """Match fresh current Stage-4 cells against persisted eligible searches."""
+
+        self._begin_lane_attempt("experimental")
+        self.metrics.experimental_cycles += 1
+        with self._phase("experimental", "LOAD_SEARCHES"):
+            searches = research_stage4_experimental_store.load_latest_search_runs()
+        with self._phase("experimental", "LOAD_CURRENT_STAGE4"):
+            current = (
+                research_signal_formula_exploration_reader
+                .load_latest_authoritative_stage4_current()
+            )
+        if type(current) is not (
+            research_signal_formula_exploration_reader
+            .LatestAuthoritativeStage4CurrentResult
+        ):
+            raise TypeError("latest authoritative Stage-4 current type is invalid")
+        current_receipt = current.receipt_dict()
+        self.metrics.experimental_current_reads += 1
+        self.metrics.last_experimental_current_receipt_sha256 = (
+            current.attestation_receipt_sha256
+        )
+        current_time = _as_utc(current_receipt.get("analysis_as_of_utc"))
+        if (
+            current_receipt.get("available") is not True
+            or current_receipt.get("status") != "AVAILABLE"
+        ):
+            completed_at = datetime.now(timezone.utc).isoformat()
+            self.metrics.last_experimental_utc = completed_at
+            self.metrics.last_experimental_error = None
+            self.metrics.last_experimental_error_phase = None
+            return {
+                "status": str(current_receipt.get("status") or "UNAVAILABLE"),
+                "current_available": False,
+                "searches_loaded": len(searches),
+                "alerts_built": 0,
+                "alerts_persisted": 0,
+                "deliveries_queued": 0,
+                "completed_at_utc": completed_at,
+                "formula_registry_effect": "NONE",
+                "live_eligible": False,
+                "trade_execution_allowed": False,
+            }
+
+        observations = current.current_observations
+        alerts: list[
+            research_experimental_formula_alert.ExperimentalFormulaAlert
+        ] = []
+        horizon_errors: list[Dict[str, Any]] = []
+        evaluated_horizons: list[int] = []
+        with self._phase("experimental", "MATCH_CURRENT"):
+            for stored_search in searches:
+                horizon = int(stored_search.get("horizon_minutes") or 0)
+                try:
+                    envelope = stored_search.get("compact_envelope")
+                    if type(envelope) is not (
+                        research_experimental_formula_alert
+                        .CompactEligibleSearchEnvelope
+                    ):
+                        envelope = (
+                            research_experimental_formula_alert
+                            .compact_eligible_search_envelope(
+                                stored_search.get("search_result") or {}
+                            )
+                        )
+                    built = (
+                        research_experimental_formula_alert
+                        .build_experimental_alerts(
+                            observations,
+                            envelope,
+                            current_time_utc=current_time,
+                        )
+                    )
+                except ValueError as exc:
+                    horizon_errors.append(
+                        {
+                            "horizon_minutes": horizon,
+                            "error": f"{type(exc).__name__}: {exc}"[:1000],
+                        }
+                    )
+                    continue
+                evaluated_horizons.append(horizon)
+                alerts.extend(built)
+
+        with self._phase("experimental", "PERSIST_ALERTS"):
+            persisted = (
+                research_stage4_experimental_store.persist_experimental_alerts(
+                    alerts
+                )
+                if alerts
+                else {
+                    "alerts_supplied": 0,
+                    "alerts_inserted": 0,
+                    "same_wave_duplicates": 0,
+                    "deliveries_queued": 0,
+                }
+            )
+        self.metrics.experimental_alerts_built += len(alerts)
+        self.metrics.experimental_alerts_persisted += int(
+            persisted.get("alerts_inserted") or 0
+        )
+        self.metrics.experimental_same_wave_duplicates += int(
+            persisted.get("same_wave_duplicates") or 0
+        )
+        self.metrics.experimental_deliveries_queued += int(
+            persisted.get("deliveries_queued") or 0
+        )
+        completed_at = datetime.now(timezone.utc).isoformat()
+        self.metrics.last_experimental_utc = completed_at
+        if horizon_errors:
+            self.metrics.last_experimental_error = (
+                "one or more horizon searches were skipped fail-closed"
+            )
+            self.metrics.last_experimental_error_phase = "MATCH_CURRENT"
+        else:
+            self.metrics.last_experimental_error = None
+            self.metrics.last_experimental_error_phase = None
+        return {
+            "status": "COMPLETED_WITH_SKIPS" if horizon_errors else "COMPLETED",
+            "current_available": True,
+            "current_receipt_sha256": current.attestation_receipt_sha256,
+            "searches_loaded": len(searches),
+            "evaluated_horizons_minutes": sorted(evaluated_horizons),
+            "skipped_horizons": horizon_errors,
+            "alerts_built": len(alerts),
+            "alerts_persisted": int(persisted.get("alerts_inserted") or 0),
+            "same_wave_duplicates": int(
+                persisted.get("same_wave_duplicates") or 0
+            ),
+            "deliveries_queued": int(persisted.get("deliveries_queued") or 0),
+            "completed_at_utc": completed_at,
+            "formula_registry_effect": "NONE",
+            "live_eligible": False,
+            "trade_execution_allowed": False,
+        }
+
+    def run_experimental_evaluation_once(self) -> Dict[str, Any]:
+        """Public synchronous seam for one isolated experimental evaluation."""
+
+        return self._run_experimental_evaluation_once()
+
+    async def _experimental_cycle_once(self) -> Dict[str, Any]:
+        """Run evaluation and delivery independently so queued work still drains."""
+
+        evaluation: Dict[str, Any]
+        delivery: Dict[str, Any]
+        try:
+            evaluation = await asyncio.to_thread(
+                self._run_experimental_evaluation_once
+            )
+        except Exception as exc:
+            self.metrics.experimental_failures += 1
+            error = f"{type(exc).__name__}: {exc}"[:1000]
+            self.metrics.last_experimental_error = error
+            phase = self.metrics.last_experimental_error_phase or "EVALUATION"
+            self.metrics.last_experimental_error_phase = phase
+            if "statement timeout" in str(exc).lower():
+                self._record_lane_timeout("experimental", phase)
+            evaluation = {"status": "FAILED_OPEN", "error": error}
+            print(
+                f"[formula-experimental] evaluation failed open: {exc!r}",
+                flush=True,
+            )
+        try:
+            delivery = await self._deliver_pending_experimental_alerts()
+        except Exception as exc:
+            self.metrics.experimental_failures += 1
+            error = f"{type(exc).__name__}: {exc}"[:1000]
+            self.metrics.last_experimental_error = error
+            self.metrics.last_experimental_error_phase = "DELIVERY"
+            if "statement timeout" in str(exc).lower():
+                self._record_lane_timeout("experimental", "DELIVERY")
+            delivery = {"status": "FAILED_OPEN", "error": error}
+            print(
+                f"[formula-experimental] delivery failed open: {exc!r}",
+                flush=True,
+            )
+        return {"evaluation": evaluation, "delivery": delivery}
 
     def run_discovery_horizon_once(
         self,
@@ -2436,10 +2852,11 @@ class FormulaResearchWorker:
         failed = 0
         for delivery in pending:
             try:
-                await self._telegram_bot.send_message(
-                    chat_id=int(delivery["chat_id"]),
-                    text=self._live_alert_text(delivery),
-                )
+                async with self._telegram_delivery_lock:
+                    await self._telegram_bot.send_message(
+                        chat_id=int(delivery["chat_id"]),
+                        text=self._live_alert_text(delivery),
+                    )
             except Exception as exc:
                 failed += 1
                 await asyncio.to_thread(
@@ -2458,6 +2875,110 @@ class FormulaResearchWorker:
         self.metrics.live_deliveries_sent += sent
         self.metrics.live_deliveries_failed += failed
         return {"sent": sent, "failed": failed}
+
+    async def _deliver_pending_experimental_alerts(self) -> Dict[str, Any]:
+        """Claim and send from the isolated experimental outbox only."""
+
+        if (
+            not _EXPERIMENTAL_ALERTS_ENABLED
+            or not self._experimental_schema_ready
+            or self._telegram_bot is None
+        ):
+            return {
+                "status": "DISABLED",
+                "claimed": 0,
+                "sent": 0,
+                "ambiguous": 0,
+                "completion_failures": 0,
+            }
+        claimed_count = 0
+        sent = 0
+        ambiguous = 0
+        completion_failures = 0
+        for _ in range(_EXPERIMENTAL_CLAIM_BATCH):
+            # Lease one item immediately before its network call.  Claiming a
+            # serial batch up front could let later leases expire in memory.
+            with self._phase("experimental", "CLAIM_DELIVERIES"):
+                claimed = await asyncio.to_thread(
+                    research_stage4_experimental_store.claim_pending_deliveries,
+                    limit=1,
+                )
+            if not claimed:
+                break
+            if len(claimed) != 1:
+                raise RuntimeError(
+                    "experimental store violated the single-claim contract"
+                )
+            delivery = claimed[0]
+            claimed_count += 1
+            self.metrics.experimental_deliveries_claimed += 1
+            try:
+                async with self._telegram_delivery_lock:
+                    response = await self._telegram_bot.send_message(
+                        chat_id=int(delivery["chat_id"]),
+                        text=str(delivery["rendered_message"]),
+                    )
+                message_id = (
+                    response.get("message_id")
+                    if isinstance(response, Mapping)
+                    else getattr(response, "message_id", None)
+                )
+                if type(message_id) is not int or message_id <= 0:
+                    raise RuntimeError(
+                        "Telegram send returned no positive message_id"
+                    )
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"[:1000]
+                try:
+                    await asyncio.to_thread(
+                        research_stage4_experimental_store.complete_delivery,
+                        str(delivery["delivery_key"]),
+                        str(delivery["claim_token"]),
+                        sent=False,
+                        error=error,
+                        ambiguous=True,
+                    )
+                except Exception as completion_exc:
+                    completion_failures += 1
+                    self.metrics.experimental_failures += 1
+                    print(
+                        "[formula-experimental] ambiguous send could not be "
+                        f"persisted; lease will terminally expire: {completion_exc!r}",
+                        flush=True,
+                    )
+                else:
+                    ambiguous += 1
+                continue
+
+            try:
+                await asyncio.to_thread(
+                    research_stage4_experimental_store.complete_delivery,
+                    str(delivery["delivery_key"]),
+                    str(delivery["claim_token"]),
+                    sent=True,
+                    telegram_message_id=message_id,
+                )
+            except Exception as exc:
+                # Telegram confirmed the send.  Keep IN_FLIGHT; stale recovery
+                # makes it AMBIGUOUS and never sends it a second time.
+                completion_failures += 1
+                self.metrics.experimental_failures += 1
+                print(
+                    "[formula-experimental] sent message completion failed; "
+                    f"lease will terminally expire: {exc!r}",
+                    flush=True,
+                )
+            else:
+                sent += 1
+        self.metrics.experimental_deliveries_sent += sent
+        self.metrics.experimental_deliveries_ambiguous += ambiguous
+        return {
+            "status": "COMPLETED",
+            "claimed": claimed_count,
+            "sent": sent,
+            "ambiguous": ambiguous,
+            "completion_failures": completion_failures,
+        }
 
 
 WORKER = FormulaResearchWorker()

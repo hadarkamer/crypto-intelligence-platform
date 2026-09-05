@@ -39,7 +39,14 @@ def run() -> None:
     )
 
     assert MIGRATION.resolve() in research_formula_schema_admin.MIGRATION_PATHS
-    assert research_formula_schema_admin.MIGRATION_PATHS[-1] == MIGRATION.resolve()
+    migration_position = research_formula_schema_admin.MIGRATION_PATHS.index(
+        MIGRATION.resolve()
+    )
+    assert migration_position > 0
+    assert (
+        research_formula_schema_admin.MIGRATION_PATHS[migration_position + 1].name
+        == "028_stage4_experimental_telegram_v1.sql"
+    )
     assert research_outcome_worker._STAGE4_DUE_SCAN_STATE_KEY == SCAN_KEY
     assert research_outcome_worker._STAGE4_DUE_SCAN_STATE_VERSION == STATE_VERSION
     assert formula_store_source.count(

@@ -40,6 +40,9 @@ import research_stage4_candidate_search as stage4_candidate_search
 
 
 SOURCE_CONTRACT_VERSION = "stage4-wave-v5-authoritative-source-v1"
+CURRENT_SOURCE_CONTRACT_VERSION = (
+    "stage4-wave-v5-current-authoritative-source-v1"
+)
 CORPUS_SOURCE_CONTRACT_VERSION = (
     "stage4-wave-v5-closed-outcome-authoritative-corpus-v2"
 )
@@ -2233,6 +2236,24 @@ SELECT {', '.join(STAGE4_VIEW_COLUMNS)}
  LIMIT %s
 """
 
+_LOAD_LATEST_TERMINAL_PROJECTION_SQL = f"""
+/* formula_exploration_reader:load_latest_terminal_projection */
+SELECT event_id AS projection_event_id,
+       event_fingerprint AS projection_event_fingerprint,
+       claimed_snapshot_set_id AS snapshot_set_id,
+       claimed_snapshot_key AS snapshot_key,
+       alert_time_utc AS projection_decision_time_utc,
+       event_created_at AS projection_created_at_utc,
+       archive_cycle_time_utc,
+       event_type,
+       engine_snapshot #>> '{{projection,status}}' AS projection_status
+  FROM {STAGE4_VIEW}
+ WHERE event_type = '{exploration.PROJECTION_EVENT_TYPE}'
+   AND alert_time_utc <= %s
+ ORDER BY alert_time_utc DESC, event_id DESC
+ LIMIT 1
+"""
+
 _LOAD_WAVE_SQL = f"""
 /* formula_exploration_reader:load_wave */
 SELECT {', '.join(WAVE_VIEW_COLUMNS)}
@@ -3313,6 +3334,159 @@ class AuthoritativeStage4WaveResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class LatestAuthoritativeStage4CurrentResult:
+    """Attested latest terminal projection plus detached current cells."""
+
+    attestation_receipt_sha256: str
+    _receipt_json: str
+    _current_observations: tuple[
+        stage4_candidate_search.CompactCurrentStage4Observation, ...
+    ]
+
+    def __post_init__(self) -> None:
+        if type(self._current_observations) is not tuple:
+            raise ValueError("current observations must be an immutable tuple")
+        try:
+            body = json.loads(self._receipt_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("current source receipt is invalid JSON") from exc
+        if _canonical_json(body) != self._receipt_json:
+            raise ValueError("current source receipt is not canonical")
+        if body.get("source_contract_version") != CURRENT_SOURCE_CONTRACT_VERSION:
+            raise ValueError("current source contract mismatch")
+        if "observations" in body or "current_observations" in body:
+            raise ValueError("current source receipt embeds observation rows")
+        try:
+            analysis_as_of = _utc(
+                body.get("analysis_as_of_utc"), field="current analysis_as_of_utc"
+            )
+        except AuthoritativeReaderError as exc:
+            raise ValueError("current source analysis time is invalid") from exc
+        status = body.get("status")
+        if status not in {
+            "AVAILABLE",
+            "NO_TERMINAL_PROJECTION",
+            "LATEST_PROJECTION_MISSED_CAUSAL_WINDOW",
+            "LATEST_PROJECTION_UNEVALUABLE",
+        }:
+            raise ValueError("current source status is invalid")
+        if (
+            body.get("available") is not bool(self._current_observations)
+            or body.get("outcomes_loaded") is not False
+            or body.get("freshness_evaluated") is not False
+            or body.get("freshness_policy_owner") != "DOWNSTREAM_CONSUMER"
+            or body.get("formula_registry_effect") != "NONE"
+            or body.get("authority_effect") != "NONE"
+            or body.get("delivery_channel") != "NONE"
+            or body.get("live_eligible") is not False
+            or body.get("telegram_delivery_allowed") is not False
+            or body.get("trade_execution_allowed") is not False
+        ):
+            raise ValueError("current source authority boundary is invalid")
+        if bool(self._current_observations) != (status == "AVAILABLE"):
+            raise ValueError("current source availability status is inconsistent")
+        latest = body.get("latest_projection")
+        if status == "NO_TERMINAL_PROJECTION":
+            if latest is not None:
+                raise ValueError("empty current source carries a projection")
+        elif not isinstance(latest, Mapping):
+            raise ValueError("current source latest projection is invalid")
+        observation_ids: set[str] = set()
+        for observation in self._current_observations:
+            try:
+                stage4_candidate_search.validate_compact_current_observation(
+                    observation,
+                    analysis_as_of_utc=analysis_as_of,
+                )
+            except ValueError as exc:
+                raise ValueError("current source observation is invalid") from exc
+            if observation.observation_id in observation_ids:
+                raise ValueError("current source duplicated an observation")
+            observation_ids.add(observation.observation_id)
+            if (
+                not isinstance(latest, Mapping)
+                or observation.projection_event_id
+                != latest.get("projection_event_id")
+                or observation.projection_event_fingerprint
+                != latest.get("projection_event_fingerprint")
+                or observation.snapshot_set_id != latest.get("snapshot_set_id")
+                or observation.snapshot_key != latest.get("snapshot_key")
+                or observation.projection_decision_time_utc
+                != latest.get("projection_decision_time_utc")
+                or observation.archive_cycle_time_utc
+                != latest.get("archive_cycle_time_utc")
+            ):
+                raise ValueError(
+                    "current source observation escaped its latest projection"
+                )
+        storage = body.get("observation_storage")
+        if not isinstance(storage, Mapping) or storage != {
+            "format": "DETACHED_IMMUTABLE_CURRENT_COMPACT_TUPLE",
+            "schema_version": (
+                stage4_candidate_search.CURRENT_OBSERVATION_SCHEMA_VERSION
+            ),
+            "hash_contract_version": (
+                stage4_candidate_search.CURRENT_OBSERVATION_CHAIN_HASH_VERSION
+            ),
+            "count": len(self._current_observations),
+            "ordered_chain_sha256": (
+                stage4_candidate_search.compact_current_observation_chain_sha256(
+                    self._current_observations
+                )
+            ),
+        }:
+            raise ValueError("current detached observation receipt mismatch")
+        if self.attestation_receipt_sha256 != _current_attestation_receipt(body):
+            raise ValueError("current source attestation receipt mismatch")
+
+    @classmethod
+    def _from_payload(
+        cls,
+        payload: Mapping[str, Any],
+        observations: Sequence[
+            stage4_candidate_search.CompactCurrentStage4Observation
+        ],
+    ) -> "LatestAuthoritativeStage4CurrentResult":
+        if not isinstance(observations, (list, tuple)) or any(
+            type(row)
+            is not stage4_candidate_search.CompactCurrentStage4Observation
+            for row in observations
+        ):
+            raise ValueError("current observations are not immutable compact rows")
+        frozen = tuple(observations)
+        body = _json_value(payload, field="current source receipt")
+        if not isinstance(body, Mapping):
+            raise ValueError("current source receipt must be an object")
+        normalized = dict(body)
+        normalized.pop("attestation_receipt_sha256", None)
+        if "observations" in normalized or "current_observations" in normalized:
+            raise ValueError("current source receipt embeds observation rows")
+        return cls(
+            _current_attestation_receipt(normalized),
+            _canonical_json(normalized),
+            frozen,
+        )
+
+    def receipt_dict(self) -> Dict[str, Any]:
+        return {
+            "attestation_receipt_sha256": self.attestation_receipt_sha256,
+            **json.loads(self._receipt_json),
+        }
+
+    @property
+    def current_observations(
+        self,
+    ) -> tuple[stage4_candidate_search.CompactCurrentStage4Observation, ...]:
+        return self._current_observations
+
+    @property
+    def observations(
+        self,
+    ) -> tuple[stage4_candidate_search.CompactCurrentStage4Observation, ...]:
+        return self._current_observations
+
+
 @dataclass(frozen=True)
 class AuthoritativeStage4CorpusResult:
     """Immutable bounded corpus page or traversal from one DB snapshot."""
@@ -3499,6 +3673,15 @@ def _attestation_receipt(body: Mapping[str, Any]) -> str:
     envelope = {
         "kind": "authoritative-stage4-wave-source",
         "source_contract_version": SOURCE_CONTRACT_VERSION,
+        "payload": dict(body),
+    }
+    return hashlib.sha256(_canonical_json(envelope).encode("utf-8")).hexdigest()
+
+
+def _current_attestation_receipt(body: Mapping[str, Any]) -> str:
+    envelope = {
+        "kind": "authoritative-latest-stage4-current-source",
+        "source_contract_version": CURRENT_SOURCE_CONTRACT_VERSION,
         "payload": dict(body),
     }
     return hashlib.sha256(_canonical_json(envelope).encode("utf-8")).hexdigest()
@@ -4661,6 +4844,90 @@ def _validate_projection_key_rows(
     return tuple(normalized[:projection_limit]), has_more
 
 
+def _validate_latest_terminal_projection_row(
+    row: Optional[Mapping[str, Any]],
+    *,
+    analysis_as_of_utc: datetime,
+) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    required = {
+        "projection_event_id",
+        "projection_event_fingerprint",
+        "snapshot_set_id",
+        "snapshot_key",
+        "projection_decision_time_utc",
+        "projection_created_at_utc",
+        "archive_cycle_time_utc",
+        "event_type",
+        "projection_status",
+    }
+    absent = required - set(row)
+    if absent:
+        raise CohortIntegrityError(
+            "latest terminal projection row omits columns: "
+            + ", ".join(sorted(absent))
+        )
+    if row.get("event_type") != exploration.PROJECTION_EVENT_TYPE:
+        raise CohortIntegrityError(
+            "latest terminal projection selector returned a non-projection"
+        )
+    status = str(row.get("projection_status") or "").strip().upper()
+    if status not in {"COMPLETED", "MISSED_CAUSAL_WINDOW"}:
+        raise CohortIntegrityError(
+            "latest terminal projection has an invalid terminal status"
+        )
+    decision = _utc(
+        row.get("projection_decision_time_utc"),
+        field="latest projection_decision_time_utc",
+    )
+    created = _utc(
+        row.get("projection_created_at_utc"),
+        field="latest projection_created_at_utc",
+    )
+    cycle = _utc(
+        row.get("archive_cycle_time_utc"),
+        field="latest archive_cycle_time_utc",
+    )
+    if (
+        decision > analysis_as_of_utc
+        or created < decision
+        or created > analysis_as_of_utc
+        or cycle > decision
+        or cycle.minute not in {0, 30}
+        or cycle.second != 0
+        or cycle.microsecond != 0
+    ):
+        raise CohortIntegrityError(
+            "latest terminal projection timestamps are not causal"
+        )
+    return {
+        "projection_event_id": _positive_int(
+            row.get("projection_event_id"), field="latest projection_event_id"
+        ),
+        "projection_event_fingerprint": _hash(
+            row.get("projection_event_fingerprint"),
+            field="latest projection_event_fingerprint",
+        ),
+        "snapshot_set_id": _positive_int(
+            row.get("snapshot_set_id"), field="latest snapshot_set_id"
+        ),
+        "snapshot_key": _hash(
+            row.get("snapshot_key"), field="latest snapshot_key"
+        ),
+        "projection_decision_time_utc": _iso(
+            decision, field="latest projection_decision_time_utc"
+        ),
+        "projection_created_at_utc": _iso(
+            created, field="latest projection_created_at_utc"
+        ),
+        "archive_cycle_time_utc": _iso(
+            cycle, field="latest archive_cycle_time_utc"
+        ),
+        "projection_status": status,
+    }
+
+
 def _validate_outcome_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -5198,6 +5465,248 @@ def _assert_attached_outcomes_authoritative(
                 "authoritative outcome failed closed validation: "
                 + reason.partition(":")[2]
             )
+
+
+def load_latest_authoritative_stage4_current(
+    database_url: Optional[str] = None,
+) -> LatestAuthoritativeStage4CurrentResult:
+    """Load the newest terminal Stage-4 decision without any outcome access.
+
+    Selection, Stage-4 hydration, Wave binding, and catalog attestation share
+    one read-only repeatable-read snapshot.  A newest MISSED_CAUSAL_WINDOW
+    receipt is terminal for this read and never falls back to an older
+    COMPLETED projection.  Freshness is intentionally a downstream policy.
+    """
+
+    url = _configured_database_url(database_url)
+    conn: Any = None
+    result: Optional[LatestAuthoritativeStage4CurrentResult] = None
+    primary_error: Optional[BaseException] = None
+    primary_traceback: Any = None
+    try:
+        conn = psycopg.connect(
+            url,
+            row_factory=dict_row,
+            connect_timeout=5,
+            autocommit=True,
+            options=CONNECTION_OPTIONS,
+        )
+        conn.execute(_BEGIN_SQL)
+        conn.execute(_SCHEMA_LOCK_SQL, (SCHEMA_LOCK_ID,))
+        as_of, session_attestation = _validate_session(
+            _fetchone(conn.execute(_SESSION_SQL)),
+            expected_database_name=_database_target(url)[3],
+        )
+        conn.execute(_PROBE_STAGE4_SQL)
+        conn.execute(_PROBE_WAVE_SQL)
+        schema_attestation = _validate_attestation(
+            _fetchone(conn.execute(_ATTESTATION_SQL))
+        )
+        selected = _validate_latest_terminal_projection_row(
+            _fetchone(
+                conn.execute(
+                    _LOAD_LATEST_TERMINAL_PROJECTION_SQL,
+                    (as_of,),
+                )
+            ),
+            analysis_as_of_utc=as_of,
+        )
+
+        current_observations: tuple[
+            stage4_candidate_search.CompactCurrentStage4Observation, ...
+        ] = ()
+        latest_projection: Optional[Dict[str, Any]] = None
+        blockers: list[str] = []
+        status = "NO_TERMINAL_PROJECTION"
+        if selected is None:
+            blockers.append("NO_TERMINAL_STAGE4_PROJECTION")
+        elif selected["projection_status"] == "MISSED_CAUSAL_WINDOW":
+            status = "LATEST_PROJECTION_MISSED_CAUSAL_WINDOW"
+            blockers.append("LATEST_STAGE4_PROJECTION_MISSED_CAUSAL_WINDOW")
+            latest_projection = dict(selected)
+        else:
+            stage4_rows = _fetchall(
+                conn.execute(
+                    _LOAD_STAGE4_SQL,
+                    (selected["snapshot_key"], MAX_STAGE4_ROWS + 1),
+                )
+            )
+            projection, archive_set, signals = _validate_stage4_rows(
+                stage4_rows,
+                snapshot_key=selected["snapshot_key"],
+                as_of=as_of,
+            )
+            projection_payload = projection.get("engine_snapshot", {}).get(
+                "projection"
+            )
+            if not isinstance(projection_payload, Mapping):
+                raise CohortIntegrityError(
+                    "latest Stage-4 projection receipt is malformed"
+                )
+            if (
+                projection["event_id"] != selected["projection_event_id"]
+                or projection["event_fingerprint"]
+                != selected["projection_event_fingerprint"]
+                or projection["alert_time_utc"]
+                != selected["projection_decision_time_utc"]
+                or projection_payload.get("status") != "COMPLETED"
+                or projection_payload.get("snapshot_set_id")
+                != selected["snapshot_set_id"]
+                or projection_payload.get("snapshot_key")
+                != selected["snapshot_key"]
+                or archive_set.get("snapshot_set_id")
+                != selected["snapshot_set_id"]
+                or archive_set.get("snapshot_key") != selected["snapshot_key"]
+                or archive_set.get("cycle_time_utc")
+                != selected["archive_cycle_time_utc"]
+            ):
+                raise CohortIntegrityError(
+                    "latest projection selector and hydrated cohort disagree"
+                )
+            frames = exploration.build_stage4_frames(
+                projection,
+                archive_set,
+                signals,
+                analysis_as_of_utc=as_of,
+            )
+            expected_slot = _utc(
+                archive_set["cycle_time_utc"],
+                field="archive cycle_time_utc",
+            ) + timedelta(minutes=2)
+            wave_rows = _fetchall(
+                conn.execute(
+                    _LOAD_WAVE_SQL,
+                    (expected_slot, MAX_WAVE_ROWS + 1),
+                )
+            )
+            memberships, transitions = _validate_wave_rows(
+                wave_rows,
+                expected_slot=expected_slot,
+                as_of=as_of,
+            )
+            bound = exploration.bind_wave_v5(
+                frames,
+                memberships,
+                transitions,
+                analysis_as_of_utc=as_of,
+            )
+            current_observations = tuple(
+                stage4_candidate_search.compact_current_authoritative_observation(
+                    observation
+                )
+                for observation in bound
+            )
+            for observation in current_observations:
+                stage4_candidate_search.validate_compact_current_observation(
+                    observation,
+                    analysis_as_of_utc=as_of,
+                )
+            latest_projection = {
+                **selected,
+                "evaluation_status": projection_payload.get(
+                    "evaluation_status"
+                ),
+                "current_observation_count": len(current_observations),
+            }
+            if current_observations:
+                status = "AVAILABLE"
+            else:
+                status = "LATEST_PROJECTION_UNEVALUABLE"
+                blockers.append("LATEST_STAGE4_PROJECTION_HAS_NO_EVALUABLE_CELLS")
+
+        source_attestation = {
+            "source_contract_version": CURRENT_SOURCE_CONTRACT_VERSION,
+            **session_attestation,
+            **schema_attestation,
+            "stage4_view": STAGE4_VIEW,
+            "wave_view": WAVE_VIEW,
+            "source_authority_attested": True,
+            "outcome_interface_access": "NOT_REQUESTED",
+            "formula_registry_effect": "NONE",
+            "authority_effect": "NONE",
+            "delivery_channel": "NONE",
+            "live_eligible": False,
+            "telegram_delivery_allowed": False,
+            "trade_execution_allowed": False,
+        }
+        storage = {
+            "format": "DETACHED_IMMUTABLE_CURRENT_COMPACT_TUPLE",
+            "schema_version": (
+                stage4_candidate_search.CURRENT_OBSERVATION_SCHEMA_VERSION
+            ),
+            "hash_contract_version": (
+                stage4_candidate_search.CURRENT_OBSERVATION_CHAIN_HASH_VERSION
+            ),
+            "count": len(current_observations),
+            "ordered_chain_sha256": (
+                stage4_candidate_search.compact_current_observation_chain_sha256(
+                    current_observations
+                )
+            ),
+        }
+        payload = {
+            "source_contract_version": CURRENT_SOURCE_CONTRACT_VERSION,
+            "analysis_as_of_utc": _iso(as_of, field="analysis_as_of_utc"),
+            "database_snapshot_id": session_attestation["database_snapshot_id"],
+            "status": status,
+            "available": bool(current_observations),
+            "latest_projection": latest_projection,
+            "source_attestation": source_attestation,
+            "observation_storage": storage,
+            "blockers": blockers,
+            "freshness_evaluated": False,
+            "freshness_policy_owner": "DOWNSTREAM_CONSUMER",
+            "outcomes_loaded": False,
+            "formula_registry_effect": "NONE",
+            "authority_effect": "NONE",
+            "delivery_channel": "NONE",
+            "live_eligible": False,
+            "telegram_delivery_allowed": False,
+            "trade_execution_allowed": False,
+        }
+        result = LatestAuthoritativeStage4CurrentResult._from_payload(
+            payload,
+            current_observations,
+        )
+    except BaseException as exc:
+        primary_error = exc
+        primary_traceback = exc.__traceback__
+
+    cleanup_errors: list[BaseException] = []
+    if conn is not None:
+        try:
+            conn.rollback()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        try:
+            conn.close()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    if primary_error is not None:
+        if isinstance(primary_error, AuthoritativeReaderError):
+            raise primary_error.with_traceback(primary_traceback)
+        if isinstance(primary_error, Exception):
+            raise AuthoritativeReaderError(
+                "authoritative latest Stage-4 current read failed: "
+                f"{type(primary_error).__name__}: {primary_error}"
+            ) from primary_error
+        raise primary_error.with_traceback(primary_traceback)
+
+    if cleanup_errors:
+        cleanup_error = cleanup_errors[0]
+        if not isinstance(cleanup_error, Exception):
+            raise cleanup_error.with_traceback(cleanup_error.__traceback__)
+        kinds = ", ".join(type(item).__name__ for item in cleanup_errors)
+        raise AuthoritativeReaderError(
+            f"authoritative current reader cleanup failed: {kinds}"
+        ) from cleanup_error
+
+    if result is None:  # pragma: no cover - every path assigns or raises
+        raise AuthoritativeReaderError(
+            "authoritative latest Stage-4 current read produced no result"
+        )
+    return result
 
 
 def load_authoritative_stage4_wave(
@@ -6534,6 +7043,7 @@ def load_complete_authoritative_stage4_corpus(
 def descriptor() -> Dict[str, Any]:
     return {
         "source_contract_version": SOURCE_CONTRACT_VERSION,
+        "current_source_contract_version": CURRENT_SOURCE_CONTRACT_VERSION,
         "corpus_source_contract_version": CORPUS_SOURCE_CONTRACT_VERSION,
         "database_url_env": DATABASE_URL_ENV,
         "trusted_reader_role": TRUSTED_READER_ROLE,
@@ -6550,6 +7060,9 @@ def descriptor() -> Dict[str, Any]:
         "schema_auto_create": False,
         "outcomes_loaded": True,
         "outcomes_loaded_capability": True,
+        "latest_current_reader_available": True,
+        "latest_current_outcomes_loaded": False,
+        "latest_current_freshness_policy_owner": "DOWNSTREAM_CONSUMER",
         "runtime_wired": True,
         "runtime_wiring_scope": "DISCOVERY_INGESTION_OBSERVABILITY_ONLY",
         "complete_corpus_single_snapshot": True,

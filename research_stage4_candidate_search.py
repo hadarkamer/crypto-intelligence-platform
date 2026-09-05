@@ -45,6 +45,12 @@ COMPACT_OBSERVATION_SCHEMA_VERSION = (
 COMPACT_OBSERVATION_CHAIN_HASH_VERSION = (
     "stage4-candidate-observation-ordered-chain-v1"
 )
+CURRENT_OBSERVATION_SCHEMA_VERSION = (
+    "stage4-current-observation-compact-v1"
+)
+CURRENT_OBSERVATION_CHAIN_HASH_VERSION = (
+    "stage4-current-observation-ordered-chain-v1"
+)
 MAX_OBSERVATIONS = 131_072
 DEFAULT_SEARCH_WALL_BUDGET_MS = 60_000
 MIN_SEARCH_WALL_BUDGET_MS = 5_000
@@ -385,6 +391,157 @@ class CompactStage4CandidateObservation(MappingABC[str, Any]):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CompactCurrentStage4Observation(MappingABC[str, Any]):
+    """Immutable decision-time Stage-4 cell with no outcome surface."""
+
+    observation_id: str
+    projection_event_id: int
+    projection_event_fingerprint: str
+    snapshot_set_id: int
+    snapshot_key: str
+    projection_decision_time_utc: str
+    archive_cycle_time_utc: str
+    symbol: str
+    direction: str
+    features: _CompactFeatureMapping
+    source_event_ids: tuple[int, ...]
+    source_event_fingerprints: tuple[str, ...]
+    wave_binding: _CompactWaveBinding
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "_schema":
+            return CURRENT_OBSERVATION_SCHEMA_VERSION
+        if key == "observation_id":
+            return self.observation_id
+        if key == "projection_event_id":
+            return self.projection_event_id
+        if key == "projection_event_fingerprint":
+            return self.projection_event_fingerprint
+        if key == "snapshot_set_id":
+            return self.snapshot_set_id
+        if key == "snapshot_key":
+            return self.snapshot_key
+        if key == "projection_decision_time_utc":
+            return self.projection_decision_time_utc
+        if key == "archive_cycle_time_utc":
+            return self.archive_cycle_time_utc
+        if key == "symbol":
+            return self.symbol
+        if key == "direction":
+            return self.direction
+        if key == "features":
+            return self.features
+        if key == "source_event_ids":
+            return self.source_event_ids
+        if key == "source_event_fingerprints":
+            return self.source_event_fingerprints
+        if key == "wave_binding":
+            return self.wave_binding
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(
+            (
+                "_schema",
+                "observation_id",
+                "projection_event_id",
+                "projection_event_fingerprint",
+                "snapshot_set_id",
+                "snapshot_key",
+                "projection_decision_time_utc",
+                "archive_cycle_time_utc",
+                "symbol",
+                "direction",
+                "features",
+                "source_event_ids",
+                "source_event_fingerprints",
+                "wave_binding",
+            )
+        )
+
+    def __len__(self) -> int:
+        return 14
+
+    def hash_fields(self) -> tuple[Any, ...]:
+        return (
+            CURRENT_OBSERVATION_SCHEMA_VERSION,
+            self.observation_id,
+            self.projection_event_id,
+            self.projection_event_fingerprint,
+            self.snapshot_set_id,
+            self.snapshot_key,
+            self.projection_decision_time_utc,
+            self.archive_cycle_time_utc,
+            self.symbol,
+            self.direction,
+            self.features.true_mask,
+            self.features.combined_vote_count,
+            self.source_event_ids,
+            self.source_event_fingerprints,
+            self.wave_binding.status,
+            self.wave_binding.reason,
+            self.wave_binding.btc_parent_movement_id,
+        )
+
+
+def compact_current_authoritative_observation(
+    value: exploration.ExplorationObservation | Mapping[str, Any],
+) -> CompactCurrentStage4Observation:
+    """Detach one validated current cell without retaining outcome labels."""
+
+    observation = (
+        value
+        if isinstance(value, exploration.ExplorationObservation)
+        else exploration.ExplorationObservation.from_dict(value)
+    )
+    row = observation.to_dict()
+    outcome = row["outcome"]
+    if outcome.get("status") != "UNBOUND":
+        raise ValueError("current Stage-4 observation must not carry an outcome")
+    feature_values = row["features"]
+    features = _CompactFeatureMapping(
+        true_mask=sum(
+            1 << index
+            for index, name in enumerate(_BOOLEAN_FEATURES)
+            if feature_values[name] is True
+        ),
+        combined_vote_count=feature_values[
+            exploration.FEATURE_COMBINED_VOTE_COUNT
+        ],
+    )
+    binding = row["wave_binding"]
+    return CompactCurrentStage4Observation(
+        observation_id=row["observation_id"],
+        projection_event_id=row["projection_event_id"],
+        projection_event_fingerprint=row["projection_event_fingerprint"],
+        snapshot_set_id=row["snapshot_set_id"],
+        snapshot_key=row["snapshot_key"],
+        projection_decision_time_utc=sys.intern(
+            row["projection_decision_time_utc"]
+        ),
+        archive_cycle_time_utc=sys.intern(row["archive_cycle_time_utc"]),
+        symbol=sys.intern(exploration._symbol(row["symbol"])),
+        direction=sys.intern(row["direction"]),
+        features=features,
+        source_event_ids=tuple(row["source_event_ids"]),
+        source_event_fingerprints=tuple(row["source_event_fingerprints"]),
+        wave_binding=_CompactWaveBinding(
+            status=sys.intern(binding["status"]),
+            reason=(
+                None
+                if binding.get("reason") is None
+                else sys.intern(str(binding["reason"]))
+            ),
+            btc_parent_movement_id=(
+                None
+                if binding.get("btc_parent_movement_id") is None
+                else sys.intern(binding["btc_parent_movement_id"])
+            ),
+        ),
+    )
+
+
 def compact_authoritative_observation(
     value: exploration.ExplorationObservation | Mapping[str, Any],
 ) -> CompactStage4CandidateObservation:
@@ -464,6 +621,170 @@ def _is_sha256(value: Any) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def validate_compact_current_observation(
+    value: CompactCurrentStage4Observation,
+    *,
+    analysis_as_of_utc: Any,
+) -> CompactCurrentStage4Observation:
+    """Validate a detached current cell without introducing outcome access."""
+
+    if (
+        type(value) is not CompactCurrentStage4Observation
+        or type(value.features) is not _CompactFeatureMapping
+        or type(value.wave_binding) is not _CompactWaveBinding
+    ):
+        raise ValueError("compact current Stage-4 observation type mismatch")
+    if set(value) != {
+        "_schema",
+        "observation_id",
+        "projection_event_id",
+        "projection_event_fingerprint",
+        "snapshot_set_id",
+        "snapshot_key",
+        "projection_decision_time_utc",
+        "archive_cycle_time_utc",
+        "symbol",
+        "direction",
+        "features",
+        "source_event_ids",
+        "source_event_fingerprints",
+        "wave_binding",
+    }:
+        raise ValueError("compact current Stage-4 observation shape mismatch")
+    if value.get("_schema") != CURRENT_OBSERVATION_SCHEMA_VERSION:
+        raise ValueError("compact current Stage-4 observation schema mismatch")
+    for field in (
+        "observation_id",
+        "projection_event_fingerprint",
+        "snapshot_key",
+    ):
+        if not _is_sha256(value.get(field)):
+            raise ValueError(f"compact current Stage-4 {field} is invalid")
+    if (
+        type(value.projection_event_id) is not int
+        or value.projection_event_id <= 0
+        or type(value.snapshot_set_id) is not int
+        or value.snapshot_set_id <= 0
+    ):
+        raise ValueError("compact current Stage-4 numeric identity is invalid")
+    as_of = _utc(analysis_as_of_utc, field="analysis_as_of_utc")
+    decision = _utc(
+        value.projection_decision_time_utc,
+        field="projection_decision_time_utc",
+    )
+    cycle = _utc(value.archive_cycle_time_utc, field="archive_cycle_time_utc")
+    if decision > as_of:
+        raise ValueError("compact current Stage-4 decision is after analysis_as_of_utc")
+    if (
+        cycle > decision
+        or cycle.minute not in {0, 30}
+        or cycle.second != 0
+        or cycle.microsecond != 0
+    ):
+        raise ValueError("compact current Stage-4 cycle/decision timing is invalid")
+    try:
+        canonical_symbol = exploration._symbol(value.symbol)
+    except ValueError as exc:
+        raise ValueError("compact current Stage-4 symbol is invalid") from exc
+    if canonical_symbol != value.symbol or value.direction not in {"LONG", "SHORT"}:
+        raise ValueError("compact current Stage-4 cell identity is invalid")
+
+    features = value.features
+    if (
+        type(features.true_mask) is not int
+        or not (0 <= features.true_mask < (1 << len(_BOOLEAN_FEATURES)))
+    ):
+        raise ValueError("compact current Stage-4 feature shape mismatch")
+    expanded = {name: features[name] for name in exploration.ALLOWED_FEATURES}
+    if features.combined_vote_count is not None and (
+        type(features.combined_vote_count) is not int
+        or features.combined_vote_count not in {2, 3}
+    ):
+        raise ValueError("compact current Stage-4 vote count is invalid")
+    if expanded[exploration.FEATURE_MAX_PAIN_STRONG] and not expanded[
+        exploration.FEATURE_MAX_PAIN_CONFIRMED
+    ]:
+        raise ValueError("compact current strong Max-Pain lacks confirmation")
+    if expanded[exploration.FEATURE_MAGNET_STRONG] and not expanded[
+        exploration.FEATURE_MAGNET_CONFIRMED
+    ]:
+        raise ValueError("compact current strong Magnet lacks confirmation")
+    combined_present = expanded[exploration.FEATURE_COMBINED_CONFIRMED]
+    combined_sources = sum(
+        int(expanded[name])
+        for name in (
+            exploration.FEATURE_COMBINED_COINGLASS,
+            exploration.FEATURE_COMBINED_PRICE_OI,
+            exploration.FEATURE_COMBINED_FUTURES_CVD,
+        )
+    )
+    combined_votes = expanded[exploration.FEATURE_COMBINED_VOTE_COUNT]
+    if combined_present:
+        if combined_votes not in {2, 3} or combined_votes != combined_sources:
+            raise ValueError("compact current Combined feature is inconsistent")
+    elif combined_votes is not None or combined_sources:
+        raise ValueError("compact current absent Combined carries evidence")
+
+    source_ids = value.source_event_ids
+    source_fingerprints = value.source_event_fingerprints
+    if (
+        type(source_ids) is not tuple
+        or any(type(item) is not int or item <= 0 for item in source_ids)
+        or len(source_ids) != len(set(source_ids))
+        or type(source_fingerprints) is not tuple
+        or any(not _is_sha256(item) for item in source_fingerprints)
+        or source_fingerprints != tuple(sorted(set(source_fingerprints)))
+        or len(source_ids) != len(source_fingerprints)
+    ):
+        raise ValueError("compact current Stage-4 source identities are invalid")
+    any_signal = bool(
+        expanded[exploration.FEATURE_MAX_PAIN_CONFIRMED]
+        or expanded[exploration.FEATURE_MAGNET_CONFIRMED]
+        or expanded[exploration.FEATURE_COMBINED_CONFIRMED]
+    )
+    if any_signal != bool(source_ids):
+        raise ValueError("compact current Stage-4 signal identities disagree")
+
+    binding = value.wave_binding
+    parent_id = binding.btc_parent_movement_id
+    if binding.status == "BOUND":
+        if not _is_sha256(parent_id) or binding.reason is not None:
+            raise ValueError("compact current Stage-4 parent binding is invalid")
+    elif binding.status == "UNAVAILABLE":
+        if (
+            parent_id is not None
+            or type(binding.reason) is not str
+            or not binding.reason
+        ):
+            raise ValueError("compact current Stage-4 unavailable binding is invalid")
+    else:
+        raise ValueError("compact current Stage-4 Wave binding is not terminal")
+    return value
+
+
+def compact_current_observation_chain_sha256(
+    values: Sequence[CompactCurrentStage4Observation],
+) -> str:
+    """Hash ordered immutable current rows without an outcome field."""
+
+    if not isinstance(values, (list, tuple)):
+        raise TypeError("compact current Stage-4 observations must be a list or tuple")
+    digest = hashlib.sha256()
+    digest.update(CURRENT_OBSERVATION_CHAIN_HASH_VERSION.encode("ascii"))
+    digest.update(b"\x00")
+    for value in values:
+        if (
+            type(value) is not CompactCurrentStage4Observation
+            or type(value.features) is not _CompactFeatureMapping
+            or type(value.wave_binding) is not _CompactWaveBinding
+        ):
+            raise TypeError("compact current Stage-4 observation type is invalid")
+        encoded = _canonical_json(value.hash_fields()).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def compact_observation_chain_sha256(
@@ -1478,6 +1799,21 @@ def search_experimental_candidates(
             "eligibility_changed": False,
         }
 
+    # Preserve every eligible condition specification before equivalent
+    # historical match sets are collapsed for display.  Two formulas that
+    # happened to match the same archived observations can diverge on a later
+    # decision-time feature snapshot, so downstream current matching needs the
+    # original condition sets rather than only the display champion.  The
+    # evaluated-candidate ceiling keeps this detached copy strictly bounded.
+    eligible_candidate_variants: list[Dict[str, Any]] = []
+    for index, candidate in enumerate(evaluated):
+        if index % 256 == 0:
+            _check_search_deadline(deadline)
+        if candidate["experimental_formula_eligible"]:
+            eligible_candidate_variants.append(
+                json.loads(_canonical_json(candidate))
+            )
+
     # Equivalent frozen observation sets are one display result.  Every
     # searched condition set nevertheless remains in the BH disclosure family.
     by_match_set: Dict[str, list[Dict[str, Any]]] = {}
@@ -1559,6 +1895,9 @@ def search_experimental_candidates(
                 duplicate_candidates_collapsed
             ),
             "eligible_experimental_candidates": len(eligible),
+            "eligible_candidate_variants": len(
+                eligible_candidate_variants
+            ),
             "family_policy_rejections": family_policy_rejections,
             "empty_direction_match_rejections": empty_match_rejections,
             "hypotheses_disclosed": len(q_values),
@@ -1566,6 +1905,7 @@ def search_experimental_candidates(
         "search_budget_exhausted": search_budget_exhausted,
         "candidates": displayed,
         "eligible_candidates": eligible,
+        "eligible_candidate_variants": eligible_candidate_variants,
         "atomic_eligibility": {
             "minimum_independent_occurrences": active.minimum_independent_occurrences,
             "independence_unit": "DISTINCT_BTC_PARENT_MARKET_MOVEMENT",
@@ -1604,6 +1944,12 @@ def descriptor() -> Dict[str, Any]:
         ),
         "compact_observation_chain_hash_version": (
             COMPACT_OBSERVATION_CHAIN_HASH_VERSION
+        ),
+        "current_observation_schema_version": (
+            CURRENT_OBSERVATION_SCHEMA_VERSION
+        ),
+        "current_observation_chain_hash_version": (
+            CURRENT_OBSERVATION_CHAIN_HASH_VERSION
         ),
         "occurrence_evidence_hash_version": OCCURRENCE_EVIDENCE_HASH_VERSION,
         "feature_schema_version": exploration.FEATURE_SCHEMA_VERSION,

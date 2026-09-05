@@ -461,6 +461,7 @@ class _FakeConnection:
             "load_corpus_wave",
             "load_corpus_outcomes",
             "load_corpus_no_signal_outcomes",
+            "load_latest_terminal_projection",
             "load_stage4",
             "load_wave",
             "rollback",
@@ -497,6 +498,8 @@ class _FakeConnection:
             return _Rows(self.driver.outcome_rows)
         if marker == "load_corpus_no_signal_outcomes":
             return _Rows(self.driver.no_signal_outcome_rows)
+        if marker == "load_latest_terminal_projection":
+            return _Rows(self.driver.latest_terminal_rows)
         if marker == "load_stage4":
             return _Rows(self.driver.stage4_rows)
         if marker == "load_wave":
@@ -526,6 +529,7 @@ class _FakeDriver:
         stage4_rows=None,
         wave_rows=None,
         projection_rows=None,
+        latest_terminal_rows=None,
         corpus_stage4_rows=None,
         corpus_wave_rows=None,
         outcome_rows=None,
@@ -551,6 +555,11 @@ class _FakeDriver:
             _projection_key_rows(self.corpus_stage4_rows)
             if projection_rows is None
             else projection_rows
+        )
+        self.latest_terminal_rows = list(
+            _latest_terminal_projection_rows(self.stage4_rows)
+            if latest_terminal_rows is None
+            else latest_terminal_rows
         )
         self.outcome_rows = list(
             _outcome_view_rows() if outcome_rows is None else outcome_rows
@@ -713,6 +722,38 @@ def _projection_key_rows(stage4_rows=None):
         }
         for row in source_rows
         if row.get("event_type") == exploration.PROJECTION_EVENT_TYPE
+    ]
+
+
+def _latest_terminal_projection_rows(stage4_rows=None):
+    source_rows = list(
+        _stage4_view_rows() if stage4_rows is None else stage4_rows
+    )
+    projections = [
+        row
+        for row in source_rows
+        if row.get("event_type") == exploration.PROJECTION_EVENT_TYPE
+    ]
+    if not projections:
+        return []
+    projections.sort(
+        key=lambda row: (row["alert_time_utc"], row["event_id"]),
+        reverse=True,
+    )
+    row = projections[0]
+    payload = row["engine_snapshot"]["projection"]
+    return [
+        {
+            "projection_event_id": row["event_id"],
+            "projection_event_fingerprint": row["event_fingerprint"],
+            "snapshot_set_id": row["claimed_snapshot_set_id"],
+            "snapshot_key": row["claimed_snapshot_key"],
+            "projection_decision_time_utc": row["alert_time_utc"],
+            "projection_created_at_utc": row["event_created_at"],
+            "archive_cycle_time_utc": row["archive_cycle_time_utc"],
+            "event_type": row["event_type"],
+            "projection_status": payload["status"],
+        }
     ]
 
 
@@ -1449,6 +1490,26 @@ def _load(driver: _FakeDriver):
         )
 
 
+def _load_current(driver: _FakeDriver):
+    database_url = "postgresql://exploration-reader@db.example/research"
+    with patch.dict(
+        os.environ,
+        {
+            "RESEARCH_DATABASE_URL": database_url,
+            "RESEARCH_SIGNAL_SNAPSHOT_DATABASE_URL": database_url,
+            "RESEARCH_MARKET_MOVEMENT_DATABASE_URL": database_url,
+            "RESEARCH_USE_PRIMARY_DATABASE": "0",
+        },
+        clear=False,
+    ):
+        return _with_driver(
+            driver,
+            lambda: reader.load_latest_authoritative_stage4_current(
+                database_url=database_url,
+            ),
+        )
+
+
 def _load_corpus(
     driver: _FakeDriver,
     *,
@@ -1954,7 +2015,168 @@ def _check_complete_corpus_single_snapshot_traversal() -> None:
     assert "connect" not in invalid_lookback_driver.calls
 
 
+def _check_latest_current_reader_boundary() -> None:
+    current_driver = _FakeDriver()
+    current = _load_current(current_driver)
+    receipt = current.receipt_dict()
+    rows = current.current_observations
+    assert type(current) is reader.LatestAuthoritativeStage4CurrentResult
+    assert receipt["status"] == "AVAILABLE"
+    assert receipt["available"] is True
+    assert receipt["freshness_evaluated"] is False
+    assert receipt["freshness_policy_owner"] == "DOWNSTREAM_CONSUMER"
+    assert receipt["outcomes_loaded"] is False
+    assert "observations" not in receipt
+    assert "current_observations" not in receipt
+    assert type(rows) is tuple
+    assert [(row.symbol, row.direction) for row in rows] == [
+        ("ETH", "LONG"),
+        ("ETH", "SHORT"),
+    ]
+    assert all(
+        type(row)
+        is reader.stage4_candidate_search.CompactCurrentStage4Observation
+        and not hasattr(row, "__dict__")
+        and not hasattr(row, "outcome")
+        and "outcome" not in row
+        for row in rows
+    )
+    assert all(
+        reader.stage4_candidate_search.validate_compact_current_observation(
+            row,
+            analysis_as_of_utc=receipt["analysis_as_of_utc"],
+        )
+        is row
+        for row in rows
+    )
+    storage = receipt["observation_storage"]
+    assert storage == {
+        "format": "DETACHED_IMMUTABLE_CURRENT_COMPACT_TUPLE",
+        "schema_version": (
+            reader.stage4_candidate_search.CURRENT_OBSERVATION_SCHEMA_VERSION
+        ),
+        "hash_contract_version": (
+            reader.stage4_candidate_search.CURRENT_OBSERVATION_CHAIN_HASH_VERSION
+        ),
+        "count": 2,
+        "ordered_chain_sha256": (
+            reader.stage4_candidate_search.compact_current_observation_chain_sha256(
+                rows
+            )
+        ),
+    }
+    assert receipt["latest_projection"]["projection_status"] == "COMPLETED"
+    assert receipt["latest_projection"]["current_observation_count"] == 2
+    assert receipt["source_attestation"]["outcome_interface_access"] == (
+        "NOT_REQUESTED"
+    )
+    assert current_driver.calls.count("connect") == 1
+    assert current_driver.calls.count("begin") == 1
+    assert current_driver.calls.count("session") == 1
+    assert current_driver.calls.count("attestation") == 1
+    assert current_driver.calls.count("load_latest_terminal_projection") == 1
+    assert current_driver.calls.count("load_stage4") == 1
+    assert current_driver.calls.count("load_wave") == 1
+    assert current_driver.calls[-2:] == ["rollback", "close"]
+    assert "commit" not in current_driver.calls
+    for forbidden_call in (
+        "probe_outcomes",
+        "probe_no_signal_outcomes",
+        "outcomes_attestation",
+        "no_signal_outcomes_attestation",
+        "load_corpus_outcomes",
+        "load_corpus_no_signal_outcomes",
+    ):
+        assert forbidden_call not in current_driver.calls
+    latest_params = dict(current_driver.params)[
+        "load_latest_terminal_projection"
+    ]
+    assert latest_params == (AS_OF,)
+
+    mismatched_selector = _latest_terminal_projection_rows()[0]
+    mismatched_selector["projection_event_id"] += 1
+    mismatch_driver = _FakeDriver(
+        latest_terminal_rows=[mismatched_selector]
+    )
+    _expect_call_failure(
+        lambda: _load_current(mismatch_driver),
+        "selector and hydrated cohort disagree",
+    )
+    assert "load_stage4" in mismatch_driver.calls
+    assert "load_wave" not in mismatch_driver.calls
+    assert mismatch_driver.calls[-2:] == ["rollback", "close"]
+
+    missed_selector = _latest_terminal_projection_rows()[0]
+    missed_selector["projection_status"] = "MISSED_CAUSAL_WINDOW"
+    missed_driver = _FakeDriver(latest_terminal_rows=[missed_selector])
+    missed = _load_current(missed_driver)
+    missed_receipt = missed.receipt_dict()
+    assert missed_receipt["status"] == (
+        "LATEST_PROJECTION_MISSED_CAUSAL_WINDOW"
+    )
+    assert missed_receipt["available"] is False
+    assert missed.current_observations == ()
+    assert missed_receipt["latest_projection"]["projection_status"] == (
+        "MISSED_CAUSAL_WINDOW"
+    )
+    assert "load_stage4" not in missed_driver.calls
+    assert "load_wave" not in missed_driver.calls
+
+    no_projection_driver = _FakeDriver(latest_terminal_rows=[])
+    no_projection = _load_current(no_projection_driver)
+    assert no_projection.receipt_dict()["status"] == "NO_TERMINAL_PROJECTION"
+    assert no_projection.current_observations == ()
+    assert "load_stage4" not in no_projection_driver.calls
+    assert "load_wave" not in no_projection_driver.calls
+
+    evaluations = [
+        {"symbol": "ETH", "status": "EVALUABLE", "reason": None},
+        {
+            "symbol": "SOL",
+            "status": "UNEVALUABLE",
+            "reason": "PRICE_OI_UNAVAILABLE",
+        },
+    ]
+    partial_rows = _stage4_view_rows(signals=[], evaluations=evaluations)
+    partial_driver = _FakeDriver(stage4_rows=partial_rows)
+    partial = _load_current(partial_driver)
+    assert [(row.symbol, row.direction) for row in partial.current_observations] == [
+        ("ETH", "LONG"),
+        ("ETH", "SHORT"),
+    ]
+    assert partial.receipt_dict()["latest_projection"]["evaluation_status"] == (
+        "PARTIAL"
+    )
+
+    missing_wave_driver = _FakeDriver(wave_rows=[])
+    missing_wave = _load_current(missing_wave_driver)
+    assert missing_wave.receipt_dict()["available"] is True
+    assert all(
+        row.wave_binding.status == "UNAVAILABLE"
+        and row.wave_binding.btc_parent_movement_id is None
+        for row in missing_wave.current_observations
+    )
+
+    sql = _normalized_sql(reader._LOAD_LATEST_TERMINAL_PROJECTION_SQL)
+    assert "ORDER BY alert_time_utc DESC, event_id DESC LIMIT 1" in sql
+    assert "projection,status" in sql
+    assert "= 'COMPLETED'" not in sql
+    assert reader.OUTCOME_VIEW not in sql
+    assert reader.NO_SIGNAL_OUTCOME_VIEW not in sql
+
+    descriptor = reader.descriptor()
+    assert descriptor["current_source_contract_version"] == (
+        reader.CURRENT_SOURCE_CONTRACT_VERSION
+    )
+    assert descriptor["latest_current_reader_available"] is True
+    assert descriptor["latest_current_outcomes_loaded"] is False
+    assert descriptor["latest_current_freshness_policy_owner"] == (
+        "DOWNSTREAM_CONSUMER"
+    )
+
+
 def run() -> None:
+    _check_latest_current_reader_boundary()
     _check_complete_corpus_single_snapshot_traversal()
     assert reader._tagged_sha256(("tag",), ("₪",), field="fixture") == (
         hashlib.sha256("tag=3:₪".encode("utf-8")).hexdigest()

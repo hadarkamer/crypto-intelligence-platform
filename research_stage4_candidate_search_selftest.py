@@ -367,6 +367,101 @@ def _check_compact_observation_equivalence() -> None:
         raise AssertionError("boolean compact feature mask was accepted")
 
 
+def _check_current_compact_has_no_outcome_surface() -> None:
+    historical = _observation(
+        19,
+        parent="current-parent",
+        decision=BASE,
+        mfe=0.60,
+        mae=0.50,
+    )
+    body = historical.to_dict()
+    body["outcome"] = {
+        "status": "UNBOUND",
+        "reason": "CLOSED_OUTCOME_BINDING_NOT_ATTEMPTED",
+        "label_fields_exposed_as_features": False,
+    }
+    current_source = exploration.ExplorationObservation._from_payload(body)
+    current = search.compact_current_authoritative_observation(current_source)
+    assert type(current) is search.CompactCurrentStage4Observation
+    assert not hasattr(current, "__dict__")
+    assert not hasattr(current, "outcome")
+    assert "outcome" not in current
+    assert set(current) == {
+        "_schema",
+        "observation_id",
+        "projection_event_id",
+        "projection_event_fingerprint",
+        "snapshot_set_id",
+        "snapshot_key",
+        "projection_decision_time_utc",
+        "archive_cycle_time_utc",
+        "symbol",
+        "direction",
+        "features",
+        "source_event_ids",
+        "source_event_fingerprints",
+        "wave_binding",
+    }
+    for forbidden in (
+        "directional_return_pct",
+        "mfe_pct",
+        "mae_pct",
+        "reference_price",
+        "price_at_horizon",
+        "measured_at_utc",
+    ):
+        assert forbidden not in current
+        assert not hasattr(current, forbidden)
+    assert search.validate_compact_current_observation(
+        current,
+        analysis_as_of_utc=AS_OF,
+    ) is current
+    condition = {
+        "feature": exploration.FEATURE_MAX_PAIN_CONFIRMED,
+        "operator": "==",
+        "value": True,
+    }
+    assert search._conditions_match(current, [condition]) is True
+    chain = search.compact_current_observation_chain_sha256((current,))
+    assert len(chain) == 64
+    assert chain == search.compact_current_observation_chain_sha256((current,))
+    assert current.source_event_ids == tuple(current_source.to_dict()["source_event_ids"])
+    assert type(current.source_event_ids) is tuple
+
+    try:
+        search.compact_current_authoritative_observation(historical)
+    except ValueError as exc:
+        assert "must not carry an outcome" in str(exc)
+    else:
+        raise AssertionError("a labeled observation reached the current surface")
+
+    invalid_sources = search.CompactCurrentStage4Observation(
+        observation_id=current.observation_id,
+        projection_event_id=current.projection_event_id,
+        projection_event_fingerprint=current.projection_event_fingerprint,
+        snapshot_set_id=current.snapshot_set_id,
+        snapshot_key=current.snapshot_key,
+        projection_decision_time_utc=current.projection_decision_time_utc,
+        archive_cycle_time_utc=current.archive_cycle_time_utc,
+        symbol=current.symbol,
+        direction=current.direction,
+        features=current.features,
+        source_event_ids=list(current.source_event_ids),
+        source_event_fingerprints=current.source_event_fingerprints,
+        wave_binding=current.wave_binding,
+    )
+    try:
+        search.validate_compact_current_observation(
+            invalid_sources,
+            analysis_as_of_utc=AS_OF,
+        )
+    except ValueError as exc:
+        assert "source identities" in str(exc)
+    else:
+        raise AssertionError("mutable current source identities were accepted")
+
+
 def _check_one_wave_is_one_occurrence() -> None:
     rows = [
         _observation(
@@ -573,6 +668,94 @@ def _check_combined_dependencies_and_disclosure_only_q() -> None:
     assert freeze_calls < cached["counts"]["candidates_evaluated"]
 
 
+def _check_eligible_variants_survive_display_collapse() -> None:
+    historical_features = _features(
+        max_pain=True,
+        max_pain_strong=True,
+    )
+    rows = [
+        _observation(
+            105 + index,
+            parent=f"equivalent-variant-parent-{index}",
+            decision=BASE + timedelta(minutes=index * 3),
+            mfe=0.60,
+            mae=0.50,
+            feature_values=historical_features,
+        )
+        for index in range(5)
+    ]
+    result = search.search_experimental_candidates(
+        rows,
+        horizon_minutes=HORIZON,
+        analysis_as_of_utc=AS_OF,
+    )
+    variants = result["eligible_candidate_variants"]
+    assert result["counts"]["eligible_candidate_variants"] == len(variants)
+    assert len(variants) <= result["config"]["max_candidates_evaluated"]
+    assert all(
+        variant["experimental_formula_eligible"] is True
+        and variant["eligibility_gate"]["passed"] is True
+        for variant in variants
+    )
+
+    confirmed_condition = [
+        {
+            "feature": exploration.FEATURE_MAX_PAIN_CONFIRMED,
+            "operator": "==",
+            "value": True,
+        }
+    ]
+    strong_condition = [
+        {
+            "feature": exploration.FEATURE_MAX_PAIN_STRONG,
+            "operator": "==",
+            "value": True,
+        }
+    ]
+    by_conditions = {
+        tuple(
+            (condition["feature"], condition["operator"], condition["value"])
+            for condition in variant["conditions"]
+        ): variant
+        for variant in variants
+    }
+    confirmed = by_conditions[
+        tuple(
+            (condition["feature"], condition["operator"], condition["value"])
+            for condition in confirmed_condition
+        )
+    ]
+    strong = by_conditions[
+        tuple(
+            (condition["feature"], condition["operator"], condition["value"])
+            for condition in strong_condition
+        )
+    ]
+    assert confirmed["candidate_key"] != strong["candidate_key"]
+    assert confirmed["match_set_sha256"] == strong["match_set_sha256"]
+    assert confirmed["occurrence_evidence_sha256"] == (
+        strong["occurrence_evidence_sha256"]
+    )
+    display_group = [
+        candidate
+        for candidate in result["candidates"]
+        if candidate["match_set_sha256"] == confirmed["match_set_sha256"]
+    ]
+    assert len(display_group) == 1
+    assert {confirmed["candidate_key"], strong["candidate_key"]}.issubset(
+        set(display_group[0]["display_equivalent_candidate_keys"])
+    )
+
+    current_row = {
+        "features": _features(
+            max_pain=True,
+            max_pain_strong=False,
+        )
+    }
+    assert search._conditions_match(current_row, confirmed["conditions"]) is True
+    assert search._conditions_match(current_row, strong["conditions"]) is False
+
+
 def _check_bounds_and_pure_boundary() -> None:
     row = _observation(
         120,
@@ -696,6 +879,12 @@ def _check_bounds_and_pure_boundary() -> None:
     assert descriptor["compact_observation_schema_version"] == (
         search.COMPACT_OBSERVATION_SCHEMA_VERSION
     )
+    assert descriptor["current_observation_schema_version"] == (
+        search.CURRENT_OBSERVATION_SCHEMA_VERSION
+    )
+    assert descriptor["current_observation_chain_hash_version"] == (
+        search.CURRENT_OBSERVATION_CHAIN_HASH_VERSION
+    )
     assert descriptor["default_max_observations"] == 32_768
     assert descriptor["max_observations_hard_limit"] == search.MAX_OBSERVATIONS
     assert descriptor["default_wall_budget_ms"] == 60_000
@@ -723,10 +912,12 @@ def _check_bounds_and_pure_boundary() -> None:
 def main() -> None:
     _check_probability_gate_and_no_time_spacing()
     _check_compact_observation_equivalence()
+    _check_current_compact_has_no_outcome_surface()
     _check_one_wave_is_one_occurrence()
     _check_first_match_is_frozen_before_outcome()
     _check_asymmetry_route_is_independent_of_probability_route()
     _check_combined_dependencies_and_disclosure_only_q()
+    _check_eligible_variants_survive_display_collapse()
     _check_bounds_and_pure_boundary()
     print("research Stage-4 candidate search self-test passed")
 

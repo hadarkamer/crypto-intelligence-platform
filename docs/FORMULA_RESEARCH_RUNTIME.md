@@ -66,10 +66,10 @@ An independent occurrence is one opportunity from an independent parent market
 wave. Multiple symbols or timestamps from the same wave are not separate
 evidence, and this path does not use a fixed 24-hour spacing rule.
 
-### Local Stage-4 no-signal carrier and candidate search
+### Stage-4 no-signal carrier and candidate search
 
-The current local-only stage completes the missing evidence path without
-changing delivery authority:
+The Stage-4 evidence path completes the missing outcome and candidate-search
+contracts without granting Formula, LIVE or trading authority:
 
 - Migration `026_stage4_no_signal_outcomes_v1.sql` adds one append-only outcome
   carrier for each exact `projection × symbol × direction × horizon` cell that
@@ -111,14 +111,91 @@ changing delivery authority:
   hash. Candidate output retains only occurrence counts, a streaming evidence
   hash and a fixed audit sample; it never retains full occurrence arrays.
   Equivalent match sets share one evidence calculation while remaining
-  separate hypotheses for multiple-testing disclosure. The compact result
-  remains only in in-memory health/runtime observability receipts. It does not
-  write the Formula registry, Shadow state or a delivery queue.
+  separate hypotheses for multiple-testing disclosure. The display result may
+  collapse candidates with the same historical match set, but
+  `eligible_candidate_variants` retains every bounded eligible condition set;
+  two historically equivalent variants can differ on a current snapshot.
+- The search result itself retains `formula_registry_effect=NONE`,
+  `delivery_channel=NONE`, `live_eligible=false`,
+  `telegram_delivery_allowed=false` and `trade_execution_allowed=false`.
+  When the isolated experimental path below is enabled, the same verified raw
+  result may also be persisted in its dedicated search-run table. It never
+  writes the Formula registry, Shadow state, LIVE approval or LIVE delivery
+  queue.
 
-This stage has `formula_registry_effect=NONE`, `delivery_channel=NONE`,
-`live_eligible=false`, `telegram_delivery_allowed=false` and
-`trade_execution_allowed=false`. It therefore creates no Telegram message,
-LIVE formula or automated trade, even when an experimental candidate passes.
+The source carrier, reader and candidate search create no Telegram message,
+LIVE formula or automated trade by themselves. Migration `028` adds a separate
+downstream experimental-only delivery authority under the contract below.
+
+### Isolated Stage-4 experimental Telegram path
+
+Migration `028_stage4_experimental_telegram_v1.sql` adds a durable, isolated
+experimental search registry, alert registry, opt-in registry, outbox and
+two-phase delivery-attempt audit. This repository contract does not state that
+the migration is applied or the path is enabled in Production; deployment and
+schema state must be verified independently before rollout.
+
+Eligibility and current matching are fail-closed:
+
+- A candidate must pass the single atomic Stage-4 gate: the same pattern has at
+  least five completed independent occurrences, where independence is a
+  distinct BTC parent market movement, and those same occurrences already show
+  good directional probability and/or favorable/adverse asymmetry. Five
+  symbols or timestamps from one market wave remain one occurrence. There is
+  no fixed 24-hour spacing rule and no second probability gate after the
+  five-occurrence test.
+- The route is not limited to Max Pain. Every condition set that the versioned
+  bounded Stage-4 search marks eligible can be evaluated, including a single
+  feature/family output, a Combined/composite output, or an allowed combination.
+  The source-closure policy still rejects dependent-family stacking and prevents
+  a composite and its own source evidence from being counted twice.
+- Current matching consumes `eligible_candidate_variants`, not only the
+  display-collapsed champions. It chooses the highest-ranked currently matching
+  variant once per `symbol × direction × horizon × BTC parent movement`; the
+  same trigger key is idempotent, so repeated polls of one wave do not create
+  new evidence or duplicate alert occurrences.
+- `load_latest_authoritative_stage4_current()` selects and hydrates the newest
+  terminal Stage-4 projection in one attested, read-only `REPEATABLE READ`
+  snapshot. Its detached compact cells contain only frozen decision-time
+  features, source fingerprints and Wave-v5 binding; it does not request or
+  expose any outcome. A newest missed-causal-window or unevaluable projection
+  blocks the current cycle and never falls back to an older completed
+  projection.
+- The downstream matcher accepts a current Stage-4 snapshot only within 45
+  minutes of its decision time, requires the eligible search to be no older
+  than twice its horizon cadence, and expires a newly constructed alert 35
+  minutes after decision time. Invalid receipts, missing Wave binding, stale
+  data, unrecognized features or a failed condition produce no alert.
+
+Each message shows direction, symbol, horizon, exact formula conditions,
+independent BTC-parent-wave count, the accepted probability and/or asymmetry
+metrics, and the recorded reasons the evidence is still experimental, including
+the lack of an independent holdout/control-relative claim. The exact text
+`ניסיוני, לא מאושר למסחר` appears at both the opening and closing boundary of
+the message. An alert has `delivery_channel=TELEGRAM_EXPERIMENTAL_ONLY`, while
+`formula_registry_effect=NONE`, `live_eligible=false` and
+`trade_execution_allowed=false` remain immutable.
+
+Subscription authority is independent from LIVE. A Telegram chat must execute
+`/ai_experimental_on`, which records command-based consent and acknowledgement
+of the exact disclaimer. `/ai_experimental_off` disables only this channel and
+`/ai_experimental_status` reports its separate schema, worker, Telegram and chat
+state. `/ai_alerts_on` and existing LIVE subscriptions are never imported or
+reused. After explicit chat opt-in, no per-formula human approval is required
+for an experimental alert; that does not approve the formula for LIVE or for
+trading, and the bot never executes a trade.
+
+Delivery uses a content-addressed outbox and an atomic `FOR UPDATE SKIP LOCKED`
+claim lease. Only chats that were already opted in when an alert occurrence was
+created receive a queue row; enabling a subscription does not backfill older
+alerts. Every claim and terminal result is append-only audited. If the worker
+cannot prove whether Telegram accepted a send, or if an `IN_FLIGHT` lease
+expires after a possible send, the delivery becomes terminal `AMBIGUOUS` and is
+never retried automatically. Exponential retry is permitted only for a failure
+that is known to have occurred before sending; retries stop at the configured
+attempt limit or alert expiry. A successful Telegram send whose database
+completion fails remains leased and later becomes `AMBIGUOUS`, preventing a
+known duplicate resend.
 
 ## Discovery
 
@@ -197,6 +274,10 @@ contract is explicitly redesigned and migrated.
 - Shadow hits remain auditable and are never sent before validation.
 - A LIVE match creates a durable delivery only for Telegram chats that opted in
   with `/ai_alerts_on`. One AI trade alert is queued per event per chat.
+- A Stage-4 experimental match is neither a Shadow hit nor a LIVE match. It may
+  create a durable message only through migration `028`'s isolated outbox, the
+  experimental runtime flag and a chat's separate `/ai_experimental_on`
+  consent. It never changes a formula lifecycle stage or owner approval.
 - Alerts are informational; there is no automatic trade execution.
 
 ## Operational change protocol
@@ -228,8 +309,11 @@ schema/watermark instead of repeating the full baseline.
   exact database watermark. Do not poll repeatedly before that condition.
 - Every stage report states what was checked, what changed, commit/deploy/schema,
   tests passed, what deliberately did not change, data still maturing and the
-  single next step requiring explicit approval. LIVE or Telegram delivery
-  remains forbidden without frozen prospective review and explicit approval.
+  single next step requiring explicit approval. LIVE Telegram delivery remains
+  forbidden without frozen prospective review and explicit owner approval.
+  The separate Stage-4 experimental channel follows migration `028`'s atomic
+  evidence, current-snapshot and explicit chat opt-in contract instead; it
+  cannot satisfy or bypass any LIVE gate.
 
 A chat handoff uses the same compact checkpoint: verified UTC, common branch
 SHA/tree, live deploy IDs, database/schema watermarks, current stage and gate,
@@ -244,6 +328,26 @@ runtime contract.
 - `FORMULA_LIVE_ALERTS_ENABLED=1` enables delivery only for a formula with an
   explicit immutable human LIVE approval and an opted-in chat; it never
   promotes a Shadow formula or bypasses the frozen prospective review.
+- `FORMULA_EXPERIMENTAL_ALERTS_ENABLED=1` enables only the isolated Stage-4
+  evaluator/outbox after its reader, dispatcher schema and Telegram connection
+  attest successfully. It does not enable LIVE and defaults disabled when
+  absent.
+- `FORMULA_EXPERIMENTAL_POLL_SECONDS=60` controls the independent evaluation and
+  queue-drain loop; accepted values are clamped to 30–900 seconds. Evaluation
+  failure does not prevent already-durable experimental deliveries from being
+  drained in the same cycle.
+- `FORMULA_EXPERIMENTAL_CLAIM_BATCH=20` bounds each atomic delivery claim to
+  1–50 rows.
+- `FORMULA_EXPERIMENTAL_CLAIM_LEASE_SECONDS=120` sets the claim lease, clamped
+  to 30–600 seconds. An expired `IN_FLIGHT` lease becomes terminal
+  `AMBIGUOUS`, never automatically retryable.
+- `FORMULA_EXPERIMENTAL_MAX_ATTEMPTS=3` limits known-not-sent attempts to 1–10.
+  `FORMULA_EXPERIMENTAL_RETRY_BASE_SECONDS=30` sets the 5–600 second bounded
+  exponential retry base; each delay is capped at 600 seconds and alert expiry
+  always wins.
+- `RESEARCH_FORMULA_EXPERIMENTAL_DATABASE_URL` must use the exact dedicated
+  `research_formula_experimental_dispatcher_v1` login. There is no fallback to
+  the primary Research, Formula/LIVE or Stage-4 reader connection.
 - `FORMULA_DISCOVERY_HORIZONS=60,240,720,1440`
 - Each horizon runs on its own UTC-aligned cadence equal to that horizon:
   hourly, every four hours, every 12 hours and daily.
@@ -297,9 +401,10 @@ runtime contract.
   local candidate search to 5–300 seconds. Expiry raises a timeout and discards
   the entire search result; no partial candidate set is exposed.
 
-Migrations `026` and `027` remain unapplied until their deployment preflight
-passes. Apply `026` after `024`/`025`, then `027`, on PostgreSQL 15 or newer as
-the trusted owner of all source relations. Provision the writer and reader roles
+Migrations `026`, `027` and `028` are rollout-gated; this document does not
+assert that any of them has been applied in Production. Apply `026` after
+`024`/`025`, then `027`, on PostgreSQL 15 or newer as the trusted owner of all
+source relations. Provision the no-signal writer and exploration reader roles
 out of band as unprivileged `NOINHERIT LOGIN` roles with no memberships and no
 database/schema ownership; leave the new writer URL disabled until the schema
 and ACL attestations pass. Before enabling it, preserve an export/backup, run
@@ -317,6 +422,46 @@ writer's direct schema ACL to be absent and all source-table access to be
 ineffective; inherited `PUBLIC` schema
 `USAGE` may remain because it conveys no table authority. A rollback never
 promotes, delivers or trades a formula.
+
+Migration `028` has a separate mandatory preflight and rollback boundary:
+
+1. Keep `FORMULA_EXPERIMENTAL_ALERTS_ENABLED` false on every replica, preserve
+   the database backup/audit export, and verify the exact code SHA and current
+   schema watermark. If startup has `FORMULA_SCHEMA_APPLY=1`, provision the
+   dispatcher role before deploying code that includes `028`; otherwise startup
+   schema application is expected to abort at the migration preflight.
+2. Out of band, create exactly
+   `research_formula_experimental_dispatcher_v1` as an unprivileged
+   `NOINHERIT LOGIN` role: no superuser, database/schema creation, role creation,
+   replication, RLS bypass, ownership or role membership. Before migration it
+   must have no authority on Research events, Formula registry, LIVE approvals,
+   LIVE deliveries, LIVE subscriptions or the authoritative Stage-4 view.
+   Password/secret creation is never embedded in a migration or committed file.
+3. Apply `028` after `027` as the same trusted owner used by the protected source
+   relations. The migration grants only the exact non-grantable table and column
+   privileges needed on its five experimental tables and fails if the dispatcher
+   can read or mutate a protected source/LIVE relation.
+4. Configure `RESEARCH_FORMULA_EXPERIMENTAL_DATABASE_URL` with direct dispatcher
+   credentials and run the migration self-test, full tracked self-tests, Python
+   compile/tab checks, clean `001→028` apply, rollback/reapply/idempotency checks,
+   dispatcher `schema_status()` ACL/trigger attestation and the latest-current
+   no-outcome reader receipt. Confirm runtime health and Telegram connectivity
+   while the experimental flag is still false; LIVE formula, approval,
+   subscription and delivery counts must be unchanged.
+5. Enable `FORMULA_EXPERIMENTAL_ALERTS_ENABLED=1` only after those checks pass.
+   Start with an explicitly opted-in test chat using `/ai_experimental_on`, then
+   verify a persisted search receipt, current trigger receipt, alert occurrence,
+   two-phase claim audit and terminal delivery state. No existing LIVE chat is
+   enrolled automatically.
+
+To roll back `028`, first disable the experimental flag on every replica, stop
+all experimental dispatchers and remove/revoke the dispatcher connection URL.
+Preserve any required search, alert, consent and delivery audit export. Then run
+the explicit dependency-ordered table/function drop and schema-`USAGE` revoke
+listed at the end of the migration; remove the out-of-band login only after no
+service uses it. Re-run protected-relation ACL checks and confirm the Formula
+registry, Shadow, LIVE approvals, LIVE deliveries and LIVE subscriptions are
+unchanged. Do not clear or retry `AMBIGUOUS` rows during rollback.
 
 The one-shot replay is separate from the Watch loop:
 
