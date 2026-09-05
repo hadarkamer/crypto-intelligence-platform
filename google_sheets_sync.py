@@ -159,8 +159,27 @@ def _merged_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
         return dict(row)
     with _SNAPSHOT_LOCK:
         existing = dict(_SNAPSHOT_CACHE.get(key) or {})
+        priorities = {
+            "COMBINED_CONFIRMATION": 5,
+            "STRONG_MAX_PAIN_CONFIRMATION": 4,
+            "MAX_PAIN_CONFIRMATION": 3,
+            "MAX_PAIN_ALERT": 2,
+            "MAGNET_ALERT": 2,
+        }
+        old_primary = str(existing.get("primary_alert_type") or "")
+        new_primary = str(row.get("primary_alert_type") or "")
+        new_is_primary = (
+            not existing
+            or priorities.get(new_primary, 1) >= priorities.get(old_primary, 0)
+        )
         merged = dict(existing)
         for name, value in row.items():
+            # A Watch snapshot may contain inverse Max-Pain/Combined events and
+            # direct OI/CVD events with the same analysis direction.  The
+            # snapshot-level displayed direction must follow its primary alert,
+            # not whichever child event happened to reach Sheets last.
+            if name == "displayed_direction" and existing and not new_is_primary:
+                continue
             if value not in (None, ""):
                 merged[name] = value
             elif name not in merged:
@@ -179,19 +198,8 @@ def _merged_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
         merged["telegram_event_count"] = int(
             existing.get("telegram_event_count") or 0
         ) + 1
-        priorities = {
-            "COMBINED_CONFIRMATION": 5,
-            "STRONG_MAX_PAIN_CONFIRMATION": 4,
-            "MAX_PAIN_CONFIRMATION": 3,
-            "MAX_PAIN_ALERT": 2,
-            "MAGNET_ALERT": 2,
-        }
-        old_primary = str(existing.get("primary_alert_type") or "")
-        new_primary = str(row.get("primary_alert_type") or "")
         merged["primary_alert_type"] = (
-            new_primary
-            if priorities.get(new_primary, 1) >= priorities.get(old_primary, 0)
-            else old_primary
+            new_primary if new_is_primary else old_primary
         )
         _SNAPSHOT_CACHE[key] = dict(merged)
         _SNAPSHOT_CACHE.move_to_end(key)
@@ -237,6 +245,10 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
     average_edge = None if selected_avg is None or opposite_avg is None else selected_avg - opposite_avg
     categories = data.get("categories") or []
     event_type = str(data.get("event_type") or "")
+    carries_maxpain = "MAX_PAIN" in event_type or event_type == "COMBINED_CONFIRMATION"
+    if not carries_maxpain:
+        max_selected = max_opposite = selected_avg = opposite_avg = None
+        score_edge = average_edge = None
     snapshot_row = {
         "snapshot_id": sheet_snapshot_id,
         "timestamp_utc": timestamp,
@@ -263,7 +275,7 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "spot_cvd_total_score": modules[2][1],
         "all_three_aligned": aligned,
         "strict_triple_65_match": triple,
-        "maxpain_selected_timeframe": data.get("timeframe"),
+        "maxpain_selected_timeframe": data.get("timeframe") if carries_maxpain else None,
         "maxpain_selected_score": max_selected,
         "maxpain_opposite_score": max_opposite,
         "maxpain_score_edge": score_edge,
@@ -286,8 +298,8 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "זמן סריקה": israel_time,
         "מטבע": data.get("symbol"),
         "כיוון נבדק": direction,
-        "כיוון מוצג": displayed_direction,
-        "כיוון ניתוח": analysis_direction,
+        "כיוון מוצג": snapshot_row.get("displayed_direction"),
+        "כיוון ניתוח": snapshot_row.get("analysis_direction"),
         "מחיר ייחוס": data.get("current_price"),
         "נשלחה התראה": "כן",
         "סוג התראה": snapshot_row.get("primary_alert_type"),

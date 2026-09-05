@@ -38,6 +38,31 @@ class Event:
         }
 
 
+class DirectEvent:
+    def to_dict(self):
+        data = Event().to_dict()
+        data.update({
+            "event_fingerprint": "evt-2",
+            "event_type": "OI_PRICE_HIGH",
+            "direction": "LONG",
+            "source_side": "BULLISH",
+            "timeframe": None,
+            "score": 99,
+            "target_price": None,
+            "initial_target_distance_pct": None,
+            "categories": ["DERIVATIVES_HIGH_65", "positioning"],
+        })
+        data["engine_snapshot"] = dict(data["engine_snapshot"])
+        data["engine_snapshot"].update({
+            "displayed_direction": "LONG",
+            "analysis_direction": "LONG",
+            "opposite_score": None,
+            "average_score_all_timeframes": None,
+            "opposite_average_score_all_timeframes": None,
+        })
+        return data
+
+
 def run():
     assert google_sheets_sync.enabled() is False
     assert google_sheets_sync.enqueue({"kind": "test"}) is False
@@ -48,7 +73,9 @@ def run():
     try:
         google_sheets_sync.enabled = lambda: True
         google_sheets_sync.enqueue = lambda payload: captured.append(payload) or True
+        google_sheets_sync._SNAPSHOT_CACHE.clear()
         assert google_sheets_sync.enqueue_delivered_event(Event()) is True
+        assert google_sheets_sync.enqueue_delivered_event(DirectEvent()) is True
     finally:
         google_sheets_sync.enabled = original_enabled
         google_sheets_sync.enqueue = original_enqueue
@@ -61,6 +88,13 @@ def run():
     assert captured[0]["upserts"][1]["row"]["analysis_direction"] == "LONG"
     assert captured[0]["upserts"][2]["row"]["event_id"] == "evt-1"
     assert captured[0]["upserts"][2]["row"]["snapshot_id"] == "sheet-snapshot-1"
+    merged = captured[1]["upserts"][1]["row"]
+    assert merged["primary_alert_type"] == "MAX_PAIN_ALERT"
+    assert merged["displayed_direction"] == "SHORT"
+    assert merged["analysis_direction"] == "LONG"
+    assert merged["maxpain_selected_score"] == 78
+    assert captured[1]["upserts"][0]["row"]["כיוון מוצג"] == "SHORT"
+    assert captured[1]["upserts"][2]["row"]["displayed_direction"] == "LONG"
     print("google_sheets_sync_selftest: PASS")
 
 
