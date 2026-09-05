@@ -63,6 +63,20 @@ class DirectEvent:
         return data
 
 
+class NeutralEvent:
+    def to_dict(self):
+        return {
+            "event_fingerprint": "neutral-btc-long-1",
+            "event_type": "PROSPECTIVE_NEUTRAL_30M",
+            "alert_time_utc": "2026-09-05T10:00:00Z",
+            "symbol": "BTC",
+            "direction": "LONG",
+            "current_price": 101.25,
+            "strategy_version": "prospective-neutral-v4",
+            "code_version": "test",
+        }
+
+
 def run():
     assert google_sheets_sync.enabled() is False
     assert google_sheets_sync.enqueue({"kind": "test"}) is False
@@ -76,6 +90,20 @@ def run():
         google_sheets_sync._SNAPSHOT_CACHE.clear()
         assert google_sheets_sync.enqueue_delivered_event(Event()) is True
         assert google_sheets_sync.enqueue_delivered_event(DirectEvent()) is True
+        assert google_sheets_sync.enqueue_neutral_snapshot(
+            NeutralEvent(),
+            decision_feature_bundle={
+                "sampler_version": "prospective-neutral-v4",
+                "model_score_status": "ABSENT",
+                "features_by_direction": {"LONG": {
+                    "time.market_session": "WEEKEND",
+                    "time.is_market_weekend": True,
+                }},
+            },
+            anchor_slot_id=42,
+            feature_bundle_policy_version="formula-visible-v1",
+            feature_bundle_sha256="abcdef0123456789fedcba",
+        ) is True
     finally:
         google_sheets_sync.enabled = original_enabled
         google_sheets_sync.enqueue = original_enqueue
@@ -95,6 +123,20 @@ def run():
     assert merged["maxpain_selected_score"] == 78
     assert captured[1]["upserts"][0]["row"]["כיוון מוצג"] == "SHORT"
     assert captured[1]["upserts"][2]["row"]["displayed_direction"] == "LONG"
+    neutral = captured[2]
+    assert neutral["kind"] == "neutral_snapshot"
+    assert len(neutral["upserts"]) == 2
+    assert {item["sheet"] for item in neutral["upserts"]} == {
+        "תצוגת לייב", "Snapshots"
+    }
+    neutral_snapshot = neutral["upserts"][1]["row"]
+    assert neutral_snapshot["no_alert_snapshot"] is True
+    assert neutral_snapshot["alert_sent"] is False
+    assert neutral_snapshot["telegram_event_count"] == 0
+    assert neutral_snapshot["market_session"] == "WEEKEND"
+    assert "price_oi_total_score" not in neutral_snapshot
+    assert neutral["upserts"][0]["row"]["נשלחה התראה"] == "לא"
+    assert neutral["upserts"][0]["row"]["שלישייה 65+"] == "לא נמדד"
     print("google_sheets_sync_selftest: PASS")
 
 

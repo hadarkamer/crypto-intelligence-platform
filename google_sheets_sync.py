@@ -197,7 +197,7 @@ def _merged_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
         merged["alert_types"] = ", ".join(sorted(old_types | new_types))
         merged["telegram_event_count"] = int(
             existing.get("telegram_event_count") or 0
-        ) + 1
+        ) + int(row.get("telegram_event_count") or 0)
         merged["primary_alert_type"] = (
             new_primary if new_is_primary else old_primary
         )
@@ -206,6 +206,91 @@ def _merged_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
         while len(_SNAPSHOT_CACHE) > 5000:
             _SNAPSHOT_CACHE.popitem(last=False)
         return merged
+
+
+def enqueue_neutral_snapshot(
+    event: Any,
+    *,
+    decision_feature_bundle: Mapping[str, Any],
+    anchor_slot_id: Any = None,
+    feature_bundle_policy_version: Any = None,
+    feature_bundle_sha256: Any = None,
+) -> bool:
+    """Mirror one persisted silent anchor to Sheets without fabricating an alert.
+
+    The canonical formula-visible feature bundle remains in PostgreSQL.  This
+    Sheet row is a compact audit/index view; alert-only scores intentionally
+    remain empty when the prospective model-score wrapper is absent.
+    """
+    if not enabled():
+        return False
+    data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+    bundle = _mapping(decision_feature_bundle)
+    timestamp = str(data.get("alert_time_utc") or "")
+    try:
+        israel_time = datetime.fromisoformat(
+            timestamp.replace("Z", "+00:00")
+        ).astimezone(ZoneInfo("Asia/Jerusalem")).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        israel_time = timestamp
+    direction = _direction(data.get("direction"))
+    fingerprint = str(data.get("event_fingerprint") or "")
+    sampler_version = str(bundle.get("sampler_version") or data.get("strategy_version") or "")
+    per_direction = _mapping(_mapping(bundle.get("features_by_direction")).get(direction))
+    market_session = per_direction.get("time.market_session")
+    is_weekend = per_direction.get("time.is_market_weekend")
+    model_score_status = str(bundle.get("model_score_status") or "ABSENT").upper()
+    provenance = ":".join(
+        value for value in (
+            str(feature_bundle_policy_version or bundle.get("feature_bundle_policy_version") or ""),
+            str(feature_bundle_sha256 or bundle.get("feature_bundle_sha256") or "")[:16],
+        ) if value
+    )
+    snapshot_row = {
+        "snapshot_id": fingerprint,
+        "timestamp_utc": timestamp,
+        "timestamp_israel": israel_time,
+        "watch_scan_id": f"prospective-anchor:{anchor_slot_id or timestamp}",
+        "parent_event_id": fingerprint,
+        "symbol": data.get("symbol"),
+        "direction": direction,
+        "displayed_direction": direction,
+        "analysis_direction": direction,
+        "no_alert_snapshot": True,
+        "reference_price": data.get("current_price"),
+        "data_quality_status": "PROSPECTIVE_EVALUABLE",
+        "alert_sent": False,
+        "alert_types": "",
+        "primary_alert_type": "PROSPECTIVE_NEUTRAL_30M",
+        "telegram_event_count": 0,
+        "market_session": market_session,
+        "is_weekend": is_weekend,
+        "strategy_version": sampler_version,
+        "code_version": provenance or data.get("code_version"),
+        "snapshot_written_at": timestamp,
+    }
+    # Explicitly document why alert-derived aggregate-score columns are blank.
+    if model_score_status != "ABSENT":
+        snapshot_row["data_quality_status"] = (
+            "PROSPECTIVE_EVALUABLE_MODEL_SCORES_PRESENT"
+        )
+    live_row = {
+        "זמן סריקה": israel_time,
+        "מטבע": data.get("symbol"),
+        "כיוון נבדק": direction,
+        "כיוון מוצג": direction,
+        "כיוון ניתוח": direction,
+        "מחיר ייחוס": data.get("current_price"),
+        "נשלחה התראה": "לא",
+        "סוג התראה": "PROSPECTIVE_NEUTRAL_30M",
+        "שלישייה 65+": "לא נמדד",
+        "סטטוס נתונים": snapshot_row["data_quality_status"],
+        "snapshot_id": fingerprint,
+    }
+    return enqueue({"kind": "neutral_snapshot", "upserts": [
+        {"sheet": "תצוגת לייב", "key": "snapshot_id", "row": live_row},
+        {"sheet": "Snapshots", "key": "snapshot_id", "row": snapshot_row},
+    ]})
 
 
 def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool:

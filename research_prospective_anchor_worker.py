@@ -19,6 +19,7 @@ import os
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 import live_price_provider
+import google_sheets_sync
 import research_prospective_anchor_store
 import research_prospective_anchors
 
@@ -441,6 +442,46 @@ class ProspectiveAnchorWorker:
             symbols=run_symbols,
         )
         summary = dict(sampling.summary())
+        persisted_by_symbol = {
+            str(item.symbol).strip().upper(): item
+            for item in sampling.persisted
+            if getattr(item, "anchor_slot_id", None) is not None
+        }
+        sheet_copies = 0
+        for decision in sampling.batch.decisions:
+            symbol = str(getattr(decision, "symbol", "")).strip().upper()
+            persisted = persisted_by_symbol.get(symbol)
+            if (
+                persisted is None
+                or getattr(decision, "evaluation_status", None)
+                != research_prospective_anchors.EVALUABLE
+            ):
+                continue
+            for event in tuple(getattr(decision, "events", ()) or ()):
+                try:
+                    copied = google_sheets_sync.enqueue_neutral_snapshot(
+                        event,
+                        decision_feature_bundle=getattr(
+                            decision, "decision_feature_bundle", {}
+                        ),
+                        anchor_slot_id=persisted.anchor_slot_id,
+                        feature_bundle_policy_version=getattr(
+                            decision, "feature_bundle_policy_version", None
+                        ),
+                        feature_bundle_sha256=getattr(
+                            decision, "feature_bundle_sha256", None
+                        ),
+                    )
+                    sheet_copies += int(bool(copied))
+                except Exception as exc:
+                    # Sheets is an observational sidecar and must never affect
+                    # canonical anchor persistence or worker progress.
+                    print(
+                        "[prospective-anchors] neutral Sheet copy failed: "
+                        f"{exc!r}",
+                        flush=True,
+                    )
+        summary["sheets_neutral_snapshots_enqueued"] = sheet_copies
         completed_slot = getattr(sampling, "slot_open_utc", None)
         if completed_slot is None:
             completed_slot = summary.get("slot_open_utc")
