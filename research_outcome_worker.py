@@ -1281,8 +1281,57 @@ class ResearchOutcomeWorker:
                     AND e.delivery_status='NOT_APPLICABLE'
                     AND EXISTS (
                         SELECT 1
-                        FROM research_prospective_shadow_events authorized
-                        WHERE authorized.event_id=e.event_id
+                        FROM research_prospective_anchor_slots authorized
+                        WHERE (
+                                authorized.long_event_id=e.event_id
+                                OR authorized.short_event_id=e.event_id
+                              )
+                          AND authorized.sampler_version=
+                              'prospective-neutral-anchor-v4-decision-features-frozen'
+                          AND authorized.coverage_policy_version=
+                              'prospective-coverage-v3-completed-fully-validated-replay-run:no-dwell-first-touch-v6:historical-raw-opportunity-replay-v2-balanced-prior-session-width'
+                          AND authorized.feature_bundle_policy_version=
+                              'prospective-decision-feature-bundle-v1'
+                          AND JSONB_TYPEOF(
+                              authorized.decision_feature_bundle
+                          )='object'
+                          AND BTRIM(authorized.feature_bundle_sha256)
+                              ~ '^[0-9a-f]{{64}}$'
+                          AND NOT (
+                              authorized.frozen_inputs
+                              ? 'decision_feature_bundle'
+                          )
+                          AND e.event_type='PROSPECTIVE_NEUTRAL_30M'
+                          AND e.capture_stage='SILENT_NEUTRAL_ANCHOR'
+                          AND e.source_side='RAW_NEUTRAL'
+                          AND e.timeframe='30m'
+                          AND e.strategy_version=
+                              'formula-prospective-neutral-v4'
+                          AND e.engine_snapshot#>>
+                              '{{prospective_anchor,sampler_version}}'
+                              IS NOT DISTINCT FROM authorized.sampler_version
+                          AND e.engine_snapshot#>>
+                              '{{prospective_anchor,coverage_policy_version}}'
+                              IS NOT DISTINCT FROM
+                                  authorized.coverage_policy_version
+                          AND e.engine_snapshot#>>
+                              '{{prospective_anchor,input_fingerprint}}'
+                              IS NOT DISTINCT FROM
+                                  BTRIM(authorized.input_fingerprint)
+                          AND e.engine_snapshot#>
+                              '{{prospective_anchor,frozen_inputs}}'
+                              IS NOT DISTINCT FROM authorized.frozen_inputs
+                          AND e.engine_snapshot#>>
+                              '{{prospective_anchor,feature_bundle_policy_version}}'
+                              IS NOT DISTINCT FROM
+                                  authorized.feature_bundle_policy_version
+                          AND e.engine_snapshot#>>
+                              '{{prospective_anchor,feature_bundle_sha256}}'
+                              IS NOT DISTINCT FROM
+                                  BTRIM(authorized.feature_bundle_sha256)
+                          AND e.engine_snapshot#>
+                              '{{prospective_anchor,decision_feature_bundle}}'
+                              IS NULL
                     )
                 )
               )
