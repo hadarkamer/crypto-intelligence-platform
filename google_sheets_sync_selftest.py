@@ -21,6 +21,8 @@ class Event:
             "strategy_version": "test",
             "code_version": "test",
             "engine_snapshot": {
+                "watch_scan_id": "shared-watch:test",
+                "sheet_snapshot_id": "sheet-snapshot-1",
                 "opposite_score": 40,
                 "average_score_all_timeframes": 70,
                 "opposite_average_score_all_timeframes": 45,
@@ -49,6 +51,9 @@ def run():
         google_sheets_sync.enqueue = original_enqueue
     assert captured[0]["upserts"][0]["row"]["שלישייה 65+"] == "כן"
     assert captured[0]["upserts"][1]["row"]["strict_triple_65_match"] is True
+    assert captured[0]["upserts"][1]["row"]["snapshot_id"] == "sheet-snapshot-1"
+    assert captured[0]["upserts"][2]["row"]["event_id"] == "evt-1"
+    assert captured[0]["upserts"][2]["row"]["snapshot_id"] == "sheet-snapshot-1"
     print("google_sheets_sync_selftest: PASS")
 
 

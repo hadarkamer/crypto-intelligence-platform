@@ -101,6 +101,22 @@ def run():
     assert sent[0]["event_fingerprint"] != sent[1]["event_fingerprint"]
     assert sent[0]["alert_time_utc"].startswith("2026-08-20T10:00:00.123456")
 
+    token = runtime.set_watch_context(
+        watch_scan_id="shared-watch:test", watch_cycle_number=7
+    )
+    try:
+        runtime.capture_sent_maxpain(item, event_time=t3)
+    finally:
+        runtime.reset_watch_context(token)
+    contextual = [
+        e for e in runtime.events(200)
+        if e["event_type"] == "MAX_PAIN_ALERT"
+        and e["alert_time_utc"].startswith("2026-08-20T11:30:00")
+    ][-1]
+    assert contextual["engine_snapshot"]["watch_scan_id"] == "shared-watch:test"
+    assert contextual["engine_snapshot"]["watch_cycle_number"] == 7
+    assert len(contextual["engine_snapshot"]["sheet_snapshot_id"]) == 64
+
     combined = {
         "key": "BTC|LONG",
         "symbol": "BTC",

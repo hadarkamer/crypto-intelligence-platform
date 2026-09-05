@@ -4328,6 +4328,12 @@ async def run_watch_cycle(
     WATCH_RUNTIME["last_error"] = None
     WATCH_RUNTIME["cycle_number"] = int(WATCH_RUNTIME.get("cycle_number", 0)) + 1
     cycle_number = WATCH_RUNTIME["cycle_number"]
+    watch_scan_id = f"shared-watch:{cycle_started_at.isoformat()}"
+    watch_context_token = research_event_runtime.set_watch_context(
+        watch_scan_id=watch_scan_id,
+        watch_cycle_number=cycle_number,
+        watch_started_at_utc=cycle_started_at.isoformat(),
+    )
 
     try:
         scrape_lock = _get_scrape_lock()
@@ -4336,7 +4342,7 @@ async def run_watch_cycle(
                 WATCH_RUNTIME["scan_owner"] = "Watch משותף"
                 return await collect_live_rows_for_watch(
                     archive_context={
-                        "cycle_id": f"shared-watch:{cycle_started_at.isoformat()}",
+                        "cycle_id": watch_scan_id,
                         "cycle_time_utc": cycle_started_at,
                         "source": "WATCH_SHARED",
                         "metadata": {
@@ -4559,6 +4565,7 @@ async def run_watch_cycle(
             pass
         return {"ok": False, "reason": repr(exc)}
     finally:
+        research_event_runtime.reset_watch_context(watch_context_token)
         WATCH_RUNTIME["scan_in_progress"] = False
         WATCH_RUNTIME["scan_owner"] = None
 

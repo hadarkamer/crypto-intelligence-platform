@@ -6,6 +6,7 @@ web app.  The web app performs idempotent upserts into the approved workbook.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime
 import json
 import os
@@ -24,6 +25,8 @@ _SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "").strip()
 _QUEUE: Queue[Dict[str, Any]] = Queue(maxsize=2000)
 _THREAD: Optional[threading.Thread] = None
 _LOCK = threading.Lock()
+_SNAPSHOT_LOCK = threading.Lock()
+_SNAPSHOT_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _STOP = threading.Event()
 _METRICS = {
     "enqueued": 0,
@@ -122,6 +125,10 @@ def _float(value: Any) -> Optional[float]:
         return None
 
 
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
 def _direction(value: Any) -> str:
     value = str(value or "").upper()
     return {"BULLISH": "LONG", "BEARISH": "SHORT"}.get(value, value)
@@ -145,6 +152,54 @@ def _is_aligned(direction: str, values: list[tuple[str, Optional[float]]]) -> bo
     return bool(direction in {"LONG", "SHORT"} and all(d == direction for d, score in values if score is not None) and all(score is not None for _, score in values))
 
 
+def _merged_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Merge Telegram child alerts into one research row per Watch/symbol/side."""
+    key = str(row.get("snapshot_id") or "")
+    if not key:
+        return dict(row)
+    with _SNAPSHOT_LOCK:
+        existing = dict(_SNAPSHOT_CACHE.get(key) or {})
+        merged = dict(existing)
+        for name, value in row.items():
+            if value not in (None, ""):
+                merged[name] = value
+            elif name not in merged:
+                merged[name] = value
+        old_types = {
+            value.strip()
+            for value in str(existing.get("alert_types") or "").split(",")
+            if value.strip()
+        }
+        new_types = {
+            value.strip()
+            for value in str(row.get("alert_types") or "").split(",")
+            if value.strip()
+        }
+        merged["alert_types"] = ", ".join(sorted(old_types | new_types))
+        merged["telegram_event_count"] = int(
+            existing.get("telegram_event_count") or 0
+        ) + 1
+        priorities = {
+            "COMBINED_CONFIRMATION": 5,
+            "STRONG_MAX_PAIN_CONFIRMATION": 4,
+            "MAX_PAIN_CONFIRMATION": 3,
+            "MAX_PAIN_ALERT": 2,
+            "MAGNET_ALERT": 2,
+        }
+        old_primary = str(existing.get("primary_alert_type") or "")
+        new_primary = str(row.get("primary_alert_type") or "")
+        merged["primary_alert_type"] = (
+            new_primary
+            if priorities.get(new_primary, 1) >= priorities.get(old_primary, 0)
+            else old_primary
+        )
+        _SNAPSHOT_CACHE[key] = dict(merged)
+        _SNAPSHOT_CACHE.move_to_end(key)
+        while len(_SNAPSHOT_CACHE) > 5000:
+            _SNAPSHOT_CACHE.popitem(last=False)
+        return merged
+
+
 def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool:
     """Copy one successfully delivered Telegram event to all live Sheet views."""
     if not enabled():
@@ -154,6 +209,7 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
     if not isinstance(snapshot, Mapping):
         snapshot = {}
     fingerprint = str(data.get("event_fingerprint") or "")
+    sheet_snapshot_id = str(snapshot.get("sheet_snapshot_id") or fingerprint)
     direction = _direction(data.get("direction"))
     modules = [
         _module_total(snapshot, "positioning"),
@@ -176,11 +232,11 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
     categories = data.get("categories") or []
     event_type = str(data.get("event_type") or "")
     snapshot_row = {
-        "snapshot_id": fingerprint,
+        "snapshot_id": sheet_snapshot_id,
         "timestamp_utc": timestamp,
         "timestamp_israel": israel_time,
         "watch_scan_id": snapshot.get("watch_scan_id"),
-        "parent_event_id": None,
+        "parent_event_id": fingerprint,
         "btc_parent_movement_id": snapshot.get("btc_parent_movement_id"),
         "symbol": data.get("symbol"),
         "direction": direction,
@@ -217,34 +273,35 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "code_version": data.get("code_version"),
         "snapshot_written_at": delivered_at_utc or timestamp,
     }
+    snapshot_row = _merged_snapshot(snapshot_row)
     live_row = {
         "זמן סריקה": israel_time,
         "מטבע": data.get("symbol"),
         "כיוון נבדק": direction,
         "מחיר ייחוס": data.get("current_price"),
         "נשלחה התראה": "כן",
-        "סוג התראה": event_type,
-        "Price/OI כולל": modules[0][1],
-        "כיוון Price/OI": modules[0][0],
-        "Futures CVD כולל": modules[1][1],
-        "כיוון Futures": modules[1][0],
-        "Spot CVD כולל": modules[2][1],
-        "כיוון Spot": modules[2][0],
-        "שלישייה 65+": "כן" if triple else "לא",
-        "MaxPain נבחר": max_selected,
-        "MaxPain נגדי": max_opposite,
-        "פער MaxPain": score_edge,
-        "ממוצע לכיוון": selected_avg,
-        "ממוצע נגדי": opposite_avg,
-        "יעד": data.get("target_price"),
-        "מרחק ליעד": data.get("initial_target_distance_pct"),
-        "מאזן נזילות": snapshot.get("near_share_pct"),
+        "סוג התראה": snapshot_row.get("primary_alert_type"),
+        "Price/OI כולל": snapshot_row.get("price_oi_total_score"),
+        "כיוון Price/OI": snapshot_row.get("price_oi_total_direction"),
+        "Futures CVD כולל": snapshot_row.get("futures_cvd_total_score"),
+        "כיוון Futures": snapshot_row.get("futures_cvd_total_direction"),
+        "Spot CVD כולל": snapshot_row.get("spot_cvd_total_score"),
+        "כיוון Spot": snapshot_row.get("spot_cvd_total_direction"),
+        "שלישייה 65+": "כן" if snapshot_row.get("strict_triple_65_match") else "לא",
+        "MaxPain נבחר": snapshot_row.get("maxpain_selected_score"),
+        "MaxPain נגדי": snapshot_row.get("maxpain_opposite_score"),
+        "פער MaxPain": snapshot_row.get("maxpain_score_edge"),
+        "ממוצע לכיוון": snapshot_row.get("maxpain_direction_average"),
+        "ממוצע נגדי": snapshot_row.get("maxpain_opposite_average"),
+        "יעד": snapshot_row.get("target_price"),
+        "מרחק ליעד": snapshot_row.get("target_distance_pct"),
+        "מאזן נזילות": snapshot_row.get("liquidity_balance_pct"),
         "סטטוס נתונים": "LIVE",
-        "snapshot_id": fingerprint,
+        "snapshot_id": sheet_snapshot_id,
     }
     telegram_row = {
         "event_id": fingerprint,
-        "snapshot_id": fingerprint,
+        "snapshot_id": sheet_snapshot_id,
         "telegram_message_id": None,
         "timestamp_utc": timestamp,
         "symbol": data.get("symbol"),
@@ -267,7 +324,11 @@ def enqueue_first_touch_outcome(*, event: Mapping[str, Any], horizon: int, refer
     event_id = str(event.get("event_id") or "")
     threshold = _float(first_touch.get("qualifying_move_threshold_pct"))
     row = {
-        "snapshot_id": event.get("event_fingerprint") or event_id,
+        "snapshot_id": (
+            (_mapping(event.get("engine_snapshot"))).get("sheet_snapshot_id")
+            or event.get("event_fingerprint")
+            or event_id
+        ),
         "symbol": event.get("symbol"),
         "direction": _direction(first_touch.get("direction") or event.get("direction")),
         "threshold_pct": threshold,

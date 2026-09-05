@@ -12,7 +12,10 @@ Telegram alerts or alter scoring.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
+from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import magnet_v1
@@ -36,6 +39,36 @@ _DERIVATIVES_HIGH_STATE: Dict[str, str] = {}
 _SPOT_FAMILY_HIGH_STATE: Dict[str, str] = {}
 _MAGNET_STATE: Dict[str, str] = {}
 _COMBINED_STATE: Dict[str, set[str]] = {}
+_WATCH_CONTEXT: ContextVar[Dict[str, Any]] = ContextVar(
+    "research_watch_context", default={}
+)
+
+
+def set_watch_context(**values: Any) -> Token:
+    """Attach one immutable Watch-cycle identity to every emitted child event."""
+    return _WATCH_CONTEXT.set({
+        str(key): value for key, value in values.items() if value not in (None, "")
+    })
+
+
+def reset_watch_context(token: Token) -> None:
+    _WATCH_CONTEXT.reset(token)
+
+
+def _with_watch_context(
+    event: research_event_capture.ResearchEvent,
+) -> research_event_capture.ResearchEvent:
+    context = dict(_WATCH_CONTEXT.get() or {})
+    if not context:
+        return event
+    snapshot = dict(event.engine_snapshot or {})
+    snapshot.update(context)
+    watch_scan_id = str(context.get("watch_scan_id") or "")
+    if watch_scan_id:
+        snapshot["sheet_snapshot_id"] = hashlib.sha256(
+            f"{watch_scan_id}|{event.symbol}|{event.direction}".encode("utf-8")
+        ).hexdigest()
+    return replace(event, engine_snapshot=snapshot)
 
 
 def _now(value: Any = None) -> Any:
@@ -139,6 +172,7 @@ def _emit(
     and therefore can never leak reconstructed history into the production
     Research Archive.
     """
+    event = _with_watch_context(event)
     remembered = SINK.emit(event)
     queued = False
     if persist:
@@ -415,6 +449,13 @@ def capture_special_transitions(
                     categories=[module_key, "DERIVATIVES_HIGH_65"],
                     engine_snapshot={
                         "module": _compact_module(module),
+                        "market_evidence": {
+                            "modules": {
+                                str(name): _compact_module(value)
+                                for name, value in modules.items()
+                                if isinstance(value, Mapping)
+                            }
+                        },
                         "threshold": DERIVATIVES_HIGH_THRESHOLD,
                         "reset_threshold": DERIVATIVES_HIGH_RESET_THRESHOLD,
                         **_price_provenance(item),
@@ -471,6 +512,13 @@ def capture_special_transitions(
                     engine_snapshot={
                         "family_key": family_key,
                         "family": {key: family.get(key) for key in ("label", "direction", "score", "quality", "agreement", "weight", "windows") if key in family},
+                        "market_evidence": {
+                            "modules": {
+                                str(name): _compact_module(value)
+                                for name, value in modules.items()
+                                if isinstance(value, Mapping)
+                            }
+                        },
                         "threshold": DERIVATIVES_HIGH_THRESHOLD,
                         "reset_threshold": DERIVATIVES_HIGH_RESET_THRESHOLD,
                         **_price_provenance(item),
@@ -599,6 +647,7 @@ def capture_combined_confirmation(
                 "derivatives_high": candidate.get("derivatives_high") or [],
                 "magnet": candidate.get("magnet") or {},
                 "top_item_components": top_item.get("components") or {},
+                "market_evidence": top_item.get("market_evidence") or {},
                 "top_item_confirmation": top_item.get("maxpain_confirmation") or {},
                 "top_item_average_score_all_timeframes": top_item.get("average_score_all_timeframes"),
                 "top_item_price_source": top_item.get("price_source"),
