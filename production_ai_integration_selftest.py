@@ -250,10 +250,22 @@ def run() -> None:
     fetch_calls = []
     writes = []
     first_touch_writes = []
+    outcome_transaction_commands = []
+
+    class _DbConnection:
+        def execute(self, query, params=()):
+            assert not params
+            command = " ".join(str(query).split())
+            assert command in {
+                "SAVEPOINT research_open_first_touch_load",
+                "RELEASE SAVEPOINT research_open_first_touch_load",
+            }
+            outcome_transaction_commands.append(command)
+            return self
 
     class _DbContext:
         def __enter__(self):
-            return object()
+            return _DbConnection()
 
         def __exit__(self, exc_type, exc, traceback):
             return False
@@ -317,6 +329,10 @@ def run() -> None:
         assert worker_result["upgraded"] == 2
         assert worker_result["first_touch_rows_written"] == 4
         assert worker_result["alert_reference_provenance_rejections"] == 0
+        assert outcome_transaction_commands == [
+            "SAVEPOINT research_open_first_touch_load",
+            "RELEASE SAVEPOINT research_open_first_touch_load",
+        ]
 
         # An unavailable canonical symbol is requested only once per run,
         # even when several archived alerts need outcomes.  It remains
@@ -365,6 +381,10 @@ def run() -> None:
         assert unavailable_fetch_calls.count("NOPE") == 1
         assert unavailable_result["missing_price_paths"] == 2
         assert unavailable_result["unavailable_symbols"] == {"NOPE": 2}
+        assert outcome_transaction_commands[-2:] == [
+            "SAVEPOINT research_open_first_touch_load",
+            "RELEASE SAVEPOINT research_open_first_touch_load",
+        ]
 
         class _EventRows:
             def fetchone(self):

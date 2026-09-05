@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import canonical_price_path
@@ -38,11 +40,138 @@ class _ConnectionContext:
     def __exit__(self, exc_type, exc, traceback):
         return False
 
+    def execute(self, query, params=()):
+        return self
+
 
 class _PsycopgStub:
     @staticmethod
     def connect(*args, **kwargs):
         return _ConnectionContext()
+
+
+class _CommandConnection:
+    """Minimal connection for SAVEPOINT-only scan orchestration tests."""
+
+    def __init__(self) -> None:
+        self.commands = []
+
+    def execute(self, query, params=()):
+        self.commands.append((" ".join(str(query).split()), tuple(params)))
+        return self
+
+
+class _OneRowResult:
+    def __init__(self, row=None) -> None:
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class _Stage4StateConnection:
+    """Script the actual advisory-lock and durable-state SQL helpers."""
+
+    def __init__(self, *, acquired, state_row=None, initialized_row=None) -> None:
+        self.acquired = bool(acquired)
+        self.state_row = state_row
+        self.initialized_row = initialized_row
+        self.commands = []
+
+    def execute(self, query, params=()):
+        normalized = " ".join(str(query).split())
+        self.commands.append((normalized, tuple(params)))
+        if "pg_try_advisory_xact_lock" in normalized:
+            return _OneRowResult({"acquired": self.acquired})
+        if normalized.startswith(
+            "INSERT INTO public.research_stage4_signal_scan_state_v1"
+        ):
+            return _OneRowResult()
+        if normalized.startswith(
+            "SELECT scan_key, state_version, cursor_alert_time_utc"
+        ):
+            return _OneRowResult(self.state_row)
+        if normalized.startswith(
+            "UPDATE public.research_stage4_signal_scan_state_v1 SET "
+            "lap_upper_alert_time_utc="
+        ):
+            return _OneRowResult(self.initialized_row)
+        raise AssertionError(f"unexpected Stage-4 state SQL: {normalized}")
+
+
+class _DurableStage4ScanState:
+    """Shared fake state that survives replacement worker instances."""
+
+    def __init__(self, *, cursor=None) -> None:
+        self.cursor = cursor
+        self.default_upper = (
+            START + timedelta(days=365),
+            worker._STAGE4_DUE_SCAN_MAX_EVENT_ID,
+        )
+        self.lap_upper = self.default_upper
+        self.records = []
+        self.acquire_calls = 0
+
+    def acquire(self, _conn):
+        self.acquire_calls += 1
+        if self.lap_upper is None:
+            self.lap_upper = self.default_upper
+        return {
+            "cursor": self.cursor,
+            "lap_upper": self.lap_upper,
+        }
+
+    def record(
+        self,
+        _conn,
+        *,
+        cursor,
+        lap_complete,
+        pages_scanned,
+        candidates_scanned,
+    ):
+        receipt = {
+            "cursor": cursor,
+            "lap_complete": bool(lap_complete),
+            "pages_scanned": int(pages_scanned),
+            "candidates_scanned": int(candidates_scanned),
+        }
+        self.records.append(receipt)
+        if lap_complete:
+            self.cursor = None
+            self.lap_upper = None
+        else:
+            self.cursor = cursor
+
+
+def _stage4_scan_row(event_id, *, priority=0):
+    return {
+        "event_id": int(event_id),
+        "alert_time_utc": START + timedelta(seconds=int(event_id)),
+        "due_queue_priority": int(priority),
+    }
+
+
+def _configure_stage4_scan(
+    service,
+    state,
+    *,
+    candidate_page,
+    validator,
+    timeout_calls=None,
+):
+    service._acquire_stage4_due_scan_state = state.acquire
+    service._record_stage4_due_scan_state = state.record
+    service._load_due_stage4_candidate_page = candidate_page
+    service._validate_and_hydrate_due_stage4_events = validator
+    calls = timeout_calls if timeout_calls is not None else []
+
+    def set_timeout(_conn, remaining_ms):
+        calls.append(int(remaining_ms))
+        return int(remaining_ms)
+
+    service._set_stage4_due_statement_timeout = set_timeout
+    return calls
 
 
 def _candle(open_time, *, high=100.0, low=100.0, close=100.0):
@@ -280,7 +409,13 @@ def _run_once_with_path(
     return result, captured_writes
 
 
-def _run_closed_current_slot_once(*, slot_authority, legacy_complete=True):
+def _run_closed_current_slot_once(
+    *,
+    slot_authority,
+    legacy_complete=True,
+    event_type="SELFTEST",
+    stage4_reference_price=100.0,
+):
     """Exercise the closed queue through the real slot-authority method."""
     now = datetime.now(timezone.utc)
     event_time = now.replace(second=0, microsecond=0) - timedelta(minutes=61)
@@ -289,7 +424,7 @@ def _run_closed_current_slot_once(*, slot_authority, legacy_complete=True):
         "alert_time_utc": event_time,
         "symbol": "BTC",
         "direction": "LONG",
-        "event_type": "SELFTEST",
+        "event_type": event_type,
         "setup_key": "SELFTEST",
         "event_kind": "DECISION_SAMPLE",
         "delivery_status": "NOT_APPLICABLE",
@@ -313,6 +448,23 @@ def _run_closed_current_slot_once(*, slot_authority, legacy_complete=True):
         "first_touch_versions": {},
         "open_first_touch_horizons": [],
     }
+    if event_type in worker._STAGE4_SIGNAL_OUTCOME_EVENT_TYPES:
+        event["engine_snapshot"]["signal_snapshot"] = {
+            "archive_reference": {
+                "snapshot_set_id": 17,
+                "snapshot_key": "a" * 64,
+                "official_price": {
+                    "price": stage4_reference_price,
+                    "source": "binance_spot",
+                    "exchange": "binance",
+                    "market": "spot",
+                    "pair": "BTCUSDT",
+                    "instrument": "BTC",
+                    "observed_at_utc": event_time - timedelta(minutes=20),
+                    "fetched_at_utc": event_time - timedelta(minutes=10),
+                },
+            }
+        }
     slot_row = _slot_authority_row(event, 60)
     loader_calls = []
     formula_event_id_calls = []
@@ -401,6 +553,632 @@ def _run_closed_current_slot_once(*, slot_authority, legacy_complete=True):
     }
 
 
+def _check_stage4_signal_state_helpers() -> None:
+    assigned_lock_ids = set()
+    for path in Path(__file__).resolve().parent.glob("*.py"):
+        if path.name in {"research_outcome_worker.py", Path(__file__).name}:
+            continue
+        assigned_lock_ids.update(
+            int(value)
+            for value in re.findall(
+                r"(?:^|\n)[A-Z_]*LOCK_ID\s*=\s*(\d+)",
+                path.read_text(encoding="utf-8"),
+            )
+        )
+    assert worker._STAGE4_DUE_SCAN_LOCK_ID not in assigned_lock_ids
+
+    busy = _Stage4StateConnection(acquired=False)
+    assert worker.ResearchOutcomeWorker._acquire_stage4_due_scan_state(busy) is None
+    assert len(busy.commands) == 1
+    assert "pg_try_advisory_xact_lock" in busy.commands[0][0]
+    assert busy.commands[0][1] == (worker._STAGE4_DUE_SCAN_LOCK_ID,)
+
+    upper = (
+        START + timedelta(days=1),
+        worker._STAGE4_DUE_SCAN_MAX_EVENT_ID,
+    )
+    empty_state = {
+        "scan_key": worker._STAGE4_DUE_SCAN_STATE_KEY,
+        "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+        "cursor_alert_time_utc": None,
+        "cursor_event_id": None,
+        "lap_upper_alert_time_utc": None,
+        "lap_upper_event_id": None,
+        "completed_laps": 0,
+        "pages_scanned": 0,
+        "candidates_scanned": 0,
+        "updated_at_utc": START,
+    }
+    initialized_state = {
+        **empty_state,
+        "lap_upper_alert_time_utc": upper[0],
+        "lap_upper_event_id": upper[1],
+    }
+    ready = _Stage4StateConnection(
+        acquired=True,
+        state_row=empty_state,
+        initialized_row=initialized_state,
+    )
+    acquired = worker.ResearchOutcomeWorker._acquire_stage4_due_scan_state(ready)
+    assert acquired is not None
+    assert acquired["cursor"] is None
+    assert acquired["lap_upper"] == upper
+    assert len(ready.commands) == 4
+    assert ready.commands[1][1] == (
+        worker._STAGE4_DUE_SCAN_STATE_KEY,
+        worker._STAGE4_DUE_SCAN_STATE_VERSION,
+    )
+    assert ready.commands[2][0].endswith("FOR UPDATE")
+    assert ready.commands[3][1] == (
+        min(worker._HORIZONS),
+        worker._STAGE4_DUE_SCAN_MAX_EVENT_ID,
+        worker._STAGE4_DUE_SCAN_STATE_KEY,
+        worker._STAGE4_DUE_SCAN_STATE_VERSION,
+    )
+
+    record_capture = _CaptureResult()
+    cursor = (START + timedelta(seconds=7), 7)
+    worker.ResearchOutcomeWorker._record_stage4_due_scan_state(
+        record_capture,
+        cursor=cursor,
+        lap_complete=False,
+        pages_scanned=-5,
+        candidates_scanned=17,
+    )
+    assert "UPDATE public.research_stage4_signal_scan_state_v1" in (
+        record_capture.query
+    )
+    assert record_capture.params == [
+        cursor[0],
+        cursor[1],
+        False,
+        False,
+        False,
+        0,
+        17,
+        worker._STAGE4_DUE_SCAN_STATE_KEY,
+        worker._STAGE4_DUE_SCAN_STATE_VERSION,
+    ]
+
+    timeout_capture = _CaptureResult()
+    ceiling = worker.research_database_timeout.heavy_statement_timeout_ms()
+    assert worker.ResearchOutcomeWorker._set_stage4_due_statement_timeout(
+        timeout_capture, ceiling + 1
+    ) == ceiling
+    assert timeout_capture.params == [f"{ceiling}ms"]
+    assert "set_config('statement_timeout', %s, true)" in timeout_capture.query
+    assert worker.ResearchOutcomeWorker._set_stage4_due_statement_timeout(
+        timeout_capture, 0
+    ) == 1
+    assert timeout_capture.params == ["1ms"]
+
+
+def _check_stage4_signal_scan_budget_and_restart_resume() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    max_pages = worker._STAGE4_DUE_SCAN_MAX_PAGES
+    state = _DurableStage4ScanState()
+    seen_cursors = []
+    seen_uppers = []
+    validation_batches = []
+    timeout_calls = []
+
+    def candidate_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=page_size,
+    ):
+        assert page_size == worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+        seen_cursors.append(cursor)
+        seen_uppers.append(upper_cursor)
+        first_id = 1 if cursor is None else int(cursor[1]) + 1
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in range(first_id, first_id + page_size)
+        ]
+
+    def validate(_conn, event_ids):
+        validation_batches.append(list(event_ids))
+        return []
+
+    first = worker.ResearchOutcomeWorker()
+    _configure_stage4_scan(
+        first,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+        timeout_calls=timeout_calls,
+    )
+    assert first._load_due_stage4_events(object(), 1) == []
+    first._acknowledge_stage4_due_scan(object(), [])
+    first._commit_stage4_due_scan_telemetry()
+
+    first_cursor = (
+        START + timedelta(seconds=page_size * max_pages),
+        page_size * max_pages,
+    )
+    assert state.cursor == first_cursor
+    assert len(seen_cursors) == max_pages
+    assert len(validation_batches) == max_pages
+    assert all(len(batch) == page_size for batch in validation_batches)
+    assert all(upper == state.default_upper for upper in seen_uppers)
+    assert state.records[-1] == {
+        "cursor": first_cursor,
+        "lap_complete": False,
+        "pages_scanned": max_pages,
+        "candidates_scanned": page_size * max_pages,
+    }
+    first_scan = first.status()["stage4_signal_due_scan"]["last_scan"]
+    assert first_scan["stop_reason"] == "PAGE_BUDGET"
+    assert first_scan["pages_scanned"] == max_pages
+    assert first_scan["heavy_statements"] == max_pages * 2
+    assert first_scan["candidates_scanned"] == page_size * max_pages
+    assert first_scan["budget_exhausted"] is True
+    # Two bounded heavy statements per page plus one restoration of the
+    # connection-level timeout.  The backlog size cannot widen this count.
+    assert len(timeout_calls) == max_pages * 2 + 1
+
+    second_start = len(seen_cursors)
+    second = worker.ResearchOutcomeWorker()
+    _configure_stage4_scan(
+        second,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+        timeout_calls=timeout_calls,
+    )
+    assert second._load_due_stage4_events(object(), 1) == []
+    assert seen_cursors[second_start] == first_cursor
+    second._acknowledge_stage4_due_scan(object(), [])
+    second._commit_stage4_due_scan_telemetry()
+    assert state.acquire_calls == 2
+    assert state.cursor == (
+        START + timedelta(seconds=page_size * max_pages * 2),
+        page_size * max_pages * 2,
+    )
+    assert len(seen_cursors) - second_start == max_pages
+    assert len(validation_batches) == max_pages * 2
+
+
+def _check_stage4_signal_result_limit_resume_boundary() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    state = _DurableStage4ScanState()
+    seen_cursors = []
+
+    def candidate_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=page_size,
+    ):
+        assert upper_cursor == state.default_upper
+        seen_cursors.append(cursor)
+        first_id = 1 if cursor is None else int(cursor[1]) + 1
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in range(first_id, first_id + page_size)
+        ]
+
+    def validate(_conn, event_ids):
+        # Reverse order proves the retained prefix follows candidate key order,
+        # not whatever order the validator happens to return.
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in (4, 2)
+            if event_id in event_ids
+        ]
+
+    first = worker.ResearchOutcomeWorker()
+    _configure_stage4_scan(
+        first,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+    )
+    first_rows = first._load_due_stage4_events(object(), 1)
+    assert [row["event_id"] for row in first_rows] == [2]
+    first._acknowledge_stage4_due_scan(object(), [2])
+    first._commit_stage4_due_scan_telemetry()
+    key_two = (START + timedelta(seconds=2), 2)
+    assert state.cursor == key_two
+    assert state.records[-1]["cursor"] == key_two
+    assert state.records[-1]["lap_complete"] is False
+
+    second = worker.ResearchOutcomeWorker()
+    _configure_stage4_scan(
+        second,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+    )
+    second_rows = second._load_due_stage4_events(object(), 1)
+    assert seen_cursors == [None, key_two]
+    assert [row["event_id"] for row in second_rows] == [4]
+
+
+def _check_stage4_signal_merge_acknowledges_retained_prefix() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    state = _DurableStage4ScanState()
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+
+    def candidate_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=page_size,
+    ):
+        assert cursor is None
+        assert upper_cursor == state.default_upper
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in range(1, page_size + 1)
+        ]
+
+    def validate(_conn, event_ids):
+        assert 2 in event_ids and 4 in event_ids
+        return [_stage4_scan_row(2), _stage4_scan_row(4)]
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=candidate_page,
+        validator=validate,
+    )
+    service._load_due_legacy_and_prospective_events = lambda _conn, _limit: [
+        {
+            "event_id": 900,
+            "event_kind": "ALERT",
+            "event_type": "LEGACY",
+            "alert_time_utc": START,
+            "due_queue_priority": 0,
+        }
+    ]
+    merged = service._load_due_events(connection, 2)
+    service._commit_stage4_due_scan_telemetry()
+    assert [row["event_id"] for row in merged] == [900, 2]
+    assert all("due_queue_priority" not in row for row in merged)
+    assert state.records[-1]["cursor"] == (
+        START + timedelta(seconds=2),
+        2,
+    )
+    assert state.records[-1]["lap_complete"] is False
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan["accepted"] == 2
+    assert scan["retained_by_merge"] == 1
+    assert scan["cursor"]["event_id"] == 2
+    assert [command for command, _params in connection.commands] == [
+        "SAVEPOINT research_legacy_due_load",
+        "RELEASE SAVEPOINT research_legacy_due_load",
+        "SAVEPOINT research_stage4_signal_due_scan",
+        "RELEASE SAVEPOINT research_stage4_signal_due_scan",
+    ]
+
+
+def _check_stage4_signal_has_reserved_progress_under_legacy_backlog() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    state = _DurableStage4ScanState()
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+
+    def candidate_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=page_size,
+    ):
+        assert cursor is None
+        assert upper_cursor == state.default_upper
+        return [
+            _stage4_scan_row(event_id)
+            for event_id in range(1, page_size + 1)
+        ]
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=candidate_page,
+        validator=lambda _conn, _ids: [
+            _stage4_scan_row(event_id) for event_id in (2, 4, 6)
+        ],
+    )
+    service._load_due_legacy_and_prospective_events = lambda _conn, _limit: [
+        {
+            "event_id": 900 + index,
+            "alert_time_utc": START - timedelta(minutes=10 - index),
+            "due_queue_priority": 0,
+        }
+        for index in range(3)
+    ]
+    merged = service._load_due_events(connection, 3)
+    service._commit_stage4_due_scan_telemetry()
+    merged_ids = {int(row["event_id"]) for row in merged}
+    assert 2 in merged_ids
+    assert len(merged_ids & {900, 901, 902}) == 2
+    assert state.cursor == (START + timedelta(seconds=2), 2)
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan["accepted"] == 3
+    assert scan["retained_by_merge"] == 1
+    assert service.status()["stage4_signal_due_scan"][
+        "bidirectional_reservation_minimum_limit"
+    ] == 2
+
+
+def _check_legacy_timeout_cannot_starve_stage4_signal_scan() -> None:
+    page_size = worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    state = _DurableStage4ScanState()
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=lambda _conn, **_kwargs: [
+            _stage4_scan_row(event_id)
+            for event_id in range(1, page_size + 1)
+        ],
+        validator=lambda _conn, _ids: [
+            _stage4_scan_row(event_id) for event_id in (2, 4, 6)
+        ],
+    )
+    service._load_due_legacy_and_prospective_events = (
+        lambda _conn, _limit: (_ for _ in ()).throw(
+            RuntimeError("canceling statement due to statement timeout")
+        )
+    )
+    rows = service._load_due_events(connection, 3)
+    service._commit_stage4_due_scan_telemetry()
+    assert [row["event_id"] for row in rows] == [2, 4, 6]
+    assert state.cursor == (
+        START + timedelta(seconds=page_size),
+        page_size,
+    )
+    assert service.metrics.legacy_due_load_failures == 1
+    assert service.metrics.last_timeout_phase == "LOAD_DUE_LEGACY"
+    assert service.status()["stage4_signal_due_scan"]["last_scan"][
+        "retained_by_merge"
+    ] == 3
+    assert [command for command, _params in connection.commands] == [
+        "SAVEPOINT research_legacy_due_load",
+        "ROLLBACK TO SAVEPOINT research_legacy_due_load",
+        "RELEASE SAVEPOINT research_legacy_due_load",
+        "SAVEPOINT research_stage4_signal_due_scan",
+        "RELEASE SAVEPOINT research_stage4_signal_due_scan",
+    ]
+
+
+def _check_open_first_touch_timeout_is_fail_closed() -> None:
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+    service._load_open_first_touch_events = (
+        lambda _conn, _limit: (_ for _ in ()).throw(
+            RuntimeError("canceling statement due to statement timeout")
+        )
+    )
+    assert service._load_open_first_touch_events_isolated(connection, 5) == []
+    assert service.metrics.open_first_touch_load_failures == 1
+    assert service.metrics.last_timeout_phase == "LOAD_OPEN_FIRST_TOUCH"
+    assert "statement timeout" in (
+        service.metrics.open_first_touch_load_last_error or ""
+    )
+    assert [command for command, _params in connection.commands] == [
+        "SAVEPOINT research_open_first_touch_load",
+        "ROLLBACK TO SAVEPOINT research_open_first_touch_load",
+        "RELEASE SAVEPOINT research_open_first_touch_load",
+    ]
+
+
+def _check_stage4_signal_lock_busy_is_bounded() -> None:
+    service = worker.ResearchOutcomeWorker()
+    service._acquire_stage4_due_scan_state = lambda _conn: None
+    service._load_due_stage4_candidate_page = lambda *_args, **_kwargs: (
+        _ for _ in ()
+    ).throw(AssertionError("lock-busy scan reached the candidate query"))
+    service._record_stage4_due_scan_state = lambda *_args, **_kwargs: (
+        _ for _ in ()
+    ).throw(AssertionError("lock-busy scan attempted acknowledgement"))
+    service._set_stage4_due_statement_timeout = lambda *_args, **_kwargs: (
+        _ for _ in ()
+    ).throw(AssertionError("lock-busy scan changed statement_timeout"))
+    assert service._load_due_stage4_events(object(), 50) == []
+    assert not hasattr(service, "_pending_stage4_due_scan")
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan == {
+        "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+        "stop_reason": "LOCK_BUSY",
+        "lock_acquired": False,
+        "pages_scanned": 0,
+        "heavy_statements": 0,
+        "candidates_scanned": 0,
+        "accepted": 0,
+    }
+
+
+def _check_stage4_signal_empty_page_completes_lap() -> None:
+    initial_cursor = (START + timedelta(seconds=50), 50)
+    state = _DurableStage4ScanState(cursor=initial_cursor)
+    service = worker.ResearchOutcomeWorker()
+    seen = []
+
+    def empty_page(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+    ):
+        seen.append((cursor, upper_cursor, page_size))
+        return []
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=empty_page,
+        validator=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("empty candidate page reached validation")
+        ),
+    )
+    assert service._load_due_stage4_events(object(), 5) == []
+    service._acknowledge_stage4_due_scan(object(), [])
+    service._commit_stage4_due_scan_telemetry()
+    assert seen == [
+        (
+            initial_cursor,
+            state.default_upper,
+            worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+        )
+    ]
+    assert state.records[-1] == {
+        "cursor": initial_cursor,
+        "lap_complete": True,
+        "pages_scanned": 1,
+        "candidates_scanned": 0,
+    }
+    assert state.cursor is None
+    assert state.lap_upper is None
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan["stop_reason"] == "LAP_COMPLETE"
+    assert scan["lap_completed"] is True
+    assert scan["heavy_statements"] == 1
+    assert service.metrics.stage4_signal_scan_laps_completed == 1
+
+
+def _check_stage4_signal_short_page_requires_empty_proof() -> None:
+    state = _DurableStage4ScanState()
+    service = worker.ResearchOutcomeWorker()
+    seen_cursors = []
+    validation_batches = []
+
+    def page_then_empty(
+        _conn,
+        *,
+        cursor=None,
+        upper_cursor=None,
+        page_size=worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE,
+    ):
+        assert upper_cursor == state.default_upper
+        seen_cursors.append(cursor)
+        return [_stage4_scan_row(1)] if cursor is None else []
+
+    def validate(_conn, event_ids):
+        validation_batches.append(list(event_ids))
+        return []
+
+    _configure_stage4_scan(
+        service,
+        state,
+        candidate_page=page_then_empty,
+        validator=validate,
+    )
+    assert service._load_due_stage4_events(object(), 5) == []
+    service._acknowledge_stage4_due_scan(object(), [])
+    service._commit_stage4_due_scan_telemetry()
+    assert seen_cursors == [None, (START + timedelta(seconds=1), 1)]
+    assert validation_batches == [[1]]
+    assert state.records[-1]["lap_complete"] is True
+    assert state.records[-1]["pages_scanned"] == 2
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan["stop_reason"] == "LAP_COMPLETE"
+    assert scan["heavy_statements"] == 3
+
+
+def _check_stage4_signal_failure_rolls_back_to_legacy() -> None:
+    service = worker.ResearchOutcomeWorker()
+    connection = _CommandConnection()
+    legacy = {
+        "event_id": 77,
+        "event_kind": "ALERT",
+        "event_type": "LEGACY",
+        "alert_time_utc": START,
+        "due_queue_priority": 1,
+    }
+    acknowledgements = []
+    service._load_due_legacy_and_prospective_events = (
+        lambda _conn, _limit: [legacy]
+    )
+    service._acquire_stage4_due_scan_state = lambda _conn: (
+        _ for _ in ()
+    ).throw(RuntimeError("incompatible Stage-4 state version"))
+    service._record_stage4_due_scan_state = (
+        lambda *_args, **_kwargs: acknowledgements.append(_kwargs)
+    )
+    result = service._load_due_events(connection, 5)
+    assert [row["event_id"] for row in result] == [77]
+    assert "due_queue_priority" not in result[0]
+    assert acknowledgements == []
+    assert not hasattr(service, "_pending_stage4_due_scan")
+    assert [command for command, _params in connection.commands] == [
+        "SAVEPOINT research_legacy_due_load",
+        "RELEASE SAVEPOINT research_legacy_due_load",
+        "SAVEPOINT research_stage4_signal_due_scan",
+        "ROLLBACK TO SAVEPOINT research_stage4_signal_due_scan",
+        "RELEASE SAVEPOINT research_stage4_signal_due_scan",
+    ]
+    assert service.metrics.stage4_signal_scan_failures == 1
+    assert "incompatible Stage-4 state version" in (
+        service.metrics.stage4_signal_scan_last_error or ""
+    )
+    scan = service.status()["stage4_signal_due_scan"]["last_scan"]
+    assert scan == {
+        "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+        "stop_reason": "FAILED_CLOSED",
+        "lock_acquired": False,
+        "pages_scanned": 0,
+        "heavy_statements": 0,
+        "candidates_scanned": 0,
+        "accepted": 0,
+        "error_type": "RuntimeError",
+    }
+
+
+def _check_stage4_signal_telemetry_follows_transaction() -> None:
+    telemetry = {
+        "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+        "stop_reason": "PAGE_BUDGET",
+        "pages_scanned": 2,
+        "candidates_scanned": 512,
+        "budget_exhausted": True,
+        "lap_completed": False,
+    }
+    original_psycopg = worker.psycopg
+    worker.psycopg = _PsycopgStub()
+    try:
+        committed = worker.ResearchOutcomeWorker()
+        committed._pending_stage4_due_telemetry = dict(telemetry)
+        with committed._outcome_read_transaction("postgresql://selftest"):
+            assert committed.status()["stage4_signal_due_scan"][
+                "last_scan"
+            ]["stop_reason"] == "NOT_RUN"
+        assert committed.status()["stage4_signal_due_scan"]["last_scan"] == (
+            telemetry
+        )
+        assert committed.metrics.stage4_signal_scan_pages == 2
+
+        rolled_back = worker.ResearchOutcomeWorker()
+        rolled_back._pending_stage4_due_telemetry = dict(telemetry)
+        try:
+            with rolled_back._outcome_read_transaction(
+                "postgresql://selftest"
+            ):
+                raise RuntimeError("later threshold load failed")
+        except RuntimeError as exc:
+            assert "threshold" in str(exc)
+        else:
+            raise AssertionError("synthetic read-transaction failure was hidden")
+        assert not hasattr(rolled_back, "_pending_stage4_due_telemetry")
+        assert rolled_back.status()["stage4_signal_due_scan"]["last_scan"] == {
+            "state_version": worker._STAGE4_DUE_SCAN_STATE_VERSION,
+            "stop_reason": "NOT_RUN",
+        }
+        assert rolled_back.metrics.stage4_signal_scan_pages == 0
+    finally:
+        worker.psycopg = original_psycopg
+
+
 def run() -> None:
     # An open horizon is never polled merely because an event exists.  It must
     # be explicitly supplied by the read-side authorization query, which only
@@ -446,6 +1224,31 @@ def run() -> None:
         {60: research_no_dwell_outcome.METHOD_VERSION},
         now=after_one_hour,
     ) == []
+    assert worker._STAGE4_OUTCOME_METHOD_VERSION != canonical_price_path.METHOD_VERSION
+    stage4_method_event = {
+        "event_type": "MAX_PAIN_CONFIRMATION_STATE",
+        "direction": "LONG",
+    }
+    assert worker._outcome_method_version_for_event(stage4_method_event) == (
+        worker._STAGE4_OUTCOME_METHOD_VERSION
+    )
+    assert worker._outcome_method_version_for_event(
+        {"event_type": "ALERT", "direction": "LONG"}
+    ) == canonical_price_path.METHOD_VERSION
+    assert worker._due_horizons(
+        START,
+        {60: worker._STAGE4_OUTCOME_METHOD_VERSION},
+        now=after_one_hour,
+        outcome_method_version=worker._STAGE4_OUTCOME_METHOD_VERSION,
+        first_touch_enabled=False,
+    ) == []
+    assert worker._due_horizons(
+        START,
+        {60: canonical_price_path.METHOD_VERSION},
+        now=after_one_hour,
+        outcome_method_version=worker._STAGE4_OUTCOME_METHOD_VERSION,
+        first_touch_enabled=False,
+    ) == [60]
 
     assert worker._latest_closed_candle_cutoff(
         datetime(2026, 8, 29, 18, 51, 0, tzinfo=timezone.utc)
@@ -459,17 +1262,262 @@ def run() -> None:
     assert worker._first_touch_write_is_safe(
         {"status": "HIT"}, observed_prefix_complete=True
     )
+    for stage4_type in worker._STAGE4_SIGNAL_OUTCOME_EVENT_TYPES:
+        assert not worker._first_touch_enabled_for_event(
+            {"event_type": stage4_type, "direction": "LONG"}
+        )
+        assert not worker._first_touch_enabled_for_event(
+            {"event_type": stage4_type, "direction": "SHORT"}
+        )
+    assert worker._first_touch_enabled_for_event(
+        {"event_type": "PROSPECTIVE_SHADOW_SAMPLE", "direction": "LONG"}
+    )
+    assert not worker._first_touch_enabled_for_event(
+        {"event_type": "PROSPECTIVE_SHADOW_SAMPLE", "direction": "NEUTRAL"}
+    )
+
+    legacy_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._load_due_legacy_and_prospective_events(
+        legacy_capture, 200
+    ) == []
+    assert legacy_capture.query.count("%s") == len(legacy_capture.params)
+    assert "ARRAY[]::integer[] AS open_first_touch_horizons" in legacy_capture.query
+    assert "e.event_kind, e.delivery_status" in legacy_capture.query
+    assert "research_formula_shadow_checks open_check" not in legacy_capture.query
+    assert "research_outcome_event_rejections rejected" in legacy_capture.query
+    assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in legacy_capture.params
+    assert "research_outcomes:due_legacy_and_prospective" in legacy_capture.query
+    assert "jsonb_array_elements" not in legacy_capture.query
+    assert "SIGNAL_SNAPSHOT_PROJECTION" not in legacy_capture.query
+    assert "due_queue_priority" in legacy_capture.query
+
+    candidate_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._load_due_stage4_candidate_page(
+        candidate_capture
+    ) == []
+    assert candidate_capture.query.count("%s") == len(candidate_capture.params)
+    assert "research_outcomes:due_stage4_candidate_page" in candidate_capture.query
+    assert "jsonb_array_elements" not in candidate_capture.query
+    assert "SIGNAL_SNAPSHOT_PROJECTION" not in candidate_capture.query
+    assert "(e.alert_time_utc, e.event_id) >" not in candidate_capture.query
+    assert candidate_capture.params[-1] == worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+
+    paged_candidate_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._load_due_stage4_candidate_page(
+        paged_candidate_capture,
+        cursor=(START, 99),
+        upper_cursor=(START + timedelta(days=1), 999),
+        page_size=9999,
+    ) == []
+    assert paged_candidate_capture.query.count("%s") == len(
+        paged_candidate_capture.params
+    )
+    assert "(e.alert_time_utc, e.event_id) > (%s, %s)" in (
+        paged_candidate_capture.query
+    )
+    assert "(e.alert_time_utc, e.event_id) <= (%s, %s)" in (
+        paged_candidate_capture.query
+    )
+    assert paged_candidate_capture.params[-5:-3] == [START, 99]
+    assert paged_candidate_capture.params[-3:-1] == [
+        START + timedelta(days=1),
+        999,
+    ]
+    assert paged_candidate_capture.params[-1] == (
+        worker._STAGE4_DUE_CANDIDATE_PAGE_SIZE
+    )
 
     closed_capture = _CaptureResult()
-    assert worker.ResearchOutcomeWorker._load_due_events(
-        closed_capture, 200
+    assert worker.ResearchOutcomeWorker._validate_and_hydrate_due_stage4_events(
+        closed_capture, [2, 1, 2]
     ) == []
     assert closed_capture.query.count("%s") == len(closed_capture.params)
-    assert "ARRAY[]::integer[] AS open_first_touch_horizons" in closed_capture.query
-    assert "e.event_kind, e.delivery_status" in closed_capture.query
-    assert "research_formula_shadow_checks open_check" not in closed_capture.query
+    assert "research_outcomes:validate_due_stage4_page" in closed_capture.query
+    assert closed_capture.params[0] == [1, 2]
+    assert closed_capture.query.count("jsonb_array_elements(") == 1
+    assert "COUNT(*) FILTER" in closed_capture.query
+    assert "evaluation_partition.symbol_count=1" in closed_capture.query
+    assert "evaluation_partition.evaluable_symbol_count=1" in closed_capture.query
     assert "research_outcome_event_rejections rejected" in closed_capture.query
     assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in closed_capture.params
+    assert closed_capture.query.count(
+        "FROM research_alert_outcomes current_o"
+    ) == len(worker._HORIZONS)
+    assert closed_capture.query.count(
+        "e.alert_time_utc <= NOW() - (%s * INTERVAL '1 minute')"
+    ) == len(worker._HORIZONS)
+    for required in (
+        "e.capture_stage=%s",
+        "e.strategy_version=%s",
+        "e.event_type=ANY(%s)",
+        "e.delivery_attempted_at_utc IS NULL",
+        "e.delivered_at_utc IS NULL",
+        "BTRIM(e.code_version)<>''",
+        "BTRIM(e.runtime_session_id)<>''",
+        "jsonb_typeof(e.categories)='array'",
+        "e.categories @> '[\"DECISION_SAMPLE\",\"SILENT\"]'::jsonb",
+        "e.engine_snapshot->'signal_snapshot'->>'contract_version'=%s",
+        "WHEN 'MAX_PAIN_CONFIRMATION_STATE' THEN 'MAX_PAIN'",
+        "WHEN 'MAGNET_CONFIRMATION_STATE' THEN 'MAGNET'",
+        "WHEN 'SILENT_COMBINED_CONFIRMATION_SNAPSHOT' THEN 'COMBINED'",
+        "projection.event_type='SIGNAL_SNAPSHOT_PROJECTION'",
+        "projection.symbol='RESEARCH'",
+        "projection.direction='NEUTRAL'",
+        "projection.delivery_attempted_at_utc IS NULL",
+        "projection.delivered_at_utc IS NULL",
+        "jsonb_typeof(projection.categories)='array'",
+        "jsonb_array_length(projection.categories)=3",
+        "'[\"DECISION_SAMPLE\",\"SILENT\",\"COMPLETED\"]'::jsonb",
+        "projection.alert_time_utc=e.alert_time_utc",
+        "projection.code_version=e.code_version",
+        "projection.runtime_session_id=e.runtime_session_id",
+        "projection.engine_snapshot->'projection'->>'status'='COMPLETED'",
+        "projection.engine_snapshot->'signal_snapshot'->>'tier'='COMPLETED'",
+        "projection.engine_snapshot->'projection'->>'decision_time_utc'=",
+        "e.engine_snapshot->'signal_snapshot'->>'decision_time_utc'",
+        "projection.engine_snapshot->'projection'->>'snapshot_key'",
+        "~ '^[0-9a-f]{64}$'",
+        "e.engine_snapshot->'signal_snapshot'->'archive_reference'->>'snapshot_key'",
+        "projection.engine_snapshot->'projection'->'symbol_evaluations'",
+        "symbol_evaluation->>'symbol'=e.symbol",
+        "symbol_evaluation->>'status'='EVALUABLE'",
+        "symbol_evaluation->'reason'",
+        "IS NOT DISTINCT FROM 'null'::jsonb",
+    ):
+        assert required in closed_capture.query
+    # Both the signal and its receipt are independently required to carry
+    # every downstream authority flag as exact JSON false.
+    for authority_flag in (
+        "formula_authorized",
+        "outcome_authorized",
+        "telegram_delivery_allowed",
+        "trade_execution_allowed",
+    ):
+        assert closed_capture.query.count(
+            f"->'{authority_flag}'"
+        ) == 2
+    assert closed_capture.query.count("IS NOT DISTINCT FROM 'false'::jsonb") == 8
+    # Closed-horizon admission is an exact three-type allowlist.  Projection,
+    # arbitrary Decision Samples and incomplete receipts cannot widen it.
+    stage4_type_params = [
+        value
+        for value in closed_capture.params
+        if value == list(worker._STAGE4_SIGNAL_OUTCOME_EVENT_TYPES)
+    ]
+    assert len(stage4_type_params) == 1
+    assert worker._STAGE4_OUTCOME_METHOD_VERSION in closed_capture.params
+    assert "WHEN e.event_type=ANY(%s) THEN %s" in legacy_capture.query
+    assert legacy_capture.query.count(
+        "AND NOT (e.event_type=ANY(%s))"
+    ) == len(worker._HORIZONS) + 1
+    assert "SIGNAL_SNAPSHOT_PROJECTION" not in stage4_type_params[0]
+    assert "PROSPECTIVE_SHADOW_SAMPLE" not in stage4_type_params[0]
+    assert "MISSED_CAUSAL_WINDOW" not in closed_capture.query
+    assert "projection.engine_snapshot->'projection'->>'status'='UNEVALUABLE'" not in (
+        closed_capture.query
+    )
+
+    _check_stage4_signal_state_helpers()
+    _check_stage4_signal_scan_budget_and_restart_resume()
+    _check_stage4_signal_result_limit_resume_boundary()
+    _check_stage4_signal_merge_acknowledges_retained_prefix()
+    _check_stage4_signal_has_reserved_progress_under_legacy_backlog()
+    _check_legacy_timeout_cannot_starve_stage4_signal_scan()
+    _check_open_first_touch_timeout_is_fail_closed()
+    _check_stage4_signal_lock_busy_is_bounded()
+    _check_stage4_signal_empty_page_completes_lap()
+    _check_stage4_signal_short_page_requires_empty_proof()
+    _check_stage4_signal_failure_rolls_back_to_legacy()
+    _check_stage4_signal_telemetry_follows_transaction()
+
+    # The final merge retains the original global queue ordering.  Delivered
+    # Alerts stay on the legacy path even if their event_type text resembles a
+    # Stage-4 type, and the internal priority column is not exposed downstream.
+    legacy_rows = [
+        {
+            "event_id": 10,
+            "event_kind": "ALERT",
+            "event_type": "MAX_PAIN_CONFIRMATION_STATE",
+            "alert_time_utc": START + timedelta(seconds=10),
+            "due_queue_priority": 0,
+        },
+        {
+            "event_id": 11,
+            "event_kind": "ALERT",
+            "event_type": "LEGACY",
+            "alert_time_utc": START,
+            "due_queue_priority": 1,
+        },
+    ]
+    stage4_rows = [
+        {
+            "event_id": 12,
+            "event_kind": "DECISION_SAMPLE",
+            "event_type": "MAX_PAIN_CONFIRMATION_STATE",
+            "alert_time_utc": START + timedelta(seconds=5),
+            "due_queue_priority": 0,
+        },
+        {
+            "event_id": 13,
+            "event_kind": "DECISION_SAMPLE",
+            "event_type": "MAGNET_CONFIRMATION_STATE",
+            "alert_time_utc": START + timedelta(seconds=20),
+            "due_queue_priority": 0,
+        },
+    ]
+    merge_service = worker.ResearchOutcomeWorker()
+    merge_service._load_due_legacy_and_prospective_events = (
+        lambda _conn, _limit: legacy_rows
+    )
+    merge_service._load_due_stage4_events = lambda _conn, _limit: stage4_rows
+    merge_connection = _CommandConnection()
+    merged = merge_service._load_due_events(merge_connection, 3)
+    assert [row["event_id"] for row in merged] == [12, 10, 13]
+    assert merged[1]["event_kind"] == "ALERT"
+    assert all("due_queue_priority" not in row for row in merged)
+    assert [command for command, _params in merge_connection.commands] == [
+        "SAVEPOINT research_legacy_due_load",
+        "RELEASE SAVEPOINT research_legacy_due_load",
+        "SAVEPOINT research_stage4_signal_due_scan",
+        "RELEASE SAVEPOINT research_stage4_signal_due_scan",
+    ]
+
+    # Even a sampler-shaped Stage-4 event must not ask the current-slot loader
+    # for First-Touch authority.
+    no_first_touch_loader_calls = []
+    original_slot_loader = (
+        worker.research_feature_matrix.load_shadow_feature_rows_by_horizon
+    )
+    worker.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+        lambda requested: no_first_touch_loader_calls.append(requested) or {}
+    )
+    try:
+        assert worker.ResearchOutcomeWorker._load_current_slot_threshold_references(
+            [
+                {
+                    "event_id": 42,
+                    "event_type": "MAX_PAIN_CONFIRMATION_STATE",
+                    "direction": "LONG",
+                    "alert_time_utc": START,
+                    "engine_snapshot": {
+                        "prospective_anchor": {
+                            "sampler_version": (
+                                worker._STRICT_PROSPECTIVE_SAMPLER_VERSION
+                            )
+                        }
+                    },
+                    "outcome_versions": {},
+                    "first_touch_versions": {},
+                    "open_first_touch_horizons": [60],
+                }
+            ],
+            now=START + timedelta(minutes=61),
+        ) == {}
+    finally:
+        worker.research_feature_matrix.load_shadow_feature_rows_by_horizon = (
+            original_slot_loader
+        )
+    assert no_first_touch_loader_calls == []
 
     captured = _CaptureResult()
     assert worker.ResearchOutcomeWorker._load_open_first_touch_events(
@@ -588,6 +1636,214 @@ def run() -> None:
         }
     ) is None
 
+    combined_archive_snapshot = {
+        "signal_snapshot": {
+            "archive_reference": {
+                "official_price": {
+                    "source": "binance_spot",
+                    "exchange": "binance",
+                    "market": "spot",
+                    "pair": "BTCUSDT",
+                    "instrument": "BTC",
+                }
+            }
+        }
+    }
+    assert worker._snapshot_price_provenance(combined_archive_snapshot) == {
+        "source": "binance_spot",
+        "exchange": "binance",
+        "market": "spot",
+        "pair": "BTCUSDT",
+        "instrument": "BTC",
+    }
+    assert worker._snapshot_price_source(combined_archive_snapshot) == (
+        "binance_spot:BTCUSDT"
+    )
+    hype_archive_snapshot = copy.deepcopy(combined_archive_snapshot)
+    hype_archive_snapshot["signal_snapshot"]["archive_reference"][
+        "official_price"
+    ] = {
+        "source": "hyperliquid",
+        "exchange": "hyperliquid",
+        "market": "spot",
+        "pair": "HYPE/USDT",
+        "instrument": "@107",
+    }
+    assert worker._snapshot_price_provenance(hype_archive_snapshot) == {
+        "source": "hyperliquid",
+        "exchange": "hyperliquid",
+        "market": "spot",
+        "pair": "HYPE/USDT",
+        "instrument": "@107",
+    }
+    # The nested archive is fallback-only: established public fields retain
+    # precedence for older event shapes.
+    assert worker._snapshot_price_provenance(
+        {
+            **combined_archive_snapshot,
+            "price_source": "top_level_source",
+            "price_pair": "TOPUSDT",
+            "market_evidence": {"price_market": "public_spot"},
+        }
+    ) == {
+        "source": "top_level_source",
+        "exchange": "binance",
+        "market": "public_spot",
+        "pair": "TOPUSDT",
+        "instrument": "BTC",
+    }
+
+    stage4_reference_event = {
+        "event_id": 808,
+        "event_type": "SILENT_COMBINED_CONFIRMATION_SNAPSHOT",
+        "symbol": "BTC",
+        "direction": "LONG",
+        "alert_time_utc": START,
+        "current_price": 100.0,
+        "engine_snapshot": {
+            "signal_snapshot": {
+                "archive_reference": {
+                    "snapshot_set_id": 17,
+                    "snapshot_key": "a" * 64,
+                    "official_price": {
+                        "price": 100.0,
+                        "source": "binance_spot",
+                        "exchange": "binance",
+                        "market": "spot",
+                        "pair": "BTCUSDT",
+                        "instrument": "BTC",
+                        "observed_at_utc": START - timedelta(minutes=50),
+                        "fetched_at_utc": START - timedelta(minutes=10),
+                    },
+                }
+            }
+        },
+    }
+    frozen_price, frozen_source = worker._stage4_frozen_price_reference(
+        stage4_reference_event
+    )
+    assert frozen_price == 100.0
+    for exact_fragment in (
+        f"reference_policy={worker._STAGE4_FROZEN_REFERENCE_POLICY_VERSION}",
+        f"admission_policy={worker._STAGE4_DERIVED_ADMISSION_POLICY_VERSION}",
+        f"semantics={worker._STAGE4_OUTCOME_SEMANTICS}",
+        "source=binance_spot",
+        "exchange=binance",
+        "market=spot",
+        "pair=BTCUSDT",
+        "observed_at_utc=2026-08-29T17:51:00+00:00",
+        "fetched_at_utc=2026-08-29T18:31:00+00:00",
+        "observed_age_seconds=3000.000000",
+        "fetched_age_seconds=600.000000",
+        "snapshot_set_id=17",
+        f"snapshot_key={'a' * 64}",
+    ):
+        assert exact_fragment in frozen_source
+
+    hype_reference_event = copy.deepcopy(stage4_reference_event)
+    hype_reference_event["symbol"] = "HYPE"
+    hype_official = hype_reference_event["engine_snapshot"]["signal_snapshot"][
+        "archive_reference"
+    ]["official_price"]
+    hype_official.update(
+        {
+            "source": "hyperliquid",
+            "exchange": "hyperliquid",
+            "market": "spot",
+            "pair": "HYPE/USDT",
+            "instrument": "@107",
+        }
+    )
+    assert "instrument=@107" in worker._stage4_frozen_price_reference(
+        hype_reference_event
+    )[1]
+
+    invalid_stage4_references = []
+    mismatched = copy.deepcopy(stage4_reference_event)
+    mismatched["current_price"] = 101.0
+    invalid_stage4_references.append(mismatched)
+    stale = copy.deepcopy(stage4_reference_event)
+    stale["engine_snapshot"]["signal_snapshot"]["archive_reference"][
+        "official_price"
+    ]["observed_at_utc"] = START - timedelta(minutes=61)
+    invalid_stage4_references.append(stale)
+    post_decision = copy.deepcopy(stage4_reference_event)
+    post_decision["engine_snapshot"]["signal_snapshot"]["archive_reference"][
+        "official_price"
+    ]["fetched_at_utc"] = START + timedelta(seconds=1)
+    invalid_stage4_references.append(post_decision)
+    wrong_exchange = copy.deepcopy(stage4_reference_event)
+    wrong_exchange["engine_snapshot"]["signal_snapshot"]["archive_reference"][
+        "official_price"
+    ]["exchange"] = ""
+    invalid_stage4_references.append(wrong_exchange)
+    for invalid_reference in invalid_stage4_references:
+        try:
+            worker._stage4_frozen_price_reference(invalid_reference)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid Stage-4 frozen reference was accepted")
+
+    outcome_capture = _CaptureResult()
+    outcome_metrics = {
+        "measured_at_utc": START + timedelta(minutes=60),
+        "price_at_horizon": 101.0,
+        "raw_return_pct": 1.0,
+        "directional_return_pct": 1.0,
+        "max_favorable_price": 102.0,
+        "max_adverse_price": 99.0,
+        "mfe_pct": 2.0,
+        "mae_pct": 1.0,
+        "time_to_first_progress_seconds": 60,
+        "time_to_mfe_seconds": 120,
+        "time_to_closest_target_seconds": None,
+        "time_to_target_seconds": None,
+        "closest_target_price": None,
+        "closest_target_distance_pct": None,
+        "target_progress_ratio": None,
+        "target_reached": None,
+    }
+    assert worker.ResearchOutcomeWorker._write_outcome(
+        outcome_capture,
+        event=stage4_reference_event,
+        horizon=60,
+        reference_price=frozen_price,
+        reference_source=frozen_source,
+        path_result={
+            "exchange": "binance",
+            "market": "spot",
+            "pair": "BTCUSDT",
+            "interval": "1m",
+            "provenance": "SELFTEST",
+            "candles": [_candle(START)],
+        },
+        path_metrics=outcome_metrics,
+        complete=True,
+    )
+    assert outcome_capture.params[-3] == worker._STAGE4_OUTCOME_METHOD_VERSION
+    assert f"reference={frozen_source}" in outcome_capture.params[-2]
+    assert "not_trade_entry_return" in outcome_capture.params[-2]
+    generic_outcome_capture = _CaptureResult()
+    assert worker.ResearchOutcomeWorker._write_outcome(
+        generic_outcome_capture,
+        event={"event_id": 809, "event_type": "DELIVERED_ALERT"},
+        horizon=60,
+        reference_price=100.0,
+        reference_source="binance_spot:BTCUSDT",
+        path_result={
+            "exchange": "binance",
+            "market": "spot",
+            "pair": "BTCUSDT",
+            "interval": "1m",
+            "provenance": "SELFTEST",
+            "candles": [_candle(START)],
+        },
+        path_metrics=outcome_metrics,
+        complete=True,
+    )
+    assert generic_outcome_capture.params[-3] == canonical_price_path.METHOD_VERSION
+
     rejection_capture = _CaptureResult()
     inserted = worker.ResearchOutcomeWorker._write_alert_reference_rejections(
         rejection_capture,
@@ -622,7 +1878,7 @@ def run() -> None:
     assert "binance_spot" in queue_priority
     assert "HYPE/USDT" in queue_priority
     assert "@107" in queue_priority
-    for queue_query in (captured.query, closed_capture.query):
+    for queue_query in (captured.query, legacy_capture.query):
         assert "e.event_kind<>'ALERT'" in queue_query
         assert queue_query.index("e.event_kind<>'ALERT'") < queue_query.index("LIMIT %s")
     assert "open_ft.status IN ('HIT', 'MISS')" in captured.query
@@ -1102,6 +2358,35 @@ def run() -> None:
     assert legacy_due["inserted"] == 1
     assert legacy_due["first_touch_threshold_policy_conflicts"] == 1
 
+    # Stage-4 signals are endpoint-outcome evidence only.  Directionality does
+    # not activate First-Touch loading, calculation or writes for these types.
+    stage4_closed, stage4_closed_trace = _run_closed_current_slot_once(
+        slot_authority=True,
+        legacy_complete=False,
+        event_type="MAX_PAIN_CONFIRMATION_STATE",
+    )
+    assert stage4_closed_trace["loader_calls"] == []
+    assert stage4_closed_trace["formula_event_id_calls"] == [[]]
+    assert len(stage4_closed_trace["fetch_calls"]) == 1
+    assert stage4_closed_trace["first_touch_writes"] == []
+    assert len(stage4_closed_trace["legacy_writes"]) == 1
+    assert stage4_closed["inserted"] == 1
+    assert stage4_closed["first_touch_rows_written"] == 0
+    assert stage4_closed["first_touch_threshold_policy_conflicts"] == 0
+
+    stage4_bad_reference, stage4_bad_trace = _run_closed_current_slot_once(
+        slot_authority=True,
+        legacy_complete=False,
+        event_type="MAX_PAIN_CONFIRMATION_STATE",
+        stage4_reference_price=101.0,
+    )
+    assert stage4_bad_trace["loader_calls"] == []
+    assert stage4_bad_trace["formula_event_id_calls"] == [[]]
+    assert stage4_bad_trace["fetch_calls"] == []
+    assert stage4_bad_trace["first_touch_writes"] == []
+    assert stage4_bad_trace["legacy_writes"] == []
+    assert stage4_bad_reference["missing_price_paths"] == 1
+
     # The exact v4 bundle produces a label without waiting for candle dwell.
     # Removing only its frozen width fails closed even with the same favorable
     # canonical wick: no HIT/PENDING row is written.
@@ -1285,6 +2570,25 @@ def run() -> None:
     )
 
     status = worker.ResearchOutcomeWorker().status()
+    assert status["heavy_query_timeout"]["statement_timeout_ms"] == (
+        worker.research_database_timeout.heavy_statement_timeout_ms()
+    )
+    phase_worker = worker.ResearchOutcomeWorker()
+    try:
+        with phase_worker._phase("load_due_events"):
+            raise RuntimeError("canceling statement due to statement timeout")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("phase probe must preserve the original failure")
+    phase_metrics = phase_worker.metrics
+    assert phase_metrics.current_phase == "IDLE"
+    assert phase_metrics.current_phase_started_at_utc is None
+    assert phase_metrics.last_phase == "LOAD_DUE_EVENTS"
+    assert phase_metrics.last_error_phase == "LOAD_DUE_EVENTS"
+    assert phase_metrics.last_timeout_phase == "LOAD_DUE_EVENTS"
+    assert phase_metrics.last_phase_duration_ms is not None
+    assert phase_metrics.last_phase_duration_ms >= 0
     policy = status["first_touch_policy"]
     assert policy["success"] == "first favorable width touch; zero dwell"
     assert policy["post_hit_reversal"] == "does not cancel success"

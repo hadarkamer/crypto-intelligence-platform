@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import math
 import os
+import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 import live_price_provider
@@ -278,6 +279,9 @@ class ProspectiveAnchorWorker:
             "last_run_symbols": [],
             "last_conflicts": [],
             "last_error": None,
+            "last_error_phase": None,
+            "last_timeout_phase": None,
+            "last_phase_duration_ms": None,
             "cycles_started": 0,
             "cycles_completed": 0,
             "cycles_failed": 0,
@@ -411,6 +415,7 @@ class ProspectiveAnchorWorker:
                 "status": "fetching_official_prices",
                 "last_started_at_utc": _iso(self._now()),
                 "last_error": None,
+                "last_error_phase": None,
                 "cycles_started": int(self._runtime["cycles_started"]) + 1,
             }
         )
@@ -434,12 +439,23 @@ class ProspectiveAnchorWorker:
                 "last_run_symbols": list(run_symbols),
             }
         )
-        sampling = await self._service.run_once_async(
-            now=checked_at,
-            official_prices_by_symbol=official_rows,
-            slot_open_utc=scheduled_slot,
-            symbols=run_symbols,
-        )
+        persistence_started = time.monotonic()
+        try:
+            sampling = await self._service.run_once_async(
+                now=checked_at,
+                official_prices_by_symbol=official_rows,
+                slot_open_utc=scheduled_slot,
+                symbols=run_symbols,
+            )
+        except Exception as exc:
+            self._runtime["last_error_phase"] = "PERSISTING"
+            if "statement timeout" in str(exc).lower():
+                self._runtime["last_timeout_phase"] = "PERSISTING"
+            raise
+        finally:
+            self._runtime["last_phase_duration_ms"] = max(
+                0, int(round((time.monotonic() - persistence_started) * 1000))
+            )
         summary = dict(sampling.summary())
         completed_slot = getattr(sampling, "slot_open_utc", None)
         if completed_slot is None:
@@ -541,6 +557,7 @@ class ProspectiveAnchorWorker:
                 "cycles_completed": int(self._runtime["cycles_completed"]) + 1,
                 "last_sampling_summary": summary,
                 "last_error": None,
+                "last_error_phase": None,
             }
         )
         return summary
@@ -583,11 +600,15 @@ class ProspectiveAnchorWorker:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    failure_phase = self._runtime.get("last_error_phase") or str(
+                        self._runtime.get("status") or "UNKNOWN"
+                    ).strip().upper()
                     self._runtime.update(
                         {
                             "status": "failed",
                             "last_completed_at_utc": _iso(self._now()),
                             "last_error": repr(exc),
+                            "last_error_phase": failure_phase,
                             "cycles_failed": int(
                                 self._runtime["cycles_failed"]
                             )

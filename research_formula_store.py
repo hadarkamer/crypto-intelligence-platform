@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover
     dict_row = None
 
 import canonical_price_path
+import research_database_timeout
 import research_evidence_contract
 import research_feature_matrix
 import research_formula_acceptance
@@ -239,6 +240,8 @@ _DELIVERY_MAX_ATTEMPTS = max(
 _DELIVERY_MAX_AGE_MINUTES = max(
     1, int(os.getenv("FORMULA_LIVE_DELIVERY_MAX_AGE_MINUTES", "15"))
 )
+_OPERATIONAL_STATEMENT_TIMEOUT_MS = 20_000
+_HEAVY_WRITE_LOCK_TIMEOUT_MS = 3_000
 
 
 def _database_url() -> str:
@@ -251,21 +254,44 @@ def _database_url() -> str:
     return ""
 
 
-def _connect(*, read_only: bool = False):
+def _connect(*, read_only: bool = False, heavy: bool = False):
     url = _database_url()
     if not url:
         raise RuntimeError("Formula registry database is not configured")
     if psycopg is None:
         raise RuntimeError("psycopg is unavailable")
-    options = "-c statement_timeout=20000"
+    statement_timeout_ms = (
+        research_database_timeout.heavy_statement_timeout_ms()
+        if heavy
+        else _OPERATIONAL_STATEMENT_TIMEOUT_MS
+    )
+    options = f"-c statement_timeout={statement_timeout_ms}"
     if read_only:
         options += " -c default_transaction_read_only=on"
+    elif heavy:
+        options += f" -c lock_timeout={_HEAVY_WRITE_LOCK_TIMEOUT_MS}"
     return psycopg.connect(
         url,
         row_factory=dict_row,
         connect_timeout=5,
         options=options,
     )
+
+
+def database_timeout_status() -> Dict[str, Any]:
+    """Describe the split between short control paths and heavy research work."""
+
+    return {
+        "operational_statement_timeout_ms": _OPERATIONAL_STATEMENT_TIMEOUT_MS,
+        "heavy_write_lock_timeout_ms": _HEAVY_WRITE_LOCK_TIMEOUT_MS,
+        "heavy_query": research_database_timeout.heavy_timeout_status(),
+        "heavy_scopes": [
+            "PERSIST_DISCOVERY",
+            "LOAD_SHADOW_WORK",
+            "PERSIST_SHADOW_CHECKS",
+            "EVALUATE_SHADOW_READINESS",
+        ],
+    }
 
 
 def _json(value: Any) -> str:
@@ -832,6 +858,7 @@ def schema_status() -> Dict[str, Any]:
         "research_formula_evidence_snapshots",
         "research_formula_relevance_assessments",
         "research_formula_discovery_schedule_state",
+        "research_stage4_signal_scan_state_v1",
     )
     required_columns = {
         "research_formula_runs": (
@@ -1001,6 +1028,18 @@ def schema_status() -> Dict[str, Any]:
             "checked_at_utc",
             "updated_at_utc",
         ),
+        "research_stage4_signal_scan_state_v1": (
+            "scan_key",
+            "state_version",
+            "cursor_alert_time_utc",
+            "cursor_event_id",
+            "lap_upper_alert_time_utc",
+            "lap_upper_event_id",
+            "completed_laps",
+            "pages_scanned",
+            "candidates_scanned",
+            "updated_at_utc",
+        ),
     }
     base = {
         "configured": bool(_database_url()),
@@ -1008,6 +1047,8 @@ def schema_status() -> Dict[str, Any]:
         "missing_tables": list(required),
         "missing_columns": [],
         "missing_enforcement": [],
+        "heavy_query_timeout": research_database_timeout.heavy_timeout_status(),
+        "database_timeout_policy": database_timeout_status(),
     }
     if not base["configured"] or psycopg is None:
         return base
@@ -1873,7 +1914,7 @@ def persist_discovery_run(
             raise ValueError("invalid versioned Discovery scheduler metadata")
     elif schedule:
         raise ValueError("partial Discovery scheduler metadata is forbidden")
-    with _connect(read_only=False) as conn:
+    with _connect(read_only=False, heavy=True) as conn:
         if not _table_exists(conn, "research_formulas"):
             raise RuntimeError("Formula Research schema is not installed")
         run = conn.execute(
@@ -2695,7 +2736,7 @@ def load_shadow_work(max_events_per_formula: int = 100) -> list[Dict[str, Any]]:
     """
     limit = max(1, min(int(max_events_per_formula), 250))
     work: list[Dict[str, Any]] = []
-    with _connect(read_only=True) as conn:
+    with _connect(read_only=True, heavy=True) as conn:
         formulas = conn.execute(
             """
             SELECT f.formula_id, f.formula_key, f.formula_version, f.formula_text,
@@ -2828,7 +2869,7 @@ def record_shadow_results(
         # A missing configuration or malformed frozen bundle is a fail-closed
         # UNEVALUABLE check, never permission to trust submitted values.
         authoritative_error = f"{type(exc).__name__}: {exc}"[:800]
-    with _connect(read_only=False) as conn:
+    with _connect(read_only=False, heavy=True) as conn:
         current = conn.execute(
             """
             SELECT formula_id, formula_key, formula_version,
@@ -5557,7 +5598,7 @@ def evaluate_shadow_readiness() -> Dict[str, Any]:
     relevance_state_counts: Dict[str, int] = {}
     ranked: list[Dict[str, Any]] = []
     evaluated_at_utc = datetime.now(timezone.utc)
-    with _connect(read_only=False) as conn:
+    with _connect(read_only=False, heavy=True) as conn:
         formulas = conn.execute(
             """
             SELECT formula_id, formula_key, formula_version, formula_schema_version,

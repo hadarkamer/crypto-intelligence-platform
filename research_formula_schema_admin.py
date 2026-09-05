@@ -12,6 +12,16 @@ except Exception:  # pragma: no cover
 
 
 _TRUE = {"1", "true", "yes", "on"}
+SCHEMA_CONNECT_TIMEOUT_SECONDS = 5
+SCHEMA_LOCK_TIMEOUT = "3s"
+SCHEMA_STATEMENT_TIMEOUT = "300s"
+SCHEMA_IDLE_IN_TRANSACTION_SESSION_TIMEOUT = "360s"
+SCHEMA_CONNECTION_OPTIONS = (
+    f"-c lock_timeout={SCHEMA_LOCK_TIMEOUT} "
+    f"-c statement_timeout={SCHEMA_STATEMENT_TIMEOUT} "
+    "-c idle_in_transaction_session_timeout="
+    f"{SCHEMA_IDLE_IN_TRANSACTION_SESSION_TIMEOUT}"
+)
 MIGRATION_PATHS = (
     Path(__file__).resolve().parent / "migrations" / "001_research_archive_v1.sql",
     Path(__file__).resolve().parent / "migrations" / "002_formula_research_v1.sql",
@@ -61,6 +71,27 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "018_prospective_shadow_view_indexed_union_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "022_neutral_price_market_movements_v5.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "023_signal_snapshot_freeze_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "024_formula_exploration_authoritative_reader_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "025_formula_exploration_outcomes_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "026_stage4_no_signal_outcomes_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "027_stage4_signal_outcome_scan_state_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "028_stage4_experimental_telegram_v1.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
@@ -87,6 +118,14 @@ def status() -> dict:
         "database_configured": bool(database_url),
         "database_source": source,
         "migration_paths": [str(path) for path in MIGRATION_PATHS],
+        "database_timeout_policy": {
+            "connect_timeout_seconds": SCHEMA_CONNECT_TIMEOUT_SECONDS,
+            "lock_timeout": SCHEMA_LOCK_TIMEOUT,
+            "statement_timeout": SCHEMA_STATEMENT_TIMEOUT,
+            "idle_in_transaction_session_timeout": (
+                SCHEMA_IDLE_IN_TRANSACTION_SESSION_TIMEOUT
+            ),
+        },
         "runtime_imported_by_watch": False,
     }
 
@@ -105,7 +144,16 @@ def apply_schema() -> None:
     missing = [str(path) for path in MIGRATION_PATHS if not path.exists()]
     if missing:
         raise RuntimeError(f"Migration files not found: {missing}")
-    with psycopg.connect(database_url, connect_timeout=5) as conn:
+    # Startup options bound the advisory-lock wait and every migration before
+    # any SQL executes.  They also remain the session defaults, so RESET in a
+    # later migration cannot restore an unbounded timeout.  The explicit
+    # options deliberately take precedence over DSN/PGOPTIONS values so a
+    # caller cannot relax these safety bounds.
+    with psycopg.connect(
+        database_url,
+        connect_timeout=SCHEMA_CONNECT_TIMEOUT_SECONDS,
+        options=SCHEMA_CONNECTION_OPTIONS,
+    ) as conn:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_ID,))
         for path in MIGRATION_PATHS:
             conn.execute(path.read_text(encoding="utf-8"))

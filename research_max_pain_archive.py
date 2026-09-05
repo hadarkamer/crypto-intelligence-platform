@@ -1394,6 +1394,182 @@ def persist_snapshot_payload(
     }
 
 
+_SET_TIMESTAMP_COLUMNS = frozenset(
+    {
+        "cutover_time_utc",
+        "cycle_time_utc",
+        "collection_started_at_utc",
+        "collection_completed_at_utc",
+        "available_at_utc",
+    }
+)
+_ROW_TIMESTAMP_COLUMNS = frozenset(
+    {"source_observed_at_utc", "price_fetched_at_utc"}
+)
+_HASH_COLUMNS = frozenset({"snapshot_key", "payload_sha256"})
+
+
+def _rehydrate_archive_record(
+    row: Mapping[str, Any],
+    columns: Sequence[str],
+    *,
+    timestamp_columns: frozenset[str] = frozenset(),
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for column in columns:
+        value = row.get(column)
+        if column in timestamp_columns and value is not None:
+            value = _iso(value)
+        elif column in _HASH_COLUMNS and value is not None:
+            value = str(value).strip()
+        result[column] = _json_safe(value)
+    return result
+
+
+def load_recent_passive_snapshot_payloads(
+    *,
+    available_since_utc: Any,
+    available_before_utc: Any = None,
+    limit: int = 48,
+    only_without_signal_snapshot_projection: bool = False,
+    database_url: Optional[str] = None,
+) -> list[Dict[str, Any]]:
+    """Rehydrate recent immutable passive payloads for bounded reconciliation."""
+
+    url = str(database_url or _database_url()).strip()
+    if not url:
+        raise RuntimeError("DATABASE_URL is not configured")
+    if psycopg is None:
+        raise RuntimeError("psycopg is unavailable")
+    bounded_limit = int(limit)
+    if bounded_limit < 1 or bounded_limit > 96:
+        raise ValueError("reconciliation limit must be between 1 and 96")
+    since = _utc(available_since_utc)
+    before = _utc(available_before_utc) if available_before_utc is not None else None
+    before_clause = "AND archive_set.available_at_utc <= %(before)s" if before else ""
+    projection_clause = (
+        """
+        AND NOT EXISTS (
+            SELECT 1
+              FROM public.research_events projection_event
+             WHERE projection_event.event_type='SIGNAL_SNAPSHOT_PROJECTION'
+               AND projection_event.capture_stage='SILENT_SIGNAL_SNAPSHOT'
+               AND projection_event.engine_snapshot #>>
+                    '{projection,snapshot_key}' =
+                    BTRIM(archive_set.snapshot_key)
+        )
+        """
+        if only_without_signal_snapshot_projection
+        else ""
+    )
+
+    with psycopg.connect(
+        url,
+        row_factory=dict_row,
+        connect_timeout=5,
+        options="-c statement_timeout=10000 -c lock_timeout=2000",
+    ) as conn:
+        relations = conn.execute(
+            """
+            SELECT to_regclass('public.research_max_pain_snapshot_sets') AS sets,
+                   to_regclass('public.research_max_pain_snapshot_symbols') AS symbols,
+                   to_regclass('public.research_max_pain_snapshot_rows') AS rows
+            """
+        ).fetchone()
+        if not relations or not all(
+            relations.get(key) for key in ("sets", "symbols", "rows")
+        ):
+            raise RuntimeError("migration 007 Max-Pain archive schema is not installed")
+        set_rows = conn.execute(
+            f"""
+            SELECT archive_set.*
+              FROM public.research_max_pain_snapshot_sets archive_set
+             WHERE archive_set.source='RESEARCH_PASSIVE'
+               AND archive_set.research_eligible=TRUE
+               AND archive_set.available_at_utc >= %(since)s
+               {before_clause}
+               {projection_clause}
+             ORDER BY archive_set.available_at_utc DESC,
+                      archive_set.snapshot_set_id DESC
+             LIMIT %(limit)s
+            """,
+            {"since": since, "before": before, "limit": bounded_limit},
+        ).fetchall()
+        # Keep the newest selected archives first.  Reconciliation can then
+        # preserve still-open causal windows before terminalizing stale rows;
+        # snapshot_set_id breaks equal-time ties deterministically.
+        captures: list[Dict[str, Any]] = []
+        for stored_set in set_rows:
+            set_id = int(stored_set["snapshot_set_id"])
+            stored_symbols = conn.execute(
+                """
+                SELECT *
+                  FROM public.research_max_pain_snapshot_symbols
+                 WHERE snapshot_set_id=%s
+                 ORDER BY symbol
+                """,
+                (set_id,),
+            ).fetchall()
+            stored_rows = conn.execute(
+                """
+                SELECT *
+                  FROM public.research_max_pain_snapshot_rows
+                 WHERE snapshot_set_id=%s
+                 ORDER BY symbol,
+                          CASE timeframe
+                            WHEN '12h' THEN 1 WHEN '24h' THEN 2
+                            WHEN '48h' THEN 3 WHEN '3d' THEN 4
+                            WHEN '1w' THEN 5 WHEN '2w' THEN 6
+                            WHEN '1m' THEN 7 ELSE 99
+                          END
+                """,
+                (set_id,),
+            ).fetchall()
+            payload = {
+                "set": _rehydrate_archive_record(
+                    stored_set,
+                    _SET_COLUMNS,
+                    timestamp_columns=_SET_TIMESTAMP_COLUMNS,
+                ),
+                "symbols": [
+                    _rehydrate_archive_record(row, _SYMBOL_COLUMNS)
+                    for row in stored_symbols
+                ],
+                "rows": [
+                    _rehydrate_archive_record(
+                        row,
+                        _ROW_COLUMNS,
+                        timestamp_columns=_ROW_TIMESTAMP_COLUMNS,
+                    )
+                    for row in stored_rows
+                ],
+            }
+            set_without_hash = dict(payload["set"])
+            expected_hash = str(set_without_hash.pop("payload_sha256", ""))
+            if _sha256(
+                {
+                    "set": set_without_hash,
+                    "symbols": payload["symbols"],
+                    "rows": payload["rows"],
+                }
+            ) != expected_hash:
+                raise RuntimeError(
+                    f"rehydrated Max-Pain payload hash mismatch for set {set_id}"
+                )
+            captures.append(
+                {
+                    "payload": payload,
+                    "persistence": {
+                        "persisted": True,
+                        "snapshot_set_id": set_id,
+                        "idempotent_existing": True,
+                    },
+                    "error": None,
+                }
+            )
+    return captures
+
+
 def _ratio(numerator: Any, denominator: Any) -> Optional[float]:
     left = _float(numerator)
     right = _float(denominator)
