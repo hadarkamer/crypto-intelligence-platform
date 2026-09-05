@@ -115,6 +115,8 @@ def run():
     ][-1]
     assert contextual["engine_snapshot"]["watch_scan_id"] == "shared-watch:test"
     assert contextual["engine_snapshot"]["watch_cycle_number"] == 7
+    assert contextual["engine_snapshot"]["displayed_direction"] == "LONG"
+    assert contextual["engine_snapshot"]["analysis_direction"] == "SHORT"
     assert len(contextual["engine_snapshot"]["sheet_snapshot_id"]) == 64
 
     combined = {
@@ -139,6 +141,8 @@ def run():
     combined_event = [e for e in runtime.events(200) if e["event_type"] == "COMBINED_CONFIRMATION"][-1]
     assert combined_event["direction"] == "SHORT"
     assert combined_event["source_side"] == "LONG"
+    assert combined_event["engine_snapshot"]["displayed_direction"] == "LONG"
+    assert combined_event["engine_snapshot"]["analysis_direction"] == "SHORT"
     assert combined_event["engine_snapshot"]["signal_count"] == 3
 
     # Losing one component while still active must be research-visible even though
@@ -182,6 +186,8 @@ def run():
         magnet_events = [e for e in runtime.events(300) if e["event_type"] == "STRONG_MAGNET_CONFIRMATION"]
         assert magnet_events
         assert magnet_events[-1]["source_side"] == "UPPER"
+        assert magnet_events[-1]["engine_snapshot"]["displayed_direction"] == "LONG"
+        assert magnet_events[-1]["engine_snapshot"]["analysis_direction"] == "LONG"
     finally:
         runtime.magnet_v1.build_magnets = original_build
         runtime.magnet_v1.expected_price_direction = original_expected

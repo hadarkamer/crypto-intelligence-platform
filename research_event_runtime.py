@@ -59,10 +59,24 @@ def _with_watch_context(
     event: research_event_capture.ResearchEvent,
 ) -> research_event_capture.ResearchEvent:
     context = dict(_WATCH_CONTEXT.get() or {})
-    if not context:
-        return event
     snapshot = dict(event.engine_snapshot or {})
     snapshot.update(context)
+    analysis_direction = str(event.direction or "NEUTRAL").upper()
+    source_side = str(event.source_side or "").upper()
+    inverse_display_family = (
+        "MAX_PAIN" in str(event.event_type or "").upper()
+        or str(event.event_type or "").upper() == "COMBINED_CONFIRMATION"
+    )
+    displayed_direction = (
+        source_side
+        if inverse_display_family and source_side in {"LONG", "SHORT"}
+        else analysis_direction
+    )
+    # Keep the two semantics explicit. Max-Pain and Combined cards display the
+    # side that is expected to be hurt, while outcomes must follow the inverse
+    # expected price direction. Magnet/CVD/OI use the displayed direction as-is.
+    snapshot["displayed_direction"] = displayed_direction
+    snapshot["analysis_direction"] = analysis_direction
     watch_scan_id = str(context.get("watch_scan_id") or "")
     if watch_scan_id:
         snapshot["sheet_snapshot_id"] = hashlib.sha256(

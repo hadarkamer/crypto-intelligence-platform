@@ -210,7 +210,13 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         snapshot = {}
     fingerprint = str(data.get("event_fingerprint") or "")
     sheet_snapshot_id = str(snapshot.get("sheet_snapshot_id") or fingerprint)
-    direction = _direction(data.get("direction"))
+    analysis_direction = _direction(
+        snapshot.get("analysis_direction") or data.get("direction")
+    )
+    displayed_direction = _direction(
+        snapshot.get("displayed_direction") or analysis_direction
+    )
+    direction = analysis_direction  # Backward-compatible outcome direction.
     modules = [
         _module_total(snapshot, "positioning"),
         _module_total(snapshot, "futures_flow"),
@@ -240,6 +246,8 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "btc_parent_movement_id": snapshot.get("btc_parent_movement_id"),
         "symbol": data.get("symbol"),
         "direction": direction,
+        "displayed_direction": displayed_direction,
+        "analysis_direction": analysis_direction,
         "no_alert_snapshot": False,
         "reference_price": data.get("current_price"),
         "data_quality_status": "LIVE",
@@ -278,6 +286,8 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "זמן סריקה": israel_time,
         "מטבע": data.get("symbol"),
         "כיוון נבדק": direction,
+        "כיוון מוצג": displayed_direction,
+        "כיוון ניתוח": analysis_direction,
         "מחיר ייחוס": data.get("current_price"),
         "נשלחה התראה": "כן",
         "סוג התראה": snapshot_row.get("primary_alert_type"),
@@ -306,6 +316,8 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "timestamp_utc": timestamp,
         "symbol": data.get("symbol"),
         "direction": direction,
+        "displayed_direction": displayed_direction,
+        "analysis_direction": analysis_direction,
         "record_type": event_type,
         "timeframe": data.get("timeframe"),
         "verification_status": "DELIVERED",

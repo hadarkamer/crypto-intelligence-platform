@@ -12,6 +12,7 @@ class Event:
             "alert_time_utc": "2026-09-05T09:30:00Z",
             "symbol": "BTC",
             "direction": "LONG",
+            "source_side": "SHORT",
             "timeframe": "4h",
             "score": 78,
             "current_price": 100,
@@ -23,6 +24,8 @@ class Event:
             "engine_snapshot": {
                 "watch_scan_id": "shared-watch:test",
                 "sheet_snapshot_id": "sheet-snapshot-1",
+                "displayed_direction": "SHORT",
+                "analysis_direction": "LONG",
                 "opposite_score": 40,
                 "average_score_all_timeframes": 70,
                 "opposite_average_score_all_timeframes": 45,
@@ -52,6 +55,10 @@ def run():
     assert captured[0]["upserts"][0]["row"]["שלישייה 65+"] == "כן"
     assert captured[0]["upserts"][1]["row"]["strict_triple_65_match"] is True
     assert captured[0]["upserts"][1]["row"]["snapshot_id"] == "sheet-snapshot-1"
+    assert captured[0]["upserts"][0]["row"]["כיוון מוצג"] == "SHORT"
+    assert captured[0]["upserts"][0]["row"]["כיוון ניתוח"] == "LONG"
+    assert captured[0]["upserts"][1]["row"]["displayed_direction"] == "SHORT"
+    assert captured[0]["upserts"][1]["row"]["analysis_direction"] == "LONG"
     assert captured[0]["upserts"][2]["row"]["event_id"] == "evt-1"
     assert captured[0]["upserts"][2]["row"]["snapshot_id"] == "sheet-snapshot-1"
     print("google_sheets_sync_selftest: PASS")
