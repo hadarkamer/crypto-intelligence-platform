@@ -38,6 +38,7 @@ except Exception:  # pragma: no cover
 
 import binance_spot_price_path
 import canonical_price_path
+import google_sheets_sync
 import research_feature_matrix
 import research_no_dwell_outcome
 import research_session_width
@@ -1235,7 +1236,7 @@ class ResearchOutcomeWorker:
                 )
             )
         query = f"""
-            SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+            SELECT e.event_id, e.event_fingerprint, e.alert_time_utc, e.symbol, e.direction,
                    e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status,
                    e.current_price, e.target_price, e.engine_snapshot,
@@ -1321,7 +1322,7 @@ class ResearchOutcomeWorker:
         admitted event classes; this query never reads any delivery queue.
         """
         query = f"""
-            SELECT e.event_id, e.alert_time_utc, e.symbol, e.direction,
+            SELECT e.event_id, e.event_fingerprint, e.alert_time_utc, e.symbol, e.direction,
                    e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status,
                    e.current_price, e.target_price, e.engine_snapshot,
@@ -1719,7 +1720,21 @@ class ResearchOutcomeWorker:
                 list(canonical_price_path.COMPLETE_QUALITIES),
             ),
         ).fetchone()
-        return bool(row)
+        written = bool(row)
+        if written:
+            try:
+                google_sheets_sync.enqueue_first_touch_outcome(
+                    event=event,
+                    horizon=horizon,
+                    reference_price=reference_price,
+                    reference_source=source,
+                    path_result=path_result,
+                    first_touch=first_touch,
+                    quality=quality,
+                )
+            except Exception as exc:
+                print(f"[google-sheets] outcome enqueue failed open: {exc!r}", flush=True)
+        return written
 
     def run_once(self, *, limit_per_horizon: int = 200) -> Dict[str, Any]:
         url = _database_url()

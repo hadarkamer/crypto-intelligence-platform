@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import magnet_v1
 import market_confidence_engine
+import google_sheets_sync
 import research_event_capture
 import research_event_store
 
@@ -148,6 +149,16 @@ def _emit(
             delivery_attempted_at_utc=delivery_attempted_at_utc,
             delivered_at_utc=delivered_at_utc,
         )
+        # Sheets is an independent fail-open copy. Only Telegram events that
+        # were actually delivered are exposed as live alerts in the workbook.
+        if str(delivery_status or "").upper() == "DELIVERED":
+            try:
+                google_sheets_sync.enqueue_delivered_event(
+                    event,
+                    delivered_at_utc=delivered_at_utc,
+                )
+            except Exception as exc:
+                print(f"[google-sheets] alert enqueue failed open: {exc!r}", flush=True)
     return bool(remembered or queued)
 
 
