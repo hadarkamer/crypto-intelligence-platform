@@ -31,6 +31,7 @@ import json
 import math
 import os
 import re
+import time
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 try:
@@ -80,6 +81,13 @@ _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT = max(
     min(
         512,
         int(os.getenv("RESEARCH_ORDERED_FIRST_TOUCH_OUTBOX_LIMIT", "128")),
+    ),
+)
+_ORDERED_FIRST_TOUCH_OUTBOX_SECONDS = max(
+    1,
+    min(
+        300,
+        int(os.getenv("RESEARCH_ORDERED_FIRST_TOUCH_OUTBOX_SECONDS", "45")),
     ),
 )
 _SLOT_THRESHOLD_AUTHORITY_BATCH_SIZE = 50
@@ -1625,8 +1633,10 @@ class ResearchOutcomeWorker:
 
         Only selected event IDs load engine snapshots.  New events use the
         existing delivery/time indexes, while open evidence advances oldest
-        observation first.  OFFSET 0 keeps prospective authorization scoped
-        to the candidate event rather than hashing every frozen slot bundle.
+        observation first.  CASE gates expensive prospective authorization
+        behind the cheap row-count check; SQL AND alone can evaluate JSONB
+        authorization for every already-complete sample.  OFFSET 0 keeps that
+        authorization scoped to one event instead of every frozen slot bundle.
         """
         query = """
             WITH settings AS MATERIALIZED (
@@ -1683,7 +1693,7 @@ class ResearchOutcomeWorker:
                             SELECT rejection_policy FROM settings
                         )
                   )
-                  AND (
+                  AND CASE WHEN (
                       SELECT COUNT(*)
                       FROM research_ordered_first_touch_outcomes ordered
                       WHERE ordered.event_id=e.event_id
@@ -1691,12 +1701,12 @@ class ResearchOutcomeWorker:
                             SELECT method_version FROM settings
                         )
                   ) < (SELECT expected_rows FROM settings)
-                  AND EXISTS (
+                  THEN EXISTS (
                       SELECT 1
                       FROM research_prospective_shadow_events authorized
                       WHERE authorized.event_id=e.event_id
                       LIMIT 1 OFFSET 0
-                  )
+                  ) ELSE FALSE END
                 ORDER BY e.alert_time_utc DESC, e.event_id DESC
                 LIMIT (SELECT batch_limit FROM settings)
             ), open_events AS MATERIALIZED (
@@ -2292,58 +2302,70 @@ class ResearchOutcomeWorker:
     def _drain_ordered_first_touch_outbox(self, url: str) -> Dict[str, int]:
         """Drain the pass budget through small, independently leased requests.
 
-        Older Sheet receivers update each row separately.  Claiming at most
-        eight rows just before each request keeps that work inside its lease
-        and preserves acknowledged progress if a later request fails.
+        Older Sheet receivers update each row separately. Claim at most eight
+        rows just before each request, falling back to one after an unconfirmed
+        request until the improved batch receiver confirms its version. Each
+        acknowledgement is saved before the next lease.
+        Stop starting requests once the elapsed-time budget is exhausted;
+        the active request is always acknowledged before returning.  This
+        keeps one-row compatibility mode from delaying the next compute pass
+        for as many as 128 sequential HTTP requests.
         """
         summary = {"claimed": 0, "synced": 0, "failed": 0}
         if not google_sheets_sync.enabled():
             return summary
-        while summary["claimed"] < _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT:
-            request_limit = min(
-                8, _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT - summary["claimed"]
-            )
-            with psycopg.connect(
-                url,
-                row_factory=dict_row,
-                connect_timeout=5,
-                options="-c statement_timeout=15000 -c lock_timeout=1000",
-            ) as conn:
-                claimed = self._claim_ordered_first_touch_outbox(
-                    conn, request_limit
+        with google_sheets_sync.delivery_slot() as acquired:
+            if not acquired:
+                return summary
+            deadline = time.monotonic() + _ORDERED_FIRST_TOUCH_OUTBOX_SECONDS
+            while summary["claimed"] < _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT:
+                if summary["claimed"] and time.monotonic() >= deadline:
+                    break
+                request_limit = min(
+                    google_sheets_sync.ordered_outcome_batch_limit(),
+                    _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT - summary["claimed"],
                 )
-            if not claimed:
-                break
-            summary["claimed"] += len(claimed)
-            payloads = [dict(_mapping(row.get("payload"))) for row in claimed]
-            delivered = google_sheets_sync.deliver_now(
-                {
-                    "kind": "ordered_first_touch_outcomes",
-                    "upserts": payloads,
-                },
-                attempts=1,
-            )
-            with psycopg.connect(
-                url,
-                row_factory=dict_row,
-                connect_timeout=5,
-                options="-c statement_timeout=15000 -c lock_timeout=1000",
-            ) as conn:
-                finished = self._finish_ordered_first_touch_outbox(
-                    conn,
-                    claimed,
-                    delivered=delivered,
-                    error=(
-                        None
-                        if delivered
-                        else "Google Sheets webhook did not confirm delivery"
-                    ),
+                with psycopg.connect(
+                    url,
+                    row_factory=dict_row,
+                    connect_timeout=5,
+                    options="-c statement_timeout=15000 -c lock_timeout=1000",
+                ) as conn:
+                    claimed = self._claim_ordered_first_touch_outbox(
+                        conn, request_limit
+                    )
+                if not claimed:
+                    break
+                summary["claimed"] += len(claimed)
+                payloads = [dict(_mapping(row.get("payload"))) for row in claimed]
+                delivered = google_sheets_sync.deliver_now(
+                    {
+                        "kind": "ordered_first_touch_outcomes",
+                        "upserts": payloads,
+                    },
+                    attempts=1,
                 )
-            summary["synced" if delivered else "failed"] += finished
-            if not delivered:
-                # The durable queue schedules the failed generation's retry.
-                # Do not lease later rows while the receiver is struggling.
-                break
+                with psycopg.connect(
+                    url,
+                    row_factory=dict_row,
+                    connect_timeout=5,
+                    options="-c statement_timeout=15000 -c lock_timeout=1000",
+                ) as conn:
+                    finished = self._finish_ordered_first_touch_outbox(
+                        conn,
+                        claimed,
+                        delivered=delivered,
+                        error=(
+                            None
+                            if delivered
+                            else "Google Sheets webhook did not confirm delivery"
+                        ),
+                    )
+                summary["synced" if delivered else "failed"] += finished
+                if not delivered:
+                    # The durable queue schedules the failed generation's retry.
+                    # Do not lease later rows while the receiver is struggling.
+                    break
         return summary
 
     def _run_ordered_first_touch_locked(

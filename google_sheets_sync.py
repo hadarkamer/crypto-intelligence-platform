@@ -7,6 +7,7 @@ web app.  The web app performs idempotent upserts into the approved workbook.
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import math
@@ -14,7 +15,7 @@ import os
 from queue import Empty, Full, Queue
 import threading
 import time
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,11 @@ _LOCK = threading.Lock()
 _SNAPSHOT_LOCK = threading.Lock()
 _SNAPSHOT_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _STOP = threading.Event()
+_RECEIVER_VERSION: Optional[str] = None
+_LAST_HTTP_SECONDS: Optional[float] = None
+_ORDERED_BATCH_FALLBACK = False
+_DURABLE_SNAPSHOT_MODE = False
+_DELIVERY_LOCK = threading.RLock()
 _METRICS = {
     "enqueued": 0,
     "delivered": 0,
@@ -54,6 +60,10 @@ def status() -> Dict[str, Any]:
         "queue_size": _QUEUE.qsize(),
         "fail_open": True,
         "http_timeout_seconds": _HTTP_TIMEOUT_SECONDS,
+        "receiver_version": _RECEIVER_VERSION,
+        "last_http_seconds": _LAST_HTTP_SECONDS,
+        "ordered_outcome_batch_limit": ordered_outcome_batch_limit(),
+        "durable_snapshot_mode": _DURABLE_SNAPSHOT_MODE,
         "metrics": dict(_METRICS),
     }
 
@@ -96,7 +106,9 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
     workers may call :func:`deliver_now` after their database transaction has
     committed, which prevents a Sheet row from preceding its durable source.
     """
+    global _RECEIVER_VERSION, _LAST_HTTP_SECONDS
     for attempt in range(1, max(1, int(attempts)) + 1):
+        started_at = time.monotonic()
         try:
             request = Request(
                 _WEBHOOK_URL,
@@ -106,15 +118,23 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
-                body = json.loads(response.read().decode("utf-8"))
+            with _DELIVERY_LOCK:
+                if _DURABLE_SNAPSHOT_MODE and _mapping(envelope.get("payload")).get("kind") in {
+                    "alert", "neutral_snapshot"
+                }:
+                    return False
+                with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            _LAST_HTTP_SECONDS = round(time.monotonic() - started_at, 3)
             if body.get("ok") is not True:
                 raise RuntimeError(
                     f"Sheets webhook rejected payload: {body!r}"
                 )
+            _RECEIVER_VERSION = str(body.get("version") or "unversioned")
             _METRICS["delivered"] += 1
             return True
         except Exception as exc:
+            _LAST_HTTP_SECONDS = round(time.monotonic() - started_at, 3)
             _METRICS["delivery_failures"] += 1
             if attempt < max(1, int(attempts)):
                 _METRICS["retries"] += 1
@@ -128,12 +148,40 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
     return False
 
 
+def ordered_outcome_batch_limit() -> int:
+    """Keep later claims small after an unconfirmed legacy receiver request.
+
+    The old Apps Script scans the complete worksheet for every input row. A
+    multirow timeout can therefore write rows without confirming any of them.
+    Retry one idempotent row per lease until a successful reply proves the
+    prepared batch receiver has actually been deployed. This state affects
+    request sizing only; the durable outbox remains the delivery authority.
+    """
+    return 1 if _ORDERED_BATCH_FALLBACK else 8
+
+
+@contextmanager
+def delivery_slot():
+    """Reserve the shared receiver before leasing rows; busy callers defer.
+
+    The reentrant lock also guards the legacy asynchronous HTTP path. Outbox
+    callers never wait behind that path while their lease is counting down.
+    """
+    acquired = _DELIVERY_LOCK.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _DELIVERY_LOCK.release()
+
+
 def deliver_now(payload: Mapping[str, Any], *, attempts: int = 1) -> bool:
     """Confirm one committed payload; its durable outbox owns later retries.
 
     One bounded HTTP attempt stays within the outbox lease even when a growing
     Sheet needs more than the old eight-second timeout to complete its batch.
     """
+    global _ORDERED_BATCH_FALLBACK
     if not enabled():
         return False
     envelope = {
@@ -141,7 +189,13 @@ def deliver_now(payload: Mapping[str, Any], *, attempts: int = 1) -> bool:
         "spreadsheet_id": _SPREADSHEET_ID,
         "payload": dict(payload),
     }
-    return _deliver_envelope(envelope, attempts=attempts)
+    delivered = _deliver_envelope(envelope, attempts=attempts)
+    if payload.get("kind") in {"ordered_first_touch_outcomes", "research_sheet_upserts"}:
+        if not delivered:
+            _ORDERED_BATCH_FALLBACK = True
+        elif _RECEIVER_VERSION == "sheets-batch-v2":
+            _ORDERED_BATCH_FALLBACK = False
+    return delivered
 
 
 def _run() -> None:
@@ -149,6 +203,13 @@ def _run() -> None:
         try:
             item = _QUEUE.get(timeout=1.0)
         except Empty:
+            continue
+        if _DURABLE_SNAPSHOT_MODE and _mapping(item.get("payload")).get("kind") in {
+            "alert", "neutral_snapshot"
+        }:
+            # A committed-source replay owns aggregate snapshot generations.
+            # Do not let an old in-memory child overwrite its complete row.
+            _QUEUE.task_done()
             continue
         delivered = _deliver_envelope(item, attempts=5)
         _QUEUE.task_done()
@@ -378,55 +439,74 @@ def _is_aligned(direction: str, values: list[tuple[str, Optional[float]]]) -> bo
     return bool(direction in {"LONG", "SHORT"} and all(d == direction for d, score in values if score is not None) and all(score is not None for _, score in values))
 
 
+def merge_snapshot_rows(
+    existing: Mapping[str, Any], row: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Pure deterministic merge; callers own complete ordered child sets."""
+    priorities = {
+        "COMBINED_CONFIRMATION": 5,
+        "STRONG_MAX_PAIN_CONFIRMATION": 4,
+        "MAX_PAIN_CONFIRMATION": 3,
+        "MAX_PAIN_ALERT": 2,
+        "MAGNET_ALERT": 2,
+    }
+    old_primary = str(existing.get("primary_alert_type") or "")
+    new_primary = str(row.get("primary_alert_type") or "")
+    new_is_primary = (
+        not existing
+        or priorities.get(new_primary, 1) >= priorities.get(old_primary, 0)
+    )
+    merged = dict(existing)
+    primary_fields = {
+        "displayed_direction", "parent_event_id", "reference_price",
+        "btc_parent_movement_id",
+        "timestamp_utc", "timestamp_israel", "target_price",
+        "target_distance_pct", "consensus_hits", "consensus_total",
+        "maxpain_selected_timeframe", "maxpain_selected_score",
+        "maxpain_opposite_score", "maxpain_score_edge", "maxpain_score_ratio",
+        "maxpain_direction_average", "maxpain_opposite_average",
+        "maxpain_average_edge", "maxpain_average_ratio",
+        "liquidity_balance_pct", "selected_liquidity_usd", "opposite_liquidity_usd",
+        "liquidity_long_pct", "liquidity_short_pct", "liquidity_timeframe",
+        "liquidity_data_source", "liquidity_by_timeframe_json",
+    }
+    for name, value in row.items():
+        # Keep timeframe, prices and liquidity bound to the chosen primary
+        # event. Even missing values from a new primary replace the old source;
+        # they must not inherit another event's measurements.
+        if name in primary_fields:
+            if new_is_primary:
+                merged[name] = value
+            continue
+        if value not in (None, ""):
+            merged[name] = value
+        elif name not in merged:
+            merged[name] = value
+    old_types = {
+        value.strip()
+        for value in str(existing.get("alert_types") or "").split(",")
+        if value.strip()
+    }
+    new_types = {
+        value.strip()
+        for value in str(row.get("alert_types") or "").split(",")
+        if value.strip()
+    }
+    merged["alert_types"] = ", ".join(sorted(old_types | new_types))
+    merged["telegram_event_count"] = int(
+        existing.get("telegram_event_count") or 0
+    ) + int(row.get("telegram_event_count") or 0)
+    merged["primary_alert_type"] = new_primary if new_is_primary else old_primary
+    return merged
+
+
 def _merged_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
-    """Merge Telegram child alerts into one research row per Watch/symbol/side."""
+    """Merge live child alerts in the legacy in-memory delivery path."""
     key = str(row.get("snapshot_id") or "")
     if not key:
         return dict(row)
     with _SNAPSHOT_LOCK:
-        existing = dict(_SNAPSHOT_CACHE.get(key) or {})
-        priorities = {
-            "COMBINED_CONFIRMATION": 5,
-            "STRONG_MAX_PAIN_CONFIRMATION": 4,
-            "MAX_PAIN_CONFIRMATION": 3,
-            "MAX_PAIN_ALERT": 2,
-            "MAGNET_ALERT": 2,
-        }
-        old_primary = str(existing.get("primary_alert_type") or "")
-        new_primary = str(row.get("primary_alert_type") or "")
-        new_is_primary = (
-            not existing
-            or priorities.get(new_primary, 1) >= priorities.get(old_primary, 0)
-        )
-        merged = dict(existing)
-        for name, value in row.items():
-            # A Watch snapshot may contain inverse Max-Pain/Combined events and
-            # direct OI/CVD events with the same analysis direction.  The
-            # snapshot-level displayed direction must follow its primary alert,
-            # not whichever child event happened to reach Sheets last.
-            if name == "displayed_direction" and existing and not new_is_primary:
-                continue
-            if value not in (None, ""):
-                merged[name] = value
-            elif name not in merged:
-                merged[name] = value
-        old_types = {
-            value.strip()
-            for value in str(existing.get("alert_types") or "").split(",")
-            if value.strip()
-        }
-        new_types = {
-            value.strip()
-            for value in str(row.get("alert_types") or "").split(",")
-            if value.strip()
-        }
-        merged["alert_types"] = ", ".join(sorted(old_types | new_types))
-        merged["telegram_event_count"] = int(
-            existing.get("telegram_event_count") or 0
-        ) + int(row.get("telegram_event_count") or 0)
-        merged["primary_alert_type"] = (
-            new_primary if new_is_primary else old_primary
-        )
+        merged = merge_snapshot_rows(_SNAPSHOT_CACHE.get(key) or {}, row)
         _SNAPSHOT_CACHE[key] = dict(merged)
         _SNAPSHOT_CACHE.move_to_end(key)
         while len(_SNAPSHOT_CACHE) > 5000:
@@ -434,22 +514,20 @@ def _merged_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
         return merged
 
 
-def enqueue_neutral_snapshot(
+def build_neutral_snapshot_payload(
     event: Any,
     *,
     decision_feature_bundle: Mapping[str, Any],
     anchor_slot_id: Any = None,
     feature_bundle_policy_version: Any = None,
     feature_bundle_sha256: Any = None,
-) -> bool:
+) -> Dict[str, Any]:
     """Mirror one persisted silent anchor to Sheets without fabricating an alert.
 
     The canonical formula-visible feature bundle remains in PostgreSQL.  This
     Sheet row is a compact audit/index view; alert-only scores intentionally
     remain empty when the prospective model-score wrapper is absent.
     """
-    if not enabled():
-        return False
     data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
     bundle = _mapping(decision_feature_bundle)
     timestamp = str(data.get("alert_time_utc") or "")
@@ -478,6 +556,7 @@ def enqueue_neutral_snapshot(
         "timestamp_israel": israel_time,
         "watch_scan_id": f"prospective-anchor:{anchor_slot_id or timestamp}",
         "parent_event_id": fingerprint,
+        "btc_parent_movement_id": data.get("btc_parent_movement_id"),
         "symbol": data.get("symbol"),
         "direction": direction,
         "displayed_direction": direction,
@@ -501,28 +580,37 @@ def enqueue_neutral_snapshot(
             "PROSPECTIVE_EVALUABLE_MODEL_SCORES_PRESENT"
         )
     live_row = {
-        "זמן סריקה": israel_time,
+        "זמן סריקה": snapshot_row.get("timestamp_israel"),
         "מטבע": data.get("symbol"),
         "כיוון נבדק": direction,
         "כיוון מוצג": direction,
         "כיוון ניתוח": direction,
-        "מחיר ייחוס": data.get("current_price"),
+        "מחיר ייחוס": snapshot_row.get("reference_price"),
         "נשלחה התראה": "לא",
         "סוג התראה": "PROSPECTIVE_NEUTRAL_30M",
         "שלישייה 65+": "לא נמדד",
         "סטטוס נתונים": snapshot_row["data_quality_status"],
         "snapshot_id": fingerprint,
     }
-    return enqueue({"kind": "neutral_snapshot", "upserts": [
+    return {"kind": "neutral_snapshot", "upserts": [
         {"sheet": "תצוגת לייב", "key": "snapshot_id", "row": live_row},
         {"sheet": "Snapshots", "key": "snapshot_id", "row": snapshot_row},
-    ]})
+    ]}
 
 
-def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool:
-    """Copy one successfully delivered Telegram event to all live Sheet views."""
-    if not enabled():
+def enqueue_neutral_snapshot(event: Any, **kwargs: Any) -> bool:
+    if not enabled() or _DURABLE_SNAPSHOT_MODE:
         return False
+    return enqueue(build_neutral_snapshot_payload(event, **kwargs))
+
+
+def build_delivered_event_payload(
+    event: Any,
+    *,
+    delivered_at_utc: Any = None,
+    snapshot_merger: Optional[Callable[[Mapping[str, Any]], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Build a Sheet payload from frozen source fields without network/cache I/O."""
     data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
     snapshot = data.get("engine_snapshot") or {}
     if not isinstance(snapshot, Mapping):
@@ -566,7 +654,7 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "timestamp_israel": israel_time,
         "watch_scan_id": snapshot.get("watch_scan_id"),
         "parent_event_id": fingerprint,
-        "btc_parent_movement_id": snapshot.get("btc_parent_movement_id"),
+        "btc_parent_movement_id": data.get("btc_parent_movement_id", snapshot.get("btc_parent_movement_id")),
         "symbol": data.get("symbol"),
         "direction": direction,
         "displayed_direction": displayed_direction,
@@ -604,14 +692,15 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "code_version": data.get("code_version"),
         "snapshot_written_at": delivered_at_utc or timestamp,
     }
-    snapshot_row = _merged_snapshot(snapshot_row)
+    if snapshot_merger is not None:
+        snapshot_row = snapshot_merger(snapshot_row)
     live_row = {
-        "זמן סריקה": israel_time,
+        "זמן סריקה": snapshot_row.get("timestamp_israel"),
         "מטבע": data.get("symbol"),
         "כיוון נבדק": direction,
         "כיוון מוצג": snapshot_row.get("displayed_direction"),
         "כיוון ניתוח": snapshot_row.get("analysis_direction"),
-        "מחיר ייחוס": data.get("current_price"),
+        "מחיר ייחוס": snapshot_row.get("reference_price"),
         "נשלחה התראה": "כן",
         "סוג התראה": snapshot_row.get("primary_alert_type"),
         "Price/OI כולל": snapshot_row.get("price_oi_total_score"),
@@ -646,11 +735,26 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "verification_status": "DELIVERED",
         "raw_text": None,
     }
-    return enqueue({"kind": "alert", "upserts": [
+    return {"kind": "alert", "upserts": [
         {"sheet": "תצוגת לייב", "key": "snapshot_id", "row": live_row},
         {"sheet": "Snapshots", "key": "snapshot_id", "row": snapshot_row},
         {"sheet": "Telegram_Events", "key": "event_id", "row": telegram_row},
-    ]})
+    ]}
+
+
+def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool:
+    if not enabled() or _DURABLE_SNAPSHOT_MODE:
+        return False
+    return enqueue(build_delivered_event_payload(
+        event, delivered_at_utc=delivered_at_utc, snapshot_merger=_merged_snapshot
+    ))
+
+
+def use_durable_snapshots() -> None:
+    """Select committed-source replay instead of partial in-memory snapshots."""
+    global _DURABLE_SNAPSHOT_MODE
+    with _DELIVERY_LOCK:
+        _DURABLE_SNAPSHOT_MODE = True
 
 
 def enqueue_first_touch_outcome(*, event: Mapping[str, Any], horizon: int, reference_price: float, reference_source: str, path_result: Mapping[str, Any], first_touch: Mapping[str, Any], quality: str) -> bool:

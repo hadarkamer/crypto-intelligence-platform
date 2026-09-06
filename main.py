@@ -40,6 +40,9 @@ import ai_telegram
 import research_event_runtime
 import research_event_store
 import research_outcome_worker
+import research_btc_episode_worker
+import research_formula_ordered_worker
+import research_snapshot_sync_worker
 import research_formula_schema_admin
 import research_formula_store
 import research_formula_worker
@@ -1533,6 +1536,43 @@ async def _prepare_research_schema() -> Dict[str, Any]:
 
 def research_schema_status() -> Dict[str, Any]:
     return json.loads(json.dumps(RESEARCH_SCHEMA_RUNTIME, default=str))
+
+
+async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, Any]:
+    """Start independent v7 research/reconciliation loops after schema checks.
+
+    Each worker verifies its additive tables and owns an advisory lock. A
+    missing migration or an unavailable export destination must not stop
+    collection or prevent the other research loops from starting.
+    """
+    results = {}
+    for label, worker in (
+        ("btc-episodes", research_btc_episode_worker.WORKER),
+        ("formula-ordered-v7", research_formula_ordered_worker.WORKER),
+        ("snapshot-sync", research_snapshot_sync_worker.WORKER),
+    ):
+        if not schema_ready:
+            results[label] = {"started": False, "reason": "research_schema_unavailable"}
+            continue
+        try:
+            started = await worker.start()
+            results[label] = {"started": bool(started), "status": worker.status()}
+        except Exception as exc:
+            results[label] = {"started": False, "error": repr(exc)}
+        print(f"[{label}] startup={results[label]}", flush=True)
+    return results
+
+
+async def _stop_ordered_research_workers() -> None:
+    for label, worker in (
+        ("snapshot-sync", research_snapshot_sync_worker.WORKER),
+        ("formula-ordered-v7", research_formula_ordered_worker.WORKER),
+        ("btc-episodes", research_btc_episode_worker.WORKER),
+    ):
+        try:
+            await worker.stop()
+        except Exception as exc:
+            print(f"[{label}] shutdown failed: {exc!r}", flush=True)
 
 async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run one manual collection and save it. Never starts Watch."""
@@ -5790,6 +5830,9 @@ async def health(request):
         "ai": ai_agent.status(),
         "research_capture": research_event_runtime.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
+        "btc_episodes": research_btc_episode_worker.WORKER.status(),
+        "formula_ordered_v7": research_formula_ordered_worker.WORKER.status(),
+        "snapshot_sync": research_snapshot_sync_worker.WORKER.status(),
         "formula_research": research_formula_worker.WORKER.status(),
         "research_schema": research_schema_status(),
         "max_pain_archive": max_pain_archive_status(),
@@ -6960,6 +7003,8 @@ async def main():
             flush=True,
         )
 
+    await _start_ordered_research_workers(schema_ready=research_schema_ready)
+
     max_pain_started = _start_max_pain_archive_task(
         schema_ready=research_schema_ready
     )
@@ -7077,6 +7122,7 @@ async def main():
         await _stop_max_pain_archive_task()
         await _stop_first_touch_backfill_task()
         await research_prospective_anchor_worker.WORKER.stop()
+        await _stop_ordered_research_workers()
         await research_formula_worker.WORKER.stop()
         await research_outcome_worker.WORKER.stop()
         await research_event_store.WRITER.stop()

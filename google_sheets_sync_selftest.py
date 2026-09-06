@@ -536,14 +536,18 @@ def run():
     original_urlopen = google_sheets_sync.urlopen
     original_webhook = google_sheets_sync._WEBHOOK_URL
     original_enabled = google_sheets_sync.enabled
+    original_receiver_version = google_sheets_sync._RECEIVER_VERSION
+    original_batch_fallback = google_sheets_sync._ORDERED_BATCH_FALLBACK
+    original_http_seconds = google_sheets_sync._LAST_HTTP_SECONDS
     calls = []
     class Response:
+        body = b'{"ok":true}'
         def __enter__(self):
             return self
         def __exit__(self, *args):
             return False
         def read(self):
-            return b'{"ok":true}'
+            return self.body
     def successful_request(request, *, timeout):
         calls.append(timeout)
         return Response()
@@ -561,10 +565,34 @@ def run():
         google_sheets_sync.urlopen = failing_request
         assert google_sheets_sync.deliver_now({"upserts": []}) is False
         assert len(calls) == 1
+
+        # A timed-out multirow request may already have changed the Sheet.
+        # Later leases shrink, but it is never treated as acknowledged.
+        google_sheets_sync._ORDERED_BATCH_FALLBACK = False
+        assert google_sheets_sync.ordered_outcome_batch_limit() == 8
+        outcome_payload = {"kind": "ordered_first_touch_outcomes", "upserts": []}
+        assert google_sheets_sync.deliver_now(outcome_payload) is False
+        assert google_sheets_sync.ordered_outcome_batch_limit() == 1
+        google_sheets_sync.urlopen = successful_request
+        assert google_sheets_sync.deliver_now(outcome_payload) is True
+        assert google_sheets_sync.status()["receiver_version"] == "unversioned"
+        assert google_sheets_sync.ordered_outcome_batch_limit() == 1
+        # Only the successfully deployed batch implementation ends fallback.
+        Response.body = b'{"ok":true,"version":"sheets-batch-v2"}'
+        assert google_sheets_sync.deliver_now(outcome_payload) is True
+        assert google_sheets_sync.ordered_outcome_batch_limit() == 8
+        assert google_sheets_sync.status()["receiver_version"] == "sheets-batch-v2"
+        assert google_sheets_sync.status()["last_http_seconds"] >= 0
+        google_sheets_sync.urlopen = failing_request
+        assert google_sheets_sync.deliver_now({"kind": "delivered_event"}) is False
+        assert google_sheets_sync.ordered_outcome_batch_limit() == 8
     finally:
         google_sheets_sync.urlopen = original_urlopen
         google_sheets_sync._WEBHOOK_URL = original_webhook
         google_sheets_sync.enabled = original_enabled
+        google_sheets_sync._RECEIVER_VERSION = original_receiver_version
+        google_sheets_sync._ORDERED_BATCH_FALLBACK = original_batch_fallback
+        google_sheets_sync._LAST_HTTP_SECONDS = original_http_seconds
     print("google_sheets_sync_selftest: PASS")
 
 

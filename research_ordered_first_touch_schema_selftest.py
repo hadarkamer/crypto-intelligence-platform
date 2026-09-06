@@ -71,7 +71,8 @@ def _check_targeted_schema_apply() -> None:
                 raise AssertionError("unsafe migration selector was accepted")
             assert len(connection_calls) == 1
 
-        previous = research_formula_schema_admin.MIGRATION_PATHS[-2]
+        previous = next(path for path in research_formula_schema_admin.MIGRATION_PATHS
+                        if path.name == "019_outcome_worker_queue_indexes_v1.sql")
         os.environ["FORMULA_SCHEMA_APPLY_ONLY"] = (
             MIGRATION.name + ", " + previous.name
         )
@@ -90,8 +91,8 @@ def run() -> None:
 
     paths = research_formula_schema_admin.MIGRATION_PATHS
     assert paths.count(MIGRATION.resolve()) == 1
-    assert paths[-1] == MIGRATION.resolve()
-    assert paths[-2].name == "019_outcome_worker_queue_indexes_v1.sql"
+    position = paths.index(MIGRATION.resolve())
+    assert paths[position - 1].name == "019_outcome_worker_queue_indexes_v1.sql"
 
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_research_events_event_direction" in sql
     assert "CREATE TABLE IF NOT EXISTS research_ordered_first_touch_outcomes" in sql

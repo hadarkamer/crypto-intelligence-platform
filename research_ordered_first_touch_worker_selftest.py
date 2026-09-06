@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import inspect
 import json
@@ -133,7 +134,10 @@ def _event(event_time):
 
 
 def _check_batched_outbox_drain(payload_template) -> None:
-    def exercise(*, budget, row_count, failures=()):
+    def exercise(
+        *, budget, row_count, failures=(), request_size=8,
+        request_seconds=0, slot_available=True,
+    ):
         service = worker.ResearchOutcomeWorker()
         pending = []
         for index in range(row_count):
@@ -151,6 +155,7 @@ def _check_batched_outbox_drain(payload_template) -> None:
         active_connections = 0
         active_claim = []
         deliveries = 0
+        elapsed = 0
 
         class Connection(_ConnectionContext):
             def __enter__(self):
@@ -173,7 +178,7 @@ def _check_batched_outbox_drain(payload_template) -> None:
             return list(active_claim)
 
         def deliver(payload, *, attempts):
-            nonlocal deliveries
+            nonlocal deliveries, elapsed
             assert active_connections == 0  # Claim committed before HTTP.
             assert attempts == 1
             assert len(active_claim) <= 8
@@ -182,6 +187,7 @@ def _check_batched_outbox_drain(payload_template) -> None:
                 "upserts": [row["payload"] for row in active_claim],
             }  # Exact stored identities, provenance and values are preserved.
             deliveries += 1
+            elapsed += request_seconds
             operations.append(("send", len(active_claim)))
             return deliveries not in failures
 
@@ -206,12 +212,51 @@ def _check_batched_outbox_drain(payload_template) -> None:
             worker.google_sheets_sync, "enabled", lambda: True
         ), patch.object(
             worker.google_sheets_sync, "deliver_now", deliver
+        ), patch.object(
+            worker.google_sheets_sync, "ordered_outcome_batch_limit", lambda: request_size
+        ), patch.object(
+            worker, "_ORDERED_FIRST_TOUCH_OUTBOX_SECONDS", 45
+        ), patch.object(
+            worker.time, "monotonic", lambda: elapsed
+        ), patch.object(
+            worker.google_sheets_sync, "delivery_slot",
+            lambda: nullcontext(slot_available),
         ):
             result = service._drain_ordered_first_touch_outbox(
                 "postgresql://selftest"
             )
         assert active_connections == 0
         return result, operations, len(pending)
+
+    fallback, fallback_operations, remaining = exercise(
+        budget=3, row_count=5, request_size=1
+    )
+    assert fallback == {"claimed": 3, "synced": 3, "failed": 0}
+    assert remaining == 2
+    assert fallback_operations == [
+        ("claim", 1), ("send", 1), ("finish", True),
+        ("claim", 1), ("send", 1), ("finish", True),
+        ("claim", 1), ("send", 1), ("finish", True),
+    ]
+
+    timed, operations, remaining = exercise(
+        budget=128, row_count=10, request_size=1, request_seconds=30
+    )
+    # Finish the request that crossed the budget, then leave all other rows
+    # unclaimed so the next compute pass is not held behind 128 requests.
+    assert timed == {"claimed": 2, "synced": 2, "failed": 0}
+    assert remaining == 8
+    assert operations == [
+        ("claim", 1), ("send", 1), ("finish", True),
+        ("claim", 1), ("send", 1), ("finish", True),
+    ]
+
+    busy, operations, remaining = exercise(
+        budget=128, row_count=10, slot_available=False
+    )
+    assert busy == {"claimed": 0, "synced": 0, "failed": 0}
+    assert remaining == 10
+    assert operations == []  # A busy receiver creates no database lease.
 
     completed, operations, remaining = exercise(budget=17, row_count=25)
     assert completed == {"claimed": 17, "synced": 17, "failed": 0}

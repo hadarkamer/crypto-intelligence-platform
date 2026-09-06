@@ -58,13 +58,18 @@ UNRESOLVED labels are not a symmetry defect.
 
 ## Separate unfinished research integration
 
+The next additive implementation is documented in
+`ORDERED_RESEARCH_CONTINUATION.md`. It supplies a separate recurring v7
+research path and global BTC movement pipeline; the legacy native pipeline
+described below remains quarantined.
+
 The native formula pipeline still consumes the old label contract and is
 quarantined at its worker boundary. Collection and ordered outcomes continue.
 Changing a method-version constant would not adapt its SQL, acceptance,
 relevance or frozen evidence contracts correctly.
 
-LIVE Episodes and a global BTC parent movement generator are not supplied by
-the v7 label fix. The old fixed-24h, formula-local, price-reset episode policy
+LIVE Episodes and a global BTC parent movement generator were not supplied by
+the initial v7 label fix. The old fixed-24h, formula-local, price-reset episode policy
 does not implement the user's newer BTC-wave requirement. Until independent
 parent movements and candidate-specific LIVE episodes are implemented, a
 workbook v7 match must not be presented as five independent observations (or

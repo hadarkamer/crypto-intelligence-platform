@@ -31,6 +31,11 @@ import research_formula_families
 import research_market_episode
 import research_mfe_mae_efficiency
 import research_no_dwell_outcome
+from research_formula_ordered_v7 import (
+    evaluate_formulas as evaluate_ordered_v7_formulas,
+    ordered_outcome_evidence,
+    summarize_scope as summarize_ordered_v7_scope,
+)
 
 ENGINE_VERSION = (
     "formula-discovery-v7.2-walk-forward-watermarked-condition-family-fail-closed"
