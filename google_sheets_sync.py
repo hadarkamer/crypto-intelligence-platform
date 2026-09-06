@@ -7,8 +7,9 @@ web app.  The web app performs idempotent upserts into the approved workbook.
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone
 import json
+import math
 import os
 from queue import Empty, Full, Queue
 import threading
@@ -22,6 +23,9 @@ _ENABLED = os.getenv("GOOGLE_SHEETS_SYNC_ENABLED", "").strip().lower() in _TRUE
 _WEBHOOK_URL = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "").strip()
 _WEBHOOK_SECRET = os.getenv("GOOGLE_SHEETS_WEBHOOK_SECRET", "").strip()
 _SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "").strip()
+_HTTP_TIMEOUT_SECONDS = max(
+    5.0, min(60.0, float(os.getenv("GOOGLE_SHEETS_HTTP_TIMEOUT_SECONDS", "45")))
+)
 _QUEUE: Queue[Dict[str, Any]] = Queue(maxsize=2000)
 _THREAD: Optional[threading.Thread] = None
 _LOCK = threading.Lock()
@@ -49,6 +53,7 @@ def status() -> Dict[str, Any]:
         "running": bool(_THREAD and _THREAD.is_alive()),
         "queue_size": _QUEUE.qsize(),
         "fail_open": True,
+        "http_timeout_seconds": _HTTP_TIMEOUT_SECONDS,
         "metrics": dict(_METRICS),
     }
 
@@ -84,35 +89,68 @@ def enqueue(payload: Mapping[str, Any]) -> bool:
         return False
 
 
+def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool:
+    """Post one already-built envelope and report confirmed delivery.
+
+    The asynchronous alert path continues to use the in-memory queue.  Outcome
+    workers may call :func:`deliver_now` after their database transaction has
+    committed, which prevents a Sheet row from preceding its durable source.
+    """
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        try:
+            request = Request(
+                _WEBHOOK_URL,
+                data=json.dumps(
+                    dict(envelope), ensure_ascii=False, default=str
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            if body.get("ok") is not True:
+                raise RuntimeError(
+                    f"Sheets webhook rejected payload: {body!r}"
+                )
+            _METRICS["delivered"] += 1
+            return True
+        except Exception as exc:
+            _METRICS["delivery_failures"] += 1
+            if attempt < max(1, int(attempts)):
+                _METRICS["retries"] += 1
+                time.sleep(min(30.0, 0.5 * (2 ** (attempt - 1))))
+            else:
+                print(
+                    "[google-sheets] delivery abandoned after retries: "
+                    f"{exc!r}",
+                    flush=True,
+                )
+    return False
+
+
+def deliver_now(payload: Mapping[str, Any], *, attempts: int = 1) -> bool:
+    """Confirm one committed payload; its durable outbox owns later retries.
+
+    One bounded HTTP attempt stays within the outbox lease even when a growing
+    Sheet needs more than the old eight-second timeout to complete its batch.
+    """
+    if not enabled():
+        return False
+    envelope = {
+        "secret": _WEBHOOK_SECRET,
+        "spreadsheet_id": _SPREADSHEET_ID,
+        "payload": dict(payload),
+    }
+    return _deliver_envelope(envelope, attempts=attempts)
+
+
 def _run() -> None:
     while not _STOP.is_set():
         try:
             item = _QUEUE.get(timeout=1.0)
         except Empty:
             continue
-        delivered = False
-        for attempt in range(1, 6):
-            try:
-                request = Request(
-                    _WEBHOOK_URL,
-                    data=json.dumps(item, ensure_ascii=False, default=str).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urlopen(request, timeout=8) as response:
-                    body = json.loads(response.read().decode("utf-8"))
-                if body.get("ok") is not True:
-                    raise RuntimeError(f"Sheets webhook rejected payload: {body!r}")
-                delivered = True
-                _METRICS["delivered"] += 1
-                break
-            except Exception as exc:
-                _METRICS["delivery_failures"] += 1
-                if attempt < 5:
-                    _METRICS["retries"] += 1
-                    time.sleep(min(30.0, 0.5 * (2 ** (attempt - 1))))
-                else:
-                    print(f"[google-sheets] delivery abandoned after retries: {exc!r}", flush=True)
+        delivered = _deliver_envelope(item, attempts=5)
         _QUEUE.task_done()
         if not delivered:
             continue
@@ -134,6 +172,117 @@ def _direction(value: Any) -> str:
     return {"BULLISH": "LONG", "BEARISH": "SHORT"}.get(value, value)
 
 
+def _utc(value: Any) -> Optional[datetime]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _minutes_between(start: Any, end: Any) -> Optional[float]:
+    start_utc = _utc(start)
+    end_utc = _utc(end)
+    if start_utc is None or end_utc is None:
+        return None
+    return max(0.0, (end_utc - start_utc).total_seconds() / 60.0)
+
+
+def _positive_event_id(event: Mapping[str, Any]) -> str:
+    raw_event_id = event.get("event_id")
+    if isinstance(raw_event_id, bool):
+        raise ValueError("First Touch requires a positive event_id")
+    try:
+        numeric_event_id = int(raw_event_id)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("First Touch requires a positive event_id") from exc
+    if numeric_event_id <= 0:
+        raise ValueError("First Touch requires a positive event_id")
+    return str(numeric_event_id)
+
+
+def _outcome_id(
+    *, event_id: str, window_minutes: int, threshold_bps: int, method_version: str
+) -> str:
+    window = int(window_minutes)
+    threshold = int(threshold_bps)
+    method = str(method_version or "").strip()
+    if window <= 0:
+        raise ValueError("First Touch requires a positive window_minutes")
+    if threshold <= 0:
+        raise ValueError("First Touch requires a positive threshold_bps")
+    if not method:
+        raise ValueError("First Touch requires a method_version")
+    # This identity mirrors the durable database key. Direction is event-level
+    # content, so correcting it must update this row rather than create a stale
+    # sibling in Sheets.
+    return "|".join((event_id, str(window), str(threshold), method))
+
+
+def _path_extrema(
+    *, reference_price: float, direction: str, path_result: Mapping[str, Any]
+) -> Dict[str, Optional[float]]:
+    candles = list(path_result.get("candles") or [])
+    reference = _float(reference_price)
+    normalized = _direction(direction)
+    if reference is None or reference <= 0 or not candles:
+        return {
+            "mfe_pct": None,
+            "mae_pct": None,
+            "max_favorable_price": None,
+            "max_adverse_price": None,
+        }
+    highs = [
+        _float(
+            candle.get("high")
+            if isinstance(candle, Mapping)
+            else getattr(candle, "high", None)
+        )
+        for candle in candles
+    ]
+    lows = [
+        _float(
+            candle.get("low")
+            if isinstance(candle, Mapping)
+            else getattr(candle, "low", None)
+        )
+        for candle in candles
+    ]
+    highs = [value for value in highs if value is not None]
+    lows = [value for value in lows if value is not None]
+    if not highs or not lows or normalized not in {"LONG", "SHORT"}:
+        return {
+            "mfe_pct": None,
+            "mae_pct": None,
+            "max_favorable_price": None,
+            "max_adverse_price": None,
+        }
+    if normalized == "LONG":
+        favorable = max(reference, max(highs))
+        adverse = min(reference, min(lows))
+        mfe = (favorable - reference) / reference * 100.0
+        mae = (reference - adverse) / reference * 100.0
+    else:
+        favorable = min(reference, min(lows))
+        adverse = max(reference, max(highs))
+        mfe = (reference - favorable) / reference * 100.0
+        mae = (adverse - reference) / reference * 100.0
+    return {
+        "mfe_pct": max(0.0, mfe),
+        "mae_pct": max(0.0, mae),
+        "max_favorable_price": favorable,
+        "max_adverse_price": adverse,
+    }
+
+
 def _module(snapshot: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     market = snapshot.get("market_evidence") or {}
     return (market.get("modules") or {}).get(name) or {}
@@ -146,6 +295,83 @@ def _module_total(snapshot: Mapping[str, Any], name: str) -> tuple[str, Optional
     if direction not in {"LONG", "SHORT"} and score is not None:
         direction = "LONG" if score > 0 else "SHORT" if score < 0 else "NEUTRAL"
     return direction, abs(score) if score is not None else None
+
+
+def _liquidity_fields(
+    data: Mapping[str, Any], snapshot: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Recover captured Max-Pain balances without mixing unrelated metrics.
+
+    Max-Pain's source side names the positions being liquidated: SHORT
+    liquidity is above price (LONG price direction), and LONG liquidity is
+    below it. Combined events retain balances in a per-timeframe list rather
+    than the top-level field used by a Max-Pain card. Missing observations stay
+    missing; Magnet's liquidity edge is a different measure.
+    """
+    def percentage(value: Any) -> Optional[float]:
+        parsed = _float(value)
+        return (
+            parsed
+            if parsed is not None and math.isfinite(parsed) and 0 <= parsed <= 100
+            else None
+        )
+
+    event_type = str(data.get("event_type") or "").upper()
+    source_side = str(snapshot.get("alert_side") or data.get("source_side") or "").upper()
+    timeframe = str(data.get("timeframe") or "")
+    near = _float(snapshot.get("near_amount"))
+    far = _float(snapshot.get("far_amount"))
+    near = near if near is not None and math.isfinite(near) and near >= 0 else None
+    far = far if far is not None and math.isfinite(far) and far >= 0 else None
+    share = percentage(snapshot.get("near_share_pct"))
+    source = "MAX_PAIN_NEAR_SHARE" if share is not None else None
+    if share is None:
+        share = percentage(_mapping(snapshot.get("balance")).get("near_share_pct"))
+        source = "MAX_PAIN_BALANCE" if share is not None else None
+    if share is None:
+        if (
+            near is not None and far is not None
+            and near + far > 0
+        ):
+            share = near / (near + far) * 100.0
+            source = "MAX_PAIN_CAPTURED_AMOUNTS"
+    balances = []
+    for item in snapshot.get("liquidity_imbalances") or []:
+        if not isinstance(item, Mapping):
+            continue
+        item_share = percentage(item.get("share_pct"))
+        if item_share is not None:
+            balances.append({
+                "timeframe": str(item.get("timeframe") or ""),
+                "share_pct": item_share,
+            })
+    if share is None and event_type == "COMBINED_CONFIRMATION":
+        selected = [item for item in balances if item["timeframe"] == timeframe]
+        if not selected and len(balances) == 1:
+            selected = balances
+        # A disagreement for the same timeframe is not a valid single balance.
+        if selected and len({item["share_pct"] for item in selected}) == 1:
+            share = selected[0]["share_pct"]
+            timeframe = selected[0]["timeframe"]
+            source = "COMBINED_CAPTURED_TIMEFRAME"
+    inverse_family = "MAX_PAIN" in event_type or event_type == "COMBINED_CONFIRMATION"
+    long_share = short_share = None
+    if share is not None and inverse_family and source_side in {"LONG", "SHORT"}:
+        long_share = share if source_side == "SHORT" else 100.0 - share
+        short_share = 100.0 - long_share
+    return {
+        "liquidity_balance_pct": share,
+        "selected_liquidity_usd": near,
+        "opposite_liquidity_usd": far,
+        "liquidity_long_pct": long_share,
+        "liquidity_short_pct": short_share,
+        "liquidity_timeframe": timeframe if share is not None else None,
+        "liquidity_data_source": source,
+        "liquidity_by_timeframe_json": (
+            json.dumps(balances, ensure_ascii=False, sort_keys=True)
+            if balances else None
+        ),
+    }
 
 
 def _is_aligned(direction: str, values: list[tuple[str, Optional[float]]]) -> bool:
@@ -373,7 +599,7 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
         "consensus_total": snapshot.get("consensus_total"),
         "target_price": data.get("target_price"),
         "target_distance_pct": data.get("initial_target_distance_pct"),
-        "liquidity_balance_pct": snapshot.get("near_share_pct"),
+        **_liquidity_fields(data, snapshot),
         "strategy_version": data.get("strategy_version"),
         "code_version": data.get("code_version"),
         "snapshot_written_at": delivered_at_utc or timestamp,
@@ -428,11 +654,42 @@ def enqueue_delivered_event(event: Any, *, delivered_at_utc: Any = None) -> bool
 
 
 def enqueue_first_touch_outcome(*, event: Mapping[str, Any], horizon: int, reference_price: float, reference_source: str, path_result: Mapping[str, Any], first_touch: Mapping[str, Any], quality: str) -> bool:
+    """Mirror the legacy one-sided v6 label without inventing adverse touches.
+
+    A v6 ``MISS`` means only that the favorable width was not reached before
+    expiry.  It is not evidence that an equal adverse barrier was touched.
+    The ordered two-barrier workbook contract is emitted separately by
+    :func:`deliver_ordered_first_touch_outcomes`.
+    """
     if not enabled():
         return False
-    event_id = str(event.get("event_id") or "")
+    event_id = _positive_event_id(event)
     threshold = _float(first_touch.get("qualifying_move_threshold_pct"))
+    if threshold is None or threshold <= 0:
+        raise ValueError("First Touch requires a positive threshold")
+    threshold_bps = int(round(threshold * 100.0))
+    method_version = str(first_touch.get("method_version") or "").strip()
+    outcome_id = _outcome_id(
+        event_id=event_id,
+        window_minutes=int(horizon),
+        threshold_bps=threshold_bps,
+        method_version=method_version,
+    )
+    raw_status = str(first_touch.get("status") or "").upper()
+    decision_time = (
+        first_touch.get("first_qualifying_move_time_utc")
+        if raw_status == "HIT"
+        else first_touch.get("observed_through_utc")
+        if raw_status == "MISS"
+        else None
+    )
+    extrema = _path_extrema(
+        reference_price=reference_price,
+        direction=first_touch.get("direction") or event.get("direction"),
+        path_result=path_result,
+    )
     row = {
+        "event_id": event_id,
         "snapshot_id": (
             (_mapping(event.get("engine_snapshot"))).get("sheet_snapshot_id")
             or event.get("event_fingerprint")
@@ -442,21 +699,154 @@ def enqueue_first_touch_outcome(*, event: Mapping[str, Any], horizon: int, refer
         "direction": _direction(first_touch.get("direction") or event.get("direction")),
         "threshold_pct": threshold,
         "measurement_start_utc": event.get("alert_time_utc"),
-        "status": {"HIT": "SUCCESS", "MISS": "FAILURE", "PENDING": "OPEN"}.get(str(first_touch.get("status") or "").upper(), first_touch.get("status")),
-        "first_touch_side": "FAVORABLE" if first_touch.get("success") else "ADVERSE" if first_touch.get("failure_final") else "NONE",
-        "decision_time_utc": first_touch.get("first_qualifying_move_time_utc"),
-        "minutes_to_decision": (_float(first_touch.get("time_to_first_qualifying_move_seconds")) or 0) / 60 if first_touch.get("time_to_first_qualifying_move_seconds") is not None else None,
-        "mae_pct": first_touch.get("pre_qualifying_mae_pct"),
-        "favorable_touch_price": first_touch.get("qualifying_move_price"),
+        "status": {
+            "HIT": "SUCCESS",
+            "MISS": "UNRESOLVED",
+            "PENDING": "OPEN",
+        }.get(raw_status, first_touch.get("status")),
+        "first_touch_side": "FAVORABLE" if raw_status == "HIT" else "NONE",
+        "decision_time_utc": decision_time,
+        "minutes_to_decision": _minutes_between(
+            event.get("alert_time_utc"), decision_time
+        ),
+        "mfe_pct": extrema["mfe_pct"],
+        "mae_pct": extrema["mae_pct"],
+        "favorable_touch_price": (
+            first_touch.get("qualifying_move_price")
+            if raw_status == "HIT"
+            else None
+        ),
+        "adverse_touch_price": None,
+        "max_favorable_price": extrema["max_favorable_price"],
+        "max_adverse_price": extrema["max_adverse_price"],
         "market_source": reference_source,
         "market_pair": path_result.get("pair"),
         "candle_interval": "1m",
         "candle_count": len(path_result.get("candles") or []),
         "data_quality_status": quality,
-        "outcome_method_version": "first-touch-no-dwell-v6",
+        "outcome_method_version": method_version,
+        "outcome_id": outcome_id,
+        "window_minutes": int(horizon),
+        "threshold_bps": threshold_bps,
     }
     return enqueue({"kind": "outcome", "upserts": [{
         "sheet": "Outcomes",
-        "key": "snapshot_id,threshold_pct",
+        "key": "outcome_id",
         "row": row,
     }]})
+
+
+def ordered_outcome_row(
+    *,
+    event: Mapping[str, Any],
+    reference_source: str,
+    path_result: Mapping[str, Any],
+    outcome: Mapping[str, Any],
+    quality: str,
+) -> Dict[str, Any]:
+    """Return one complete row for the workbook's ordered barrier contract."""
+    event_id = _positive_event_id(event)
+    snapshot_id = str(
+        (_mapping(event.get("engine_snapshot"))).get("sheet_snapshot_id")
+        or event.get("event_fingerprint")
+        or event_id
+    )
+    direction = _direction(outcome.get("direction") or event.get("direction"))
+    threshold_bps = int(outcome["threshold_bps"])
+    window_minutes = int(outcome["window_minutes"])
+    method_version = str(outcome.get("method_version") or "")
+    normalized_quality = str(quality or "").strip()
+    if not normalized_quality:
+        raise ValueError("ordered First Touch requires data quality")
+    outcome_id = _outcome_id(
+        event_id=event_id,
+        window_minutes=window_minutes,
+        threshold_bps=threshold_bps,
+        method_version=method_version,
+    )
+    decision_time = (
+        outcome.get("decision_time_utc")
+        if outcome.get("decision_time_utc") not in (None, "")
+        else outcome.get("outcome_decided_at_utc")
+    )
+    observed_from = (
+        outcome.get("observed_from_utc")
+        if outcome.get("observed_from_utc") not in (None, "")
+        else outcome.get("first_observed_open_utc")
+    )
+    return {
+        "event_id": event_id,
+        "snapshot_id": snapshot_id,
+        "symbol": event.get("symbol"),
+        "direction": direction,
+        "threshold_pct": (
+            outcome.get("threshold_pct")
+            if outcome.get("threshold_pct") is not None
+            else threshold_bps / 100.0
+        ),
+        "measurement_start_utc": outcome.get("measurement_start_utc"),
+        "status": outcome.get("status"),
+        "first_touch_side": outcome.get("first_touch_side"),
+        "decision_time_utc": decision_time,
+        "minutes_to_decision": (
+            _float(outcome.get("time_to_decision_seconds")) / 60.0
+            if outcome.get("time_to_decision_seconds") is not None
+            else None
+        ),
+        "mfe_pct": outcome.get("mfe_pct"),
+        "mae_pct": outcome.get("mae_pct"),
+        "favorable_touch_price": outcome.get("favorable_touch_price"),
+        "adverse_touch_price": outcome.get("adverse_touch_price"),
+        "max_favorable_price": outcome.get("max_favorable_price"),
+        "max_adverse_price": outcome.get("max_adverse_price"),
+        "market_source": reference_source,
+        "market_pair": path_result.get("pair"),
+        "candle_interval": "1m",
+        "candle_count": outcome.get("path_samples"),
+        "data_quality_status": normalized_quality,
+        "outcome_method_version": method_version,
+        "outcome_id": outcome_id,
+        "window_minutes": window_minutes,
+        "threshold_bps": threshold_bps,
+        "observed_from_utc": observed_from,
+        "observed_through_utc": outcome.get("observed_through_utc"),
+        "terminal_reason": outcome.get("terminal_reason"),
+        "initial_gap_seconds": outcome.get("initial_gap_seconds"),
+        "favorable_barrier_price": outcome.get("favorable_barrier_price"),
+        "adverse_barrier_price": outcome.get("adverse_barrier_price"),
+        "initial_gap_unobserved": outcome.get("initial_gap_unobserved"),
+        "data_quality_note": outcome.get("data_quality_note"),
+        "path_complete": outcome.get("path_complete"),
+    }
+
+
+def deliver_ordered_first_touch_outcomes(
+    *,
+    event: Mapping[str, Any],
+    reference_source: str,
+    path_result: Mapping[str, Any],
+    outcomes: list[Mapping[str, Any]],
+    quality: str,
+) -> bool:
+    """Deliver a committed v7 outcome set with collision-safe identities."""
+    if not enabled() or not outcomes:
+        return False
+    rows = [
+        ordered_outcome_row(
+            event=event,
+            reference_source=reference_source,
+            path_result=path_result,
+            outcome=outcome,
+            quality=quality,
+        )
+        for outcome in outcomes
+    ]
+    return deliver_now(
+        {
+            "kind": "ordered_first_touch_outcomes",
+            "upserts": [
+                {"sheet": "Outcomes", "key": "outcome_id", "row": row}
+                for row in rows
+            ],
+        }
+    )

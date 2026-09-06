@@ -32,6 +32,18 @@ class _CaptureResult:
 
 
 class _ConnectionContext:
+    def execute(self, query, params=()):
+        if "pg_try_advisory_lock" in str(query):
+            assert list(params) == [
+                worker._ORDERED_FIRST_TOUCH_PASS_LOCK_ID
+            ]
+            return SimpleNamespace(
+                # This legacy-v6 test isolates the retained path; the v7
+                # worker has its own compute/outbox integration self-test.
+                fetchone=lambda: {"acquired": False}
+            )
+        raise AssertionError(f"unexpected connection query: {query}")
+
     def __enter__(self):
         return self
 
@@ -1163,6 +1175,8 @@ def run() -> None:
     )
     assert complete["first_touch_hits"] == 1
     assert len(complete_writes) == 1
+    assert "candles" not in complete_writes[0]["path_result"]
+    assert complete_writes[0]["path_result"]["path_samples"] == 3
     frozen = complete_writes[0]["first_touch"]
     assert frozen["status"] == "HIT"
     assert frozen["dwell_required_seconds"] == 0
@@ -1264,6 +1278,7 @@ def run() -> None:
         complete=True,
     )
     assert conflict_capture.query.count("%s") == len(conflict_capture.params)
+    assert conflict_capture.params[22] == 3
     assert "status IN ('HIT', 'MISS')" in conflict_capture.query
     assert "data_quality_status=ANY(%s)" in conflict_capture.query
     assert "EXCLUDED.observed_through_utc >=" in conflict_capture.query

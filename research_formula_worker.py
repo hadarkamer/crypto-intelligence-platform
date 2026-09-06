@@ -1,4 +1,4 @@
-"""Fail-open background discovery and live Shadow evaluation workers."""
+"""Background Formula research, fail-closed on outcome-contract incompatibility."""
 
 from __future__ import annotations
 
@@ -26,6 +26,22 @@ _TRUE = {"1", "true", "yes", "on"}
 _DISCOVERY_ENABLED = os.getenv("FORMULA_DISCOVERY_ENABLED", "").strip().lower() in _TRUE
 _SHADOW_ENABLED = os.getenv("FORMULA_SHADOW_ENABLED", "").strip().lower() in _TRUE
 _LIVE_ALERTS_ENABLED = os.getenv("FORMULA_LIVE_ALERTS_ENABLED", "").strip().lower() in _TRUE
+# The native Formula pipeline still builds its labels from the one-sided v6
+# first-touch contract.  Keep the historical tables and direct pure/test entry
+# points intact, but fail closed at the production worker boundary until the
+# feature matrix and Formula acceptance/relevance pipeline consume ordered v7.
+_REQUIRED_OUTCOME_METHOD_VERSION = "ordered-first-touch-v7"
+_NATIVE_FORMULA_OUTCOME_METHOD_VERSION = research_feature_matrix.VERIFIED_OUTCOME_METHOD
+_NATIVE_PIPELINE_COMPATIBLE = (
+    _NATIVE_FORMULA_OUTCOME_METHOD_VERSION == _REQUIRED_OUTCOME_METHOD_VERSION
+)
+_QUARANTINE_STATE = "QUARANTINED_AWAITING_ORDERED_FIRST_TOUCH_V7"
+_QUARANTINE_REASON = (
+    "native Formula discovery, Shadow relevance, promotion and live delivery are "
+    "paused because their feature/label contract still consumes one-sided "
+    f"{_NATIVE_FORMULA_OUTCOME_METHOD_VERSION}; awaiting explicit "
+    f"{_REQUIRED_OUTCOME_METHOD_VERSION} support"
+)
 _DISCOVERY_STARTUP_DELAY_SECONDS = max(
     15, int(os.getenv("FORMULA_DISCOVERY_STARTUP_DELAY_SECONDS", "30"))
 )
@@ -399,13 +415,38 @@ class FormulaResearchWorker:
 
     def bind_telegram(self, bot: Any) -> None:
         """Bind the initialized Telegram bot used for durable live delivery."""
-        self._telegram_bot = bot
+        # Do not retain a delivery capability while the native Formula outcome
+        # contract is quarantined.  Event capture and ordered-v7 outcomes use
+        # separate workers and are unaffected by this guard.
+        self._telegram_bot = bot if _NATIVE_PIPELINE_COMPATIBLE else None
 
     def status(self) -> Dict[str, Any]:
+        discovery_enabled = _DISCOVERY_ENABLED and _NATIVE_PIPELINE_COMPATIBLE
+        shadow_enabled = _SHADOW_ENABLED and _NATIVE_PIPELINE_COMPATIBLE
+        live_alerts_enabled = _LIVE_ALERTS_ENABLED and _NATIVE_PIPELINE_COMPATIBLE
         return {
-            "discovery_enabled": _DISCOVERY_ENABLED,
-            "shadow_enabled": _SHADOW_ENABLED,
-            "live_alerts_enabled": _LIVE_ALERTS_ENABLED,
+            "execution_state": (
+                "READY" if _NATIVE_PIPELINE_COMPATIBLE else _QUARANTINE_STATE
+            ),
+            "execution_enabled": _NATIVE_PIPELINE_COMPATIBLE,
+            "quarantined": not _NATIVE_PIPELINE_COMPATIBLE,
+            "quarantine_reason": (
+                None if _NATIVE_PIPELINE_COMPATIBLE else _QUARANTINE_REASON
+            ),
+            "outcome_contract": {
+                "native_method_version": _NATIVE_FORMULA_OUTCOME_METHOD_VERSION,
+                "required_method_version": _REQUIRED_OUTCOME_METHOD_VERSION,
+                "compatible": _NATIVE_PIPELINE_COMPATIBLE,
+                "historical_rows_preserved": True,
+            },
+            "configured": {
+                "discovery_enabled": _DISCOVERY_ENABLED,
+                "shadow_enabled": _SHADOW_ENABLED,
+                "live_alerts_enabled": _LIVE_ALERTS_ENABLED,
+            },
+            "discovery_enabled": discovery_enabled,
+            "shadow_enabled": shadow_enabled,
+            "live_alerts_enabled": live_alerts_enabled,
             "running": bool(
                 (self._discovery_task and not self._discovery_task.done())
                 or (self._shadow_task and not self._shadow_task.done())
@@ -452,13 +493,20 @@ class FormulaResearchWorker:
             ),
             "automatic_stage_ceiling": "SHADOW_PENDING_EXPLICIT_APPROVAL",
             "live_delivery_gate": {
-                "environment_enabled": _LIVE_ALERTS_ENABLED,
+                "environment_enabled": live_alerts_enabled,
+                "environment_configured": _LIVE_ALERTS_ENABLED,
+                "outcome_contract_compatible": _NATIVE_PIPELINE_COMPATIBLE,
                 "formula_validation_required": True,
                 "telegram_delivery_connected": self._telegram_bot is not None,
                 "chat_subscription_required": True,
                 "reason": (
-                    "delivery requires a separate explicit owner approval record, LIVE "
-                    "stage, runtime enablement and /ai_alerts_on in the destination chat"
+                    _QUARANTINE_REASON
+                    if not _NATIVE_PIPELINE_COMPATIBLE
+                    else (
+                        "delivery requires a separate explicit owner approval record, "
+                        "LIVE stage, runtime enablement and /ai_alerts_on in the "
+                        "destination chat"
+                    )
                 ),
             },
             "canonical_outcomes": (
@@ -468,6 +516,13 @@ class FormulaResearchWorker:
         }
 
     async def start(self) -> bool:
+        if not _NATIVE_PIPELINE_COMPATIBLE:
+            # This is an intentional fail-closed compatibility stop, not a
+            # schema outage.  In particular, do not query Formula tables or
+            # create discovery/Shadow tasks under the v6 label contract.
+            self._schema_ready = False
+            self._telegram_bot = None
+            return False
         if not (_DISCOVERY_ENABLED or _SHADOW_ENABLED):
             return False
         schema = await asyncio.to_thread(research_formula_store.schema_status)
@@ -1067,7 +1122,11 @@ class FormulaResearchWorker:
         )
 
     async def _deliver_pending_live_alerts(self) -> Dict[str, int]:
-        if not _LIVE_ALERTS_ENABLED or self._telegram_bot is None:
+        if (
+            not _NATIVE_PIPELINE_COMPATIBLE
+            or not _LIVE_ALERTS_ENABLED
+            or self._telegram_bot is None
+        ):
             return {"sent": 0, "failed": 0}
         pending = await asyncio.to_thread(
             research_formula_store.load_pending_live_deliveries

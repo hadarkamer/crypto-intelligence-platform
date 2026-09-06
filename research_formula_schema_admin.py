@@ -64,6 +64,9 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "019_outcome_worker_queue_indexes_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "020_ordered_first_touch_v7.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
@@ -83,6 +86,28 @@ def _database_url() -> tuple[str, str | None]:
     return "", None
 
 
+def _selected_migration_paths() -> tuple[Path, ...]:
+    """Resolve an optional exact-basename allowlist before opening the DB.
+
+    Omitting FORMULA_SCHEMA_APPLY_ONLY retains the existing full installer.
+    An explicit selection never follows arbitrary paths and always preserves
+    the declared migration order, even if its input order differs.
+    """
+    raw = os.getenv("FORMULA_SCHEMA_APPLY_ONLY", "").strip()
+    if not raw:
+        return MIGRATION_PATHS
+    names = [name.strip() for name in raw.split(",")]
+    allowed = {path.name for path in MIGRATION_PATHS}
+    unknown = [name for name in names if name not in allowed]
+    if unknown or len(names) != len(set(names)):
+        raise ValueError(
+            "FORMULA_SCHEMA_APPLY_ONLY must contain unique exact migration "
+            "filenames from MIGRATION_PATHS"
+        )
+    selected = set(names)
+    return tuple(path for path in MIGRATION_PATHS if path.name in selected)
+
+
 def status() -> dict:
     database_url, source = _database_url()
     return {
@@ -90,6 +115,8 @@ def status() -> dict:
         "database_configured": bool(database_url),
         "database_source": source,
         "migration_paths": [str(path) for path in MIGRATION_PATHS],
+        "migration_selection": os.getenv("FORMULA_SCHEMA_APPLY_ONLY", "").strip()
+        or "ALL",
         "runtime_imported_by_watch": False,
     }
 
@@ -97,6 +124,7 @@ def status() -> dict:
 def apply_schema() -> None:
     if not _enabled():
         raise RuntimeError("Refusing schema mutation: set FORMULA_SCHEMA_APPLY=1 explicitly")
+    paths = _selected_migration_paths()
     database_url, source = _database_url()
     if not database_url:
         raise RuntimeError(
@@ -105,15 +133,24 @@ def apply_schema() -> None:
         )
     if psycopg is None:
         raise RuntimeError("psycopg is unavailable")
-    missing = [str(path) for path in MIGRATION_PATHS if not path.exists()]
+    missing = [str(path) for path in paths if not path.exists()]
     if missing:
         raise RuntimeError(f"Migration files not found: {missing}")
-    with psycopg.connect(database_url, connect_timeout=5) as conn:
+    options = {}
+    if os.getenv("FORMULA_SCHEMA_APPLY_ONLY", "").strip():
+        # Targeted live rollouts fail promptly instead of waiting on a busy
+        # research relation or rerunning unrelated historical migrations.
+        options["options"] = "-c statement_timeout=15000 -c lock_timeout=1000"
+    with psycopg.connect(database_url, connect_timeout=5, **options) as conn:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_ID,))
-        for path in MIGRATION_PATHS:
+        for path in paths:
             conn.execute(path.read_text(encoding="utf-8"))
         conn.commit()
-    print(f"Formula Research schema applied successfully via {source}.", flush=True)
+    print(
+        f"Formula Research schema applied successfully via {source}; "
+        f"migrations={','.join(path.name for path in paths)}.",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

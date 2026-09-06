@@ -5,7 +5,10 @@ aged into a configured horizon, one canonical spot one-minute path is
 fetched and converted into fixed-horizon return, MFE, MAE, speed and optional
 target-progress measurements.  A separate additive v6 label records the first
 touch of a frozen favorable width with zero dwell and conservative pre-touch
-MAE.  Eligible delivered Alerts and authorized prospective Decision Samples
+MAE.  The v6 rows remain database-only audit evidence.  Additive v7 labels
+instead compare symmetric favorable/adverse barriers at all eight fixed widths
+over 1h, 4h, 12h and 24h, and use a transactional outbox for their Sheets
+mirror.  Eligible delivered Alerts and authorized prospective Decision Samples
 that match a Shadow formula are polled while their relevant horizon is still
 open, so a verified first touch can be frozen without waiting for the horizon
 to close. Current prospective Shadow labels require the exact decision-time
@@ -23,6 +26,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import os
@@ -41,6 +45,7 @@ import canonical_price_path
 import google_sheets_sync
 import research_feature_matrix
 import research_no_dwell_outcome
+import research_ordered_first_touch
 import research_session_width
 
 
@@ -52,9 +57,44 @@ _OPEN_FIRST_TOUCH_EVENT_LIMIT = max(
     1,
     min(200, int(os.getenv("RESEARCH_OPEN_FIRST_TOUCH_EVENT_LIMIT", "32"))),
 )
+_CLOSED_OUTCOME_EVENT_LIMIT = max(
+    1,
+    min(200, int(os.getenv("RESEARCH_CLOSED_OUTCOME_EVENT_LIMIT", "32"))),
+)
+_ORDERED_FIRST_TOUCH_EVENT_LIMIT = max(
+    1,
+    min(
+        64,
+        int(os.getenv("RESEARCH_ORDERED_FIRST_TOUCH_EVENT_LIMIT", "8")),
+    ),
+)
+_ORDERED_FIRST_TOUCH_BACKFILL_DAYS = max(
+    1,
+    min(
+        90,
+        int(os.getenv("RESEARCH_ORDERED_FIRST_TOUCH_BACKFILL_DAYS", "14")),
+    ),
+)
+_ORDERED_FIRST_TOUCH_OUTBOX_LIMIT = max(
+    1,
+    min(
+        512,
+        int(os.getenv("RESEARCH_ORDERED_FIRST_TOUCH_OUTBOX_LIMIT", "128")),
+    ),
+)
 _SLOT_THRESHOLD_AUTHORITY_BATCH_SIZE = 50
 _METHOD_VERSION = canonical_price_path.METHOD_VERSION
 _FIRST_TOUCH_METHOD_VERSION = research_no_dwell_outcome.METHOD_VERSION
+_ORDERED_FIRST_TOUCH_METHOD_VERSION = research_ordered_first_touch.METHOD_VERSION
+_ORDERED_FIRST_TOUCH_WINDOWS = _HORIZONS
+_ORDERED_FIRST_TOUCH_ROW_COUNT = len(_ORDERED_FIRST_TOUCH_WINDOWS) * len(
+    research_ordered_first_touch.SUPPORTED_THRESHOLDS_PCT
+)
+# Stable signed-bigint advisory-lock key derived from
+# ``research-outcomes:ordered-first-touch-v7:compute-and-sheet-drain``.
+# The session-level lock serializes payload generations through the remote
+# Sheets write; a transaction-level lock would be released before HTTP.
+_ORDERED_FIRST_TOUCH_PASS_LOCK_ID = 4860059309063875571
 _STRICT_FROZEN_EVIDENCE_POLICY_VERSION = (
     "prospective-shadow-frozen-decision-features-v1"
 )
@@ -951,6 +991,12 @@ def _expected_candles(event_time: datetime, horizon_time: datetime) -> int:
     return int((last_open - first_open) // interval_ms) + 1
 
 
+def _path_sample_count(path_result: Mapping[str, Any]) -> int:
+    """Read compact prepared metadata or the original provider result."""
+    count = path_result.get("path_samples")
+    return int(count) if count is not None else len(path_result.get("candles") or ())
+
+
 @dataclass
 class OutcomeMetrics:
     runs: int = 0
@@ -965,6 +1011,12 @@ class OutcomeMetrics:
     first_touch_threshold_policy_conflicts: int = 0
     alert_reference_provenance_rejections: int = 0
     first_touch_terminal_rows_deferred_for_incomplete_prefix: int = 0
+    ordered_first_touch_events_checked: int = 0
+    ordered_first_touch_rows_written: int = 0
+    ordered_first_touch_rows_synced: int = 0
+    ordered_first_touch_sync_failures: int = 0
+    ordered_first_touch_failures: int = 0
+    ordered_first_touch_last_error: Optional[str] = None
     failures: int = 0
     last_run_utc: Optional[str] = None
     last_error: Optional[str] = None
@@ -989,6 +1041,20 @@ class ResearchOutcomeWorker:
             "poll_seconds": _POLL_SECONDS,
             "method": _METHOD_VERSION,
             "first_touch_method": _FIRST_TOUCH_METHOD_VERSION,
+            "ordered_first_touch_method": _ORDERED_FIRST_TOUCH_METHOD_VERSION,
+            "ordered_first_touch_windows_minutes": list(
+                _ORDERED_FIRST_TOUCH_WINDOWS
+            ),
+            "ordered_first_touch_thresholds_pct": list(
+                research_ordered_first_touch.SUPPORTED_THRESHOLDS_PCT
+            ),
+            "ordered_first_touch_event_limit": (
+                _ORDERED_FIRST_TOUCH_EVENT_LIMIT
+            ),
+            "ordered_first_touch_backfill_days": (
+                _ORDERED_FIRST_TOUCH_BACKFILL_DAYS
+            ),
+            "closed_outcome_event_limit": _CLOSED_OUTCOME_EVENT_LIMIT,
             "open_first_touch_event_limit": _OPEN_FIRST_TOUCH_EVENT_LIMIT,
             "first_touch_policy": {
                 "success": "first favorable width touch; zero dwell",
@@ -1012,6 +1078,14 @@ class ResearchOutcomeWorker:
                     "missing or malformed evidence fails closed"
                 ),
                 "legacy_evidence": "audit_only",
+            },
+            "ordered_first_touch_policy": {
+                "barriers": "symmetric fixed percent around decision price",
+                "same_candle_both": "UNRESOLVED/AMBIGUOUS",
+                "closed_without_touch": "UNRESOLVED/NONE",
+                "incomplete_path": "DATA_MISSING/NONE",
+                "workbook_export": "v7_only_via_durable_outbox",
+                "legacy_v6_workbook_export": "disabled",
             },
             "price_paths": {
                 "default": "Binance Spot USDT",
@@ -1544,6 +1618,809 @@ class ResearchOutcomeWorker:
         return int(row["inserted"] or 0)
 
     @staticmethod
+    def _load_ordered_first_touch_due_events(
+        conn, limit: int
+    ) -> list[Dict[str, Any]]:
+        """Load a bounded, live-first queue for the additive v7 labels.
+
+        Every event is fetched at most once per pass and supplies the common
+        post-decision path for all four windows and all eight fixed widths.
+        Authorized silent LONG/SHORT controls are admitted through the
+        fail-closed prospective view; arbitrary undelivered events are not.
+        """
+        query = f"""
+            SELECT e.event_id, e.event_fingerprint, e.alert_time_utc,
+                   e.symbol, e.direction, e.event_type, e.setup_key,
+                   e.event_kind, e.delivery_status, e.current_price,
+                   e.target_price, e.engine_snapshot
+            FROM research_events e
+            LEFT JOIN LATERAL (
+                SELECT
+                    COUNT(*) AS row_count,
+                    MIN(ordered.observed_through_utc) FILTER (
+                        WHERE ordered.status='OPEN'
+                    ) AS oldest_open_observed_utc,
+                    COALESCE(BOOL_OR(
+                        ordered.status='OPEN'
+                        AND ordered.observed_through_utc < LEAST(
+                            e.alert_time_utc
+                                + (ordered.window_minutes
+                                   * INTERVAL '1 minute'),
+                            date_trunc('minute', NOW())
+                                - INTERVAL '1 millisecond'
+                        )
+                    ), FALSE) AS open_due,
+                    COALESCE(BOOL_OR(
+                        ordered.status='DATA_MISSING'
+                        AND ordered.updated_at_utc
+                              <= NOW() - INTERVAL '6 hours'
+                    ), FALSE) AS data_missing_due
+                FROM research_ordered_first_touch_outcomes ordered
+                WHERE ordered.event_id=e.event_id
+                  AND ordered.method_version=%s
+            ) ordered_state ON TRUE
+            WHERE e.direction IN ('LONG', 'SHORT')
+              AND e.event_kind IN ('ALERT', 'DECISION_SAMPLE')
+              AND (
+                    (
+                        e.event_kind='ALERT'
+                        AND e.delivery_status='DELIVERED'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM research_prospective_shadow_events authorized
+                        WHERE authorized.event_id=e.event_id
+                    )
+                  )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM research_outcome_event_rejections rejected
+                  WHERE rejected.event_id=e.event_id
+                    AND rejected.rejection_policy_version=%s
+              )
+              AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
+              AND date_trunc('minute', e.alert_time_utc)
+                    + INTERVAL '1 minute'
+                    + CASE
+                        WHEN e.alert_time_utc > date_trunc(
+                            'minute', e.alert_time_utc
+                        ) THEN INTERVAL '1 minute'
+                        ELSE INTERVAL '0 minutes'
+                      END
+                  <= date_trunc('minute', NOW())
+              AND (
+                    ordered_state.row_count < %s
+                    OR ordered_state.open_due
+                    OR ordered_state.data_missing_due
+                  )
+            ORDER BY
+                CASE
+                    WHEN e.alert_time_utc >= NOW() - INTERVAL '25 hours'
+                    THEN 0 ELSE 1
+                END ASC,
+                {_alert_reference_queue_priority_sql("e")} ASC,
+                CASE
+                    WHEN ordered_state.row_count < %s
+                    THEN e.alert_time_utc
+                END DESC NULLS LAST,
+                COALESCE(
+                    ordered_state.oldest_open_observed_utc,
+                    e.alert_time_utc
+                ) ASC,
+                e.event_id DESC
+            LIMIT %s
+        """
+        params = (
+            _ORDERED_FIRST_TOUCH_METHOD_VERSION,
+            _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
+            _ORDERED_FIRST_TOUCH_BACKFILL_DAYS,
+            _ORDERED_FIRST_TOUCH_ROW_COUNT,
+            _ORDERED_FIRST_TOUCH_ROW_COUNT,
+            max(1, min(int(limit), _ORDERED_FIRST_TOUCH_EVENT_LIMIT)),
+        )
+        return conn.execute(query, params).fetchall()
+
+    @staticmethod
+    def _write_ordered_first_touch_outcome(
+        conn,
+        *,
+        event: Mapping[str, Any],
+        window_minutes: int,
+        reference_source: str,
+        path_result: Mapping[str, Any],
+        outcome: Mapping[str, Any],
+        expected_candles: int,
+    ) -> bool:
+        """Atomically persist one v7 row and its exact Sheet outbox payload.
+
+        A repaired incomplete path may decide on an earlier candle than its
+        previous diagnostic end.  Allow that complete replacement while
+        keeping terminal evidence immutable and rejecting stale partial paths.
+        """
+        normalized = dict(outcome)
+        normalized["window_minutes"] = int(window_minutes)
+        complete = bool(normalized.get("path_complete"))
+        quality = canonical_price_path.quality_status(
+            dict(path_result), complete=complete
+        )
+        normalized["data_quality_status"] = quality
+        source = _path_source(reference_source, dict(path_result))
+        threshold_policy = {
+            "kind": "fixed-symmetric-percent",
+            "threshold_pct": normalized["threshold_pct"],
+            "favorable_and_adverse_widths_equal": True,
+            "same_candle_both": "UNRESOLVED_AMBIGUOUS",
+            "partial_decision_minute": "EXCLUDED",
+        }
+        calculation_audit = {
+            "observation_closed": bool(
+                normalized.get("observation_closed")
+            ),
+            "expected_candles": int(expected_candles),
+            "provider_expected_candles": path_result.get(
+                "expected_candles"
+            ),
+            "provider_path_complete": path_result.get("complete"),
+            "retrieved_at_utc": path_result.get("retrieved_at_utc"),
+        }
+        database_record = {
+            "event_id": int(event["event_id"]),
+            "window_minutes": int(window_minutes),
+            "threshold_bps": int(normalized["threshold_bps"]),
+            "method_version": _ORDERED_FIRST_TOUCH_METHOD_VERSION,
+            "direction": normalized["direction"],
+            "status": normalized["status"],
+            "first_touch_side": normalized["first_touch_side"],
+            "terminal_reason": normalized.get("terminal_reason"),
+            "success": normalized.get("success"),
+            "measurement_start_utc": normalized["measurement_start_utc"],
+            "first_observed_open_utc": normalized.get(
+                "first_observed_open_utc"
+            ),
+            "observed_through_utc": normalized["observed_through_utc"],
+            "decision_time_utc": normalized.get("decision_time_utc"),
+            "time_to_decision_seconds": normalized.get(
+                "time_to_decision_seconds"
+            ),
+            "initial_gap_seconds": int(
+                normalized.get("initial_gap_seconds") or 0
+            ),
+            "initial_gap_unobserved": bool(
+                normalized.get("initial_gap_unobserved")
+            ),
+            "reference_price": normalized["reference_price"],
+            "favorable_barrier_price": normalized[
+                "favorable_barrier_price"
+            ],
+            "adverse_barrier_price": normalized["adverse_barrier_price"],
+            "favorable_touch_price": normalized.get(
+                "favorable_touch_price"
+            ),
+            "adverse_touch_price": normalized.get("adverse_touch_price"),
+            "max_favorable_price": normalized["max_favorable_price"],
+            "max_adverse_price": normalized["max_adverse_price"],
+            "mfe_pct": normalized["mfe_pct"],
+            "mae_pct": normalized["mae_pct"],
+            "candle_interval_seconds": normalized[
+                "candle_interval_seconds"
+            ],
+            "path_samples": normalized["path_samples"],
+            "observation_closed": normalized["observation_closed"],
+            "input_path_complete": normalized["input_path_complete"],
+            "path_complete": normalized["path_complete"],
+            "price_source": source,
+            "market_pair": path_result.get("pair"),
+            "data_quality_status": quality,
+            "data_quality_note": normalized["data_quality_note"],
+            "threshold_policy": threshold_policy,
+            "calculation_audit": calculation_audit,
+        }
+        written = conn.execute(
+            """
+            WITH candidate AS (
+                SELECT *
+                FROM jsonb_to_record(%s::jsonb) AS item(
+                    event_id BIGINT,
+                    window_minutes INTEGER,
+                    threshold_bps INTEGER,
+                    method_version TEXT,
+                    direction TEXT,
+                    status TEXT,
+                    first_touch_side TEXT,
+                    terminal_reason TEXT,
+                    success BOOLEAN,
+                    measurement_start_utc TIMESTAMPTZ,
+                    first_observed_open_utc TIMESTAMPTZ,
+                    observed_through_utc TIMESTAMPTZ,
+                    decision_time_utc TIMESTAMPTZ,
+                    time_to_decision_seconds INTEGER,
+                    initial_gap_seconds INTEGER,
+                    initial_gap_unobserved BOOLEAN,
+                    reference_price DOUBLE PRECISION,
+                    favorable_barrier_price DOUBLE PRECISION,
+                    adverse_barrier_price DOUBLE PRECISION,
+                    favorable_touch_price DOUBLE PRECISION,
+                    adverse_touch_price DOUBLE PRECISION,
+                    max_favorable_price DOUBLE PRECISION,
+                    max_adverse_price DOUBLE PRECISION,
+                    mfe_pct DOUBLE PRECISION,
+                    mae_pct DOUBLE PRECISION,
+                    candle_interval_seconds INTEGER,
+                    path_samples INTEGER,
+                    observation_closed BOOLEAN,
+                    input_path_complete BOOLEAN,
+                    path_complete BOOLEAN,
+                    price_source TEXT,
+                    market_pair TEXT,
+                    data_quality_status TEXT,
+                    data_quality_note TEXT,
+                    threshold_policy JSONB,
+                    calculation_audit JSONB
+                )
+            )
+            INSERT INTO research_ordered_first_touch_outcomes (
+                event_id, window_minutes, threshold_bps, method_version,
+                direction, status, first_touch_side, terminal_reason, success,
+                measurement_start_utc, first_observed_open_utc,
+                observed_through_utc, decision_time_utc,
+                time_to_decision_seconds, initial_gap_seconds,
+                initial_gap_unobserved, reference_price,
+                favorable_barrier_price, adverse_barrier_price,
+                favorable_touch_price, adverse_touch_price,
+                max_favorable_price, max_adverse_price, mfe_pct, mae_pct,
+                candle_interval_seconds, path_samples, observation_closed,
+                input_path_complete, path_complete, price_source, market_pair,
+                data_quality_status, data_quality_note, threshold_policy,
+                calculation_audit
+            )
+            SELECT
+                event_id, window_minutes, threshold_bps, method_version,
+                direction, status, first_touch_side, terminal_reason, success,
+                measurement_start_utc, first_observed_open_utc,
+                observed_through_utc, decision_time_utc,
+                time_to_decision_seconds, initial_gap_seconds,
+                initial_gap_unobserved, reference_price,
+                favorable_barrier_price, adverse_barrier_price,
+                favorable_touch_price, adverse_touch_price,
+                max_favorable_price, max_adverse_price, mfe_pct, mae_pct,
+                candle_interval_seconds, path_samples, observation_closed,
+                input_path_complete, path_complete, price_source, market_pair,
+                data_quality_status, data_quality_note, threshold_policy,
+                calculation_audit
+            FROM candidate
+            ON CONFLICT (
+                event_id, window_minutes, threshold_bps, method_version
+            ) DO UPDATE SET
+                direction=EXCLUDED.direction,
+                status=EXCLUDED.status,
+                first_touch_side=EXCLUDED.first_touch_side,
+                terminal_reason=EXCLUDED.terminal_reason,
+                success=EXCLUDED.success,
+                first_observed_open_utc=EXCLUDED.first_observed_open_utc,
+                observed_through_utc=EXCLUDED.observed_through_utc,
+                decision_time_utc=EXCLUDED.decision_time_utc,
+                time_to_decision_seconds=EXCLUDED.time_to_decision_seconds,
+                initial_gap_seconds=EXCLUDED.initial_gap_seconds,
+                initial_gap_unobserved=EXCLUDED.initial_gap_unobserved,
+                favorable_touch_price=EXCLUDED.favorable_touch_price,
+                adverse_touch_price=EXCLUDED.adverse_touch_price,
+                max_favorable_price=EXCLUDED.max_favorable_price,
+                max_adverse_price=EXCLUDED.max_adverse_price,
+                mfe_pct=EXCLUDED.mfe_pct,
+                mae_pct=EXCLUDED.mae_pct,
+                path_samples=EXCLUDED.path_samples,
+                observation_closed=EXCLUDED.observation_closed,
+                input_path_complete=EXCLUDED.input_path_complete,
+                path_complete=EXCLUDED.path_complete,
+                price_source=EXCLUDED.price_source,
+                market_pair=EXCLUDED.market_pair,
+                data_quality_status=EXCLUDED.data_quality_status,
+                data_quality_note=EXCLUDED.data_quality_note,
+                threshold_policy=EXCLUDED.threshold_policy,
+                calculation_audit=EXCLUDED.calculation_audit,
+                updated_at_utc=NOW()
+            WHERE research_ordered_first_touch_outcomes.status
+                    IN ('OPEN', 'DATA_MISSING')
+              AND (
+                    EXCLUDED.observed_through_utc >=
+                        research_ordered_first_touch_outcomes.observed_through_utc
+                    OR (
+                        research_ordered_first_touch_outcomes.status='DATA_MISSING'
+                        AND EXCLUDED.path_complete IS TRUE
+                    )
+                  )
+            RETURNING event_id
+            """,
+            (
+                json.dumps(
+                    database_record,
+                    ensure_ascii=False,
+                    default=str,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+            ),
+        ).fetchone()
+        if not written:
+            return False
+
+        row = google_sheets_sync.ordered_outcome_row(
+            event=event,
+            reference_source=source,
+            path_result=path_result,
+            outcome=normalized,
+            quality=quality,
+        )
+        payload = {"sheet": "Outcomes", "key": "outcome_id", "row": row}
+        serialized_payload = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        payload_sha256 = hashlib.sha256(
+            serialized_payload.encode("utf-8")
+        ).hexdigest()
+        conn.execute(
+            """
+            INSERT INTO research_ordered_first_touch_sync_outbox (
+                event_id, window_minutes, threshold_bps, method_version,
+                remote_row_key, payload, payload_sha256
+            ) VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
+            ON CONFLICT (
+                event_id, window_minutes, threshold_bps, method_version,
+                destination
+            ) DO UPDATE SET
+                remote_row_key=EXCLUDED.remote_row_key,
+                payload=EXCLUDED.payload,
+                payload_sha256=EXCLUDED.payload_sha256,
+                sync_status=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.sync_status
+                    ELSE 'PENDING'
+                END,
+                attempts=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.attempts
+                    ELSE 0
+                END,
+                next_attempt_at_utc=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.next_attempt_at_utc
+                    ELSE NOW()
+                END,
+                last_attempt_at_utc=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.last_attempt_at_utc
+                    ELSE NULL
+                END,
+                claim_token=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.claim_token
+                    ELSE NULL
+                END,
+                claimed_at_utc=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.claimed_at_utc
+                    ELSE NULL
+                END,
+                lease_expires_at_utc=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.lease_expires_at_utc
+                    ELSE NULL
+                END,
+                claimed_payload_sha256=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.claimed_payload_sha256
+                    ELSE NULL
+                END,
+                synced_at_utc=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.synced_at_utc
+                    ELSE NULL
+                END,
+                last_error=CASE
+                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
+                            = EXCLUDED.payload_sha256
+                    THEN research_ordered_first_touch_sync_outbox.last_error
+                    ELSE NULL
+                END,
+                updated_at_utc=NOW()
+            """,
+            (
+                int(event["event_id"]),
+                int(window_minutes),
+                int(normalized["threshold_bps"]),
+                _ORDERED_FIRST_TOUCH_METHOD_VERSION,
+                row["outcome_id"],
+                serialized_payload,
+                payload_sha256,
+            ),
+        )
+        return True
+
+    @staticmethod
+    def _claim_ordered_first_touch_outbox(
+        conn, limit: int
+    ) -> list[Dict[str, Any]]:
+        """Lease due outbox rows without holding a lock during HTTP."""
+        return conn.execute(
+            """
+            WITH picked AS (
+                SELECT event_id, window_minutes, threshold_bps,
+                       method_version, destination
+                FROM research_ordered_first_touch_sync_outbox
+                WHERE destination='GOOGLE_SHEETS'
+                  AND (
+                        (
+                            sync_status IN ('PENDING', 'RETRY')
+                            AND next_attempt_at_utc <= NOW()
+                        )
+                        OR (
+                            sync_status='IN_FLIGHT'
+                            AND lease_expires_at_utc <= NOW()
+                        )
+                      )
+                ORDER BY next_attempt_at_utc, created_at_utc,
+                         event_id, window_minutes, threshold_bps
+                FOR UPDATE SKIP LOCKED
+                LIMIT %s
+            )
+            UPDATE research_ordered_first_touch_sync_outbox queued
+            SET sync_status='IN_FLIGHT',
+                attempts=queued.attempts + 1,
+                last_attempt_at_utc=NOW(),
+                claim_token=gen_random_uuid(),
+                claimed_at_utc=NOW(),
+                lease_expires_at_utc=NOW() + INTERVAL '2 minutes',
+                claimed_payload_sha256=queued.payload_sha256,
+                next_attempt_at_utc=NOW(),
+                synced_at_utc=NULL,
+                last_error=NULL,
+                updated_at_utc=NOW()
+            FROM picked
+            WHERE queued.event_id=picked.event_id
+              AND queued.window_minutes=picked.window_minutes
+              AND queued.threshold_bps=picked.threshold_bps
+              AND queued.method_version=picked.method_version
+              AND queued.destination=picked.destination
+            RETURNING queued.event_id, queued.window_minutes,
+                      queued.threshold_bps, queued.method_version,
+                      queued.destination, queued.payload, queued.attempts,
+                      queued.claim_token, queued.claimed_payload_sha256
+            """,
+            (max(1, min(int(limit), _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT)),),
+        ).fetchall()
+
+    @staticmethod
+    def _finish_ordered_first_touch_outbox(
+        conn,
+        claimed: Sequence[Mapping[str, Any]],
+        *,
+        delivered: bool,
+        error: Optional[str] = None,
+    ) -> int:
+        keys = [
+            {
+                "event_id": int(row["event_id"]),
+                "window_minutes": int(row["window_minutes"]),
+                "threshold_bps": int(row["threshold_bps"]),
+                "method_version": str(row["method_version"]),
+                "destination": str(row["destination"]),
+                "claim_token": str(row["claim_token"]),
+                "claimed_payload_sha256": str(
+                    row["claimed_payload_sha256"]
+                ),
+            }
+            for row in claimed
+        ]
+        if not keys:
+            return 0
+        if delivered:
+            result = conn.execute(
+                """
+                WITH keys AS (
+                    SELECT * FROM jsonb_to_recordset(%s::jsonb) AS item(
+                        event_id BIGINT,
+                        window_minutes INTEGER,
+                        threshold_bps INTEGER,
+                        method_version TEXT,
+                        destination TEXT,
+                        claim_token UUID,
+                        claimed_payload_sha256 CHAR(64)
+                    )
+                )
+                UPDATE research_ordered_first_touch_sync_outbox queued
+                SET sync_status='SYNCED', synced_at_utc=NOW(),
+                    last_error=NULL,
+                    claim_token=NULL,
+                    claimed_at_utc=NULL,
+                    lease_expires_at_utc=NULL,
+                    claimed_payload_sha256=NULL,
+                    updated_at_utc=NOW()
+                FROM keys
+                WHERE queued.event_id=keys.event_id
+                  AND queued.window_minutes=keys.window_minutes
+                  AND queued.threshold_bps=keys.threshold_bps
+                  AND queued.method_version=keys.method_version
+                  AND queued.destination=keys.destination
+                  AND queued.sync_status='IN_FLIGHT'
+                  AND queued.claim_token=keys.claim_token
+                  AND queued.payload_sha256=keys.claimed_payload_sha256
+                  AND queued.claimed_payload_sha256=
+                        keys.claimed_payload_sha256
+                RETURNING queued.event_id
+                """,
+                (json.dumps(keys, separators=(",", ":")),),
+            ).fetchall()
+            return len(result)
+
+        reason = str(error or "Google Sheets did not confirm delivery")[:2000]
+        result = conn.execute(
+            """
+            WITH keys AS (
+                SELECT * FROM jsonb_to_recordset(%s::jsonb) AS item(
+                    event_id BIGINT,
+                    window_minutes INTEGER,
+                    threshold_bps INTEGER,
+                    method_version TEXT,
+                    destination TEXT,
+                    claim_token UUID,
+                    claimed_payload_sha256 CHAR(64)
+                )
+            )
+            UPDATE research_ordered_first_touch_sync_outbox queued
+            SET sync_status=CASE
+                    WHEN queued.attempts >= 12 THEN 'DEAD_LETTER'
+                    ELSE 'RETRY'
+                END,
+                synced_at_utc=NULL,
+                last_error=%s,
+                claim_token=NULL,
+                claimed_at_utc=NULL,
+                lease_expires_at_utc=NULL,
+                claimed_payload_sha256=NULL,
+                next_attempt_at_utc=NOW()
+                    + (LEAST(3600, 30 * POWER(2, LEAST(7, queued.attempts)))
+                       * INTERVAL '1 second'),
+                updated_at_utc=NOW()
+            FROM keys
+            WHERE queued.event_id=keys.event_id
+              AND queued.window_minutes=keys.window_minutes
+              AND queued.threshold_bps=keys.threshold_bps
+              AND queued.method_version=keys.method_version
+              AND queued.destination=keys.destination
+              AND queued.sync_status='IN_FLIGHT'
+              AND queued.claim_token=keys.claim_token
+              AND queued.payload_sha256=keys.claimed_payload_sha256
+              AND queued.claimed_payload_sha256=keys.claimed_payload_sha256
+            RETURNING queued.event_id
+            """,
+            (json.dumps(keys, separators=(",", ":")), reason),
+        ).fetchall()
+        return len(result)
+
+    def _drain_ordered_first_touch_outbox(self, url: str) -> Dict[str, int]:
+        if not google_sheets_sync.enabled():
+            return {"claimed": 0, "synced": 0, "failed": 0}
+        with psycopg.connect(
+            url,
+            row_factory=dict_row,
+            connect_timeout=5,
+            options="-c statement_timeout=15000 -c lock_timeout=1000",
+        ) as conn:
+            claimed = self._claim_ordered_first_touch_outbox(
+                conn, _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT
+            )
+        if not claimed:
+            return {"claimed": 0, "synced": 0, "failed": 0}
+        payloads = [dict(_mapping(row.get("payload"))) for row in claimed]
+        delivered = google_sheets_sync.deliver_now(
+            {
+                "kind": "ordered_first_touch_outcomes",
+                "upserts": payloads,
+            },
+            attempts=1,
+        )
+        with psycopg.connect(
+            url,
+            row_factory=dict_row,
+            connect_timeout=5,
+            options="-c statement_timeout=15000 -c lock_timeout=1000",
+        ) as conn:
+            finished = self._finish_ordered_first_touch_outbox(
+                conn,
+                claimed,
+                delivered=delivered,
+                error=(
+                    None
+                    if delivered
+                    else "Google Sheets webhook did not confirm delivery"
+                ),
+            )
+        return {
+            "claimed": len(claimed),
+            "synced": finished if delivered else 0,
+            "failed": 0 if delivered else finished,
+        }
+
+    def _run_ordered_first_touch_locked(
+        self, url: str, *, event_limit: int
+    ) -> Dict[str, int]:
+        """Calculate and export v7 while the caller owns the pass lock."""
+        summary = {
+            "checked": 0,
+            "written": 0,
+            "path_failures": 0,
+            "synced": 0,
+            "sync_failures": 0,
+            "lock_skipped": 0,
+        }
+        now = datetime.now(timezone.utc)
+        latest_closed_cutoff = _latest_closed_candle_cutoff(now)
+        with psycopg.connect(
+            url,
+            row_factory=dict_row,
+            connect_timeout=5,
+            options="-c statement_timeout=15000 -c lock_timeout=1000",
+        ) as conn:
+            events = self._load_ordered_first_touch_due_events(
+                conn, event_limit
+            )
+
+        for raw_event in events:
+            event = dict(raw_event)
+            summary["checked"] += 1
+            event_time = _utc(event["alert_time_utc"])
+            symbol = str(event.get("symbol") or "").strip().upper()
+            provenance_error = _alert_reference_provenance_error(event)
+            if provenance_error is not None:
+                with psycopg.connect(
+                    url,
+                    row_factory=dict_row,
+                    connect_timeout=5,
+                    options=(
+                        "-c statement_timeout=15000 -c lock_timeout=1000"
+                    ),
+                ) as conn:
+                    self._write_alert_reference_rejections(
+                        conn, [{"event": event, "reason": provenance_error}]
+                    )
+                continue
+            try:
+                reference_price = float(event.get("current_price"))
+                if not math.isfinite(reference_price) or reference_price <= 0:
+                    raise ValueError("invalid immutable decision price")
+                observation_cutoff = min(
+                    event_time
+                    + timedelta(minutes=max(_ORDERED_FIRST_TOUCH_WINDOWS)),
+                    latest_closed_cutoff,
+                )
+                path_result = canonical_price_path.fetch_closed_candles(
+                    symbol, event_time, observation_cutoff
+                )
+                path_provenance_error = _canonical_path_provenance_error(
+                    symbol, path_result
+                )
+                if path_provenance_error is not None:
+                    raise ValueError(path_provenance_error)
+            except Exception as exc:
+                summary["path_failures"] += 1
+                print(
+                    "[research-outcomes] ordered v7 path unavailable "
+                    f"event={event.get('event_id')} symbol={symbol}: {exc!r}",
+                    flush=True,
+                )
+                continue
+
+            full_path = list(path_result.get("candles") or [])
+            reference_source = _snapshot_price_source(
+                event.get("engine_snapshot")
+            )
+            with psycopg.connect(
+                url,
+                row_factory=dict_row,
+                connect_timeout=5,
+                options="-c statement_timeout=15000 -c lock_timeout=1000",
+            ) as conn:
+                for window_minutes in _ORDERED_FIRST_TOUCH_WINDOWS:
+                    window_cutoff = event_time + timedelta(
+                        minutes=window_minutes
+                    )
+                    observed_cutoff = min(
+                        window_cutoff, latest_closed_cutoff
+                    )
+                    candles = _candles_for_horizon(
+                        full_path, observed_cutoff
+                    )
+                    expected = _expected_candles(
+                        event_time, observed_cutoff
+                    )
+                    # Completeness is window-local.  A gap after 60m must not
+                    # invalidate an otherwise complete 60m prefix merely
+                    # because the single shared 24h fetch is partial later.
+                    # The pure calculator independently verifies contiguity.
+                    prefix_complete = len(candles) == expected
+                    outcomes = (
+                        research_ordered_first_touch
+                        .calculate_all_ordered_first_touch_outcomes(
+                            reference_price=reference_price,
+                            direction=str(event["direction"]),
+                            event_time=event_time,
+                            candles=candles,
+                            observation_closed=(now >= window_cutoff),
+                            path_complete=prefix_complete,
+                        )
+                    )
+                    for outcome in outcomes:
+                        if self._write_ordered_first_touch_outcome(
+                            conn,
+                            event=event,
+                            window_minutes=window_minutes,
+                            reference_source=reference_source,
+                            path_result=path_result,
+                            outcome=outcome,
+                            expected_candles=expected,
+                        ):
+                            summary["written"] += 1
+            # Drop the potentially 1,440-candle route before the next event.
+            del full_path
+
+        delivery = self._drain_ordered_first_touch_outbox(url)
+        summary["synced"] = delivery["synced"]
+        summary["sync_failures"] = delivery["failed"]
+        return summary
+
+    def _run_ordered_first_touch_once(
+        self, url: str, *, event_limit: int
+    ) -> Dict[str, int]:
+        """Run one bounded cross-process single-writer v7 pass.
+
+        The dedicated PostgreSQL session stays open through calculation,
+        outbox claim and remote HTTP delivery.  This prevents a second worker
+        from replacing an ``IN_FLIGHT`` generation and delivering it before
+        the first request finishes.  ``pg_try_advisory_lock`` never waits: a
+        competing pass reports a skip and retries on its normal next poll.
+        Closing the dedicated session releases the session-level lock even if
+        calculation or delivery raises.
+        """
+        skipped = {
+            "checked": 0,
+            "written": 0,
+            "path_failures": 0,
+            "synced": 0,
+            "sync_failures": 0,
+            "lock_skipped": 1,
+        }
+        with psycopg.connect(
+            url,
+            row_factory=dict_row,
+            connect_timeout=5,
+            autocommit=True,
+            options="-c statement_timeout=15000 -c lock_timeout=1000",
+        ) as lock_conn:
+            lock_row = lock_conn.execute(
+                "SELECT pg_try_advisory_lock(%s) AS acquired",
+                (_ORDERED_FIRST_TOUCH_PASS_LOCK_ID,),
+            ).fetchone()
+            if not lock_row or not bool(lock_row["acquired"]):
+                return skipped
+            return self._run_ordered_first_touch_locked(
+                url, event_limit=event_limit
+            )
+
+    @staticmethod
     def _write_outcome(
         conn,
         *,
@@ -1626,7 +2503,7 @@ class ResearchOutcomeWorker:
                 path_metrics["target_progress_ratio"],
                 path_metrics["target_reached"],
                 canonical_price_path.INTERVAL_SECONDS,
-                len(path_result["candles"]),
+                _path_sample_count(path_result),
                 _METHOD_VERSION,
                 source,
                 quality,
@@ -1740,7 +2617,7 @@ class ResearchOutcomeWorker:
                 first_touch["qualifying_candle_order_ambiguous"],
                 first_touch["dwell_required_seconds"],
                 canonical_price_path.INTERVAL_SECONDS,
-                len(path_result["candles"]),
+                _path_sample_count(path_result),
                 source,
                 quality,
                 list(canonical_price_path.COMPLETE_QUALITIES),
@@ -1748,28 +2625,53 @@ class ResearchOutcomeWorker:
                 list(canonical_price_path.COMPLETE_QUALITIES),
             ),
         ).fetchone()
-        written = bool(row)
-        if written:
-            try:
-                google_sheets_sync.enqueue_first_touch_outcome(
-                    event=event,
-                    horizon=horizon,
-                    reference_price=reference_price,
-                    reference_source=source,
-                    path_result=path_result,
-                    first_touch=first_touch,
-                    quality=quality,
-                )
-            except Exception as exc:
-                print(f"[google-sheets] outcome enqueue failed open: {exc!r}", flush=True)
-        return written
+        # v6 is a one-sided favorable-touch audit label, not an ordered
+        # favorable-vs-adverse race.  Exporting it to the shared Outcomes tab
+        # previously invented adverse touches for MISS rows and allowed its
+        # legacy snapshot/threshold key to collide with v7 rows.  Retain v6 in
+        # PostgreSQL only; the additive v7 path owns the workbook contract.
+        return bool(row)
 
-    def run_once(self, *, limit_per_horizon: int = 200) -> Dict[str, Any]:
+    def run_once(
+        self, *, limit_per_horizon: int = _CLOSED_OUTCOME_EVENT_LIMIT
+    ) -> Dict[str, Any]:
         url = _database_url()
         if not _ENABLED:
             return {"enabled": False, "inserted": 0, "upgraded": 0}
         if not url or psycopg is None:
             raise RuntimeError("Research outcome worker database is not configured")
+
+        ordered_summary = {
+            "checked": 0,
+            "written": 0,
+            "path_failures": 0,
+            "synced": 0,
+            "sync_failures": 0,
+            "lock_skipped": 0,
+        }
+        try:
+            ordered_summary = self._run_ordered_first_touch_once(
+                url,
+                event_limit=min(
+                    int(limit_per_horizon),
+                    _ORDERED_FIRST_TOUCH_EVENT_LIMIT,
+                ),
+            )
+            self.metrics.ordered_first_touch_last_error = None
+        except Exception as exc:
+            # v7 storage/export is additive and must not interrupt the retained
+            # canonical endpoint and v6 audit workers during a transient DB or
+            # Sheet-side failure.  Its own durable outbox and metrics make the
+            # failure visible and retryable on the next pass.
+            self.metrics.ordered_first_touch_failures += 1
+            self.metrics.ordered_first_touch_last_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            print(
+                "[research-outcomes] ordered v7 pass failed: "
+                f"{exc!r}",
+                flush=True,
+            )
 
         inserted = 0
         upgraded = 0
@@ -2085,8 +2987,15 @@ class ResearchOutcomeWorker:
                     and not first_touch_write_safe
                 ):
                     first_touch_terminal_deferred += 1
-                outcome_path = dict(path_result)
-                outcome_path["candles"] = candles
+                # All path-dependent calculations are finished.  Persistence
+                # only needs route provenance and the sample count; keeping
+                # candle objects here retained every event's full 24h path
+                # until the entire legacy batch had finished downloading.
+                outcome_path = {
+                    key: value for key, value in path_result.items()
+                    if key != "candles"
+                }
+                outcome_path["path_samples"] = len(candles)
                 prepared.append(
                     {
                         "event": event,
@@ -2211,6 +3120,18 @@ class ResearchOutcomeWorker:
         self.metrics.first_touch_terminal_rows_deferred_for_incomplete_prefix += (
             first_touch_terminal_deferred
         )
+        self.metrics.ordered_first_touch_events_checked += ordered_summary[
+            "checked"
+        ]
+        self.metrics.ordered_first_touch_rows_written += ordered_summary[
+            "written"
+        ]
+        self.metrics.ordered_first_touch_rows_synced += ordered_summary[
+            "synced"
+        ]
+        self.metrics.ordered_first_touch_sync_failures += ordered_summary[
+            "sync_failures"
+        ]
         self.metrics.last_run_utc = datetime.now(timezone.utc).isoformat()
         self.metrics.last_error = None
         return {
@@ -2232,6 +3153,7 @@ class ResearchOutcomeWorker:
             "first_touch_terminal_rows_deferred_for_incomplete_prefix": (
                 first_touch_terminal_deferred
             ),
+            "ordered_first_touch": dict(ordered_summary),
             "unavailable_symbols": {
                 symbol: unavailable_event_counts[symbol]
                 for symbol in sorted(unavailable_symbols)
