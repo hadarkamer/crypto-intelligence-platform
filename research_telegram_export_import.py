@@ -144,20 +144,57 @@ def _rows(payload: Mapping[str, Any]) -> Iterable[Dict[str, Any]]:
             }
 
 
-def import_export(path: Path, *, apply: bool = False) -> Dict[str, Any]:
+def _boundary(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        raise ValueError("Telegram import boundaries must include a UTC offset")
+    return parsed.astimezone(timezone.utc)
+
+
+def import_export(
+    path: Path,
+    *,
+    apply: bool = False,
+    since: Any = None,
+    until: Any = None,
+) -> Dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError("Telegram export root must be a JSON object")
-    rows = list(_rows(payload))
+    all_rows = list(_rows(payload))
+    since_utc = _boundary(since)
+    until_utc = _boundary(until)
+    if since_utc and until_utc and since_utc > until_utc:
+        raise ValueError("Telegram import since boundary is after until boundary")
+    rows = [
+        row for row in all_rows
+        if (since_utc is None or row["message_time_utc"] >= since_utc)
+        and (until_utc is None or row["message_time_utc"] <= until_utc)
+    ]
     summary = {
         "source": str(path),
+        "parsed_alert_messages": len(all_rows),
         "candidate_messages": len(rows),
+        "excluded_before_window": sum(
+            row["message_time_utc"] < since_utc for row in all_rows
+        ) if since_utc else 0,
+        "excluded_after_window": sum(
+            row["message_time_utc"] > until_utc for row in all_rows
+        ) if until_utc else 0,
+        "since_utc": since_utc,
+        "until_utc": until_utc,
         "applied": False,
         "inserted": 0,
         "training_eligible": False,
     }
     if not apply:
         return summary
+    if since_utc is None:
+        raise RuntimeError(
+            "Refusing import without an explicit timezone-aware --since boundary"
+        )
     if os.getenv("RESEARCH_LEGACY_IMPORT_APPLY", "").strip().lower() not in _TRUE:
         raise RuntimeError(
             "Refusing import: set RESEARCH_LEGACY_IMPORT_APPLY=1 explicitly"
@@ -197,8 +234,25 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("path", type=Path)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--since",
+        help="Inclusive timezone-aware lower bound, e.g. 2026-09-04T00:00:00+03:00",
+    )
+    parser.add_argument(
+        "--until",
+        help="Inclusive timezone-aware upper bound; omit to include through execution time",
+    )
     args = parser.parse_args()
-    print(json.dumps(import_export(args.path, apply=args.apply), indent=2, default=str))
+    print(json.dumps(
+        import_export(
+            args.path,
+            apply=args.apply,
+            since=args.since,
+            until=args.until,
+        ),
+        indent=2,
+        default=str,
+    ))
 
 
 if __name__ == "__main__":

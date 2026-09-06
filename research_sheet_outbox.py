@@ -14,6 +14,21 @@ except ImportError:
     dict_row = None
 
 _LOCK_ID = 702094113543720211
+_SHEET_ROTATION = (
+    'Telegram_Events',
+    'Snapshots',
+    'תצוגת לייב',
+    'Episodes',
+    'Formula_Results',
+)
+_rotation_index = 0
+
+
+def _next_preferred_sheet() -> str:
+    global _rotation_index
+    sheet = _SHEET_ROTATION[_rotation_index % len(_SHEET_ROTATION)]
+    _rotation_index = (_rotation_index + 1) % len(_SHEET_ROTATION)
+    return sheet
 
 
 def _json(value: Any) -> str:
@@ -70,13 +85,16 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
             while summary['claimed'] < max(1, int(max_rows)) and time.monotonic() < deadline:
                 token = str(uuid.uuid4())
                 count = min(8, google_sheets_sync.ordered_outcome_batch_limit(), int(max_rows)-summary['claimed'])
+                preferred_sheet = _next_preferred_sheet()
                 with _connect(database_url) as conn:
                     rows = conn.execute('''
                         WITH due AS (
                             SELECT sheet_name,row_key FROM research_sheet_upsert_outbox
                             WHERE (sync_status IN ('PENDING','RETRY') AND next_attempt_at_utc <= NOW())
                                OR (sync_status='IN_FLIGHT' AND lease_expires_at_utc < NOW())
-                            ORDER BY next_attempt_at_utc,updated_at_utc,sheet_name,row_key
+                            ORDER BY
+                                CASE WHEN sheet_name=%s THEN 0 ELSE 1 END,
+                                next_attempt_at_utc,updated_at_utc,sheet_name,row_key
                             FOR UPDATE SKIP LOCKED LIMIT %s
                         )
                         UPDATE research_sheet_upsert_outbox AS q SET
@@ -86,7 +104,7 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
                             synced_at_utc=NULL,last_error=NULL
                         FROM due WHERE q.sheet_name=due.sheet_name AND q.row_key=due.row_key
                         RETURNING q.sheet_name,q.row_key,q.payload,q.payload_sha256,q.attempts
-                    ''', (count,token)).fetchall()
+                    ''', (preferred_sheet,count,token)).fetchall()
                 if not rows:
                     break
                 summary['claimed'] += len(rows)

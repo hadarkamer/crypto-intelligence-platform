@@ -38,7 +38,7 @@ class SourceConnection:
         self.calls.append((query, params))
         if "pg_try_advisory_xact_lock" in query:
             return Result([{"held": True}])
-        if "WITH picked AS MATERIALIZED" in query:
+        if "picked AS MATERIALIZED" in query:
             return Result(self.candidates)
         if "ORDER BY event.event_id LIMIT" in query:
             return Result(self.children)
@@ -50,6 +50,14 @@ class SourceConnection:
 
 
 def run():
+    worker.research_sheet_outbox._rotation_index = 0
+    rotation = [
+        worker.research_sheet_outbox._next_preferred_sheet()
+        for _ in worker.research_sheet_outbox._SHEET_ROTATION
+    ]
+    assert tuple(rotation) == worker.research_sheet_outbox._SHEET_ROTATION
+    assert worker.research_sheet_outbox._next_preferred_sheet() == rotation[0]
+
     primary = _alert(Event(), 1)
     primary["engine_snapshot"].update(near_share_pct=70, near_amount=700, far_amount=300)
     child = _alert(DirectEvent(), 2)
@@ -123,8 +131,10 @@ def run():
     assert result["deferred"] == 1 and result["rejected"] == 0
     deferred = [params for query, params in pending.calls if "INSERT INTO research_snapshot_sheet_sources" in query]
     assert deferred[0][3] == "DEFERRED"
-    candidate_query = next(query for query, _ in pending.calls if "WITH picked AS MATERIALIZED" in query)
+    candidate_query = next(query for query, _ in pending.calls if "picked AS MATERIALIZED" in query)
     assert "staged.next_attempt_at_utc>NOW()" in candidate_query
+    assert "ORDER BY event_id ASC" in candidate_query
+    assert "ORDER BY event_id DESC" in candidate_query
     authorized = SourceConnection([neutral], neutral={
         "decision_feature_bundle": {"model_score_status": "ABSENT"},
         "anchor_slot_id": 8, "feature_bundle_policy_version": "formula-visible-v1",

@@ -43,6 +43,7 @@ import research_outcome_worker
 import research_btc_episode_worker
 import research_formula_ordered_worker
 import research_snapshot_sync_worker
+import google_sheets_sync
 import research_formula_schema_admin
 import research_formula_store
 import research_formula_worker
@@ -96,6 +97,7 @@ COLLECT_LOCK = None
 SCRAPE_LOCK = None
 WATCH_TASK = None
 WATCH_SCAN_TASK = None
+WATCH_SUPERVISOR_TASK = None
 SPECIFIC_WATCH_TASK = None
 OI_REFRESH_TASK = None
 FLOW_REFRESH_TASK = None
@@ -109,6 +111,11 @@ FLOW_BACKFILL_LOCK = None
 SPECIFIC_WATCHES: Dict[str, Dict[str, Any]] = {}
 MAGNET_V1_WATCHES: Dict[str, Dict[str, Any]] = {}
 WATCH_GENERAL_ENABLED = False
+WATCH_DESIRED_STATE_KEY = "watch_desired_state_v1"
+WATCH_DESIRED_STATE_VERSION = "durable-watch-v1"
+WATCH_SUPERVISOR_INTERVAL_SECONDS = max(
+    5, int(os.getenv("WATCH_SUPERVISOR_INTERVAL_SECONDS", "15"))
+)
 SPECIFIC_WATCH_INTERVAL_MINUTES = 5
 ALERT_COMMAND_LOCK = None
 PROCESSED_UPDATE_IDS = set()
@@ -176,6 +183,9 @@ WATCH_RUNTIME = {
     "scan_owner": None,
     "cycle_number": 0,
     "mode": "all",
+    "chat_id": None,
+    "supervisor_restarts": 0,
+    "restored_from_persistence": False,
     "derivatives_generation": None,
     "derivatives_status": None,
     "oi_ready": 0,
@@ -471,6 +481,123 @@ def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
 
 def watch_enabled() -> bool:
     return get_setting("watch_enabled", "0") == "1"
+
+
+def _watch_desired_state() -> Dict[str, Any]:
+    """Return the complete durable Watch intent as one atomic JSON value."""
+    chat_id = WATCH_RUNTIME.get("chat_id")
+    if chat_id is None:
+        for watch in MAGNET_V1_WATCHES.values():
+            if watch.get("chat_id") is not None:
+                chat_id = int(watch["chat_id"])
+                break
+    return {
+        "version": WATCH_DESIRED_STATE_VERSION,
+        "general_enabled": bool(WATCH_GENERAL_ENABLED),
+        "mode": "top8" if WATCH_RUNTIME.get("mode") == "top8" else "all",
+        "chat_id": int(chat_id) if chat_id is not None else None,
+        "magnet_symbols": sorted(MAGNET_V1_WATCHES),
+        "magnet_watches": [
+            {
+                "symbol": symbol,
+                "chat_id": (
+                    int(watch["chat_id"])
+                    if watch.get("chat_id") is not None
+                    else None
+                ),
+                "started_at": watch.get("started_at"),
+            }
+            for symbol, watch in sorted(MAGNET_V1_WATCHES.items())
+        ],
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _persist_watch_subscriptions() -> None:
+    """Persist desired subscriptions; only explicit commands may disable them."""
+    desired = _watch_desired_state()
+    set_setting(
+        WATCH_DESIRED_STATE_KEY,
+        json.dumps(desired, ensure_ascii=False, separators=(",", ":")),
+    )
+    # Keep the old keys accurate for status tooling and a safe one-time upgrade.
+    set_setting("watch_enabled", "1" if desired["general_enabled"] else "0")
+    set_setting("watch_mode", desired["mode"])
+    set_setting("watch_chat_id", "" if desired["chat_id"] is None else str(desired["chat_id"]))
+
+
+def _restore_watch_subscriptions() -> Dict[str, Any]:
+    """Restore Watch intent after a process restart without inventing stop commands."""
+    global WATCH_GENERAL_ENABLED
+    raw = get_setting(WATCH_DESIRED_STATE_KEY)
+    migrated = False
+    if raw:
+        try:
+            desired = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Invalid persisted Watch desired state") from exc
+        if not isinstance(desired, Mapping):
+            raise RuntimeError("Persisted Watch desired state is not an object")
+    else:
+        # Until this release startup itself wrote watch_enabled=0.  A retained
+        # watch_chat_id therefore proves a previously authorized Watch, while
+        # the zero does not prove an explicit /watch_stop.  Seed the currently
+        # requested Top-8 + eight-symbol Magnet configuration once; every later
+        # stop/start is represented by the atomic state above.
+        legacy_chat_id = get_setting("watch_chat_id")
+        desired = {
+            "version": WATCH_DESIRED_STATE_VERSION,
+            "general_enabled": bool(legacy_chat_id),
+            "mode": "top8",
+            "chat_id": int(legacy_chat_id) if legacy_chat_id else None,
+            "magnet_symbols": sorted(TOP8_SYMBOLS) if legacy_chat_id else [],
+        }
+        migrated = bool(legacy_chat_id)
+
+    chat_id = desired.get("chat_id")
+    try:
+        chat_id = int(chat_id) if chat_id not in (None, "") else None
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("Persisted Watch chat_id is invalid") from exc
+    mode = "top8" if desired.get("mode") == "top8" else "all"
+    stored_watches = desired.get("magnet_watches")
+    if not isinstance(stored_watches, list):
+        stored_watches = [
+            {"symbol": symbol, "chat_id": chat_id}
+            for symbol in (desired.get("magnet_symbols") or [])
+        ]
+    WATCH_GENERAL_ENABLED = bool(desired.get("general_enabled"))
+    WATCH_RUNTIME["mode"] = mode
+    WATCH_RUNTIME["chat_id"] = chat_id
+    WATCH_RUNTIME["restored_from_persistence"] = bool(
+        WATCH_GENERAL_ENABLED or stored_watches
+    )
+    MAGNET_V1_WATCHES.clear()
+    for stored_watch in stored_watches:
+        if not isinstance(stored_watch, Mapping):
+            continue
+        symbol = str(stored_watch.get("symbol") or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,20}", symbol):
+            continue
+        watch_chat_id = stored_watch.get("chat_id", chat_id)
+        try:
+            watch_chat_id = (
+                int(watch_chat_id) if watch_chat_id not in (None, "") else chat_id
+            )
+        except (TypeError, ValueError, OverflowError):
+            watch_chat_id = chat_id
+        MAGNET_V1_WATCHES[symbol] = {
+            "symbol": symbol,
+            "chat_id": watch_chat_id,
+            "started_at": (
+                stored_watch.get("started_at") or desired.get("updated_at_utc")
+            ),
+            "last_scan_utc": None,
+            "last_generation": None,
+        }
+    if migrated:
+        _persist_watch_subscriptions()
+    return _watch_desired_state()
 
 
 def _parse_utc_setting(value: Optional[str]) -> Optional[datetime]:
@@ -5039,6 +5166,45 @@ async def _ensure_watch_coordinator(bot_app, chat_id: int) -> bool:
     return True
 
 
+async def _watch_supervisor_loop(bot_app) -> None:
+    """Keep every persisted Watch subscription alive until an explicit stop."""
+    while True:
+        try:
+            if _watch_consumers_active():
+                chat_id = WATCH_RUNTIME.get("chat_id")
+                if chat_id is None:
+                    for watch in MAGNET_V1_WATCHES.values():
+                        if watch.get("chat_id") is not None:
+                            chat_id = int(watch["chat_id"])
+                            break
+                if chat_id is None:
+                    WATCH_RUNTIME["last_cycle_status"] = "blocked_missing_chat_id"
+                    WATCH_RUNTIME["last_error"] = (
+                        "Persisted Watch is active but has no chat_id"
+                    )
+                elif WATCH_TASK is None or WATCH_TASK.done():
+                    await _ensure_watch_coordinator(bot_app, int(chat_id))
+                    WATCH_RUNTIME["supervisor_restarts"] = int(
+                        WATCH_RUNTIME.get("supervisor_restarts") or 0
+                    ) + 1
+                    WATCH_RUNTIME["last_cycle_status"] = "restored_by_supervisor"
+                    WATCH_RUNTIME["last_error"] = None
+                    print(
+                        "[watch] supervisor restored persistent coordinator; "
+                        f"restart={WATCH_RUNTIME['supervisor_restarts']}",
+                        flush=True,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Desired state remains enabled.  A transient failure is retried on
+            # the next supervisor pass and is never converted into a stop.
+            WATCH_RUNTIME["last_cycle_status"] = "supervisor_retry"
+            WATCH_RUNTIME["last_error"] = repr(exc)
+            print(f"[watch] supervisor retry after error: {exc!r}", flush=True)
+        await asyncio.sleep(WATCH_SUPERVISOR_INTERVAL_SECONDS)
+
+
 async def _stop_watch_coordinator_if_idle() -> None:
     """Cancel the shared loop only when no regular or Magnet subscriber remains."""
     global WATCH_TASK, WATCH_SCAN_TASK
@@ -5364,16 +5530,16 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
     WATCH_RUNTIME["mode"] = "all"
     WATCH_RUNTIME["chat_id"] = chat_id
+    _persist_watch_subscriptions()
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id
         )
     except Exception as error:
-        WATCH_GENERAL_ENABLED = False
-        WATCH_RUNTIME["last_cycle_status"] = "failed_to_start"
+        WATCH_RUNTIME["last_cycle_status"] = "supervisor_retry"
         WATCH_RUNTIME["last_error"] = repr(error)
         await update.message.reply_text(
-            f"❌ Watch לא הצליח להתחיל: {error!r}"
+            f"⚠️ Watch ממתין לניסיון התאוששות אוטומטי: {error!r}"
         )
         return
 
@@ -5413,16 +5579,16 @@ async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["next_scan_utc"] = datetime.now(timezone.utc).isoformat()
     WATCH_RUNTIME["mode"] = "top8"
     WATCH_RUNTIME["chat_id"] = chat_id
+    _persist_watch_subscriptions()
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id
         )
     except Exception as error:
-        WATCH_GENERAL_ENABLED = False
-        WATCH_RUNTIME["last_cycle_status"] = "failed_to_start"
+        WATCH_RUNTIME["last_cycle_status"] = "supervisor_retry"
         WATCH_RUNTIME["last_error"] = repr(error)
         await update.message.reply_text(
-            f"❌ Watch Top 8 לא הצליח להתחיל: {error!r}"
+            f"⚠️ Watch Top 8 ממתין לניסיון התאוששות אוטומטי: {error!r}"
         )
         return
 
@@ -5466,14 +5632,16 @@ async def watch_magnet_v1_cmd(
         "last_scan_utc": None,
         "last_generation": None,
     }
+    if WATCH_RUNTIME.get("chat_id") is None:
+        WATCH_RUNTIME["chat_id"] = chat_id
+    _persist_watch_subscriptions()
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id
         )
     except Exception as exc:
-        MAGNET_V1_WATCHES.pop(symbol, None)
         await update.message.reply_text(
-            f"❌ Magnet Watch לא הצליח להתחיל: {exc!r}"
+            f"⚠️ Magnet Watch נשמר וממתין לניסיון התאוששות אוטומטי: {exc!r}"
         )
         return
 
@@ -5515,6 +5683,7 @@ async def watch_magnet_v1_stop_cmd(
             if count
             else "אין מעקבי Magnet Watch פעילים."
         )
+    _persist_watch_subscriptions()
     await _stop_watch_coordinator_if_idle()
     await update.message.reply_text(text)
 
@@ -5563,6 +5732,7 @@ async def watch_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     was_active = bool(WATCH_GENERAL_ENABLED)
     WATCH_GENERAL_ENABLED = False
+    _persist_watch_subscriptions()
     await _stop_watch_coordinator_if_idle()
     if MAGNET_V1_WATCHES:
         WATCH_RUNTIME["last_cycle_status"] = "magnet_only"
@@ -5833,6 +6003,21 @@ async def health(request):
         "btc_episodes": research_btc_episode_worker.WORKER.status(),
         "formula_ordered_v7": research_formula_ordered_worker.WORKER.status(),
         "snapshot_sync": research_snapshot_sync_worker.WORKER.status(),
+        "google_sheets_delivery": google_sheets_sync.status(),
+        "watch": {
+            "desired_general_enabled": bool(WATCH_GENERAL_ENABLED),
+            "mode": WATCH_RUNTIME.get("mode"),
+            "chat_configured": WATCH_RUNTIME.get("chat_id") is not None,
+            "magnet_symbols": sorted(MAGNET_V1_WATCHES),
+            "coordinator_running": bool(WATCH_TASK and not WATCH_TASK.done()),
+            "supervisor_running": bool(
+                WATCH_SUPERVISOR_TASK and not WATCH_SUPERVISOR_TASK.done()
+            ),
+            "supervisor_restarts": WATCH_RUNTIME.get("supervisor_restarts", 0),
+            "last_cycle_status": WATCH_RUNTIME.get("last_cycle_status"),
+            "last_scan_utc": WATCH_RUNTIME.get("last_scan_utc"),
+            "last_error": WATCH_RUNTIME.get("last_error"),
+        },
         "formula_research": research_formula_worker.WORKER.status(),
         "research_schema": research_schema_status(),
         "max_pain_archive": max_pain_archive_status(),
@@ -6856,12 +7041,14 @@ async def main():
 
     init_db()
 
-    global WATCH_TASK, WATCH_SCAN_TASK, WATCH_GENERAL_ENABLED
+    global WATCH_TASK, WATCH_SCAN_TASK, WATCH_SUPERVISOR_TASK
+    global WATCH_GENERAL_ENABLED
     global OI_REFRESH_TASK, FLOW_REFRESH_TASK
     global OI_REGIME_TASK, HISTORY_BACKFILL_TASK, FLOW_COLLECTION_TASK
     global MAX_PAIN_ARCHIVE_TASK, FIRST_TOUCH_BACKFILL_TASK
     WATCH_TASK = None
     WATCH_SCAN_TASK = None
+    WATCH_SUPERVISOR_TASK = None
     WATCH_GENERAL_ENABLED = False
     OI_REFRESH_TASK = None
     FLOW_REFRESH_TASK = None
@@ -6884,6 +7071,8 @@ async def main():
         "scan_owner": None,
         "cycle_number": 0,
         "chat_id": None,
+        "supervisor_restarts": 0,
+        "restored_from_persistence": False,
         "derivatives_generation": None,
         "derivatives_status": None,
         "oi_ready": 0,
@@ -6920,12 +7109,15 @@ async def main():
         }
     )
 
-    # Remove legacy activation flags. Startup never launches a scan.
+    # Restore desired subscriptions.  Process restarts and deployments are not
+    # stop commands, so they must never erase an active Watch configuration.
     try:
-        set_setting("watch_enabled", "0")
-        set_setting("watch_next_scan_utc", "")
+        _restore_watch_runtime()
+        restored_watch = _restore_watch_subscriptions()
+        print(f"[startup] restored Watch desired state: {restored_watch}", flush=True)
     except Exception as exc:
-        print(f"[startup] legacy watch reset warning: {exc!r}", flush=True)
+        restored_watch = _watch_desired_state()
+        print(f"[startup] Watch restore warning: {exc!r}", flush=True)
 
     bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
@@ -7033,8 +7225,8 @@ async def main():
     )
 
     print(
-        "[startup] manual-only trading mode; no Max-Pain alert or trading Watch "
-        "scan started automatically (silent Research archive is independently guarded)",
+        "[startup] Watch commands remain the only authority for desired state; "
+        "active persisted subscriptions will resume after restart",
         flush=True,
     )
 
@@ -7079,10 +7271,22 @@ async def main():
 
     await start_web_server(bot_app)
 
+    WATCH_SUPERVISOR_TASK = asyncio.create_task(
+        _watch_supervisor_loop(bot_app), name="persistent-watch-supervisor"
+    )
+    await asyncio.sleep(0)
+
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
+        if WATCH_SUPERVISOR_TASK is not None and not WATCH_SUPERVISOR_TASK.done():
+            WATCH_SUPERVISOR_TASK.cancel()
+            try:
+                await WATCH_SUPERVISOR_TASK
+            except asyncio.CancelledError:
+                pass
+
         if WATCH_TASK is not None and not WATCH_TASK.done():
             WATCH_TASK.cancel()
             try:

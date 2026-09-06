@@ -24,6 +24,7 @@ import research_sheet_outbox
 RECONCILE_VERSION = "committed-snapshot-reconcile-v1"
 _PASS_LOCK_ID = 4860059309063875574
 _SOURCE_LIMIT = 16
+_POLL_SECONDS = max(5, int(os.getenv("SHEET_OUTBOX_POLL_SECONDS", "5")))
 _MAX_GROUP_CHILDREN = 256
 _BACKFILL_DAYS = 14
 _TRUE = {"1", "true", "yes", "on"}
@@ -110,9 +111,12 @@ def reconcile_sources(conn, *, limit: int = _SOURCE_LIMIT) -> Dict[str, int]:
     # Limit IDs before loading source JSON. The partial candidate index and
     # marker primary key keep replay incremental; no event-ID high-water mark
     # can skip an earlier transaction that committed later.
+    bounded_limit = max(1, min(int(limit), 64))
+    oldest_limit = max(1, bounded_limit // 2)
+    newest_limit = max(0, bounded_limit - oldest_limit)
     candidates = conn.execute(
         """
-        WITH picked AS MATERIALIZED (
+        WITH eligible AS MATERIALIZED (
             SELECT event.event_id
             FROM research_events event
             LEFT JOIN research_event_btc_movements movement ON movement.event_id=event.event_id
@@ -127,7 +131,10 @@ def reconcile_sources(conn, *, limit: int = _SOURCE_LIMIT) -> Dict[str, int]:
                     AND (staged.source_status <> 'DEFERRED' OR staged.next_attempt_at_utc>NOW())
                     AND staged.btc_parent_movement_id IS NOT DISTINCT FROM movement.btc_parent_movement_id
               )
-            ORDER BY event.event_id DESC LIMIT %s
+        ), picked AS MATERIALIZED (
+            (SELECT event_id FROM eligible ORDER BY event_id ASC LIMIT %s)
+            UNION
+            (SELECT event_id FROM eligible ORDER BY event_id DESC LIMIT %s)
         )
         SELECT event.*, movement.btc_parent_movement_id
         FROM picked JOIN research_events event USING (event_id)
@@ -135,7 +142,14 @@ def reconcile_sources(conn, *, limit: int = _SOURCE_LIMIT) -> Dict[str, int]:
             AND movement.episode_policy_version=%s AND movement.membership_status='LIVE'
         ORDER BY event.event_id
         """,
-        (_BTC_POLICY, _BACKFILL_DAYS, RECONCILE_VERSION, max(1, min(int(limit), 64)), _BTC_POLICY),
+        (
+            _BTC_POLICY,
+            _BACKFILL_DAYS,
+            RECONCILE_VERSION,
+            oldest_limit,
+            newest_limit,
+            _BTC_POLICY,
+        ),
     ).fetchall()
     processed = set()
     for candidate in candidates:
@@ -260,7 +274,7 @@ class SnapshotSyncWorker:
             except Exception as exc:
                 self._runtime["last_error"] = type(exc).__name__
                 print(f"[snapshot-sheet-sync] pass failed: {type(exc).__name__}", flush=True)
-            await asyncio.sleep(60)
+            await asyncio.sleep(_POLL_SECONDS)
 
 
 WORKER = SnapshotSyncWorker()
