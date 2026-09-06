@@ -1621,100 +1621,178 @@ class ResearchOutcomeWorker:
     def _load_ordered_first_touch_due_events(
         conn, limit: int
     ) -> list[Dict[str, Any]]:
-        """Load a bounded, live-first queue for the additive v7 labels.
+        """Interleave bounded, index-ordered new/live/repair queues.
 
-        Every event is fetched at most once per pass and supplies the common
-        post-decision path for all four windows and all eight fixed widths.
-        Authorized silent LONG/SHORT controls are admitted through the
-        fail-closed prospective view; arbitrary undelivered events are not.
+        Only selected event IDs load engine snapshots.  New events use the
+        existing delivery/time indexes, while open evidence advances oldest
+        observation first.  OFFSET 0 keeps prospective authorization scoped
+        to the candidate event rather than hashing every frozen slot bundle.
         """
-        query = f"""
+        query = """
+            WITH settings AS MATERIALIZED (
+                SELECT %s::text AS method_version,
+                       %s::text AS rejection_policy,
+                       %s::integer AS backfill_days,
+                       %s::integer AS expected_rows,
+                       %s::integer AS batch_limit
+            ), new_alerts AS MATERIALIZED (
+                SELECT e.event_id, e.alert_time_utc AS queue_time,
+                       0 AS lane
+                FROM research_events e
+                WHERE e.event_kind='ALERT'
+                  AND e.delivery_status='DELIVERED'
+                  AND e.direction IN ('LONG', 'SHORT')
+                  AND e.alert_time_utc >= NOW() - (
+                      (SELECT backfill_days FROM settings) * INTERVAL '1 day'
+                  )
+                  AND e.alert_time_utc <= date_trunc('minute', NOW())
+                        - INTERVAL '1 minute'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM research_outcome_event_rejections rejected
+                      WHERE rejected.event_id=e.event_id
+                        AND rejected.rejection_policy_version=(
+                            SELECT rejection_policy FROM settings
+                        )
+                  )
+                  AND (
+                      SELECT COUNT(*)
+                      FROM research_ordered_first_touch_outcomes ordered
+                      WHERE ordered.event_id=e.event_id
+                        AND ordered.method_version=(
+                            SELECT method_version FROM settings
+                        )
+                  ) < (SELECT expected_rows FROM settings)
+                ORDER BY e.alert_time_utc DESC, e.event_id DESC
+                LIMIT (SELECT batch_limit FROM settings)
+            ), new_samples AS MATERIALIZED (
+                SELECT e.event_id, e.alert_time_utc AS queue_time,
+                       1 AS lane
+                FROM research_events e
+                WHERE e.event_kind='DECISION_SAMPLE'
+                  AND e.delivery_status='NOT_APPLICABLE'
+                  AND e.direction IN ('LONG', 'SHORT')
+                  AND e.alert_time_utc >= NOW() - (
+                      (SELECT backfill_days FROM settings) * INTERVAL '1 day'
+                  )
+                  AND e.alert_time_utc <= date_trunc('minute', NOW())
+                        - INTERVAL '1 minute'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM research_outcome_event_rejections rejected
+                      WHERE rejected.event_id=e.event_id
+                        AND rejected.rejection_policy_version=(
+                            SELECT rejection_policy FROM settings
+                        )
+                  )
+                  AND (
+                      SELECT COUNT(*)
+                      FROM research_ordered_first_touch_outcomes ordered
+                      WHERE ordered.event_id=e.event_id
+                        AND ordered.method_version=(
+                            SELECT method_version FROM settings
+                        )
+                  ) < (SELECT expected_rows FROM settings)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM research_prospective_shadow_events authorized
+                      WHERE authorized.event_id=e.event_id
+                      LIMIT 1 OFFSET 0
+                  )
+                ORDER BY e.alert_time_utc DESC, e.event_id DESC
+                LIMIT (SELECT batch_limit FROM settings)
+            ), open_events AS MATERIALIZED (
+                SELECT ordered.event_id,
+                       MIN(ordered.observed_through_utc) AS queue_time,
+                       2 AS lane
+                FROM research_ordered_first_touch_outcomes ordered
+                JOIN research_events e ON e.event_id=ordered.event_id
+                WHERE ordered.method_version=(
+                          SELECT method_version FROM settings
+                      )
+                  AND ordered.status='OPEN'
+                  AND e.alert_time_utc >= NOW() - (
+                      (SELECT backfill_days FROM settings) * INTERVAL '1 day'
+                  )
+                  AND ordered.observed_through_utc < LEAST(
+                      e.alert_time_utc
+                          + ordered.window_minutes * INTERVAL '1 minute',
+                      date_trunc('minute', NOW()) - INTERVAL '1 millisecond'
+                  )
+                GROUP BY ordered.event_id
+                ORDER BY queue_time ASC, ordered.event_id ASC
+                LIMIT (SELECT batch_limit FROM settings)
+            ), missing_events AS MATERIALIZED (
+                SELECT ordered.event_id,
+                       MIN(ordered.updated_at_utc) AS queue_time,
+                       3 AS lane
+                FROM research_ordered_first_touch_outcomes ordered
+                JOIN research_events e ON e.event_id=ordered.event_id
+                WHERE ordered.method_version=(
+                          SELECT method_version FROM settings
+                      )
+                  AND ordered.status='DATA_MISSING'
+                  AND ordered.updated_at_utc <= NOW() - INTERVAL '6 hours'
+                  AND e.alert_time_utc >= NOW() - (
+                      (SELECT backfill_days FROM settings) * INTERVAL '1 day'
+                  )
+                GROUP BY ordered.event_id
+                ORDER BY queue_time ASC, ordered.event_id ASC
+                LIMIT (SELECT batch_limit FROM settings)
+            ), pooled AS (
+                SELECT * FROM new_alerts
+                UNION ALL SELECT * FROM new_samples
+                UNION ALL SELECT * FROM open_events
+                UNION ALL SELECT * FROM missing_events
+            ), ranked AS (
+                SELECT event_id, lane,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY lane
+                           ORDER BY
+                               CASE WHEN lane < 2 THEN queue_time END DESC,
+                               CASE WHEN lane >= 2 THEN queue_time END ASC,
+                               event_id
+                       ) AS queue_round
+                FROM pooled
+            ), deduplicated AS (
+                SELECT DISTINCT ON (event_id)
+                       event_id, lane, queue_round
+                FROM ranked
+                ORDER BY event_id, queue_round, lane
+            ), picked AS MATERIALIZED (
+                SELECT event_id, lane, queue_round
+                FROM deduplicated
+                ORDER BY queue_round, lane, event_id
+                LIMIT (SELECT batch_limit FROM settings)
+            )
             SELECT e.event_id, e.event_fingerprint, e.alert_time_utc,
                    e.symbol, e.direction, e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status, e.current_price,
                    e.target_price, e.engine_snapshot
-            FROM research_events e
-            LEFT JOIN LATERAL (
-                SELECT
-                    COUNT(*) AS row_count,
-                    MIN(ordered.observed_through_utc) FILTER (
-                        WHERE ordered.status='OPEN'
-                    ) AS oldest_open_observed_utc,
-                    COALESCE(BOOL_OR(
-                        ordered.status='OPEN'
-                        AND ordered.observed_through_utc < LEAST(
-                            e.alert_time_utc
-                                + (ordered.window_minutes
-                                   * INTERVAL '1 minute'),
-                            date_trunc('minute', NOW())
-                                - INTERVAL '1 millisecond'
-                        )
-                    ), FALSE) AS open_due,
-                    COALESCE(BOOL_OR(
-                        ordered.status='DATA_MISSING'
-                        AND ordered.updated_at_utc
-                              <= NOW() - INTERVAL '6 hours'
-                    ), FALSE) AS data_missing_due
-                FROM research_ordered_first_touch_outcomes ordered
-                WHERE ordered.event_id=e.event_id
-                  AND ordered.method_version=%s
-            ) ordered_state ON TRUE
-            WHERE e.direction IN ('LONG', 'SHORT')
-              AND e.event_kind IN ('ALERT', 'DECISION_SAMPLE')
-              AND (
-                    (
-                        e.event_kind='ALERT'
-                        AND e.delivery_status='DELIVERED'
-                    )
+            FROM picked
+            JOIN research_events e ON e.event_id=picked.event_id
+            WHERE picked.lane < 2 OR (
+                NOT EXISTS (
+                    SELECT 1 FROM research_outcome_event_rejections rejected
+                    WHERE rejected.event_id=e.event_id
+                      AND rejected.rejection_policy_version=(
+                          SELECT rejection_policy FROM settings
+                      )
+                )
+                AND (
+                    (e.event_kind='ALERT' AND e.delivery_status='DELIVERED')
                     OR EXISTS (
                         SELECT 1
                         FROM research_prospective_shadow_events authorized
                         WHERE authorized.event_id=e.event_id
+                        LIMIT 1 OFFSET 0
                     )
-                  )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM research_outcome_event_rejections rejected
-                  WHERE rejected.event_id=e.event_id
-                    AND rejected.rejection_policy_version=%s
-              )
-              AND e.alert_time_utc >= NOW() - (%s * INTERVAL '1 day')
-              AND date_trunc('minute', e.alert_time_utc)
-                    + INTERVAL '1 minute'
-                    + CASE
-                        WHEN e.alert_time_utc > date_trunc(
-                            'minute', e.alert_time_utc
-                        ) THEN INTERVAL '1 minute'
-                        ELSE INTERVAL '0 minutes'
-                      END
-                  <= date_trunc('minute', NOW())
-              AND (
-                    ordered_state.row_count < %s
-                    OR ordered_state.open_due
-                    OR ordered_state.data_missing_due
-                  )
-            ORDER BY
-                CASE
-                    WHEN e.alert_time_utc >= NOW() - INTERVAL '25 hours'
-                    THEN 0 ELSE 1
-                END ASC,
-                {_alert_reference_queue_priority_sql("e")} ASC,
-                CASE
-                    WHEN ordered_state.row_count < %s
-                    THEN e.alert_time_utc
-                END DESC NULLS LAST,
-                COALESCE(
-                    ordered_state.oldest_open_observed_utc,
-                    e.alert_time_utc
-                ) ASC,
-                e.event_id DESC
-            LIMIT %s
+                )
+            )
+            ORDER BY picked.queue_round, picked.lane, picked.event_id
         """
         params = (
             _ORDERED_FIRST_TOUCH_METHOD_VERSION,
             _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
             _ORDERED_FIRST_TOUCH_BACKFILL_DAYS,
-            _ORDERED_FIRST_TOUCH_ROW_COUNT,
             _ORDERED_FIRST_TOUCH_ROW_COUNT,
             max(1, min(int(limit), _ORDERED_FIRST_TOUCH_EVENT_LIMIT)),
         )

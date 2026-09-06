@@ -139,15 +139,19 @@ def run() -> None:
     query, params = query_capture.calls[0]
     assert query.count("%s") == len(params)
     assert "research_prospective_shadow_events authorized" in query
-    assert "e.event_kind IN ('ALERT', 'DECISION_SAMPLE')" in query
+    assert "e.event_kind='ALERT'" in query
+    assert "e.event_kind='DECISION_SAMPLE'" in query
     assert "research_ordered_first_touch_outcomes ordered" in query
     assert "ordered.status='OPEN'" in query
     assert "ordered.status='DATA_MISSING'" in query
-    assert "MIN(ordered.observed_through_utc) FILTER" in query
-    assert "ordered_state.oldest_open_observed_utc" in query
-    assert "WHEN ordered_state.row_count < %s" in query
-    assert "END DESC NULLS LAST" in query
-    assert "LIMIT %s" in query
+    assert "MIN(ordered.observed_through_utc) AS queue_time" in query
+    assert "new_alerts AS MATERIALIZED" in query
+    assert "new_samples AS MATERIALIZED" in query
+    assert "picked AS MATERIALIZED" in query
+    assert "ORDER BY queue_round, lane, event_id" in query
+    assert "LIMIT 1 OFFSET 0" in query
+    assert "_alert_reference_queue_priority_sql" not in query
+    assert query.count("LIMIT (SELECT batch_limit FROM settings)") == 5
     assert params[-1] == worker._ORDERED_FIRST_TOUCH_EVENT_LIMIT
     assert worker._ORDERED_FIRST_TOUCH_ROW_COUNT == 32
 
