@@ -2290,48 +2290,61 @@ class ResearchOutcomeWorker:
         return len(result)
 
     def _drain_ordered_first_touch_outbox(self, url: str) -> Dict[str, int]:
+        """Drain the pass budget through small, independently leased requests.
+
+        Older Sheet receivers update each row separately.  Claiming at most
+        eight rows just before each request keeps that work inside its lease
+        and preserves acknowledged progress if a later request fails.
+        """
+        summary = {"claimed": 0, "synced": 0, "failed": 0}
         if not google_sheets_sync.enabled():
-            return {"claimed": 0, "synced": 0, "failed": 0}
-        with psycopg.connect(
-            url,
-            row_factory=dict_row,
-            connect_timeout=5,
-            options="-c statement_timeout=15000 -c lock_timeout=1000",
-        ) as conn:
-            claimed = self._claim_ordered_first_touch_outbox(
-                conn, _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT
+            return summary
+        while summary["claimed"] < _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT:
+            request_limit = min(
+                8, _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT - summary["claimed"]
             )
-        if not claimed:
-            return {"claimed": 0, "synced": 0, "failed": 0}
-        payloads = [dict(_mapping(row.get("payload"))) for row in claimed]
-        delivered = google_sheets_sync.deliver_now(
-            {
-                "kind": "ordered_first_touch_outcomes",
-                "upserts": payloads,
-            },
-            attempts=1,
-        )
-        with psycopg.connect(
-            url,
-            row_factory=dict_row,
-            connect_timeout=5,
-            options="-c statement_timeout=15000 -c lock_timeout=1000",
-        ) as conn:
-            finished = self._finish_ordered_first_touch_outbox(
-                conn,
-                claimed,
-                delivered=delivered,
-                error=(
-                    None
-                    if delivered
-                    else "Google Sheets webhook did not confirm delivery"
-                ),
+            with psycopg.connect(
+                url,
+                row_factory=dict_row,
+                connect_timeout=5,
+                options="-c statement_timeout=15000 -c lock_timeout=1000",
+            ) as conn:
+                claimed = self._claim_ordered_first_touch_outbox(
+                    conn, request_limit
+                )
+            if not claimed:
+                break
+            summary["claimed"] += len(claimed)
+            payloads = [dict(_mapping(row.get("payload"))) for row in claimed]
+            delivered = google_sheets_sync.deliver_now(
+                {
+                    "kind": "ordered_first_touch_outcomes",
+                    "upserts": payloads,
+                },
+                attempts=1,
             )
-        return {
-            "claimed": len(claimed),
-            "synced": finished if delivered else 0,
-            "failed": 0 if delivered else finished,
-        }
+            with psycopg.connect(
+                url,
+                row_factory=dict_row,
+                connect_timeout=5,
+                options="-c statement_timeout=15000 -c lock_timeout=1000",
+            ) as conn:
+                finished = self._finish_ordered_first_touch_outbox(
+                    conn,
+                    claimed,
+                    delivered=delivered,
+                    error=(
+                        None
+                        if delivered
+                        else "Google Sheets webhook did not confirm delivery"
+                    ),
+                )
+            summary["synced" if delivered else "failed"] += finished
+            if not delivered:
+                # The durable queue schedules the failed generation's retry.
+                # Do not lease later rows while the receiver is struggling.
+                break
+        return summary
 
     def _run_ordered_first_touch_locked(
         self, url: str, *, event_limit: int

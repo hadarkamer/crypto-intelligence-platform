@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import research_ordered_first_touch as ordered
 import research_outcome_worker as worker
@@ -129,6 +130,115 @@ def _event(event_time):
             "price_pair": "BTCUSDT",
         },
     }
+
+
+def _check_batched_outbox_drain(payload_template) -> None:
+    def exercise(*, budget, row_count, failures=()):
+        service = worker.ResearchOutcomeWorker()
+        pending = []
+        for index in range(row_count):
+            payload = json.loads(json.dumps(payload_template))
+            payload["row"]["outcome_id"] = (
+                f"{index + 1}|60|25|ordered-first-touch-v7"
+            )
+            pending.append({
+                "event_id": index + 1,
+                "payload": payload,
+                "claim_token": f"claim-{index + 1}",
+                "claimed_payload_sha256": "a" * 64,
+            })
+        operations = []
+        active_connections = 0
+        active_claim = []
+        deliveries = 0
+
+        class Connection(_ConnectionContext):
+            def __enter__(self):
+                nonlocal active_connections
+                active_connections += 1
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                nonlocal active_connections
+                active_connections -= 1
+                return False
+
+        def claim(conn, limit):
+            nonlocal active_claim
+            assert active_connections == 1
+            assert not active_claim  # Prior batch acknowledged before re-lease.
+            active_claim = pending[:limit]
+            del pending[:limit]
+            operations.append(("claim", limit))
+            return list(active_claim)
+
+        def deliver(payload, *, attempts):
+            nonlocal deliveries
+            assert active_connections == 0  # Claim committed before HTTP.
+            assert attempts == 1
+            assert len(active_claim) <= 8
+            assert payload == {
+                "kind": "ordered_first_touch_outcomes",
+                "upserts": [row["payload"] for row in active_claim],
+            }  # Exact stored identities, provenance and values are preserved.
+            deliveries += 1
+            operations.append(("send", len(active_claim)))
+            return deliveries not in failures
+
+        def finish(conn, claimed, *, delivered, error):
+            nonlocal active_claim
+            assert active_connections == 1
+            assert all(left is right for left, right in zip(claimed, active_claim))
+            assert len(claimed) == len(active_claim)
+            assert delivered == (deliveries not in failures)
+            assert (error is None) == delivered
+            operations.append(("finish", delivered))
+            active_claim = []
+            return len(claimed)
+
+        service._claim_ordered_first_touch_outbox = claim
+        service._finish_ordered_first_touch_outbox = finish
+        with patch.object(
+            worker, "psycopg", SimpleNamespace(connect=lambda *a, **kw: Connection())
+        ), patch.object(
+            worker, "_ORDERED_FIRST_TOUCH_OUTBOX_LIMIT", budget
+        ), patch.object(
+            worker.google_sheets_sync, "enabled", lambda: True
+        ), patch.object(
+            worker.google_sheets_sync, "deliver_now", deliver
+        ):
+            result = service._drain_ordered_first_touch_outbox(
+                "postgresql://selftest"
+            )
+        assert active_connections == 0
+        return result, operations, len(pending)
+
+    completed, operations, remaining = exercise(budget=17, row_count=25)
+    assert completed == {"claimed": 17, "synced": 17, "failed": 0}
+    assert remaining == 8
+    assert operations == [
+        ("claim", 8), ("send", 8), ("finish", True),
+        ("claim", 8), ("send", 8), ("finish", True),
+        ("claim", 1), ("send", 1), ("finish", True),
+    ]
+
+    partial, operations, remaining = exercise(
+        budget=32, row_count=24, failures=(2,)
+    )
+    assert partial == {"claimed": 16, "synced": 8, "failed": 8}
+    assert remaining == 8
+    assert operations == [
+        ("claim", 8), ("send", 8), ("finish", True),
+        ("claim", 8), ("send", 8), ("finish", False),
+    ]
+
+    exhausted, operations, remaining = exercise(budget=32, row_count=10)
+    assert exhausted == {"claimed": 10, "synced": 10, "failed": 0}
+    assert remaining == 0
+    assert operations[-1] == ("claim", 8)
+    assert [item for item in operations if item[0] == "send"] == [
+        ("send", 8), ("send", 2),
+    ]
 
 
 def run() -> None:
@@ -280,6 +390,7 @@ def run() -> None:
     assert sheet_row["decision_time_utc"]
     assert sheet_row["adverse_touch_price"] == 99.75
     assert len(outbox_params[6]) == 64
+    _check_batched_outbox_drain(sheet_payload)
 
     no_write = _CaptureConnection(first_write=False)
     assert not worker.ResearchOutcomeWorker._write_ordered_first_touch_outcome(
