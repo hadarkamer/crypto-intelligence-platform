@@ -1,6 +1,12 @@
 """Admission and source safeguards of the bounded BTC research worker."""
 
+import ast
+import asyncio
+from datetime import timedelta
+import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -26,6 +32,54 @@ class Connection:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_nonempty_pass_status_and_health_are_json_safe(self):
+        class LiveConnection(Connection):
+            def __enter__(self): return self
+            def __exit__(self,*args): return False
+            def commit(self): pass
+            def rollback(self): pass
+            def fetchone(self):
+                return {"locked":True} if "pg_try_advisory_lock" in self.calls[-1][0] else None
+        subject=worker.ResearchBTCEpisodeWorker()
+        candle=bar(0,100)
+        with patch.dict(os.environ,{"RESEARCH_BTC_EPISODES_ENABLED":"1",
+                                    "RESEARCH_DATABASE_URL":"test",
+                                    "RESEARCH_BTC_EPISODE_START_UTC":START.isoformat()}), \
+             patch.object(worker,"psycopg",SimpleNamespace(connect=lambda *a,**k:LiveConnection())):
+            result=subject.run_once(now=START+timedelta(minutes=1),fetch_candles=lambda *args:{
+                "exchange":"binance","market":"spot","pair":"BTCUSDT",
+                "interval_seconds":60,"candles":[candle]})
+        self.assertEqual(result["bars_written"],1)
+        self.assertEqual(result["observed_through_utc"],candle["close_time_utc"])
+        json.dumps(subject.status())
+        self.assertEqual(subject.status()["metrics"]["last_result"]["observed_through_utc"],
+                         candle["close_time_utc"].isoformat())
+        self.assertEqual(subject.metrics["last_result"]["observed_through_utc"],
+                         candle["close_time_utc"])
+        # Execute the production health handler with isolated external services;
+        # aiohttp's real JSON encoder must accept a completed worker status.
+        from aiohttp import web
+        source=ast.parse(Path(__file__).with_name("main.py").read_text())
+        handler=next(node for node in source.body
+                     if isinstance(node,ast.AsyncFunctionDef) and node.name=="health")
+        empty=lambda:{}
+        module=SimpleNamespace(status=empty,WORKER=SimpleNamespace(status=empty))
+        names={node.id for node in ast.walk(handler) if isinstance(node,ast.Name)}
+        namespace={name:(empty if name.endswith("_status") else module) for name in names}
+        namespace.update(web=web,research_btc_episode_worker=SimpleNamespace(WORKER=subject))
+        exec(compile(ast.Module(body=[handler],type_ignores=[]),"main.py","exec"),namespace)
+        response=asyncio.run(namespace["health"](None))
+        self.assertEqual(response.status,200)
+        self.assertEqual(json.loads(response.text)["btc_episodes"]["metrics"]["last_result"]["bars_written"],1)
+
+    def test_status_recursively_copies_datetime_lists(self):
+        subject=worker.ResearchBTCEpisodeWorker()
+        subject.metrics["nested"]={"items":[START,{"timestamp":START}]}
+        status=subject.status()
+        json.dumps(status)
+        self.assertEqual(status["metrics"]["nested"]["items"][1]["timestamp"],START.isoformat())
+        self.assertIs(subject.metrics["nested"]["items"][0],START)
+
     def test_source_revision_is_rejected_before_any_write(self):
         conn = Connection(conflict={"open_time_utc":START})
         with self.assertRaisesRegex(ValueError,"revision"):

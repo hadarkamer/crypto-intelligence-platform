@@ -50,6 +50,17 @@ def _json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), default=str, allow_nan=False)
 
 
+def _json_safe_status(value: Any) -> Any:
+    """Copy status trees without leaking internal datetime objects to HTTP JSON."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {key: _json_safe_status(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_status(item) for item in value]
+    return value
+
+
 def _write_source_and_parents(conn, candles: list, parents: list[dict]) -> None:
     bars = [policy.validate_candle(candle) for candle in candles]
     if bars:
@@ -175,7 +186,7 @@ class ResearchBTCEpisodeWorker:
             "price_source": policy.SOURCE, "reversal_bps": policy.REVERSAL_BPS,
             "policy_origin": "NEW_CONSERVATIVE_ENGINEERING_POLICY",
             "fixed_time_gate": False, "retroactive_pivot": False,
-            "automatic_live_promotion": False, "metrics": dict(self.metrics),
+            "automatic_live_promotion": False, "metrics": _json_safe_status(self.metrics),
         }
 
     async def start(self) -> bool:
