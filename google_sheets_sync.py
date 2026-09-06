@@ -130,7 +130,13 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
                 raise RuntimeError(
                     f"Sheets webhook rejected payload: {body!r}"
                 )
-            _RECEIVER_VERSION = str(body.get("version") or "unversioned")
+            receiver_version = str(body.get("version") or "unversioned")
+            if receiver_version != _RECEIVER_VERSION:
+                print(
+                    f"[google-sheets] receiver version={receiver_version}",
+                    flush=True,
+                )
+            _RECEIVER_VERSION = receiver_version
             _METRICS["delivered"] += 1
             return True
         except Exception as exc:
