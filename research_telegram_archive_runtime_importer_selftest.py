@@ -15,10 +15,12 @@ from research_telegram_archive_features import extract_message
 
 
 class Cursor:
-    def __init__(self, row=None, count=0):
-        self.row, self.rowcount = row, count
+    def __init__(self, row=None, count=0, rows=None):
+        self.row, self.rowcount, self.rows = row, count, rows or []
     def fetchone(self):
         return self.row
+    def fetchall(self):
+        return self.rows
 
 
 class ArchivePGFixture:
@@ -30,6 +32,21 @@ class ArchivePGFixture:
     def execute(self, sql, args=()):
         if "to_regclass" in sql:
             return Cursor({"present": args[0] in self.tables})
+        if "WITH outcome_counts AS" in sql:
+            run_key = args[0]
+            complete = []
+            for key, event in self.tables["research_archive_reconstructed_events"].items():
+                if key[0] != run_key:
+                    continue
+                event_key = key[1]
+                outcomes = sum(k[0] == run_key and k[1] == event_key
+                    for k in self.tables["research_archive_delayed_entry_outcomes"])
+                metrics = sum(k[0] == run_key and k[1] == event_key
+                    for k in self.tables["research_archive_common_window_metrics"])
+                expected = event["calculation_status"] == "COMPLETE_64_LABELS"
+                if (expected and outcomes == 64 and metrics == 8) or (not expected and outcomes == 0 and metrics == 0):
+                    complete.append({"event_key": event_key})
+            return Cursor(rows=complete)
         if sql.startswith("INSERT INTO "):
             table = re.match(r"INSERT INTO (\w+)", sql)[1]
             if self.fail_once and table == "research_archive_common_window_metrics":
@@ -96,6 +113,12 @@ class RuntimeImporterTests(unittest.TestCase):
         self.assertEqual(report["inserted_by_table"]["research_archive_common_window_metrics"], 8)
         self.assertEqual(report["live_events_inserted"], 0)
         self.assertTrue(all(count == 0 for count in self.transfer()["inserted_by_table"].values()))
+    def test_atomic_resume_skips_only_structurally_complete_events(self):
+        self.transfer()
+        report = importer.import_artifact(self.pg,self.path,expected_sha256=self.sha,
+            expected_run_key=self.run_key,batch_size=50,trust_atomic_resume=True)
+        self.assertEqual(report["verified_events"], 1)
+        self.assertTrue(all(count == 0 for count in report["inserted_by_table"].values()))
     def test_interrupted_event_transaction_does_not_leave_ready_event_without_labels(self):
         self.pg.fail_once = True
         with self.assertRaises(RuntimeError):

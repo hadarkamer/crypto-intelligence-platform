@@ -174,11 +174,43 @@ def _write_verified_batch(conn: Any, table: str, records: list[dict[str, Any]]) 
     return count
 
 
+def _complete_existing_event_keys(conn: Any, run_key: str) -> set[str]:
+    """Return only atomically complete rows from an interrupted prior attempt."""
+    rows = conn.execute("""
+        WITH outcome_counts AS (
+            SELECT event_key, COUNT(*) AS row_count
+            FROM research_archive_delayed_entry_outcomes
+            WHERE run_key=%s GROUP BY event_key
+        ), metric_counts AS (
+            SELECT event_key, COUNT(*) AS row_count
+            FROM research_archive_common_window_metrics
+            WHERE run_key=%s GROUP BY event_key
+        )
+        SELECT event.event_key
+        FROM research_archive_reconstructed_events event
+        LEFT JOIN outcome_counts outcomes USING(event_key)
+        LEFT JOIN metric_counts metrics USING(event_key)
+        WHERE event.run_key=%s AND (
+            (event.calculation_status='COMPLETE_64_LABELS'
+             AND COALESCE(outcomes.row_count,0)=64
+             AND COALESCE(metrics.row_count,0)=8)
+            OR
+            (event.calculation_status<>'COMPLETE_64_LABELS'
+             AND COALESCE(outcomes.row_count,0)=0
+             AND COALESCE(metrics.row_count,0)=0)
+        )
+    """, (run_key, run_key, run_key)).fetchall()
+    return {str(_one_value(row, "event_key")) for row in rows}
+
+
 def import_artifact(conn: Any, sqlite_path: Path, *, expected_sha256: str,
-                    expected_run_key: str, batch_size: int = 8) -> dict[str, Any]:
+                    expected_run_key: str, batch_size: int = 8,
+                    trust_atomic_resume: bool = False) -> dict[str, Any]:
     """Explicit connection supplied by authenticated runtime; archive tables only."""
     if type(batch_size) is not int or not 1 <= batch_size <= 50:
         raise ValueError("Archive event batch size must be 1..50")
+    if type(trust_atomic_resume) is not bool:
+        raise ValueError("Atomic resume flag must be boolean")
     source = open_reviewed_artifact(sqlite_path, expected_sha256)
     inserted = {table: 0 for table in TABLES}
     reviewed_events = 0
@@ -198,6 +230,8 @@ def import_artifact(conn: Any, sqlite_path: Path, *, expected_sha256: str,
         inserted["research_archive_reconstruction_runs"] += _write_verified_batch(conn, "research_archive_reconstruction_runs",
             [{"run_key": expected_run_key, "contract": contract, "source_scope": "ARCHIVE_ONLY"}])
         conn.commit()
+        completed_event_keys = (_complete_existing_event_keys(conn, expected_run_key)
+                                if trust_atomic_resume else set())
         parents = source.execute("SELECT * FROM archive_btc_parents WHERE run_key=? ORDER BY btc_parent_movement_id", (expected_run_key,))
         while batch := parents.fetchmany(250):
             records = []
@@ -210,7 +244,11 @@ def import_artifact(conn: Any, sqlite_path: Path, *, expected_sha256: str,
             conn.commit()
         cursor = source.execute("SELECT * FROM archive_reconstructed_events WHERE run_key=? ORDER BY event_key", (expected_run_key,))
         while batch := cursor.fetchmany(batch_size):
-            events = [_event_record(row) for row in batch]
+            pending = [row for row in batch if row["event_key"] not in completed_event_keys]
+            reviewed_events += len(batch) - len(pending)
+            if not pending:
+                continue
+            events = [_event_record(row) for row in pending]
             outcomes, metrics = [], []
             for event in events:
                 key = (expected_run_key, event["event_key"])
