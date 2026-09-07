@@ -1025,6 +1025,10 @@ class OutcomeMetrics:
     ordered_first_touch_rows_written: int = 0
     ordered_first_touch_rows_synced: int = 0
     ordered_first_touch_sync_failures: int = 0
+    ordered_first_touch_sync_last_confirmed_at_utc: Optional[str] = None
+    ordered_first_touch_sync_latest_measurement_start_utc: Optional[str] = None
+    ordered_first_touch_sync_latest_observed_through_utc: Optional[str] = None
+    ordered_first_touch_sync_latest_event_id: Optional[int] = None
     ordered_first_touch_failures: int = 0
     ordered_first_touch_last_error: Optional[str] = None
     failures: int = 0
@@ -1663,8 +1667,8 @@ class ResearchOutcomeWorker:
     ) -> list[Dict[str, Any]]:
         """Interleave bounded, index-ordered new/live/repair queues.
 
-        Only selected event IDs load engine snapshots.  New events use the
-        existing delivery/time indexes, while open evidence advances oldest
+        Only selected event IDs load engine snapshots.  New events use finite
+        source pages, while open evidence advances oldest
         observation first.  CASE gates expensive prospective authorization
         behind the cheap row-count check; SQL AND alone can evaluate JSONB
         authorization for every already-complete sample.  OFFSET 0 keeps that
@@ -1679,6 +1683,28 @@ class ResearchOutcomeWorker:
         Keep the runtime version check as well, so a future method cannot
         silently reuse this v7-specific cardinality/index contract.
         """
+        # A finite metadata page precedes every per-event label count and
+        # prospective authorization. Completing thousands of samples must not
+        # make the next native alert wait for another full history scan.
+        from research_event_scan import claim_event_page, retain_unprocessed_tail
+        cap = max(1, min(int(limit), _ORDERED_FIRST_TOUCH_EVENT_LIMIT))
+        page_limit = 128
+        source_clock = """e.direction IN ('LONG','SHORT')
+            AND e.alert_time_utc>=NOW()-%s*INTERVAL '1 day'
+            AND e.alert_time_utc<=date_trunc('minute',NOW())-INTERVAL '1 minute'"""
+        alert_key, sample_key = 'ordered-v7-new-alerts-v1', 'ordered-v7-new-samples-v1'
+        history_alert_ids = claim_event_page(conn, alert_key, limit=page_limit,
+            predicate="e.event_kind='ALERT' AND e.delivery_status='DELIVERED' AND "+source_clock,
+            params=(_ORDERED_FIRST_TOUCH_BACKFILL_DAYS,))
+        sample_ids = claim_event_page(conn, sample_key, limit=page_limit,
+            predicate="e.event_kind='DECISION_SAMPLE' AND e.delivery_status='NOT_APPLICABLE' AND "+source_clock,
+            params=(_ORDERED_FIRST_TOUCH_BACKFILL_DAYS,))
+        recent_ids = [row['event_id'] for row in conn.execute("""
+            SELECT e.event_id FROM research_events e
+            WHERE e.event_kind='ALERT' AND e.delivery_status='DELIVERED'
+              AND """+source_clock+"""
+            ORDER BY e.alert_time_utc DESC,e.event_id DESC LIMIT %s
+        """,(_ORDERED_FIRST_TOUCH_BACKFILL_DAYS,page_limit)).fetchall()]
         query = """
             WITH settings AS MATERIALIZED (
                 SELECT %s::text AS method_version,
@@ -1690,7 +1716,8 @@ class ResearchOutcomeWorker:
                 SELECT e.event_id, e.alert_time_utc AS queue_time,
                        0 AS lane
                 FROM research_events e
-                WHERE e.event_kind='ALERT'
+                WHERE e.event_id=ANY(%s::bigint[])
+                  AND e.event_kind='ALERT'
                   AND e.delivery_status='DELIVERED'
                   AND e.direction IN ('LONG', 'SHORT')
                   AND e.alert_time_utc >= NOW() - (
@@ -1715,11 +1742,41 @@ class ResearchOutcomeWorker:
                   ) < (SELECT expected_rows FROM settings)
                 ORDER BY e.alert_time_utc DESC, e.event_id DESC
                 LIMIT (SELECT batch_limit FROM settings)
+            ), new_alert_history AS MATERIALIZED (
+                SELECT e.event_id, e.alert_time_utc AS queue_time,
+                       4 AS lane
+                FROM research_events e
+                WHERE e.event_id=ANY(%s::bigint[])
+                  AND e.event_kind='ALERT'
+                  AND e.delivery_status='DELIVERED'
+                  AND e.direction IN ('LONG', 'SHORT')
+                  AND e.alert_time_utc >= NOW() - (
+                      (SELECT backfill_days FROM settings) * INTERVAL '1 day'
+                  )
+                  AND e.alert_time_utc <= date_trunc('minute', NOW())
+                        - INTERVAL '1 minute'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM research_outcome_event_rejections rejected
+                      WHERE rejected.event_id=e.event_id
+                        AND rejected.rejection_policy_version=(
+                            SELECT rejection_policy FROM settings
+                        )
+                  )
+                  AND (
+                      SELECT COUNT(*)
+                      FROM research_ordered_first_touch_outcomes ordered
+                      WHERE ordered.event_id=e.event_id
+                        AND ordered.method_version=(
+                            SELECT method_version FROM settings
+                        )
+                  ) < (SELECT expected_rows FROM settings)
+                ORDER BY e.event_id ASC
             ), new_samples AS MATERIALIZED (
                 SELECT e.event_id, e.alert_time_utc AS queue_time,
                        1 AS lane
                 FROM research_events e
-                WHERE e.event_kind='DECISION_SAMPLE'
+                WHERE e.event_id=ANY(%s::bigint[])
+                  AND e.event_kind='DECISION_SAMPLE'
                   AND e.delivery_status='NOT_APPLICABLE'
                   AND e.direction IN ('LONG', 'SHORT')
                   AND e.alert_time_utc >= NOW() - (
@@ -1748,8 +1805,7 @@ class ResearchOutcomeWorker:
                       WHERE authorized.event_id=e.event_id
                       LIMIT 1 OFFSET 0
                   ) ELSE FALSE END
-                ORDER BY e.alert_time_utc DESC, e.event_id DESC
-                LIMIT (SELECT batch_limit FROM settings)
+                ORDER BY e.event_id ASC
             ), open_events AS MATERIALIZED (
                 SELECT ordered.event_id,
                        MIN(ordered.observed_through_utc) AS queue_time,
@@ -1804,19 +1860,41 @@ class ResearchOutcomeWorker:
                 LIMIT (SELECT batch_limit FROM settings)
             ), pooled AS (
                 SELECT * FROM new_alerts
+                UNION ALL SELECT * FROM new_alert_history
                 UNION ALL SELECT * FROM new_samples
                 UNION ALL SELECT * FROM open_events
                 UNION ALL SELECT * FROM missing_events
+            ), eligible_pooled AS MATERIALIZED (
+                SELECT pooled.* FROM pooled JOIN research_events e USING(event_id)
+                WHERE CASE WHEN pooled.lane IN (0,1,4) THEN TRUE ELSE (
+                    NOT EXISTS (
+                        SELECT 1 FROM research_outcome_event_rejections rejected
+                        WHERE rejected.event_id=e.event_id
+                          AND rejected.rejection_policy_version=(
+                              SELECT rejection_policy FROM settings
+                          )
+                    )
+                    AND (
+                        (e.event_kind='ALERT' AND e.delivery_status='DELIVERED')
+                        OR EXISTS (
+                            SELECT 1
+                            FROM research_prospective_shadow_events authorized
+                            WHERE authorized.event_id=e.event_id
+                            LIMIT 1 OFFSET 0
+                        )
+                    )
+                ) END
             ), ranked AS (
                 SELECT event_id, lane,
                        ROW_NUMBER() OVER (
                            PARTITION BY lane
                            ORDER BY
-                               CASE WHEN lane < 2 THEN queue_time END DESC,
-                               CASE WHEN lane >= 2 THEN queue_time END ASC,
+                               CASE WHEN lane = 0 THEN queue_time END DESC,
+                               CASE WHEN lane IN (2,3) THEN queue_time END ASC,
+                               CASE WHEN lane = 0 THEN event_id END DESC,
                                event_id
                        ) AS queue_round
-                FROM pooled
+                FROM eligible_pooled
             ), deduplicated AS (
                 SELECT DISTINCT ON (event_id)
                        event_id, lane, queue_round
@@ -1831,27 +1909,12 @@ class ResearchOutcomeWorker:
             SELECT e.event_id, e.event_fingerprint, e.alert_time_utc,
                    e.symbol, e.direction, e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status, e.current_price,
-                   e.target_price, e.engine_snapshot
+                   e.target_price, e.engine_snapshot,
+                   picked.lane AS _ordered_queue_lane,
+                   ARRAY(SELECT event_id FROM new_alert_history) AS _history_due_ids,
+                   ARRAY(SELECT event_id FROM new_samples) AS _sample_due_ids
             FROM picked
             JOIN research_events e ON e.event_id=picked.event_id
-            WHERE picked.lane < 2 OR (
-                NOT EXISTS (
-                    SELECT 1 FROM research_outcome_event_rejections rejected
-                    WHERE rejected.event_id=e.event_id
-                      AND rejected.rejection_policy_version=(
-                          SELECT rejection_policy FROM settings
-                      )
-                )
-                AND (
-                    (e.event_kind='ALERT' AND e.delivery_status='DELIVERED')
-                    OR EXISTS (
-                        SELECT 1
-                        FROM research_prospective_shadow_events authorized
-                        WHERE authorized.event_id=e.event_id
-                        LIMIT 1 OFFSET 0
-                    )
-                )
-            )
             ORDER BY picked.queue_round, picked.lane, picked.event_id
         """
         params = (
@@ -1859,9 +1922,21 @@ class ResearchOutcomeWorker:
             _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
             _ORDERED_FIRST_TOUCH_BACKFILL_DAYS,
             _ORDERED_FIRST_TOUCH_ROW_COUNT,
-            max(1, min(int(limit), _ORDERED_FIRST_TOUCH_EVENT_LIMIT)),
+            cap, recent_ids, history_alert_ids, sample_ids,
         )
-        return conn.execute(query, params).fetchall()
+        rows = conn.execute(query, params).fetchall()
+        # Selection commits before external price fetches. Preserve every due
+        # historical candidate that lost this pass's finite interleave so the
+        # next lap cannot repeatedly skip its still-unprocessed page suffix.
+        selected_ids = {int(row['event_id']) for row in rows}
+        for key, field in ((alert_key,'_history_due_ids'),(sample_key,'_sample_due_ids')):
+            due_ids = {int(i) for row in rows for i in row.get(field,[])}
+            remaining = due_ids-selected_ids
+            if remaining:
+                retain_unprocessed_tail(conn,key,min(remaining)-1)
+        return [{key:value for key,value in row.items()
+                 if key not in ('_ordered_queue_lane','_history_due_ids','_sample_due_ids')}
+                for row in rows]
 
     @staticmethod
     def _write_ordered_first_touch_outcome(
@@ -2194,17 +2269,26 @@ class ResearchOutcomeWorker:
         return True
 
     @staticmethod
-    def _claim_ordered_first_touch_outbox(
-        conn, limit: int
+    def _claim_ordered_first_touch_lane(
+        conn, limit: int, *, recent: bool
     ) -> list[Dict[str, Any]]:
-        """Lease due outbox rows without holding a lock during HTTP."""
+        """Lease one bounded, index-ordered share of the current request."""
+        if limit <= 0:
+            return []
+        observed = "research_sheet_source_timestamp(payload->'row'->>'observed_through_utc')"
+        measured = "research_sheet_source_timestamp(payload->'row'->>'measurement_start_utc')"
+        source_filter = f"AND {observed} IS NOT NULL" if recent else ""
+        order = (f"{observed} DESC, {measured} DESC, " if recent else "") + (
+            "next_attempt_at_utc, created_at_utc, event_id, window_minutes, threshold_bps"
+        )
         return conn.execute(
-            """
+            f"""
             WITH picked AS (
                 SELECT event_id, window_minutes, threshold_bps,
                        method_version, destination
                 FROM research_ordered_first_touch_sync_outbox
                 WHERE destination='GOOGLE_SHEETS'
+                  AND method_version='ordered-first-touch-v7'
                   -- Matches the ordered active-queue partial index. Without
                   -- this shared lane, the OR below forces a full queue sort
                   -- before LIMIT even when only one row is being leased.
@@ -2219,8 +2303,8 @@ class ResearchOutcomeWorker:
                             AND lease_expires_at_utc <= NOW()
                         )
                       )
-                ORDER BY next_attempt_at_utc, created_at_utc,
-                         event_id, window_minutes, threshold_bps
+                {source_filter}
+                ORDER BY {order}
                 FOR UPDATE SKIP LOCKED
                 LIMIT %s
             )
@@ -2249,6 +2333,52 @@ class ResearchOutcomeWorker:
             """,
             (max(1, min(int(limit), _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT)),),
         ).fetchall()
+
+    @staticmethod
+    def _claim_ordered_first_touch_outbox(
+        conn, limit: int
+    ) -> list[Dict[str, Any]]:
+        """Reserve recent evidence and oldest backlog in the same transaction.
+
+        A persisted turn preserves both shares for one-row compatibility mode
+        and across process restarts. Every lane atomically leases its rows, so
+        later lanes cannot select those active leases again. Claims and ACKs
+        still use the exact original event/window/threshold/version generation.
+        """
+        count = max(1, min(int(limit), _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT))
+        ready = conn.execute("""
+            SELECT to_regclass('research_ordered_first_touch_delivery_cursor') IS NOT NULL
+                AND EXISTS (
+                    SELECT 1 FROM pg_index
+                    WHERE indexrelid=to_regclass('idx_ordered_first_touch_sync_fresh_observed')
+                      AND indrelid=to_regclass('research_ordered_first_touch_sync_outbox')
+                      AND indisvalid AND indisready
+                ) AS ready
+        """).fetchone()
+        if not ready or not ready["ready"]:
+            # Deployment may precede migration039 or its concurrent index build
+            # may have failed after creating an unusable catalog entry. Preserve
+            # indexed FIFO until PostgreSQL can use the fresh lane's index.
+            return ResearchOutcomeWorker._claim_ordered_first_touch_lane(conn, count, recent=False)
+        slot = conn.execute("""
+            UPDATE research_ordered_first_touch_delivery_cursor
+            SET next_slot=next_slot+1 WHERE singleton=TRUE
+            RETURNING next_slot-1 AS slot
+        """).fetchone()
+        if not slot:
+            raise RuntimeError("MISSING_ORDERED_SHEET_DELIVERY_CURSOR")
+        recent_first = int(slot["slot"]) % 2 == 0
+        rows = ResearchOutcomeWorker._claim_ordered_first_touch_lane(
+            conn, (count + 1) // 2, recent=recent_first
+        )
+        rows += ResearchOutcomeWorker._claim_ordered_first_touch_lane(
+            conn, count - len(rows), recent=not recent_first
+        )
+        if len(rows) < count:
+            rows += ResearchOutcomeWorker._claim_ordered_first_touch_lane(
+                conn, count - len(rows), recent=False
+            )
+        return rows
 
     @staticmethod
     def _finish_ordered_first_touch_outbox(
@@ -2358,6 +2488,41 @@ class ResearchOutcomeWorker:
         ).fetchall()
         return len(result)
 
+    def _record_ordered_sync_freshness(self, claimed: Sequence[Mapping[str, Any]]) -> None:
+        """Advance source freshness only after every exact claimed row is ACKed.
+
+        The caller skips this diagnostic for partial/stale-generation ACKs;
+        missing timestamps stay missing and never inherit the worker clock.
+        """
+        observed_candidates = []
+        measured_candidates = []
+        for item in claimed:
+            row = _mapping(_mapping(item.get("payload")).get("row"))
+            for name, target in (("measurement_start_utc", measured_candidates),
+                                 ("observed_through_utc", observed_candidates)):
+                raw = row.get(name)
+                if raw in (None, ""):
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                    target.append((parsed.astimezone(timezone.utc), int(item["event_id"])))
+        self.metrics.ordered_first_touch_sync_last_confirmed_at_utc = datetime.now(timezone.utc).isoformat()
+        for candidates, attribute in (
+            (measured_candidates, "ordered_first_touch_sync_latest_measurement_start_utc"),
+            (observed_candidates, "ordered_first_touch_sync_latest_observed_through_utc"),
+        ):
+            if not candidates:
+                continue
+            timestamp, event_id = max(candidates)
+            previous = getattr(self.metrics, attribute)
+            if previous is None or timestamp > datetime.fromisoformat(previous):
+                setattr(self.metrics, attribute, timestamp.isoformat())
+                if attribute.endswith("observed_through_utc"):
+                    self.metrics.ordered_first_touch_sync_latest_event_id = event_id
+
     def _drain_ordered_first_touch_outbox(self, url: str) -> Dict[str, int]:
         """Drain the pass budget through small, independently leased requests.
 
@@ -2421,6 +2586,8 @@ class ResearchOutcomeWorker:
                         ),
                     )
                 summary["synced" if delivered else "failed"] += finished
+                if delivered and finished == len(claimed):
+                    self._record_ordered_sync_freshness(claimed)
                 if not delivered:
                     # The durable queue schedules the failed generation's retry.
                     # Do not lease later rows while the receiver is struggling.

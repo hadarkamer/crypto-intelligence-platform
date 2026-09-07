@@ -136,7 +136,7 @@ def _event(event_time):
 def _check_batched_outbox_drain(payload_template) -> None:
     def exercise(
         *, budget, row_count, failures=(), request_size=8,
-        request_seconds=0, slot_available=True,
+        request_seconds=0, slot_available=True, stale_acks=(),
     ):
         service = worker.ResearchOutcomeWorker()
         pending = []
@@ -200,8 +200,18 @@ def _check_batched_outbox_drain(payload_template) -> None:
             assert (error is None) == delivered
             operations.append(("finish", delivered))
             active_claim = []
-            return len(claimed)
+            return len(claimed) - (1 if deliveries in stale_acks else 0)
 
+        confirmed_batches = 0
+        record_freshness = service._record_ordered_sync_freshness
+
+        def record_after_commit(claimed):
+            nonlocal confirmed_batches
+            assert active_connections == 0, "freshness must follow committed ACK"
+            confirmed_batches += 1
+            record_freshness(claimed)
+
+        service._record_ordered_sync_freshness = record_after_commit
         service._claim_ordered_first_touch_outbox = claim
         service._finish_ordered_first_touch_outbox = finish
         with patch.object(
@@ -226,7 +236,19 @@ def _check_batched_outbox_drain(payload_template) -> None:
                 "postgresql://selftest"
             )
         assert active_connections == 0
+        if not confirmed_batches:
+            assert service.metrics.ordered_first_touch_sync_latest_observed_through_utc is None
+            assert service.metrics.ordered_first_touch_sync_last_confirmed_at_utc is None
+        else:
+            assert service.metrics.ordered_first_touch_sync_latest_observed_through_utc == (
+                datetime.fromisoformat(payload_template["row"]["observed_through_utc"].replace("Z", "+00:00")).isoformat()
+            )
+            assert service.metrics.ordered_first_touch_sync_last_confirmed_at_utc is not None
         return result, operations, len(pending)
+
+    stale, _, remaining = exercise(budget=8, row_count=8, stale_acks=(1,))
+    assert stale == {"claimed": 8, "synced": 7, "failed": 0}
+    assert remaining == 0  # Partial generation ACK must not advance freshness.
 
     fallback, fallback_operations, remaining = exercise(
         budget=3, row_count=5, request_size=1
@@ -288,10 +310,11 @@ def _check_batched_outbox_drain(payload_template) -> None:
 
 def run() -> None:
     query_capture = _CaptureConnection()
-    assert worker.ResearchOutcomeWorker._load_ordered_first_touch_due_events(
-        query_capture, 999
-    ) == []
-    query, params = query_capture.calls[0]
+    with patch('research_event_scan.claim_event_page',return_value=[]):
+        assert worker.ResearchOutcomeWorker._load_ordered_first_touch_due_events(
+            query_capture, 999
+        ) == []
+    query, params = query_capture.calls[-1]
     assert query.count("%s") == len(params)
     assert "research_prospective_shadow_events authorized" in query
     assert "e.event_kind='ALERT'" in query
@@ -306,8 +329,9 @@ def run() -> None:
     assert "ORDER BY queue_round, lane, event_id" in query
     assert "LIMIT 1 OFFSET 0" in query
     assert "_alert_reference_queue_priority_sql" not in query
-    assert query.count("LIMIT (SELECT batch_limit FROM settings)") == 5
-    assert params[-1] == worker._ORDERED_FIRST_TOUCH_EVENT_LIMIT
+    assert query.count("LIMIT (SELECT batch_limit FROM settings)") == 4
+    assert params[4] == worker._ORDERED_FIRST_TOUCH_EVENT_LIMIT
+    assert params[5:] == [[],[],[]]
     assert worker._ORDERED_FIRST_TOUCH_ROW_COUNT == 32
 
     event_time = datetime(2026, 9, 6, 10, 0, tzinfo=timezone.utc)
@@ -450,8 +474,8 @@ def run() -> None:
     assert len(no_write.calls) == 1
 
     claim_capture = _CaptureConnection()
-    assert worker.ResearchOutcomeWorker._claim_ordered_first_touch_outbox(
-        claim_capture, 999
+    assert worker.ResearchOutcomeWorker._claim_ordered_first_touch_lane(
+        claim_capture, 999, recent=False
     ) == []
     claim_sql, claim_params = claim_capture.calls[0]
     assert "FOR UPDATE SKIP LOCKED" in claim_sql

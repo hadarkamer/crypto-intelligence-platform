@@ -111,6 +111,8 @@ MIGRATION_PATHS = (
     / "034_past_price_features.sql",
     Path(__file__).resolve().parent / "migrations" / "037_ordered_experimental_delivery.sql",
     Path(__file__).resolve().parent / "migrations" / "038_runtime_event_scan_bounds.sql",
+    Path(__file__).resolve().parent / "migrations" / "039_ordered_first_touch_fresh_delivery.sql",
+    Path(__file__).resolve().parent / "migrations" / "040_formula_scope_fairness.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
@@ -123,6 +125,7 @@ def _migration_statement_timeout_ms(path: Path) -> int:
     bounded_backfills = {
         "025_ordered_first_touch_sync_claim_queue.sql",
         "026_research_sheet_fresh_delivery.sql",
+        "039_ordered_first_touch_fresh_delivery.sql",
     }
     return 60000 if path.name in bounded_backfills else 15000
 

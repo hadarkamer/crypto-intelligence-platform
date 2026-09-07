@@ -13,6 +13,7 @@ def run():
     by_name = {path.name: path for path in admin.MIGRATION_PATHS}
     index = by_name['025_ordered_first_touch_sync_claim_queue.sql']
     fresh_delivery = by_name['026_research_sheet_fresh_delivery.sql']
+    outcome_fresh_delivery = by_name['039_ordered_first_touch_fresh_delivery.sql']
     next_migration = by_name['027_ordered_formula_research_periods.sql']
     archive = by_name['028_telegram_archive_source_staging.sql']
 
@@ -108,6 +109,14 @@ def run():
     assert admin._migration_statement_timeout_ms(Path(index.name + '.backup')) == 15000
     assert admin._migration_statement_timeout_ms(Path('026_other.sql')) == 15000
     assert admin._migration_statement_timeout_ms(Path(fresh_delivery.name + '.backup')) == 15000
+    events = exercise([outcome_fresh_delivery, next_migration])
+    assert (outcome_fresh_delivery.name, '60000') in events
+    assert events[events.index((outcome_fresh_delivery.name, '60000')) + 1] == ('TIMEOUT', '15000')
+    assert (next_migration.name, '15000') in events
+    events = exercise([outcome_fresh_delivery, next_migration], failure=outcome_fresh_delivery)
+    assert not any(kind in ('COMMIT', next_migration.name) for kind, _ in events)
+    assert events[-1] == ('ROLLBACK', '60000')
+    assert admin._migration_statement_timeout_ms(Path(outcome_fresh_delivery.name + '.backup')) == 15000
     print('targeted schema migration timeout selftest: PASS')
 
 

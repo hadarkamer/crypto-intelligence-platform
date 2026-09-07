@@ -1,176 +1,194 @@
-"""Outbox claim/index parity without touching a production database.
+"""Execute real fresh/backlog lease SQL with SQLite compatibility syntax.
 
-Execute the actual selection in SQLite after translating only NOW(), the
-parameter marker and PostgreSQL's locking suffix. This proves the redundant
-index guard leaves eligibility, global fairness and full row identities
-unchanged; locking/lease clauses are asserted against the original contract.
-SQLite does not simulate PostgreSQL's concurrent row locks.
+SQLite checks selected identities, source ordering, durable cursor fairness,
+lease exclusions and actual index selection. It does not emulate concurrent
+PostgreSQL row locks; the companion PostgreSQL test exercises those directly.
 """
-
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 from pathlib import Path
-import random
 import re
 import sqlite3
-from types import SimpleNamespace
+from uuid import uuid4
 
-import research_formula_schema_admin
 import research_outcome_worker as worker
-
 
 ROOT = Path(__file__).resolve().parent
 NOW = 100_000
-INDEX_GUARD = "AND sync_status IN ('PENDING', 'RETRY', 'IN_FLIGHT')"
-ORDER = ("next_attempt_at_utc, created_at_utc, event_id, "
-         "window_minutes, threshold_bps")
+METHOD = 'ordered-first-touch-v7'
+TABLE = 'research_ordered_first_touch_sync_outbox'
 
 
-def _claim_query(limit):
-    calls = []
-    connection = SimpleNamespace(
-        execute=lambda query, params: calls.append((query, params))
-        or SimpleNamespace(fetchall=lambda: [])
-    )
-    assert worker.ResearchOutcomeWorker._claim_ordered_first_touch_outbox(
-        connection, limit
-    ) == []
-    assert len(calls) == 1  # Selection and lease are one atomic statement.
-    query, params = calls[0]
-    query = re.sub(r"--[^\n]*", "", query)
-    return " ".join(query.split()), params
+def source_time(value):
+    if not value or not re.fullmatch(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})', value):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return None
 
 
-def _check_lease_contract(query):
-    assert query.count("FOR UPDATE SKIP LOCKED") == 1
-    assert query.count("UPDATE research_ordered_first_touch_sync_outbox") == 1
-    assert "FOR UPDATE SKIP LOCKED LIMIT %s" in query
-    assert f"ORDER BY {ORDER}" in query
-    assert "attempts=queued.attempts + 1" in query
-    assert "claim_token=gen_random_uuid()" in query
-    assert "claimed_payload_sha256=queued.payload_sha256" in query
-    assert "lease_expires_at_utc=NOW() + INTERVAL '2 minutes'" in query
-    assert "last_attempt_at_utc=NOW()" in query
-    assert "claimed_at_utc=NOW()" in query
-    assert "next_attempt_at_utc=NOW()" in query
-    assert "synced_at_utc=NULL" in query and "last_error=NULL" in query
-    for key in ("event_id", "window_minutes", "threshold_bps",
-                "method_version", "destination"):
-        assert f"queued.{key}=picked.{key}" in query
-    assert "queued.payload, queued.attempts, queued.claim_token, " in query
-    # No split lanes: no extra rows locked, duplicates or fairness change from
-    # independently limiting the retry and expired-lease selections.
-    assert "UNION" not in query
-    assert query.count("LIMIT %s") == 1
+def timestamp(value):
+    return datetime.fromtimestamp(value, timezone.utc).isoformat() if value is not None else None
 
 
-def _check_index_contract():
-    path = ROOT / "migrations/025_ordered_first_touch_sync_claim_queue.sql"
-    assert path.resolve() in research_formula_schema_admin.MIGRATION_PATHS
-    executable = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))
-    sql = " ".join(executable.split())
-    assert len([item for item in sql.split(";") if item.strip()]) == 1
-    assert sql.startswith("CREATE INDEX IF NOT EXISTS "
-                          "idx_ordered_first_touch_sync_claim_queue")
-    assert "destination, next_attempt_at_utc ASC, created_at_utc ASC, " \
-           "event_id, window_minutes, threshold_bps" in sql
-    assert "WHERE sync_status IN ('PENDING', 'RETRY', 'IN_FLIGHT')" in sql
-    return executable
+class Database:
+    def __init__(self, conn, *, ready=True):
+        self.conn, self.ready, self.calls = conn, ready, []
+
+    def translate(self, query):
+        query = query.replace("NOW() + INTERVAL '2 minutes'", str(NOW+120))
+        query = query.replace('NOW()', str(NOW)).replace('%s', '?')
+        query = query.replace('FOR UPDATE SKIP LOCKED', '')
+        query = query.replace(f'UPDATE {TABLE} queued', f'UPDATE {TABLE} AS queued')
+        if 'RETURNING queued.' in query:
+            prefix, suffix = query.split('RETURNING ', 1)
+            query = prefix + 'RETURNING ' + suffix.replace('queued.', '')
+        return query
+
+    def execute(self, query, params=()):
+        self.calls.append((query, params))
+        if 'to_regclass' in query:
+            # Execute the actual readiness predicate against catalog-shaped
+            # rows; an existing, failed concurrent index must remain disabled.
+            self.conn.create_function('to_regclass', 1, lambda name: {
+                'research_ordered_first_touch_delivery_cursor': 1 if self.ready else None,
+                'idx_ordered_first_touch_sync_fresh_observed': 2,
+                TABLE: 3,
+            }.get(name))
+            return self.conn.execute(query, params)
+        if 'WITH picked AS (' in query:
+            assert query.count('FOR UPDATE SKIP LOCKED') == 1
+            assert 'claimed_payload_sha256=queued.payload_sha256' in query
+            assert 'attempts=queued.attempts + 1' in query
+            assert "method_version='ordered-first-touch-v7'" in query
+            for key in ('event_id', 'window_minutes', 'threshold_bps', 'method_version', 'destination'):
+                assert f'queued.{key}=picked.{key}' in query
+        return self.conn.execute(self.translate(query), params)
+
+
+def database():
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.create_function('research_sheet_source_timestamp', 1, source_time, deterministic=True)
+    conn.create_function('gen_random_uuid', 0, lambda: str(uuid4()))
+    conn.executescript(f'''CREATE TABLE {TABLE} (
+        event_id INTEGER,window_minutes INTEGER DEFAULT 60,threshold_bps INTEGER DEFAULT 25,
+        method_version TEXT DEFAULT '{METHOD}',destination TEXT DEFAULT 'GOOGLE_SHEETS',
+        sync_status TEXT DEFAULT 'PENDING',payload TEXT,payload_sha256 TEXT DEFAULT 'generation-1',
+        next_attempt_at_utc INTEGER DEFAULT 1,created_at_utc INTEGER DEFAULT 1,
+        updated_at_utc INTEGER DEFAULT 1,lease_expires_at_utc INTEGER,
+        attempts INTEGER DEFAULT 0,last_attempt_at_utc INTEGER,claim_token TEXT,
+        claimed_at_utc INTEGER,claimed_payload_sha256 TEXT,synced_at_utc INTEGER,last_error TEXT,
+        PRIMARY KEY(event_id,window_minutes,threshold_bps,method_version,destination));
+        CREATE TABLE research_ordered_first_touch_delivery_cursor (
+            singleton BOOLEAN PRIMARY KEY,next_slot INTEGER DEFAULT 0);
+        INSERT INTO research_ordered_first_touch_delivery_cursor(singleton) VALUES(TRUE);
+        CREATE TABLE pg_index (indexrelid INTEGER,indrelid INTEGER,
+            indisvalid BOOLEAN,indisready BOOLEAN);
+        INSERT INTO pg_index VALUES(2,3,TRUE,TRUE);''')
+    for name in ('025_ordered_first_touch_sync_claim_queue.sql', '039_ordered_first_touch_fresh_delivery.sql'):
+        source = (ROOT/'migrations'/name).read_text()
+        for sql in re.findall(r'CREATE INDEX IF NOT EXISTS.*?;', source, re.S):
+            conn.executescript(sql)
+            conn.executescript(sql)
+    return Database(conn)
+
+
+def add(db, event_id, observed, *, measured=None, **overrides):
+    values = dict(event_id=event_id,
+        payload=json.dumps({'row': {'observed_through_utc': timestamp(observed),
+            'measurement_start_utc': timestamp(measured if measured is not None else observed)}}),
+        **overrides)
+    db.conn.execute(f"INSERT INTO {TABLE}({','.join(values)}) VALUES ({','.join('?' for _ in values)})", tuple(values.values()))
+
+
+def ids(rows):
+    return [row['event_id'] for row in rows]
 
 
 def run():
-    index_sql = _check_index_contract()
-    query, params = _claim_query(999)
-    assert params == (worker._ORDERED_FIRST_TOUCH_OUTBOX_LIMIT,)
-    assert _claim_query(0)[1] == (1,)
-    assert _claim_query(-8)[1] == (1,)
-    assert _claim_query(8)[1] == (8,)
-    _check_lease_contract(query)
-    picked = query.split("WITH picked AS (", 1)[1].split(
-        ") UPDATE research_ordered_first_touch_sync_outbox", 1
-    )[0]
-    assert INDEX_GUARD in picked
-    original = picked.replace(INDEX_GUARD, "")
+    service = worker.ResearchOutcomeWorker
+    db = database()
+    for i in range(1, 201):
+        add(db, i, i, created_at_utc=i, updated_at_utc=NOW+1000)
+    for i in range(501, 507):
+        add(db, i, NOW+i, created_at_utc=NOW-1)
+    add(db, 600, NOW+1000, sync_status='RETRY', next_attempt_at_utc=NOW+1)
+    add(db, 601, NOW+1000, sync_status='IN_FLIGHT', lease_expires_at_utc=NOW+1)
+    add(db, 602, NOW+1000, sync_status='SYNCED')
+    add(db, 603, NOW+1000, sync_status='DEAD_LETTER')
+    add(db, 604, NOW+1000, method_version='audit-version')
+    add(db, 605, NOW+1000, destination='OTHER')
+    rows = service._claim_ordered_first_touch_outbox(db, 8)
+    assert set(ids(rows)) == {1, 2, 3, 4, 503, 504, 505, 506}, ids(rows)
+    assert len({row['claim_token'] for row in rows}) == 8
+    assert all(row['attempts'] == 1 and row['claimed_payload_sha256'] == 'generation-1' for row in rows)
+    leases = db.conn.execute(f'SELECT lease_expires_at_utc FROM {TABLE} WHERE claim_token IS NOT NULL').fetchall()
+    assert all(tuple(row) == (NOW+120,) for row in leases)
+    # A fresh wrapper after every call models process restarts: only DB state persists.
+    assert ids(service._claim_ordered_first_touch_outbox(Database(db.conn), 1)) == [5]
+    assert ids(service._claim_ordered_first_touch_outbox(Database(db.conn), 1)) == [502]
+    assert ids(service._claim_ordered_first_touch_outbox(Database(db.conn), 1)) == [6]
+    assert ids(service._claim_ordered_first_touch_outbox(Database(db.conn), 1)) == [501]
 
-    def sqlite_query(sql):
-        return sql.replace("NOW()", str(NOW)).replace(
-            "FOR UPDATE SKIP LOCKED", ""
-        ).replace("%s", "?")
+    isolated = database()
+    add(isolated, 1, NOW-20, sync_status='IN_FLIGHT', lease_expires_at_utc=NOW-1,
+        next_attempt_at_utc=NOW+500)
+    add(isolated, 2, None)
+    add(isolated, 3, NOW, sync_status='RETRY', next_attempt_at_utc=NOW+1)
+    add(isolated, 4, NOW, sync_status='IN_FLIGHT', lease_expires_at_utc=NOW+1)
+    assert set(ids(service._claim_ordered_first_touch_outbox(isolated, 8))) == {1, 2}
+    assert service._claim_ordered_first_touch_outbox(isolated, 8) == []
+    # A missing migration continues via the old backlog lane without source time.
+    fallback = database()
+    add(fallback, 1, None)
+    assert ids(service._claim_ordered_first_touch_outbox(Database(fallback.conn, ready=False), 1)) == [1]
 
-    revised = sqlite_query(picked)
-    original = sqlite_query(original)
-    with sqlite3.connect(":memory:") as conn:
-        conn.execute("""
-            CREATE TABLE research_ordered_first_touch_sync_outbox (
-                event_id INTEGER, window_minutes INTEGER,
-                threshold_bps INTEGER, method_version TEXT,
-                destination TEXT, sync_status TEXT,
-                next_attempt_at_utc INTEGER, created_at_utc INTEGER,
-                lease_expires_at_utc INTEGER,
-                PRIMARY KEY(event_id,window_minutes,threshold_bps,
-                            method_version,destination)
-            )
-        """)
-        conn.executescript(index_sql)
-        conn.executescript(index_sql)  # Reapplying migration is idempotent.
-        assert conn.execute(revised, (8,)).fetchall() == []
-        rows = []
-        for event in range(1, 171):
-            for window in (60, 240, 720, 1440):
-                for threshold in range(25, 201, 25):
-                    status = ("PENDING", "RETRY", "IN_FLIGHT", "SYNCED",
-                              "DEAD_LETTER")[event % 5]
-                    # All combinations of lane, due/future deadline, NULL or
-                    # expired/live lease. Deadline equality is eligible.
-                    due_at = NOW + (event % 3 - 1) * 500
-                    lease_at = (None if event % 7 == 0 else
-                                NOW + (event % 4 - 2) * 300)
-                    rows.append((event, window, threshold, "ordered-first-touch-v7",
-                                 "GOOGLE_SHEETS", status, due_at,
-                                 NOW - event % 9, lease_at))
-        # Destination and method are part of the exact identity; the claim
-        # must not silently impose a new method-version filter or conflate
-        # paired directions/thresholds/windows with the same event id.
-        rows.extend([
-            (999, 60, 25, "audit-version", "OTHER", "PENDING", 1, 1, None),
-            (999, 60, 25, "audit-version", "GOOGLE_SHEETS", "PENDING", 2, 1, None),
-            (999, 60, 50, "ordered-first-touch-v7", "GOOGLE_SHEETS",
-             "IN_FLIGHT", NOW + 999, 1, NOW - 1),
-        ])
-        random.Random(725).shuffle(rows)
-        conn.executemany("INSERT INTO research_ordered_first_touch_sync_outbox "
-                         "VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    # A partial concurrent build can leave its relation name in the catalog.
+    # Neither an invalid/not-ready index nor a same-name index on another table
+    # may advance the fresh cursor or choose newer evidence over the FIFO row.
+    for valid, ready, table in ((False, True, 3), (True, False, 3), (True, True, 99)):
+        unavailable = database()
+        add(unavailable, 1, NOW-100, created_at_utc=1)
+        add(unavailable, 2, NOW, created_at_utc=2)
+        unavailable.conn.execute('UPDATE pg_index SET indisvalid=?,indisready=?,indrelid=?',
+            (valid, ready, table))
+        assert ids(service._claim_ordered_first_touch_outbox(unavailable, 1)) == [1]
+        assert unavailable.conn.execute('SELECT next_slot FROM research_ordered_first_touch_delivery_cursor').fetchone()[0] == 0
 
-        for limit in (1, 2, 8, 128, 9999):
-            expected = conn.execute(original, (limit,)).fetchall()
-            actual = conn.execute(revised, (limit,)).fetchall()
-            assert actual == expected, limit
-            assert len(actual) == len(set(actual)), "duplicate full identities"
-        all_due = conn.execute(revised, (9999,)).fetchall()
-        assert all(row[4] == "GOOGLE_SHEETS" for row in all_due)
-        assert all_due[0] == (999, 60, 25, "audit-version", "GOOGLE_SHEETS")
-        # An expired lease is eligible even with a future next-attempt date;
-        # retaining the original OR is essential for stale-lease recovery.
-        assert (999, 60, 50, "ordered-first-touch-v7", "GOOGLE_SHEETS") in all_due
+    tied = database()
+    add(tied, 1, NOW, measured=NOW-100, updated_at_utc=NOW+1000)
+    add(tied, 2, NOW, measured=NOW-10, updated_at_utc=1)
+    add(tied, 3, NOW-1, updated_at_utc=NOW+9999)
+    assert ids(service._claim_ordered_first_touch_lane(tied, 1, recent=True)) == [2]
+    assert service._claim_ordered_first_touch_lane(tied, 0, recent=False) == []
+    capture = Database(tied.conn)
+    service._claim_ordered_first_touch_lane(capture, 99999, recent=False)
+    assert capture.calls[-1][1] == (worker._ORDERED_FIRST_TOUCH_OUTBOX_LIMIT,)
 
-        # Exhaust consecutive batches and prove no eligible row is starved or
-        # duplicated by the common ordering, including interleaved lanes.
-        consumed = []
-        while True:
-            batch = conn.execute(revised, (8,)).fetchall()
-            if not batch:
-                break
-            consumed.extend(batch)
-            conn.executemany("""
-                UPDATE research_ordered_first_touch_sync_outbox
-                SET sync_status='SYNCED'
-                WHERE event_id=? AND window_minutes=? AND threshold_bps=?
-                  AND method_version=? AND destination=?
-            """, batch)
-        assert consumed == all_due
-        assert len(consumed) == len(set(consumed))
-    print("ordered First Touch sync claim parity selftest passed")
+    # Exhaust oldest-only selection to prove all supported identities progress once.
+    exhausted = database()
+    for i in range(1, 90):
+        add(exhausted, i, i, created_at_utc=i)
+    consumed = []
+    while batch := service._claim_ordered_first_touch_lane(exhausted, 8, recent=False):
+        consumed.extend(ids(batch))
+    assert consumed == list(range(1, 90))
+    assert len(consumed) == len(set(consumed))
+
+    # Explain each actual selection, with the production partial index predicate.
+    for recent, expected in ((True, 'idx_ordered_first_touch_sync_fresh_observed'),
+                             (False, 'idx_ordered_first_touch_sync_claim_queue')):
+        service._claim_ordered_first_touch_lane(db, 2, recent=recent)
+        query, params = db.calls[-1]
+        selection = query.split('WITH picked AS (', 1)[1].split(')\n            UPDATE', 1)[0]
+        plan = db.conn.execute('EXPLAIN QUERY PLAN '+db.translate(selection), params).fetchall()
+        assert expected in str([tuple(row) for row in plan]), plan
+    print('ordered First Touch fresh/backlog claim selftest passed')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     run()
