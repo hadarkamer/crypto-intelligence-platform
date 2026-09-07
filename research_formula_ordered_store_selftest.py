@@ -50,6 +50,15 @@ def run():
     assert row['median_mfe_pct']==row['median_mae_pct']==''
     assert row['meets_min_5'] is False and row['status']=='INCOMPLETE_DECISION_POPULATION'
     assert 'provisional' in row['chat_summary']
+    # A complete First Touch cohort is insufficient for full-window metrics.
+    assert payload['row']['median_mfe_pct']==payload['row']['median_mae_pct']==payload['row']['asymmetry_ratio']==''
+    fixed=Capture()
+    with_common={**result,'common_window_metrics':{'common_window_complete':True,
+        'common_window_median_mfe_pct':2.0,'common_window_median_mae_pct':0.5,
+        'common_window_asymmetry_ratio':3.75,'asymmetry_method':'RATIO_SUM_MFE_TO_SUM_MAE_FULL_COMMON_WINDOW'}}
+    store.persist_scope(fixed,scope,[],with_common,now=now)
+    fixed_row=json.loads(next(params[2] for sql,params in fixed.calls if 'INSERT INTO research_sheet_upsert_outbox' in sql))['row']
+    assert (fixed_row['median_mfe_pct'],fixed_row['median_mae_pct'],fixed_row['asymmetry_ratio'])==(2.0,0.5,3.75)
     states=[evidence_row(1,wave='success'),evidence_row(2,wave='failure',success=False)]
     states += [nondecisive_row(i+3,status=status,wave=status)
                for i,status in enumerate(('OPEN','AMBIGUOUS','NO_TOUCH','DATA_MISSING'))]

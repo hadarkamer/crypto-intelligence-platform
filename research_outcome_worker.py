@@ -47,6 +47,8 @@ import google_sheets_sync
 import research_feature_matrix
 import research_no_dwell_outcome
 import research_ordered_first_touch
+import research_common_window_metrics
+import research_common_window_metrics_store
 import research_session_width
 
 
@@ -2406,6 +2408,10 @@ class ResearchOutcomeWorker:
             "synced": 0,
             "sync_failures": 0,
             "lock_skipped": 0,
+            "common_window_written": 0,
+            "common_window_checked": 0,
+            "common_window_path_failures": 0,
+            "common_window_schema_missing": 0,
         }
         now = datetime.now(timezone.utc)
         latest_closed_cutoff = _latest_closed_candle_cutoff(now)
@@ -2418,6 +2424,11 @@ class ResearchOutcomeWorker:
             events = self._load_ordered_first_touch_due_events(
                 conn, event_limit
             )
+            metrics_available = research_common_window_metrics_store.available(conn)
+            if metrics_available:
+                research_common_window_metrics_store.seed_bounded_history(conn)
+            else:
+                summary["common_window_schema_missing"] = 1
 
         for raw_event in events:
             event = dict(raw_event)
@@ -2474,6 +2485,8 @@ class ResearchOutcomeWorker:
                 connect_timeout=5,
                 options="-c statement_timeout=15000 -c lock_timeout=1000",
             ) as conn:
+                if metrics_available:
+                    research_common_window_metrics_store.seed_event(conn, event)
                 for window_minutes in _ORDERED_FIRST_TOUCH_WINDOWS:
                     window_cutoff = event_time + timedelta(
                         minutes=window_minutes
@@ -2492,6 +2505,17 @@ class ResearchOutcomeWorker:
                     # because the single shared 24h fetch is partial later.
                     # The pure calculator independently verifies contiguity.
                     prefix_complete = len(candles) == expected
+                    if metrics_available:
+                        metric = research_common_window_metrics.calculate_common_window_metrics(
+                            symbol=symbol, reference_price=reference_price,
+                            direction=str(event["direction"]), event_time=event_time,
+                            window_minutes=window_minutes, candles=candles,
+                            observed_at=now, path_result=path_result,
+                        )
+                        if research_common_window_metrics_store.write_metrics(
+                            conn, event_id=int(event["event_id"]), metrics=metric
+                        ):
+                            summary["common_window_written"] += 1
                     outcomes = (
                         research_ordered_first_touch
                         .calculate_all_ordered_first_touch_outcomes(
@@ -2517,9 +2541,94 @@ class ResearchOutcomeWorker:
             # Drop the potentially 1,440-candle route before the next event.
             del full_path
 
+        # Early terminal First Touch events disappear from its OPEN queue.
+        # Their separate fixed-horizon jobs still mature and reuse one path
+        # fetch per event across all four windows, with at most four events.
+        if metrics_available:
+            try:
+                metrics_summary = self._run_common_window_due(url, now=now)
+                for key, value in metrics_summary.items():
+                    summary[key] += value
+            except Exception as exc:
+                summary["common_window_worker_failures"] = 1
+                print(f"[research-outcomes] common-window queue unavailable: {exc!r}", flush=True)
+
+        # On-demand inverse rows have their own canonical event identities;
+        # compute their paths afresh, never negate or swap native v7 statuses.
+        # A sidecar queue failure must not prevent existing v7 Sheet delivery.
+        try:
+            import research_ordered_inverse_worker
+            inverse_summary = research_ordered_inverse_worker.run_pending(
+                url, now=now, event_limit=4,
+                connect=lambda database_url: psycopg.connect(database_url,
+                    row_factory=dict_row, connect_timeout=5,
+                    options="-c statement_timeout=15000 -c lock_timeout=1000"),
+            )
+            for key, value in inverse_summary.items():
+                summary[key] = summary.get(key, 0) + value
+        except Exception as exc:
+            summary["inverse_worker_failures"] = 1
+            print(f"[research-outcomes] inverse queue unavailable: {exc!r}", flush=True)
+
         delivery = self._drain_ordered_first_touch_outbox(url)
         summary["synced"] = delivery["synced"]
         summary["sync_failures"] = delivery["failed"]
+        # History enrichment runs after native v7 delivery, never in its way.
+        # Only one event and a 15s official HTTP budget per pass; source data
+        # is strictly earlier than entry and carries its own method/provenance.
+        try:
+            import research_past_price_features_worker
+            past_summary = research_past_price_features_worker.run_pending(
+                url, now=now, max_seconds=15,
+                connect=lambda database_url: psycopg.connect(database_url,
+                    row_factory=dict_row, connect_timeout=5,
+                    options="-c statement_timeout=15000 -c lock_timeout=1000"),
+            )
+            for key, value in past_summary.items():
+                summary[key] = summary.get(key, 0) + value
+        except Exception as exc:
+            summary["past_features_worker_failures"] = 1
+            print(f"[research-outcomes] prior-price queue unavailable: {exc!r}", flush=True)
+        return summary
+
+    def _run_common_window_due(self, url: str, *, now: datetime) -> Dict[str, int]:
+        summary = {"common_window_checked": 0, "common_window_written": 0,
+                   "common_window_path_failures": 0}
+        deadline = time.monotonic() + 20
+        options = "-c statement_timeout=15000 -c lock_timeout=1000"
+        with psycopg.connect(url, row_factory=dict_row, connect_timeout=5, options=options) as conn:
+            events = research_common_window_metrics_store.load_due_events(conn, limit=4)
+        for event in events:
+            if time.monotonic() >= deadline:
+                break
+            summary["common_window_checked"] += 1
+            try:
+                provenance_error = _alert_reference_provenance_error(event)
+                if provenance_error:
+                    raise ValueError(provenance_error)
+                start = _utc(event["alert_time_utc"])
+                symbol = str(event["symbol"]).upper()
+                cutoff = min(start + timedelta(minutes=1440), _latest_closed_candle_cutoff(now))
+                path_result = canonical_price_path.fetch_closed_candles(symbol, start, cutoff)
+                path_error = _canonical_path_provenance_error(symbol, path_result)
+                if path_error:
+                    raise ValueError(path_error)
+                path = list(path_result.get("candles") or [])
+                metrics = [research_common_window_metrics.calculate_common_window_metrics(
+                    symbol=symbol, reference_price=event["current_price"],
+                    direction=event["direction"], event_time=start,
+                    window_minutes=window, candles=path, observed_at=now,
+                    path_result=path_result) for window in _ORDERED_FIRST_TOUCH_WINDOWS]
+                with psycopg.connect(url, row_factory=dict_row, connect_timeout=5, options=options) as conn:
+                    for metric in metrics:
+                        if research_common_window_metrics_store.write_metrics(conn,
+                                event_id=int(event["event_id"]), metrics=metric):
+                            summary["common_window_written"] += 1
+            except Exception as exc:
+                summary["common_window_path_failures"] += 1
+                with psycopg.connect(url, row_factory=dict_row, connect_timeout=5, options=options) as conn:
+                    research_common_window_metrics_store.defer_event(conn, int(event["event_id"]), reason=str(exc))
+                print(f"[research-outcomes] common-window unavailable event={event['event_id']}: {exc!r}", flush=True)
         return summary
 
     def _run_ordered_first_touch_once(

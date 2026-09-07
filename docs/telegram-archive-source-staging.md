@@ -92,6 +92,11 @@ normalization, prior-import evidence or manifest versions create a new intake.
 
 ## Statistical integration remains separate
 
+The subsequent isolated reconstruction is now implemented in
+`telegram-archive-delayed-entry-research.md`. It measures a separately versioned
+next-minute Spot-open entry; it does not change this source intake’s eligibility
+flags or make archive and native LIVE entries interchangeable.
+
 Reconstruct only fields that existed when each message's conditions became
 complete; validate family total scores and direction-version mapping; obtain
 eligible price paths and ordered First Touch v7 results per threshold/horizon;

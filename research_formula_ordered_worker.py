@@ -7,6 +7,10 @@ import time
 from typing import Any
 import research_formula_ordered_store as store
 import research_formula_ordered_v7 as evaluator
+import research_ordered_question_catalog as questions
+import research_ordered_question_store as question_store
+import research_ordered_validation_store as validation_store
+import research_ordered_inverse_store as inverse_store
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -45,11 +49,12 @@ class ResearchFormulaOrderedWorker:
             'schema_ready':self._schema_ready,'poll_seconds':_POLL,'formula_version':store.FORMULA_VERSION,
             'parent_policy_version':store.PARENT_POLICY,'outcome_method_version':evaluator.METHOD_VERSION,
             'research_periods':[store.period_contract({'period_key':key}) for key in store.PERIODS],
-            'candidate_count':len(evaluator.candidate_catalog()),'scope_limit_per_pass':_SCOPE_LIMIT,'event_limit_per_pass':_EVENT_LIMIT,
+            'candidate_count':len(evaluator.candidate_catalog(include_extended=True)),'scope_limit_per_pass':_SCOPE_LIMIT,'event_limit_per_pass':_EVENT_LIMIT,
             'thresholds_bps':list(evaluator.THRESHOLDS_BPS),'horizons_minutes':list(evaluator.HORIZONS_MINUTES),
             'evidence_policy':'One causally verified BTC parent across all coins/time; earliest frozen matching cohort',
-            'research_scope':'Descriptive singles/pairs/triple total-score65 screen; delivered alerts only; metrics stop at first touch',
-            'live_effect':'NONE','remaining_validation':'Prospective/full-horizon probability/asymmetry validation not yet implemented',
+            'research_scope':'Versioned Q01-Q72 captured-feature queue; normal/inverse; finite singles/pairs/justified triples/quads; original delivered-alert wave cohorts',
+            'question_map_count':len(questions.question_map()),'feature_version':questions.VERSION,
+            'live_effect':'NONE','remaining_validation':'Missing captured fields, prior-price/regime features and exact documented acceptance policies stay explicitly blocked',
             'metrics':dict(self.metrics)}
 
     async def start(self)->bool:
@@ -96,7 +101,7 @@ class ResearchFormulaOrderedWorker:
     def run_once(self,*,now:datetime|None=None)->dict[str,Any]:
         now=now or datetime.now(timezone.utc)
         started=time.monotonic()
-        summary={'scopes_evaluated':0,'episodes':0,'upserts':0,'truncated_scopes':0,'locked':False}
+        summary={'scopes_evaluated':0,'unchanged_scopes_skipped':0,'episodes':0,'upserts':0,'truncated_scopes':0,'locked':False}
         url=_database_url()
         if not url or psycopg is None:
             raise RuntimeError('Ordered Formula research database is unavailable')
@@ -109,27 +114,71 @@ class ResearchFormulaOrderedWorker:
             try:
                 catalog=store.register_catalog(conn)
                 summary.update(store.ingest_matches(conn,catalog,now=now,event_limit=_EVENT_LIMIT))
+                inverse_available=inverse_store.available(conn)
+                if inverse_available:
+                    for event_id in sorted(set(summary.pop('inverse_source_event_ids',[]))|set(store.inverse_reconciliation_ids(conn,limit=32))):
+                        inverse_store.request_inverse(conn,{'event_id':event_id},now=now)
+                else:
+                    summary['inverse_status']='BLOCKED_MISSING_MIGRATION_033'
                 conn.commit()
+                validation_available=validation_store.schema_status(conn)['schema_present']
+                attempts=conn.execute("SELECT COUNT(*) AS n FROM research_ordered_formula_scopes WHERE period_key<>'LEGACY_UNSCOPED'").fetchone()['n']
+                candidates={candidate['formula_id']:candidate for candidate in catalog}
                 period_population={key:store.source_population_complete(conn,now=now,period_key=key) for key in store.PERIODS}
                 summary['source_population_complete_by_period']=period_population
                 summary['source_population_complete']=all(period_population.values())
                 scopes=store.due_scopes(conn,_SCOPE_LIMIT)
+                feature_coverage_cache={}
                 conn.commit()
                 for scope in scopes:
                     if time.monotonic()-started>=_PASS_SECONDS:
                         break
                     population_complete=period_population[scope['period_key']]
+                    feature_key=(scope['candidate_key'],scope['symbol'],scope['direction'],scope['period_key'])
+                    if feature_key not in feature_coverage_cache:
+                        feature_coverage_cache[feature_key]=store.candidate_feature_coverage_complete(conn,scope,candidates[scope['candidate_key']],now=now)
+                    feature_coverage=feature_coverage_cache[feature_key]
+                    candidate_population_complete=bool(population_complete and feature_coverage['complete'])
                     rows,truncated=store.load_scope_rows(conn,scope,row_limit=_ROW_LIMIT,now=now)
                     mappings_complete=store.membership_complete(conn,scope,now=now)
-                    result=evaluator.summarize_scope(rows,analysis_as_of_utc=now,truncated=truncated,source_coverage_complete=bool(population_complete and mappings_complete))
+                    common_rows=store.common_window_rows(conn,scope,rows)
+                    input_sha=question_store.evaluation_input(scope,[{**row,'common_window_record':common_rows.get(row['event_id'])} for row in rows],now=now,population_complete=candidate_population_complete,membership_complete=mappings_complete)
+                    input_sha=store.digest({'input':input_sha,'validation_available':validation_available,'registered_attempts':attempts})
+                    if scope.get('evaluation_input_sha256')==input_sha:
+                        conn.execute('UPDATE research_ordered_formula_scopes SET last_evaluated_at_utc=%s WHERE scope_key=%s',(now,scope['scope_key']))
+                        conn.commit()
+                        summary['unchanged_scopes_skipped']+=1
+                        continue
+                    result=evaluator.summarize_scope(rows,analysis_as_of_utc=now,truncated=truncated,source_coverage_complete=bool(candidate_population_complete and mappings_complete))
+                    result['candidate_feature_coverage']=feature_coverage
+                    result['past_price_coverage']={'representative_events':len(rows),
+                        'with_closed_prior_features':sum(any(key.startswith('historical.closed_1m.') and not key.endswith('.method_version') for key in (row.get('decision_features') or {})) for row in rows),
+                        'range_regime_status':'NOT_DEFINED; exact closed-return sign is separate'}
                     result['period_coverage']=store.period_coverage(conn,scope,now=now)
-                    result['source_population_complete']=population_complete
+                    result['source_population_complete']=candidate_population_complete
+                    result['source_alert_screen_complete']=population_complete
                     result['membership_population_complete']=mappings_complete
-                    if not population_complete or not mappings_complete:
+                    if not candidate_population_complete or not mappings_complete:
                         result['count_eligible']=False
                         result['count_route']='INCOMPLETE_DECISION_POPULATION'
                         result['exclusion_reasons']['INCOMPLETE_DECISION_POPULATION']=1
+                    if not feature_coverage['complete']:
+                        result['exclusion_reasons']['REQUIRED_PAST_FEATURES_UNKNOWN_FOR_POSSIBLE_EARLIER_MATCH']=1
+                    if validation_available:
+                        contract={**scope,**store.period_contract(scope),'parent_policy_version':store.PARENT_POLICY}
+                        candidate=candidates[scope['candidate_key']]
+                        validated=validation_store.evaluate_scope(conn,contract,rows,now=now,
+                            candidate_definition={**candidate,'direction_mode':candidate.get('research_orientation','NORMAL')},
+                            source_coverage_complete=bool(candidate_population_complete and mappings_complete),truncated=truncated,
+                            common_window_rows=common_rows,registered_attempts=attempts)
+                        result['prospective_validation']=validated
+                        result['research_ready']=validated['research_ready']
+                        result['validation_status']=validated['validation_status']
+                        if 'all_period_metrics' in validated:
+                            question_store.apply_validation_cohorts(result,validated)
                     counts=store.persist_scope(conn,scope,rows,result,now=now)
+                    question_store.record_scope_trial(conn,candidates[scope['candidate_key']],scope,result,input_sha=input_sha,now=now)
+                    conn.execute('UPDATE research_ordered_formula_scopes SET evaluation_input_sha256=%s WHERE scope_key=%s',(input_sha,scope['scope_key']))
                     conn.commit()
                     summary['scopes_evaluated']+=1
                     summary['truncated_scopes']+=int(truncated)

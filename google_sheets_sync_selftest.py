@@ -566,14 +566,27 @@ def run():
         assert google_sheets_sync.deliver_now({"upserts": []}) is False
         assert len(calls) == 1
 
+        # Restarting must not send a multirow probe to an unknown or legacy
+        # receiver: a single confirmed row establishes batch capability.
+        google_sheets_sync._ORDERED_BATCH_FALLBACK = False
+        google_sheets_sync._RECEIVER_VERSION = None
+        assert google_sheets_sync.ordered_outcome_batch_limit() == 1
+        google_sheets_sync.urlopen = successful_request
+        outcome_payload = {"kind": "ordered_first_touch_outcomes", "upserts": []}
+        for body in (b'{"ok":true}', b'{"ok":true,"version":"unknown-new-version"}'):
+            Response.body = body
+            assert google_sheets_sync.deliver_now(outcome_payload) is True
+            assert google_sheets_sync.ordered_outcome_batch_limit() == 1
+        Response.body = b'{"ok":true,"version":"sheets-batch-v2"}'
+        assert google_sheets_sync.deliver_now(outcome_payload) is True
+        assert google_sheets_sync.ordered_outcome_batch_limit() == 8
         # A timed-out multirow request may already have changed the Sheet.
         # Later leases shrink, but it is never treated as acknowledged.
-        google_sheets_sync._ORDERED_BATCH_FALLBACK = False
-        assert google_sheets_sync.ordered_outcome_batch_limit() == 8
-        outcome_payload = {"kind": "ordered_first_touch_outcomes", "upserts": []}
+        google_sheets_sync.urlopen = failing_request
         assert google_sheets_sync.deliver_now(outcome_payload) is False
         assert google_sheets_sync.ordered_outcome_batch_limit() == 1
         google_sheets_sync.urlopen = successful_request
+        Response.body = b'{"ok":true}'
         assert google_sheets_sync.deliver_now(outcome_payload) is True
         assert google_sheets_sync.status()["receiver_version"] == "unversioned"
         assert google_sheets_sync.ordered_outcome_batch_limit() == 1

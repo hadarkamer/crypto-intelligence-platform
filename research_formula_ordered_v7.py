@@ -93,6 +93,9 @@ def ordered_outcome_evidence(
     as_of = _utc(analysis_as_of_utc)
     if label.get("method_version") != METHOD_VERSION:
         reasons.append("OUTCOME_METHOD_MISMATCH")
+    expected_event_id=row.get('outcome_event_id',_field(row,'event_id'))
+    if type(expected_event_id) is not int or expected_event_id<=0 or label.get('event_id')!=expected_event_id:
+        reasons.append('OUTCOME_EVENT_ID_MISMATCH')
     direction = label.get("direction")
     if direction not in DIRECTIONS or _field(row, "direction") != direction:
         reasons.append("DIRECTION_MISMATCH")
@@ -199,6 +202,13 @@ def ordered_outcome_evidence(
         reasons.append("INITIAL_GAP_AUDIT_MISMATCH")
 
     reference = _number(label.get("reference_price"))
+    original_entry = _number(_field(row, "entry_price"))
+    if original_entry is None:
+        original_entry = _number(_event(row).get("current_price"))
+    if original_entry is None or original_entry <= 0:
+        reasons.append("MISSING_ORIGINAL_ENTRY_PRICE")
+    elif reference is not None and not math.isclose(reference, original_entry, rel_tol=1e-12):
+        reasons.append("REFERENCE_PRICE_DIFFERS_FROM_ORIGINAL_ENTRY")
     favorable = _number(label.get("favorable_barrier_price"))
     adverse = _number(label.get("adverse_barrier_price"))
     if (
@@ -258,7 +268,7 @@ def _conditions(formula: Mapping[str, Any]) -> list[dict[str, Any]]:
         if (
             not feature.startswith(_FEATURE_PREFIXES)
             or any(token in feature.lower().replace("futures", "") for token in _LABEL_TOKENS)
-            or item.get("operator") not in {">=", "<=", "=="}
+            or item.get("operator") not in {">=", "<=", "==", ">", "<"}
             or isinstance(item.get("value"), (dict, list, tuple))
             or item.get("value") is None
         ):
@@ -282,9 +292,10 @@ def _matches(features: Mapping[str, Any], conditions: Sequence[Mapping[str, Any]
                     passed = actual == expected and _number(actual) is not None
         else:
             left, right = _number(actual), _number(expected)
-            passed = left is not None and right is not None and (
-                left >= right if condition["operator"] == ">=" else left <= right
-            )
+            passed = left is not None and right is not None and {
+                ">=": lambda: left >= right, "<=": lambda: left <= right,
+                ">": lambda: left > right, "<": lambda: left < right,
+            }[condition["operator"]]()
         if not passed:
             return False
     return True
@@ -325,7 +336,7 @@ def extract_event_features(event: Mapping[str, Any]) -> dict[str, Any]:
     return features
 
 
-def candidate_catalog() -> list[dict[str, Any]]:
+def candidate_catalog(*, include_extended: bool = False) -> list[dict[str, Any]]:
     """Small prespecified screen, never label-fitted or advertised as exhaustive."""
     families = ("price_oi", "futures_cvd", "spot_cvd")
     candidates = []
@@ -349,6 +360,10 @@ def candidate_catalog() -> list[dict[str, Any]]:
         "conditions": [condition(family) for family in families], "repeat_count": 1,
         "catalog_version": CATALOG_VERSION,
     })
+    if include_extended:
+        import research_ordered_question_catalog as questions
+        extended = questions.candidates()
+        return candidates + extended + questions.inverse_candidates(candidates + extended)
     return candidates
 
 

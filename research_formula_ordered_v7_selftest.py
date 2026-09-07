@@ -34,7 +34,7 @@ def row(
         observation_closed=False, path_complete=True,
     )
     return {
-        **label, "event_id": event_id, "symbol": symbol,
+        **label, "event_id": event_id, "symbol": symbol, "entry_price": 100.0,
         "alert_time_utc": start, "window_minutes": horizon,
         "btc_parent_movement_id": wave,
         "episode_policy_version": "btc-parent-test-v1",
@@ -72,6 +72,21 @@ def evaluate(rows, candidate=CANDIDATE):
 
 
 class OrderedEvidenceTests(unittest.TestCase):
+    def test_self_consistent_label_cannot_change_original_entry(self):
+        source=row()
+        for key in ('reference_price','favorable_barrier_price','adverse_barrier_price','favorable_touch_price'):
+            source[key] *= 2
+        audit=formulas.ordered_outcome_evidence(source,analysis_as_of_utc=AS_OF)
+        self.assertFalse(audit['eligible'])
+        self.assertIn('REFERENCE_PRICE_DIFFERS_FROM_ORIGINAL_ENTRY',audit['exclusion_reasons'])
+        missing=row();missing.pop('entry_price')
+        self.assertIn('MISSING_ORIGINAL_ENTRY_PRICE',formulas.ordered_outcome_evidence(missing,analysis_as_of_utc=AS_OF)['exclusion_reasons'])
+        original=row();wrong={**original,'ordered_outcome':{**original,'event_id':99}}
+        self.assertIn('OUTCOME_EVENT_ID_MISMATCH',formulas.ordered_outcome_evidence(wrong,analysis_as_of_utc=AS_OF)['exclusion_reasons'])
+        # An explicit real derived inverse identity is allowed; its source ID
+        # remains unchanged for the BTC cohort. Direction and price gates still apply.
+        mapped={**wrong,'outcome_event_id':99}
+        self.assertTrue(formulas.ordered_outcome_evidence(mapped,analysis_as_of_utc=AS_OF)['eligible'])
     def test_real_calculator_labels_and_fail_closed_audit(self):
         for direction in formulas.DIRECTIONS:
             for success in (True, False):

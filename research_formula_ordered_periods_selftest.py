@@ -23,6 +23,7 @@ class RelationalStore:
             CREATE TABLE research_ordered_first_touch_outcomes(event_id INTEGER,window_minutes INTEGER,threshold_bps INTEGER,method_version TEXT);
             CREATE TABLE research_events(event_id INTEGER,event_kind TEXT,delivery_status TEXT,direction TEXT,alert_time_utc TEXT);
             CREATE TABLE research_ordered_formula_event_checks(event_id INTEGER);
+            CREATE TABLE research_ordered_feature_screens(event_id INTEGER,feature_version TEXT);
         ''')
 
     def execute(self,sql,params):
@@ -38,6 +39,7 @@ class RelationalStore:
         self.db.execute('INSERT INTO research_events VALUES(?,?,?,?,?)',(event_id,'ALERT','DELIVERED','LONG',time.isoformat()))
         if checked:
             self.db.execute('INSERT INTO research_ordered_formula_event_checks VALUES(?)',(event_id,))
+            self.db.execute('INSERT INTO research_ordered_feature_screens VALUES(?,?)',(event_id,store.questions.VERSION))
         if member is not None:
             self.db.execute('INSERT INTO research_event_btc_movements VALUES(?,?,?,?)',(event_id,store.PARENT_POLICY,wave,member))
         if not self.db.execute('SELECT 1 FROM research_btc_parent_movements WHERE btc_parent_movement_id=?',(wave,)).fetchone():

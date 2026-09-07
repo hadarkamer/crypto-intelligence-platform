@@ -91,6 +91,24 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "028_telegram_archive_source_staging.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "029_common_window_metrics.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "030_ordered_question_search.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "031_ordered_prospective_validation.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "032_telegram_archive_reconstruction.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "033_ordered_inverse_analysis_requests.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "034_past_price_features.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

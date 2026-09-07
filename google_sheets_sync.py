@@ -158,15 +158,17 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
 
 
 def ordered_outcome_batch_limit() -> int:
-    """Keep later claims small after an unconfirmed legacy receiver request.
+    """Require a confirmed batch receiver before making multirow claims.
 
     The old Apps Script scans the complete worksheet for every input row. A
     multirow timeout can therefore write rows without confirming any of them.
-    Retry one idempotent row per lease until a successful reply proves the
-    prepared batch receiver has actually been deployed. This state affects
-    request sizing only; the durable outbox remains the delivery authority.
+    Begin with one idempotent row per lease, including after process restarts,
+    until a successful reply proves the prepared batch receiver is deployed.
+    This avoids an oversized discovery request timing out after every deploy.
+    This state affects request sizing only; the durable outbox remains the
+    delivery authority.
     """
-    return 1 if _ORDERED_BATCH_FALLBACK else 8
+    return 8 if _RECEIVER_VERSION == "sheets-batch-v2" and not _ORDERED_BATCH_FALLBACK else 1
 
 
 @contextmanager

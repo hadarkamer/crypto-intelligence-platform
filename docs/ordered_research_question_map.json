@@ -1,0 +1,578 @@
+[
+  {
+    "question_id": "Q01",
+    "question": "האם מאזן נזילות התומך בכיוון משפר גם הסתברות וגם אסימטריה לעומת מאזן מנוגד או חסר?",
+    "justification": "בדיקת התרומה המרכזית שביקשה המשתמשת",
+    "requested_fields": "liquidity_balance_pct, direction, Outcomes, MFE, MAE",
+    "independence_unit": "btc_parent_movement_id + episode_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q02",
+    "question": "האם קיימים טווחי מאזן יעילים: <40, 40–50, 50–60, 60–70, 70–80, 80+?",
+    "justification": "ייתכן יחס לא ליניארי",
+    "requested_fields": "liquidity_balance_pct, Outcomes",
+    "independence_unit": "episode_id לפי סף",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q03",
+    "question": "האם Combined Confirmation עם נזילות תומכת מצליח יותר מאותו מבנה ללא תמיכה?",
+    "justification": "מבודד את תוספת הנזילות",
+    "requested_fields": "primary_alert_type, alert_types, liquidity_balance_pct, Outcomes",
+    "independence_unit": "episode_id + גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q04",
+    "question": "האם נזילות מועילה רק יחד עם Price/OI או CVD חזקים ובאותו כיוון?",
+    "justification": "בדיקת אינטראקציה ולא רכיב בודד",
+    "requested_fields": "שלושת ציוני total והכיוונים, liquidity_balance_pct, Outcomes",
+    "independence_unit": "episode_id + גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q05",
+    "question": "האם תרומת מאזן הנזילות משתנה לפי מטבע, LONG/SHORT וסף?",
+    "justification": "מונע ערבוב אוכלוסיות שונות",
+    "requested_fields": "symbol, direction, threshold_pct, liquidity_balance_pct",
+    "independence_unit": "episode_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q06",
+    "question": "האם חסר במאזן הנזילות תלוי בסוג ההתראה או בכיוון ועלול להטות את המחקר?",
+    "justification": "חסר שיטתי עלול ליצור מסקנה כוזבת",
+    "requested_fields": "primary_alert_type, direction, liquidity_balance_pct, data_quality_status",
+    "independence_unit": "snapshot_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q07",
+    "question": "האם ממוצע ציון מעל 55 משתפר בהדרגה בספים 60, 65, 70, 75 ו־80?",
+    "justification": "בודק את הממצא הקודם בלי לקבע 55",
+    "requested_fields": "כל שדה ממוצע בשמו המקורי בנפרד; MaxPain direction/opposite_average; GOAT אם קיים; ממוצע מנועים מוגדר בנפרד; Outcomes",
+    "independence_unit": "episode_id + גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q08",
+    "question": "האם יישור כל שלושת הכיוונים עדיף על רוב של 2 מתוך 3, ומה תוספת של שלישייה 65+?",
+    "justification": "בודק תרומת יישור מול עוצמה",
+    "requested_fields": "all_three_aligned, strict_triple_65_match, total scores",
+    "independence_unit": "episode_id + גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q09",
+    "question": "האם MaxPain נבחר גבוה יחד עם ציון נגדי נמוך ופער גדול עדיף על ציון נבחר לבדו?",
+    "justification": "בודק איכות יחסית",
+    "requested_fields": "selected/opposite score, edge, ratio, Outcomes",
+    "independence_unit": "episode_id + משפחת MaxPain",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q10",
+    "question": "האם ממוצעי MaxPain על פני הטיימפריימים מנבאים טוב יותר מטיימפריים נבחר יחיד?",
+    "justification": "מצמצם רגישות לטווח בודד",
+    "requested_fields": "direction/opposite average, selected timeframe score",
+    "independence_unit": "episode_id + משפחת MaxPain",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q11",
+    "question": "האם Magnet CONFIRMED/STRONG_CONFIRMED עדיף על NOT_CONFIRMED/OBSERVATION?",
+    "justification": "בודק ערך ממשי של האישור",
+    "requested_fields": "magnet status, component scores, Outcomes",
+    "independence_unit": "episode_id + יעד מגנט מאוחד",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q12",
+    "question": "האם מרחק יעד מסוים משפר הצלחה ואסימטריה, ובאילו ספים?",
+    "justification": "מרחק גדול עלול להיות פחות בר־השגה",
+    "requested_fields": "target_distance_pct, threshold_pct, Outcomes",
+    "independence_unit": "episode_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q13",
+    "question": "אילו מטבעות מצליחים בכמה משפחות נוסחאות שונות שאינן חופפות?",
+    "justification": "מזהה עקביות אמיתית של מטבע",
+    "requested_fields": "candidate family, symbol, Outcomes",
+    "independence_unit": "episode_id + גל BTC",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q14",
+    "question": "האם נוסחת FRESH של 3 אפיזודות מה־14 ימים האחרונים נשארת רלוונטית כשהיא מגיעה ל־5?",
+    "justification": "בודק עמידות של אות טרי",
+    "requested_fields": "episode dates, formula status, Outcomes",
+    "independence_unit": "episode_id",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q15",
+    "question": "האם אות הנשמר בכמה סריקות רצופות חזק יותר מאות חד־פעמי?",
+    "justification": "בודק התמדה בלי לנפח מדגם",
+    "requested_fields": "watch_scan_id, candidate state, Outcomes",
+    "independence_unit": "אפיזודה אחת לאורך רצף",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q16",
+    "question": "האם התוצאה משתנה לפי שעה, יום, סוף שבוע ותנאי שוק?",
+    "justification": "משטרי שוק עשויים לשנות ביצועים",
+    "requested_fields": "timestamp, market_session, is_weekend, Outcomes",
+    "independence_unit": "episode_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q17",
+    "question": "האם הממצא נובע מהנוסחה או מגל BTC משותף לכל המטבעות?",
+    "justification": "מונע תלות בין מטבעות",
+    "requested_fields": "btc_parent_movement_id, symbol, Outcomes",
+    "independence_unit": "btc_parent_movement_id",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q18",
+    "question": "כאשר CVD בטווחים שונים סותר, איזה טווח מוביל ומהי השפעת הסתירה?",
+    "justification": "סתירות עשויות להיות אות ולא רעש",
+    "requested_fields": "פירוט CVD לפי טווח, total direction, Outcomes",
+    "independence_unit": "episode_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q19",
+    "question": "האם נוסחה עדיפה על תאי no-signal מקבילים באותו זמן ומטבע?",
+    "justification": "בדיקת תרומה נוספת כאשר יש נתוני השוואה תקינים; אינה תנאי חוסם גורף ליצירת מועמדות",
+    "requested_fields": "PROSPECTIVE_NEUTRAL_30M, Outcomes, same slot",
+    "independence_unit": "גל BTC + slot",
+    "missing_step": "Complete matched PROSPECTIVE neutral source and ordered-v7 labels"
+  },
+  {
+    "question_id": "Q20",
+    "question": "האם מספר Confirmation/Strong Confirmation משפר הסתברות ואסימטריה?",
+    "justification": "בודק מונוטוניות של חוזק אישור",
+    "requested_fields": "confirmation count, strong count, Outcomes",
+    "independence_unit": "episode_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q21",
+    "question": "מהי עקומת התוצאה לכל נוסחה בין 0.25% ל־2.00%?",
+    "justification": "אסור להסיק מסף אחד על אחר",
+    "requested_fields": "threshold_pct, status, MFE, MAE",
+    "independence_unit": "episode_id לכל סף",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q22",
+    "question": "האם חוסרים ב־MFE/MAE, HYPE או שדות רכיב יוצרים הטיית בחירה?",
+    "justification": "חסר לא אקראי משנה הסתברות ואסימטריה",
+    "requested_fields": "data quality, source, MFE, MAE, symbol",
+    "independence_unit": "snapshot_id/episode_id",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q23",
+    "question": "האם הסכמה בין טווחים קצרים ובינוניים/ארוכים מנבאת יותר מטווח בודד, למשל 15m+1h+4h, גם עם ממוצע דומה?",
+    "justification": "בקשת המשתמשת: שילוב טווחי זמן",
+    "requested_fields": "MaxPain_TF.timeframe, long_score, short_score; פירוט CVD/GOAT אם קיים",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q24",
+    "question": "האם טווח קצר שמתהפך מול טווח ארוך, או מעבר מסתירה להסכמה, מקדים תיקון או חידוש מגמה?",
+    "justification": "הרחבה: שינוי היחסים בין הטווחים",
+    "requested_fields": "רצף כיווני TF עם timestamp; מחירי עבר; Outcomes",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q25",
+    "question": "האם ציון קונצנזוס, יחס hits/total והרכב הטווחים מוסיפים מעבר לציון ולממוצע, והאם קונצנזוס מלא עדיף על חלקי?",
+    "justification": "בקשת המשתמשת: ציוני קונצנזוס",
+    "requested_fields": "consensus_hits, consensus_total; ציון קונצנזוס/פירוט TF אם נשמר",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q26",
+    "question": "האם אותו ציון MaxPain סופי מצליח אחרת כשעיקרו נובע מקונצנזוס, גאפ, קרבה או Cluster?",
+    "justification": "הרחבה: הרכב ציון דומה",
+    "requested_fields": "selected_score; gap_score, proximity_score, cluster_score; consensus",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q27",
+    "question": "האם גאפ גבוה יחד עם קרבה ל-MaxPain וקונצנזוס חזק מנבא יותר מכל רכיב לבדו?",
+    "justification": "בקשת המשתמשת: גאפ והצלבות",
+    "requested_fields": "MaxPain_TF.gap_score, proximity_score; consensus; score_edge; Outcomes",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q28",
+    "question": "באיזה מרחק ובאיזה צד של MaxPain מתקבלת המשכיות, ובאיזה מרחק מופיעה נטייה להיפוך?",
+    "justification": "בקשת המשתמשת: קרבה ל-MaxPain גם כאות הפוך",
+    "requested_fields": "current_price, long_maxpain_price, short_maxpain_price, proximity_score, threshold_pct",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q29",
+    "question": "האם התקרבות ל-MaxPain קבוע שונה מהתקרבות ליעד שזז, ומה קורה לאחר שהיעד זז עם המחיר או נגדו?",
+    "justification": "הרחבה: התנהגות היעד לאורך זמן",
+    "requested_fields": "רצף מחירים ויעדי MaxPain באותו TF; watch_scan_id",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q30",
+    "question": "האם Magnet ו-MaxPain באותו כיוון ובאותו אזור מחיר מחזקים זה את זה, ומה קורה כשהיעדים סותרים?",
+    "justification": "בקשת המשתמשת: Magnet ו/או MaxPain",
+    "requested_fields": "target_price, magnet_low/high/side, target_distance_pct; אישורי מנועים",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q31",
+    "question": "האם ציון/ממוצע נגדי נמוך, גבוה או קיצוני, והיחס או ההפרש מול הצד הנבחר, מנבאים המשך או היפוך?",
+    "justification": "שאלה קודמת: יחסים וממוצעים של שני הכיוונים",
+    "requested_fields": "selected/opposite_score, direction/opposite_average, edge, ratio",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q32",
+    "question": "האם Price/OI, Futures CVD או Spot CVD לבדם מנבאים תנועה, ובאילו ציוני total ושילובי עוצמה?",
+    "justification": "שימור הבדיקות הפשוטות לצד קומבינציות",
+    "requested_fields": "שלושת total_score ושלושת total_direction; Outcomes",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q33",
+    "question": "האם מחיר עולה עם OI עולה/יורד או מחיר יורד עם OI עולה/יורד מנבאים אחרת בשילוב CVD, Magnet ו-MaxPain?",
+    "justification": "הרחבה: ארבעת מצבי Price/OI",
+    "requested_fields": "price_change_pct, oi_change_pct, חלון מדידה, CVD; אם קיימים במקור",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q34",
+    "question": "האם Spot CVD חזק מול Futures CVD מנוגד, או CVD שמתחזק כשהמחיר יורד/מדשדש, מנבאים פריצה או היפוך?",
+    "justification": "בקשת המשתמשת: סתירות כהצלבות",
+    "requested_fields": "spot/futures_cvd_total_score/direction; פירוט TF אם זמין; מחירי עבר",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q35",
+    "question": "האם Spot CVD שמופיע לפני אישורי נגזרים יוצר הזדמנות מוקדמת, והאם הוספת אישור Magnet/MaxPain בהמשך משפרת את התוצאה?",
+    "justification": "בקשת המשתמשת: אישורי נגזרים עם Magnet ו/או MaxPain",
+    "requested_fields": "רצף Spot CVD, Price/OI, Futures CVD, confirmation/magnet/maxpain; timestamps",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q36",
+    "question": "האם מאזן נזילות גדול שחוזר ב־2 או 3 סריקות מנבא יותר מהופעה יחידה, גם בלי שינוי במחיר?",
+    "justification": "בקשת המשתמשת: התראות מאזן חוזרות",
+    "requested_fields": "watch_scan_id, timestamp, liquidity_balance_pct; מחיר; כיסוי סריקות",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q37",
+    "question": "האם חזרת Spot CVD חזק, אישורי נגזרים, Magnet, MaxPain או Combined מחזקת אות או מצביעה על התשה?",
+    "justification": "בקשת המשתמשת: רצפים בכל משפחות ההתראה",
+    "requested_fields": "alert_types; total scores; confirmation/magnet/maxpain states לאורך סריקות",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q38",
+    "question": "האם סדר ההופעה נזילות→Spot CVD→נגזרים→Magnet/MaxPain מנבא אחרת מסדר הפוך או הופעה יחד?",
+    "justification": "הרחבה: סדר ולא רק נוכחות רכיבים",
+    "requested_fields": "timestamp לכל רכיב; watch_scan_id; source timestamps; Outcomes",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q39",
+    "question": "האם ציון, גאפ או קונצנזוס שמתחזקים/נחלשים במשך כמה סריקות מנבאים תנועה גם כשהרמה הסופית זהה?",
+    "justification": "הרחבה: שינוי בעוצמה",
+    "requested_fields": "רצף score/average/edge/gap/consensus; זמן בין סריקות; מחיר",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q40",
+    "question": "האם ההתראה הראשונה או השנייה/השלישית ברצף מספקת נקודת כניסה טובה יותר מבחינת הסתברות, אסימטריה ומרחק שכבר נע?",
+    "justification": "הרחבה: מועד הכניסה ברצף",
+    "requested_fields": "רצף התאמות; reference_price בכל התאמה; Outcomes מאותו זמן כניסה",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q41",
+    "question": "האם שינוי במאזן הנזילות או מעבר מצד אחד לצד השני מנבאים יותר מהרמה המוחלטת, במיוחד עם CVD ומגנט?",
+    "justification": "הרחבה: דינמיקת הנזילות",
+    "requested_fields": "liquidity_balance_pct, selected/opposite_liquidity_usd לאורך זמן; side mapping",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q42",
+    "question": "האם אותו מאזן נזילות מצליח אחרת לפי כמות הכסף והמרחק ליעד, והאם רוב הכסף קרוב או רחוק משנה את האות?",
+    "justification": "הרחבה: נזילות יחסית, מוחלטת ומרחק",
+    "requested_fields": "liquidity_balance_pct, selected/opposite_liquidity_usd; מרחקי יעדים/אשכולות אם זמינים",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q43",
+    "question": "האם כל מועמדת מנבאת דווקא תנועה הפוכה בצורה עקבית, גם אם נכשלת בכיוון המחקר הרגיל?",
+    "justification": "בקשה מפורשת: אינדיקציות הופכיות",
+    "requested_fields": "תנאי מועמדת; displayed/analysis_direction; נרות ותוצאות לכל צד וסף",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q44",
+    "question": "האם ממוצע, קונצנזוס, גאפ או נזילות קיצוניים לאחר מהלך ארוך מסמנים סוף תנועה, לעומת אותם ציונים בתחילת תנועה?",
+    "justification": "בקשת המשתמשת: אינדיקטור הפוך + מחיר קודם",
+    "requested_fields": "ציונים/ממוצעים/קונצנזוס/נזילות; שינוי מחיר ומשך מהלך עד ההתראה",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q45",
+    "question": "האם ריבוי אישורים חזקים ללא התקדמות במחיר, או היחלשות אישורים כשהמחיר ממשיך, מקדים היפוך?",
+    "justification": "הרחבה: אי־תגובה של מחיר וסתירה",
+    "requested_fields": "רצף confirmations/total scores; תשואות מחיר עד ההתראה; Outcomes",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+  },
+  {
+    "question_id": "Q46",
+    "question": "מה עשה המחיר ב־15m, 30m, 1h, 4h, 12h ו־24h שלפני ההתראה, והאם גודל, משך ותנודתיות המהלך משנים את התוצאה?",
+    "justification": "בקשה מפורשת: התנועה שקדמה לנקודת ההתראה",
+    "requested_fields": "נרות Spot היסטוריים סגורים; timestamp כניסה; שינוי, טווח ותנודתיות נגררים",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q47",
+    "question": "לאחר דשדוש, האם נזילות/CVD/נגזרים עם קונצנזוס וגאפ מנבאים יציאה מהטווח או חזרה למרכזו?",
+    "justification": "בקשת המשתמשת: דשדוש והצלבות",
+    "requested_fields": "טווח גבוה/נמוך ותשואה בחלון עבר; ציוני מנועים; יעדים; Outcomes",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q48",
+    "question": "האם מהלך ממושך ללא תיקון משמעותי יוצר סיכוי לזיג הפוך, ובאילו שילובי CVD, נגזרים, גאפ ונזילות?",
+    "justification": "שאלה קודמת: תנועה ארוכה ללא זיג הפוך",
+    "requested_fields": "נרות עבר; אורך רצף; עומק תיקון מקסימלי עד t; ציוני מנועים ויעדים",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q49",
+    "question": "האם אות בכיוון העלייה/הירידה הקודמת מנבא המשך, ואילו שילובים הופכים אותו לאות נגד המגמה?",
+    "justification": "בקשת המשתמשת: שילוב מצב המחיר עם יתר השאלות",
+    "requested_fields": "סיווג עבר Q46–Q48; כיוונים; נזילות, CVD, MaxPain/Magnet, consensus/gap",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q50",
+    "question": "האם ירידה חדה וחזרה לטווח, או עלייה חדה וחזרה, יחד עם שינוי נזילות/CVD או יעד, מקדימות תנועה לצד השני?",
+    "justification": "הרחבה: זיגזג שכבר נצפה לפני האות",
+    "requested_fields": "נרות עבר, spike/retracement שכבר הושלמו; נזילות/CVD/יעדים",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q51",
+    "question": "האם החלק שכבר נע והמרחק שנותר ל-MaxPain/Magnet מסבירים מתי התראה נעשית מאוחרת מדי לכל סף?",
+    "justification": "הרחבה: רוחב תנועה שנותר",
+    "requested_fields": "שינוי מחיר עבר; target_distance_pct; threshold_pct; כיוון היעד",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q52",
+    "question": "האם אותה נוסחה פועלת אחרת כאשר BTC עולה, יורד או מדשדש, והאם אות BTC קודם לאות המטבע?",
+    "justification": "שאלה קודמת + הרחבה: הקשר BTC והשהיה",
+    "requested_fields": "נרות BTC עד זמן האות; נרות מטבע; timestamps; btc_parent_movement_id",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q53",
+    "question": "האם מטבע שמתחזק או נחלש יחסית ל-BTC מגיב טוב יותר לצירוף אותות מסוים?",
+    "justification": "הרחבה: התנהגות ייחודית למטבע",
+    "requested_fields": "תשואות עבר מטבע ו-BTC באותו חלון; אותות; Outcomes",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+  },
+  {
+    "question_id": "Q54",
+    "question": "כאשר מטבע מתאים לכמה נוסחאות פעילות יחד, האם מגוון משפחות שונה משפר תוצאה לעומת גרסאות חופפות של אותה נוסחה?",
+    "justification": "בקשת המשתמשת: מטבעות המתאימים להרבה נוסחאות",
+    "requested_fields": "formula_id/version/family; התאמות בזמן אמת; חפיפת תנאים וגלים",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q55",
+    "question": "האם נוסחה התחזקה או נחלשה לאחרונה, והאם ביצועי 7/14 הימים האחרונים שונים מהתקופה שקדמה להם באותה גרסה?",
+    "justification": "בקשה קודמת: נוסחאות טריות ושינוי רלוונטיות",
+    "requested_fields": "תאריכי התאמות/תוצאות; formula_version; סטטיסטיקה בחלונות זמן",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q56",
+    "question": "באילו ספים ואופקים 1h/4h/12h/24h האות פועל מהר, ובאילו נדרש זמן או מופיעה תחילה תנועה נגדית?",
+    "justification": "הרחבה: תזמון, הסתברות ואסימטריה",
+    "requested_fields": "First Touch, time_to_target, MFE/MAE בחלון מוגדר; נרות 1m",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q57",
+    "question": "איזה תנאי מוסיף מידע לכל נוסחה, והאם נוסחה פשוטה מספיקה כמו זוג/שלישייה/רביעייה של תנאים?",
+    "justification": "בקשת המשתמשת: קומבינציות נוספות; יעילות",
+    "requested_fields": "תנאים פשוטים ומשולבים על אותן אפיזודות; הסתברות ואסימטריה",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q58",
+    "question": "האם הממצא נשמר בספים סמוכים, בגלים מאוחרים ובמטבעות נוספים, או נעלם מחוץ לנתונים שבהם נמצא?",
+    "justification": "הרחבה: עמידות לאחר חיפוש שילובים רבים",
+    "requested_fields": "יומן ניסיונות; תנאים וגרסאות קפואים; חלוקת זמן לפי גלי שוק",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q59",
+    "question": "האם התוצאה משתנה לאחר הפרדה נכונה של הכיוון המוצג, כיוון המחקר והבדיקה ההפוכה בכל משפחת התראה?",
+    "justification": "שימור כללי כיוון ומניעת היפוך כפול",
+    "requested_fields": "displayed_direction, analysis_direction, alert_type, strategy/code_version",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q60",
+    "question": "אילו נוסחאות מובילות לפי הסתברות ואסימטריה, באיזה רוחב תנועה, ומהו דפוס הכישלון העיקרי של כל אחת?",
+    "justification": "שאלה קודמת: דירוג משוקלל וגודל מדגם בנפרד",
+    "requested_fields": "hit_rate, asymmetry, threshold, failure pattern, independent waves; ranking policy",
+    "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
+    "missing_step": "Independent later-wave validation, metric coverage and version-compatible acceptance policy"
+  },
+  {
+    "question_id": "Q61",
+    "question": "האם זוג LONG/SHORT בעל אותו מחיר, זמן, סף, אופק ומסלול תצפית מקבל הכרעות First Touch משלימות כשיש מגע מוכרע?",
+    "justification": "בדיקת תקינות: במגע מוכרע חד־משמעי נדרש SUCCESS בצד אחד ו־FAILURE בצד השני. אותו OPEN, AMBIGUOUS או NO_TOUCH בשני הכיוונים עשוי להיות תקין ומוחרג משיעור ההצלחה.",
+    "requested_fields": "snapshot_id, watch_scan_id, symbol, direction, reference_price, measurement_start_utc, window_minutes, threshold_bps, outcome_method_version, observed_from_utc, observed_through_utc, status, first_touch_side, decision_time_utc",
+    "independence_unit": "זוג LONG/SHORT באותו מטבע, מחיר, זמן התחלה, סף, אופק, גרסת שיטה ומסלול תצפית; הכרעה FAVORABLE מול ADVERSE",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q62",
+    "question": "האם מנוע Outcomes מייצר לכל Snapshot בדיוק את שמונת הספים המורשים ובאופן סימטרי ל־LONG/SHORT?",
+    "justification": "בדיקת חוזה בסיסית: סף חסר, סף דינמי או כיוון יחיד מונעים השוואה בין ספים וקבוצת no-signal תקינה",
+    "requested_fields": "snapshot_id, event_id, direction, threshold_bps, window_minutes, measurement_start_utc, data_quality_status, no_alert_snapshot, status, outcome_method_version",
+    "independence_unit": "אירוע × כיוון × אופק × סף × גרסת שיטה; עצמאות סטטיסטית לפי btc_parent_movement_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q63",
+    "question": "האם Backfill או השלמת שדות הופכים כמה Snapshots חלקיים מאותה התראה להתאמות כפולות לאותה נוסחה?",
+    "justification": "העשרת רשומות בדיעבד יכולה לנפח את מספר ההתאמות מעבר למספר ההקשרים והגלים שנצפו בפועל",
+    "requested_fields": "snapshot_id, parent_event_id, watch_scan_id, timestamp_utc, symbol, direction, feature values, candidate_key, code_version",
+    "independence_unit": "Snapshot קנוני אחד לכל הקשר התראה; עצמאות סטטיסטית לפי btc_parent_movement_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q64",
+    "question": "האם liquidity_balance_pct מיוצא באופן סימטרי ל־LONG ול־SHORT בתוך אותו Snapshot/מחזור Watch?",
+    "justification": "בדיקת תקינות הכרחית: חוסר שיטתי לפי כיוון יוצר הטיית בחירה ואוסר לפרש חסר כ־no-signal או להשוות נזילות תומכת/מנוגדת",
+    "requested_fields": "snapshot_id, watch_scan_id, symbol, direction, displayed_direction, analysis_direction, liquidity_balance_pct, liquidity_long_pct, liquidity_short_pct, liquidity_timeframe, liquidity_data_source, liquidity_by_timeframe_json, selected_liquidity_usd, opposite_liquidity_usd, code_version",
+    "independence_unit": "זוג LONG/SHORT באותו watch_scan_id ומטבע; ספירת כיסוי לפי כיוון וגרסה",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q65",
+    "question": "האם מחזורי LIVE ועוגני PROSPECTIVE נשמרים ברצף ובקצב הצפוי, והאם כתיבה מאוחרת עלולה לגרום להחמצת דלתא?",
+    "justification": "פערי איסוף או רשומות שמופיעות לאחר בדיקה עם timestamp מוקדם יותר עלולים להיראות בטעות כ־no-signal ולגרום למעקב מבוסס זמן להחמיץ אירועים",
+    "requested_fields": "snapshot_id, watch_scan_id, timestamp_utc, snapshot_written_at, data_quality_status, code_version; מונה שורות ומזהים בין בדיקות",
+    "independence_unit": "מחזור צפוי של כ־30 דקות; זיהוי דלתא לפי snapshot_id/watch_scan_id ולא לפי timestamp בלבד",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q66",
+    "question": "האם מפיק Outcomes החי כותב רק ordered-first-touch-v7 עם event_id, outcome_id, window_minutes ו־threshold_bps מלאים?",
+    "justification": "זהו חוזה הקבילות המחייב; גרסה ישנה או מזהה חסר עלולים להחזיר תוצאות מזוהמות למחקר ולשנות סטטוס נוסחה בטעות.",
+    "requested_fields": "outcome_method_version, event_id, outcome_id, window_minutes, threshold_bps, path_complete, data_quality_status, terminal_reason",
+    "independence_unit": "outcome_id ייחודי; עצמאות סטטיסטית לפי episode_id ו־btc_parent_movement_id",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q67",
+    "question": "האם כל snapshot_id שמופיע ב־Outcomes v7 קיים פעם אחת בלשונית Snapshots וניתן לצרף אליו את מאפייני ההחלטה המקוריים?",
+    "justification": "בדיקת שלמות חיבור הכרחית: Outcome תקין ללא Snapshot מקור אינו מאפשר לשייך תנאי נוסחה, כיוון מחקר, watch_scan_id או גל שוק.",
+    "requested_fields": "Outcomes.snapshot_id, Snapshots.snapshot_id, event_id, watch_scan_id, feature bundle, code_version, btc_parent_movement_id",
+    "independence_unit": "snapshot_id ייחודי; בדיקת join לכל event_id לפני חישוב מועמדות",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q68",
+    "question": "האם כל סלוט PROSPECTIVE נשמר אטומית עבור כל שמונת המטבעות ושני הכיוונים, ללא timeout או חסר שיטתי?",
+    "justification": "עוגן חסר פוגע בקבוצת no-signal, בהשוואת מטבעות ובחיפוש נוסחאות; אין לפרש חסר כאי־אות.",
+    "requested_fields": "event_id, alert_time_utc, symbol, direction, event_kind, event_type, sampler_version, last_completed_slot_utc, retry_pending_symbols, last_error",
+    "independence_unit": "סלוט×מטבע×כיוון; 16 רשומות צפויות לכל סלוט מלא. לא ראיה עצמאית; עצמאות לפי btc_parent_movement_id.",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q69",
+    "question": "האם כל התראת Telegram שנמסרה משוחזרת ב-Sheets ללא רעב תור, timeout או כפילות?",
+    "justification": "חסר ב-Sheets אינו היעדר אות; הוא עלול להטות כיסוי נוסחאות ואימות התראות.",
+    "requested_fields": "research_events, research_snapshot_sheet_sources, research_sheet_upsert_outbox, event_id, snapshot_id, sync_status, receiver_version",
+    "independence_unit": "event_id / snapshot_id; אותו גל BTC אינו ראיה נוספת.",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q70",
+    "question": "האם זמני המקור מוצגים ומסתנכרנים תחת כותרות הזמן המדויקות, בלי החלפה בזמן הסנכרון?",
+    "justification": "שינוי כותרת תצוגה עלול להשמיט זמן גם כשהמקור תקין ולפגוע בביקורת הסדר/FRESH.",
+    "requested_fields": "תצוגת לייב.זמן סריקה; snapshot_id; Snapshots.timestamp_utc/timestamp_israel; research_events.alert_time_utc; payload.row",
+    "independence_unit": "מזהה Snapshot אחד; בדיקת שלמות תצוגה, לא ראיה עצמאית",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q71",
+    "question": "כיצד יש להפריד בין בדיקה עצמאית של כל התראה לבין ספירת ראיות עצמאיות לאמינות נוסחה?",
+    "justification": "כל התראה וסף חייבים להימדד בנפרד, אך התראות מאותו אירוע שוק עשויות להיות מתואמות; ערבוב שתי היחידות מנפח הסתברות ובו בזמן עלול להסתיר מידע ברמת ההתראה.",
+    "requested_fields": "event_id, snapshot_id, watch_scan_id, btc_parent_movement_id, episode_policy_version, threshold_bps, window_minutes, outcome_id, alert_time_utc",
+    "independence_unit": "תוצאה: event_id×סף×אופק; אמינות נוסחה: btc_parent_movement_id מאומת לכל חיתוך; בדיקת רגישות נפרדת ברמת התראה ובשגיאות מקובצות לפי parent",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  },
+  {
+    "question_id": "Q72",
+    "question": "האם תוצאות נוסחה נשמרות באופן עקבי בשתי אוכלוסיות חופפות: כל המקורות התואמים מ־16/8/2026, ומ־4/9/2026 והלאה?",
+    "justification": "בקשת המשתמשת להפריד תקופות בלי להכפיל ראיות או לערבב גרסאות ומקורות.",
+    "requested_fields": "period_key, source_chat_key, source_message_id, normalized_message_time_utc, normalization_version, source_revision_sha256, snapshot_id, outcome_id, btc_parent_movement_id",
+    "independence_unit": "גל BTC לכל נוסחה×מטבע×כיוון×סף×אופק×תקופה; שתי תקופות חופפות אינן אימותים עצמאיים.",
+    "missing_step": "Dedicated data-quality audit; feature screen does not implement this diagnostic"
+  }
+]
