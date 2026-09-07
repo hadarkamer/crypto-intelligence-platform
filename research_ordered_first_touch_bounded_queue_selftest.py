@@ -12,6 +12,7 @@ import random
 import re
 import sqlite3
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import research_formula_schema_admin
 import research_outcome_worker as worker
@@ -27,10 +28,11 @@ def _captured_query():
         execute=lambda query, params: calls.append((query, params))
         or SimpleNamespace(fetchall=lambda: [])
     )
-    worker.ResearchOutcomeWorker._load_ordered_first_touch_due_events(
-        connection, 8
-    )
-    return calls[0][0]
+    with patch('research_event_scan.claim_event_page',return_value=[]):
+        worker.ResearchOutcomeWorker._load_ordered_first_touch_due_events(
+            connection, 8
+        )
+    return calls[-1][0]
 
 
 def _lane_queries(query, lane):

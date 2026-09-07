@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from unittest.mock import patch
 
 import research_outcome_worker as worker
 
@@ -19,10 +20,14 @@ class _CaptureConnection:
 
 def run() -> None:
     capture = _CaptureConnection()
-    worker.ResearchOutcomeWorker._load_ordered_first_touch_due_events(capture, 8)
+    with patch('research_event_scan.claim_event_page',return_value=[]):
+        worker.ResearchOutcomeWorker._load_ordered_first_touch_due_events(capture, 8)
     sample_query = capture.query.split("new_samples AS MATERIALIZED (", 1)[1]
     sample_query = sample_query.split("), open_events AS MATERIALIZED (", 1)[0]
-    # Run the actual selection, CASE authorization, ordering and final limit.
+    # The real PostgreSQL source-page tests exercise this finite ID binding;
+    # here every fixture row is inside the single supplied page.
+    sample_query = sample_query.replace('WHERE e.event_id=ANY(%s::bigint[])\n                  AND','WHERE')
+    # Run the actual source selection, CASE authorization and ordering.
     # Fixture timestamps are all eligible. Remove only PostgreSQL-specific
     # clock arithmetic; SQLite supplies the remaining SQL boolean semantics.
     start = sample_query.index("                  AND e.alert_time_utc >= NOW()")

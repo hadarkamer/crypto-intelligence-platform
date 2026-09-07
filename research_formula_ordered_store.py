@@ -18,7 +18,7 @@ PERIODS = {
     'SINCE_20260904': datetime(2026,9,3,21,tzinfo=timezone.utc),
 }
 SOURCE_START_UTC = min(PERIODS.values())
-REQUIRED_TABLES = ('research_ordered_formula_event_checks','research_ordered_formula_candidates','research_ordered_formula_matches','research_ordered_formula_scopes','research_ordered_formula_episodes','research_ordered_formula_trials','research_ordered_formula_worker_state','research_sheet_upsert_outbox','research_event_btc_movements','research_btc_parent_movements','research_ordered_first_touch_outcomes','research_ordered_question_map','research_ordered_feature_screens','research_ordered_question_runs','research_event_scan_cursors')
+REQUIRED_TABLES = ('research_ordered_formula_event_checks','research_ordered_formula_candidates','research_ordered_formula_matches','research_ordered_formula_scopes','research_ordered_formula_episodes','research_ordered_formula_trials','research_ordered_formula_worker_state','research_sheet_upsert_outbox','research_event_btc_movements','research_btc_parent_movements','research_ordered_first_touch_outcomes','research_ordered_question_map','research_ordered_feature_screens','research_ordered_question_runs','research_event_scan_cursors','research_ordered_scope_schedule_state')
 
 
 def canonical(value: Any) -> str:
@@ -183,6 +183,29 @@ def load_sequence_history(conn:Any,changed:Mapping[int,Mapping[str,Any]])->tuple
     return history,stats
 
 
+def recent_unscreened_event_ids(conn,*,now:datetime,limit:int=32)->list[int]:
+    """Inspect a finite live tail before filtering already screened siblings.
+
+    A late Magnet burst must not repeatedly occupy all 32 live slots while
+    earlier Max Pain/CVD alerts from the same scan wait on historical replay.
+    The ascending history cursor still recovers everything outside this tail.
+    """
+    rows=conn.execute('''WITH recent_source AS MATERIALIZED (
+        SELECT event_id FROM research_events
+        WHERE alert_time_utc>=%s AND alert_time_utc<=%s
+          AND event_kind='ALERT' AND delivery_status='DELIVERED'
+          AND direction IN ('LONG','SHORT')
+        ORDER BY event_id DESC LIMIT 256
+    ) SELECT recent.event_id FROM recent_source recent
+      WHERE NOT EXISTS (
+          SELECT 1 FROM research_ordered_feature_screens checked
+          WHERE checked.event_id=recent.event_id AND checked.feature_version=%s
+          LIMIT 1 OFFSET 0
+      ) ORDER BY recent.event_id DESC LIMIT %s''',
+      (SOURCE_START_UTC,now,questions.VERSION,max(1,min(32,int(limit))))).fetchall()
+    return [int(row['event_id']) for row in rows]
+
+
 def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_limit: int=128) -> dict[str,Any]:
     conn.execute('INSERT INTO research_ordered_formula_worker_state(worker_key) VALUES(%s) ON CONFLICT DO NOTHING',(WORKER_KEY,))
     cursor = conn.execute('SELECT last_event_id FROM research_ordered_formula_worker_state WHERE worker_key=%s FOR UPDATE',(WORKER_KEY,)).fetchone()['last_event_id']
@@ -192,13 +215,13 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
           AND alert_time_utc<=%s AND event_kind='ALERT' AND delivery_status='DELIVERED'
           AND direction IN ('LONG','SHORT') ORDER BY event_id LIMIT %s
         ) ''' + _EVENT_PROJECT,(cursor,since,now,event_limit)).fetchall()
-    # The recent tail advances live work while the ascending cursor backfills;
-    # wrap-around also recovers delayed delivery-state transitions below it.
-    recent = conn.execute('''WITH picked AS MATERIALIZED (
-        SELECT event_id FROM research_events WHERE alert_time_utc>=%s AND alert_time_utc<=%s
-          AND event_kind='ALERT' AND delivery_status='DELIVERED'
-          AND direction IN ('LONG','SHORT') ORDER BY event_id DESC LIMIT %s
-        ) ''' + _EVENT_PROJECT,(since,now,min(32,event_limit))).fetchall()
+    # Project only unscreened current-version events from the bounded live
+    # tail. Immutable older inputs and delayed transitions retain the existing
+    # ascending/wrap-around replay; past-feature changes have their own queue.
+    recent_ids=recent_unscreened_event_ids(conn,now=now,limit=event_limit)
+    recent=(conn.execute('''WITH picked AS MATERIALIZED (
+        SELECT unnest(%s::bigint[]) AS event_id
+        ) ''' + _EVENT_PROJECT,(recent_ids,)).fetchall() if recent_ids else [])
     conn.execute('UPDATE research_ordered_formula_worker_state SET last_event_id=%s,initial_scan_complete=initial_scan_complete OR %s,updated_at_utc=NOW() WHERE worker_key=%s',
                  (max(row['event_id'] for row in events) if events else 0,not events,WORKER_KEY))
     records, symbols, missing_features = [], set(), 0
@@ -278,17 +301,73 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
     pending=sorted(requested-known,key=lambda cell:(len(candidate_by_id[cell[0]]['conditions']),cell))
     for candidate_key,symbol,direction,period_key in pending[:8]:
         register_scopes(conn,[candidate_by_id[candidate_key]],{symbol},directions=[direction],include_all=False,period_keys=[period_key])
-    return {'events_checked':len(changed),'events_unchanged_skipped':len(unique)-len(changed),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat(),'scope_cells_waiting':max(0,len(pending)-8),'inverse_source_event_ids':sorted(inverse_requests),**screens,**sequence_stats}
+    return {'events_checked':len(changed),'fresh_unscreened_events_selected':len(recent_ids),'screen_feature_version':questions.VERSION,'events_unchanged_skipped':len(unique)-len(changed),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat(),'scope_cells_waiting':max(0,len(pending)-8),'inverse_source_event_ids':sorted(inverse_requests),**screens,**sequence_stats}
+
+
+class ScopeScheduleBatch(list):
+    """Keep scheduling metadata outside immutable scope evidence dictionaries."""
+    def __init__(self,rows,ticket):
+        super().__init__(rows)
+        self.schedule_ticket=ticket
+
+
+def _interleave(first,second,limit):
+    selected=[]
+    for index in range(max(len(first),len(second))):
+        for lane in (first,second):
+            if index<len(lane):
+                selected.append(lane[index])
+                if len(selected)>=limit:
+                    return selected
+    return selected
 
 
 def due_scopes(conn:Any,limit:int=64,*,candidate_keys=None)->list[dict[str,Any]]:
     keys=list(candidate_keys or ())
-    if not keys:
-        return []
-    return conn.execute('''SELECT * FROM research_ordered_formula_scopes
+    if not keys or limit<1:
+        return ScopeScheduleBatch([],0)
+    cap=max(1,min(512,int(limit)))
+    scheduler=WORKER_KEY+':'+questions.VERSION+':fair-scopes-v1'
+    conn.execute('''INSERT INTO research_ordered_scope_schedule_state(scheduler_key)
+        VALUES(%s) ON CONFLICT DO NOTHING''',(scheduler,))
+    ticket=int(conn.execute('''SELECT next_ticket FROM research_ordered_scope_schedule_state
+        WHERE scheduler_key=%s FOR UPDATE''',(scheduler,)).fetchone()['next_ticket'])
+    conn.execute('''UPDATE research_ordered_scope_schedule_state
+        SET next_ticket=next_ticket+1,updated_at_utc=NOW() WHERE scheduler_key=%s''',(scheduler,))
+    # Limit lightweight IDs in both lanes; only the selected combined batch
+    # loads result JSON. Never-evaluated catalog expansion cannot starve old
+    # published results, and refresh cannot block new candidate coverage.
+    initial=conn.execute('''SELECT scope_key FROM research_ordered_formula_scopes
         WHERE period_key=ANY(%s) AND candidate_key=ANY(%s)
-        ORDER BY last_evaluated_at_utc ASC NULLS FIRST,scope_key LIMIT %s''',
-        (list(PERIODS),keys,limit)).fetchall()
+          AND last_evaluated_at_utc IS NULL
+        ORDER BY scope_key LIMIT %s''',(list(PERIODS),keys,cap)).fetchall()
+    refresh=conn.execute('''SELECT scope_key FROM research_ordered_formula_scopes
+        WHERE period_key=ANY(%s) AND candidate_key=ANY(%s)
+          AND last_evaluated_at_utc IS NOT NULL
+        ORDER BY last_evaluated_at_utc,scope_key LIMIT %s''',(list(PERIODS),keys,cap)).fetchall()
+    lanes=(refresh,initial) if ticket%2==0 else (initial,refresh)
+    ids=[row['scope_key'] for row in _interleave(*lanes,cap)]
+    if not ids:
+        return ScopeScheduleBatch([],ticket)
+    rows=conn.execute('''SELECT * FROM research_ordered_formula_scopes
+        WHERE scope_key=ANY(%s)''',(ids,)).fetchall()
+    found={row['scope_key']:row for row in rows}
+    if set(found)!=set(ids):
+        raise RuntimeError('Scheduled formula scopes disappeared during selection')
+    return ScopeScheduleBatch([found[key] for key in ids],ticket)
+
+
+def interleave_experimental_refresh(scopes,priority,*,limit):
+    """Reserve ordinary work even while qualified formulas need fresh checks."""
+    ticket=getattr(scopes,'schedule_ticket',0)
+    priority_by_id={row['scope_key']:row for row in priority}
+    ordinary=[row for row in scopes if row['scope_key'] not in priority_by_id]
+    special=list(priority_by_id.values())
+    # With even a one-scope time budget, both ordinary lanes and experimental
+    # refresh get a first position across a six-pass cycle. No wall clock or
+    # process restart can pin one lane ahead of the others.
+    lanes=(special,ordinary) if ticket%3==2 else (ordinary,special)
+    return _interleave(*lanes,max(1,int(limit)))
 
 
 def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:datetime|None=None)->tuple[list[dict[str,Any]],bool]:

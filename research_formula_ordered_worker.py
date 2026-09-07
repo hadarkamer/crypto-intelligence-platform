@@ -137,8 +137,12 @@ class ResearchFormulaOrderedWorker:
                 summary['source_population_complete_by_period']=period_population
                 summary['source_population_complete']=all(period_population.values())
                 scopes=store.due_scopes(conn,_SCOPE_LIMIT,candidate_keys=candidates)
+                summary['scope_schedule_ticket']=getattr(scopes,'schedule_ticket',0)
+                priority_scope_ids=set()
                 if experimental_available:
-                    scopes=experimental_store.prioritize(conn,scopes,now=now,limit=_SCOPE_LIMIT,candidate_keys=candidates)
+                    priority=experimental_store.prioritize(conn,[],now=now,limit=min(8,_SCOPE_LIMIT),candidate_keys=candidates)
+                    priority_scope_ids={scope['scope_key'] for scope in priority}
+                    scopes=store.interleave_experimental_refresh(scopes,priority,limit=_SCOPE_LIMIT)
                 feature_coverage_cache={}
                 conn.commit()
                 # Intake and reconciliation have separate row/query bounds.
@@ -166,7 +170,13 @@ class ResearchFormulaOrderedWorker:
                     common_rows=store.common_window_rows(conn,scope,rows)
                     input_sha=question_store.evaluation_input(scope,[{**row,'common_window_record':common_rows.get(row['event_id'])} for row in rows],now=now,population_complete=candidate_population_complete,membership_complete=mappings_complete)
                     input_sha=store.digest({'input':input_sha,'validation_available':validation_available,'registered_attempts':attempts})
-                    refresh_qualification=bool(experimental_available and (scope.get('result') or {}).get('research_ready'))
+                    # A still-active grant may coexist with a newer OPEN-wave
+                    # result whose research_ready is false. Recheck selected
+                    # grants even when the frozen input hash did not change,
+                    # so qualification expiry/revocation cannot be skipped.
+                    refresh_qualification=bool(experimental_available and (
+                        scope['scope_key'] in priority_scope_ids
+                        or (scope.get('result') or {}).get('research_ready')))
                     if scope.get('evaluation_input_sha256')==input_sha and not refresh_qualification:
                         conn.execute('UPDATE research_ordered_formula_scopes SET last_evaluated_at_utc=%s WHERE scope_key=%s',(now,scope['scope_key']))
                         conn.commit()
