@@ -236,19 +236,50 @@ class Tests(unittest.TestCase):
             rows,_=store.load_scope_rows(db,scope,now=cutoff+timedelta(days=1))
         self.assertEqual({r['event_id'] for r in rows},{1,2})
         self.assertTrue(all(r['outcome_event_id'] is None and 'status' not in r['ordered_outcome'] for r in rows))
-        db.db.executescript('''CREATE TABLE research_ordered_formula_worker_state(worker_key TEXT PRIMARY KEY,last_event_id INTEGER DEFAULT 0,updated_at_utc TEXT);
+        db.db.executescript('''CREATE TABLE research_event_scan_cursors(
+          queue_key TEXT PRIMARY KEY,last_event_id INTEGER NOT NULL DEFAULT 0,
+          high_water_event_id INTEGER NOT NULL DEFAULT 0,updated_at_utc TEXT,
+          CHECK(last_event_id<=high_water_event_id));
           CREATE TABLE research_ordered_inverse_requests(linked_source_event_id INTEGER,inverse_version TEXT);''')
         original_execute=db.execute
-        # SQLite executes selection/cursor semantics; PG lock behavior is not
-        # claimed by this single-connection relational fixture.
-        db.execute=lambda sql,args:original_execute(sql.replace('NOW()','CURRENT_TIMESTAMP').replace(' FOR UPDATE',''),args)
+        # SQLite executes source paging, fixed lap bounds, request exclusion
+        # and cursor writes. Only PostgreSQL parameter/lock syntax is adapted;
+        # the real claim_event_page and reconciliation functions run unchanged.
+        def execute(sql,args=()):
+            sql=sql.replace('NOW()','CURRENT_TIMESTAMP').replace(' FOR UPDATE','')
+            if 'm.event_id=ANY(%s::bigint[])' in sql:
+                version,ids,prefix=args
+                sql=sql.replace('m.event_id=ANY(%s::bigint[])',
+                    'm.event_id IN ('+','.join('%s' for _ in ids)+')')
+                args=(version,*ids,prefix)
+            return original_execute(sql,args)
+        db.execute=execute
+        cursor_key=q.VERSION+':inverse-request-reconciliation'
+        def cursor():
+            row=db.db.execute('SELECT last_event_id,high_water_event_id FROM research_event_scan_cursors WHERE queue_key=?',(cursor_key,)).fetchone()
+            return tuple(row)
         self.assertEqual(store.inverse_reconciliation_ids(db,limit=1),[1])
+        self.assertEqual(cursor(),(1,2))
         db.db.execute('INSERT INTO research_ordered_inverse_requests VALUES(?,?)',(1,inverse.VERSION))
+        # A newly arriving cached match cannot extend the current finite lap.
+        db.event(3,cutoff+timedelta(hours=2),'3',cutoff)
+        db.db.execute('UPDATE research_ordered_formula_matches SET candidate_key=?,direction=? WHERE event_id=3',(key,'SHORT'))
         self.assertEqual(store.inverse_reconciliation_ids(db,limit=1),[2])
+        self.assertEqual(cursor(),(2,2))
         db.db.execute('INSERT INTO research_ordered_inverse_requests VALUES(?,?)',(2,inverse.VERSION))
         self.assertEqual(store.inverse_reconciliation_ids(db,limit=1),[])
+        self.assertEqual(cursor(),(1,3))
+        # Recover a missing cached request below the cursor on the next lap.
+        # An empty bounded page must not falsely imply global completion.
         db.db.execute('DELETE FROM research_ordered_inverse_requests WHERE linked_source_event_id=1')
+        self.assertEqual(store.inverse_reconciliation_ids(db,limit=1),[])
+        self.assertEqual(cursor(),(2,3))
+        self.assertEqual(store.inverse_reconciliation_ids(db,limit=1),[3])
+        self.assertEqual(cursor(),(3,3))
+        db.db.execute('INSERT INTO research_ordered_inverse_requests VALUES(?,?)',(3,inverse.VERSION))
         self.assertEqual(store.inverse_reconciliation_ids(db,limit=1),[1])
+        self.assertEqual(cursor(),(1,3))
+
 
 
 if __name__=='__main__':

@@ -114,6 +114,17 @@ class ReconstructionTests(unittest.TestCase):
 
     def test_candidate_summary_selects_wave_before_labels_and_keeps_period_scope(self):
         import research_telegram_archive_summary as summary
+        import research_telegram_archive_runtime_importer as importer
+        # The summary now validates the original archive contract before any
+        # cohort selection. Keep this fixture versioned like a real artifact.
+        contract = {"backfill_version": importer.BACKFILL_VERSION, "prepared_stage_digest": "a" * 64,
+            "entry_policy_version": importer.ENTRY_VERSION, "feature_version": importer.FEATURE_VERSION,
+            "direction_version": importer.DIRECTION_VERSION, "time_version": importer.TIME_VERSION,
+            "parent_policy_version": importer.parent_policy.POLICY_VERSION, "source_scope": "ARCHIVE_ONLY",
+            "threshold_bps": list(range(25, 201, 25)), "window_minutes": list(importer.WINDOWS),
+            "variants": ["NORMAL", "INVERSE"], "cache_sha256": "b" * 64,
+            "live_union_eligible": False, "phase": "DISCOVERY", "formula_relevance": "NOT_EVALUATED"}
+        run_key = importer._hash(contract)
         event = extract_message(source("#1 BTC / 24h | 🔴 SHORT | 78\nסיכום Futures: ציון +68/100"), MANIFEST)
         event, labels, metrics = calculate_event(event, cache(), [], observed_at=ENTRY+timedelta(days=2))
         event.update({"membership_status":"LIVE", "parent_evidence_eligible":True, "parent_start_time_utc":ENTRY.isoformat(), "btc_parent_movement_id":"wave1"})
@@ -122,16 +133,17 @@ class ReconstructionTests(unittest.TestCase):
             root=Path(directory);path=root/"data.sqlite"
             with sqlite3.connect(path) as conn:
                 initialize(conn)
-                conn.execute("INSERT INTO archive_reconstructed_events VALUES(?,?,?,?,?,?,?)", ("run",event["archive_event_key"],event["source_message_time_utc"],"BTC","READY_FOR_SPOT_ENTRY_PATH",event["calculation_status"],canonical(event)))
-                conn.executemany("INSERT INTO archive_delayed_entry_outcomes VALUES(?,?,?,?,?,?,?,?)", [("run",event["archive_event_key"],label["signal_variant"],label["window_minutes"],label["threshold_bps"],label["outcome_id"],label["status"],canonical(label)) for label in labels])
-                conn.executemany("INSERT INTO archive_common_window_metrics VALUES(?,?,?,?,?,?)", [("run",event["archive_event_key"],metric["signal_variant"],metric["window_minutes"],metric["status"],canonical(metric)) for metric in metrics])
+                conn.execute("INSERT INTO archive_reconstruction_runs VALUES (?,?)", (run_key, canonical(contract)))
+                conn.execute("INSERT INTO archive_reconstructed_events VALUES(?,?,?,?,?,?,?)", (run_key,event["archive_event_key"],event["source_message_time_utc"],"BTC","READY_FOR_SPOT_ENTRY_PATH",event["calculation_status"],canonical(event)))
+                conn.executemany("INSERT INTO archive_delayed_entry_outcomes VALUES(?,?,?,?,?,?,?,?)", [(run_key,event["archive_event_key"],label["signal_variant"],label["window_minutes"],label["threshold_bps"],label["outcome_id"],label["status"],canonical(label)) for label in labels])
+                conn.executemany("INSERT INTO archive_common_window_metrics VALUES(?,?,?,?,?,?)", [(run_key,event["archive_event_key"],metric["signal_variant"],metric["window_minutes"],metric["status"],canonical(metric)) for metric in metrics])
             with patch.object(summary,"candidate_catalog",return_value=[candidate]):
-                report=summary.summarize(path,run_key="run",observed_at=ENTRY+timedelta(days=2),output=root/"summary")
+                report=summary.summarize(path,run_key=run_key,expected_sha256=importer.file_sha256(path),observed_at=ENTRY+timedelta(days=2),output=root/"summary")
             self.assertEqual(report["maximum_decisive_independent_waves"],1)
             self.assertEqual(report["nonempty_cells_tested"],128)
             self.assertFalse(report["research_ready"])
             from research_telegram_archive_audit import audit
-            audit_report=audit(path,run_key="run",observed_at=ENTRY+timedelta(days=2),output=root/"audit.json")
+            audit_report=audit(path,run_key=run_key,observed_at=ENTRY+timedelta(days=2),output=root/"audit.json")
             self.assertTrue(audit_report["valid"])
             self.assertEqual(audit_report["paired_normal_inverse_cells"],32)
             cells=[json.loads(line) for line in (root/"summary"/"archive_candidate_cells.jsonl").read_text().splitlines()]

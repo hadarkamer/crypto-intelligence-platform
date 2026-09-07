@@ -5,15 +5,22 @@ function doPost(e) {
     const body = JSON.parse(e.postData.contents || "{}");
     const expected = PropertiesService.getScriptProperties().getProperty("SHEETS_WEBHOOK_SECRET");
     if (!expected || body.secret !== expected) return json_({ok: false, error: "unauthorized"});
+    // This receiver belongs only to the approved research workbook.
+    if (body.spreadsheet_id !== "1ci_T6v2r0MeGc3ErOsaY3ftMFo94m4syGF9U94X0fQQ") {
+      return json_({ok: false, error: "wrong_workbook"});
+    }
     const ss = SpreadsheetApp.openById(body.spreadsheet_id);
     const lock = LockService.getScriptLock();
     lock.waitLock(20000);
     try {
+      if (body.payload && body.payload.kind === "telegram_event_audit_page") {
+        return json_({ok: true, version: "sheets-batch-v3", audit: telegramAuditPage_(ss, body.payload)});
+      }
       upsertBatch_(ss, body.payload.upserts || []);
     } finally {
       lock.releaseLock();
     }
-    return json_({ok: true, version: "sheets-batch-v2"});
+    return json_({ok: true, version: "sheets-batch-v3"});
   } catch (err) {
     return json_({ok: false, error: String(err)});
   }
@@ -36,7 +43,13 @@ function upsertBatch_(ss, items) {
       const width = sheet.getLastColumn();
       if (!width) throw new Error("Missing headers in " + item.sheet);
       const all = sheet.getRange(1, 1, Math.max(1, sheet.getLastRow()), width).getValues();
-      state = {sheet: sheet, headers: all[0], rows: all.slice(1), indexes: new Map(), changed: new Set()};
+      const extra = requiredColumns_(item.sheet).filter(name => !all[0].includes(name));
+      // Additive columns only; preexisting data/headers and demo keys survive.
+      if (extra.length) {
+        all[0].push(...extra);
+        all.slice(1).forEach(row => extra.forEach(() => row.push("")));
+      }
+      state = {sheet: sheet, headers: all[0], rows: all.slice(1), indexes: new Map(), changed: new Set(), extra: extra};
       states.set(item.sheet, state);
     }
     const rowObject = item.row || {};
@@ -47,6 +60,7 @@ function upsertBatch_(ss, items) {
       "תצוגת לייב": ["זמן סריקה"],
       Snapshots: ["timestamp_utc"],
       Telegram_Events: ["timestamp_utc"],
+      MaxPain_TF: ["timestamp_utc"],
       Outcomes: ["decision_time_utc"],
     }[item.sheet] || [];
     timeFields.forEach(name => {
@@ -88,6 +102,10 @@ function upsertBatch_(ss, items) {
   // Validate/stage the complete request before performing any writes. Only
   // changed contiguous ranges are written; append batches need one setValues.
   states.forEach(state => {
+    if (state.extra.length) {
+      ensureColumnCapacity_(state.sheet, state.headers.length);
+      state.sheet.getRange(1, 1, 1, state.headers.length).setValues([state.headers]);
+    }
     const positions = Array.from(state.changed).sort((left, right) => left - right);
     const requiredRows = state.rows.length + 1;
     if (requiredRows > state.sheet.getMaxRows()) {
@@ -105,4 +123,77 @@ function upsertBatch_(ss, items) {
 
 function json_(value) {
   return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON);
+}
+
+
+function requiredColumns_(name) {
+  return ({
+    Telegram_Events: ["source_record_type", "normalized_record_type", "classification_version"],
+    MaxPain_TF: ["event_id", "timestamp_utc", "source_side", "score_direction_basis",
+      "consensus_score", "components_json", "is_alert_timeframe", "target_distance_pct",
+      "selected_liquidity_share_pct", "consensus_hits", "consensus_total", "source_record_type"],
+  })[name] || [];
+}
+
+function ensureColumnCapacity_(sheet, width) {
+  if (width > sheet.getMaxColumns()) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), width - sheet.getMaxColumns());
+  }
+}
+
+function telegramAuditPage_(ss, payload) {
+  // Explicit narrow operation. No arbitrary tab, range, query, or public GET.
+  const first = Number(payload.start_row === undefined ? 2 : payload.start_row);
+  const count = Number(payload.page_size === undefined ? 500 : payload.page_size);
+  if (!Number.isInteger(first) || first < 2 || !Number.isInteger(count) || count < 1 || count > 500) {
+    throw new Error("Invalid audit page bounds");
+  }
+  const sheet = ss.getSheetByName("Telegram_Events");
+  if (!sheet) throw new Error("Missing Telegram_Events");
+  const actualLast = sheet.getLastRow();
+  const last = payload.last_row === undefined ? actualLast : Number(payload.last_row);
+  if (!Number.isInteger(last) || last < 1 || last > actualLast) throw new Error("Audit row bounds changed; restart");
+  let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  ["event_id", "timestamp_utc", "record_type", "verification_status", "raw_text"].forEach(name => {
+    if (headers.filter(h => h === name).length !== 1) throw new Error("Missing or duplicate audit column: " + name);
+  });
+  const extras = requiredColumns_("Telegram_Events").filter(name => !headers.includes(name));
+  if (extras.length) {
+    headers.push(...extras);
+    ensureColumnCapacity_(sheet, headers.length);
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+  const size = Math.min(count, Math.max(0, last - first + 1));
+  const rows = size ? sheet.getRange(first, 1, size, headers.length).getValues() : [];
+  const at = name => headers.indexOf(name);
+  let normalized = 0;
+  const changedColumns = new Set();
+  const audit = rows.map((row, offset) => {
+    const type = String(row[at("record_type")] || "");
+    const raw = String(row[at("raw_text")] || "");
+    const alias = type === "WATCH_CANDIDATE" && /\bMax\s*Pain\b/i.test(raw) ? "MAX_PAIN_ALERT" : type;
+    const derived = {source_record_type: type, normalized_record_type: alias,
+      classification_version: "maxpain-source-alias-v1"};
+    // Only these audit columns change. Original type, text, IDs and status
+    // remain untouched; historical imports never become DELIVERED alerts.
+    Object.keys(derived).forEach(name => {
+      if (row[at(name)] !== derived[name]) {
+        row[at(name)] = derived[name];
+        changedColumns.add(name);
+      }
+    });
+    if (alias !== type) normalized++;
+    return {event_id: String(row[at("event_id")] || ""),
+      timestamp_utc: row[at("timestamp_utc")], record_type: type,
+      normalized_record_type: alias, verification_status: String(row[at("verification_status")] || ""),
+      row_number: first + offset};
+  });
+  // Three contiguous columns when freshly migrated, otherwise at most three
+  // bounded column writes. Never rewrite the raw source records.
+  if (rows.length) changedColumns.forEach(name => {
+    const col = at(name);
+    sheet.getRange(first, col + 1, rows.length, 1).setValues(rows.map(row => [row[col]]));
+  });
+  return {rows: audit, start_row: first, next_row: first + size,
+    last_row: last, complete: first + size > last, normalized_maxpain_rows: normalized};
 }

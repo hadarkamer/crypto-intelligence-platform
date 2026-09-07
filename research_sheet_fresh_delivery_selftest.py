@@ -214,14 +214,14 @@ def run():
 
     # New wrapper for each call models process restarts: cursor lives in DB.
     first_cycle = []
-    for index in range(10):
+    for index in range(2 * len(outbox._SHEET_ROTATION)):
         fresh_process = Database(db.conn)
         batch = outbox._claim_batch(fresh_process, 1, f'token-{index}')
         assert len(batch) == 1
         first_cycle.extend((row['sheet_name'], row['row_key']) for row in batch)
-    assert first_cycle[:5] == [(sheet, 'fresh') for sheet in outbox._SHEET_ROTATION]
-    assert first_cycle[5:] == [(sheet, 'old-000') for sheet in outbox._SHEET_ROTATION]
-    assert len(set(first_cycle)) == 10
+    assert first_cycle[:len(outbox._SHEET_ROTATION)] == [(sheet, 'fresh') for sheet in outbox._SHEET_ROTATION]
+    assert first_cycle[len(outbox._SHEET_ROTATION):] == [(sheet, 'old-000') for sheet in outbox._SHEET_ROTATION]
+    assert len(set(first_cycle)) == 2 * len(outbox._SHEET_ROTATION)
 
     # Larger batches reserve both shares and cannot select their own new leases.
     db.conn.execute('UPDATE research_sheet_delivery_cursor SET next_slot=0')

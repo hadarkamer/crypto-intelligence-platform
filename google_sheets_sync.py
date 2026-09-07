@@ -18,6 +18,7 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
+import research_maxpain_sheet_rows
 
 _TRUE = {"1", "true", "yes", "on"}
 _ENABLED = os.getenv("GOOGLE_SHEETS_SYNC_ENABLED", "").strip().lower() in _TRUE
@@ -168,7 +169,7 @@ def ordered_outcome_batch_limit() -> int:
     This state affects request sizing only; the durable outbox remains the
     delivery authority.
     """
-    return 8 if _RECEIVER_VERSION == "sheets-batch-v2" and not _ORDERED_BATCH_FALLBACK else 1
+    return 8 if _RECEIVER_VERSION in {"sheets-batch-v2", "sheets-batch-v3"} and not _ORDERED_BATCH_FALLBACK else 1
 
 
 @contextmanager
@@ -236,7 +237,7 @@ def deliver_now(payload: Mapping[str, Any], *, attempts: int = 1) -> bool:
     if payload.get("kind") in {"ordered_first_touch_outcomes", "research_sheet_upserts"}:
         if not delivered:
             _ORDERED_BATCH_FALLBACK = True
-        elif _RECEIVER_VERSION == "sheets-batch-v2":
+        elif _RECEIVER_VERSION in {"sheets-batch-v2", "sheets-batch-v3"}:
             _ORDERED_BATCH_FALLBACK = False
     return delivered
 
@@ -774,6 +775,9 @@ def build_delivered_event_payload(
         "displayed_direction": displayed_direction,
         "analysis_direction": analysis_direction,
         "record_type": event_type,
+        "source_record_type": event_type,
+        "normalized_record_type": research_maxpain_sheet_rows.classification(event_type),
+        "classification_version": "maxpain-source-alias-v1",
         "timeframe": data.get("timeframe"),
         "verification_status": "DELIVERED",
         "raw_text": None,
@@ -782,6 +786,7 @@ def build_delivered_event_payload(
         {"sheet": "תצוגת לייב", "key": "snapshot_id", "row": live_row},
         {"sheet": "Snapshots", "key": "snapshot_id", "row": snapshot_row},
         {"sheet": "Telegram_Events", "key": "event_id", "row": telegram_row},
+        *research_maxpain_sheet_rows.build_rows(data),
     ]}
 
 
@@ -997,3 +1002,33 @@ def deliver_ordered_first_touch_outcomes(
             ],
         }
     )
+
+
+def read_telegram_audit_page(*, start_row: int = 2, last_row: int | None = None) -> Dict[str, Any]:
+    """Read only the bounded, authenticated receiver audit contract."""
+    global _RECEIVER_VERSION
+    if not enabled():
+        raise RuntimeError("SHEETS_UNCONFIGURED")
+    payload: Dict[str, Any] = {"kind": "telegram_event_audit_page", "start_row": start_row, "page_size": 500}
+    if last_row is not None:
+        payload["last_row"] = last_row
+    envelope = {"secret": _WEBHOOK_SECRET, "spreadsheet_id": _SPREADSHEET_ID, "payload": payload}
+    with delivery_slot(wait_seconds=10) as acquired:
+        if not acquired:
+            raise RuntimeError("SHEET_RECEIVER_BUSY")
+        request = Request(_WEBHOOK_URL, data=json.dumps(envelope).encode("utf-8"),
+                          headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+            # The receiver emits no raw texts; this bound prevents accidental
+            # HTML or arbitrary download responses from becoming audit data.
+            raw = response.read(512_001)
+        if len(raw) > 512_000:
+            raise ValueError("SHEET_AUDIT_RESPONSE_TOO_LARGE")
+        body = json.loads(raw.decode("utf-8"))
+        if body.get("ok") is not True or body.get("version") != "sheets-batch-v3":
+            raise ValueError("SHEET_AUDIT_RECEIVER_V3_REQUIRED")
+        audit = body.get("audit")
+        if not isinstance(audit, dict) or not isinstance(audit.get("rows"), list) or len(audit["rows"]) > 500:
+            raise ValueError("INVALID_SHEET_AUDIT_RESPONSE")
+        _RECEIVER_VERSION = body["version"]
+        return audit

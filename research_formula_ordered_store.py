@@ -18,7 +18,7 @@ PERIODS = {
     'SINCE_20260904': datetime(2026,9,3,21,tzinfo=timezone.utc),
 }
 SOURCE_START_UTC = min(PERIODS.values())
-REQUIRED_TABLES = ('research_ordered_formula_event_checks','research_ordered_formula_candidates','research_ordered_formula_matches','research_ordered_formula_scopes','research_ordered_formula_episodes','research_ordered_formula_trials','research_ordered_formula_worker_state','research_sheet_upsert_outbox','research_event_btc_movements','research_btc_parent_movements','research_ordered_first_touch_outcomes','research_ordered_question_map','research_ordered_feature_screens','research_ordered_question_runs')
+REQUIRED_TABLES = ('research_ordered_formula_event_checks','research_ordered_formula_candidates','research_ordered_formula_matches','research_ordered_formula_scopes','research_ordered_formula_episodes','research_ordered_formula_trials','research_ordered_formula_worker_state','research_sheet_upsert_outbox','research_event_btc_movements','research_btc_parent_movements','research_ordered_first_touch_outcomes','research_ordered_question_map','research_ordered_feature_screens','research_ordered_question_runs','research_event_scan_cursors')
 
 
 def canonical(value: Any) -> str:
@@ -106,29 +106,41 @@ _EVENT_PROJECT = '''
 SELECT e.event_id,e.symbol,e.direction,e.alert_time_utc,e.event_fingerprint,
        e.current_price,e.event_type,e.event_kind,e.delivery_status,e.score,e.source_side,
        e.target_price,e.timeframe,e.strategy_version,e.code_version,
-       jsonb_build_object('sheet_snapshot_id',e.engine_snapshot->'sheet_snapshot_id',
+       jsonb_build_object('sheet_snapshot_id',projected.fields->'sheet_snapshot_id',
            'market_evidence',jsonb_build_object('modules',jsonb_build_object(
-             'positioning',jsonb_build_object('score',e.engine_snapshot#>'{market_evidence,modules,positioning,score}','direction',e.engine_snapshot#>'{market_evidence,modules,positioning,direction}'),
-             'futures_flow',jsonb_build_object('score',e.engine_snapshot#>'{market_evidence,modules,futures_flow,score}','direction',e.engine_snapshot#>'{market_evidence,modules,futures_flow,direction}'),
-             'spot_flow',jsonb_build_object('score',e.engine_snapshot#>'{market_evidence,modules,spot_flow,score}','direction',e.engine_snapshot#>'{market_evidence,modules,spot_flow,direction}'))))
+             'positioning',jsonb_build_object('score',projected.fields#>'{market_evidence,modules,positioning,score}','direction',projected.fields#>'{market_evidence,modules,positioning,direction}'),
+             'futures_flow',jsonb_build_object('score',projected.fields#>'{market_evidence,modules,futures_flow,score}','direction',projected.fields#>'{market_evidence,modules,futures_flow,direction}'),
+             'spot_flow',jsonb_build_object('score',projected.fields#>'{market_evidence,modules,spot_flow,score}','direction',projected.fields#>'{market_evidence,modules,spot_flow,direction}'))))
        || jsonb_strip_nulls(jsonb_build_object(
-           'watch_scan_id',e.engine_snapshot->'watch_scan_id','alert_side',e.engine_snapshot->'alert_side',
-           'score_components',e.engine_snapshot->'score_components','opposite_score',e.engine_snapshot->'opposite_score',
-           'calculation_validation_errors',e.engine_snapshot->'calculation_validation_errors',
-           'average_score_all_timeframes',e.engine_snapshot->'average_score_all_timeframes',
-           'opposite_average_score_all_timeframes',e.engine_snapshot->'opposite_average_score_all_timeframes',
-           'directional_scores_all_timeframes',e.engine_snapshot->'directional_scores_all_timeframes',
-           'top_item_average_score_all_timeframes',e.engine_snapshot->'top_item_average_score_all_timeframes',
-           'top_item_components',e.engine_snapshot->'top_item_components','top_item_confirmation',e.engine_snapshot->'top_item_confirmation',
-           'consensus_hits',e.engine_snapshot->'consensus_hits','consensus_total',e.engine_snapshot->'consensus_total',
-           'gap_consensus_supporting',e.engine_snapshot->'gap_consensus_supporting','gap_consensus_total',e.engine_snapshot->'gap_consensus_total',
-           'distance_pct',e.engine_snapshot->'distance_pct','near_amount',e.engine_snapshot->'near_amount','far_amount',e.engine_snapshot->'far_amount',
-           'near_share_pct',e.engine_snapshot->'near_share_pct','magnet',e.engine_snapshot->'magnet',
-           'magnet_confirmation',e.engine_snapshot->'magnet_confirmation','maxpain_confirmation',e.engine_snapshot->'maxpain_confirmation',
-           'signal_count',e.engine_snapshot->'signal_count','normal_confirmations',e.engine_snapshot->'normal_confirmations',
-           'strong_confirmations',e.engine_snapshot->'strong_confirmations','high_scores',e.engine_snapshot->'high_scores',
-           'anomaly_setups',e.engine_snapshot->'anomaly_setups','liquidity_imbalances',e.engine_snapshot->'liquidity_imbalances')) AS engine_snapshot
-FROM picked JOIN research_events e USING(event_id) ORDER BY e.event_id
+           'watch_scan_id',projected.fields->'watch_scan_id','alert_side',projected.fields->'alert_side',
+           'score_components',projected.fields->'score_components','opposite_score',projected.fields->'opposite_score',
+           'calculation_validation_errors',projected.fields->'calculation_validation_errors',
+           'average_score_all_timeframes',projected.fields->'average_score_all_timeframes',
+           'opposite_average_score_all_timeframes',projected.fields->'opposite_average_score_all_timeframes',
+           'directional_scores_all_timeframes',projected.fields->'directional_scores_all_timeframes',
+           'top_item_average_score_all_timeframes',projected.fields->'top_item_average_score_all_timeframes',
+           'top_item_components',projected.fields->'top_item_components','top_item_confirmation',projected.fields->'top_item_confirmation',
+           'consensus_hits',projected.fields->'consensus_hits','consensus_total',projected.fields->'consensus_total',
+           'gap_consensus_supporting',projected.fields->'gap_consensus_supporting','gap_consensus_total',projected.fields->'gap_consensus_total',
+           'distance_pct',projected.fields->'distance_pct','near_amount',projected.fields->'near_amount','far_amount',projected.fields->'far_amount',
+           'near_share_pct',projected.fields->'near_share_pct','magnet',projected.fields->'magnet',
+           'magnet_confirmation',projected.fields->'magnet_confirmation','maxpain_confirmation',projected.fields->'maxpain_confirmation',
+           'signal_count',projected.fields->'signal_count','normal_confirmations',projected.fields->'normal_confirmations',
+           'strong_confirmations',projected.fields->'strong_confirmations','high_scores',projected.fields->'high_scores',
+           'anomaly_setups',projected.fields->'anomaly_setups','liquidity_imbalances',projected.fields->'liquidity_imbalances')) AS engine_snapshot
+FROM picked JOIN research_events e USING(event_id)
+CROSS JOIN LATERAL (
+    -- Extract archived fields together, retaining only the small fields
+    -- used by formula extraction. Repeated paths below use this compact value.
+    SELECT COALESCE(jsonb_object_agg(field.key,
+        CASE WHEN field.key='market_evidence' THEN
+            jsonb_build_object('modules',jsonb_build_object('positioning',jsonb_build_object('score',field.value#>'{modules,positioning,score}','direction',field.value#>'{modules,positioning,direction}'),'futures_flow',jsonb_build_object('score',field.value#>'{modules,futures_flow,score}','direction',field.value#>'{modules,futures_flow,direction}'),'spot_flow',jsonb_build_object('score',field.value#>'{modules,spot_flow,score}','direction',field.value#>'{modules,spot_flow,direction}')))
+        ELSE field.value END),'{}'::jsonb) AS fields
+    FROM jsonb_each(CASE WHEN jsonb_typeof(e.engine_snapshot)='object'
+        THEN e.engine_snapshot ELSE '{}'::jsonb END) AS field(key,value)
+    WHERE field.key IN ('sheet_snapshot_id','watch_scan_id','alert_side','score_components','opposite_score','calculation_validation_errors','average_score_all_timeframes','opposite_average_score_all_timeframes','directional_scores_all_timeframes','top_item_average_score_all_timeframes','top_item_components','top_item_confirmation','consensus_hits','consensus_total','gap_consensus_supporting','gap_consensus_total','distance_pct','near_amount','far_amount','near_share_pct','magnet','magnet_confirmation','maxpain_confirmation','signal_count','normal_confirmations','strong_confirmations','high_scores','anomaly_setups','liquidity_imbalances','market_evidence')
+) projected
+ORDER BY e.event_id
 '''
 
 
@@ -334,18 +346,20 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:dat
 
 
 def inverse_reconciliation_ids(conn,*,limit=32):
-    """Recover cached matches after a delayed033 deployment, with a durable cursor."""
+    """Reconcile one finite source page; never sort the full match archive."""
     import research_ordered_inverse_store as inverse_store
-    key=questions.VERSION+':inverse-request-reconciliation'
-    conn.execute('INSERT INTO research_ordered_formula_worker_state(worker_key) VALUES(%s) ON CONFLICT DO NOTHING',(key,))
-    cursor=conn.execute('SELECT last_event_id FROM research_ordered_formula_worker_state WHERE worker_key=%s FOR UPDATE',(key,)).fetchone()['last_event_id']
+    from research_event_scan import claim_event_page
+    ids=claim_event_page(conn,questions.VERSION+':inverse-request-reconciliation',
+        limit=max(1,min(128,limit)),
+        predicate="e.event_kind='ALERT' AND e.delivery_status='DELIVERED' AND e.direction IN ('LONG','SHORT')")
+    if not ids:
+        return []
     rows=conn.execute('''SELECT DISTINCT m.event_id FROM research_ordered_formula_matches m
         LEFT JOIN research_ordered_inverse_requests r ON r.linked_source_event_id=m.event_id AND r.inverse_version=%s
-        WHERE m.candidate_key LIKE %s AND m.event_id>%s AND r.linked_source_event_id IS NULL
-        ORDER BY m.event_id LIMIT %s''',(inverse_store.VERSION,questions.VERSION+':INVERSE:%',cursor,max(1,min(128,limit)))).fetchall()
-    ids=[row['event_id'] for row in rows]
-    conn.execute('UPDATE research_ordered_formula_worker_state SET last_event_id=%s,updated_at_utc=NOW() WHERE worker_key=%s',(max(ids) if ids else 0,key))
-    return ids
+        WHERE m.event_id=ANY(%s::bigint[]) AND m.candidate_key LIKE %s
+          AND r.linked_source_event_id IS NULL
+        ORDER BY m.event_id''',(inverse_store.VERSION,ids,questions.VERSION+':INVERSE:%')).fetchall()
+    return [row['event_id'] for row in rows]
 
 
 def common_window_rows(conn,scope,rows):

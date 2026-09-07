@@ -1003,6 +1003,7 @@ def build_opportunities(
     directional_scores: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(
         lambda: {"LONG": {}, "SHORT": {}}
     )
+    maxpain_timeframes: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
     for row in rows:
         symbol = str(_get(row, "symbol", "") or "").upper()
@@ -1019,6 +1020,32 @@ def build_opportunities(
             if details is not None:
                 candidates.append(details)
                 directional_scores[symbol][side][timeframe] = float(details["score"])
+                if timeframe in TIMEFRAMES:
+                    # Freeze the already calculated candidates before choosing
+                    # the displayed side or applying the opportunity limit.
+                    frozen = {
+                        "timeframe": timeframe,
+                        "source_side": side,
+                        "score": details["score"],
+                        "components": dict(details["components"]),
+                        "target_price": _target_for_side(row, side),
+                        "distance_pct": details["distance"],
+                        "consensus_hits": details["consensus_hits"],
+                        "consensus_total": details["consensus_total"],
+                    }
+                    near_key = "long_liquidation_amount" if side == "LONG" else "short_liquidation_amount"
+                    far_key = "short_liquidation_amount" if side == "LONG" else "long_liquidation_amount"
+                    # Scoring treats absent amounts as zero. Research must
+                    # distinguish that fallback from an observed numeric zero.
+                    if _get(row, near_key) not in (None, ""):
+                        frozen["near_amount"] = details["near_amount"]
+                    if _get(row, far_key) not in (None, ""):
+                        frozen["far_amount"] = details["far_amount"]
+                    if "near_amount" in frozen and "far_amount" in frozen:
+                        share = details["balance"].get("near_share_pct")
+                        if share is not None:
+                            frozen["near_share_pct"] = share
+                    maxpain_timeframes[symbol].append(frozen)
 
         if forced_symbol == symbol and forced_side:
             selected = next((x for x in candidates if x.get("side") == forced_side), None)
@@ -1155,6 +1182,13 @@ def build_opportunities(
             "LONG": dict(directional_scores.get(symbol, {}).get("LONG", {})),
             "SHORT": dict(directional_scores.get(symbol, {}).get("SHORT", {})),
         }
+        item["maxpain_timeframes"] = [
+            {**entry, "components": dict(entry["components"])}
+            for entry in sorted(
+                maxpain_timeframes.get(symbol, []),
+                key=lambda entry: (TIMEFRAMES.index(entry["timeframe"]), entry["source_side"]),
+            )[:14]
+        ]
         item["average_score_all_timeframes"] = round(
             directional_averages.get(symbol, {}).get(side, float(item["score"])), 2
         )

@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
-VERSION = 'captured-question-search-v2-sequence-regime-acceptance'
+VERSION = 'captured-question-search-v3-experimental-binding'
 ROOT = Path(__file__).resolve().parent
 DIRECTIONS = ('LONG', 'SHORT')
 

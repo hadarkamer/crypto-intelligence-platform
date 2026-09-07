@@ -42,6 +42,7 @@ import research_event_store
 import research_outcome_worker
 import research_btc_episode_worker
 import research_formula_ordered_worker
+import research_ordered_experimental_worker
 import research_snapshot_sync_worker
 import google_sheets_sync
 import research_formula_schema_admin
@@ -1677,6 +1678,7 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
     for label, worker in (
         ("btc-episodes", research_btc_episode_worker.WORKER),
         ("formula-ordered-v7", research_formula_ordered_worker.WORKER),
+        ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
     ):
         if not schema_ready:
@@ -1693,6 +1695,7 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
 
 async def _stop_ordered_research_workers() -> None:
     for label, worker in (
+        ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
         ("formula-ordered-v7", research_formula_ordered_worker.WORKER),
         ("btc-episodes", research_btc_episode_worker.WORKER),
@@ -3697,6 +3700,7 @@ async def _build_magnet_report(
 
         lines = [
             f"מגנט {icon} <b>{side_label} #{side_counts[side]}</b>",
+            f"נכס: <b>{html.escape(symbol)}</b>",
             f"אזור: <b>{html.escape(target_text)}</b>",
             f"טווחים: <b>{html.escape(members)}</b>",
             f"איכות Magnet Quality: <b>{float(magnet.get('magnet_quality') or 0.0):.2f}/100</b>",
@@ -6003,6 +6007,7 @@ async def health(request):
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "btc_episodes": research_btc_episode_worker.WORKER.status(),
         "formula_ordered_v7": research_formula_ordered_worker.WORKER.status(),
+        "ordered_experimental": research_ordered_experimental_worker.WORKER.status(),
         "snapshot_sync": research_snapshot_sync_worker.WORKER.status(),
         "google_sheets_delivery": google_sheets_sync.status(),
         "watch": {
@@ -7160,6 +7165,7 @@ async def main():
     research_schema_ready = bool(schema_runtime.get("ready"))
     await bot_app.start()
     research_formula_worker.WORKER.bind_telegram(bot_app.bot)
+    research_ordered_experimental_worker.WORKER.bind_telegram(bot_app.bot)
 
     if research_schema_ready:
         try:

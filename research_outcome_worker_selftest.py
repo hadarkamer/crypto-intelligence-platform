@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -18,13 +19,17 @@ class _CaptureResult:
     def __init__(self) -> None:
         self.query = ""
         self.params = []
+        self.calls = []
 
     def execute(self, query, params):
         self.query = str(query)
         self.params = list(params)
+        self.calls.append((self.query,self.params))
         return self
 
     def fetchall(self):
+        if "/* canonical_due_ids */" in self.query:
+            return [{"event_id":77}]
         return []
 
     def fetchone(self):
@@ -473,15 +478,27 @@ def run() -> None:
     )
 
     closed_capture = _CaptureResult()
-    assert worker.ResearchOutcomeWorker._load_due_events(
-        closed_capture, 200
-    ) == []
+    with patch('research_event_scan.claim_event_page', return_value=[77]) as page:
+        assert worker.ResearchOutcomeWorker._load_due_events(closed_capture, 200) == []
+    page_args = page.call_args.kwargs
+    assert page_args['limit'] == 128
+    assert 'engine_snapshot' not in page_args['predicate']
+    due_query,due_params = next((q,p) for q,p in closed_capture.calls if '/* canonical_due_ids */' in q)
+    assert 'engine_snapshot' not in due_query
+    assert 'research_outcome_event_rejections rejected' in due_query
+    assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in due_params
+    assert due_query.count('%s') == len(due_params)
+    assert due_query.count('LIMIT 1 OFFSET 0') == 2 * len(worker._HORIZONS) + 1
+    assert closed_capture.params[0] == [77]
+    with patch('research_event_scan.claim_event_page', return_value=[]):
+        empty = _CaptureResult()
+        assert worker.ResearchOutcomeWorker._load_due_events(empty, 8) == []
+        assert empty.query == ''
     assert closed_capture.query.count("%s") == len(closed_capture.params)
     assert "ARRAY[]::integer[] AS open_first_touch_horizons" in closed_capture.query
     assert "e.event_kind, e.delivery_status" in closed_capture.query
     assert "research_formula_shadow_checks open_check" not in closed_capture.query
-    assert "research_outcome_event_rejections rejected" in closed_capture.query
-    assert worker._ALERT_REFERENCE_REJECTION_POLICY_VERSION in closed_capture.params
+    assert "WITH picked AS MATERIALIZED" in closed_capture.query
 
     captured = _CaptureResult()
     assert worker.ResearchOutcomeWorker._load_open_first_touch_events(

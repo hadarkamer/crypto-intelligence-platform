@@ -11,6 +11,8 @@ import research_ordered_question_catalog as questions
 import research_ordered_question_store as question_store
 import research_ordered_validation_store as validation_store
 import research_ordered_inverse_store as inverse_store
+import research_ordered_experimental_store as experimental_store
+import research_ordered_experimental_worker as experimental_worker
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -56,7 +58,7 @@ class ResearchFormulaOrderedWorker:
             'evidence_policy':'One causally verified BTC parent across all coins/time; earliest frozen matching cohort',
             'research_scope':'Versioned Q01-Q72 captured-feature queue; normal/inverse; finite singles/pairs/justified triples/quads; original delivered-alert wave cohorts',
             'question_map_count':len(questions.question_map()),'feature_version':questions.VERSION,
-            'live_effect':'NONE','remaining_validation':'Sequence/regime features and exact acceptance are active for new v2 freezes; genuine later waves, incomplete captured fields and explicit trade approval remain',
+            'live_effect':'NONE','remaining_validation':'New v3 freezes use an exactly bound acceptance policy; later genuine BTC waves and complete captured features are required. A separate authorized experimental notification worker never executes trades.',
             'metrics':dict(self.metrics)}
 
     async def start(self)->bool:
@@ -128,12 +130,15 @@ class ResearchFormulaOrderedWorker:
                 conn.commit()
                 self.metrics['last_stage']='PREPARE_SCOPE_QUEUE'
                 validation_available=validation_store.schema_status(conn)['schema_present']
+                experimental_available=experimental_worker.enabled() and experimental_store.available(conn)
                 candidates={candidate['formula_id']:candidate for candidate in catalog}
                 attempts=conn.execute("SELECT COUNT(*) AS n FROM research_ordered_formula_scopes WHERE period_key<>'LEGACY_UNSCOPED' AND candidate_key=ANY(%s)",(list(candidates),)).fetchone()['n']
                 period_population={key:store.source_population_complete(conn,now=now,period_key=key) for key in store.PERIODS}
                 summary['source_population_complete_by_period']=period_population
                 summary['source_population_complete']=all(period_population.values())
                 scopes=store.due_scopes(conn,_SCOPE_LIMIT,candidate_keys=candidates)
+                if experimental_available:
+                    scopes=experimental_store.prioritize(conn,scopes,now=now,limit=_SCOPE_LIMIT,candidate_keys=candidates)
                 feature_coverage_cache={}
                 conn.commit()
                 # Intake and reconciliation have separate row/query bounds.
@@ -161,7 +166,8 @@ class ResearchFormulaOrderedWorker:
                     common_rows=store.common_window_rows(conn,scope,rows)
                     input_sha=question_store.evaluation_input(scope,[{**row,'common_window_record':common_rows.get(row['event_id'])} for row in rows],now=now,population_complete=candidate_population_complete,membership_complete=mappings_complete)
                     input_sha=store.digest({'input':input_sha,'validation_available':validation_available,'registered_attempts':attempts})
-                    if scope.get('evaluation_input_sha256')==input_sha:
+                    refresh_qualification=bool(experimental_available and (scope.get('result') or {}).get('research_ready'))
+                    if scope.get('evaluation_input_sha256')==input_sha and not refresh_qualification:
                         conn.execute('UPDATE research_ordered_formula_scopes SET last_evaluated_at_utc=%s WHERE scope_key=%s',(now,scope['scope_key']))
                         conn.commit()
                         summary['unchanged_scopes_skipped']+=1
@@ -183,15 +189,21 @@ class ResearchFormulaOrderedWorker:
                         result['exclusion_reasons']['REQUIRED_PAST_FEATURES_UNKNOWN_FOR_POSSIBLE_EARLIER_MATCH']=1
                     if validation_available:
                         contract={**scope,**store.period_contract(scope),'parent_policy_version':store.PARENT_POLICY}
-                        candidate=candidates[scope['candidate_key']]
+                        # One exact definition enters policy registration and
+                        # freeze. v2 added direction_mode only to the latter,
+                        # producing a different binding and no matching policy.
+                        candidate={**candidates[scope['candidate_key']],
+                            'direction_mode':candidates[scope['candidate_key']].get('research_orientation','NORMAL')}
                         validation_store.register_supported_acceptance(conn,contract,candidate)
                         validated=validation_store.evaluate_scope(conn,contract,rows,now=now,
-                            candidate_definition={**candidate,'direction_mode':candidate.get('research_orientation','NORMAL')},
+                            candidate_definition=candidate,
                             source_coverage_complete=bool(candidate_population_complete and mappings_complete),truncated=truncated,
                             common_window_rows=common_rows,registered_attempts=attempts)
                         result['prospective_validation']=validated
                         result['research_ready']=validated['research_ready']
                         result['validation_status']=validated['validation_status']
+                        if experimental_available:
+                            experimental_store.publish_evaluation(conn,scope,validated,now=now,rows=rows,common_window_rows=common_rows)
                         if 'all_period_metrics' in validated:
                             question_store.apply_validation_cohorts(result,validated)
                     counts=store.persist_scope(conn,scope,rows,result,now=now)

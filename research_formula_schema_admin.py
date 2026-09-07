@@ -109,6 +109,8 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "034_past_price_features.sql",
+    Path(__file__).resolve().parent / "migrations" / "037_ordered_experimental_delivery.sql",
+    Path(__file__).resolve().parent / "migrations" / "038_runtime_event_scan_bounds.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
