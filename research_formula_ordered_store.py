@@ -2,14 +2,20 @@
 from __future__ import annotations
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Mapping
 import research_formula_ordered_v7 as evaluator
 import research_sheet_outbox
 
 PARENT_POLICY = 'btc-parent-close-reversal-200bps-v1'
-WORKER_KEY = 'ordered-v7-frozen-total-scores-v1'
+WORKER_KEY = 'ordered-v7-frozen-total-scores-periods-v2'
 FORMULA_VERSION = evaluator.POLICY_VERSION + ':' + evaluator.CATALOG_VERSION + ':' + PARENT_POLICY
+PERIOD_VERSION = 'live-israel-cutoffs-v1'
+PERIODS = {
+    'ALL_COMPATIBLE_SINCE_20260816': datetime(2026,8,15,21,tzinfo=timezone.utc),
+    'SINCE_20260904': datetime(2026,9,3,21,tzinfo=timezone.utc),
+}
+SOURCE_START_UTC = min(PERIODS.values())
 REQUIRED_TABLES = ('research_ordered_formula_event_checks','research_ordered_formula_candidates','research_ordered_formula_matches','research_ordered_formula_scopes','research_ordered_formula_episodes','research_ordered_formula_trials','research_ordered_formula_worker_state','research_sheet_upsert_outbox','research_event_btc_movements','research_btc_parent_movements','research_ordered_first_touch_outcomes')
 
 
@@ -23,7 +29,27 @@ def digest(value: Any) -> str:
 
 def schema_status(conn: Any) -> dict[str, Any]:
     missing = [name for name in REQUIRED_TABLES if conn.execute('SELECT to_regclass(%s) AS relation',(name,)).fetchone()['relation'] is None]
+    if not missing:
+        columns = {row['column_name'] for row in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='research_ordered_formula_scopes'").fetchall()}
+        missing.extend('research_ordered_formula_scopes.'+name for name in ('period_key','period_start_utc') if name not in columns)
     return {'schema_present':not missing,'missing_tables':missing}
+
+
+def period_contract(scope: Mapping[str,Any]) -> dict[str,Any]:
+    key = scope.get('period_key')
+    if key not in PERIODS:
+        raise ValueError('An explicit supported LIVE research period is required')
+    cutoff = PERIODS[key]
+    if scope.get('period_start_utc') is not None and evaluator._utc(scope['period_start_utc']) != cutoff:
+        raise ValueError('Persisted period cutoff does not match its versioned definition')
+    return {'period_key':key,'period_start_utc':cutoff.isoformat(),
+            'period_version':PERIOD_VERSION,'source_scope':'LIVE',
+            'boundary_policy':'Exclude parent waves starting before cutoff; retain all alert outcomes separately',
+            'overlap_policy':'Periods overlap and are never additional independent evidence'}
+
+
+def scope_formula_version(scope: Mapping[str,Any]) -> str:
+    return FORMULA_VERSION + ':' + PERIOD_VERSION + ':' + period_contract(scope)['period_key']
 
 
 def register_catalog(conn: Any) -> list[dict[str, Any]]:
@@ -40,19 +66,21 @@ def register_catalog(conn: Any) -> list[dict[str, Any]]:
     return catalog
 
 
-def register_scopes(conn: Any,catalog: list[dict[str,Any]],symbols: set[str],*,directions=None,include_all:bool=True) -> int:
+def register_scopes(conn: Any,catalog: list[dict[str,Any]],symbols: set[str],*,directions=None,include_all:bool=True,period_keys=None) -> int:
     records = []
     for candidate in catalog:
         for symbol in sorted(symbols | ({'ALL'} if include_all else set())):
             for direction in (directions or evaluator.DIRECTIONS):
                 for horizon in evaluator.HORIZONS_MINUTES:
                     for bps in evaluator.THRESHOLDS_BPS:
-                        identity = (candidate['formula_id'],symbol,direction,horizon,bps,FORMULA_VERSION)
-                        records.append((digest(identity),*identity[:5]))
+                        for period_key in (period_keys or PERIODS):
+                            contract = period_contract({'period_key':period_key})
+                            identity = (candidate['formula_id'],symbol,direction,horizon,bps,FORMULA_VERSION,PERIOD_VERSION,period_key,'LIVE')
+                            records.append((digest(identity),*identity[:5],period_key,contract['period_start_utc']))
     if records:
         with conn.cursor() as cur:
-            cur.executemany('''INSERT INTO research_ordered_formula_scopes(scope_key,candidate_key,symbol,direction,window_minutes,threshold_bps)
-                VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING''',records)
+            cur.executemany('''INSERT INTO research_ordered_formula_scopes(scope_key,candidate_key,symbol,direction,window_minutes,threshold_bps,period_key,period_start_utc)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING''',records)
     return len(records)
 
 
@@ -70,10 +98,10 @@ FROM picked JOIN research_events e USING(event_id) ORDER BY e.event_id
 '''
 
 
-def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_limit: int=128,lookback_days: int=14) -> dict[str,Any]:
+def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_limit: int=128) -> dict[str,Any]:
     conn.execute('INSERT INTO research_ordered_formula_worker_state(worker_key) VALUES(%s) ON CONFLICT DO NOTHING',(WORKER_KEY,))
     cursor = conn.execute('SELECT last_event_id FROM research_ordered_formula_worker_state WHERE worker_key=%s FOR UPDATE',(WORKER_KEY,)).fetchone()['last_event_id']
-    since = now-timedelta(days=lookback_days)
+    since = SOURCE_START_UTC
     events = conn.execute('''WITH picked AS MATERIALIZED (
         SELECT event_id FROM research_events WHERE event_id>%s AND alert_time_utc>=%s
           AND alert_time_utc<=%s AND event_kind='ALERT' AND delivery_status='DELIVERED'
@@ -107,26 +135,32 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
         with conn.cursor() as cur:
             cur.executemany('''INSERT INTO research_ordered_formula_matches(candidate_key,event_id,symbol,direction,alert_time_utc,snapshot_id,entry_price,decision_features)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT(candidate_key,event_id) DO NOTHING''',records)
-    known = {(row['candidate_key'],row['symbol'],row['direction']) for row in conn.execute('SELECT DISTINCT candidate_key,symbol,direction FROM research_ordered_formula_scopes').fetchall()}
-    if not known:
-        register_scopes(conn,catalog,set())
+    known = {(row['candidate_key'],row['symbol'],row['direction'],row['period_key']) for row in conn.execute('SELECT DISTINCT candidate_key,symbol,direction,period_key FROM research_ordered_formula_scopes').fetchall()}
+    # Existing matches also receive both periods during an upgrade, even when
+    # they were seen before this worker's current bounded ingest pass.
+    match_cells = {(row['candidate_key'],row['symbol'],row['direction']) for row in conn.execute('SELECT DISTINCT candidate_key,symbol,direction FROM research_ordered_formula_matches WHERE alert_time_utc>=%s',(since,)).fetchall()}
+    match_cells |= {(candidate['formula_id'],'ALL',direction) for candidate in catalog for direction in evaluator.DIRECTIONS}
     candidate_by_id = {candidate['formula_id']:candidate for candidate in catalog}
-    for candidate_key,symbol,direction in sorted({(record[0],record[2],record[3]) for record in records}-known):
-        register_scopes(conn,[candidate_by_id[candidate_key]],{symbol},directions=[direction],include_all=False)
-    return {'events_checked':len(unique),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0)}
+    requested = {(candidate,symbol,direction,period) for candidate,symbol,direction in match_cells if candidate in candidate_by_id for period in PERIODS}
+    for candidate_key,symbol,direction,period_key in sorted(requested-known):
+        register_scopes(conn,[candidate_by_id[candidate_key]],{symbol},directions=[direction],include_all=False,period_keys=[period_key])
+    return {'events_checked':len(unique),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat()}
 
 
 def due_scopes(conn:Any,limit:int=64)->list[dict[str,Any]]:
-    return conn.execute('SELECT * FROM research_ordered_formula_scopes ORDER BY last_evaluated_at_utc ASC NULLS FIRST,scope_key LIMIT %s',(limit,)).fetchall()
+    return conn.execute('SELECT * FROM research_ordered_formula_scopes WHERE period_key=ANY(%s) ORDER BY last_evaluated_at_utc ASC NULLS FIRST,scope_key LIMIT %s',(list(PERIODS),limit)).fetchall()
 
 
-def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000)->tuple[list[dict[str,Any]],bool]:
+def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:datetime|None=None)->tuple[list[dict[str,Any]],bool]:
     # First matching time is chosen BEFORE any outcome join. All simultaneous
     # matching cards/coins are retained, so missing labels cannot select winners.
-    candidate_count=conn.execute("SELECT COUNT(*) AS n FROM (SELECT event_id FROM research_ordered_formula_matches WHERE candidate_key=%s AND direction=%s AND (%s='ALL' OR symbol=%s) LIMIT 10001) bounded",(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'])).fetchone()['n']
+    cutoff=period_contract(scope)['period_start_utc']
+    now=now or datetime.now(timezone.utc)
+    candidate_count=conn.execute("SELECT COUNT(*) AS n FROM (SELECT event_id FROM research_ordered_formula_matches WHERE candidate_key=%s AND direction=%s AND (%s='ALL' OR symbol=%s) AND alert_time_utc>=%s AND alert_time_utc<=%s LIMIT 10001) bounded",(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now)).fetchone()['n']
     rows=conn.execute('''
         WITH source_matches AS MATERIALIZED (
             SELECT * FROM research_ordered_formula_matches WHERE candidate_key=%s AND direction=%s AND (%s='ALL' OR symbol=%s)
+              AND alert_time_utc>=%s AND alert_time_utc<=%s
             ORDER BY alert_time_utc,event_id LIMIT 10000
         ), matched AS MATERIALIZED (
             SELECT m.*,membership.btc_parent_movement_id,membership.membership_status,
@@ -137,6 +171,7 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000)->tuple
               AND membership.episode_policy_version=%s AND membership.membership_status='LIVE'
             JOIN research_btc_parent_movements parent ON parent.btc_parent_movement_id=membership.btc_parent_movement_id
               AND parent.episode_policy_version=%s AND parent.evidence_eligible IS TRUE
+              AND parent.start_time_utc>=%s
             WHERE m.candidate_key=%s AND m.direction=%s AND (%s='ALL' OR m.symbol=%s)
         ), representatives AS MATERIALIZED (
             SELECT * FROM matched WHERE alert_time_utc=first_match_time
@@ -151,7 +186,7 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000)->tuple
           ON o.event_id=m.event_id AND o.window_minutes=%s AND o.threshold_bps=%s
              AND o.method_version='ordered-first-touch-v7'
         ORDER BY m.alert_time_utc,m.event_id
-    ''',(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],PARENT_POLICY,PARENT_POLICY,scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],row_limit+1,
+    ''',(scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now,PARENT_POLICY,PARENT_POLICY,cutoff,scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],row_limit+1,
          scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'],scope['window_minutes'],scope['threshold_bps'])).fetchall()
     truncated=len(rows)>row_limit or candidate_count>10000
     if len(rows)>row_limit:
@@ -162,12 +197,15 @@ def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000)->tuple
 
 
 def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],result:dict[str,Any],*,now:datetime)->dict[str,int]:
+    period=period_contract(scope)
+    formula_version=scope_formula_version(scope)
     episodes=result.get('episodes',[])
     summary={key:value for key,value in result.items() if key!='episodes'}
     summary['decision_evidence_sha256']=digest(episodes)
-    summary.update({'formula_version':FORMULA_VERSION,'parent_policy_version':PARENT_POLICY,
+    summary.update({'formula_version':formula_version,'parent_policy_version':PARENT_POLICY,
                     'feature_source':'IMMUTABLE_DELIVERED_ALERT_TOTAL_SCORES','universe':'ALERTS_ONLY_MODEL_TOTAL_SCORES',
                     'validation_limitation':'Independent prospective/full-horizon validation is not yet implemented in this path.'})
+    summary.update(period)
     evidence_sha=digest({'scope':dict(scope)|{'last_evaluated_at_utc':None,'result':None},'episodes':episodes,'summary':summary})
     conn.execute('UPDATE research_ordered_formula_scopes SET result=%s::jsonb,last_evaluated_at_utc=%s WHERE scope_key=%s',(canonical(summary),now,scope['scope_key']))
     if canonical(summary)==canonical(scope.get('result') or {}):
@@ -186,8 +224,10 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
         first=by_id.get(episode['event_ids'][0],{})
         labels=[by_id[event_id].get('ordered_outcome') or {} for event_id in episode['event_ids'] if event_id in by_id]
         decisive=[label for label in labels if label.get('status')==episode['status']]
-        audit={'window_minutes':scope['window_minutes'],'threshold_bps':scope['threshold_bps'],'representative_event_ids':episode['event_ids'],
+        audit={**period,'window_minutes':scope['window_minutes'],'threshold_bps':scope['threshold_bps'],'representative_event_ids':episode['event_ids'],
                'exclusion_reasons':episode['exclusion_reasons'],'metric_scope':'STOP_AT_FIRST_TOUCH','parent_policy_version':PARENT_POLICY,
+               'representative_outcome_statuses':episode.get('representative_outcome_statuses',[]),
+               'status_reporting_version':evaluator.STATUS_REPORTING_VERSION,
                'same_wave_repeats':'Not additional independent evidence','live_effect':'NONE'}
         row={'episode_id':episode_id,'candidate_key':scope['candidate_key'],'symbol':scope['symbol'],'direction':scope['direction'],
              'threshold_pct':scope['threshold_bps']/100,'first_snapshot_id':first.get('snapshot_id'),
@@ -195,11 +235,16 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
              'state':'LIVE','result':episode['status'],'closed_at_utc':max((str(label.get('decision_time_utc') or '') for label in decisive),default=''),
              'close_price':(decisive[0].get('favorable_touch_price') if episode['success'] else decisive[0].get('adverse_touch_price')) if decisive else '',
              'swallowed_snapshot_count':'','rearmed_snapshot_id':'','rearm_reason':'NO_TIME_RESET_RULE',
-             'btc_parent_movement_id':episode['btc_parent_movement_id'],'policy_version':FORMULA_VERSION,'audit_note':canonical(audit)}
+             'btc_parent_movement_id':episode['btc_parent_movement_id'],'policy_version':formula_version,'audit_note':canonical(audit)}
         upserts.append({'sheet':'Episodes','key':'episode_id','row':row})
-    complete=bool(summary.get('source_population_complete',True) and summary.get('membership_population_complete',True) and not summary.get('truncated'))
+    complete=bool(summary.get('source_coverage_complete',True) and summary.get('source_population_complete',True) and summary.get('membership_population_complete',True) and not summary.get('truncated'))
     detail=f"{summary['independent_waves']} {'independent' if complete else 'provisional'} BTC waves; route {summary['count_route']}; research only; stop-at-first-touch metrics; validation pending."
+    detail+=' Period='+canonical(period)+'. Coverage='+canonical(summary.get('period_coverage',{}))+'.'
     detail+=f" All grouped waves={summary['independent_waves']}; recent14d={summary['fresh_independent_waves']}; displayed denominator={summary['sample_size'] if complete else 0}."
+    detail+=' Wave status audit='+canonical({key:summary.get(key) for key in (
+        'status_reporting_version','status_count_scope','status_counts','all_wave_status_counts',
+        'fresh_wave_status_counts','cohort_status_policy',
+    )})+'. Only SUCCESS/FAILURE enter the hit-rate denominator; excluded evidence is not OPEN.'
     if summary['exclusion_reasons']:
         detail+=' Excluded evidence reasons='+canonical(summary['exclusion_reasons'])+'.'
     if not complete:
@@ -207,29 +252,47 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
     formula_row={'candidate_key':scope['candidate_key'],'candidate_name':scope['candidate_key'],'exact_conditions':canonical(next(candidate['conditions'] for candidate in evaluator.candidate_catalog() if candidate['formula_id']==scope['candidate_key'])),
         'coin_scope':scope['symbol'],'direction':scope['direction'],'threshold_pct':scope['threshold_bps']/100,'horizon':scope['window_minutes'],
         'independent_episodes':summary['sample_size'] if complete else 0,'successes':summary['successes'] if complete else 0,'failures':summary['failures'] if complete else 0,
-        'open_episodes':summary['excluded_waves'],'hit_rate':summary['hit_rate_pct'] if complete else '','median_mfe_pct':summary['median_mfe_pct'],'median_mae_pct':summary['median_mae_pct'],
+        'open_episodes':summary['open_waves'],'hit_rate':summary['hit_rate_pct'] if complete else '','median_mfe_pct':summary['median_mfe_pct'] if complete else '','median_mae_pct':summary['median_mae_pct'] if complete else '',
         'asymmetry_ratio':summary['median_mfe_mae_ratio'] if complete else '','opposite_indicator_test':'NOT_TESTED','current_period_hit_rate':'','prior_period_hit_rate':'','change_pp':'',
         'strongest_failure_pattern':'NOT_TESTED','status':'INCOMPLETE_DECISION_POPULATION' if not complete else summary['validation_status'] if summary['count_eligible'] else 'INSUFFICIENT_INDEPENDENT_EVIDENCE',
-        'meets_min_5':complete and summary['independent_waves']>=5,'last_evaluated_at':now.isoformat(),'chat_summary':detail,'formula_version':FORMULA_VERSION}
+        'meets_min_5':complete and summary['independent_waves']>=5,'last_evaluated_at':now.isoformat(),'chat_summary':detail,'formula_version':formula_version}
     if canonical(summary) != canonical(scope.get('result') or {}):
         upserts.append({'sheet':'Formula_Results','key':'candidate_key,coin_scope,direction,threshold_pct,horizon,formula_version','row':formula_row})
     research_sheet_outbox.stage_upserts(conn,upserts)
     return {'episodes':len(episodes),'upserts':len(upserts)}
 
 
-def source_population_complete(conn:Any,*,now:datetime,lookback_days:int=14)->bool:
+def source_population_complete(conn:Any,*,now:datetime,period_key:str)->bool:
     # A processed ledger covers both matching and nonmatching source alerts.
     # No v7/outcome condition is used in this source population check.
     return conn.execute("""SELECT NOT EXISTS(
         SELECT 1 FROM research_events e LEFT JOIN research_ordered_formula_event_checks checked USING(event_id)
         WHERE e.event_kind='ALERT' AND e.delivery_status='DELIVERED' AND e.direction IN ('LONG','SHORT')
           AND e.alert_time_utc>=%s AND e.alert_time_utc<=%s AND checked.event_id IS NULL LIMIT 1
-    ) AS complete""",(now-timedelta(days=lookback_days),now)).fetchone()['complete']
+    ) AS complete""",(period_contract({'period_key':period_key})['period_start_utc'],now)).fetchone()['complete']
 
 
-def membership_complete(conn:Any,scope:Mapping[str,Any])->bool:
+def membership_complete(conn:Any,scope:Mapping[str,Any],*,now:datetime|None=None)->bool:
     return conn.execute("""SELECT NOT EXISTS(
         SELECT 1 FROM research_ordered_formula_matches m
         LEFT JOIN research_event_btc_movements membership ON membership.event_id=m.event_id AND membership.episode_policy_version=%s
-        WHERE m.candidate_key=%s AND m.direction=%s AND (%s='ALL' OR m.symbol=%s) AND membership.event_id IS NULL LIMIT 1
-    ) AS complete""",(PARENT_POLICY,scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'])).fetchone()['complete']
+        WHERE m.candidate_key=%s AND m.direction=%s AND (%s='ALL' OR m.symbol=%s)
+          AND m.alert_time_utc>=%s AND m.alert_time_utc<=%s
+          AND (membership.event_id IS NULL OR membership.membership_status='BTC_DATA_MISSING') LIMIT 1
+    ) AS complete""",(PARENT_POLICY,scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],period_contract(scope)['period_start_utc'],now or datetime.now(timezone.utc))).fetchone()['complete']
+
+
+def period_coverage(conn:Any,scope:Mapping[str,Any],*,now:datetime)->dict[str,Any]:
+    cutoff=period_contract(scope)['period_start_utc']
+    return dict(conn.execute('''SELECT COUNT(*) AS matching_alert_count,
+        COUNT(DISTINCT m.snapshot_id) AS matching_snapshot_count,
+        COUNT(*) FILTER(WHERE parent.start_time_utc<%s) AS boundary_excluded_alerts,
+        COUNT(DISTINCT parent.btc_parent_movement_id) FILTER(WHERE parent.start_time_utc<%s) AS boundary_excluded_waves,
+        COUNT(*) FILTER(WHERE membership.event_id IS NULL OR membership.membership_status='BTC_DATA_MISSING') AS missing_membership_alerts,
+        COUNT(*) FILTER(WHERE membership.membership_status='BOUNDARY_UNVERIFIED') AS unverified_boundary_alerts
+        FROM research_ordered_formula_matches m
+        LEFT JOIN research_event_btc_movements membership ON membership.event_id=m.event_id AND membership.episode_policy_version=%s
+        LEFT JOIN research_btc_parent_movements parent ON parent.btc_parent_movement_id=membership.btc_parent_movement_id AND parent.episode_policy_version=%s
+        WHERE m.candidate_key=%s AND m.direction=%s AND (%s='ALL' OR m.symbol=%s)
+          AND m.alert_time_utc>=%s AND m.alert_time_utc<=%s
+    ''',(cutoff,cutoff,PARENT_POLICY,PARENT_POLICY,scope['candidate_key'],scope['direction'],scope['symbol'],scope['symbol'],cutoff,now)).fetchone())

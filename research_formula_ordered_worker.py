@@ -44,6 +44,7 @@ class ResearchFormulaOrderedWorker:
         return {'enabled':_ENABLED,'configured':bool(_database_url()),'running':bool(self._task and not self._task.done()),
             'schema_ready':self._schema_ready,'poll_seconds':_POLL,'formula_version':store.FORMULA_VERSION,
             'parent_policy_version':store.PARENT_POLICY,'outcome_method_version':evaluator.METHOD_VERSION,
+            'research_periods':[store.period_contract({'period_key':key}) for key in store.PERIODS],
             'candidate_count':len(evaluator.candidate_catalog()),'scope_limit_per_pass':_SCOPE_LIMIT,'event_limit_per_pass':_EVENT_LIMIT,
             'thresholds_bps':list(evaluator.THRESHOLDS_BPS),'horizons_minutes':list(evaluator.HORIZONS_MINUTES),
             'evidence_policy':'One causally verified BTC parent across all coins/time; earliest frozen matching cohort',
@@ -109,16 +110,19 @@ class ResearchFormulaOrderedWorker:
                 catalog=store.register_catalog(conn)
                 summary.update(store.ingest_matches(conn,catalog,now=now,event_limit=_EVENT_LIMIT))
                 conn.commit()
-                population_complete=store.source_population_complete(conn,now=now)
-                summary['source_population_complete']=population_complete
+                period_population={key:store.source_population_complete(conn,now=now,period_key=key) for key in store.PERIODS}
+                summary['source_population_complete_by_period']=period_population
+                summary['source_population_complete']=all(period_population.values())
                 scopes=store.due_scopes(conn,_SCOPE_LIMIT)
                 conn.commit()
                 for scope in scopes:
                     if time.monotonic()-started>=_PASS_SECONDS:
                         break
-                    rows,truncated=store.load_scope_rows(conn,scope,row_limit=_ROW_LIMIT)
-                    mappings_complete=store.membership_complete(conn,scope)
+                    population_complete=period_population[scope['period_key']]
+                    rows,truncated=store.load_scope_rows(conn,scope,row_limit=_ROW_LIMIT,now=now)
+                    mappings_complete=store.membership_complete(conn,scope,now=now)
                     result=evaluator.summarize_scope(rows,analysis_as_of_utc=now,truncated=truncated,source_coverage_complete=bool(population_complete and mappings_complete))
+                    result['period_coverage']=store.period_coverage(conn,scope,now=now)
                     result['source_population_complete']=population_complete
                     result['membership_population_complete']=mappings_complete
                     if not population_complete or not mappings_complete:

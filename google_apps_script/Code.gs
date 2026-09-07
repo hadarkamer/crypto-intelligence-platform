@@ -40,6 +40,21 @@ function upsertBatch_(ss, items) {
       states.set(item.sheet, state);
     }
     const rowObject = item.row || {};
+    // A renamed header used to silently discard the source time while the
+    // webhook acknowledged success. Validate populated source-time fields
+    // before writing any part of this request; never infer a replacement time.
+    const timeFields = {
+      "תצוגת לייב": ["זמן סריקה"],
+      Snapshots: ["timestamp_utc"],
+      Telegram_Events: ["timestamp_utc"],
+      Outcomes: ["decision_time_utc"],
+    }[item.sheet] || [];
+    timeFields.forEach(name => {
+      if (rowObject[name] !== undefined && rowObject[name] !== "" && rowObject[name] !== null &&
+          state.headers.filter(header => header === name).length !== 1) {
+        throw new Error("Missing or duplicate source-time column: " + item.sheet + "." + name);
+      }
+    });
     const values = state.headers.map(header => rowObject[header] === undefined ? "" : rowObject[header]);
     const keyNames = String(item.key || state.headers[0]).split(",").map(name => name.trim());
     const keyIndexes = keyNames.map(name => state.headers.indexOf(name));

@@ -2173,6 +2173,10 @@ class ResearchOutcomeWorker:
                        method_version, destination
                 FROM research_ordered_first_touch_sync_outbox
                 WHERE destination='GOOGLE_SHEETS'
+                  -- Matches the ordered active-queue partial index. Without
+                  -- this shared lane, the OR below forces a full queue sort
+                  -- before LIMIT even when only one row is being leased.
+                  AND sync_status IN ('PENDING', 'RETRY', 'IN_FLIGHT')
                   AND (
                         (
                             sync_status IN ('PENDING', 'RETRY')

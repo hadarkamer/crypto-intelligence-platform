@@ -50,14 +50,6 @@ class SourceConnection:
 
 
 def run():
-    worker.research_sheet_outbox._rotation_index = 0
-    rotation = [
-        worker.research_sheet_outbox._next_preferred_sheet()
-        for _ in worker.research_sheet_outbox._SHEET_ROTATION
-    ]
-    assert tuple(rotation) == worker.research_sheet_outbox._SHEET_ROTATION
-    assert worker.research_sheet_outbox._next_preferred_sheet() == rotation[0]
-
     primary = _alert(Event(), 1)
     primary["engine_snapshot"].update(near_share_pct=70, near_amount=700, far_amount=300)
     child = _alert(DirectEvent(), 2)

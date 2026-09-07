@@ -75,3 +75,19 @@ assert.equal(composite.rows[2][2], "UNCHANGED");
 assert.equal(composite.reads, 1);
 assert.equal(composite.writes, 2);
 console.log("google Apps Script batch self-test: PASS");
+// Header corruption must reject the complete batch, not silently drop time.
+const live = sheet([["מה", "snapshot_id"]]);
+sheets["תצוגת לייב"] = live;
+const liveItem = {sheet: "תצוגת לייב", key: "snapshot_id",
+  row: {snapshot_id: "fresh", "זמן סריקה": "07/09/2026 08:00"}};
+const writesBeforeCorruptHeader = outcomes.writes;
+assert.throws(() => context.upsertBatch_(ss, [items[0], liveItem]), /source-time column/);
+assert.equal(outcomes.writes, writesBeforeCorruptHeader);
+assert.equal(live.writes, 0);
+live.rows[0][0] = "זמן סריקה";
+context.upsertBatch_(ss, [liveItem]);
+assert.equal(live.rows[1][0], "07/09/2026 08:00");
+live.rows[0].push("זמן סריקה");
+assert.throws(() => context.upsertBatch_(ss, [liveItem]), /source-time column/);
+assert.equal(live.writes, 1);
+console.log("google Apps Script timestamp contract self-test: PASS");

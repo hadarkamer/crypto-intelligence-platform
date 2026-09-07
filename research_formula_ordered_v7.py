@@ -28,6 +28,12 @@ DIRECTIONS = ("LONG", "SHORT")
 FRESH_DAYS = 14
 CATALOG_VERSION = "ordered-v7-total-score-simple-pairs-strict65-v1"
 METRIC_SCOPE = "STOP_AT_FIRST_TOUCH_V7"
+STATUS_REPORTING_VERSION = "ordered-v7-wave-status-reporting-v2"
+WAVE_STATUSES = ("SUCCESS", "FAILURE", "OPEN", "AMBIGUOUS", "NO_TOUCH", "DATA_MISSING")
+VERIFIED_DATA_QUALITY = (
+    "VERIFIED_BINANCE_SPOT_1M_CLOSED_CANDLES",
+    "VERIFIED_HYPERLIQUID_SPOT_1M_CLOSED_CANDLES",
+)
 
 
 def _utc(value: Any) -> datetime:
@@ -98,12 +104,43 @@ def ordered_outcome_evidence(
         reasons.append("UNSUPPORTED_THRESHOLD")
 
     status = label.get("status")
+    reported_status = status
     expected = {
         "SUCCESS": (True, "FAVORABLE", "FAVORABLE_FIRST", "favorable_touch_price"),
         "FAILURE": (False, "ADVERSE", "ADVERSE_FIRST", "adverse_touch_price"),
     }.get(status)
     if expected is None:
-        reasons.append("UNRESOLVED_OR_OPEN_OUTCOME")
+        if status == "OPEN":
+            valid_state = (
+                label.get("first_touch_side") == "NONE"
+                and label.get("terminal_reason") is None
+                and label.get("observation_closed") is False
+            )
+        elif status == "UNRESOLVED" and label.get("terminal_reason") == "SAME_CANDLE_BOTH":
+            reported_status = "AMBIGUOUS"
+            valid_state = label.get("first_touch_side") == "AMBIGUOUS"
+        elif status == "UNRESOLVED" and label.get("terminal_reason") == "OBSERVATION_WINDOW_CLOSED_NO_TOUCH":
+            reported_status = "NO_TOUCH"
+            valid_state = (
+                label.get("first_touch_side") == "NONE"
+                and label.get("observation_closed") is True
+            )
+        elif status == "DATA_MISSING":
+            valid_state = (
+                label.get("first_touch_side") == "NONE"
+                and label.get("terminal_reason") == "INCOMPLETE_PATH"
+            )
+        else:
+            valid_state = False
+        if not valid_state or label.get("success") is not None:
+            reasons.append("INVALID_NONDECISIVE_OUTCOME_STATE")
+        if reported_status in ("OPEN", "NO_TOUCH", "DATA_MISSING") and any(
+            label.get(key) is not None for key in (
+                "decision_time_utc", "time_to_decision_seconds",
+                "favorable_touch_price", "adverse_touch_price",
+            )
+        ):
+            reasons.append("NONDECISIVE_OUTCOME_HAS_TOUCH")
     else:
         success, side, terminal, touch_key = expected
         if label.get("success") is not success:
@@ -123,24 +160,29 @@ def ordered_outcome_evidence(
             break
     if label.get("path_complete") is not True:
         reasons.append("INCOMPLETE_PATH")
+    if label.get("data_quality_status") not in VERIFIED_DATA_QUALITY:
+        reasons.append("UNVERIFIED_DATA_QUALITY")
     if label.get("candle_interval_seconds") != 60:
         reasons.append("CANDLE_INTERVAL_MISMATCH")
     samples = label.get("path_samples")
-    if type(samples) is not int or samples <= 0:
+    if type(samples) is not int or samples < (1 if expected is not None or reported_status == "AMBIGUOUS" else 0):
         reasons.append("MISSING_PATH_SAMPLES")
     try:
         measurement = _utc(label.get("measurement_start_utc"))
-        decided = _utc(label.get("decision_time_utc"))
         observed = _utc(label.get("observed_through_utc"))
-        if not measurement <= decided <= observed <= as_of:
+        if not measurement <= observed <= as_of:
             reasons.append("OUTCOME_TIME_ORDER_OR_FUTURE_DATA")
         if measurement != _decision_time(row):
             reasons.append("MEASUREMENT_DOES_NOT_START_AT_ALERT")
-        if type(horizon) is int and decided > measurement + timedelta(minutes=horizon):
-            reasons.append("DECISION_AFTER_HORIZON")
-        elapsed = label.get("time_to_decision_seconds")
-        if type(elapsed) is not int or elapsed != int((decided - measurement).total_seconds()):
-            reasons.append("DECISION_DURATION_MISMATCH")
+        if expected is not None or reported_status == "AMBIGUOUS":
+            decided = _utc(label.get("decision_time_utc"))
+            if not measurement <= decided <= observed:
+                reasons.append("OUTCOME_TIME_ORDER_OR_FUTURE_DATA")
+            if type(horizon) is int and decided > measurement + timedelta(minutes=horizon):
+                reasons.append("DECISION_AFTER_HORIZON")
+            elapsed = label.get("time_to_decision_seconds")
+            if type(elapsed) is not int or elapsed != int((decided - measurement).total_seconds()):
+                reasons.append("DECISION_DURATION_MISMATCH")
     except (TypeError, ValueError, OverflowError):
         reasons.append("MISSING_OR_INVALID_DECISION_TIME")
 
@@ -177,9 +219,21 @@ def ordered_outcome_evidence(
             barrier = favorable if expected[0] else adverse
             if touch is not None and not math.isclose(touch, barrier, rel_tol=1e-9):
                 reasons.append("TOUCH_PRICE_DOES_NOT_MATCH_BARRIER")
+        elif reported_status == "AMBIGUOUS":
+            for key, barrier in (("favorable_touch_price", favorable), ("adverse_touch_price", adverse)):
+                touch = _number(label.get(key))
+                if touch is None or not math.isclose(touch, barrier, rel_tol=1e-9):
+                    reasons.append("TOUCH_PRICE_DOES_NOT_MATCH_BARRIER")
+    # Nondecisive v7 states are observable statuses, not usable probability
+    # evidence. A broken state/path stays DATA_MISSING rather than OPEN.
+    reported_status = "DATA_MISSING" if reasons else reported_status
+    if expected is None:
+        reasons.append("UNRESOLVED_OR_OPEN_OUTCOME")
     return {
         "eligible": not reasons,
         "success": expected[0] if expected is not None and not reasons else None,
+        "reported_status": reported_status,
+        "source_status": status,
         "exclusion_reasons": sorted(set(reasons)),
     }
 
@@ -481,6 +535,42 @@ def _block_incomplete_evidence(result: dict[str, Any], reason: str) -> None:
     result["evidence_coverage_status"] = reason
 
 
+def _cohort_status(statuses: Sequence[str], *, conflicting: bool = False) -> str:
+    """Report one cohort without treating any nondecisive member as a vote."""
+    if conflicting or not statuses:
+        return "DATA_MISSING"
+    # Preserve the existing all-members-required evidence policy. These are
+    # reporting priorities only; individual member statuses remain in audit.
+    for status in ("DATA_MISSING", "OPEN", "AMBIGUOUS", "NO_TOUCH", "FAILURE"):
+        if status in statuses:
+            return status
+    return "SUCCESS"
+
+
+def _status_counts(
+    episodes: Sequence[Mapping[str, Any]], *, as_of: datetime, count_route: str
+) -> dict[str, Any]:
+    def counts(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+        counter = Counter(item["status"] for item in items)
+        return {status: counter[status] for status in WAVE_STATUSES}
+
+    fresh = [item for item in episodes if item["forecast_start_utc"] >= as_of - timedelta(days=FRESH_DAYS)]
+    active = fresh if count_route == "FRESH" else episodes
+    active_counts = counts(active)
+    return {
+        "status_reporting_version": STATUS_REPORTING_VERSION,
+        "status_count_scope": "FRESH_14D_SELECTED_WAVES" if count_route == "FRESH" else "ALL_SELECTED_WAVES",
+        "status_counts": active_counts,
+        "all_wave_status_counts": counts(episodes),
+        "fresh_wave_status_counts": counts(fresh),
+        "open_waves": active_counts["OPEN"],
+        "ambiguous_waves": active_counts["AMBIGUOUS"],
+        "no_touch_waves": active_counts["NO_TOUCH"],
+        "data_missing_waves": active_counts["DATA_MISSING"],
+        "cohort_status_policy": "DATA_MISSING > OPEN > AMBIGUOUS > NO_TOUCH > FAILURE > SUCCESS; all representative labels required for a decisive vote",
+    }
+
+
 def summarize_scope(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -550,10 +640,17 @@ def summarize_scope(
             if identity in unique and dict(_outcome(unique[identity])) != dict(_outcome(row)):
                 excluded["CONFLICTING_OUTCOME_ROWS"] += 1
             unique[identity] = row
-        labels = []
+        labels, member_statuses = [], []
         for row in unique.values():
             audit = ordered_outcome_evidence(row, analysis_as_of_utc=as_of)
             excluded.update(audit["exclusion_reasons"])
+            member_statuses.append({
+                "event_id": _identity(row)[0],
+                "reported_status": audit["reported_status"],
+                "source_status": audit["source_status"],
+                "first_touch_side": _outcome(row).get("first_touch_side"),
+                "terminal_reason": _outcome(row).get("terminal_reason"),
+            })
             if audit["eligible"]:
                 labels.append(_outcome(row))
         eligible = bool(labels) and not excluded
@@ -564,7 +661,11 @@ def summarize_scope(
             "event_ids": sorted({_identity(row)[0] for row in selected}),
             "eligible": eligible,
             "success": success,
-            "status": "SUCCESS" if success is True else "FAILURE" if success is False else "EXCLUDED",
+            "status": _cohort_status(
+                [item["reported_status"] for item in member_statuses],
+                conflicting=bool(excluded.get("CONFLICTING_OUTCOME_ROWS")),
+            ),
+            "representative_outcome_statuses": member_statuses,
             "first_touch_side": "FAVORABLE" if success is True else "ADVERSE" if success is False else None,
             "mfe_pct": min(float(label["mfe_pct"]) for label in labels) if eligible else None,
             "mae_pct": max(float(label["mae_pct"]) for label in labels) if eligible else None,
@@ -575,6 +676,7 @@ def summarize_scope(
         if eligible:
             evidence.append(item)
     result = _summary(evidence, as_of=as_of)
+    result.update(_status_counts(episodes, as_of=as_of, count_route=result["count_route"]))
     if not source_coverage_complete:
         _block_incomplete_evidence(result, "INCOMPLETE_MEMBERSHIP_COVERAGE")
         diagnostics["INCOMPLETE_MEMBERSHIP_COVERAGE"] += 1
@@ -657,24 +759,31 @@ def evaluate_formulas(
                 for horizon in HORIZONS_MINUTES:
                     for threshold in THRESHOLDS_BPS:
                         evidence = []
+                        episode_statuses = []
                         excluded: Counter = Counter()
                         for wave, members in cohorts.items():
                             labels = []
+                            statuses = []
                             eligible = True
                             for member in members:
                                 key = (*_identity(member), horizon, threshold)
                                 row = outcomes.get(key)
                                 if key in conflicts:
-                                    audit = {"eligible": False, "exclusion_reasons": ["CONFLICTING_OUTCOME_ROWS"]}
+                                    audit = {"eligible": False, "reported_status": "DATA_MISSING", "exclusion_reasons": ["CONFLICTING_OUTCOME_ROWS"]}
                                 elif row is None:
-                                    audit = {"eligible": False, "exclusion_reasons": ["MISSING_OUTCOME_CELL"]}
+                                    audit = {"eligible": False, "reported_status": "DATA_MISSING", "exclusion_reasons": ["MISSING_OUTCOME_CELL"]}
                                 else:
                                     audit = ordered_outcome_evidence(row, analysis_as_of_utc=as_of)
+                                statuses.append(audit["reported_status"])
                                 if not audit["eligible"]:
                                     eligible = False
                                     excluded.update(audit["exclusion_reasons"])
                                 else:
                                     labels.append(_outcome(row))
+                            episode_statuses.append({
+                                "forecast_start_utc": _decision_time(members[0]),
+                                "status": _cohort_status(statuses),
+                            })
                             if eligible:
                                 evidence.append({
                                     "btc_parent_movement_id": wave,
@@ -685,6 +794,7 @@ def evaluate_formulas(
                                     "event_ids": sorted({_identity(row)[0] for row in members}),
                                 })
                         summary = _summary(evidence, as_of=as_of)
+                        summary.update(_status_counts(episode_statuses, as_of=as_of, count_route=summary["count_route"]))
                         if decision_exclusions.get("MISSING_BTC_MEMBERSHIP_COVERAGE"):
                             _block_incomplete_evidence(summary, "INCOMPLETE_MEMBERSHIP_COVERAGE")
                         if len(formula_payload["episode_policy_versions"]) > 1:

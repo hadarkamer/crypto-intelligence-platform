@@ -6,7 +6,7 @@ web app.  The web app performs idempotent upserts into the approved workbook.
 """
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
@@ -38,6 +38,9 @@ _LAST_HTTP_SECONDS: Optional[float] = None
 _ORDERED_BATCH_FALLBACK = False
 _DURABLE_SNAPSHOT_MODE = False
 _DELIVERY_LOCK = threading.RLock()
+_DELIVERY_TURN = threading.Condition()
+_DELIVERY_WAITERS: "deque[object]" = deque()
+_DELIVERY_SLOT_LOCAL = threading.local()
 _METRICS = {
     "enqueued": 0,
     "delivered": 0,
@@ -167,18 +170,50 @@ def ordered_outcome_batch_limit() -> int:
 
 
 @contextmanager
-def delivery_slot():
-    """Reserve the shared receiver before leasing rows; busy callers defer.
+def delivery_slot(*, wait_seconds: float = 120.0):
+    """Reserve the shared receiver in FIFO order BEFORE leasing any rows.
 
-    The reentrant lock also guards the legacy asynchronous HTTP path. Outbox
-    callers never wait behind that path while their lease is counting down.
+    A nonblocking attempt lost its turn whenever another sender was active.
+    The frequent snapshot sender could therefore repeatedly exclude outcomes.
+    Remember each waiting sender's turn, with a bounded wait and no DB lease.
+    The original reentrant lock still serializes all HTTP, including legacy
+    callers. A timed-out waiter defers without claiming or acknowledging rows.
     """
-    acquired = _DELIVERY_LOCK.acquire(blocking=False)
+    # A sender may invoke a helper that reserves another slot in this thread.
+    # It already owns the turn; waiting behind itself would deadlock.
+    if getattr(_DELIVERY_SLOT_LOCAL, "active", False):
+        with _DELIVERY_LOCK:
+            yield True
+        return
+
+    timeout = max(0.0, min(120.0, float(wait_seconds)))
+    deadline = time.monotonic() + timeout
+    ticket = object()
+    acquired = False
+    with _DELIVERY_TURN:
+        _DELIVERY_WAITERS.append(ticket)
+        _DELIVERY_TURN.notify_all()
     try:
+        with _DELIVERY_TURN:
+            while _DELIVERY_WAITERS[0] is not ticket:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                _DELIVERY_TURN.wait(remaining)
+            has_turn = _DELIVERY_WAITERS[0] is ticket
+        if has_turn:
+            remaining = max(0.0, deadline - time.monotonic())
+            acquired = _DELIVERY_LOCK.acquire(timeout=remaining)
+        if acquired:
+            _DELIVERY_SLOT_LOCAL.active = True
         yield acquired
     finally:
         if acquired:
+            _DELIVERY_SLOT_LOCAL.active = False
             _DELIVERY_LOCK.release()
+        with _DELIVERY_TURN:
+            _DELIVERY_WAITERS.remove(ticket)
+            _DELIVERY_TURN.notify_all()
 
 
 def deliver_now(payload: Mapping[str, Any], *, attempts: int = 1) -> bool:

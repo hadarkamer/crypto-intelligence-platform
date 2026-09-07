@@ -41,7 +41,24 @@ def row(
         "membership_status": "LIVE", "parent_evidence_eligible": True,
         "decision_features": {"price_oi.aligned_score": 70},
         "features_observed_at_utc": start,
+        "data_quality_status": "VERIFIED_BINANCE_SPOT_1M_CLOSED_CANDLES",
     }
+
+
+def nondecisive_row(event_id=1, *, status="OPEN", wave="wave-1", start=START, symbol="BTCUSDT"):
+    path = [{
+        "open_time_utc": start + timedelta(minutes=i),
+        "close_time_utc": start + timedelta(minutes=i, seconds=59, milliseconds=999),
+        "open": 100.0, "close": 100.0,
+        "high": 101.0 if status == "AMBIGUOUS" else 100.01,
+        "low": 99.0 if status == "AMBIGUOUS" else 99.99,
+    } for i in range(60 if status == "NO_TOUCH" else 1)]
+    label = ordered.calculate_ordered_first_touch_outcome(
+        reference_price=100, direction="LONG", event_time=start,
+        candles=path, threshold_pct=0.5,
+        observation_closed=status == "NO_TOUCH", path_complete=status != "DATA_MISSING",
+    )
+    return {**row(event_id, wave=wave, start=start, symbol=symbol), **label}
 
 
 def cell(result, *, symbol="ALL", direction="LONG", horizon=60, threshold=50):
@@ -76,6 +93,8 @@ class OrderedEvidenceTests(unittest.TestCase):
             {"observed_through_utc": AS_OF + timedelta(days=1)},
             {"measurement_start_utc": START - timedelta(minutes=1)},
             {"threshold_bps": True},
+            {"data_quality_status": "PARTIAL_BINANCE_SPOT_1M_CLOSED_CANDLES"},
+            {"data_quality_status": None},
         ):
             item = {**row(success=False), **update}
             self.assertFalse(formulas.ordered_outcome_evidence(item, analysis_as_of_utc=AS_OF)["eligible"], update)
@@ -100,10 +119,69 @@ class OrderedEvidenceTests(unittest.TestCase):
         self.assertEqual(cell(result)["successes"], 0)
 
     def test_pending_earliest_cohort_cannot_disappear(self):
-        pending = {**row(), "status": "OPEN", "success": None, "decision_time_utc": None}
+        pending = nondecisive_row()
         result = evaluate([pending, row(2, start=START + timedelta(minutes=30))])
         self.assertEqual(cell(result)["sample_size"], 0)
         self.assertEqual(cell(result)["excluded_waves"], 1)
+        self.assertEqual(cell(result)["open_waves"], 1)
+        self.assertEqual(cell(result)["data_missing_waves"], 0)
+
+    def test_every_nondecisive_status_has_its_own_wave_count(self):
+        rows = [row(1, wave="success"), row(2, wave="failure", success=False)]
+        rows += [nondecisive_row(i + 3, status=status, wave=status)
+                 for i, status in enumerate(("OPEN", "AMBIGUOUS", "NO_TOUCH", "DATA_MISSING"))]
+        for result in (
+            formulas.summarize_scope(rows, analysis_as_of_utc=AS_OF),
+            cell(evaluate(rows)),
+        ):
+            self.assertEqual(result["status_counts"], dict.fromkeys(formulas.WAVE_STATUSES, 1))
+            self.assertEqual(result["decision_waves"], 6)
+            self.assertEqual(result["excluded_waves"], 4)
+            self.assertEqual(result["sample_size"], 2)
+            self.assertEqual(result["hit_rate_pct"], 50)
+            self.assertEqual(result["open_waves"], 1)
+        incremental = formulas.summarize_scope(rows, analysis_as_of_utc=AS_OF)
+        ambiguous = next(item for item in incremental["episodes"] if item["status"] == "AMBIGUOUS")
+        self.assertFalse(ambiguous["eligible"])
+        self.assertEqual(ambiguous["representative_outcome_statuses"][0]["source_status"], "UNRESOLVED")
+
+    def test_missing_or_invalid_labels_are_never_open(self):
+        malformed = [
+            {**nondecisive_row(), "path_complete": False},
+            {**nondecisive_row(), "data_quality_status": None},
+            {**nondecisive_row(), "method_version": "first-touch-v6"},
+            {**nondecisive_row(), "first_touch_side": "FAVORABLE"},
+            {**nondecisive_row(), "observation_closed": True},
+            {**row(), "decision_time_utc": None},
+        ]
+        for item in malformed:
+            result = formulas.summarize_scope([item], analysis_as_of_utc=AS_OF)
+            self.assertEqual(result["data_missing_waves"], 1, item)
+            self.assertEqual(result["open_waves"], 0, item)
+            self.assertEqual(result["sample_size"], 0, item)
+        missing_cell = cell(evaluate([row()]), threshold=75)
+        self.assertEqual(missing_cell["data_missing_waves"], 1)
+        self.assertEqual(missing_cell["open_waves"], 0)
+
+    def test_mixed_cohort_keeps_member_statuses_without_extra_votes(self):
+        rows = [row(), nondecisive_row(2, symbol="ETHUSDT"),
+                nondecisive_row(3, symbol="SOLUSDT", status="DATA_MISSING")]
+        result = formulas.summarize_scope(rows + [rows[0]], analysis_as_of_utc=AS_OF)
+        self.assertEqual(result["decision_waves"], 1)
+        self.assertEqual(result["status_counts"]["DATA_MISSING"], 1)
+        self.assertEqual(result["open_waves"], 0)
+        self.assertEqual(result["sample_size"], 0)
+        self.assertEqual(len(result["episodes"][0]["representative_outcome_statuses"]), 3)
+
+    def test_fresh_status_counts_do_not_include_old_open_waves(self):
+        rows = [row(i + 1, wave=f"recent-{i}", start=START - timedelta(days=i)) for i in range(3)]
+        rows += [nondecisive_row(10, wave="old-open", start=START - timedelta(days=20)),
+                 nondecisive_row(11, wave="recent-open")]
+        result = formulas.summarize_scope(rows, analysis_as_of_utc=AS_OF)
+        self.assertEqual(result["count_route"], "FRESH")
+        self.assertEqual(result["open_waves"], 1)
+        self.assertEqual(result["all_wave_status_counts"]["OPEN"], 2)
+        self.assertEqual(result["status_count_scope"], "FRESH_14D_SELECTED_WAVES")
 
     def test_simultaneous_coins_one_conservative_global_vote(self):
         result = evaluate([row(), row(2, symbol="ETHUSDT", success=False)])

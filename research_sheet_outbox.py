@@ -2,8 +2,10 @@
 from __future__ import annotations
 import hashlib
 import json
+import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Mapping
 import google_sheets_sync
 try:
@@ -21,23 +23,49 @@ _SHEET_ROTATION = (
     'Episodes',
     'Formula_Results',
 )
-_rotation_index = 0
-
-
-def _next_preferred_sheet() -> str:
-    global _rotation_index
-    sheet = _SHEET_ROTATION[_rotation_index % len(_SHEET_ROTATION)]
-    _rotation_index = (_rotation_index + 1) % len(_SHEET_ROTATION)
-    return sheet
+_SOURCE_TIMESTAMP = re.compile(
+    r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$'
+)
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, default=str, allow_nan=False)
 
 
+def _source_time(value: Any) -> datetime | None:
+    """Only timezone-qualified source timestamps can prioritize fresh data."""
+    if isinstance(value, str):
+        if not _SOURCE_TIMESTAMP.fullmatch(value):
+            return None
+        try:
+            value = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        return None
+    try:
+        return value.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _row_source_time(item: Mapping[str, Any]) -> datetime | None:
+    field = {
+        'Snapshots': 'timestamp_utc',
+        'Telegram_Events': 'timestamp_utc',
+        'Episodes': 'opened_at_utc',
+        'Formula_Results': 'last_evaluated_at',
+    }.get(str(item['sheet']))
+    return _source_time(item['row'].get(field)) if field else None
+
+
 def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
     """Stage complete Sheet rows in the caller's transaction, idempotently."""
     records = {}
+    snapshot_times = {
+        str(item['row'].get('snapshot_id')): _row_source_time(item)
+        for item in upserts if item['sheet'] == 'Snapshots'
+    }
     for raw in upserts:
         item = dict(raw)
         sheet = str(item['sheet'])
@@ -46,6 +74,10 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
         if any(row.get(name) in (None, '') for name in columns):
             raise ValueError('Sheet upsert has missing composite key value')
         row_key = _json([str(row[name]) for name in columns])
+        if sheet == 'תצוגת לייב':
+            # The visible Israel date is never parsed or mistaken for UTC.
+            source_time = snapshot_times.get(str(row.get('snapshot_id')))
+            item['source_time_utc'] = source_time.isoformat() if source_time else None
         payload = _json(item)
         records[(sheet, row_key)] = (sheet, row_key, payload, hashlib.sha256(payload.encode()).hexdigest())
     if not records:
@@ -69,6 +101,59 @@ def _connect(url: str):
                            options='-c statement_timeout=15000 -c lock_timeout=1000')
 
 
+def _claim_lane(conn: Any, *, count: int, token: str, sheet: str | None,
+                recent: bool) -> list[Mapping[str, Any]]:
+    if count <= 0:
+        return []
+    sheet_filter = 'AND sheet_name=%s' if sheet is not None else ''
+    source_filter = 'AND source_time_utc IS NOT NULL' if recent else ''
+    order = ('source_time_utc DESC, next_attempt_at_utc, created_at_utc, row_key'
+             if recent else 'next_attempt_at_utc, created_at_utc, row_key')
+    params = (sheet, count, token) if sheet is not None else (count, token)
+    return conn.execute(f'''
+        WITH due AS (
+            SELECT sheet_name,row_key FROM research_sheet_upsert_outbox
+            WHERE sync_status IN ('PENDING','RETRY','IN_FLIGHT')
+              AND ((sync_status IN ('PENDING','RETRY') AND next_attempt_at_utc <= NOW())
+                OR (sync_status='IN_FLIGHT' AND lease_expires_at_utc < NOW()))
+              {sheet_filter} {source_filter}
+            ORDER BY {order}
+            FOR UPDATE SKIP LOCKED LIMIT %s
+        )
+        UPDATE research_sheet_upsert_outbox AS q SET
+            sync_status='IN_FLIGHT',attempts=q.attempts+1,
+            claim_token=%s::uuid,claimed_payload_sha256=q.payload_sha256,
+            lease_expires_at_utc=NOW()+INTERVAL '120 seconds',
+            synced_at_utc=NULL,last_error=NULL
+        FROM due WHERE q.sheet_name=due.sheet_name AND q.row_key=due.row_key
+        RETURNING q.sheet_name,q.row_key,q.payload,q.payload_sha256,q.attempts
+    ''', params).fetchall()
+
+
+def _claim_batch(conn: Any, count: int, token: str) -> list[Mapping[str, Any]]:
+    # Persist the turn so restarts and one-row HTTP batches retain both shares.
+    slot = conn.execute('''
+        UPDATE research_sheet_delivery_cursor SET next_slot=next_slot+1
+        WHERE singleton=TRUE RETURNING next_slot-1 AS slot
+    ''').fetchone()['slot']
+    preferred_sheet = _SHEET_ROTATION[slot % len(_SHEET_ROTATION)]
+    recent_first = (slot // len(_SHEET_ROTATION)) % 2 == 0
+    first_count = (count + 1) // 2
+    rows = _claim_lane(conn, count=first_count, token=token,
+                       sheet=preferred_sheet, recent=recent_first)
+    rows += _claim_lane(conn, count=count-len(rows), token=token,
+                        sheet=preferred_sheet, recent=not recent_first)
+    # A sheet with only undated/backlog rows must still use a recent turn.
+    if len(rows) < count:
+        rows += _claim_lane(conn, count=count-len(rows), token=token,
+                            sheet=preferred_sheet, recent=False)
+    # Empty preferred sheets do not waste capacity; the next turn still rotates.
+    if len(rows) < count:
+        rows += _claim_lane(conn, count=count-len(rows), token=token,
+                            sheet=None, recent=False)
+    return rows
+
+
 def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float = 45) -> dict[str, Any]:
     """Acknowledge only a claimed exact generation, never while holding a txn."""
     summary = {'claimed': 0, 'synced': 0, 'failed': 0, 'locked': False}
@@ -82,29 +167,21 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
             summary['locked'] = True
             return summary
         try:
+            ready = lock_conn.execute('''
+                SELECT to_regclass('research_sheet_delivery_cursor') IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM pg_attribute
+                        WHERE attrelid=to_regclass('research_sheet_upsert_outbox')
+                          AND attname='source_time_utc' AND NOT attisdropped) AS ready
+            ''').fetchone()['ready']
+            lock_conn.commit()
+            if not ready:
+                return dict(summary, deferred=True,
+                            reason='MISSING_FRESH_DELIVERY_MIGRATION_026')
             while summary['claimed'] < max(1, int(max_rows)) and time.monotonic() < deadline:
                 token = str(uuid.uuid4())
                 count = min(8, google_sheets_sync.ordered_outcome_batch_limit(), int(max_rows)-summary['claimed'])
-                preferred_sheet = _next_preferred_sheet()
                 with _connect(database_url) as conn:
-                    rows = conn.execute('''
-                        WITH due AS (
-                            SELECT sheet_name,row_key FROM research_sheet_upsert_outbox
-                            WHERE (sync_status IN ('PENDING','RETRY') AND next_attempt_at_utc <= NOW())
-                               OR (sync_status='IN_FLIGHT' AND lease_expires_at_utc < NOW())
-                            ORDER BY
-                                CASE WHEN sheet_name=%s THEN 0 ELSE 1 END,
-                                next_attempt_at_utc,updated_at_utc,sheet_name,row_key
-                            FOR UPDATE SKIP LOCKED LIMIT %s
-                        )
-                        UPDATE research_sheet_upsert_outbox AS q SET
-                            sync_status='IN_FLIGHT',attempts=q.attempts+1,
-                            claim_token=%s::uuid,claimed_payload_sha256=q.payload_sha256,
-                            lease_expires_at_utc=NOW()+INTERVAL '120 seconds',
-                            synced_at_utc=NULL,last_error=NULL
-                        FROM due WHERE q.sheet_name=due.sheet_name AND q.row_key=due.row_key
-                        RETURNING q.sheet_name,q.row_key,q.payload,q.payload_sha256,q.attempts
-                    ''', (preferred_sheet,count,token)).fetchall()
+                    rows = _claim_batch(conn, count, token)
                 if not rows:
                     break
                 summary['claimed'] += len(rows)
