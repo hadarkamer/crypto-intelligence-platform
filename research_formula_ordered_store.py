@@ -206,6 +206,69 @@ def recent_unscreened_event_ids(conn,*,now:datetime,limit:int=32)->list[int]:
     return [int(row['event_id']) for row in rows]
 
 
+def _missing_scope_cells(conn,cells):
+    """Probe each expected cell's 32nd unique scope, including partial repair."""
+    missing=set()
+    cells=sorted(cells)
+    for start in range(0,len(cells),128):
+        batch=cells[start:start+128]
+        placeholders=','.join(['(%s,%s,%s,%s)']*len(batch))
+        expected=len(evaluator.HORIZONS_MINUTES)*len(evaluator.THRESHOLDS_BPS)
+        rows=conn.execute('''WITH requested(candidate_key,symbol,direction,period_key)
+            AS (VALUES '''+placeholders+''')
+            SELECT * FROM requested r WHERE NOT EXISTS (
+                SELECT 1 FROM research_ordered_formula_scopes s
+                WHERE s.candidate_key=r.candidate_key AND s.symbol=r.symbol
+                  AND s.direction=r.direction AND s.period_key=r.period_key
+                  AND s.window_minutes=ANY(%s) AND s.threshold_bps=ANY(%s)
+                LIMIT 1 OFFSET '''+str(expected-1)+')',
+                (*[value for cell in batch for value in cell],
+                 list(evaluator.HORIZONS_MINUTES),list(evaluator.THRESHOLDS_BPS))).fetchall()
+        missing.update((r['candidate_key'],r['symbol'],r['direction'],r['period_key']) for r in rows)
+    return missing
+
+
+def discover_scope_cells(conn,catalog,observed_cells=(),*,page_limit=128,cell_limit=8):
+    """Drain finite historical pages alongside newly matched formula cells.
+
+    Creating a cell inserts all horizon/threshold scopes in this transaction.
+    A page stays pending until every missing historical cell has been created;
+    rollback also replays its cursor. Later laps recover matches inserted for
+    older source IDs, including prior catalog upgrades and late delivery.
+    """
+    from research_event_scan import claim_event_page,retain_unprocessed_tail
+    candidates={candidate['formula_id']:candidate for candidate in catalog}
+    queue=questions.VERSION+':scope-cell-discovery-v1'
+    ids=claim_event_page(conn,queue,limit=min(128,max(1,int(page_limit))),predicate='TRUE')
+    rows=(conn.execute('''SELECT DISTINCT candidate_key,symbol,direction
+        FROM research_ordered_formula_matches
+        WHERE event_id=ANY(%s) AND candidate_key=ANY(%s) AND alert_time_utc>=%s''',
+        (ids,list(candidates),SOURCE_START_UTC)).fetchall() if ids and candidates else [])
+    historical={(row['candidate_key'],row['symbol'],row['direction']) for row in rows}
+    def periods(cells):
+        return {(key,scope_symbol,direction,period) for key,symbol,direction in cells
+            if key in candidates for scope_symbol in (symbol,'ALL') for period in PERIODS}
+    historical=periods(historical)
+    fresh=periods(observed_cells)
+    pending=_missing_scope_cells(conn,historical|fresh)
+    rank=lambda cell:(len(candidates[cell[0]]['conditions']),cell)
+    old=sorted(pending&historical,key=rank)
+    new=sorted(pending-historical,key=rank)
+    # A continuous stream of newly matched cells cannot starve the retained
+    # historical page. Its lane gets the first slot even with a one-cell cap.
+    selected=_interleave(old,new,min(8,max(1,int(cell_limit))))
+    for candidate_key,symbol,direction,period_key in selected:
+        register_scopes(conn,[candidates[candidate_key]],{symbol},directions=[direction],
+            include_all=False,period_keys=[period_key])
+    retained=bool(set(old)-set(selected))
+    if retained:
+        retain_unprocessed_tail(conn,queue,ids[0]-1)
+    return {'scope_cells_created':len(selected),'scope_cells_waiting':len(pending)-len(selected),
+        'scope_cells_waiting_scope':'CURRENT_DISCOVERY_PAGE_AND_OBSERVED_BATCH',
+        'scope_discovery_source_ids':len(ids),'scope_discovery_page_retained':retained,
+        'scope_discovery_cursor':(ids[0]-1 if retained else ids[-1]) if ids else 0}
+
+
 def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_limit: int=128) -> dict[str,Any]:
     conn.execute('INSERT INTO research_ordered_formula_worker_state(worker_key) VALUES(%s) ON CONFLICT DO NOTHING',(WORKER_KEY,))
     cursor = conn.execute('SELECT last_event_id FROM research_ordered_formula_worker_state WHERE worker_key=%s FOR UPDATE',(WORKER_KEY,)).fetchone()['last_event_id']
@@ -282,26 +345,9 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
         with conn.cursor() as cur:
             cur.executemany('''INSERT INTO research_ordered_formula_matches(candidate_key,event_id,symbol,direction,alert_time_utc,snapshot_id,entry_price,decision_features)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT(candidate_key,event_id) DO NOTHING''',records)
-    candidate_by_id = {candidate['formula_id']:candidate for candidate in catalog}
-    current_keys = list(candidate_by_id)
-    # Previous catalog versions remain immutable audit history, but must not
-    # be rescanned by the current worker or enter its pending-scope queue.
-    known = {(row['candidate_key'],row['symbol'],row['direction'],row['period_key']) for row in conn.execute(
-        'SELECT DISTINCT candidate_key,symbol,direction,period_key FROM research_ordered_formula_scopes WHERE candidate_key=ANY(%s)',
-        (current_keys,)).fetchall()}
-    # Existing matches also receive both periods during an upgrade, even when
-    # they were seen before this worker's current bounded ingest pass.
-    match_cells = {(row['candidate_key'],row['symbol'],row['direction']) for row in conn.execute(
-        'SELECT DISTINCT candidate_key,symbol,direction FROM research_ordered_formula_matches WHERE candidate_key=ANY(%s) AND alert_time_utc>=%s',
-        (current_keys,since)).fetchall()}
-    # Zero-match/failing predicates remain in question trials. Avoid creating
-    # thousands of empty scopes merely because a predicate exists in the map.
-    match_cells |= {(key,'ALL',direction) for key,symbol,direction in match_cells}
-    requested = {(candidate,symbol,direction,period) for candidate,symbol,direction in match_cells if candidate in candidate_by_id for period in PERIODS}
-    pending=sorted(requested-known,key=lambda cell:(len(candidate_by_id[cell[0]]['conditions']),cell))
-    for candidate_key,symbol,direction,period_key in pending[:8]:
-        register_scopes(conn,[candidate_by_id[candidate_key]],{symbol},directions=[direction],include_all=False,period_keys=[period_key])
-    return {'events_checked':len(changed),'fresh_unscreened_events_selected':len(recent_ids),'screen_feature_version':questions.VERSION,'events_unchanged_skipped':len(unique)-len(changed),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat(),'scope_cells_waiting':max(0,len(pending)-8),'inverse_source_event_ids':sorted(inverse_requests),**screens,**sequence_stats}
+    scope_discovery=discover_scope_cells(conn,catalog,
+        {(record[0],record[2],record[3]) for record in records})
+    return {'events_checked':len(changed),'fresh_unscreened_events_selected':len(recent_ids),'screen_feature_version':questions.VERSION,'events_unchanged_skipped':len(unique)-len(changed),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat(),'inverse_source_event_ids':sorted(inverse_requests),**screens,**sequence_stats,**scope_discovery}
 
 
 class ScopeScheduleBatch(list):

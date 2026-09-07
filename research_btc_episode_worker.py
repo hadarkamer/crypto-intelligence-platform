@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover
 
 import binance_spot_price_path
 import research_btc_parent_movement as policy
+from research_event_scan import claim_event_page
 
 
 _LOCK_ID = 682311007312467990
@@ -122,22 +123,54 @@ def _assign_due_events(conn, *, through: datetime) -> dict:
     # a later winning repeat to become the supposedly earliest evidence anchor.
     # v7 admission is used only for authorized prospective samples, which the
     # current alert-only candidate summary does not count as match evidence.
-    rows = conn.execute(
-        """WITH picked AS MATERIALIZED (
-            SELECT e.event_id,e.alert_time_utc
-            FROM research_events e
-            WHERE e.alert_time_utc<=%s
+    # Bound source metadata before label admission or membership lookup. The
+    # historical lap fixes its high-water ID, so permanently unadmitted samples
+    # and a growing live tail cannot starve later old rows. Separate recent
+    # reserves keep both delivered alerts and recent decision samples current.
+    # All three pages together fit the existing event budget: nothing selected
+    # from the historical page is discarded by a later LIMIT.
+    recent_limit = min(128, _EVENT_BATCH // 3)
+    history_limit = _EVENT_BATCH - 2 * recent_limit
+    time_predicate = """e.alert_time_utc<=%s
               AND e.alert_time_utc >= (
                 SELECT MIN(start_time_utc) FROM research_btc_parent_movements
-                WHERE episode_policy_version=%s)
-              AND ((e.event_kind='ALERT' AND e.delivery_status='DELIVERED')
-                OR (e.event_kind='DECISION_SAMPLE' AND EXISTS (
+                WHERE episode_policy_version=%s)"""
+    native_predicate = "e.event_kind='ALERT' AND e.delivery_status='DELIVERED'"
+    sample_predicate = "e.event_kind='DECISION_SAMPLE'"
+    source_ids = set(claim_event_page(
+        conn, "btc-episode-membership:" + policy.POLICY_VERSION,
+        limit=history_limit,
+        predicate=time_predicate + " AND ((" + native_predicate
+            + ") OR (" + sample_predicate + "))",
+        params=(through, policy.POLICY_VERSION),
+    ))
+    for source_predicate in (native_predicate, sample_predicate):
+        recent = conn.execute(
+            "SELECT e.event_id FROM research_events e WHERE "
+            + time_predicate + " AND " + source_predicate
+            + " ORDER BY e.alert_time_utc DESC,e.event_id DESC LIMIT %s",
+            (through, policy.POLICY_VERSION, recent_limit),
+        ).fetchall()
+        source_ids.update(int(row["event_id"]) for row in recent)
+    rows = conn.execute(
+        """WITH source_page AS MATERIALIZED (
+            SELECT e.event_id,e.alert_time_utc,e.event_kind,e.delivery_status
+            FROM research_events e WHERE e.event_id=ANY(%s::bigint[])
+              AND """ + time_predicate + """
+        ), unassigned AS MATERIALIZED (
+            SELECT e.* FROM source_page e
+            WHERE NOT EXISTS (SELECT 1 FROM research_event_btc_movements m
+                WHERE m.event_id=e.event_id AND m.episode_policy_version=%s)
+        ), picked AS MATERIALIZED (
+            SELECT e.event_id,e.alert_time_utc FROM unassigned e
+            WHERE CASE WHEN e.event_kind='ALERT' THEN e.delivery_status='DELIVERED'
+                WHEN e.event_kind='DECISION_SAMPLE' THEN EXISTS (
                     SELECT 1 FROM research_ordered_first_touch_outcomes o
                     WHERE o.event_id=e.event_id
-                      AND o.method_version='ordered-first-touch-v7')))
-              AND NOT EXISTS (SELECT 1 FROM research_event_btc_movements m
-                WHERE m.event_id=e.event_id AND m.episode_policy_version=%s)
-            ORDER BY e.alert_time_utc,e.event_id LIMIT %s)
+                      AND o.method_version='ordered-first-touch-v7'
+                    LIMIT 1 OFFSET 0)
+                ELSE FALSE END
+            ORDER BY e.alert_time_utc,e.event_id)
             SELECT e.*,to_jsonb(p) AS parent,to_jsonb(b) AS btc_bar FROM picked e
             LEFT JOIN LATERAL (
                 SELECT * FROM research_btc_parent_movements p
@@ -149,8 +182,8 @@ def _assign_due_events(conn, *, through: datetime) -> dict:
                 SELECT close_time_utc FROM research_btc_price_bars b
                 WHERE b.close_time_utc<=e.alert_time_utc
                 ORDER BY b.close_time_utc DESC LIMIT 1) b ON TRUE""",
-        (through, policy.POLICY_VERSION, policy.POLICY_VERSION,
-         _EVENT_BATCH, policy.POLICY_VERSION),
+        (sorted(source_ids), through, policy.POLICY_VERSION,
+         policy.POLICY_VERSION, policy.POLICY_VERSION),
     ).fetchall()
     members = [policy.membership(row, parent=row.get("parent"), btc_bar=row.get("btc_bar"))
                for row in rows]
@@ -206,6 +239,7 @@ class ResearchBTCEpisodeWorker:
                     to_regclass('public.research_btc_price_bars') IS NOT NULL
                     AND to_regclass('public.research_btc_parent_movements') IS NOT NULL
                     AND to_regclass('public.research_event_btc_movements') IS NOT NULL
+                    AND to_regclass('public.research_event_scan_cursors') IS NOT NULL
                     AND EXISTS (SELECT 1 FROM pg_trigger
                         WHERE tgname='research_event_btc_membership_v1'
                           AND tgrelid=to_regclass('public.research_event_btc_movements')
@@ -213,7 +247,8 @@ class ResearchBTCEpisodeWorker:
             ready = bool(row and row.get("ready"))
             self.metrics["schema_ready"] = ready
             self.metrics["last_error"] = None if ready else (
-                "BTC episode schema unavailable: apply 021_btc_parent_movements_v1.sql"
+                "BTC episode schema unavailable: apply 021_btc_parent_movements_v1.sql "
+                "and 038_runtime_event_scan_bounds.sql"
             )
             return ready
         except Exception as exc:
