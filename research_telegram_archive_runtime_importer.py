@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
+from datetime import timedelta
 import hashlib
 import json
+import math
 from pathlib import Path
 import sqlite3
 from typing import Any, Mapping
@@ -70,6 +72,10 @@ def open_reviewed_artifact(path: Path, expected_sha256: str) -> sqlite3.Connecti
 
 
 def validate_contract(contract: Mapping[str, Any], run_key: str) -> None:
+    import research_telegram_archive_hype_supplement as hype
+    if contract.get('backfill_version') == hype.BACKFILL_VERSION:
+        hype.validate_contract(contract,run_key)
+        return
     expected = {"backfill_version": BACKFILL_VERSION, "entry_policy_version": ENTRY_VERSION,
         "feature_version": FEATURE_VERSION, "direction_version": DIRECTION_VERSION, "time_version": TIME_VERSION,
         "parent_policy_version": parent_policy.POLICY_VERSION, "source_scope": "ARCHIVE_ONLY",
@@ -98,22 +104,47 @@ def _one_value(row: Any, key: str) -> Any:
     return row[key] if isinstance(row, Mapping) else row[0]
 
 
-def _event_record(row: Mapping[str, Any]) -> dict[str, Any]:
+def _event_record(row: Mapping[str, Any], *, contract: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    import research_telegram_archive_hype_supplement as hype
+    supplemental = bool(contract and contract.get('backfill_version') == hype.BACKFILL_VERSION)
+    entry_version = hype.ENTRY_VERSION if supplemental else ENTRY_VERSION
     payload = _json_row(row, "event_json")
     if (payload.get("archive_event_key") != row["event_key"] or payload.get("symbol") != row["symbol"]
             or payload.get("source_message_time_utc") != row["source_time_utc"]
             or payload.get("reconstruction_status") != row["reconstruction_status"]
             or payload.get("source_scope") != "ARCHIVE_ONLY" or payload.get("record_mode") != "ARCHIVE"
-            or payload.get("live_union_eligible") is not False or payload.get("entry_policy_version") != ENTRY_VERSION
+            or payload.get("live_union_eligible") is not False or payload.get("entry_policy_version") != entry_version
             or payload.get("feature_version") != FEATURE_VERSION or payload.get("direction_mapping_version") != DIRECTION_VERSION
             or payload.get("time_policy_version") != TIME_VERSION
             or payload.get("statistical_phase") != "DISCOVERY"):
         raise ValueError("Archive event relational identity or isolation disagrees with payload")
+    if supplemental and (payload.get('symbol') != 'HYPE'
+            or payload.get('reconstruction_status') != 'READY_FOR_FUTURES_MARK_ENTRY_PATH'
+            or payload.get('price_source_contract') != hype.SOURCE
+            or payload.get('base_archive_run_key') != contract.get('base_run_key')
+            or payload.get('base_entry_policy_version') != ENTRY_VERSION
+            or not payload.get('base_archive_event_key')
+            or payload.get('archive_event_key') != hype.event_identity(payload['base_archive_event_key'])
+            or payload.get('analysis_direction') not in ('LONG','SHORT')
+            or payload.get('conflicts') or payload.get('missing_evidence')):
+        raise ValueError('HYPE supplement event source/ancestry mismatch')
+    if supplemental:
+        entry = hype.utc(payload['entry_time_utc'])
+        expected_entry = hype.utc(payload['source_message_time_utc']).replace(second=0,microsecond=0)+timedelta(minutes=1)
+        price = payload.get('entry_price')
+        if (entry != expected_entry or payload.get('calculation_status') != row['calculation_status']
+                or (price is not None and (isinstance(price,bool) or not isinstance(price,(int,float))
+                    or not math.isfinite(price) or price <= 0 or payload.get('entry_price_source') != 'BINANCE_FUTURES_MARK_1M_OPEN'))
+                or (row['calculation_status'] == 'COMPLETE_64_LABELS' and price is None)):
+            raise ValueError('HYPE supplement entry time/source/reference mismatch')
     return {**{key: row[key] for key in ("run_key", "event_key", "source_time_utc", "symbol", "reconstruction_status", "calculation_status")},
             "event_payload": payload}
 
 
 def _outcome_record(row: Mapping[str, Any], event: Mapping[str, Any]) -> dict[str, Any]:
+    import research_telegram_archive_hype_supplement as hype
+    supplemental = event['event_payload'].get('entry_policy_version') == hype.ENTRY_VERSION
+    entry_version = hype.ENTRY_VERSION if supplemental else ENTRY_VERSION
     payload = _json_row(row, "outcome_json")
     variant, window, threshold = row["signal_variant"], row["window_minutes"], row["threshold_bps"]
     event_id = _hash(event["event_key"], variant)
@@ -127,24 +158,44 @@ def _outcome_record(row: Mapping[str, Any], event: Mapping[str, Any]) -> dict[st
             or payload.get("window_minutes") != window or payload.get("threshold_bps") != threshold
             or payload.get("method_version") != METHOD_VERSION or payload.get("outcome_method_version") != METHOD_VERSION
             or payload.get("source_scope") != "ARCHIVE_ONLY" or payload.get("record_mode") != "ARCHIVE"
-            or payload.get("entry_policy_version") != ENTRY_VERSION or payload.get("signal_variant") != variant
+            or payload.get("entry_policy_version") != entry_version or payload.get("signal_variant") != variant
             or payload.get("direction") != direction or payload.get("source_price_exchange") != "binance"
-            or payload.get("source_price_market") != "spot"):
+            or payload.get("source_price_market") != ('futures' if supplemental else 'spot')):
         raise ValueError("Archive v7 outcome identity/version/source mismatch")
+    if supplemental and (payload.get('source_price_pair') != 'HYPEUSDT' or payload.get('source_price_kind') != 'MARK'
+            or payload.get('price_source_contract') != hype.SOURCE
+            or payload.get('data_quality_status') not in (hype.VERIFIED_QUALITY,hype.PARTIAL_QUALITY)
+            or payload.get('reference_price') != event['event_payload'].get('entry_price')
+            or hype.utc(payload['measurement_start_utc']) != hype.utc(event['event_payload']['entry_time_utc'])):
+        raise ValueError('HYPE outcome MARK provenance/reference mismatch')
     return {**{key: row[key] for key in ("run_key", "event_key", "signal_variant", "window_minutes", "threshold_bps", "outcome_id", "status")},
             "outcome_payload": payload}
 
 
 def _metric_record(row: Mapping[str, Any], event: Mapping[str, Any]) -> dict[str, Any]:
+    import research_telegram_archive_hype_supplement as hype
+    supplemental = event['event_payload'].get('entry_policy_version') == hype.ENTRY_VERSION
+    entry_version = hype.ENTRY_VERSION if supplemental else ENTRY_VERSION
     payload = _json_row(row, "metrics_json")
     variant, window = row["signal_variant"], row["window_minutes"]
+    direction = event['event_payload'].get('analysis_direction')
+    if variant == 'INVERSE':direction = {'LONG':'SHORT','SHORT':'LONG'}.get(direction)
     if (variant not in ("NORMAL", "INVERSE") or window not in WINDOWS
             or payload.get("event_id") != _hash(event["event_key"], variant)
-            or payload.get("method_version") != METRIC_VERSION or payload.get("window_minutes") != window
+            or payload.get("method_version") != (hype.METRIC_VERSION if supplemental else METRIC_VERSION) or payload.get("window_minutes") != window
             or payload.get("status") != row["status"] or payload.get("signal_variant") != variant
             or row["status"] not in ("READY", "OPEN", "DATA_MISSING")
-            or payload.get("source_scope") != "ARCHIVE_ONLY" or payload.get("entry_policy_version") != ENTRY_VERSION):
+            or payload.get("source_scope") != "ARCHIVE_ONLY" or payload.get("entry_policy_version") != entry_version):
         raise ValueError("Archive common-window identity/version/source mismatch")
+    if supplemental and (payload.get('symbol') != 'HYPE' or payload.get('source') != hype.SOURCE
+            or payload.get('data_quality_status') not in (hype.VERIFIED_QUALITY,hype.PARTIAL_QUALITY)
+            or payload.get('reference_price') != event['event_payload'].get('entry_price')
+            or payload.get('direction') != direction
+            or hype.utc(payload['measurement_start_utc']) != hype.utc(event['event_payload']['entry_time_utc'])
+            or hype.utc(payload['window_end_utc']) != hype.utc(event['event_payload']['entry_time_utc'])+timedelta(minutes=window)
+            or (row['status'] == 'READY' and (payload.get('path_complete') is not True
+                or payload.get('observation_closed') is not True or payload.get('data_quality_status') != hype.VERIFIED_QUALITY))):
+        raise ValueError('HYPE fixed-window MARK provenance/reference mismatch')
     return {**{key: row[key] for key in ("run_key", "event_key", "signal_variant", "window_minutes", "status")},
             "metrics_payload": payload}
 
@@ -248,7 +299,7 @@ def import_artifact(conn: Any, sqlite_path: Path, *, expected_sha256: str,
             reviewed_events += len(batch) - len(pending)
             if not pending:
                 continue
-            events = [_event_record(row) for row in pending]
+            events = [_event_record(row,contract=contract) for row in pending]
             outcomes, metrics = [], []
             for event in events:
                 key = (expected_run_key, event["event_key"])
