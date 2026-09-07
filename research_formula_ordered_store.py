@@ -132,6 +132,45 @@ FROM picked JOIN research_events e USING(event_id) ORDER BY e.event_id
 '''
 
 
+def load_sequence_history(conn:Any,changed:Mapping[int,Mapping[str,Any]])->tuple[list[dict[str,Any]],dict[str,int]]:
+    """Keep the original source bound; project only causally relevant history."""
+    stats={'sequence_source_rows':0,'sequence_projected_rows':0,'sequence_projection_batches':0}
+    if not changed: return [],stats
+    lower=min(event['alert_time_utc'] for event in changed.values())-timedelta(hours=4)
+    upper=max(event['alert_time_utc'] for event in changed.values())
+    # Select the same ordered source set as before, without detoasting JSON.
+    # Check the original global cap before removing irrelevant source rows.
+    source=conn.execute('''SELECT event_id,symbol,direction,alert_time_utc
+        FROM research_events WHERE alert_time_utc>=%s AND alert_time_utc<=%s
+          AND event_kind='ALERT' AND delivery_status='DELIVERED' AND direction IN ('LONG','SHORT')
+        ORDER BY event_id LIMIT 5001''',(lower,upper)).fetchall()
+    stats['sequence_source_rows']=len(source)
+    if len(source)>5000:
+        raise RuntimeError('bounded causal sequence source exceeded; paginate before evaluating')
+    windows={}
+    for event in changed.values():
+        # These are the stored direction/symbol returned by _EVENT_PROJECT;
+        # inverse candidate direction is assigned only after sequence capture.
+        windows.setdefault((event['symbol'],event['direction']),[]).append(event['alert_time_utc'])
+    ids=[old['event_id'] for old in source if any(
+        when-timedelta(hours=4)<=old['alert_time_utc']<when
+        for when in windows.get((old['symbol'],old['direction']),()))]
+    source_by_id={old['event_id']:old for old in source}
+    history=[]
+    for start in range(0,len(ids),64):
+        batch=ids[start:start+64]
+        projected=conn.execute('''WITH picked AS MATERIALIZED (
+            SELECT unnest(%s::bigint[]) AS event_id) '''+_EVENT_PROJECT,(batch,)).fetchall()
+        if [event['event_id'] for event in projected]!=batch or any(
+            any(event[key]!=source_by_id[event['event_id']][key]
+                for key in ('symbol','direction','alert_time_utc')) for event in projected):
+            raise RuntimeError('bounded causal sequence projection lost or changed source rows')
+        history.extend(projected)
+        stats['sequence_projection_batches']+=1
+    stats['sequence_projected_rows']=len(history)
+    return history,stats
+
+
 def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_limit: int=128) -> dict[str,Any]:
     conn.execute('INSERT INTO research_ordered_formula_worker_state(worker_key) VALUES(%s) ON CONFLICT DO NOTHING',(WORKER_KEY,))
     cursor = conn.execute('SELECT last_event_id FROM research_ordered_formula_worker_state WHERE worker_key=%s FOR UPDATE',(WORKER_KEY,)).fetchone()['last_event_id']
@@ -173,19 +212,11 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
                 event['causal_past_feature_sha256']=past[event_id].get('feature_sha256')
     changed = question_store.new_feature_events(conn,unique)
     sequence_source={}
-    if changed:
-        lower=min(event['alert_time_utc'] for event in changed.values())-timedelta(hours=4)
-        upper=max(event['alert_time_utc'] for event in changed.values())
-        history=conn.execute('''WITH picked AS MATERIALIZED (
-            SELECT event_id FROM research_events WHERE alert_time_utc>=%s AND alert_time_utc<=%s
-              AND event_kind='ALERT' AND delivery_status='DELIVERED' AND direction IN ('LONG','SHORT')
-            ORDER BY event_id LIMIT 5001) '''+_EVENT_PROJECT,(lower,upper)).fetchall()
-        if len(history)>5000:
-            raise RuntimeError('bounded causal sequence source exceeded; paginate before evaluating')
-        for prior in history:
-            base=evaluator.extract_event_features(prior)
-            base.update(questions.extended_features(prior))
-            sequence_source[prior['event_id']]=(prior,base)
+    history,sequence_stats=load_sequence_history(conn,changed)
+    for prior in history:
+        base=evaluator.extract_event_features(prior)
+        base.update(questions.extended_features(prior))
+        sequence_source[prior['event_id']]=(prior,base)
     features_by_id, inverse_requests = {}, set()
     for event in changed.values():
         symbols.add(event['symbol'])
@@ -235,7 +266,7 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
     pending=sorted(requested-known,key=lambda cell:(len(candidate_by_id[cell[0]]['conditions']),cell))
     for candidate_key,symbol,direction,period_key in pending[:8]:
         register_scopes(conn,[candidate_by_id[candidate_key]],{symbol},directions=[direction],include_all=False,period_keys=[period_key])
-    return {'events_checked':len(changed),'events_unchanged_skipped':len(unique)-len(changed),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat(),'scope_cells_waiting':max(0,len(pending)-8),'inverse_source_event_ids':sorted(inverse_requests),**screens}
+    return {'events_checked':len(changed),'events_unchanged_skipped':len(unique)-len(changed),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat(),'scope_cells_waiting':max(0,len(pending)-8),'inverse_source_event_ids':sorted(inverse_requests),**screens,**sequence_stats}
 
 
 def due_scopes(conn:Any,limit:int=64,*,candidate_keys=None)->list[dict[str,Any]]:
