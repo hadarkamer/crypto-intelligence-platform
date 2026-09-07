@@ -46,7 +46,8 @@ class WorkerTests(unittest.TestCase):
         with patch.dict(os.environ,{"RESEARCH_BTC_EPISODES_ENABLED":"1",
                                     "RESEARCH_DATABASE_URL":"test",
                                     "RESEARCH_BTC_EPISODE_START_UTC":START.isoformat()}), \
-             patch.object(worker,"psycopg",SimpleNamespace(connect=lambda *a,**k:LiveConnection())):
+             patch.object(worker,"psycopg",SimpleNamespace(connect=lambda *a,**k:LiveConnection())), \
+             patch.object(worker,"claim_event_page",return_value=[]):
             result=subject.run_once(now=START+timedelta(minutes=1),fetch_candles=lambda *args:{
                 "exchange":"binance","market":"spot","pair":"BTCUSDT",
                 "interval_seconds":60,"candles":[candle]})

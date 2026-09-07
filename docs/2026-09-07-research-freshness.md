@@ -55,3 +55,41 @@ rules were preserved; no duplicate task was created.
 The HYPE archive supplement transfer remains outside this fix and has not been
 approved or performed. Native HYPE reference provenance and missing historical
 source evidence remain separately auditable limitations.
+
+## Initial production verification
+
+PR 11 was merged as `af0537843b1f374e95e834990ff2536e5fe74ee5` and
+became live at 17:33:11 UTC. Its final head passed all 79 selftest files,
+including 28 real PostgreSQL checks, source integrity and Apps Script contracts.
+Migrations 039 and 040 committed after the delivery expression index was built
+concurrently and verified both valid and ready. The exporter checks both flags
+and falls back to FIFO if an index build is incomplete.
+
+At 17:38:20 UTC, actual Sheet row 8649 held v7 outcome
+`11729|60|50|ordered-first-touch-v7`, with measurement start 17:10:38.045183
+and source observations through 17:33:59.999. The newest observation watermark
+was about 4 minutes 20 seconds old instead of approximately 29 hours. This OPEN
+outcome is an observation update, not a completed trade decision.
+
+The 17:39:29 delivery batch also acknowledged historical event 6561 from
+September 6 alongside current event 11727. Historical export continues without
+blocking the fresh lane. In a pinned population of 256 pre-deploy alerts,
+Max Pain screening initially advanced from 0/16 to 6/16 and Spot CVD from 0/36
+to 8/36; these are partial coverage measurements, not formula qualifications.
+
+The first deployment also exposed two intermittent, previously unbounded
+queries: whole-history DISTINCT scope discovery inside formula INGEST_MATCHES,
+and BTC episode membership assignment before its final LIMIT. Their timeouts
+can roll back useful intake work. Follow-up verification must include bounded
+discovery, preserved history progress, and consecutive completed formula cycles
+before claiming stable analysis. The historical population remains incomplete.
+
+The follow-up replaces whole-history scope discovery with an indexed page of
+at most 128 source IDs, plus the current ingestion batch. A page with remaining
+scope cells stays pending; a bounded cell lookup avoids scanning all scopes.
+BTC membership assignment admits at most 500 source candidates split between
+recent delivered alerts, recent decision samples and a finite historical lap.
+Already assigned sources are excluded before sample outcome admission. Existing
+LIVE, causal closed-bar and immutable BTC_DATA_MISSING policies are unchanged.
+Both scanners reuse migration 038 and commit cursor progress with their writes;
+neither needs a new schema migration or a larger timeout.
