@@ -25,6 +25,7 @@ _EVENT_LIMIT=max(8,min(512,int(os.getenv('RESEARCH_ORDERED_FORMULA_EVENT_LIMIT',
 _SCOPE_LIMIT=max(1,min(512,int(os.getenv('RESEARCH_ORDERED_FORMULA_SCOPE_LIMIT','128'))))
 _ROW_LIMIT=max(100,min(5000,int(os.getenv('RESEARCH_ORDERED_FORMULA_ROW_LIMIT','2000'))))
 _PASS_SECONDS=max(10,min(50,float(os.getenv('RESEARCH_ORDERED_FORMULA_PASS_SECONDS','40'))))
+_STATEMENT_TIMEOUT_MS=max(15000,min(60000,int(os.getenv('RESEARCH_ORDERED_FORMULA_STATEMENT_TIMEOUT_MS','30000'))))
 _LOCK_ID=588794583090203387
 
 
@@ -34,7 +35,7 @@ def _database_url()->str:
 
 
 def _connect(url:str):
-    return psycopg.connect(url,row_factory=dict_row,connect_timeout=5,options='-c statement_timeout=15000 -c lock_timeout=1000')
+    return psycopg.connect(url,row_factory=dict_row,connect_timeout=5,options=f'-c statement_timeout={_STATEMENT_TIMEOUT_MS} -c lock_timeout=1000')
 
 
 class ResearchFormulaOrderedWorker:
@@ -42,7 +43,7 @@ class ResearchFormulaOrderedWorker:
         self._task=None
         self._stopping=False
         self._schema_ready=False
-        self.metrics={'runs':0,'failures':0,'last_run_utc':None,'last_error':None,'last_summary':None}
+        self.metrics={'runs':0,'failures':0,'last_run_utc':None,'last_error':None,'last_stage':None,'last_summary':None}
 
     def status(self)->dict[str,Any]:
         return {'enabled':_ENABLED,'configured':bool(_database_url()),'running':bool(self._task and not self._task.done()),
@@ -95,7 +96,7 @@ class ResearchFormulaOrderedWorker:
             except Exception as exc:
                 self.metrics['failures']+=1
                 self.metrics['last_error']=f'{type(exc).__name__}: {exc}'
-                print(f'[ordered-formula] run failed: {exc!r}',flush=True)
+                print(f"[ordered-formula] run failed at {self.metrics.get('last_stage')}: {exc!r}",flush=True)
             await asyncio.sleep(_POLL)
 
     def run_once(self,*,now:datetime|None=None)->dict[str,Any]:
@@ -112,8 +113,11 @@ class ResearchFormulaOrderedWorker:
                 summary['locked']=True
                 return summary
             try:
+                self.metrics['last_stage']='REGISTER_CATALOG'
                 catalog=store.register_catalog(conn)
+                self.metrics['last_stage']='INGEST_MATCHES'
                 summary.update(store.ingest_matches(conn,catalog,now=now,event_limit=_EVENT_LIMIT))
+                self.metrics['last_stage']='INVERSE_RECONCILIATION'
                 inverse_available=inverse_store.available(conn)
                 if inverse_available:
                     for event_id in sorted(set(summary.pop('inverse_source_event_ids',[]))|set(store.inverse_reconciliation_ids(conn,limit=32))):
@@ -121,19 +125,21 @@ class ResearchFormulaOrderedWorker:
                 else:
                     summary['inverse_status']='BLOCKED_MISSING_MIGRATION_033'
                 conn.commit()
+                self.metrics['last_stage']='PREPARE_SCOPE_QUEUE'
                 validation_available=validation_store.schema_status(conn)['schema_present']
-                attempts=conn.execute("SELECT COUNT(*) AS n FROM research_ordered_formula_scopes WHERE period_key<>'LEGACY_UNSCOPED'").fetchone()['n']
                 candidates={candidate['formula_id']:candidate for candidate in catalog}
+                attempts=conn.execute("SELECT COUNT(*) AS n FROM research_ordered_formula_scopes WHERE period_key<>'LEGACY_UNSCOPED' AND candidate_key=ANY(%s)",(list(candidates),)).fetchone()['n']
                 period_population={key:store.source_population_complete(conn,now=now,period_key=key) for key in store.PERIODS}
                 summary['source_population_complete_by_period']=period_population
                 summary['source_population_complete']=all(period_population.values())
-                scopes=store.due_scopes(conn,_SCOPE_LIMIT)
+                scopes=store.due_scopes(conn,_SCOPE_LIMIT,candidate_keys=candidates)
                 feature_coverage_cache={}
                 conn.commit()
                 for scope in scopes:
                     if time.monotonic()-started>=_PASS_SECONDS:
                         break
                     population_complete=period_population[scope['period_key']]
+                    self.metrics['last_stage']='EVALUATE_SCOPE:'+scope['scope_key']
                     feature_key=(scope['candidate_key'],scope['symbol'],scope['direction'],scope['period_key'])
                     if feature_key not in feature_coverage_cache:
                         feature_coverage_cache[feature_key]=store.candidate_feature_coverage_complete(conn,scope,candidates[scope['candidate_key']],now=now)
@@ -192,6 +198,7 @@ class ResearchFormulaOrderedWorker:
         self.metrics['runs']+=1
         self.metrics['last_run_utc']=now.isoformat()
         self.metrics['last_error']=None
+        self.metrics['last_stage']='COMPLETE'
         self.metrics['last_summary']=dict(summary)
         return summary
 

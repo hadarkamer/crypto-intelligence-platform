@@ -58,15 +58,24 @@ def scope_formula_version(scope: Mapping[str,Any]) -> str:
 def register_catalog(conn: Any) -> list[dict[str, Any]]:
     catalog = evaluator.candidate_catalog(include_extended=True)
     question_store.register_questions(conn)
+    records = []
     for candidate in catalog:
         key = candidate['formula_id']
         version = FORMULA_VERSION if candidate.get('catalog_version')==evaluator.CATALOG_VERSION else evaluator.POLICY_VERSION+':'+questions.VERSION+':'+PARENT_POLICY
         definition = {'candidate':candidate,'formula_version':version,'parent_policy_version':PARENT_POLICY}
         sha = digest(definition)
-        conn.execute('''INSERT INTO research_ordered_formula_candidates(candidate_key,formula_version,definition_sha256,definition)
-            VALUES(%s,%s,%s,%s::jsonb) ON CONFLICT(candidate_key) DO NOTHING''',(key,version,sha,canonical(definition)))
-        found = conn.execute('SELECT definition_sha256 FROM research_ordered_formula_candidates WHERE candidate_key=%s',(key,)).fetchone()
-        if found['definition_sha256'] != sha:
+        records.append((key,version,sha,canonical(definition)))
+    if records:
+        with conn.cursor() as cur:
+            cur.executemany('''INSERT INTO research_ordered_formula_candidates(candidate_key,formula_version,definition_sha256,definition)
+                VALUES(%s,%s,%s,%s::jsonb) ON CONFLICT(candidate_key) DO NOTHING''',records)
+        found = {row['candidate_key']:row['definition_sha256'] for row in conn.execute(
+            'SELECT candidate_key,definition_sha256 FROM research_ordered_formula_candidates WHERE candidate_key=ANY(%s)',
+            ([row[0] for row in records],)).fetchall()}
+    else:
+        found = {}
+    for key, _version, sha, _definition in records:
+        if found.get(key) != sha:
             raise ValueError('Frozen candidate definition changed; use a new versioned key')
     return catalog
 
@@ -207,14 +216,21 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
         with conn.cursor() as cur:
             cur.executemany('''INSERT INTO research_ordered_formula_matches(candidate_key,event_id,symbol,direction,alert_time_utc,snapshot_id,entry_price,decision_features)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT(candidate_key,event_id) DO NOTHING''',records)
-    known = {(row['candidate_key'],row['symbol'],row['direction'],row['period_key']) for row in conn.execute('SELECT DISTINCT candidate_key,symbol,direction,period_key FROM research_ordered_formula_scopes').fetchall()}
+    candidate_by_id = {candidate['formula_id']:candidate for candidate in catalog}
+    current_keys = list(candidate_by_id)
+    # Previous catalog versions remain immutable audit history, but must not
+    # be rescanned by the current worker or enter its pending-scope queue.
+    known = {(row['candidate_key'],row['symbol'],row['direction'],row['period_key']) for row in conn.execute(
+        'SELECT DISTINCT candidate_key,symbol,direction,period_key FROM research_ordered_formula_scopes WHERE candidate_key=ANY(%s)',
+        (current_keys,)).fetchall()}
     # Existing matches also receive both periods during an upgrade, even when
     # they were seen before this worker's current bounded ingest pass.
-    match_cells = {(row['candidate_key'],row['symbol'],row['direction']) for row in conn.execute('SELECT DISTINCT candidate_key,symbol,direction FROM research_ordered_formula_matches WHERE alert_time_utc>=%s',(since,)).fetchall()}
+    match_cells = {(row['candidate_key'],row['symbol'],row['direction']) for row in conn.execute(
+        'SELECT DISTINCT candidate_key,symbol,direction FROM research_ordered_formula_matches WHERE candidate_key=ANY(%s) AND alert_time_utc>=%s',
+        (current_keys,since)).fetchall()}
     # Zero-match/failing predicates remain in question trials. Avoid creating
     # thousands of empty scopes merely because a predicate exists in the map.
     match_cells |= {(key,'ALL',direction) for key,symbol,direction in match_cells}
-    candidate_by_id = {candidate['formula_id']:candidate for candidate in catalog}
     requested = {(candidate,symbol,direction,period) for candidate,symbol,direction in match_cells if candidate in candidate_by_id for period in PERIODS}
     pending=sorted(requested-known,key=lambda cell:(len(candidate_by_id[cell[0]]['conditions']),cell))
     for candidate_key,symbol,direction,period_key in pending[:8]:
@@ -222,8 +238,14 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
     return {'events_checked':len(changed),'events_unchanged_skipped':len(unique)-len(changed),'missing_total_score_features':missing_features,'matches_observed':len(records),'symbols':sorted(symbols),'cursor':max((e['event_id'] for e in events),default=0),'source_start_utc':since.isoformat(),'scope_cells_waiting':max(0,len(pending)-8),'inverse_source_event_ids':sorted(inverse_requests),**screens}
 
 
-def due_scopes(conn:Any,limit:int=64)->list[dict[str,Any]]:
-    return conn.execute('SELECT * FROM research_ordered_formula_scopes WHERE period_key=ANY(%s) ORDER BY last_evaluated_at_utc ASC NULLS FIRST,scope_key LIMIT %s',(list(PERIODS),limit)).fetchall()
+def due_scopes(conn:Any,limit:int=64,*,candidate_keys=None)->list[dict[str,Any]]:
+    keys=list(candidate_keys or ())
+    if not keys:
+        return []
+    return conn.execute('''SELECT * FROM research_ordered_formula_scopes
+        WHERE period_key=ANY(%s) AND candidate_key=ANY(%s)
+        ORDER BY last_evaluated_at_utc ASC NULLS FIRST,scope_key LIMIT %s''',
+        (list(PERIODS),keys,limit)).fetchall()
 
 
 def load_scope_rows(conn:Any,scope:Mapping[str,Any],*,row_limit:int=5000,now:datetime|None=None)->tuple[list[dict[str,Any]],bool]:
