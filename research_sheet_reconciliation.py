@@ -143,11 +143,18 @@ class SheetReconciler:
         try:
             if self.expected is None:
                 self._begin(database_url)
+            self.runtime["status"] = "SCANNING"
             page = google_sheets_sync.read_telegram_audit_page(start_row=self.next_row, last_row=self.last_row)
             if self.consume_page(page):
                 self._finish(database_url)
                 self.next_attempt = time.monotonic() + CYCLE_INTERVAL_SECONDS
             self.runtime["last_error"] = None
+        except google_sheets_sync.SheetReceiverBusy:
+            # No request was admitted, so no remote data or row bounds changed
+            # within this attempt. Preserve the frozen population and every
+            # prior page; ordinary FIFO contention must not restart the cycle.
+            # It remains incomplete and will resume at the next bounded turn.
+            self.runtime.update(status="DEFERRED_RECEIVER_BUSY", last_error=None)
         except Exception as exc:
             self.runtime.update(status="AUDIT_FAILED", last_error=str(exc)[:160])
             # Failures never certify coverage, or reuse an incomplete ID scan.

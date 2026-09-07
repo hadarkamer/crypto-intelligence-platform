@@ -67,6 +67,51 @@ class AuditTests(unittest.TestCase):
         finish.assert_not_called()
         self.assertIsNone(a.expected)
 
+    def test_busy_after_partial_page_preserves_population_and_resumes_exact_cursor(self):
+        a = self.auditor()
+        population = a.expected
+        a.consume_page({"start_row": 2, "next_row": 3, "last_row": 4, "complete": False,
+                        "rows": [self.row("present")]})
+        with patch.object(audit.google_sheets_sync, "read_telegram_audit_page",
+                          side_effect=audit.google_sheets_sync.SheetReceiverBusy("SHEET_RECEIVER_BUSY")) as request, \
+             patch.object(a, "_begin") as begin, patch.object(a, "_finish") as finish:
+            status = a.run_due("test")
+        request.assert_called_once_with(start_row=3, last_row=4)
+        begin.assert_not_called()
+        finish.assert_not_called()
+        self.assertIs(a.expected, population)
+        self.assertEqual(a.seen, {"present": 1})
+        self.assertEqual((a.next_row, a.last_row), (3, 4))
+        self.assertEqual(status["status"], "DEFERRED_RECEIVER_BUSY")
+        self.assertIsNone(status["last_complete"])
+        self.assertIsNone(status["last_error"])
+        a.next_attempt = 0
+        with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", return_value={
+                "start_row": 3, "next_row": 5, "last_row": 4, "complete": True,
+                "rows": [self.row("duplicate"), self.row("missing")]}), \
+             patch.object(audit.research_sheet_outbox, "_connect", return_value=Connection()), \
+             patch.object(a, "_begin") as begin:
+            status = a.run_due("test")
+        begin.assert_not_called()
+        self.assertEqual(status["status"], "MATCHED")
+        self.assertEqual(status["last_complete"]["sheet_unique"], 3)
+        self.assertEqual(status["last_complete"]["missing"], 0)
+        self.assertEqual(status["last_complete"]["duplicate_ids"], 0)
+
+    def test_invalid_remote_page_after_partial_scan_still_discards_population(self):
+        a = self.auditor()
+        a.consume_page({"start_row": 2, "next_row": 3, "last_row": 4, "complete": False,
+                        "rows": [self.row("present")]})
+        with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", return_value={
+                "start_row": 3, "next_row": 5, "last_row": 999, "complete": True,
+                "rows": [self.row("duplicate"), self.row("missing")]}), \
+             patch.object(a, "_finish") as finish:
+            status = a.run_due("test")
+        finish.assert_not_called()
+        self.assertIsNone(a.expected)
+        self.assertEqual(status["status"], "AUDIT_FAILED")
+        self.assertIsNone(status["last_complete"])
+
     def test_empty_sheet_is_true_missing_and_never_future_row(self):
         a = self.auditor()
         self.assertTrue(a.consume_page({"start_row": 2, "next_row": 2, "last_row": 1, "complete": True, "rows": []}))

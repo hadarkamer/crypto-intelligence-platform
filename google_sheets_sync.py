@@ -1004,6 +1004,10 @@ def deliver_ordered_first_touch_outcomes(
     )
 
 
+class SheetReceiverBusy(RuntimeError):
+    """No receiver admission occurred; the caller may retain its audit cursor."""
+
+
 def read_telegram_audit_page(*, start_row: int = 2, last_row: int | None = None) -> Dict[str, Any]:
     """Read only the bounded, authenticated receiver audit contract."""
     global _RECEIVER_VERSION
@@ -1015,7 +1019,7 @@ def read_telegram_audit_page(*, start_row: int = 2, last_row: int | None = None)
     envelope = {"secret": _WEBHOOK_SECRET, "spreadsheet_id": _SPREADSHEET_ID, "payload": payload}
     with delivery_slot(wait_seconds=10) as acquired:
         if not acquired:
-            raise RuntimeError("SHEET_RECEIVER_BUSY")
+            raise SheetReceiverBusy("SHEET_RECEIVER_BUSY")
         request = Request(_WEBHOOK_URL, data=json.dumps(envelope).encode("utf-8"),
                           headers={"Content-Type": "application/json"}, method="POST")
         with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
