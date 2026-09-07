@@ -1,5 +1,67 @@
 # Sheets synchronization checkpoint — 2026-09-07
 
+## Verified rollout, 05:45–05:50 UTC
+
+Production commit `512274e9b0676a5f8b97380586a64b2408c2169f` is live on
+Render deployment `dep-daf4tlks728c738hfho0`. Migrations 025–028 committed
+at 05:45:22.186 UTC; schema apply error is null and both the source sync
+and ordered formula workers are running. Earlier installation attempts
+rolled back completely: 025 first exceeded its 15-second statement limit,
+and the next attempt completed 025 but timed out in 026. The final release
+allows 60 seconds per statement only during those two installation files,
+resets to 15 seconds after each, and retains the 1-second lock timeout.
+026 contains multiple statements and completed in about 69 seconds total.
+Dedicated installer tests verify the exact filename allowlist, reset,
+rollback, unchanged later migrations and unchanged untargeted installer.
+
+Post-installation PostgreSQL checks found all five tested queue/period
+indices valid and ready and the source timestamp trigger enabled. EXPLAIN
+uses the new ordered index for the v7 claim and the new source-time index
+for fresh generic delivery, without a global queue sort before LIMIT.
+The generic worker subsequently confirmed 10 of 10 claimed deliveries.
+Ordered v7 delivery confirmed four rows on its second pass; the first
+eight-row attempt was unconfirmed and remains retriable. This verifies
+progress, not completion of the backlog or sustained throughput.
+
+Actual Sheet readback at 05:46–05:49 UTC found September 7 alert records
+in Telegram_Events, including ZEC Magnet at 08:37 Israel time. The first
+September 7 visible-view arrivals were explicitly neutral prospective
+anchors, not alerts. Do not equate these rows with independent evidence
+or claim the full visible-view alert backlog was cleared from this sample.
+At 05:43 UTC the source had 781 delivered alert records from September 7;
+all were pending then. Four were acknowledged by 05:47 UTC.
+
+Both new LIVE periods are registered: 2,432 scopes per period, 4,864 total,
+plus all 2,432 legacy scopes preserved. At 05:48:59 UTC, 124 ALL-period
+and 132 SINCE-September-4 scopes had been evaluated; each period had at
+most one provisional wave and zero ready formulas. Input replay remains
+incomplete, so these are not final period statistics. Read-only guards
+found zero inconsistent OPEN counters, zero exposed rates for incomplete
+coverage and zero parent-wave starts crossing the relevant cutoffs.
+Formula_Results row 1160 was read back with the SINCE period version,
+DATA_MISSING=1, OPEN=0 and withheld rates, verifying the exported status
+distinction rather than merely inspecting the code.
+
+Archive migration 028 is installed but production archive tables have not
+been loaded. The verified portable source intake was saved separately:
+14,354 unique messages, 11,466 signal messages, 318 messages since September
+4, with 216 exact prior-import event links to 119 existing snapshots.
+August 30–September 3 has no supplied export coverage. Every source remains
+ARCHIVE_ONLY and ineligible for formula evidence. Prepared-stage digest:
+`92939e9facb691381fd14d4117b85377903cabc130c2945d060cb9eafda48c56`.
+The retained ZIP SHA256 is
+`3e2361bbe01aca406c64bbac857e8029e2f39b85c34bb1d26621729b91e3ca32`.
+
+Remaining work: finish backlog/replay and monitor actual delivery; deploy
+the separately authenticated Google receiver update (currently unversioned,
+batch size 1); reconstruct and validate archive causal features, times,
+v7 outcomes and native duplicate/parent mapping before statistical union;
+implement common-window asymmetry and future validation; expand research
+beyond the seven total-score-65 candidate families. No regular/FRESH
+relevance or trade authorization is implied by this infrastructure release.
+The Sheet research questions and field dictionary contain the final
+readback audit. Earlier sections below are historical checkpoints.
+
 ## Authorized continuation, 2026-09-07
 
 The user accepted the proposed synchronization, status-reporting, archive and
