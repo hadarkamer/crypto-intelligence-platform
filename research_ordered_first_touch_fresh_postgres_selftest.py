@@ -172,6 +172,39 @@ class PostgreSQLOutcomeFreshnessTests(unittest.TestCase):
             self.assertNotEqual(second[0]['event_id'], replay[0]['event_id'])
         self.conn.commit()
 
+    def test_failed_concurrent_index_build_keeps_fifo_until_valid_rebuild(self):
+        self.seed()
+        index = 'idx_ordered_first_touch_sync_fresh_observed'
+        self.conn.execute(self.sql.SQL('DROP INDEX {}').format(self.sql.Identifier(index)))
+        self.conn.commit()
+        # PostgreSQL itself leaves the invalid index behind after this failed
+        # concurrent build. No catalog writes or production connections occur.
+        with self.connect() as ddl:
+            ddl.autocommit = True
+            with self.assertRaises(self.psycopg.errors.UniqueViolation):
+                ddl.execute(self.sql.SQL('CREATE UNIQUE INDEX CONCURRENTLY {} ON '
+                    'research_ordered_first_touch_sync_outbox(destination)').format(
+                    self.sql.Identifier(index)))
+        state = self.conn.execute('''SELECT i.indisvalid, i.indisready,
+                i.indrelid='research_ordered_first_touch_sync_outbox'::regclass AS correct_table
+            FROM pg_index i WHERE i.indexrelid=to_regclass(%s)''', (index,)).fetchone()
+        self.assertIsNotNone(state, 'Failed concurrent build must leave the named index')
+        self.assertFalse(state['indisvalid'])
+        self.assertTrue(state['correct_table'])
+        before = self.conn.execute('SELECT next_slot FROM research_ordered_first_touch_delivery_cursor').fetchone()
+        self.conn.commit()
+        self.assertEqual([r['event_id'] for r in self.claim(1)], [1])
+        after = self.conn.execute('SELECT next_slot FROM research_ordered_first_touch_delivery_cursor').fetchone()
+        self.assertEqual(before, after, 'Invalid index must not advance the freshness cursor')
+        # Removing the failed artifact lets the real migration build its index.
+        self.conn.execute(self.sql.SQL('DROP INDEX {}').format(self.sql.Identifier(index)))
+        self.conn.execute((ROOT/'migrations'/MIGRATIONS[-1]).read_text(), prepare=False)
+        self.conn.commit()
+        self.assertEqual([r['event_id'] for r in self.claim(1)], [106])
+        ready = self.conn.execute('SELECT indisvalid AND indisready AS ready FROM pg_index '
+            'WHERE indexrelid=to_regclass(%s)', (index,)).fetchone()
+        self.assertTrue(ready['ready'])
+
     def test_migration_reapply_preserves_cursor_and_payloads(self):
         self.seed()
         self.claim(1)

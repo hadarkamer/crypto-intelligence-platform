@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 import re
 import sqlite3
-from types import SimpleNamespace
 from uuid import uuid4
 
 import research_outcome_worker as worker
@@ -52,7 +51,14 @@ class Database:
     def execute(self, query, params=()):
         self.calls.append((query, params))
         if 'to_regclass' in query:
-            return SimpleNamespace(fetchone=lambda: {'ready': self.ready})
+            # Execute the actual readiness predicate against catalog-shaped
+            # rows; an existing, failed concurrent index must remain disabled.
+            self.conn.create_function('to_regclass', 1, lambda name: {
+                'research_ordered_first_touch_delivery_cursor': 1 if self.ready else None,
+                'idx_ordered_first_touch_sync_fresh_observed': 2,
+                TABLE: 3,
+            }.get(name))
+            return self.conn.execute(query, params)
         if 'WITH picked AS (' in query:
             assert query.count('FOR UPDATE SKIP LOCKED') == 1
             assert 'claimed_payload_sha256=queued.payload_sha256' in query
@@ -79,7 +85,10 @@ def database():
         PRIMARY KEY(event_id,window_minutes,threshold_bps,method_version,destination));
         CREATE TABLE research_ordered_first_touch_delivery_cursor (
             singleton BOOLEAN PRIMARY KEY,next_slot INTEGER DEFAULT 0);
-        INSERT INTO research_ordered_first_touch_delivery_cursor(singleton) VALUES(TRUE);''')
+        INSERT INTO research_ordered_first_touch_delivery_cursor(singleton) VALUES(TRUE);
+        CREATE TABLE pg_index (indexrelid INTEGER,indrelid INTEGER,
+            indisvalid BOOLEAN,indisready BOOLEAN);
+        INSERT INTO pg_index VALUES(2,3,TRUE,TRUE);''')
     for name in ('025_ordered_first_touch_sync_claim_queue.sql', '039_ordered_first_touch_fresh_delivery.sql'):
         source = (ROOT/'migrations'/name).read_text()
         for sql in re.findall(r'CREATE INDEX IF NOT EXISTS.*?;', source, re.S):
@@ -137,6 +146,18 @@ def run():
     fallback = database()
     add(fallback, 1, None)
     assert ids(service._claim_ordered_first_touch_outbox(Database(fallback.conn, ready=False), 1)) == [1]
+
+    # A partial concurrent build can leave its relation name in the catalog.
+    # Neither an invalid/not-ready index nor a same-name index on another table
+    # may advance the fresh cursor or choose newer evidence over the FIFO row.
+    for valid, ready, table in ((False, True, 3), (True, False, 3), (True, True, 99)):
+        unavailable = database()
+        add(unavailable, 1, NOW-100, created_at_utc=1)
+        add(unavailable, 2, NOW, created_at_utc=2)
+        unavailable.conn.execute('UPDATE pg_index SET indisvalid=?,indisready=?,indrelid=?',
+            (valid, ready, table))
+        assert ids(service._claim_ordered_first_touch_outbox(unavailable, 1)) == [1]
+        assert unavailable.conn.execute('SELECT next_slot FROM research_ordered_first_touch_delivery_cursor').fetchone()[0] == 0
 
     tied = database()
     add(tied, 1, NOW, measured=NOW-100, updated_at_utc=NOW+1000)

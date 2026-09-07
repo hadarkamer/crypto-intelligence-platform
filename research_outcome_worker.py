@@ -2348,11 +2348,17 @@ class ResearchOutcomeWorker:
         count = max(1, min(int(limit), _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT))
         ready = conn.execute("""
             SELECT to_regclass('research_ordered_first_touch_delivery_cursor') IS NOT NULL
-                AND to_regclass('idx_ordered_first_touch_sync_fresh_observed') IS NOT NULL AS ready
+                AND EXISTS (
+                    SELECT 1 FROM pg_index
+                    WHERE indexrelid=to_regclass('idx_ordered_first_touch_sync_fresh_observed')
+                      AND indrelid=to_regclass('research_ordered_first_touch_sync_outbox')
+                      AND indisvalid AND indisready
+                ) AS ready
         """).fetchone()
         if not ready or not ready["ready"]:
-            # Deployment may precede migration039. Preserve the old indexed
-            # delivery path until the fresh lane has its required access path.
+            # Deployment may precede migration039 or its concurrent index build
+            # may have failed after creating an unusable catalog entry. Preserve
+            # indexed FIFO until PostgreSQL can use the fresh lane's index.
             return ResearchOutcomeWorker._claim_ordered_first_touch_lane(conn, count, recent=False)
         slot = conn.execute("""
             UPDATE research_ordered_first_touch_delivery_cursor
