@@ -20,8 +20,9 @@ except Exception:  # pragma: no cover
 
 import google_sheets_sync
 import research_sheet_outbox
+import research_sheet_reconciliation
 
-RECONCILE_VERSION = "committed-snapshot-reconcile-v1"
+RECONCILE_VERSION = "committed-snapshot-reconcile-v2-maxpain"
 _PASS_LOCK_ID = 4860059309063875574
 _SOURCE_LIMIT = 16
 _POLL_SECONDS = max(5, int(os.getenv("SHEET_OUTBOX_POLL_SECONDS", "5")))
@@ -78,7 +79,7 @@ def rebuild_alert_group(events: Sequence[Mapping[str, Any]]) -> list[Dict[str, A
         final_payload = google_sheets_sync.build_delivered_event_payload(
             event, delivered_at_utc=event.get("delivered_at_utc"), snapshot_merger=merge
         )
-        telegram_rows.append(final_payload["upserts"][2])
+        telegram_rows.extend(final_payload["upserts"][2:])
     return final_payload["upserts"][:2] + telegram_rows
 
 
@@ -206,6 +207,7 @@ class SnapshotSyncWorker:
     def __init__(self):
         self._task = None
         self._ready = False
+        self._sheet_reconciler = research_sheet_reconciliation.SheetReconciler()
         self._runtime: Dict[str, Any] = {"last_result": None, "last_error": None}
 
     def status(self) -> Dict[str, Any]:
@@ -215,6 +217,7 @@ class SnapshotSyncWorker:
             "ready": self._ready,
             "reconcile_version": RECONCILE_VERSION,
             "backfill_days": _BACKFILL_DAYS,
+            "telegram_sheet_reconciliation": self._sheet_reconciler.status(),
             **self._runtime,
         }
 
@@ -238,7 +241,8 @@ class SnapshotSyncWorker:
             staged = reconcile_sources(conn)
         # The connection context committed both payloads and source coverage.
         delivered = research_sheet_outbox.drain(url, max_rows=32, max_seconds=45)
-        return {"reconcile": staged, "delivery": delivered}
+        audit = self._sheet_reconciler.run_due(url)
+        return {"reconcile": staged, "delivery": delivered, "sheet_audit": audit}
 
     async def start(self) -> bool:
         if self._task and not self._task.done():

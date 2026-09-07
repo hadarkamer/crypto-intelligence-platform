@@ -1292,6 +1292,7 @@ class ResearchOutcomeWorker:
                               AND current_o.horizon_minutes=%s
                               AND current_o.outcome_method_version=%s
                               AND current_o.data_quality_status=ANY(%s)
+                            LIMIT 1 OFFSET 0
                         )
                         OR (
                             e.direction IN ('LONG', 'SHORT')
@@ -1302,6 +1303,7 @@ class ResearchOutcomeWorker:
                                   AND current_ft.method_version=%s
                                   AND current_ft.status IN ('HIT', 'MISS')
                                   AND current_ft.data_quality_status=ANY(%s)
+                                LIMIT 1 OFFSET 0
                             )
                         )
                     )
@@ -1319,7 +1321,45 @@ class ResearchOutcomeWorker:
                     list(canonical_price_path.COMPLETE_QUALITIES),
                 )
             )
+        # A raw metadata page is fixed before outcome eligibility. OFFSET 0
+        # keeps correlated EXISTS checks on event/horizon primary keys instead
+        # of building global hashed outcome sets for all four horizons.
+        from research_event_scan import claim_event_page, retain_unprocessed_tail
+        cap = max(1, min(int(limit), 64))
+        queue_key = 'canonical-outcome-due-v1'
+        source_ids = claim_event_page(
+            conn, queue_key, limit=128,
+            predicate="e.event_kind='ALERT' AND e.delivery_status='DELIVERED'",
+        )
+        if not source_ids:
+            return []
+        due_query = f"""/* canonical_due_ids */
+            WITH source_page AS MATERIALIZED (
+                SELECT unnest(%s::bigint[]) AS event_id
+            )
+            SELECT e.event_id FROM source_page
+            JOIN research_events e USING(event_id)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM research_outcome_event_rejections rejected
+                WHERE rejected.event_id=e.event_id
+                  AND rejected.rejection_policy_version=%s
+                LIMIT 1 OFFSET 0
+            ) AND ({' OR '.join(clauses)})
+            ORDER BY e.event_id LIMIT %s
+        """
+        event_ids = [row['event_id'] for row in conn.execute(
+            due_query, (source_ids, _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
+                        *condition_params, cap)).fetchall()]
+        if not event_ids:
+            return []
+        # Do not skip eligible rows beyond this compute batch: start the next
+        # page immediately after the last selected ID within the same lap.
+        if len(event_ids) == cap:
+            retain_unprocessed_tail(conn, queue_key, event_ids[-1])
         query = f"""
+            WITH picked AS MATERIALIZED (
+                SELECT unnest(%s::bigint[]) AS event_id
+            )
             SELECT e.event_id, e.event_fingerprint, e.alert_time_utc, e.symbol, e.direction,
                    e.event_type, e.setup_key,
                    e.event_kind, e.delivery_status,
@@ -1356,17 +1396,8 @@ class ResearchOutcomeWorker:
                    ) AS first_touch_versions,
                    ARRAY[]::integer[] AS open_first_touch_horizons,
                    NULL::timestamptz AS open_first_touch_observed_utc
-            FROM research_events e
+            FROM picked JOIN research_events e USING(event_id)
             LEFT JOIN research_alert_outcomes o ON o.event_id=e.event_id
-            WHERE e.event_kind='ALERT'
-              AND e.delivery_status='DELIVERED'
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM research_outcome_event_rejections rejected
-                  WHERE rejected.event_id=e.event_id
-                    AND rejected.rejection_policy_version=%s
-              )
-              AND ({' OR '.join(clauses)})
             GROUP BY e.event_id
             ORDER BY
                 {_alert_reference_queue_priority_sql("e")} ASC,
@@ -1375,13 +1406,12 @@ class ResearchOutcomeWorker:
             LIMIT %s
         """
         params: list[Any] = [
+            event_ids,
             _METHOD_VERSION,
             list(canonical_price_path.COMPLETE_QUALITIES),
             list(canonical_price_path.COMPLETE_QUALITIES),
             _FIRST_TOUCH_METHOD_VERSION,
-            _ALERT_REFERENCE_REJECTION_POLICY_VERSION,
-            *condition_params,
-            max(1, min(int(limit), 1000)),
+            cap,
         ]
         return conn.execute(query, params).fetchall()
 

@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
 
@@ -27,6 +28,12 @@ DEFAULT_DRY_RUN_EVENTS = 500
 
 _ALLOWED_DIRECTIONS = {"LONG", "SHORT", "NEUTRAL"}
 _ALLOWED_KINDS = {"ALERT", "SIGNAL_STATE_CHANGE", "DECISION_SAMPLE"}
+_MAXPAIN_TIMEFRAMES = ("12h", "24h", "48h", "3d", "1w", "2w", "1m")
+_MAXPAIN_COMPONENTS = (
+    "directional_alignment", "consensus", "consensus_max", "target_proximity",
+    "cluster_confidence", "target_clustering", "cluster_density", "cluster_coverage",
+    "cluster_liquidity_growth", "cluster_liquidity_multiplier", "relative_gap",
+)
 
 
 def _utc(value: Any = None) -> datetime:
@@ -199,6 +206,45 @@ def _compact_gap(value: Any) -> Dict[str, Any]:
     }
 
 
+def compact_maxpain_timeframes(value: Any) -> List[Dict[str, Any]]:
+    """Copy at most seven frozen timeframes per liquidation side, without inference."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    entries: Dict[tuple[str, str], Dict[str, Any]] = {}
+    numeric_fields = (
+        "score", "target_price", "distance_pct", "near_amount", "far_amount",
+        "near_share_pct", "consensus_hits", "consensus_total",
+    )
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            continue
+        timeframe = str(raw.get("timeframe") or "")
+        source_side = str(raw.get("source_side") or "").upper()
+        key = (timeframe, source_side)
+        if timeframe not in _MAXPAIN_TIMEFRAMES or source_side not in {"LONG", "SHORT"} or key in entries:
+            continue
+        entry: Dict[str, Any] = {"timeframe": timeframe, "source_side": source_side}
+        for field in numeric_fields:
+            number = _float(raw.get(field))
+            if number is not None and not isinstance(raw.get(field), bool) and math.isfinite(number):
+                entry[field] = number
+        components = raw.get("components")
+        if isinstance(components, Mapping):
+            entry["components"] = {}
+            for field in _MAXPAIN_COMPONENTS:
+                number = _float(components.get(field))
+                if number is not None and not isinstance(components.get(field), bool) and math.isfinite(number):
+                    entry["components"][field] = number
+        entries[key] = entry
+        if len(entries) == 14:
+            break
+    return [
+        entries[key] for key in sorted(
+            entries, key=lambda key: (_MAXPAIN_TIMEFRAMES.index(key[0]), key[1])
+        )
+    ]
+
+
 def _bounded_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     safe = _json_safe(snapshot)
     raw = _canonical(safe).encode("utf-8")
@@ -322,6 +368,7 @@ def build_maxpain_event(
         "average_score_all_timeframes": _float(item.get("average_score_all_timeframes")),
         "opposite_average_score_all_timeframes": _float(item.get("opposite_average_score_all_timeframes")),
         "directional_scores_all_timeframes": _json_safe(item.get("directional_scores_all_timeframes") or {}),
+        "maxpain_timeframes": compact_maxpain_timeframes(item.get("maxpain_timeframes")),
         "opposite_score": _float(item.get("opposite_score")),
         "directional_edge": _float(item.get("directional_edge")),
         "consensus_hits": item.get("consensus_hits"),

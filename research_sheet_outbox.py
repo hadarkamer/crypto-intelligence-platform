@@ -18,6 +18,7 @@ except ImportError:
 _LOCK_ID = 702094113543720211
 _SHEET_ROTATION = (
     'Telegram_Events',
+    'MaxPain_TF',
     'Snapshots',
     'תצוגת לייב',
     'Episodes',
@@ -53,6 +54,7 @@ def _row_source_time(item: Mapping[str, Any]) -> datetime | None:
     field = {
         'Snapshots': 'timestamp_utc',
         'Telegram_Events': 'timestamp_utc',
+        'MaxPain_TF': 'timestamp_utc',
         'Episodes': 'opened_at_utc',
         'Formula_Results': 'last_evaluated_at',
     }.get(str(item['sheet']))
@@ -93,6 +95,22 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
                 synced_at_utc=NULL,last_error=NULL,updated_at_utc=NOW()
             WHERE research_sheet_upsert_outbox.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256
         ''', list(records.values()))
+    # Migration 026 predates this tab and its trigger yields NULL for it.
+    # Apply its frozen event timestamp through the existing indexed row key;
+    # no global backfill, implicit time inference, or DDL in the live worker.
+    source_times = [
+        (sheet, row_key, _row_source_time(json.loads(record[2])))
+        for (sheet, row_key), record in records.items() if sheet == 'MaxPain_TF'
+    ]
+    if source_times:
+        values_sql = ','.join(['(%s,%s,%s::timestamptz)'] * len(source_times))
+        conn.execute(f"""
+            UPDATE research_sheet_upsert_outbox AS queued
+            SET source_time_utc=source.source_time_utc
+            FROM (VALUES {values_sql}) AS source(sheet_name,row_key,source_time_utc)
+            WHERE queued.sheet_name=source.sheet_name AND queued.row_key=source.row_key
+              AND queued.source_time_utc IS DISTINCT FROM source.source_time_utc
+        """, tuple(value for row in source_times for value in row))
     return len(records)
 
 

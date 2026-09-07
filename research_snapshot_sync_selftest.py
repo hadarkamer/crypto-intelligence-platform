@@ -70,8 +70,8 @@ def run():
     assert rebuilt[0]["row"]["זמן סריקה"] == snapshot["timestamp_israel"]
     assert rebuilt == worker.rebuild_alert_group(list(reversed(sources)))
     assert sheets._SNAPSHOT_CACHE == before_cache
-    assert len(rebuilt) == 4  # One aggregate per live/Snapshots + two Telegram IDs.
-    assert len({item["row"]["event_id"] for item in rebuilt[2:]}) == 2
+    assert len(rebuilt) == 5  # Two aggregate rows, two Telegram IDs, one MaxPain TF.
+    assert len({item["row"]["event_id"] for item in rebuilt[2:] if item["sheet"] == "Telegram_Events"}) == 2
 
     # A later, higher-priority 1h source may not inherit a previous 4h balance.
     combined = _alert(Event(), 3)
@@ -107,7 +107,7 @@ def run():
     conn = SourceConnection(sources, sources)
     with patch.object(worker.research_sheet_outbox, "stage_upserts", stage):
         result = worker.reconcile_sources(conn)
-    assert result == {"sources": 2, "groups": 1, "staged_rows": 4, "rejected": 0, "deferred": 0}
+    assert result == {"sources": 2, "groups": 1, "staged_rows": 5, "rejected": 0, "deferred": 0}
     assert staged == [rebuilt]
     markers = [params for query, params in conn.calls if "INSERT INTO research_snapshot_sheet_sources" in query]
     assert [params[0] for params in markers] == [1, 2]
@@ -156,7 +156,8 @@ def run():
          patch.object(worker, "_database_url", lambda: "postgresql://selftest"), \
          patch.object(sheets, "enabled", lambda: True), \
          patch.object(worker, "reconcile_sources", lambda conn: {"staged_rows": 1}), \
-         patch.object(worker.research_sheet_outbox, "drain", drain):
+         patch.object(worker.research_sheet_outbox, "drain", drain), \
+         patch.object(worker.research_sheet_reconciliation.SheetReconciler, "run_due", lambda self, url: {}):
         assert worker.SnapshotSyncWorker().run_once()["delivery"]["synced"] == 1
 
     # Switching delivery ownership blocks both newly enqueued and pre-start

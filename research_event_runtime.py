@@ -661,6 +661,9 @@ def capture_combined_confirmation(
                 "derivatives_high": candidate.get("derivatives_high") or [],
                 "magnet": candidate.get("magnet") or {},
                 "top_item_components": top_item.get("components") or {},
+                "maxpain_timeframes": research_event_capture.compact_maxpain_timeframes(
+                    top_item.get("maxpain_timeframes")
+                ),
                 "market_evidence": top_item.get("market_evidence") or {},
                 "top_item_confirmation": top_item.get("maxpain_confirmation") or {},
                 "top_item_average_score_all_timeframes": top_item.get("average_score_all_timeframes"),

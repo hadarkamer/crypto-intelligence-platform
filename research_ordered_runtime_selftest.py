@@ -32,18 +32,21 @@ async def check():
     btc = Worker("btc", calls, fail_start=True)
     formula = Worker("formula", calls)
     snapshot = Worker("snapshot", calls, fail_stop=True)
+    experimental = Worker("experimental", calls)
     with patch.object(main, "research_btc_episode_worker", SimpleNamespace(WORKER=btc)), \
          patch.object(main, "research_formula_ordered_worker", SimpleNamespace(WORKER=formula)), \
+         patch.object(main, "research_ordered_experimental_worker", SimpleNamespace(WORKER=experimental)), \
          patch.object(main, "research_snapshot_sync_worker", SimpleNamespace(WORKER=snapshot)):
         blocked = await main._start_ordered_research_workers(schema_ready=False)
         assert not calls and all(not row["started"] for row in blocked.values())
         result = await main._start_ordered_research_workers(schema_ready=True)
-        assert calls == [("btc", "start"), ("formula", "start"), ("snapshot", "start")]
+        assert calls == [("btc", "start"), ("formula", "start"), ("experimental", "start"), ("snapshot", "start")]
         assert not result["btc-episodes"]["started"]
         assert result["formula-ordered-v7"]["started"]
         assert result["snapshot-sync"]["started"]
+        assert result["ordered-experimental"]["started"]
         await main._stop_ordered_research_workers()
-        assert calls[-3:] == [("snapshot", "stop"), ("formula", "stop"), ("btc", "stop")]
+        assert calls[-4:] == [("experimental", "stop"), ("snapshot", "stop"), ("formula", "stop"), ("btc", "stop")]
 
 
 if __name__ == "__main__":

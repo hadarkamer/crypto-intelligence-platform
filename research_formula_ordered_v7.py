@@ -84,10 +84,12 @@ def _decision_time(row: Mapping[str, Any]) -> datetime:
 
 
 def ordered_outcome_evidence(
-    row: Mapping[str, Any], *, analysis_as_of_utc: Any
+    row: Mapping[str, Any], *, analysis_as_of_utc: Any, archive_price_policy: str | None = None
 ) -> dict[str, Any]:
     """Validate one label without guessing missing audit fields or versions."""
 
+    if archive_price_policy not in (None, "archive-spot-plus-hype-mark-v1"):
+        raise ValueError("Unknown archive price policy")
     label = _outcome(row)
     reasons: list[str] = []
     as_of = _utc(analysis_as_of_utc)
@@ -163,7 +165,11 @@ def ordered_outcome_evidence(
             break
     if label.get("path_complete") is not True:
         reasons.append("INCOMPLETE_PATH")
-    if label.get("data_quality_status") not in VERIFIED_DATA_QUALITY:
+    quality_verified = label.get("data_quality_status") in VERIFIED_DATA_QUALITY
+    if archive_price_policy is not None:
+        from research_archive_price_policy import archive_outcome_price_verified
+        quality_verified = archive_outcome_price_verified(row)
+    if not quality_verified:
         reasons.append("UNVERIFIED_DATA_QUALITY")
     if label.get("candle_interval_seconds") != 60:
         reasons.append("CANDLE_INTERVAL_MISMATCH")
@@ -592,6 +598,7 @@ def summarize_scope(
     analysis_as_of_utc: Any,
     truncated: bool = False,
     source_coverage_complete: bool = True,
+    archive_price_policy: str | None = None,
 ) -> dict[str, Any]:
     """Audit an already outcome-blind selected candidate/symbol/cell scope.
 
@@ -601,6 +608,8 @@ def summarize_scope(
     timestamp from the supplied decisions and validates one shared cell.
     """
     as_of = _utc(analysis_as_of_utc)
+    if archive_price_policy not in (None, "archive-spot-plus-hype-mark-v1"):
+        raise ValueError("Unknown archive price policy")
     if type(source_coverage_complete) is not bool:
         raise ValueError("source_coverage_complete must be an explicit boolean")
     waves: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
@@ -657,7 +666,7 @@ def summarize_scope(
             unique[identity] = row
         labels, member_statuses = [], []
         for row in unique.values():
-            audit = ordered_outcome_evidence(row, analysis_as_of_utc=as_of)
+            audit = ordered_outcome_evidence(row, analysis_as_of_utc=as_of, archive_price_policy=archive_price_policy)
             excluded.update(audit["exclusion_reasons"])
             member_statuses.append({
                 "event_id": _identity(row)[0],
