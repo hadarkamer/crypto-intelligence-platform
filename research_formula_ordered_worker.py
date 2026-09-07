@@ -51,6 +51,7 @@ class ResearchFormulaOrderedWorker:
             'parent_policy_version':store.PARENT_POLICY,'outcome_method_version':evaluator.METHOD_VERSION,
             'research_periods':[store.period_contract({'period_key':key}) for key in store.PERIODS],
             'candidate_count':len(evaluator.candidate_catalog(include_extended=True)),'scope_limit_per_pass':_SCOPE_LIMIT,'event_limit_per_pass':_EVENT_LIMIT,
+            'evaluation_budget_seconds':_PASS_SECONDS,
             'thresholds_bps':list(evaluator.THRESHOLDS_BPS),'horizons_minutes':list(evaluator.HORIZONS_MINUTES),
             'evidence_policy':'One causally verified BTC parent across all coins/time; earliest frozen matching cohort',
             'research_scope':'Versioned Q01-Q72 captured-feature queue; normal/inverse; finite singles/pairs/justified triples/quads; original delivered-alert wave cohorts',
@@ -135,8 +136,18 @@ class ResearchFormulaOrderedWorker:
                 scopes=store.due_scopes(conn,_SCOPE_LIMIT,candidate_keys=candidates)
                 feature_coverage_cache={}
                 conn.commit()
+                # Intake and reconciliation have separate row/query bounds.
+                # Their latency must not consume the scope-evaluation budget.
+                evaluation_started=time.monotonic()
+                summary['preparation_seconds']=round(evaluation_started-started,3)
+                summary['evaluation_budget_seconds']=_PASS_SECONDS
+                summary['evaluation_budget_exhausted']=False
+                summary['scopes_fetched']=len(scopes)
                 for scope in scopes:
-                    if time.monotonic()-started>=_PASS_SECONDS:
+                    # Finish and commit an in-flight scope; stop starting new
+                    # scopes once this stage has spent its time allowance.
+                    if time.monotonic()-evaluation_started>=_PASS_SECONDS:
+                        summary['evaluation_budget_exhausted']=True
                         break
                     population_complete=period_population[scope['period_key']]
                     self.metrics['last_stage']='EVALUATE_SCOPE:'+scope['scope_key']
@@ -191,10 +202,12 @@ class ResearchFormulaOrderedWorker:
                     summary['truncated_scopes']+=int(truncated)
                     for name in ('episodes','upserts'):
                         summary[name]+=counts[name]
+                summary['evaluation_seconds']=round(time.monotonic()-evaluation_started,3)
             finally:
                 conn.rollback()
                 conn.execute('SELECT pg_advisory_unlock(%s)',(_LOCK_ID,))
                 conn.commit()
+        summary['elapsed_seconds']=round(time.monotonic()-started,3)
         self.metrics['runs']+=1
         self.metrics['last_run_utc']=now.isoformat()
         self.metrics['last_error']=None
