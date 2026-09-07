@@ -149,7 +149,7 @@ def _import(session: str, payload: dict[str, Any]) -> None:
         with psycopg.connect(url, row_factory=dict_row, connect_timeout=5,
                              options="-c statement_timeout=30000 -c lock_timeout=1000") as conn:
             report = importer.import_artifact(conn, sqlite_path, expected_sha256=sqlite_sha,
-                                              expected_run_key=run_key, batch_size=8)
+                                              expected_run_key=run_key, batch_size=50)
         with _state_lock:
             _state.update(status="COMPLETE", report=report, error=None)
     except Exception as exc:
