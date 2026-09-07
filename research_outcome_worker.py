@@ -1891,6 +1891,7 @@ class ResearchOutcomeWorker:
                            ORDER BY
                                CASE WHEN lane = 0 THEN queue_time END DESC,
                                CASE WHEN lane IN (2,3) THEN queue_time END ASC,
+                               CASE WHEN lane = 0 THEN event_id END DESC,
                                event_id
                        ) AS queue_round
                 FROM eligible_pooled
