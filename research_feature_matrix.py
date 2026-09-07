@@ -91,6 +91,11 @@ REPLAY_COVERAGE_STREAM_BATCH_SIZE = 500
 # below one symbol partition so the 12-second read-only statement timeout is
 # applied to bounded work rather than several partitions at once.
 REPLAY_OPPORTUNITY_STREAM_BATCH_SIZE = 50
+# Frozen v4 decision bundles are large TOASTed JSON values.  Fetch only a
+# bounded page per server statement, validate it, then retain the compact
+# source series rather than buffering the entire history/bundle result set.
+# This is a transport bound, never a cap on the number of historical slots.
+PROSPECTIVE_SOURCE_STREAM_BATCH_SIZE = 32
 _TRUE = {"1", "true", "yes", "on"}
 
 
@@ -2156,7 +2161,8 @@ def _load_prospective_frozen_rows(
     ]
     if created_cutoff is not None:
         params.append(created_cutoff)
-    rows = conn.execute(
+    rows = research_historical_replay.iter_query_rows(
+        conn,
         f"""
         SELECT anchor_slot_id, sampler_version, coverage_policy_version,
                coverage_snapshot, symbol, source_candle_open_utc,
@@ -2177,7 +2183,8 @@ def _load_prospective_frozen_rows(
         ORDER BY symbol, decision_time_utc, anchor_slot_id
         """,
         tuple(params),
-    ).fetchall()
+        batch_size=PROSPECTIVE_SOURCE_STREAM_BATCH_SIZE,
+    )
     price_rows: list[Dict[str, Any]] = []
     oi_rows: list[Dict[str, Any]] = []
     futures_rows: list[Dict[str, Any]] = []

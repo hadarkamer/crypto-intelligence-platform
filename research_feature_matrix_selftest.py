@@ -707,6 +707,105 @@ def run() -> None:
         as_of_created_utc=slot_time + timedelta(seconds=2),
     )
     assert all(not values for values in rejected)
+
+    # Production history reads must stream the large immutable JSON bundles
+    # with a server cursor.  The page size limits transport, not history:
+    # later-page valid slots still contribute and later-page corrupt slots
+    # still pass through the identical source/bundle validation contract.
+    class _StreamingFrozenSlotConnection:
+        def __init__(self, rows, *, fail_on_fetch=None):
+            self.rows = list(rows)
+            self.offset = 0
+            self.fetch_sizes = []
+            self.fail_on_fetch = fail_on_fetch
+            self.closed = False
+            self.cursor_names = []
+
+        def cursor(self, *, name):
+            assert name
+            self.cursor_names.append(name)
+            parent = self
+
+            class _Cursor:
+                def execute(self, query, params):
+                    assert query.count("%s") == len(params)
+                    assert "sampler_version=ANY(%s)" in query
+                    assert set(params[0]) == {
+                        legacy_v3, matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION
+                    }
+                    assert "created_at_utc <= %s" in query
+                    assert params[-1] == slot_time + timedelta(seconds=2)
+                    assert "ORDER BY symbol, decision_time_utc, anchor_slot_id" in query
+                    assert "LIMIT" not in query.upper()
+
+                def fetchmany(self, size):
+                    parent.fetch_sizes.append(size)
+                    assert size == 2
+                    if len(parent.fetch_sizes) == parent.fail_on_fetch:
+                        raise TimeoutError("simulated later-page source timeout")
+                    batch = parent.rows[parent.offset:parent.offset + size]
+                    parent.offset += len(batch)
+                    return batch
+
+                def fetchall(self):
+                    raise AssertionError("prospective history buffered all bundles")
+
+                def close(self):
+                    parent.closed = True
+
+            return _Cursor()
+
+        def execute(self, query, params):
+            raise AssertionError("prospective history bypassed its server cursor")
+
+    original_batch_size = matrix.PROSPECTIVE_SOURCE_STREAM_BATCH_SIZE
+    assert original_batch_size == 32
+    stream_args = {
+        "symbols": ("BTC", "HYPE"),
+        "start": slot_time - timedelta(days=1),
+        "end": slot_time,
+        "sampler_versions": (legacy_v3, matrix.PROSPECTIVE_ANCHOR_SAMPLER_VERSION),
+        "as_of_created_utc": slot_time + timedelta(seconds=2),
+    }
+    matrix.PROSPECTIVE_SOURCE_STREAM_BATCH_SIZE = 2
+    try:
+        connection = _StreamingFrozenSlotConnection([
+            slot_row, fingerprint_tampered, v4_slot,
+            v4_bundle_tampered, hype_row, future_tampered, fallback_tampered,
+        ])
+        streamed = matrix._load_prospective_frozen_rows(connection, **stream_args)
+        for index in range(4):
+            assert streamed[index] == (
+                frozen_loaded[index] + v4_prior[index] + hype_loaded[index]
+            )
+        assert streamed[4] == {
+            **frozen_loaded[4], **v4_prior[4], **hype_loaded[4]
+        }
+        assert connection.fetch_sizes == [2, 2, 2, 2, 2]
+        assert connection.closed
+        assert len(connection.cursor_names) == 1
+
+        empty_connection = _StreamingFrozenSlotConnection([])
+        empty_history = matrix._load_prospective_frozen_rows(
+            empty_connection, **stream_args
+        )
+        assert all(not values for values in empty_history)
+        assert empty_connection.closed
+
+        failed_connection = _StreamingFrozenSlotConnection(
+            [slot_row, v4_slot, hype_row], fail_on_fetch=2
+        )
+        try:
+            matrix._load_prospective_frozen_rows(failed_connection, **stream_args)
+        except TimeoutError as error:
+            assert "later-page" in str(error)
+        else:
+            raise AssertionError("partial source history was returned after timeout")
+        assert failed_connection.fetch_sizes == [2, 2]
+        assert failed_connection.closed
+    finally:
+        matrix.PROSPECTIVE_SOURCE_STREAM_BATCH_SIZE = original_batch_size
+
     anchor_snapshot = {
         "sampler_version": v4_slot["sampler_version"],
         "input_fingerprint": v4_slot["input_fingerprint"],

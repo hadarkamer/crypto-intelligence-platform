@@ -1637,6 +1637,15 @@ class ResearchOutcomeWorker:
         behind the cheap row-count check; SQL AND alone can evaluate JSONB
         authorization for every already-complete sample.  OFFSET 0 keeps that
         authorization scoped to one event instead of every frozen slot bundle.
+
+        The v7 schema permits at most 32 rows per event.  Reading the first
+        batch_limit * 32 eligible rows in queue order therefore contains the
+        first batch_limit distinct events, including ties.  Group only this
+        bounded prefix, not the entire outcomes heap.  The literal v7 guards
+        are intentional: a version read from a settings CTE is an InitPlan,
+        which cannot imply the version predicate of the partial queue indexes.
+        Keep the runtime version check as well, so a future method cannot
+        silently reuse this v7-specific cardinality/index contract.
         """
         query = """
             WITH settings AS MATERIALIZED (
@@ -1713,20 +1722,27 @@ class ResearchOutcomeWorker:
                 SELECT ordered.event_id,
                        MIN(ordered.observed_through_utc) AS queue_time,
                        2 AS lane
-                FROM research_ordered_first_touch_outcomes ordered
-                JOIN research_events e ON e.event_id=ordered.event_id
-                WHERE ordered.method_version=(
-                          SELECT method_version FROM settings
+                FROM (
+                    SELECT ordered.event_id, ordered.observed_through_utc
+                    FROM research_ordered_first_touch_outcomes ordered
+                    JOIN research_events e ON e.event_id=ordered.event_id
+                    WHERE ordered.method_version='ordered-first-touch-v7'
+                      AND ordered.method_version=(
+                              SELECT method_version FROM settings
+                          )
+                      AND ordered.status='OPEN'
+                      AND e.alert_time_utc >= NOW() - (
+                          (SELECT backfill_days FROM settings) * INTERVAL '1 day'
                       )
-                  AND ordered.status='OPEN'
-                  AND e.alert_time_utc >= NOW() - (
-                      (SELECT backfill_days FROM settings) * INTERVAL '1 day'
-                  )
-                  AND ordered.observed_through_utc < LEAST(
-                      e.alert_time_utc
-                          + ordered.window_minutes * INTERVAL '1 minute',
-                      date_trunc('minute', NOW()) - INTERVAL '1 millisecond'
-                  )
+                      AND ordered.observed_through_utc < LEAST(
+                          e.alert_time_utc
+                              + ordered.window_minutes * INTERVAL '1 minute',
+                          date_trunc('minute', NOW()) - INTERVAL '1 millisecond'
+                      )
+                    ORDER BY ordered.observed_through_utc, ordered.event_id,
+                             ordered.window_minutes, ordered.threshold_bps
+                    LIMIT (SELECT batch_limit * expected_rows FROM settings)
+                ) ordered
                 GROUP BY ordered.event_id
                 ORDER BY queue_time ASC, ordered.event_id ASC
                 LIMIT (SELECT batch_limit FROM settings)
@@ -1734,16 +1750,23 @@ class ResearchOutcomeWorker:
                 SELECT ordered.event_id,
                        MIN(ordered.updated_at_utc) AS queue_time,
                        3 AS lane
-                FROM research_ordered_first_touch_outcomes ordered
-                JOIN research_events e ON e.event_id=ordered.event_id
-                WHERE ordered.method_version=(
-                          SELECT method_version FROM settings
+                FROM (
+                    SELECT ordered.event_id, ordered.updated_at_utc
+                    FROM research_ordered_first_touch_outcomes ordered
+                    JOIN research_events e ON e.event_id=ordered.event_id
+                    WHERE ordered.method_version='ordered-first-touch-v7'
+                      AND ordered.method_version=(
+                              SELECT method_version FROM settings
+                          )
+                      AND ordered.status='DATA_MISSING'
+                      AND ordered.updated_at_utc <= NOW() - INTERVAL '6 hours'
+                      AND e.alert_time_utc >= NOW() - (
+                          (SELECT backfill_days FROM settings) * INTERVAL '1 day'
                       )
-                  AND ordered.status='DATA_MISSING'
-                  AND ordered.updated_at_utc <= NOW() - INTERVAL '6 hours'
-                  AND e.alert_time_utc >= NOW() - (
-                      (SELECT backfill_days FROM settings) * INTERVAL '1 day'
-                  )
+                    ORDER BY ordered.updated_at_utc, ordered.event_id,
+                             ordered.window_minutes, ordered.threshold_bps
+                    LIMIT (SELECT batch_limit * expected_rows FROM settings)
+                ) ordered
                 GROUP BY ordered.event_id
                 ORDER BY queue_time ASC, ordered.event_id ASC
                 LIMIT (SELECT batch_limit FROM settings)

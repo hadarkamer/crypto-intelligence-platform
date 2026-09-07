@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import builtins
 from datetime import timedelta
 import json
 import os
@@ -65,8 +66,13 @@ class WorkerTests(unittest.TestCase):
         empty=lambda:{}
         module=SimpleNamespace(status=empty,WORKER=SimpleNamespace(status=empty))
         names={node.id for node in ast.walk(handler) if isinstance(node,ast.Name)}
-        namespace={name:(empty if name.endswith("_status") else module) for name in names}
-        namespace.update(web=web,research_btc_episode_worker=SimpleNamespace(WORKER=subject))
+        namespace={name:(empty if name.endswith("_status") else module)
+                   for name in names if not hasattr(builtins,name)}
+        # Watch health was added after this fixture: stub its runtime state,
+        # not Python's bool/sorted builtins or the handler's JSON encoder.
+        namespace.update(web=web,research_btc_episode_worker=SimpleNamespace(WORKER=subject),
+                         WATCH_GENERAL_ENABLED=False,WATCH_RUNTIME={},
+                         MAGNET_V1_WATCHES={},WATCH_TASK=None,WATCH_SUPERVISOR_TASK=None)
         exec(compile(ast.Module(body=[handler],type_ignores=[]),"main.py","exec"),namespace)
         response=asyncio.run(namespace["health"](None))
         self.assertEqual(response.status,200)

@@ -76,6 +76,9 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent
     / "migrations"
     / "023_snapshot_sync_reconciliation.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "024_ordered_first_touch_repair_queue.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
