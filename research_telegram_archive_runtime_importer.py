@@ -156,7 +156,11 @@ def _write_verified_batch(conn: Any, table: str, records: list[dict[str, Any]]) 
         return 0
     encoded = canonical(records)
     if len(encoded.encode()) > MAX_BATCH_JSON_BYTES:
-        raise ValueError("Archive batch exceeds byte budget; use a smaller batch size")
+        if len(records) == 1:
+            raise ValueError("Single archive row exceeds the verified JSON byte budget")
+        midpoint = len(records) // 2
+        return (_write_verified_batch(conn, table, records[:midpoint])
+                + _write_verified_batch(conn, table, records[midpoint:]))
     fields = TABLES[table]
     columns = ",".join(name for name, _ in fields)
     typed = ",".join(name + " " + kind for name, kind in fields)
