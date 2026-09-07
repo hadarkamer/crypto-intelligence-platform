@@ -63,6 +63,28 @@ def source():
 
 
 class Tests(unittest.TestCase):
+    def test_sequence_uses_distinct_scans_and_strictly_earlier_times(self):
+        now=datetime(2026,9,7,10,tzinfo=timezone.utc)
+        current={'event_id':9,'symbol':'SOL','direction':'LONG','event_type':'SPOT_CVD_ALERT',
+                 'alert_time_utc':now,'current_price':102,'engine_snapshot':{'watch_scan_id':'scan-3'}}
+        features={'spot_cvd.aligned_score':70}
+        old=[]
+        for event_id,minutes,scan,score in ((1,20,'scan-1',66),(2,10,'scan-1',68),(3,5,'scan-2',69),(4,0,'scan-x',90)):
+            event={**current,'event_id':event_id,'alert_time_utc':now-timedelta(minutes=minutes),
+                   'current_price':100,'engine_snapshot':{'watch_scan_id':scan}}
+            old.append((event,{'spot_cvd.aligned_score':score}))
+        result=q.sequence_features(current,features,old)
+        self.assertEqual(result['sequence.30m.spot_cvd.prior_scans_same_symbol_direction'],2)
+        self.assertEqual(result['sequence.30m.spot_cvd.entry_ordinal'],3)
+        self.assertEqual(result['sequence.30m.spot_cvd.score_change'],1)
+        self.assertAlmostEqual(result['sequence.30m.price_progress_aligned_pct'],2)
+
+    def test_new_catalog_is_policy_bounded(self):
+        all_=e.candidate_catalog(include_extended=True)
+        self.assertTrue(any(c['formula_id']==q.VERSION+':CORE_STRICT_TRIPLE_TOTAL_65' for c in all_))
+        self.assertTrue(any('ENTRY_3' in c['formula_id'] for c in all_))
+        self.assertTrue(any('REGIME_RANGE' in c['formula_id'] for c in all_))
+        self.assertLessEqual(len(all_),300)
     def test_exact_averages_components_liquidity_and_time(self):
         f=q.extended_features(source())
         self.assertEqual(f['max_pain.average_score_all_timeframes'],66)

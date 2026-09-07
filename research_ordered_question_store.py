@@ -53,7 +53,7 @@ def record_screens(conn,events,features_by_id,candidates,*,now,inverse_requested
             'missing_step':observations[0]['missing_step'],'statistical_test_performed':False,
             'inverse_requested_source_event_ids':sorted(inverse_requested),
             'prior_history_and_regime':{'valid_prior_feature_events':sum(any(key.startswith('historical.closed_1m.') and not key.endswith('.method_version') for key in features_by_id[eid]) for eid in events),
-                'range_regime_status':'NOT_DEFINED; exact return sign is reported separately'},
+                'range_regime_status':'CLOSED_RANGE_EFFICIENCY_V1_WHERE_COMPLETE'},
             'candidate_keys':sorted(covered),'overlap_groups':sorted({c.get('overlap_group',c['formula_id']) for c in relevant}),
             'candidate_component_families':{c['formula_id']:catalog.component_families(c) for c in relevant},
             'next_step':'Versioned wave-level outcomes in formula scopes; no feature screen promotes formulas'}

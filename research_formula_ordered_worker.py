@@ -54,7 +54,7 @@ class ResearchFormulaOrderedWorker:
             'evidence_policy':'One causally verified BTC parent across all coins/time; earliest frozen matching cohort',
             'research_scope':'Versioned Q01-Q72 captured-feature queue; normal/inverse; finite singles/pairs/justified triples/quads; original delivered-alert wave cohorts',
             'question_map_count':len(questions.question_map()),'feature_version':questions.VERSION,
-            'live_effect':'NONE','remaining_validation':'Missing captured fields, prior-price/regime features and exact documented acceptance policies stay explicitly blocked',
+            'live_effect':'NONE','remaining_validation':'Sequence/regime features and exact acceptance are active for new v2 freezes; genuine later waves, incomplete captured fields and explicit trade approval remain',
             'metrics':dict(self.metrics)}
 
     async def start(self)->bool:
@@ -167,6 +167,7 @@ class ResearchFormulaOrderedWorker:
                     if validation_available:
                         contract={**scope,**store.period_contract(scope),'parent_policy_version':store.PARENT_POLICY}
                         candidate=candidates[scope['candidate_key']]
+                        validation_store.register_supported_acceptance(conn,contract,candidate)
                         validated=validation_store.evaluate_scope(conn,contract,rows,now=now,
                             candidate_definition={**candidate,'direction_mode':candidate.get('research_orientation','NORMAL')},
                             source_coverage_complete=bool(candidate_population_complete and mappings_complete),truncated=truncated,

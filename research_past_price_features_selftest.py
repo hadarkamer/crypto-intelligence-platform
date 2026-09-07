@@ -48,8 +48,16 @@ def check_causality_and_features():
     assert flat['historical.closed_1m.1h.btc_direction']=='FLAT'
     assert abs(flat['historical.closed_1m.1h.relative_strength_pct']-2)<1e-12
     assert past.flatten_event_features(result,'SHORT')['historical.closed_1m.1h.alignment']=='OPPOSES'
-    assert not any('mfe' in key or 'mae' in key or 'regime' in key for key in flat)
-    assert result['market_regime_status']=='UNCLASSIFIED_NO_DOCUMENTED_REGIME_RULE'
+    assert not any('mfe' in key or 'mae' in key for key in flat)
+    assert flat['historical.closed_1m.1h.market_regime']=='UP'
+    assert flat['historical.closed_1m.1h.btc_market_regime']=='RANGE'
+    assert result['market_regime_status']=='READY_WHERE_LOOKBACK_READY'
+
+
+def check_market_regime_policy():
+    assert past.market_regime(1,1.5)[0]=='UP'
+    assert past.market_regime(-1,1.5)[0]=='DOWN'
+    assert past.market_regime(.2,1.5)[0]=='RANGE'
 
 
 def check_missing_and_provenance():
@@ -147,7 +155,7 @@ def check_one_event_worker():
 
 
 def main():
-    check_causality_and_features();check_missing_and_provenance();check_bounded_network();check_store_windows_and_refresh();check_one_event_worker()
+    check_causality_and_features();check_market_regime_policy();check_missing_and_provenance();check_bounded_network();check_store_windows_and_refresh();check_one_event_worker()
     print('PASS past price causal boundaries, six windows, missing coverage, BTC strength, immutable retry windows, stale refresh and bounded HTTP')
 
 

@@ -53,6 +53,26 @@ def freeze_scope(conn: Any, scope: Mapping[str, Any], candidate_definition: Mapp
     return saved
 
 
+def register_supported_acceptance(conn: Any, scope: Mapping[str, Any],
+                                  candidate_definition: Mapping[str, Any]) -> bool:
+    """Install the predeclared policy before a new supported scope freezes."""
+    import research_ordered_acceptance_policy as acceptance
+    exact = validation.binding(scope, candidate_definition)
+    policy = acceptance.policy_for(exact, candidate_definition)
+    if policy is None:
+        return False
+    validation.validate_acceptance(policy, exact)
+    conn.execute("""INSERT INTO research_ordered_validation_acceptance
+        (policy_version,binding_sha256,policy) VALUES(%s,%s,%s::jsonb)
+        ON CONFLICT DO NOTHING""", (policy["policy_version"], policy["binding_sha256"],
+        validation.canonical(policy)))
+    saved = conn.execute("SELECT policy FROM research_ordered_validation_acceptance WHERE binding_sha256=%s",
+                         (validation.digest(exact),)).fetchone()
+    if not saved or validation.canonical(saved["policy"]) != validation.canonical(policy):
+        raise ValueError("immutable acceptance policy registration conflict")
+    return True
+
+
 def _enrich_rows(conn: Any, rows: Sequence[Mapping[str, Any]], contract: Mapping[str, Any]) -> list[dict[str, Any]]:
     if contract["source_scope"] != "LIVE":
         raise ValueError("native DB validation adapter only supports explicitly LIVE source")

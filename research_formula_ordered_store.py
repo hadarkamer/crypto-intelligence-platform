@@ -2,7 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping
 import research_formula_ordered_v7 as evaluator
 import research_sheet_outbox
@@ -163,12 +163,27 @@ def ingest_matches(conn: Any,catalog: list[dict[str,Any]],*,now: datetime,event_
                 event['causal_past_features']=past_features.flatten_event_features(past[event_id],event['direction'])
                 event['causal_past_feature_sha256']=past[event_id].get('feature_sha256')
     changed = question_store.new_feature_events(conn,unique)
+    sequence_source={}
+    if changed:
+        lower=min(event['alert_time_utc'] for event in changed.values())-timedelta(hours=4)
+        upper=max(event['alert_time_utc'] for event in changed.values())
+        history=conn.execute('''WITH picked AS MATERIALIZED (
+            SELECT event_id FROM research_events WHERE alert_time_utc>=%s AND alert_time_utc<=%s
+              AND event_kind='ALERT' AND delivery_status='DELIVERED' AND direction IN ('LONG','SHORT')
+            ORDER BY event_id LIMIT 5001) '''+_EVENT_PROJECT,(lower,upper)).fetchall()
+        if len(history)>5000:
+            raise RuntimeError('bounded causal sequence source exceeded; paginate before evaluating')
+        for prior in history:
+            base=evaluator.extract_event_features(prior)
+            base.update(questions.extended_features(prior))
+            sequence_source[prior['event_id']]=(prior,base)
     features_by_id, inverse_requests = {}, set()
     for event in changed.values():
         symbols.add(event['symbol'])
         features = evaluator.extract_event_features(event)
         features.update(questions.extended_features(event))
         features.update(event.get('causal_past_features') or {})
+        features.update(questions.sequence_features(event,features,[value for key,value in sequence_source.items() if key!=event['event_id']]))
         features_by_id[event['event_id']]=features
         if not any(name.endswith('.aligned_score') and value is not None for name,value in features.items()):
             missing_features += 1

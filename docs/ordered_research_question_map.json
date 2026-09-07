@@ -117,7 +117,7 @@
     "justification": "בודק התמדה בלי לנפח מדגם",
     "requested_fields": "watch_scan_id, candidate state, Outcomes",
     "independence_unit": "אפיזודה אחת לאורך רצף",
-    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+    "missing_step": "Causal distinct-scan sequence extractor implemented; awaiting complete LIVE coverage and prospective waves"
   },
   {
     "question_id": "Q16",
@@ -189,7 +189,7 @@
     "justification": "הרחבה: שינוי היחסים בין הטווחים",
     "requested_fields": "רצף כיווני TF עם timestamp; מחירי עבר; Outcomes",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+    "missing_step": "Causal distinct-scan sequence extractor implemented; awaiting complete LIVE coverage and prospective waves"
   },
   {
     "question_id": "Q25",
@@ -229,7 +229,7 @@
     "justification": "הרחבה: התנהגות היעד לאורך זמן",
     "requested_fields": "רצף מחירים ויעדי MaxPain באותו TF; watch_scan_id",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+    "missing_step": "Causal strict-time family-order extractor implemented; awaiting complete LIVE coverage and prospective waves"
   },
   {
     "question_id": "Q30",
@@ -277,7 +277,7 @@
     "justification": "בקשת המשתמשת: אישורי נגזרים עם Magnet ו/או MaxPain",
     "requested_fields": "רצף Spot CVD, Price/OI, Futures CVD, confirmation/magnet/maxpain; timestamps",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+    "missing_step": "Causal score-change sequence extractor implemented; awaiting complete LIVE coverage and prospective waves"
   },
   {
     "question_id": "Q36",
@@ -285,7 +285,7 @@
     "justification": "בקשת המשתמשת: התראות מאזן חוזרות",
     "requested_fields": "watch_scan_id, timestamp, liquidity_balance_pct; מחיר; כיסוי סריקות",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+    "missing_step": "Actual second/third distinct-scan entry is implemented; awaiting complete LIVE coverage and prospective waves"
   },
   {
     "question_id": "Q37",
@@ -293,7 +293,7 @@
     "justification": "בקשת המשתמשת: רצפים בכל משפחות ההתראה",
     "requested_fields": "alert_types; total scores; confirmation/magnet/maxpain states לאורך סריקות",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+    "missing_step": "Causal liquidity-change sequence is implemented where source amounts are valid; coverage remains incomplete"
   },
   {
     "question_id": "Q38",
@@ -349,7 +349,7 @@
     "justification": "בקשת המשתמשת: אינדיקטור הפוך + מחיר קודם",
     "requested_fields": "ציונים/ממוצעים/קונצנזוס/נזילות; שינוי מחיר ומשך מהלך עד ההתראה",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+    "missing_step": "Closed prior Spot movement and fixed range-efficiency regime implemented; awaiting complete coverage and prospective waves"
   },
   {
     "question_id": "Q45",
@@ -357,7 +357,7 @@
     "justification": "הרחבה: אי־תגובה של מחיר וסתירה",
     "requested_fields": "רצף confirmations/total scores; תשואות מחיר עד ההתראה; Outcomes",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Timestamped scan sequence and a completed causal repetition extractor"
+    "missing_step": "Causal score and price-progress sequence implemented; awaiting complete coverage and prospective waves"
   },
   {
     "question_id": "Q46",
@@ -365,7 +365,7 @@
     "justification": "בקשה מפורשת: התנועה שקדמה לנקודת ההתראה",
     "requested_fields": "נרות Spot היסטוריים סגורים; timestamp כניסה; שינוי, טווח ותנודתיות נגררים",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+    "missing_step": "Closed prior Spot movement and fixed range-efficiency regime implemented; awaiting complete coverage and prospective waves"
   },
   {
     "question_id": "Q47",
@@ -373,7 +373,7 @@
     "justification": "בקשת המשתמשת: דשדוש והצלבות",
     "requested_fields": "טווח גבוה/נמוך ותשואה בחלון עבר; ציוני מנועים; יעדים; Outcomes",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+    "missing_step": "Closed prior Spot movement and fixed range-efficiency regime implemented; correction-depth candidate remains blocked"
   },
   {
     "question_id": "Q48",
@@ -381,7 +381,7 @@
     "justification": "שאלה קודמת: תנועה ארוכה ללא זיג הפוך",
     "requested_fields": "נרות עבר; אורך רצף; עומק תיקון מקסימלי עד t; ציוני מנועים ויעדים",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+    "missing_step": "Closed prior Spot movement/regime and alignment implemented; awaiting complete coverage and prospective waves"
   },
   {
     "question_id": "Q49",
@@ -389,7 +389,7 @@
     "justification": "בקשת המשתמשת: שילוב מצב המחיר עם יתר השאלות",
     "requested_fields": "סיווג עבר Q46–Q48; כיוונים; נזילות, CVD, MaxPain/Magnet, consensus/gap",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+    "missing_step": "Closed prior high/low rebound fields implemented; composite spike-return candidate remains to be frozen"
   },
   {
     "question_id": "Q50",
@@ -397,7 +397,7 @@
     "justification": "הרחבה: זיגזג שכבר נצפה לפני האות",
     "requested_fields": "נרות עבר, spike/retracement שכבר הושלמו; נזילות/CVD/יעדים",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+    "missing_step": "Closed prior movement and target distance are captured; exact already-moved/remaining composite remains to be frozen"
   },
   {
     "question_id": "Q51",
@@ -405,7 +405,7 @@
     "justification": "הרחבה: רוחב תנועה שנותר",
     "requested_fields": "שינוי מחיר עבר; target_distance_pct; threshold_pct; כיוון היעד",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+    "missing_step": "Causal BTC range-efficiency regimes implemented at the same cutoff; lead-lag candidate still needs complete timestamps"
   },
   {
     "question_id": "Q52",
@@ -413,7 +413,7 @@
     "justification": "שאלה קודמת + הרחבה: הקשר BTC והשהיה",
     "requested_fields": "נרות BTC עד זמן האות; נרות מטבע; timestamps; btc_parent_movement_id",
     "independence_unit": "אפיזודה לפי מועמדת/מטבע/כיוון/סף; איחוד לפי גל BTC",
-    "missing_step": "Closed prior Spot candles with source timestamps and past-only feature extractor"
+    "missing_step": "Same-window asset-minus-BTC relative strength implemented; awaiting complete coverage and prospective waves"
   },
   {
     "question_id": "Q53",

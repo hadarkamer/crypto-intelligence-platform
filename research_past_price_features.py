@@ -19,8 +19,9 @@ import canonical_price_path
 from research_common_window_metrics import utc
 from research_ordered_first_touch import _field, _finite_number
 
-METHOD_VERSION = "past-price-spot-1m-v1"
+METHOD_VERSION = "past-price-spot-1m-v2-regime"
 LOOKBACKS = (("15m",15),("30m",30),("1h",60),("4h",240),("12h",720),("24h",1440))
+REGIME_VERSION = "closed-range-efficiency-50pct-v1"
 
 
 def digest(value: Any) -> str:
@@ -29,6 +30,21 @@ def digest(value: Any) -> str:
 
 def direction(value: float) -> str:
     return "UP" if value>0 else "DOWN" if value<0 else "FLAT"
+
+
+def market_regime(return_pct: float, range_pct: float) -> tuple[str, float | None]:
+    """Outcome-blind trend/range label from a completed lookback only.
+
+    A move is directional when its absolute net displacement covers at least
+    half of the observed high-low range.  Otherwise it is RANGE.  The fixed
+    0.50 efficiency boundary is versioned and never tuned from outcomes.
+    """
+    if range_pct <= 0:
+        return "RANGE", 0.0 if return_pct == 0 else None
+    efficiency = abs(return_pct) / range_pct
+    if efficiency < 0.5:
+        return "RANGE", efficiency
+    return ("UP" if return_pct > 0 else "DOWN" if return_pct < 0 else "RANGE"), efficiency
 
 
 def prior_bounds(event_time: Any) -> tuple[datetime,datetime]:
@@ -98,8 +114,10 @@ def _window(*,symbol:str,event_time:datetime,minutes:int,candles:Iterable[Any],p
         if sign!="FLAT":
             if previous_sign is not None and sign!=previous_sign: turns+=1
             previous_sign=sign
+    regime,regime_efficiency=market_regime(net,100*(high-low)/first)
     result.update({"status":"READY","first_open":first,"last_close":last,"high":high,"low":low,
         "return_pct":net,"direction":direction(net),"range_pct":100*(high-low)/first,
+        "market_regime":regime,"market_regime_efficiency":regime_efficiency,"market_regime_version":REGIME_VERSION,
         "volatility_pct":100*pstdev(returns),"realized_volatility_pct":100*math.sqrt(sum(x*x for x in returns)),
         "drawdown_from_high_pct":100*(last/high-1),"rebound_from_low_pct":100*(last/low-1),
         "up_minutes":sum(x>0 for x in returns),"down_minutes":sum(x<0 for x in returns),"flat_minutes":sum(x==0 for x in returns),
@@ -137,7 +155,7 @@ def record_from_windows(*,symbol:str,event_time:Any,windows:Mapping[str,Any],com
     return {**signature,"computed_at_utc":computed,"feature_sha256":digest(signature),
         "status":"READY" if ready==len(LOOKBACKS) else "PARTIAL" if valid_assets or valid_btc else "DATA_MISSING",
         "asset_windows_ready":valid_assets,"btc_windows_ready":valid_btc,"paired_windows_ready":ready,
-        "market_regime_status":"UNCLASSIFIED_NO_DOCUMENTED_REGIME_RULE",
+        "market_regime_status":"READY_WHERE_LOOKBACK_READY","market_regime_version":REGIME_VERSION,
         "direction_policy":"EXACT_SIGN_OF_PAST_WINDOW_RETURN_NOT_MARKET_REGIME",
         "volatility_method":"POPULATION_STD_OF_1M_LOG_RETURNS_PCT_FIRST_OPEN_REFERENCE",
         "relative_strength_method":"ASSET_RETURN_PCT_MINUS_BTC_RETURN_PCT_IDENTICAL_CLOSED_WINDOW",
@@ -170,17 +188,22 @@ def flatten_event_features(record:Mapping[str,Any]|None,analysis_direction:str) 
                     and utc(window['window_end_utc'])==boundary-timedelta(milliseconds=1)
                     and utc(window['event_time_utc'])==entry and source.get('symbol')==symbol
                     and window.get("data_quality_status")==canonical_price_path.quality_status(source,complete=True)
-                    and window.get('direction')==direction(_finite_number(window.get('return_pct'),name='return_pct')))
+                    and window.get('direction')==direction(_finite_number(window.get('return_pct'),name='return_pct'))
+                    and window.get('market_regime_version')==REGIME_VERSION
+                    and window.get('market_regime')==market_regime(
+                        _finite_number(window.get('return_pct'),name='return_pct'),
+                        _finite_number(window.get('range_pct'),name='range_pct'))[0])
             except (TypeError,ValueError,KeyError):return False
         own_valid,btc_valid=valid(own,record.get('symbol')),valid(btc,'BTC')
         if own_valid:
             for key in ("return_pct","direction","range_pct","volatility_pct","realized_volatility_pct",
                     "drawdown_from_high_pct","rebound_from_low_pct","up_minutes","down_minutes","flat_minutes",
-                    "longest_up_streak_minutes","longest_down_streak_minutes","direction_changes"):
+                    "longest_up_streak_minutes","longest_down_streak_minutes","direction_changes",
+                    "market_regime","market_regime_efficiency"):
                 features[prefix+key]=own[key]
             features[prefix+"alignment"]=aligned(own["direction"])
         if btc_valid:
-            for key in ("return_pct","direction","range_pct","volatility_pct"):
+            for key in ("return_pct","direction","range_pct","volatility_pct","market_regime","market_regime_efficiency"):
                 features[prefix+"btc_"+key]=btc[key]
             features[prefix+"btc_alignment"]=aligned(btc["direction"])
         if own_valid and btc_valid:

@@ -49,6 +49,7 @@ import research_formula_store
 import research_formula_worker
 import research_max_pain_archive
 import research_prospective_anchor_worker
+import research_archive_admin
 from collections import defaultdict
 
 try:
@@ -6023,6 +6024,7 @@ async def health(request):
         "max_pain_archive": max_pain_archive_status(),
         "first_touch_backfill": first_touch_backfill_status(),
         "prospective_anchors": research_prospective_anchor_worker.WORKER.status(),
+        "archive_import": research_archive_admin.status(),
     })
 
 async def telegram_webhook(request):
@@ -7016,13 +7018,14 @@ async def _flow_collection_loop() -> None:
 
 
 async def start_web_server(bot_app):
-    app = web.Application()
+    app = web.Application(client_max_size=research_archive_admin.MAX_CHUNK_BYTES + 1024 * 1024)
     app["bot_app"] = bot_app
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     app.router.add_post("/telegram", telegram_webhook)
     app.router.add_post("/webhooks/tradingview", tradingview_webhook)
     app.router.add_get("/technical/status", technical_status_api)
+    research_archive_admin.register_routes(app)
 
     runner = web.AppRunner(app)
     await runner.setup()

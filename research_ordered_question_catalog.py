@@ -5,14 +5,14 @@ liquidity 40/50/60/70/80) or an existing signal rule (total 65). They are
 discovery predicates, never acceptance thresholds. No future path is read.
 """
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 import math
 from pathlib import Path
 from typing import Any, Mapping
 
-VERSION = 'captured-question-search-v1'
+VERSION = 'captured-question-search-v2-sequence-regime-acceptance'
 ROOT = Path(__file__).resolve().parent
 DIRECTIONS = ('LONG', 'SHORT')
 
@@ -120,6 +120,90 @@ def extended_features(event: Mapping[str, Any]) -> dict[str, Any]:
     return f
 
 
+def _signal_families(event: Mapping[str, Any], features: Mapping[str, Any]) -> set[str]:
+    families=set()
+    for name in ('price_oi','futures_cvd','spot_cvd'):
+        score=number(features.get(name+'.aligned_score'))
+        if score is not None and score>=65: families.add(name.upper())
+    kind=str(event.get('event_type') or '').upper()
+    for token,name in (('MAX_PAIN','MAX_PAIN'),('MAGNET','MAGNET'),('COMBINED','COMBINED')):
+        if token in kind: families.add(name)
+    if features.get('liquidity.capture_status')=='VALID': families.add('LIQUIDITY')
+    return families
+
+
+def _primary_family(event: Mapping[str,Any], families:set[str]) -> str:
+    kind=str(event.get('event_type') or '').upper()
+    for token,name in (('COMBINED','COMBINED'),('MAX_PAIN','MAX_PAIN'),('MAGNET','MAGNET'),
+                       ('SPOT_CVD','SPOT_CVD'),('FUTURES_CVD','FUTURES_CVD'),('PRICE_OI','PRICE_OI')):
+        if token in kind:return name
+    return next(iter(families)) if len(families)==1 else 'MULTIPLE' if families else 'NONE'
+
+
+def sequence_features(event: Mapping[str, Any], current: Mapping[str, Any],
+                      prior: list[tuple[Mapping[str, Any],Mapping[str, Any]]]) -> dict[str,Any]:
+    """Past-only, scan-aware sequence state at the exact alert timestamp.
+
+    Equal timestamps are excluded because their source order is unknown.  A
+    repeat count uses distinct real watch/snapshot scan identifiers; a clock
+    gap alone never manufactures an additional observation.
+    """
+    try:
+        when=event['alert_time_utc'] if isinstance(event['alert_time_utc'],datetime) else datetime.fromisoformat(str(event['alert_time_utc']).replace('Z','+00:00'))
+        when=when.astimezone(timezone.utc)
+    except (KeyError,ValueError,TypeError): return {'sequence.capture_status':'MISSING_EVENT_TIME'}
+    symbol,direction=str(event.get('symbol') or ''),str(event.get('direction') or '')
+    current_families=_signal_families(event,current)
+    result={'sequence.capture_status':'READY','sequence.current_families':'|'.join(sorted(current_families)),
+            'sequence.current_primary_family':_primary_family(event,current_families)}
+    for minutes in (30,60,240):
+        start=when-timedelta(minutes=minutes)
+        eligible=[]
+        for old,features in prior:
+            try:
+                old_time=old['alert_time_utc'] if isinstance(old['alert_time_utc'],datetime) else datetime.fromisoformat(str(old['alert_time_utc']).replace('Z','+00:00'))
+                old_time=old_time.astimezone(timezone.utc)
+            except (KeyError,ValueError,TypeError): continue
+            if start<=old_time<when and str(old.get('symbol') or '')==symbol and str(old.get('direction') or '')==direction:
+                scan=(old.get('engine_snapshot') or {}).get('watch_scan_id') or (old.get('engine_snapshot') or {}).get('sheet_snapshot_id')
+                if scan: eligible.append((old_time,str(scan),old,features,_signal_families(old,features)))
+        prefix=f'sequence.{minutes}m.'
+        result[prefix+'prior_distinct_scans']=len({item[1] for item in eligible})
+        observed=set()
+        for family in ('PRICE_OI','FUTURES_CVD','SPOT_CVD','MAX_PAIN','MAGNET','COMBINED','LIQUIDITY'):
+            scans={item[1] for item in eligible if family in item[4]}
+            result[prefix+family.lower()+'.prior_scans_same_symbol_direction']=len(scans)
+            if family in current_families:
+                observed.add(family)
+                result[prefix+family.lower()+'.entry_ordinal']=len(scans)+1
+        result[prefix+'distinct_families_including_current']=len(observed|{family for item in eligible for family in item[4]})
+        if eligible:
+            latest_time=max(item[0] for item in eligible)
+            latest=[item for item in eligible if item[0]==latest_time]
+            latest_families={_primary_family(item[2],item[4]) for item in latest}
+            result[prefix+'minutes_since_previous']=round((when-latest_time).total_seconds()/60,6)
+            result[prefix+'previous_primary_family']=next(iter(latest_families)) if len(latest_families)==1 else 'MULTIPLE'
+            previous_price=number(latest[0][2].get('current_price')) if len(latest)==1 else None
+            current_price=number(event.get('current_price'))
+            if previous_price and current_price:
+                move=100*(current_price/previous_price-1)*(1 if direction=='LONG' else -1)
+                result[prefix+'price_progress_aligned_pct']=move
+        for name in ('price_oi','futures_cvd','spot_cvd'):
+            value=number(current.get(name+'.aligned_score'))
+            comparable=[item for item in eligible if number(item[3].get(name+'.aligned_score')) is not None]
+            if value is not None and comparable:
+                latest=max(comparable,key=lambda item:item[0])
+                result[prefix+name+'.score_change']=value-number(latest[3][name+'.aligned_score'])
+        share=number(current.get('liquidity.selected_share_pct'))
+        comparable=[item for item in eligible if number(item[3].get('liquidity.selected_share_pct')) is not None]
+        if share is not None and comparable:
+            latest=max(comparable,key=lambda item:item[0])
+            old_share=number(latest[3]['liquidity.selected_share_pct'])
+            result[prefix+'liquidity.share_change_pct_points']=share-old_share
+            result[prefix+'liquidity.previous_alignment']=latest[3].get('liquidity.alignment')
+    return result
+
+
 def condition(feature,operator,value): return {'feature':feature,'operator':operator,'value':value}
 
 
@@ -130,6 +214,14 @@ def candidates() -> list[dict[str,Any]]:
             'catalog_version':VERSION,'question_ids':qs,'overlap_group':group,'justification':justification,
             'research_orientation':'NORMAL','discovery_only':True})
     valid=condition('event.direction_mapping_valid','==',True)
+    # Versioned policy-ready aliases for the seven original total-score screens.
+    totals=('price_oi','futures_cvd','spot_cvd')
+    for family in totals:
+        add('CORE_'+family.upper()+'_TOTAL_65',['Q32','Q57'],[condition(family+'.aligned_score','>=',65)],'CORE_TOTAL:'+family,'New prospective version with the documented ordered-v7 acceptance contract')
+    for index,left in enumerate(totals):
+        for right in totals[index+1:]:
+            add('CORE_'+left.upper()+'_'+right.upper()+'_TOTAL_65',['Q32','Q57'],[condition(left+'.aligned_score','>=',65),condition(right+'.aligned_score','>=',65)],'CORE_TOTAL_PAIR','New prospective version with the documented ordered-v7 acceptance contract')
+    add('CORE_STRICT_TRIPLE_TOTAL_65',['Q32','Q57'],[condition(x+'.aligned_score','>=',65) for x in totals],'CORE_TOTAL_TRIPLE','New prospective version with the documented ordered-v7 acceptance contract')
     for state in ('SUPPORTS','OPPOSES','BALANCED'):
         add('LIQUIDITY_'+state,['Q01','Q05'],[valid,condition('liquidity.alignment','==',state)],'LIQUIDITY','Compare valid captured selected-side shares under one source contract')
     # Missing is a coverage diagnostic only, never a tradable no-signal formula.
@@ -172,6 +264,26 @@ def candidates() -> list[dict[str,Any]]:
         add('RELATIVE_BTC_1h_'+state,['Q53'],[condition('historical.closed_1m.1h.relative_strength_pct',operator,0)],'RELATIVE_BTC','Difference of same-window closed coin and BTC returns')
     for alignment in ('SUPPORTS','OPPOSES','FLAT'):
         add('SPOT65_PRIOR_1h_'+alignment,['Q49','Q57'],[condition('spot_cvd.aligned_score','>=',65),condition('historical.closed_1m.1h.alignment','==',alignment)],'SPOT_PRIOR_RETURN','Frozen Spot65 condition with or against completed prior1h move')
+    for family in ('price_oi','futures_cvd','spot_cvd','max_pain','magnet','combined','liquidity'):
+        for ordinal in (2,3):
+            add(f'{family}_ENTRY_{ordinal}',['Q36','Q37','Q40'],
+                [condition(f'sequence.30m.{family}.entry_ordinal','==',ordinal)],'SEQUENCE_ENTRY:'+family,
+                f'Entry begins at the actual {ordinal}th distinct scan; equal timestamps never imply order')
+    for current,previous in (('SPOT_CVD','FUTURES_CVD'),('FUTURES_CVD','SPOT_CVD'),('MAGNET','MAX_PAIN')):
+        add(f'ORDER_{previous}_TO_{current}',['Q38'],[condition('sequence.current_primary_family','==',current),
+            condition('sequence.30m.previous_primary_family','==',previous)],'SEQUENCE_ORDER:'+current+':'+previous,
+            'Only an unambiguous earlier source timestamp establishes family order')
+    for family in ('price_oi','futures_cvd','spot_cvd'):
+        for operator,label in (('>','STRENGTHENING'),('<','WEAKENING')):
+            add(f'{family}_{label}_30m',['Q39','Q45'],[condition(f'sequence.30m.{family}.score_change',operator,0)],
+                'SEQUENCE_SCORE:'+family,'Past-to-current aligned total score change within one symbol and direction')
+    for regime in ('UP','DOWN','RANGE'):
+        add('ASSET_4h_REGIME_'+regime,['Q46','Q47','Q48'],[condition('historical.closed_1m.4h.market_regime','==',regime)],
+            'MARKET_REGIME_ASSET_4h','Fixed closed-range efficiency regime; no future candles')
+        for family in totals:
+            add(f'{family}_65_BTC_4h_{regime}',['Q52','Q57'],[condition(family+'.aligned_score','>=',65),
+                condition('historical.closed_1m.4h.btc_market_regime','==',regime)],'TOTAL_BTC_REGIME:'+family,
+                'Simple total-score baseline crossed with a fixed causal BTC regime')
     return sorted(out,key=lambda c:(len(c['conditions']),c['question_ids'][0],c['formula_id']))
 
 
