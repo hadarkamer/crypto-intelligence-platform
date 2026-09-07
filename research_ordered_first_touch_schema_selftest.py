@@ -50,10 +50,16 @@ def _check_targeted_schema_apply() -> None:
         assert connection_calls[0][1]["options"] == (
             "-c statement_timeout=15000 -c lock_timeout=1000"
         )
-        assert len(calls) == 3
+        assert len(calls) == 5
         assert "pg_advisory_xact_lock" in calls[0][0]
-        assert calls[1][0] == MIGRATION.read_text(encoding="utf-8")
-        assert calls[2][0] == "COMMIT"
+        assert calls[1] == (
+            "SELECT set_config('statement_timeout', %s, true)", ("15000",)
+        )
+        assert calls[2][0] == MIGRATION.read_text(encoding="utf-8")
+        assert calls[3] == (
+            "SELECT set_config('statement_timeout', '15000', true)", ()
+        )
+        assert calls[4][0] == "COMMIT"
 
         for invalid in (
             "missing.sql",

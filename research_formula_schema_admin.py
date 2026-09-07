@@ -95,6 +95,13 @@ MIGRATION_PATHS = (
 SCHEMA_LOCK_ID = 94837242
 
 
+def _migration_statement_timeout_ms(path: Path) -> int:
+    # Production evidence: building this ordered index over the 220 MB
+    # delivery table exceeded 15 seconds. Bound that one installation step
+    # separately; retain the short lock wait and normal query timeouts.
+    return 60000 if path.name == "025_ordered_first_touch_sync_claim_queue.sql" else 15000
+
+
 def _enabled() -> bool:
     return os.getenv("FORMULA_SCHEMA_APPLY", "").strip().lower() in _TRUE
 
@@ -168,7 +175,14 @@ def apply_schema() -> None:
     with psycopg.connect(database_url, connect_timeout=5, **options) as conn:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_ID,))
         for path in paths:
+            if options:
+                conn.execute("SELECT set_config('statement_timeout', %s, true)",
+                             (str(_migration_statement_timeout_ms(path)),))
+            print(f"[research-schema] applying migration={path.name}", flush=True)
             conn.execute(path.read_text(encoding="utf-8"))
+            if options:
+                conn.execute("SELECT set_config('statement_timeout', '15000', true)")
+            print(f"[research-schema] completed migration={path.name}", flush=True)
         conn.commit()
     print(
         f"Formula Research schema applied successfully via {source}; "
