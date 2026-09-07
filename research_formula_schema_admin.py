@@ -96,10 +96,15 @@ SCHEMA_LOCK_ID = 94837242
 
 
 def _migration_statement_timeout_ms(path: Path) -> int:
-    # Production evidence: building this ordered index over the 220 MB
-    # delivery table exceeded 15 seconds. Bound that one installation step
+    # Production evidence: the ordered index over the 220 MB delivery table
+    # and the source-time backfill/index migration over the existing queue
+    # each exceeded 15 seconds. Bound only those installation steps
     # separately; retain the short lock wait and normal query timeouts.
-    return 60000 if path.name == "025_ordered_first_touch_sync_claim_queue.sql" else 15000
+    bounded_backfills = {
+        "025_ordered_first_touch_sync_claim_queue.sql",
+        "026_research_sheet_fresh_delivery.sql",
+    }
+    return 60000 if path.name in bounded_backfills else 15000
 
 
 def _enabled() -> bool:

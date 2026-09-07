@@ -12,7 +12,9 @@ import research_formula_schema_admin as admin
 def run():
     by_name = {path.name: path for path in admin.MIGRATION_PATHS}
     index = by_name['025_ordered_first_touch_sync_claim_queue.sql']
-    next_migration = by_name['026_research_sheet_fresh_delivery.sql']
+    fresh_delivery = by_name['026_research_sheet_fresh_delivery.sql']
+    next_migration = by_name['027_ordered_formula_research_periods.sql']
+    archive = by_name['028_telegram_archive_source_staging.sql']
 
     def exercise(paths, *, failure=None, targeted=True):
         events = []
@@ -80,24 +82,32 @@ def run():
                 assert f'applying migration={path.name}' in output.getvalue()
         return events
 
-    events = exercise([index, next_migration])
-    assert (index.name, '60000') in events
-    assert (next_migration.name, '15000') in events
+    events = exercise([index, fresh_delivery, next_migration, archive])
+    for path in (index, fresh_delivery):
+        assert (path.name, '60000') in events
+        assert events[events.index((path.name, '60000')) + 1] == ('TIMEOUT', '15000')
+    for path in (next_migration, archive):
+        assert (path.name, '15000') in events
     assert ('COMMIT', '15000') in events
-    assert [value for kind, value in events if kind == 'TIMEOUT'] == ['60000', '15000', '15000', '15000']
-    assert events[events.index((index.name, '60000')) + 1] == ('TIMEOUT', '15000')
+    assert [value for kind, value in events if kind == 'TIMEOUT'] == [
+        '60000', '15000', '60000', '15000', '15000', '15000', '15000', '15000']
 
     # Failure must propagate, roll back all changes, and prevent the next file.
     events = exercise([index, next_migration], failure=index)
     assert not any(kind in ('COMMIT', next_migration.name) for kind, _ in events)
     assert events[-1] == ('ROLLBACK', '60000')
+    events = exercise([index, fresh_delivery, next_migration, archive], failure=fresh_delivery)
+    assert not any(kind in ('COMMIT', next_migration.name, archive.name) for kind, _ in events)
+    assert events[-1] == ('ROLLBACK', '60000')
 
     events = exercise([next_migration])
     assert not any(value == '60000' for _, value in events)
-    events = exercise([index, next_migration], targeted=False)
+    events = exercise([index, fresh_delivery, next_migration, archive], targeted=False)
     assert not any(kind == 'TIMEOUT' for kind, _ in events), 'full installer behavior must remain unchanged'
     assert admin._migration_statement_timeout_ms(Path('025_other.sql')) == 15000
     assert admin._migration_statement_timeout_ms(Path(index.name + '.backup')) == 15000
+    assert admin._migration_statement_timeout_ms(Path('026_other.sql')) == 15000
+    assert admin._migration_statement_timeout_ms(Path(fresh_delivery.name + '.backup')) == 15000
     print('targeted schema migration timeout selftest: PASS')
 
 
