@@ -68,3 +68,30 @@ canonical Spot evidence. Public price retrieval needs no private archive upload.
 
 Record the tested commit, migration result, requested-queue coverage, actual
 Sheet delivery and explicit report cutoff after completing the recovery.
+
+## Native HYPE recovery after the production price probe
+
+PR14 deployed as `83035da3c59787f4eb4d55195de84282e24660fc`; migrations 041
+and 042 applied. A public Binance Futures MARK request from Render returned
+HTTP 451, although the same source was available in the research environment.
+The dated full-wave report remains explicitly Binance MARK and must not be
+silently replaced with another price series.
+
+The ongoing native HYPE recovery therefore uses Hyperliquid's independent
+`candleSnapshot` source for the exact `HYPE` perpetual instrument. Migration 043
+creates separate PERP event, outcome and common-metric tables. Scope
+`DERIVED_NATIVE_HYPE_PERP` and adapter `native-hype-perp-derived-outcomes-v1`
+retain the original alert/reference and use their own next-full-minute entry.
+Neither canonical Spot nor existing MARK evidence is rewritten.
+
+The v7 capacity defaults to 32 events per pass, independently of the legacy
+eight-event limit, with half the capacity retained for ordinary work. OPEN
+refresh is due at the next fixed horizon or within 30 minutes; HYPE uses its
+persisted derived entry for that boundary. Failed paths retain a 15-minute
+retry. Actual pass duration and recovery counters are exposed in health.
+
+The full-wave Sheet snapshot at 2026-09-08 07:21:03 UTC contains all eight
+thresholds. Wave 9 ends at 2026-09-07 15:32:59.999 UTC and active wave 10 is
+observed through 2026-09-08 07:19:59.999 UTC. Four qualifying BTC parents, three
+closed and one active, are represented; this is not ten independent cases.
+It is a dated full-wave report, distinct from the worker's fixed horizons.

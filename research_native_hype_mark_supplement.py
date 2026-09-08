@@ -34,6 +34,27 @@ SOURCE_FIELDS = ("event_id", "event_kind", "event_type", "alert_time_utc", "symb
     "code_version", "delivery_status", "engine_snapshot")
 
 
+def _settings(adapter_version):
+    """Two fixed independent contracts; table names never come from caller input."""
+    if adapter_version == ADAPTER_VERSION:
+        return {"source": archive.SOURCE, "entry_version": ENTRY_VERSION,
+            "metric_version": METRIC_VERSION, "scope": SOURCE_SCOPE,
+            "table_prefix": "research_native_hype_mark", "fetch": provider.fetch_closed_candles,
+            "label": "MARK", "verified_quality": archive.VERIFIED_QUALITY,
+            "partial_quality": archive.PARTIAL_QUALITY,
+            "boundary_policy": "NEXT_FULL_MINUTE_MARK_OPEN_CLOSED_1M_ONLY"}
+    if adapter_version == "native-hype-perp-derived-outcomes-v1":
+        import hyperliquid_perp_price_path as perp
+        return {"source": perp.SOURCE, "entry_version": "native-hype-next-full-minute-perp-open-v1",
+            "metric_version": "native-hype-common-window-perp-trade-1m-v1",
+            "scope": "DERIVED_NATIVE_HYPE_PERP", "table_prefix": "research_native_hype_perp",
+            "fetch": perp.fetch_closed_candles, "label": "PERP TRADE",
+            "verified_quality": "VERIFIED_HYPERLIQUID_PERP_TRADE_1M_CLOSED_CANDLES",
+            "partial_quality": "INCOMPLETE_HYPERLIQUID_PERP_TRADE_1M_PATH",
+            "boundary_policy": "NEXT_FULL_MINUTE_PERP_TRADE_OPEN_CLOSED_1M_ONLY"}
+    raise ValueError("Unknown native derived futures policy")
+
+
 def _utc(value):
     return provider._utc(value)
 
@@ -67,7 +88,7 @@ def _validate_event(event):
     return _utc(event["alert_time_utc"]).replace(second=0, microsecond=0) + timedelta(minutes=1)
 
 
-def derive_entry(event, membership, path_result):
+def derive_entry(event, membership, path_result, *, adapter_version=ADAPTER_VERSION):
     """Return the same isolated entry for a full-wave path of any length.
 
     Only the entry candle is selected here; the wave calculator must validate
@@ -77,11 +98,12 @@ def derive_entry(event, membership, path_result):
     entry_bars = [raw for raw in path_result.get("candles", [])
         if _utc(raw["open_time_utc"]) == entry]
     return derive_measurement(event, membership, {**path_result, "candles": entry_bars},
-        observed_at=entry + timedelta(minutes=1))["event"]
+        observed_at=entry + timedelta(minutes=1), adapter_version=adapter_version)["event"]
 
 
-def derive_measurement(event, membership, path_result, *, observed_at):
+def derive_measurement(event, membership, path_result, *, observed_at, adapter_version=ADAPTER_VERSION):
     """Pure isolated derivation; input rows and native source metadata stay intact."""
+    policy = _settings(adapter_version)
     entry = _validate_event(event)
     now = _utc(observed_at)
     if membership is not None:
@@ -89,8 +111,8 @@ def derive_measurement(event, membership, path_result, *, observed_at):
             or membership.get("episode_policy_version") != PARENT_POLICY
             or _utc(membership["decision_time_utc"]) != _utc(event["alert_time_utc"])):
             raise ValueError("BTC membership must belong to the original decision")
-    if any(path_result.get(key) != value for key, value in archive.SOURCE.items()):
-        raise ValueError("Derived HYPE path must retain exact official Binance Futures MARK source")
+    if any(path_result.get(key) != value for key, value in policy["source"].items()):
+        raise ValueError("Derived HYPE path must retain its exact explicit official source contract")
     cutoff = min(entry + timedelta(days=1), now.replace(second=0, microsecond=0))
     bars = {}
     for raw in path_result.get("candles", []):
@@ -99,18 +121,15 @@ def derive_measurement(event, membership, path_result, *, observed_at):
         if not entry <= opened < cutoff or bar["close_time_utc"] >= cutoff:
             raise ValueError("Derived path contains an unclosed or out-of-window candle")
         if opened in bars and bars[opened] != bar:
-            raise ValueError("Conflicting duplicate MARK candle")
+            raise ValueError("Conflicting duplicate derived futures candle")
         bars[opened] = bar
     digest = source_digest(event)
-    derived_id = hashlib.sha256(f"{ADAPTER_VERSION}|{event['event_id']}|{digest}".encode()).hexdigest()
-    # Reuse the archive's pure candle/entry/v7 math. Its archive-only identity is
-    # deliberately internal: every persisted record below has this native-derived contract.
-    internal = {"symbol": "HYPE", "entry_policy_version": archive.ENTRY_VERSION,
-        "price_source_contract": dict(archive.SOURCE), "entry_time_utc": entry,
-        "analysis_direction": event["direction"], "archive_event_key": derived_id}
-    calculated, labels, metrics = archive.calculate_event(internal, bars, observed_at=now)
-    shared = {"adapter_version": ADAPTER_VERSION, "entry_policy_version": ENTRY_VERSION,
-        "source_scope": SOURCE_SCOPE, "record_mode": "DERIVED",
+    derived_id = hashlib.sha256(f"{adapter_version}|{event['event_id']}|{digest}".encode()).hexdigest()
+    from research_derived_futures_outcomes import calculate
+    calculated, labels, metrics = calculate(derived_id=derived_id, direction=event["direction"],
+        entry=entry, bars=bars, observed_at=now, policy=policy)
+    shared = {"adapter_version": adapter_version, "entry_policy_version": policy["entry_version"],
+        "source_scope": policy["scope"], "record_mode": "DERIVED",
         "source_event_id": event["event_id"], "event_id": event["event_id"],
         "derived_measurement_id": derived_id, "source_sha256": digest,
         "live_union_eligible": False, "formula_relevance": "NOT_EVALUATED",
@@ -119,11 +138,11 @@ def derive_measurement(event, membership, path_result, *, observed_at):
     output = {**shared, "original_event": source_record(event), "original_btc_membership": membership,
         "entry_time_utc": entry, "entry_price": calculated.get("entry_price"),
         "original_reference_price": event["current_price"], "observed_at_utc": now,
-        "price_source_contract": dict(archive.SOURCE),
+        "price_source_contract": dict(policy["source"]),
         "calculation_status": calculated["calculation_status"].replace("64_LABELS", "32_LABELS"),
         "entry_delay_seconds": (entry - _utc(event["alert_time_utc"])).total_seconds()}
     normal_labels = [{**label, **shared} for label in labels if label["signal_variant"] == "NORMAL"]
-    normal_metrics = [{**metric, **shared, "method_version": METRIC_VERSION}
+    normal_metrics = [{**metric, **shared, "method_version": policy["metric_version"]}
         for metric in metrics if metric["signal_variant"] == "NORMAL"]
     output["window_coverage"] = {str(metric["window_minutes"]): {
         "path_samples": metric["path_samples"],
@@ -144,17 +163,22 @@ def write_measurement(conn, measurement):
     """Atomically persist an idempotent refresh without source changes or regression."""
     event = measurement["event"]
     event_id = event["event_id"]
+    adapter_version = event["adapter_version"]
+    policy = _settings(adapter_version)
+    tables = policy["table_prefix"]
+    if event.get("source_scope") != policy["scope"] or event.get("price_source_contract") != policy["source"]:
+        raise ValueError("Derived persistence source policy mismatch")
     with conn.transaction():
         # Serializes two invocations for this original event, including first insert.
         conn.execute("SELECT pg_advisory_xact_lock(1942808,%s)", (event_id,))
         current = _load(conn, [event_id])
         if not current or source_digest(current[0]) != event["source_sha256"]:
-            raise ValueError("Native source changed while its MARK path was fetched")
+            raise ValueError("Native source changed while its futures path was fetched")
         if canonical(current[0].get("btc_membership")) != canonical(event["original_btc_membership"]):
-            raise ValueError("BTC membership changed while its MARK path was fetched; retry")
-        old = conn.execute("""SELECT source_sha256, observed_at_utc, measurement_payload
-            FROM research_native_hype_mark_measurements WHERE event_id=%s AND adapter_version=%s""",
-            (event_id, ADAPTER_VERSION)).fetchone()
+            raise ValueError("BTC membership changed while its futures path was fetched; retry")
+        old = conn.execute(f"""SELECT source_sha256, observed_at_utc, measurement_payload
+            FROM {tables}_measurements WHERE event_id=%s AND adapter_version=%s""",
+            (event_id, adapter_version)).fetchone()
         if old:
             if old["source_sha256"] != event["source_sha256"]:
                 raise ValueError("Derived source identity is immutable")
@@ -162,7 +186,7 @@ def write_measurement(conn, measurement):
                 return False
             previous_entry = old["measurement_payload"].get("entry_price")
             if previous_entry is not None and previous_entry != event["entry_price"]:
-                raise ValueError("A refresh cannot change or erase its frozen MARK entry")
+                raise ValueError(f"A refresh cannot change or erase its frozen {policy['label']} entry")
             old_parent = old["measurement_payload"].get("btc_parent_movement_id")
             if old_parent is not None and old_parent != event["btc_parent_movement_id"]:
                 raise ValueError("A refresh cannot reassign its original BTC wave")
@@ -174,48 +198,51 @@ def write_measurement(conn, measurement):
                     return False
             incoming_labels = {(row["window_minutes"], row["threshold_bps"]): row
                 for row in measurement["outcomes"]}
-            for previous in conn.execute("""SELECT window_minutes,threshold_bps,outcome_payload
-                FROM research_native_hype_mark_outcomes WHERE event_id=%s AND adapter_version=%s
-                AND status IN ('SUCCESS','FAILURE','UNRESOLVED')""", (event_id, ADAPTER_VERSION)).fetchall():
+            for previous in conn.execute(f"""SELECT window_minutes,threshold_bps,outcome_payload
+                FROM {tables}_outcomes WHERE event_id=%s AND adapter_version=%s
+                AND status IN ('SUCCESS','FAILURE','UNRESOLVED')""", (event_id, adapter_version)).fetchall():
                 candidate = incoming_labels.get((previous["window_minutes"], previous["threshold_bps"]), {})
                 before = {key: previous["outcome_payload"].get(key) for key in TERMINAL_FIELDS}
                 after = {key: candidate.get(key) for key in TERMINAL_FIELDS}
                 if canonical(before) != canonical(after):
-                    raise ValueError("Historical MARK candles conflict with frozen terminal evidence")
+                    raise ValueError("Historical futures candles conflict with frozen terminal evidence")
             incoming_metrics = {row["window_minutes"]: row for row in measurement["metrics"]}
-            for previous in conn.execute("""SELECT window_minutes,metrics_payload
-                FROM research_native_hype_mark_metrics WHERE event_id=%s AND adapter_version=%s
-                AND status='READY'""", (event_id, ADAPTER_VERSION)).fetchall():
+            for previous in conn.execute(f"""SELECT window_minutes,metrics_payload
+                FROM {tables}_metrics WHERE event_id=%s AND adapter_version=%s
+                AND status='READY'""", (event_id, adapter_version)).fetchall():
                 candidate = incoming_metrics.get(previous["window_minutes"], {})
                 if previous["metrics_payload"].get("path_sha256") != candidate.get("path_sha256"):
-                    raise ValueError("Historical MARK candles conflict with frozen complete-window evidence")
-        conn.execute("""INSERT INTO research_native_hype_mark_measurements
+                    raise ValueError("Historical futures candles conflict with frozen complete-window evidence")
+        conn.execute(f"""INSERT INTO {tables}_measurements
             (event_id,adapter_version,source_sha256,source_event,btc_membership,observed_at_utc,measurement_payload)
             VALUES (%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s::jsonb)
             ON CONFLICT(event_id,adapter_version) DO UPDATE SET
                 btc_membership=EXCLUDED.btc_membership, observed_at_utc=EXCLUDED.observed_at_utc,
                 measurement_payload=EXCLUDED.measurement_payload, updated_at_utc=NOW()""",
-            (event_id, ADAPTER_VERSION, event["source_sha256"], canonical(event["original_event"]),
+            (event_id, adapter_version, event["source_sha256"], canonical(event["original_event"]),
              canonical(event["original_btc_membership"]), event["observed_at_utc"], canonical(event)))
         for label in measurement["outcomes"]:
-            conn.execute("""INSERT INTO research_native_hype_mark_outcomes
+            conn.execute(f"""INSERT INTO {tables}_outcomes
                 (event_id,adapter_version,window_minutes,threshold_bps,status,outcome_payload)
                 VALUES (%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT(event_id,adapter_version,window_minutes,threshold_bps)
                 DO UPDATE SET status=EXCLUDED.status,outcome_payload=EXCLUDED.outcome_payload""",
-                (event_id, ADAPTER_VERSION, label["window_minutes"], label["threshold_bps"], label["status"], canonical(label)))
+                (event_id, adapter_version, label["window_minutes"], label["threshold_bps"], label["status"], canonical(label)))
         for metric in measurement["metrics"]:
-            conn.execute("""INSERT INTO research_native_hype_mark_metrics
+            conn.execute(f"""INSERT INTO {tables}_metrics
                 (event_id,adapter_version,window_minutes,status,metrics_payload)
                 VALUES (%s,%s,%s,%s,%s::jsonb) ON CONFLICT(event_id,adapter_version,window_minutes)
                 DO UPDATE SET status=EXCLUDED.status,metrics_payload=EXCLUDED.metrics_payload""",
-                (event_id, ADAPTER_VERSION, metric["window_minutes"], metric["status"], canonical(metric)))
+                (event_id, adapter_version, metric["window_minutes"], metric["status"], canonical(metric)))
     return True
 
 
-def run(*, database_url, event_ids, observed_at=None, fetch_candles=provider.fetch_closed_candles):
+def run(*, database_url, event_ids, observed_at=None, fetch_candles=None, adapter_version=ADAPTER_VERSION):
     """Fetch at most 128 exact IDs, one <=24h public MARK request per eligible event."""
     import psycopg
     from psycopg.rows import dict_row
+    policy = _settings(adapter_version)
+    tables = policy["table_prefix"]
+    fetch_candles = fetch_candles or policy["fetch"]
     if (not isinstance(event_ids, (list, tuple)) or not 1 <= len(event_ids) <= MAX_EVENTS
         or any(type(value) is not int or value <= 0 for value in event_ids)
         or len(set(event_ids)) != len(event_ids)):
@@ -223,7 +250,7 @@ def run(*, database_url, event_ids, observed_at=None, fetch_candles=provider.fet
     now = _utc(observed_at or datetime.now(timezone.utc))
     if now > datetime.now(timezone.utc):
         raise ValueError("Observation cutoff cannot be in the future")
-    result = {"adapter_version": ADAPTER_VERSION, "observed_at_utc": now.isoformat(),
+    result = {"adapter_version": adapter_version, "observed_at_utc": now.isoformat(),
         "requested": len(event_ids), "written": 0, "labels_written": 0, "metrics_written": 0,
         "unchanged": 0, "errors": [], "measurements": [],
         "source_events_modified": 0, "native_outcomes_modified": 0}
@@ -238,8 +265,8 @@ def run(*, database_url, event_ids, observed_at=None, fetch_candles=provider.fet
                 row = by_id[event_id]
                 start = _validate_event(row)
                 cutoff = min(start + timedelta(days=1), now.replace(second=0, microsecond=0))
-                path = fetch_candles("HYPE", start, cutoff) if cutoff > start else {**archive.SOURCE, "candles": []}
-                measurement = derive_measurement(row, row.get("btc_membership"), path, observed_at=now)
+                path = fetch_candles("HYPE", start, cutoff) if cutoff > start else {**policy["source"], "candles": []}
+                measurement = derive_measurement(row, row.get("btc_membership"), path, observed_at=now, adapter_version=adapter_version)
                 if write_measurement(conn, measurement):
                     result["written"] += 1
                     result["labels_written"] += len(measurement["outcomes"])
@@ -248,8 +275,8 @@ def run(*, database_url, event_ids, observed_at=None, fetch_candles=provider.fet
                     result["unchanged"] += 1
                 # Read committed persisted state: an older or incomplete retry
                 # may intentionally retain a newer, more complete measurement.
-                saved = conn.execute("""SELECT measurement_payload FROM research_native_hype_mark_measurements
-                    WHERE event_id=%s AND adapter_version=%s""", (event_id, ADAPTER_VERSION)).fetchone()
+                saved = conn.execute(f"""SELECT measurement_payload FROM {tables}_measurements
+                    WHERE event_id=%s AND adapter_version=%s""", (event_id, adapter_version)).fetchone()
                 payload = saved["measurement_payload"]
                 ready = [int(window) for window, item in payload.get("window_coverage", {}).items()
                     if item.get("status") == "READY"]
@@ -259,10 +286,11 @@ def run(*, database_url, event_ids, observed_at=None, fetch_candles=provider.fet
                         and item.get("status") in ("READY", "OPEN") for item in coverage.values()))
                 result["measurements"].append({"event_id": event_id,
                     "calculation_status": payload["calculation_status"],
+                    "entry_time_utc": payload["entry_time_utc"],
                     "observed_at_utc": payload["observed_at_utc"], "ready_windows": sorted(ready),
                     "complete": sorted(ready) == list(archive.WINDOWS),
                     "current_prefix_complete": prefix_complete,
-                    "source_scope": SOURCE_SCOPE, "live_union_eligible": False})
+                    "source_scope": policy["scope"], "live_union_eligible": False})
             except Exception as exc:
                 result["errors"].append({"event_id": event_id, "error": str(exc)[:300]})
     return result
