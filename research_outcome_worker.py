@@ -49,6 +49,7 @@ import research_no_dwell_outcome
 import research_ordered_first_touch
 import research_common_window_metrics
 import research_common_window_metrics_store
+import research_ordered_outcome_recovery_store
 import research_session_width
 
 
@@ -1031,6 +1032,7 @@ class OutcomeMetrics:
     ordered_first_touch_sync_latest_event_id: Optional[int] = None
     ordered_first_touch_failures: int = 0
     ordered_first_touch_last_error: Optional[str] = None
+    ordered_outcome_recovery_last_summary: Optional[Dict[str, Any]] = None
     failures: int = 0
     last_run_utc: Optional[str] = None
     last_error: Optional[str] = None
@@ -2270,7 +2272,7 @@ class ResearchOutcomeWorker:
 
     @staticmethod
     def _claim_ordered_first_touch_lane(
-        conn, limit: int, *, recent: bool
+        conn, limit: int, *, recent: bool, event_ids: Optional[Sequence[int]]=None
     ) -> list[Dict[str, Any]]:
         """Lease one bounded, index-ordered share of the current request."""
         if limit <= 0:
@@ -2278,6 +2280,15 @@ class ResearchOutcomeWorker:
         observed = "research_sheet_source_timestamp(payload->'row'->>'observed_through_utc')"
         measured = "research_sheet_source_timestamp(payload->'row'->>'measurement_start_utc')"
         source_filter = f"AND {observed} IS NOT NULL" if recent else ""
+        params=[]
+        if event_ids is not None:
+            ids=sorted(set(int(value) for value in event_ids))
+            if not ids:
+                return []
+            if len(ids)>32 or ids[0]<=0:
+                raise ValueError('Requested Sheet delivery requires at most32 exact event IDs')
+            source_filter+=' AND event_id=ANY(%s::bigint[])'
+            params.append(ids)
         order = (f"{observed} DESC, {measured} DESC, " if recent else "") + (
             "next_attempt_at_utc, created_at_utc, event_id, window_minutes, threshold_bps"
         )
@@ -2331,7 +2342,7 @@ class ResearchOutcomeWorker:
                       queued.destination, queued.payload, queued.attempts,
                       queued.claim_token, queued.claimed_payload_sha256
             """,
-            (max(1, min(int(limit), _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT)),),
+            (*params,max(1, min(int(limit), _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT))),
         ).fetchall()
 
     @staticmethod
@@ -2555,9 +2566,16 @@ class ResearchOutcomeWorker:
                     connect_timeout=5,
                     options="-c statement_timeout=15000 -c lock_timeout=1000",
                 ) as conn:
-                    claimed = self._claim_ordered_first_touch_outbox(
-                        conn, request_limit
-                    )
+                    claimed=[]
+                    recovery_ready=research_ordered_outcome_recovery_store.available(conn)
+                    if recovery_ready:
+                        requested_ids=research_ordered_outcome_recovery_store.delivery_ids(conn)
+                        if requested_ids:
+                            claimed=self._claim_ordered_first_touch_lane(conn,
+                                research_ordered_outcome_recovery_store.delivery_budget(conn,request_limit),
+                                recent=False,event_ids=requested_ids)
+                    if len(claimed)<request_limit:
+                        claimed+=self._claim_ordered_first_touch_outbox(conn,request_limit-len(claimed))
                 if not claimed:
                     break
                 summary["claimed"] += len(claimed)
@@ -2585,6 +2603,8 @@ class ResearchOutcomeWorker:
                             else "Google Sheets webhook did not confirm delivery"
                         ),
                     )
+                    if recovery_ready and delivered:
+                        research_ordered_outcome_recovery_store.delivery_ids(conn)
                 summary["synced" if delivered else "failed"] += finished
                 if delivered and finished == len(claimed):
                     self._record_ordered_sync_freshness(claimed)
@@ -2609,6 +2629,14 @@ class ResearchOutcomeWorker:
             "common_window_checked": 0,
             "common_window_path_failures": 0,
             "common_window_schema_missing": 0,
+            "recovery_intake": 0,
+            "recovery_checked": 0,
+            "recovery_complete": 0,
+            "recovery_open": 0,
+            "recovery_retry": 0,
+            "recovery_blocked": 0,
+            "recovery_derived_open": 0,
+            "recovery_supplemented": 0,
         }
         now = datetime.now(timezone.utc)
         latest_closed_cutoff = _latest_closed_candle_cutoff(now)
@@ -2618,10 +2646,17 @@ class ResearchOutcomeWorker:
             connect_timeout=5,
             options="-c statement_timeout=15000 -c lock_timeout=1000",
         ) as conn:
-            events = self._load_ordered_first_touch_due_events(
-                conn, event_limit
-            )
             metrics_available = research_common_window_metrics_store.available(conn)
+            recovery_available = research_ordered_outcome_recovery_store.available(conn)
+            requested = []
+            if recovery_available and metrics_available:
+                summary['recovery_intake'] = research_ordered_outcome_recovery_store.intake(
+                    conn, now=now, backfill_days=_ORDERED_FIRST_TOUCH_BACKFILL_DAYS)
+                requested = research_ordered_outcome_recovery_store.load_due(conn,
+                    limit=research_ordered_outcome_recovery_store.next_requested_budget(conn,event_limit))
+            ordinary_capacity = max(0,event_limit-len(requested))
+            ordinary = self._load_ordered_first_touch_due_events(conn,ordinary_capacity) if ordinary_capacity else []
+            events = research_ordered_outcome_recovery_store.combine(requested,ordinary,limit=event_limit)
             if metrics_available:
                 research_common_window_metrics_store.seed_bounded_history(conn)
             else:
@@ -2630,6 +2665,9 @@ class ResearchOutcomeWorker:
         for raw_event in events:
             event = dict(raw_event)
             summary["checked"] += 1
+            is_requested = event.get('_recovery_requested_through') is not None
+            if is_requested:
+                summary['recovery_checked'] += 1
             event_time = _utc(event["alert_time_utc"])
             symbol = str(event.get("symbol") or "").strip().upper()
             provenance_error = _alert_reference_provenance_error(event)
@@ -2645,6 +2683,26 @@ class ResearchOutcomeWorker:
                     self._write_alert_reference_rejections(
                         conn, [{"event": event, "reason": provenance_error}]
                     )
+                    if is_requested and symbol!='HYPE':
+                        research_ordered_outcome_recovery_store.finish_error(
+                            conn,event,error=provenance_error,blocked=True)
+                        summary['recovery_blocked'] += 1
+                if is_requested and symbol=='HYPE':
+                    try:
+                        import research_native_hype_mark_supplement
+                        derived = research_native_hype_mark_supplement.run(
+                            database_url=url,event_ids=[int(event['event_id'])],observed_at=now)
+                        with psycopg.connect(url,row_factory=dict_row,connect_timeout=5,
+                                options='-c statement_timeout=15000 -c lock_timeout=1000') as conn:
+                            state=research_ordered_outcome_recovery_store.finish_derived(
+                                conn,event,result=derived,now=now)
+                        if state:
+                            summary['recovery_'+state.lower()] += 1
+                    except Exception as exc:
+                        with psycopg.connect(url,row_factory=dict_row,connect_timeout=5,
+                                options='-c statement_timeout=15000 -c lock_timeout=1000') as conn:
+                            research_ordered_outcome_recovery_store.finish_error(conn,event,error=str(exc))
+                        summary['recovery_retry'] += 1
                 continue
             try:
                 reference_price = float(event.get("current_price"))
@@ -2665,6 +2723,11 @@ class ResearchOutcomeWorker:
                     raise ValueError(path_provenance_error)
             except Exception as exc:
                 summary["path_failures"] += 1
+                if is_requested:
+                    with psycopg.connect(url,row_factory=dict_row,connect_timeout=5,
+                            options='-c statement_timeout=15000 -c lock_timeout=1000') as conn:
+                        research_ordered_outcome_recovery_store.finish_error(conn,event,error=str(exc))
+                    summary['recovery_retry'] += 1
                 print(
                     "[research-outcomes] ordered v7 path unavailable "
                     f"event={event.get('event_id')} symbol={symbol}: {exc!r}",
@@ -2735,6 +2798,10 @@ class ResearchOutcomeWorker:
                             expected_candles=expected,
                         ):
                             summary["written"] += 1
+                if is_requested:
+                    state=research_ordered_outcome_recovery_store.finish_success(conn,event,now=now)
+                    if state:
+                        summary['recovery_'+state.lower()] += 1
             # Drop the potentially 1,440-candle route before the next event.
             del full_path
 
@@ -2786,6 +2853,10 @@ class ResearchOutcomeWorker:
         except Exception as exc:
             summary["past_features_worker_failures"] = 1
             print(f"[research-outcomes] prior-price queue unavailable: {exc!r}", flush=True)
+        self.metrics.ordered_outcome_recovery_last_summary = {
+            'at_utc': now.isoformat(),
+            **{key:value for key,value in summary.items() if key.startswith('recovery_')},
+        }
         return summary
 
     def _run_common_window_due(self, url: str, *, now: datetime) -> Dict[str, int]:

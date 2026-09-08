@@ -113,6 +113,8 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent / "migrations" / "038_runtime_event_scan_bounds.sql",
     Path(__file__).resolve().parent / "migrations" / "039_ordered_first_touch_fresh_delivery.sql",
     Path(__file__).resolve().parent / "migrations" / "040_formula_scope_fairness.sql",
+    Path(__file__).resolve().parent / "migrations" / "041_ordered_outcome_recovery_queue.sql",
+    Path(__file__).resolve().parent / "migrations" / "042_native_hype_mark_supplement.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
