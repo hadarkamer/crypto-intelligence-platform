@@ -93,3 +93,36 @@ Already assigned sources are excluded before sample outcome admission. Existing
 LIVE, causal closed-bar and immutable BTC_DATA_MISSING policies are unchanged.
 Both scanners reuse migration 038 and commit cursor progress with their writes;
 neither needs a new schema migration or a larger timeout.
+
+## September 8 storage recovery and causal-history follow-up
+
+PR 12 became live at 17:54:20 UTC on September 7. Subsequent disk-full errors
+and the database's user-marked suspension at 18:53 UTC prevented consecutive
+analysis-cycle acceptance. With the user's explicit approval, the database was
+resumed and storage increased from 5 GB to 10 GB at 04:22:31 UTC on September 8.
+Compute remains Basic 256 MB, autoscaling remains disabled, and the additional
+storage costs $1.50/month. The dashboard reported 50.19% disk use afterward.
+The capture retry queue drained completely: 1,147 enqueued records were inserted
+or deduplicated, with zero queue-full drops.
+
+Actual Sheet evidence resumed: outcome `13396|60|100|ordered-first-touch-v7`
+at row 9797 recorded SUCCESS with observations through 04:22:59.999 UTC;
+formula row 3709 recorded evaluation at 04:23:49.471320 UTC. That cycle completed
+45 scopes, but the next ingestion attempt hit the old global 5,000-source
+sequence-history cap. These observations prove recovery, not consecutive-cycle
+acceptance or full historical coverage.
+
+The follow-up selects the exact union of each changed event's same-symbol,
+same-direction, half-open four-hour causal window. A named PostgreSQL cursor
+streams the metadata in 512-row pages under one SELECT snapshot; existing
+64-row JSON projection batches preserve event ID ordering and validate source
+identity and eligibility. There is no total-row truncation, gap scanning, or
+partial screen acknowledgement. The caller's transaction still rolls back all
+pending ingestion work on failure. Formula rules and evidence gates are unchanged.
+
+Regression coverage includes dense histories beyond 5,000 genuinely causal
+records, disjoint historical/live windows, precise endpoints, nonchronological
+IDs, source drift, cursor cleanup and transaction rollback. Actual PostgreSQL
+tests also exercise concurrent source insertion and delayed delivery admission.
+Production acceptance still requires consecutive completed analysis cycles and
+their corresponding updates in the actual Sheet after this follow-up deploys.

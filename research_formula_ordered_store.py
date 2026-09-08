@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping
+from uuid import uuid4
 import research_formula_ordered_v7 as evaluator
 import research_sheet_outbox
 import research_ordered_question_catalog as questions
@@ -145,40 +146,62 @@ ORDER BY e.event_id
 
 
 def load_sequence_history(conn:Any,changed:Mapping[int,Mapping[str,Any]])->tuple[list[dict[str,Any]],dict[str,int]]:
-    """Keep the original source bound; project only causally relevant history."""
-    stats={'sequence_source_rows':0,'sequence_projected_rows':0,'sequence_projection_batches':0}
+    """Read the complete causal union in bounded pages, before any screen ACK.
+
+    Historical replay and live intake can be days apart. The gap between
+    their four-hour windows is not sequence evidence and must not exhaust a
+    shared source cap. A server cursor holds one metadata SELECT snapshot;
+    fetching pages neither changes that source set nor commits partial work.
+    """
+    stats={'sequence_source_rows':0,'sequence_source_pages':0,
+        'sequence_projected_rows':0,'sequence_projection_batches':0}
     if not changed: return [],stats
-    lower=min(event['alert_time_utc'] for event in changed.values())-timedelta(hours=4)
-    upper=max(event['alert_time_utc'] for event in changed.values())
-    # Select the same ordered source set as before, without detoasting JSON.
-    # Check the original global cap before removing irrelevant source rows.
-    source=conn.execute('''SELECT event_id,symbol,direction,alert_time_utc
-        FROM research_events WHERE alert_time_utc>=%s AND alert_time_utc<=%s
-          AND event_kind='ALERT' AND delivery_status='DELIVERED' AND direction IN ('LONG','SHORT')
-        ORDER BY event_id LIMIT 5001''',(lower,upper)).fetchall()
-    stats['sequence_source_rows']=len(source)
-    if len(source)>5000:
-        raise RuntimeError('bounded causal sequence source exceeded; paginate before evaluating')
     windows={}
     for event in changed.values():
         # These are the stored direction/symbol returned by _EVENT_PROJECT;
         # inverse candidate direction is assigned only after sequence capture.
-        windows.setdefault((event['symbol'],event['direction']),[]).append(event['alert_time_utc'])
-    ids=[old['event_id'] for old in source if any(
-        when-timedelta(hours=4)<=old['alert_time_utc']<when
-        for when in windows.get((old['symbol'],old['direction']),()))]
-    source_by_id={old['event_id']:old for old in source}
+        when=event['alert_time_utc']
+        windows.setdefault((event['symbol'],event['direction']),[]).append((when-timedelta(hours=4),when))
+    merged=[]
+    for (symbol,direction),intervals in sorted(windows.items()):
+        union=[]
+        for lower,upper in sorted(intervals):
+            if union and lower<=union[-1][1]:
+                union[-1]=(union[-1][0],max(union[-1][1],upper))
+            else:
+                union.append((lower,upper))
+        merged.extend((symbol,direction,lower,upper) for lower,upper in union)
+    placeholders=','.join(['(%s,%s,%s,%s)']*len(merged))
+    query='''WITH wanted(symbol,direction,lower_utc,upper_utc) AS (VALUES '''+placeholders+''')
+        SELECT e.event_id,e.symbol,e.direction,e.alert_time_utc
+        FROM wanted w JOIN research_events e
+          ON e.symbol=w.symbol AND e.direction=w.direction
+          AND e.alert_time_utc>=w.lower_utc AND e.alert_time_utc<w.upper_utc
+        WHERE e.event_kind='ALERT' AND e.delivery_status='DELIVERED'
+          AND e.direction IN ('LONG','SHORT')
+        ORDER BY e.event_id'''
     history=[]
-    for start in range(0,len(ids),64):
-        batch=ids[start:start+64]
-        projected=conn.execute('''WITH picked AS MATERIALIZED (
-            SELECT unnest(%s::bigint[]) AS event_id) '''+_EVENT_PROJECT,(batch,)).fetchall()
-        if [event['event_id'] for event in projected]!=batch or any(
-            any(event[key]!=source_by_id[event['event_id']][key]
-                for key in ('symbol','direction','alert_time_utc')) for event in projected):
-            raise RuntimeError('bounded causal sequence projection lost or changed source rows')
-        history.extend(projected)
-        stats['sequence_projection_batches']+=1
+    with conn.cursor(name='ordered_sequence_'+uuid4().hex) as source_cursor:
+        source_cursor.execute(query,tuple(value for interval in merged for value in interval))
+        while source:=source_cursor.fetchmany(512):
+            stats['sequence_source_pages']+=1
+            stats['sequence_source_rows']+=len(source)
+            source_by_id={old['event_id']:old for old in source}
+            ids=[old['event_id'] for old in source]
+            if len(source_by_id)!=len(ids) or ids!=sorted(ids) or (history and ids[0]<=history[-1]['event_id']):
+                raise RuntimeError('bounded causal sequence source order changed')
+            for start in range(0,len(ids),64):
+                batch=ids[start:start+64]
+                projected=conn.execute('''WITH picked AS MATERIALIZED (
+                    SELECT unnest(%s::bigint[]) AS event_id) '''+_EVENT_PROJECT,(batch,)).fetchall()
+                if [event['event_id'] for event in projected]!=batch or any(
+                    any(event[key]!=source_by_id[event['event_id']][key]
+                        for key in ('symbol','direction','alert_time_utc'))
+                    or event['event_kind']!='ALERT' or event['delivery_status']!='DELIVERED'
+                    for event in projected):
+                    raise RuntimeError('bounded causal sequence projection lost or changed source rows')
+                history.extend(projected)
+                stats['sequence_projection_batches']+=1
     stats['sequence_projected_rows']=len(history)
     return history,stats
 
