@@ -68,6 +68,43 @@ class RecoveryTests(unittest.TestCase):
         for invalid in ([],[0],range(1,1002)):
             with self.assertRaises(ValueError):store.normalize_ids(invalid)
 
+    def test_bounded_capacity_reserves_half_for_ordinary_work(self):
+        for cap in (2,8,32,64,1000):
+            requested_cap=store.next_requested_budget(None,cap)
+            effective=min(cap,64)
+            self.assertEqual(requested_cap,effective//2)
+            requested=[{'event_id':i,'_recovery_requested_through':START}
+                for i in range(1,requested_cap+1)]
+            ordinary=[{'event_id':i+100} for i in range(effective-requested_cap)]
+            selected=store.combine(requested,ordinary,limit=effective)
+            self.assertEqual(len(selected),effective)
+            self.assertEqual(sum('_recovery_requested_through' not in row for row in selected),
+                effective-requested_cap)
+
+    def test_open_refresh_obeys_cadence_and_actual_entry_boundaries(self):
+        self.assertEqual(store.next_open_refresh_at(START,START+timedelta(minutes=5)),
+            START+timedelta(minutes=35))
+        for horizon in store.WINDOWS:
+            boundary=START+timedelta(minutes=horizon)
+            self.assertEqual(store.next_open_refresh_at(START,boundary-timedelta(milliseconds=1)),boundary)
+            self.assertEqual(store.next_open_refresh_at(START,boundary),boundary+timedelta(minutes=30))
+        # HYPE enters at the next full minute, not at the immutable alert's seconds.
+        derived_entry=START.replace(second=0,microsecond=0)+timedelta(minutes=1)
+        original_boundary=START+timedelta(minutes=60)
+        self.assertEqual(store.next_open_refresh_at(derived_entry,original_boundary),
+            derived_entry+timedelta(minutes=60))
+
+    def test_v7_pass_capacity_is_independent_of_legacy_closed_limit(self):
+        import research_outcome_worker as worker
+        class EndAfterOrderedPass(Exception):pass
+        service=worker.ResearchOutcomeWorker()
+        with patch.object(worker,'_ENABLED',True), patch.object(worker,'_database_url',return_value='test'), \
+                patch.object(worker,'_ORDERED_FIRST_TOUCH_EVENT_LIMIT',32), \
+                patch.object(worker,'psycopg',SimpleNamespace(connect=lambda *a,**k:(_ for _ in ()).throw(EndAfterOrderedPass()))), \
+                patch.object(service,'_run_ordered_first_touch_once',return_value={}) as ordered:
+            with self.assertRaises(EndAfterOrderedPass):service.run_once(limit_per_horizon=8)
+            ordered.assert_called_once_with('test',event_limit=32)
+
     def test_matured_open_v7_cannot_be_called_complete(self):
         now=START+timedelta(days=2)
         labels,metrics=grid(now=now)
@@ -80,7 +117,8 @@ class RecoveryTests(unittest.TestCase):
             def execute(self,query,params=()):return SimpleNamespace(fetchone=lambda:{'event_id':1})
         item={'event_id':1,'calculation_status':'RETRY_INCOMPLETE_PATH','complete':False,
             'current_prefix_complete':True,'source_scope':'DERIVED_NATIVE_HYPE_MARK',
-            'live_union_eligible':False,'observed_at_utc':now}
+            'live_union_eligible':False,'observed_at_utc':now,
+            'entry_time_utc':START.replace(second=0)+timedelta(minutes=1)}
         self.assertEqual(store.finish_derived(Connection(),event,result={'measurements':[item]},now=now),'DERIVED_OPEN')
         item['observed_at_utc']=now-timedelta(minutes=1)
         self.assertEqual(store.finish_derived(Connection(),event,result={'measurements':[item]},now=now),'RETRY')
@@ -89,9 +127,29 @@ class RecoveryTests(unittest.TestCase):
         item['ready_windows']=list(store.WINDOWS)
         self.assertEqual(store.finish_derived(Connection(),event,result={'measurements':[item]},now=now),'SUPPLEMENTED')
 
+    def test_derived_refresh_waits_for_derived_horizon_and_retry_keeps_backoff(self):
+        now=START+timedelta(minutes=60)
+        event={'event_id':1,'_recovery_requested_through':now,'alert_time_utc':START}
+        class Connection:
+            def execute(self,query,params=()):
+                self.params=params
+                return SimpleNamespace(fetchone=lambda:{'event_id':1})
+        entry=START.replace(second=0,microsecond=0)+timedelta(minutes=1)
+        item={'event_id':1,'calculation_status':'RETRY_INCOMPLETE_PATH','complete':False,
+            'current_prefix_complete':True,'source_scope':'DERIVED_NATIVE_HYPE_PERP',
+            'live_union_eligible':False,'observed_at_utc':now,'entry_time_utc':entry}
+        conn=Connection()
+        self.assertEqual(store.finish_derived(conn,event,result={'measurements':[item]},now=now,
+            expected_source_scope='DERIVED_NATIVE_HYPE_PERP'),'DERIVED_OPEN')
+        self.assertEqual(conn.params[-3],entry+timedelta(minutes=60))
+        del item['entry_time_utc']
+        self.assertEqual(store.finish_derived(conn,event,result={'measurements':[item]},now=now,
+            expected_source_scope='DERIVED_NATIVE_HYPE_PERP'),'RETRY')
+        self.assertEqual(conn.params[-3],now+timedelta(minutes=15))
+
     def test_worker_hype_branch_calls_actual_keyword_only_adapter_contract(self):
         import research_outcome_worker as worker
-        import research_native_hype_mark_supplement as hype
+        import research_native_hype_perp_supplement as hype
         import research_ordered_inverse_worker as inverse
         import research_past_price_features_worker as past
         import research_common_window_metrics_store as common
@@ -106,9 +164,10 @@ class RecoveryTests(unittest.TestCase):
             stack.enter_context(patch.object(worker,'psycopg',SimpleNamespace(connect=lambda *a,**k:Connection())))
             for module,name,value in ((common,'available',True),(common,'seed_bounded_history',0),
                 (store,'available',True),(store,'intake',1),(store,'next_requested_budget',1),
-                (store,'load_due',[event]),(store,'finish_derived','DERIVED_OPEN'),
+                (store,'load_due',[event]),
                 (inverse,'run_pending',{}),(past,'run_pending',{})):
                 stack.enter_context(patch.object(module,name,return_value=value))
+            finish=stack.enter_context(patch.object(store,'finish_derived',return_value='DERIVED_OPEN'))
             stack.enter_context(patch.object(service,'_write_alert_reference_rejections',return_value=1))
             stack.enter_context(patch.object(service,'_run_common_window_due',return_value={}))
             stack.enter_context(patch.object(service,'_drain_ordered_first_touch_outbox',return_value={'synced':0,'failed':0}))
@@ -119,7 +178,34 @@ class RecoveryTests(unittest.TestCase):
             adapter.assert_called_once()
             self.assertEqual(adapter.call_args.kwargs['database_url'],'test')
             self.assertEqual(adapter.call_args.kwargs['event_ids'],[1])
+            self.assertEqual(finish.call_args.kwargs['expected_source_scope'],'DERIVED_NATIVE_HYPE_PERP')
             native.assert_not_called()
+            health=service.status()
+            self.assertEqual(health['ordered_outcome_recovery_open_refresh_minutes'],30)
+            self.assertEqual(health['ordered_outcome_recovery_retry_minutes'],15)
+            self.assertGreaterEqual(health['metrics']['ordered_first_touch_last_pass_duration_seconds'],0)
+
+    def test_derived_source_contract_is_exact_and_not_a_canonical_ack(self):
+        now=START+timedelta(days=2)
+        event={'event_id':1,'_recovery_requested_through':now}
+        class Connection:
+            def __init__(self):self.calls=[]
+            def execute(self,query,params=()):
+                self.calls.append((query,params))
+                return SimpleNamespace(fetchone=lambda:{'event_id':1})
+        item={'event_id':1,'calculation_status':'COMPLETE_32_LABELS','complete':True,
+            'current_prefix_complete':True,'source_scope':'DERIVED_NATIVE_HYPE_PERP',
+            'live_union_eligible':False,'observed_at_utc':now,'ready_windows':list(store.WINDOWS)}
+        conn=Connection()
+        self.assertEqual(store.finish_derived(conn,event,result={'measurements':[item]},now=now,
+            expected_source_scope='DERIVED_NATIVE_HYPE_PERP'),'SUPPLEMENTED')
+        self.assertIn('DERIVED_NATIVE_HYPE_PERP:1',conn.calls[-1][1])
+        self.assertTrue(all('research_ordered_first_touch_outcomes' not in query for query,_ in conn.calls))
+        self.assertEqual(store.finish_derived(conn,event,result={'measurements':[item]},now=now,
+            expected_source_scope='DERIVED_NATIVE_HYPE_MARK'),'BLOCKED')
+        with self.assertRaises(ValueError):
+            store.finish_derived(conn,event,result={'measurements':[item]},now=now,
+                expected_source_scope='UNKNOWN_PRICE_SOURCE')
 
 
 DSN=os.environ.get('TEST_DATABASE_URL') or os.environ.get('RESEARCH_TEST_POSTGRES_URL')

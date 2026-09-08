@@ -69,7 +69,7 @@ _ORDERED_FIRST_TOUCH_EVENT_LIMIT = max(
     1,
     min(
         64,
-        int(os.getenv("RESEARCH_ORDERED_FIRST_TOUCH_EVENT_LIMIT", "8")),
+        int(os.getenv("RESEARCH_ORDERED_FIRST_TOUCH_EVENT_LIMIT", "32")),
     ),
 )
 _ORDERED_FIRST_TOUCH_BACKFILL_DAYS = max(
@@ -1033,6 +1033,7 @@ class OutcomeMetrics:
     ordered_first_touch_failures: int = 0
     ordered_first_touch_last_error: Optional[str] = None
     ordered_outcome_recovery_last_summary: Optional[Dict[str, Any]] = None
+    ordered_first_touch_last_pass_duration_seconds: Optional[float] = None
     failures: int = 0
     last_run_utc: Optional[str] = None
     last_error: Optional[str] = None
@@ -1067,6 +1068,8 @@ class ResearchOutcomeWorker:
             "ordered_first_touch_event_limit": (
                 _ORDERED_FIRST_TOUCH_EVENT_LIMIT
             ),
+            "ordered_outcome_recovery_open_refresh_minutes": research_ordered_outcome_recovery_store.OPEN_REFRESH_MINUTES,
+            "ordered_outcome_recovery_retry_minutes": research_ordered_outcome_recovery_store.RETRY_MINUTES,
             "ordered_first_touch_backfill_days": (
                 _ORDERED_FIRST_TOUCH_BACKFILL_DAYS
             ),
@@ -2616,8 +2619,10 @@ class ResearchOutcomeWorker:
 
     def _run_ordered_first_touch_locked(
         self, url: str, *, event_limit: int
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """Calculate and export v7 while the caller owns the pass lock."""
+        started = time.monotonic()
+        event_limit = max(1,min(int(event_limit),64))
         summary = {
             "checked": 0,
             "written": 0,
@@ -2689,13 +2694,14 @@ class ResearchOutcomeWorker:
                         summary['recovery_blocked'] += 1
                 if is_requested and symbol=='HYPE':
                     try:
-                        import research_native_hype_mark_supplement
-                        derived = research_native_hype_mark_supplement.run(
+                        import research_native_hype_perp_supplement
+                        derived = research_native_hype_perp_supplement.run(
                             database_url=url,event_ids=[int(event['event_id'])],observed_at=now)
                         with psycopg.connect(url,row_factory=dict_row,connect_timeout=5,
                                 options='-c statement_timeout=15000 -c lock_timeout=1000') as conn:
                             state=research_ordered_outcome_recovery_store.finish_derived(
-                                conn,event,result=derived,now=now)
+                                conn,event,result=derived,now=now,
+                                expected_source_scope=research_native_hype_perp_supplement.SOURCE_SCOPE)
                         if state:
                             summary['recovery_'+state.lower()] += 1
                     except Exception as exc:
@@ -2855,8 +2861,12 @@ class ResearchOutcomeWorker:
             print(f"[research-outcomes] prior-price queue unavailable: {exc!r}", flush=True)
         self.metrics.ordered_outcome_recovery_last_summary = {
             'at_utc': now.isoformat(),
+            'event_limit': event_limit,
             **{key:value for key,value in summary.items() if key.startswith('recovery_')},
         }
+        duration=round(time.monotonic()-started,3)
+        self.metrics.ordered_first_touch_last_pass_duration_seconds=duration
+        summary['duration_seconds']=duration
         return summary
 
     def _run_common_window_due(self, url: str, *, now: datetime) -> Dict[str, int]:
@@ -2901,7 +2911,7 @@ class ResearchOutcomeWorker:
 
     def _run_ordered_first_touch_once(
         self, url: str, *, event_limit: int
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """Run one bounded cross-process single-writer v7 pass.
 
         The dedicated PostgreSQL session stays open through calculation,
@@ -3169,10 +3179,7 @@ class ResearchOutcomeWorker:
         try:
             ordered_summary = self._run_ordered_first_touch_once(
                 url,
-                event_limit=min(
-                    int(limit_per_horizon),
-                    _ORDERED_FIRST_TOUCH_EVENT_LIMIT,
-                ),
+                event_limit=_ORDERED_FIRST_TOUCH_EVENT_LIMIT,
             )
             self.metrics.ordered_first_touch_last_error = None
         except Exception as exc:

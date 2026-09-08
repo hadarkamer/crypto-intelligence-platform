@@ -8,6 +8,16 @@ from research_common_window_metrics import WINDOWS, utc, METHOD_VERSION as COMMO
 
 V7 = 'ordered-first-touch-v7'
 THRESHOLDS = (25, 50, 75, 100, 125, 150, 175, 200)
+OPEN_REFRESH_MINUTES = 30
+RETRY_MINUTES = 15
+
+
+def next_open_refresh_at(entry_time: datetime, now: datetime) -> datetime:
+    """Refresh the current prefix within 30m and at each actual entry horizon."""
+    start, clock = utc(entry_time), utc(now)
+    due = clock + timedelta(minutes=OPEN_REFRESH_MINUTES)
+    return min([due] + [end for window in WINDOWS
+        if (end := start + timedelta(minutes=window)) > clock])
 
 
 def available(conn) -> bool:
@@ -194,17 +204,23 @@ def finish_success(conn, event: Mapping, *, now: datetime) -> str | None:
         (event_id,COMMON_VERSION)).fetchall()
     state=coverage_state(event,outcomes,common,now=now)
     error='Canonical 32-label / 4-window coverage is incomplete' if state=='RETRY' else None
+    next_attempt = (next_open_refresh_at(event['alert_time_utc'],now) if state=='OPEN'
+        else utc(now)+timedelta(minutes=RETRY_MINUTES))
     row=conn.execute("""UPDATE research_ordered_outcome_recovery SET status=%s,
         attempts=attempts+1,last_error=%s,sheet_pending=TRUE,
         refreshed_through_utc=CASE WHEN %s IN ('OPEN','COMPLETE') THEN %s ELSE refreshed_through_utc END,
-        next_attempt_at_utc=NOW()+INTERVAL '15 minutes',updated_at_utc=NOW()
+        next_attempt_at_utc=%s,updated_at_utc=NOW()
         WHERE event_id=%s AND requested_through_utc=%s RETURNING event_id""",
-        (state,error,state,utc(now),event_id,token)).fetchone()
+        (state,error,state,utc(now),next_attempt,event_id,token)).fetchone()
     return state if row else None
 
 
-def finish_derived(conn,event: Mapping,*,result: Mapping,now: datetime) -> str | None:
-    """A MARK supplement never ACKs the canonical Spot evidence grid."""
+def finish_derived(conn,event: Mapping,*,result: Mapping,now: datetime,
+                   expected_source_scope: str='DERIVED_NATIVE_HYPE_MARK') -> str | None:
+    """An explicit derived contract never ACKs canonical Spot evidence."""
+    allowed_scopes={'DERIVED_NATIVE_HYPE_MARK','DERIVED_NATIVE_HYPE_PERP'}
+    if expected_source_scope not in allowed_scopes:
+        raise ValueError('Unsupported HYPE supplement source contract')
     event_id=int(event['event_id'])
     measurements=[row for row in result.get('measurements',[]) if int(row.get('event_id',0))==event_id]
     if not measurements:
@@ -212,7 +228,7 @@ def finish_derived(conn,event: Mapping,*,result: Mapping,now: datetime) -> str |
         finish_error(conn,event,error=error)
         return 'RETRY'
     measurement=measurements[0]
-    if (measurement.get('source_scope')!='DERIVED_NATIVE_HYPE_MARK'
+    if (measurement.get('source_scope')!=expected_source_scope
             or measurement.get('live_union_eligible') is not False):
         finish_error(conn,event,error='HYPE supplement source contract mismatch',blocked=True)
         return 'BLOCKED'
@@ -226,15 +242,21 @@ def finish_derived(conn,event: Mapping,*,result: Mapping,now: datetime) -> str |
     if (state=='DERIVED_OPEN' and measured_at.replace(second=0,microsecond=0)
             < utc(now).replace(second=0,microsecond=0)):
         state='RETRY'
+    entry_time=measurement.get('entry_time_utc')
+    if state=='DERIVED_OPEN' and not entry_time:
+        state='RETRY'
+    next_attempt=(next_open_refresh_at(entry_time,now) if state=='DERIVED_OPEN'
+        else utc(now)+timedelta(minutes=RETRY_MINUTES))
     row=conn.execute("""UPDATE research_ordered_outcome_recovery SET status=%s,
         attempts=attempts+1,
         refreshed_through_utc=CASE WHEN %s IN ('DERIVED_OPEN','SUPPLEMENTED') THEN %s ELSE refreshed_through_utc END,
         derivation_reference=%s,last_error=%s,
-        next_attempt_at_utc=NOW()+INTERVAL '15 minutes',updated_at_utc=NOW()
+        next_attempt_at_utc=%s,updated_at_utc=NOW()
         WHERE event_id=%s AND requested_through_utc=%s RETURNING event_id""",
-        (state,state,measured_at,'DERIVED_NATIVE_HYPE_MARK:'+str(event_id),
-         'Native Spot provenance unavailable; isolated MARK supplement only' if state!='RETRY'
-         else 'Isolated MARK supplement path is incomplete',event_id,event['_recovery_requested_through'])).fetchone()
+        (state,state,measured_at,expected_source_scope+':'+str(event_id),
+         'Native Spot provenance unavailable; isolated '+expected_source_scope+' supplement only' if state!='RETRY'
+         else 'Isolated '+expected_source_scope+' supplement path is incomplete',
+         next_attempt,event_id,event['_recovery_requested_through'])).fetchone()
     return state if row else None
 
 
