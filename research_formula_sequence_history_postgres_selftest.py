@@ -124,10 +124,10 @@ class SequenceHistoryPostgreSQLTests(unittest.TestCase):
             SELECT id,'test',%s,'MAGNET_ALERT',%s,%s,%s,repeat('s',64),
                 lpad(id::text,64,'0'),'test','test','test',%s,100,101,70,%s,
                 jsonb_build_object('watch_scan_id','scan-'||id,
-                    'magnet',jsonb_build_object('side',%s),
+                    'magnet',jsonb_build_object('side',%s::text),
                     'market_evidence',jsonb_build_object('modules',jsonb_build_object(
-                        'futures_flow',jsonb_build_object('score',65,'direction',%s),
-                        'spot_flow',jsonb_build_object('score',66,'direction',%s))),
+                        'futures_flow',jsonb_build_object('score',65,'direction',%s::text),
+                        'spot_flow',jsonb_build_object('score',66,'direction',%s::text))),
                     'unused_large_payload',repeat('not-projected',100))
             FROM generate_series(%s::bigint,%s::bigint) id""",
             (kind, when or self.now - timedelta(hours=1), symbol, direction,
