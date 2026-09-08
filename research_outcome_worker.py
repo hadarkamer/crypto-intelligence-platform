@@ -1149,6 +1149,8 @@ class ResearchOutcomeWorker:
 
     async def _run(self) -> None:
         while not self._stopping:
+            started = time.monotonic()
+            delay = _POLL_SECONDS
             try:
                 await asyncio.to_thread(self.run_once)
             except asyncio.CancelledError:
@@ -1157,7 +1159,11 @@ class ResearchOutcomeWorker:
                 self.metrics.failures += 1
                 self.metrics.last_error = f"{type(exc).__name__}: {exc}"
                 print(f"[research-outcomes] run failed: {exc!r}", flush=True)
-            await asyncio.sleep(_POLL_SECONDS)
+            else:
+                # Poll successful cycles from start to start. Long cycles
+                # still yield cooperatively; failures retain the full backoff.
+                delay = max(0.0, _POLL_SECONDS - (time.monotonic() - started))
+            await asyncio.sleep(delay)
 
     @staticmethod
     def _load_frozen_threshold_references(

@@ -83,11 +83,11 @@ class RecoveryTests(unittest.TestCase):
 
     def test_open_refresh_obeys_cadence_and_actual_entry_boundaries(self):
         self.assertEqual(store.next_open_refresh_at(START,START+timedelta(minutes=5)),
-            START+timedelta(minutes=35))
+            START+timedelta(minutes=50))
         for horizon in store.WINDOWS:
             boundary=START+timedelta(minutes=horizon)
             self.assertEqual(store.next_open_refresh_at(START,boundary-timedelta(milliseconds=1)),boundary)
-            self.assertEqual(store.next_open_refresh_at(START,boundary),boundary+timedelta(minutes=30))
+            self.assertEqual(store.next_open_refresh_at(START,boundary),boundary+timedelta(minutes=45))
         # HYPE enters at the next full minute, not at the immutable alert's seconds.
         derived_entry=START.replace(second=0,microsecond=0)+timedelta(minutes=1)
         original_boundary=START+timedelta(minutes=60)
@@ -181,7 +181,7 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(finish.call_args.kwargs['expected_source_scope'],'DERIVED_NATIVE_HYPE_PERP')
             native.assert_not_called()
             health=service.status()
-            self.assertEqual(health['ordered_outcome_recovery_open_refresh_minutes'],30)
+            self.assertEqual(health['ordered_outcome_recovery_open_refresh_minutes'],45)
             self.assertEqual(health['ordered_outcome_recovery_retry_minutes'],15)
             self.assertGreaterEqual(health['metrics']['ordered_first_touch_last_pass_duration_seconds'],0)
 

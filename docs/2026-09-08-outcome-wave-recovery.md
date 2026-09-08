@@ -86,9 +86,14 @@ Neither canonical Spot nor existing MARK evidence is rewritten.
 
 The v7 capacity defaults to 32 events per pass, independently of the legacy
 eight-event limit, with half the capacity retained for ordinary work. OPEN
-refresh is due at the next fixed horizon or within 30 minutes; HYPE uses its
+refresh is scheduled at the next fixed horizon or 45 minutes later; HYPE uses its
 persisted derived entry for that boundary. Failed paths retain a 15-minute
 retry. Actual pass duration and recovery counters are exposed in health.
+
+Successful worker cycles use a 60-second minimum start-to-start interval.
+Long successful cycles yield cooperatively and immediately begin the next
+cycle; an exception retains the full 60-second post-failure backoff. This
+removes idle time without changing queue shares, measurements or delivery.
 
 The full-wave Sheet snapshot at 2026-09-08 07:21:03 UTC contains all eight
 thresholds. Wave 9 ends at 2026-09-07 15:32:59.999 UTC and active wave 10 is
