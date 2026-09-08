@@ -8,12 +8,12 @@ from research_common_window_metrics import WINDOWS, utc, METHOD_VERSION as COMMO
 
 V7 = 'ordered-first-touch-v7'
 THRESHOLDS = (25, 50, 75, 100, 125, 150, 175, 200)
-OPEN_REFRESH_MINUTES = 30
+OPEN_REFRESH_MINUTES = 45
 RETRY_MINUTES = 15
 
 
 def next_open_refresh_at(entry_time: datetime, now: datetime) -> datetime:
-    """Refresh the current prefix within 30m and at each actual entry horizon."""
+    """Schedule refresh after 45m or at an earlier actual entry horizon."""
     start, clock = utc(entry_time), utc(now)
     due = clock + timedelta(minutes=OPEN_REFRESH_MINUTES)
     return min([due] + [end for window in WINDOWS
