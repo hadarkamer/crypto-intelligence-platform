@@ -341,7 +341,8 @@ def _unavailable(event: Mapping, wave: Mapping, now: datetime, source: str, reas
 
 
 def build_report(*, waves: Iterable[Mapping], events: Iterable[Mapping], observed_at: Any,
-                 include_hype_mark: bool = False, fetcher: Callable | None = None) -> dict:
+                 include_hype_mark: bool = False, fetcher: Callable | None = None,
+                 _verified_closed_cache: Mapping | None = None) -> dict:
     now, parents = utc(observed_at), [dict(wave) for wave in waves]
     if not 0 < len(parents) <= MAX_WAVES:
         raise ValueError("Specify between 1 and 32 exact parent IDs")
@@ -360,7 +361,7 @@ def build_report(*, waves: Iterable[Mapping], events: Iterable[Mapping], observe
                 and utc(candidate["start_time_utc"]) == utc(wave["end_time_utc"])
                 for candidate in parents)
     representatives = select_representatives(event for event in events if utc(event["alert_time_utc"]) <= now)
-    records, cache = [], {}
+    records, cache = [], dict(_verified_closed_cache or {})
     for event in representatives:
         wave = by_id[event["btc_parent_movement_id"]]
         cutoff = wave_observation_cutoff(wave, now)
@@ -427,6 +428,58 @@ def build_report(*, waves: Iterable[Mapping], events: Iterable[Mapping], observe
             "This explicitly reconstructed contract does not claim to reproduce an unavailable earlier chat calculation."]}
 
 
+def refresh_report(*, previous_report: Mapping, previous_source: Mapping,
+                   waves: Iterable[Mapping], events: Iterable[Mapping], observed_at: Any,
+                   include_hype_mark: bool = False, fetcher: Callable | None = None) -> dict:
+    """Refresh open/missing paths; reuse verified unchanged complete closed paths.
+
+    The caller must reread parent metadata and the candidate source cohort.
+    Old source rows are compared with the new source before reuse. Selection
+    still happens anew before outcomes, so new earlier representatives cannot
+    be hidden by the cache. Mixed-source rows are rebuilt from their components.
+    """
+    if previous_report.get("method_version") != METHOD_VERSION:
+        raise ValueError("Cannot reuse a different full-wave report contract")
+    parents, incoming = list(waves), list(events)
+    old_events = {int(e["event_id"]): e for e in previous_source["events"]}
+    new_events = {int(e["event_id"]): e for e in incoming}
+    old_waves = {w["btc_parent_movement_id"]: w for w in previous_source["waves"]}
+    new_waves = {w["btc_parent_movement_id"]: w for w in parents}
+    fields = ("event_id", "event_kind", "event_type", "symbol", "direction", "score", "current_price",
+        "delivery_status", "engine_snapshot", "event_fingerprint", "strategy_version", "code_version",
+        "membership_status", "membership_policy_version", "membership_parent_id")
+    def signature(event):
+        value = {field: event.get(field) for field in fields}
+        value.update({field: utc(event[field]).isoformat() if event.get(field) else None
+            for field in ("alert_time_utc", "decision_time_utc", "btc_observed_close_utc")})
+        return json.dumps(value, default=_json_default, sort_keys=True, allow_nan=False)
+    cache = {}
+    for row in previous_report["records"]:
+        event_id, wave_id = int(row["source_event_id"]), row["btc_parent_movement_id"]
+        if (row["source_scope"] not in {SPOT_SCOPE, MARK_SCOPE} or row["status"] != "READY"
+                or not row.get("path_complete") or not row.get("observation_closed")
+                or event_id not in old_events or event_id not in new_events
+                or wave_id not in old_waves or wave_id not in new_waves):
+            continue
+        before, after = old_waves[wave_id], new_waves[wave_id]
+        if (signature(old_events[event_id]) != signature(new_events[event_id])
+                or any(before.get(key) != after.get(key) for key in (
+                    "episode_policy_version", "start_time_utc", "end_time_utc", "evidence_eligible", "boundary_reason"))
+                or not after.get("end_time_utc")
+                or utc(after["end_time_utc"]) > utc(observed_at)):
+            continue
+        verified = any(p.get("episode_policy_version") == POLICY_VERSION and p.get("evidence_eligible") is True
+            and p.get("boundary_reason") == "CAUSAL_CLOSE_REVERSAL"
+            and utc(p["start_time_utc"]) == utc(after["end_time_utc"]) for p in parents)
+        if verified:
+            cache[(row["source_scope"], event_id)] = {**row, "closing_boundary_verified": True,
+                "source_reverified_at_utc": utc(observed_at)}
+    result = build_report(waves=parents, events=incoming, observed_at=observed_at,
+        include_hype_mark=include_hype_mark, fetcher=fetcher, _verified_closed_cache=cache)
+    result["reused_complete_closed_source_paths"] = len(cache)
+    return result
+
+
 def load_source(conn: Any, wave_ids: list[str]) -> tuple[list[dict], list[dict]]:
     """Read a bounded cohort in the caller's read-only repeatable-read snapshot."""
     if not 0 < len(set(wave_ids)) <= MAX_WAVES or len(set(wave_ids)) != len(wave_ids):
@@ -472,6 +525,8 @@ def main() -> None:
     parser.add_argument("--input", "--input-json", help="Optional JSON containing waves/events instead of readonly PostgreSQL")
     parser.add_argument("--observed-at", required=True, help="Explicit timezone-aware report cutoff")
     parser.add_argument("--include-hype-mark", action="store_true")
+    parser.add_argument("--previous-report", help="Reuse verified unchanged closed paths from this JSON report")
+    parser.add_argument("--previous-source", help="Original waves/events JSON for strict source comparison")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.input:
@@ -493,8 +548,12 @@ def main() -> None:
                 options="-c default_transaction_read_only=on -c statement_timeout=15000 -c lock_timeout=1000") as conn:
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             waves, events = load_source(conn, args.wave_id)
-    result = build_report(waves=waves, events=events, observed_at=args.observed_at,
-                          include_hype_mark=args.include_hype_mark)
+    if bool(args.previous_report) != bool(args.previous_source):
+        raise ValueError("Refresh requires both --previous-report and --previous-source")
+    kwargs = dict(waves=waves, events=events, observed_at=args.observed_at,
+                  include_hype_mark=args.include_hype_mark)
+    result = refresh_report(previous_report=json.loads(Path(args.previous_report).read_text()),
+        previous_source=json.loads(Path(args.previous_source).read_text()), **kwargs) if args.previous_report else build_report(**kwargs)
     output = Path(args.output)
     output.write_text(json.dumps(result, default=_json_default, ensure_ascii=False,
                                   indent=2, allow_nan=False) + "\n")

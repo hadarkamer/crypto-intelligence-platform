@@ -156,12 +156,40 @@ def check_real_hype_adapter_and_mixed_contract():
     assert result["fixed_horizon_outcomes_modified"] is False
 
 
+def check_refresh_reuses_only_verified_unchanged_closed_paths():
+    first_wave = wave()
+    second_wave = {**wave("second"), "start_time_utc": first_wave["end_time_utc"], "end_time_utc": None,
+                   "observed_through_utc": START + timedelta(minutes=90) - report.MILLISECOND}
+    events = [event(), event(2, seconds=3610, wave_id="second")]
+    parents = [first_wave, second_wave]
+    calls = []
+    def fetch(symbol, start, end):
+        calls.append(start)
+        first_i = int((start - START) // report.MINUTE)
+        count = int((end + report.MILLISECOND - start) // report.MINUTE)
+        return {**ROUTE, "candles": [candle(first_i+i, high=101., low=99.5) for i in range(count)]}
+    old = report.build_report(waves=parents, events=events, observed_at=START+timedelta(minutes=90), fetcher=fetch)
+    assert len(calls) == 2
+    fresh_parents = [first_wave, {**second_wave, "observed_through_utc": START+timedelta(minutes=120)-report.MILLISECOND}]
+    calls.clear()
+    result = report.refresh_report(previous_report=old, previous_source={"waves": parents, "events": events},
+        waves=fresh_parents, events=events, observed_at=START+timedelta(minutes=120), fetcher=fetch)
+    assert result["reused_complete_closed_source_paths"] == 1 and len(calls) == 1
+    assert calls[0] > first_wave["end_time_utc"]
+    calls.clear()
+    changed = [{**events[0], "current_price": 100.1}, events[1]]
+    result = report.refresh_report(previous_report=old, previous_source={"waves": parents, "events": events},
+        waves=fresh_parents, events=changed, observed_at=START+timedelta(minutes=120), fetcher=fetch)
+    assert result["reused_complete_closed_source_paths"] == 0 and len(calls) == 2
+
+
 def main():
     check_full_wave_after_first_touch_and_active()
     check_complete_prefix_and_ambiguity()
     check_selection_is_pre_outcome_and_independence()
     check_fullwave_paging_beyond_provider_cap()
     check_real_hype_adapter_and_mixed_contract()
+    check_refresh_reuses_only_verified_unchanged_closed_paths()
     print("PASS full-wave endpoint, active prefix, full excursions, all eight thresholds, causal selection, source separation and real HYPE derived entry")
 
 
