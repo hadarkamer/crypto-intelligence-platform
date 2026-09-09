@@ -209,6 +209,36 @@ def sheet_upserts(completed, *, evaluated_at, previous_report=None):
     return rows
 
 
+def sheet_delivery_status(conn, completed):
+    """Do not replace a report generation until its exact rows were ACKed.
+
+    The sheet/row key is the outbox primary key. The bounded read covers the
+    current 9 coin scopes x 2 directions x 8 thresholds plus withdrawals.
+    Older SYNCED rows cannot stand in for the current report digest.
+    """
+    report_hash = digest(completed)
+    expected_keys = {
+        research_sheet_outbox._json([str(summary[name]) for name in
+            ("source_scope", "coin_scope", "direction", "threshold_pct")])
+        for summary in completed.get("summary_rows", [])
+        if summary["source_scope"] == report.PERP_MIXED_SCOPE
+    }
+    rows = conn.execute("""SELECT row_key,sync_status,
+            payload->'row'->>'report_digest' AS report_digest
+        FROM research_sheet_upsert_outbox WHERE sheet_name=%s
+        ORDER BY row_key LIMIT 257""", (SHEET_NAME,)).fetchall()
+    if len(rows) > 256:
+        raise ValueError("Full-wave Sheet delivery audit exceeds its 256-row bound")
+    current = [row for row in rows if row["report_digest"] == report_hash]
+    found = {row["row_key"] for row in current}
+    missing = len(expected_keys-found)
+    pending = sum(row["sync_status"] != "SYNCED" for row in current)
+    return {"complete": missing == 0 and pending == 0,
+        "report_digest": report_hash, "expected_rows": len(expected_keys),
+        "current_generation_rows": len(current), "synced_rows": len(current)-pending,
+        "pending_rows": pending, "missing_or_other_generation_rows": missing}
+
+
 class ResearchBTCWaveReportWorker:
     def __init__(self):
         self._task = None
@@ -220,6 +250,7 @@ class ResearchBTCWaveReportWorker:
             "running": bool(self._task and not self._task.done()), "schema_ready": self._ready,
             "version": VERSION, "source_scope": report.PERP_MIXED_SCOPE,
             "refresh_minutes": _REFRESH_MINUTES, "poll_seconds": _POLL_SECONDS,
+            "refresh_policy": "AT_LEAST_15_MINUTES_AFTER_COMPLETION_AND_PREVIOUS_SHEET_GENERATION_FULLY_ACKED",
             "path_limit_per_pass": _PATHS_PER_PASS, "sheet": SHEET_NAME,
             "canonical_fixed_horizon_modified": False, **self.metrics}
 
@@ -236,6 +267,19 @@ class ResearchBTCWaveReportWorker:
                 if state is None:
                     raise RuntimeError("Full-wave report migration045 required")
                 job = state["pending_job"]
+                # A previous deployment may already have checkpointed a newer
+                # job while the old report is still being delivered. Preserve
+                # that checkpoint, but never advance it past unACKed evidence.
+                if state["report"]:
+                    delivery = sheet_delivery_status(conn, state["report"])
+                    conn.commit()
+                    if not delivery["complete"]:
+                        waiting = {"waiting_for_sheet_delivery": True, "delivery": delivery,
+                            "report_observed_at_utc": state["report_observed_at_utc"],
+                            "earliest_next_report_at_utc": state["next_report_at_utc"],
+                            "pending_job_preserved": bool(job)}
+                        self.metrics.update(last_result=waiting, last_error=None)
+                        return waiting
                 if not job:
                     if state["next_report_at_utc"] and now < state["next_report_at_utc"]:
                         return {"waiting_until": state["next_report_at_utc"].isoformat(), "report_observed_at_utc": state["report_observed_at_utc"]}

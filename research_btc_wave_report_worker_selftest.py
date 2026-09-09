@@ -52,9 +52,30 @@ def run():
     assert {r["row"]["threshold_pct"] for r in rows} == set(report.SUPPORTED_THRESHOLDS_PCT)
     assert all(r["row"]["closed_representatives"] == 1 and r["row"]["active_representatives"] == 1 for r in rows)
     assert all(r["row"]["source_digest"] == job["source_digest"] for r in rows)
+    class DeliveryRows:
+        def __init__(self, rows): self.rows = rows
+        def execute(self, sql, params):
+            assert "WHERE sheet_name=%s" in sql and "LIMIT 257" in sql
+            assert params == (worker.SHEET_NAME,)
+            return self
+        def fetchall(self): return self.rows
+    acknowledgments = [{"row_key": worker.research_sheet_outbox._json([str(item["row"][key])
+        for key in ("source_scope", "coin_scope", "direction", "threshold_pct")]),
+        "sync_status": "SYNCED", "report_digest": worker.digest(completed)} for item in rows]
+    assert worker.sheet_delivery_status(DeliveryRows(acknowledgments), completed)["complete"]
+    acknowledgments[0]["sync_status"] = "IN_FLIGHT"
+    pending = worker.sheet_delivery_status(DeliveryRows(acknowledgments), completed)
+    assert not pending["complete"] and pending["pending_rows"] == 1
+    acknowledgments[0]["sync_status"] = "SYNCED"
+    acknowledgments[0]["report_digest"] = "older-report-generation"
+    stale = worker.sheet_delivery_status(DeliveryRows(acknowledgments), completed)
+    assert not stale["complete"] and stale["missing_or_other_generation_rows"] == 1
+    missing_row = worker.sheet_delivery_status(DeliveryRows(acknowledgments[1:]), completed)
+    assert not missing_row["complete"] and missing_row["missing_or_other_generation_rows"] == 1
     # Reload a stored report: JSON timestamp types must not prevent safe
     # complete closed path reuse on the next actual DB-backed generation.
     previous = json.loads(worker.canonical(completed))
+    assert worker.digest(previous) == worker.digest(completed)
     updated = fixtures()
     updated["waves"][1]["observed_through_utc"] = START+timedelta(minutes=180)-report.MILLISECOND
     fresh = worker.prepare_job(updated, now+timedelta(hours=1), previous_report=previous,

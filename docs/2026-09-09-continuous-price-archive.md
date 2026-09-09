@@ -39,6 +39,20 @@ durable Sheet outbox. It is a separate explicit Spot + HYPE perpetual TRADE
 report. The prior `MaxPain_Wave_Recovery` tab remains the dated MARK snapshot;
 neither version silently changes the source contract of the other.
 
+Reports are eligible for another refresh 15 minutes after completion. A new
+generation waits until every row of the preceding generation has an exact
+delivery acknowledgement. While a wave report is pending, three of every four
+bounded eight-row delivery turns serve it; the fourth continues the ordinary
+sheet rotation. An empty wave queue returns its capacity to ordinary delivery.
+This prevents a report being continuously replaced before the workbook can
+receive it, while preserving progress for other sheets.
+
+The complete source population begins September 4 in Israel, with an explicit
+32-parent bound. Exceeding that bound stops publication instead of silently
+discarding older waves. The dated MARK snapshot and the live perpetual TRADE
+report retain separate HYPE evidence. Unavailable old HYPE prices can still
+block a headline even after all recoverable minute gaps are filled.
+
 Probability uses decided outcomes only. Asymmetry in this full-wave contract
 is the ratio of summed full-path favorable/adverse excursions on the same
 complete cohort; it is not a separately selected cohort per threshold. BTC
@@ -56,3 +70,14 @@ Acceptance checks: immutable-source/gap/restart tests, real PostgreSQL tests,
 exact deployed commit, minute archive continuity and latest-tail advancement,
 explicit unavailable historical HYPE range, full report generation plus Sheet
 acknowledgement, and source/formula/outcome freshness checked independently.
+
+The first production continuity audit at September 9 07:04 UTC found 35,165
+consecutive minutes per Spot asset from August 15 21:00 UTC, and 5,009
+consecutive HYPE perpetual minutes from September 5 19:36 UTC. All eight had
+zero internal missing minutes. This states the verified coverage interval;
+it does not imply recovery of the earlier HYPE interval.
+
+Production validation also exposed a pre-existing formula queue sort: the
+refresh query omitted the NULL ordering of its schedule index. Explicit
+`ASC NULLS FIRST` matches that index without changing non-null refresh
+ordering and avoids sorting the whole eligible refresh population.

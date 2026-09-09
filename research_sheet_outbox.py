@@ -23,8 +23,8 @@ _SHEET_ROTATION = (
     'תצוגת לייב',
     'Episodes',
     'Formula_Results',
-    'MaxPain_Wave_Live',
 )
+_WAVE_REPORT_SHEET = 'MaxPain_Wave_Live'
 _SOURCE_TIMESTAMP = re.compile(
     r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$'
 )
@@ -123,21 +123,23 @@ def _connect(url: str):
 
 
 def _claim_lane(conn: Any, *, count: int, token: str, sheet: str | None,
-                recent: bool) -> list[Mapping[str, Any]]:
+                recent: bool, exclude_sheet: str | None = None) -> list[Mapping[str, Any]]:
     if count <= 0:
         return []
     sheet_filter = 'AND sheet_name=%s' if sheet is not None else ''
+    exclusion_filter = 'AND sheet_name<>%s' if exclude_sheet is not None else ''
     source_filter = 'AND source_time_utc IS NOT NULL' if recent else ''
     order = ('source_time_utc DESC, next_attempt_at_utc, created_at_utc, row_key'
              if recent else 'next_attempt_at_utc, created_at_utc, row_key')
-    params = (sheet, count, token) if sheet is not None else (count, token)
+    params = (*((sheet,) if sheet is not None else ()),
+              *((exclude_sheet,) if exclude_sheet is not None else ()),count,token)
     return conn.execute(f'''
         WITH due AS (
             SELECT sheet_name,row_key FROM research_sheet_upsert_outbox
             WHERE sync_status IN ('PENDING','RETRY','IN_FLIGHT')
               AND ((sync_status IN ('PENDING','RETRY') AND next_attempt_at_utc <= NOW())
                 OR (sync_status='IN_FLIGHT' AND lease_expires_at_utc < NOW()))
-              {sheet_filter} {source_filter}
+              {sheet_filter} {exclusion_filter} {source_filter}
             ORDER BY {order}
             FOR UPDATE SKIP LOCKED LIMIT %s
         )
@@ -157,10 +159,19 @@ def _claim_batch(conn: Any, count: int, token: str) -> list[Mapping[str, Any]]:
         UPDATE research_sheet_delivery_cursor SET next_slot=next_slot+1
         WHERE singleton=TRUE RETURNING next_slot-1 AS slot
     ''').fetchone()['slot']
-    preferred_sheet = _SHEET_ROTATION[slot % len(_SHEET_ROTATION)]
-    recent_first = (slot // len(_SHEET_ROTATION)) % 2 == 0
-    first_count = (count + 1) // 2
-    rows = _claim_lane(conn, count=first_count, token=token,
+    # A finite 136-row report must finish before its next 15-minute generation.
+    # Three of four batch turns first serve that report; the fourth always
+    # rotates ordinary sheets. Once the report drains, all turns immediately
+    # return to ordinary work. The HTTP size and exact-generation ACK do not
+    # change. This cursor survives restarts, including single-row fallback.
+    preferred_sheet = _SHEET_ROTATION[(slot // 4) % len(_SHEET_ROTATION)]
+    recent_first = (slot // (4 * len(_SHEET_ROTATION))) % 2 == 0
+    rows = []
+    if slot % 4 < 3:
+        rows = _claim_lane(conn, count=count, token=token,
+                           sheet=_WAVE_REPORT_SHEET, recent=False)
+    first_count = (count-len(rows)+1) // 2
+    rows += _claim_lane(conn, count=first_count, token=token,
                        sheet=preferred_sheet, recent=recent_first)
     rows += _claim_lane(conn, count=count-len(rows), token=token,
                         sheet=preferred_sheet, recent=not recent_first)
@@ -169,6 +180,12 @@ def _claim_batch(conn: Any, count: int, token: str) -> list[Mapping[str, Any]]:
         rows += _claim_lane(conn, count=count-len(rows), token=token,
                             sheet=preferred_sheet, recent=False)
     # Empty preferred sheets do not waste capacity; the next turn still rotates.
+    # A reserved ordinary turn must check *all* ordinary work before returning
+    # to the report: an empty preferred tab cannot give its guarantee away to
+    # older report rows while another ordinary tab has a due backlog.
+    if len(rows) < count and slot % 4 == 3:
+        rows += _claim_lane(conn,count=count-len(rows),token=token,
+                            sheet=None,recent=False,exclude_sheet=_WAVE_REPORT_SHEET)
     if len(rows) < count:
         rows += _claim_lane(conn, count=count-len(rows), token=token,
                             sheet=None, recent=False)

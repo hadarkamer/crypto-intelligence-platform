@@ -199,6 +199,10 @@ def check_perp_contract_and_exact_thresholds():
     assert all(row["original_alert_reference_price"] == 99 and row["reference_price"] == 100 for row in mixed)
     assert all(row["source"]["price_kind"] == "TRADE" and row["source"]["market"] == "perpetual" for row in mixed)
     assert not any(row["source_scope"] in {report.MARK_SCOPE, report.MIXED_SCOPE} for row in result["records"])
+    unavailable = report.build_report(waves=[wave()], events=[hype], observed_at=START+timedelta(hours=2),
+        include_hype_perp=True, fetcher=lambda *args: {**perp.SOURCE, "candles": []})
+    errors = [reason for row in unavailable["records"] if row["source_scope"] == report.PERP_SCOPE for reason in row["missing_reasons"]]
+    assert errors and all("PERP TRADE entry" in reason and "MARK" not in reason for reason in errors)
     wrong = report.build_report(waves=[wave()], events=[hype], observed_at=START+timedelta(hours=2),
                                 include_hype_mark=True, fetcher=fetch)
     assert all(row["status"] == "DATA_MISSING" for row in wrong["records"])

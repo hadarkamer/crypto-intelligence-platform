@@ -59,7 +59,7 @@ class WaveReportPostgresTests(unittest.TestCase):
     def state(self):
         return self.conn.execute("SELECT * FROM research_btc_wave_report_state").fetchone()
 
-    def run_worker(self, *, fail_staging=False, source_reader=None):
+    def run_worker(self, *, fail_staging=False, source_reader=None, now=None):
         with patch.object(worker, "_connect", self.connect), patch.object(worker, "_database_url", lambda:self.dsn), \
              patch.object(worker, "load_job_source", source_reader or (lambda conn, now:self.source)):
             if fail_staging:
@@ -68,8 +68,8 @@ class WaveReportPostgresTests(unittest.TestCase):
                     real_stage(conn, rows)
                     raise RuntimeError("simulated failure after staging before report checkpoint")
                 with patch.object(worker.research_sheet_outbox, "stage_upserts", fail):
-                    return worker.ResearchBTCWaveReportWorker().run_once(now=START+timedelta(minutes=120))
-            return worker.ResearchBTCWaveReportWorker().run_once(now=START+timedelta(minutes=120))
+                    return worker.ResearchBTCWaveReportWorker().run_once(now=now or START+timedelta(minutes=120))
+            return worker.ResearchBTCWaveReportWorker().run_once(now=now or START+timedelta(minutes=120))
 
     def test_archive_only_report_and_outbox_commit_together(self):
         result = self.run_worker()
@@ -81,7 +81,49 @@ class WaveReportPostgresTests(unittest.TestCase):
         rows = self.conn.execute("SELECT payload FROM research_sheet_upsert_outbox").fetchall()
         self.assertEqual(len(rows), 16)
         self.assertTrue(all(row["payload"]["row"]["coverage_status"] == "COMPLETE_OBSERVED_PREFIX" for row in rows))
-        self.assertIn("waiting_until", self.run_worker())
+        self.assertTrue(self.run_worker()["waiting_for_sheet_delivery"])
+
+    def test_delayed_exact_sheet_ack_gates_next_generation(self):
+        self.assertTrue(self.run_worker()["published"])
+        original = self.state()
+        later = START+timedelta(minutes=136)
+        def no_source(conn, now):
+            raise AssertionError("New source generation must wait for previous Sheet ACK")
+        waiting = self.run_worker(now=later, source_reader=no_source)
+        self.assertTrue(waiting["waiting_for_sheet_delivery"])
+        self.assertEqual(waiting["delivery"]["pending_rows"], 16)
+        self.assertEqual(self.state()["report"], original["report"])
+        self.assertIsNone(self.state()["pending_job"])
+        # The sender alone sets SYNCED after matching the current claimed
+        # generation. Simulate those exact confirmed acknowledgments here.
+        self.conn.execute("UPDATE research_sheet_upsert_outbox SET sync_status='SYNCED'")
+        refreshed = self.run_worker(now=later)
+        self.assertTrue(refreshed["published"])
+        self.assertEqual(self.state()["report_observed_at_utc"], later)
+
+    def test_pending_job_from_previous_deployment_waits_for_old_report_ack(self):
+        self.assertTrue(self.run_worker()["published"])
+        original = self.state()
+        later = START+timedelta(minutes=136)
+        pending = worker.prepare_job(self.source, later,
+            previous_report=original["report"], previous_source=original["source"])
+        self.conn.execute("UPDATE research_btc_wave_report_state SET pending_job=%s::jsonb",
+                          (worker.canonical(pending),))
+        checkpoint = self.state()["pending_job"]
+        self.assertTrue(checkpoint["pending_event_ids"])
+        def no_source(conn, now):
+            raise AssertionError("Resumed job must wait for its previous report ACK")
+        waiting = self.run_worker(now=later, source_reader=no_source)
+        self.assertTrue(waiting["waiting_for_sheet_delivery"])
+        self.assertTrue(waiting["pending_job_preserved"])
+        self.assertEqual(self.state()["pending_job"], checkpoint)
+        self.assertEqual(self.state()["report"], original["report"])
+        self.assertEqual(self.conn.execute("SELECT count(*) AS n FROM research_sheet_upsert_outbox").fetchone()["n"], 16)
+        self.conn.execute("UPDATE research_sheet_upsert_outbox SET sync_status='SYNCED'")
+        resumed = self.run_worker(now=later)
+        self.assertTrue(resumed["published"])
+        self.assertIsNone(self.state()["pending_job"])
+        self.assertEqual(self.state()["report_observed_at_utc"], later)
 
     def test_hype_perpetual_archive_enters_only_explicit_mixed_report(self):
         self.source["events"][0].update(symbol="HYPE", current_price=99.,
