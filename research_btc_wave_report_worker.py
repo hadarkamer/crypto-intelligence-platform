@@ -54,6 +54,10 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
+def _iso_or_none(value):
+    return report.utc(value).isoformat() if value is not None else None
+
+
 def _database_url():
     dedicated = os.getenv("RESEARCH_DATABASE_URL", "").strip()
     return dedicated or (os.getenv("DATABASE_URL", "").strip()
@@ -275,14 +279,17 @@ class ResearchBTCWaveReportWorker:
                     conn.commit()
                     if not delivery["complete"]:
                         waiting = {"waiting_for_sheet_delivery": True, "delivery": delivery,
-                            "report_observed_at_utc": state["report_observed_at_utc"],
-                            "earliest_next_report_at_utc": state["next_report_at_utc"],
+                            "report_observed_at_utc": _iso_or_none(state["report_observed_at_utc"]),
+                            "earliest_next_report_at_utc": _iso_or_none(state["next_report_at_utc"]),
                             "pending_job_preserved": bool(job)}
                         self.metrics.update(last_result=waiting, last_error=None)
                         return waiting
                 if not job:
                     if state["next_report_at_utc"] and now < state["next_report_at_utc"]:
-                        return {"waiting_until": state["next_report_at_utc"].isoformat(), "report_observed_at_utc": state["report_observed_at_utc"]}
+                        waiting = {"waiting_until": _iso_or_none(state["next_report_at_utc"]),
+                                   "report_observed_at_utc": _iso_or_none(state["report_observed_at_utc"])}
+                        self.metrics.update(last_result=waiting, last_error=None)
+                        return waiting
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                         source = load_job_source(conn, now)

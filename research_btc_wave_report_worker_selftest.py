@@ -72,6 +72,43 @@ def run():
     assert not stale["complete"] and stale["missing_or_other_generation_rows"] == 1
     missing_row = worker.sheet_delivery_status(DeliveryRows(acknowledgments[1:]), completed)
     assert not missing_row["complete"] and missing_row["missing_or_other_generation_rows"] == 1
+    # Health serializes worker.status with standard json.dumps. Exercise the
+    # actual wait path with PostgreSQL-shaped datetime values, including a
+    # saved pending job, without hiding the failure with default=str.
+    class WaitingConnection:
+        def __init__(self, ack_rows, pending_job=None):
+            self.rows = ack_rows
+            self.state = {"report": completed, "report_observed_at_utc": now,
+                "next_report_at_utc": now+timedelta(minutes=15), "pending_job": pending_job}
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, sql, params=()):
+            self.sql = sql
+            return self
+        def fetchone(self):
+            return self.state if "SELECT * FROM research_btc_wave_report_state" in self.sql else {"held": True}
+        def fetchall(self): return self.rows
+        def commit(self): pass
+        def rollback(self): pass
+    for saved_job in (None, {"next_index": 1}):
+        connection = WaitingConnection(acknowledgments, saved_job)
+        service = worker.ResearchBTCWaveReportWorker()
+        with patch.object(worker, "_connect", lambda url: connection):
+            waiting = service.run_once(now=now+timedelta(minutes=20))
+        assert waiting["waiting_for_sheet_delivery"]
+        assert waiting["pending_job_preserved"] is bool(saved_job)
+        assert waiting["report_observed_at_utc"] == now.isoformat()
+        json.dumps(service.status(), allow_nan=False)
+        json.dumps(waiting, allow_nan=False)
+    acknowledgments[0]["report_digest"] = worker.digest(completed)
+    connection = WaitingConnection(acknowledgments)
+    service = worker.ResearchBTCWaveReportWorker()
+    with patch.object(worker, "_connect", lambda url: connection):
+        waiting = service.run_once(now=now+timedelta(minutes=1))
+    assert "waiting_until" in waiting
+    assert service.status()["last_result"] == waiting
+    json.dumps(service.status(), allow_nan=False)
+    json.dumps(waiting, allow_nan=False)
     # Reload a stored report: JSON timestamp types must not prevent safe
     # complete closed path reuse on the next actual DB-backed generation.
     previous = json.loads(worker.canonical(completed))
