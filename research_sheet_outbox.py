@@ -23,6 +23,7 @@ _SHEET_ROTATION = (
     'תצוגת לייב',
     'Episodes',
     'Formula_Results',
+    'MaxPain_Wave_Live',
 )
 _SOURCE_TIMESTAMP = re.compile(
     r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$'
@@ -57,6 +58,7 @@ def _row_source_time(item: Mapping[str, Any]) -> datetime | None:
         'MaxPain_TF': 'timestamp_utc',
         'Episodes': 'opened_at_utc',
         'Formula_Results': 'last_evaluated_at',
+        'MaxPain_Wave_Live': 'last_evaluated_at',
     }.get(str(item['sheet']))
     return _source_time(item['row'].get(field)) if field else None
 
@@ -100,7 +102,8 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
     # no global backfill, implicit time inference, or DDL in the live worker.
     source_times = [
         (sheet, row_key, _row_source_time(json.loads(record[2])))
-        for (sheet, row_key), record in records.items() if sheet == 'MaxPain_TF'
+        for (sheet, row_key), record in records.items()
+        if sheet in {'MaxPain_TF', 'MaxPain_Wave_Live'}
     ]
     if source_times:
         values_sql = ','.join(['(%s,%s,%s::timestamptz)'] * len(source_times))

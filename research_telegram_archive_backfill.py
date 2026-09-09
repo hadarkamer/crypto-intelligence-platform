@@ -69,7 +69,8 @@ class SpotCache:
             raise ValueError("HYPE must not be substituted with Binance Futures")
         if binance_spot_price_path.BINANCE_SPOT_BASE_URL != "https://data-api.binance.vision" or binance_spot_price_path.BINANCE_SPOT_KLINES_ENDPOINT != "/api/v3/klines":
             raise ValueError("Archive extension requires the reviewed official Binance Spot endpoint")
-        result = binance_spot_price_path.fetch_closed_candles(symbol, start, end)
+        import research_archived_price_path
+        result = research_archived_price_path.fetch_binance(symbol, start, end)
         if result.get("exchange") != "binance" or result.get("market") != "spot" or result.get("pair") != symbol + "USDT":
             raise ValueError("Official Spot extension returned wrong source")
         current = {bar["open_time_utc"]: bar for bar in self.bars.get(symbol, [])}

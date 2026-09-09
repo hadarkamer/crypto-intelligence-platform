@@ -36,10 +36,11 @@ SOURCE_FIELDS = ("event_id", "event_kind", "event_type", "alert_time_utc", "symb
 
 def _settings(adapter_version):
     """Two fixed independent contracts; table names never come from caller input."""
+    import research_archived_price_path
     if adapter_version == ADAPTER_VERSION:
         return {"source": archive.SOURCE, "entry_version": ENTRY_VERSION,
             "metric_version": METRIC_VERSION, "scope": SOURCE_SCOPE,
-            "table_prefix": "research_native_hype_mark", "fetch": provider.fetch_closed_candles,
+            "table_prefix": "research_native_hype_mark", "fetch": research_archived_price_path.fetch_mark,
             "label": "MARK", "verified_quality": archive.VERIFIED_QUALITY,
             "partial_quality": archive.PARTIAL_QUALITY,
             "boundary_policy": "NEXT_FULL_MINUTE_MARK_OPEN_CLOSED_1M_ONLY"}
@@ -48,7 +49,7 @@ def _settings(adapter_version):
         return {"source": perp.SOURCE, "entry_version": "native-hype-next-full-minute-perp-open-v1",
             "metric_version": "native-hype-common-window-perp-trade-1m-v1",
             "scope": "DERIVED_NATIVE_HYPE_PERP", "table_prefix": "research_native_hype_perp",
-            "fetch": perp.fetch_closed_candles, "label": "PERP TRADE",
+            "fetch": research_archived_price_path.fetch_perp, "label": "PERP TRADE",
             "verified_quality": "VERIFIED_HYPERLIQUID_PERP_TRADE_1M_CLOSED_CANDLES",
             "partial_quality": "INCOMPLETE_HYPERLIQUID_PERP_TRADE_1M_PATH",
             "boundary_policy": "NEXT_FULL_MINUTE_PERP_TRADE_OPEN_CLOSED_1M_ONLY"}
