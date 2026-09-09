@@ -1,5 +1,6 @@
 """Real PostgreSQL report checkpoint/publication atomicity and local archive reads."""
 from datetime import timedelta
+import json
 import os
 from pathlib import Path
 import unittest
@@ -60,6 +61,7 @@ class WaveReportPostgresTests(unittest.TestCase):
         return self.conn.execute("SELECT * FROM research_btc_wave_report_state").fetchone()
 
     def run_worker(self, *, fail_staging=False, source_reader=None, now=None):
+        self.last_worker = worker.ResearchBTCWaveReportWorker()
         with patch.object(worker, "_connect", self.connect), patch.object(worker, "_database_url", lambda:self.dsn), \
              patch.object(worker, "load_job_source", source_reader or (lambda conn, now:self.source)):
             if fail_staging:
@@ -68,8 +70,8 @@ class WaveReportPostgresTests(unittest.TestCase):
                     real_stage(conn, rows)
                     raise RuntimeError("simulated failure after staging before report checkpoint")
                 with patch.object(worker.research_sheet_outbox, "stage_upserts", fail):
-                    return worker.ResearchBTCWaveReportWorker().run_once(now=now or START+timedelta(minutes=120))
-            return worker.ResearchBTCWaveReportWorker().run_once(now=now or START+timedelta(minutes=120))
+                    return self.last_worker.run_once(now=now or START+timedelta(minutes=120))
+            return self.last_worker.run_once(now=now or START+timedelta(minutes=120))
 
     def test_archive_only_report_and_outbox_commit_together(self):
         result = self.run_worker()
@@ -91,6 +93,8 @@ class WaveReportPostgresTests(unittest.TestCase):
             raise AssertionError("New source generation must wait for previous Sheet ACK")
         waiting = self.run_worker(now=later, source_reader=no_source)
         self.assertTrue(waiting["waiting_for_sheet_delivery"])
+        json.dumps(self.last_worker.status(), allow_nan=False)
+        json.dumps(waiting, allow_nan=False)
         self.assertEqual(waiting["delivery"]["pending_rows"], 16)
         self.assertEqual(self.state()["report"], original["report"])
         self.assertIsNone(self.state()["pending_job"])
@@ -115,6 +119,8 @@ class WaveReportPostgresTests(unittest.TestCase):
             raise AssertionError("Resumed job must wait for its previous report ACK")
         waiting = self.run_worker(now=later, source_reader=no_source)
         self.assertTrue(waiting["waiting_for_sheet_delivery"])
+        json.dumps(self.last_worker.status(), allow_nan=False)
+        json.dumps(waiting, allow_nan=False)
         self.assertTrue(waiting["pending_job_preserved"])
         self.assertEqual(self.state()["pending_job"], checkpoint)
         self.assertEqual(self.state()["report"], original["report"])
