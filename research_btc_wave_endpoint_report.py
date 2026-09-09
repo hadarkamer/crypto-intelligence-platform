@@ -204,7 +204,8 @@ def calculate_wave_record(*, event: Mapping, wave: Mapping, path_result: Mapping
                 or derived_entry.get("source_event_id") != event["event_id"]):
             raise ValueError("Explicit versioned native HYPE derived entry is required")
         start = utc(derived_entry["entry_time_utc"])
-        reference = _finite_number(derived_entry["entry_price"], name="derived MARK entry")
+        reference = _finite_number(derived_entry["entry_price"],
+                                   name="derived PERP TRADE entry" if source_scope == PERP_SCOPE else "derived MARK entry")
         if start != original_start.replace(second=0, microsecond=0) + MINUTE:
             raise ValueError("Derived entry must be the first fully post-alert minute")
         if source_scope == PERP_SCOPE:

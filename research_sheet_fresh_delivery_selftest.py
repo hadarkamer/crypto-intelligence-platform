@@ -201,6 +201,8 @@ def run():
     _stage_test()
     _delivery_ack_test()
     db = _database()
+    for index in range(6 * len(outbox._SHEET_ROTATION)):
+        _add(db,outbox._WAVE_REPORT_SHEET,f'wave-{index:03}',NOW)
     for sheet in outbox._SHEET_ROTATION:
         for index in range(200):
             _add(db, sheet, f'old-{index:03}', index, created_at_utc=index)
@@ -214,17 +216,23 @@ def run():
 
     # New wrapper for each call models process restarts: cursor lives in DB.
     first_cycle = []
-    for index in range(2 * len(outbox._SHEET_ROTATION)):
+    wave_claims = 0
+    for index in range(8 * len(outbox._SHEET_ROTATION)):
         fresh_process = Database(db.conn)
         batch = outbox._claim_batch(fresh_process, 1, f'token-{index}')
         assert len(batch) == 1
-        first_cycle.extend((row['sheet_name'], row['row_key']) for row in batch)
+        if index % 4 < 3:
+            assert batch[0]['sheet_name']==outbox._WAVE_REPORT_SHEET
+            wave_claims += 1
+        else:
+            first_cycle.extend((row['sheet_name'], row['row_key']) for row in batch)
+    assert wave_claims==6*len(outbox._SHEET_ROTATION)
     assert first_cycle[:len(outbox._SHEET_ROTATION)] == [(sheet, 'fresh') for sheet in outbox._SHEET_ROTATION]
     assert first_cycle[len(outbox._SHEET_ROTATION):] == [(sheet, 'old-000') for sheet in outbox._SHEET_ROTATION]
     assert len(set(first_cycle)) == 2 * len(outbox._SHEET_ROTATION)
 
     # Larger batches reserve both shares and cannot select their own new leases.
-    db.conn.execute('UPDATE research_sheet_delivery_cursor SET next_slot=0')
+    db.conn.execute('UPDATE research_sheet_delivery_cursor SET next_slot=3')
     sheet = outbox._SHEET_ROTATION[0]
     for index in range(6):
         _add(db, sheet, f'new-{index}', NOW+index+10,
@@ -252,6 +260,47 @@ def run():
     other = _database()
     _add(other, 'Additional_Sheet', 'undated', None)
     assert outbox._claim_batch(other, 1, 'fallback')[0]['row_key'] == 'undated'
+
+    # The measured finite report needs 17 proven 8-row HTTP batches. Burst
+    # allocation completes it in 22 total turns while ordinary tables continue.
+    capacity = _database()
+    for index in range(136):
+        _add(capacity,outbox._WAVE_REPORT_SHEET,f'wave-{index:03}',NOW)
+    for ordinary in outbox._SHEET_ROTATION:
+        for index in range(100):
+            _add(capacity,ordinary,f'ordinary-{index:03}',index)
+    report_rows=ordinary_rows=0
+    ordinary_sheets=set()
+    for index in range(24):
+        batch=outbox._claim_batch(Database(capacity.conn),8,f'capacity-{index}')
+        assert len(batch)==8
+        report_rows += sum(row['sheet_name']==outbox._WAVE_REPORT_SHEET for row in batch)
+        ordinary_rows += sum(row['sheet_name']!=outbox._WAVE_REPORT_SHEET for row in batch)
+        ordinary_sheets.update(row['sheet_name'] for row in batch if row['sheet_name']!=outbox._WAVE_REPORT_SHEET)
+        if index==21:
+            assert report_rows==136 and ordinary_rows==40
+    assert ordinary_sheets==set(outbox._SHEET_ROTATION)
+    assert ordinary_rows==56
+    # With the finite report exhausted, a formerly prioritized turn fills from
+    # normal backlog immediately and makes no duplicate/live-lease claim.
+    after=outbox._claim_batch(Database(capacity.conn),8,'after-wave')
+    assert len(after)==8 and all(row['sheet_name']!=outbox._WAVE_REPORT_SHEET for row in after)
+
+    # A reserved ordinary turn whose preferred Telegram tab is empty still
+    # serves another ordinary backlog before older report rows.
+    sparse = _database()
+    sparse.conn.execute('UPDATE research_sheet_delivery_cursor SET next_slot=3')
+    for index in range(8):
+        _add(sparse,outbox._WAVE_REPORT_SHEET,f'older-wave-{index}',1,created_at_utc=1)
+        _add(sparse,'Formula_Results',f'newer-formula-{index}',NOW,
+             created_at_utc=NOW-1,next_attempt_at_utc=NOW-1)
+    reserved=outbox._claim_batch(sparse,8,'sparse-reserved')
+    assert len(reserved)==8 and all(row['sheet_name']=='Formula_Results' for row in reserved)
+    # If every ordinary row is unavailable, that reserved turn may use report
+    # capacity instead of becoming idle.
+    sparse.conn.execute('UPDATE research_sheet_delivery_cursor SET next_slot=3')
+    spare=outbox._claim_batch(sparse,8,'sparse-idle')
+    assert len(spare)==8 and all(row['sheet_name']==outbox._WAVE_REPORT_SHEET for row in spare)
 
     # Explain the actual due selection, with the same partial-index predicate.
     for recent, expected_index in ((True, 'idx_research_sheet_fresh_claim'),

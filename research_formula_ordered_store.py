@@ -406,14 +406,16 @@ def due_scopes(conn:Any,limit:int=64,*,candidate_keys=None)->list[dict[str,Any]]
     # Limit lightweight IDs in both lanes; only the selected combined batch
     # loads result JSON. Never-evaluated catalog expansion cannot starve old
     # published results, and refresh cannot block new candidate coverage.
+    # Match the existing NULLS FIRST schedule index in both lanes. The NULL
+    # predicates preserve selection order; implicit NULLS LAST forces a sort.
     initial=conn.execute('''SELECT scope_key FROM research_ordered_formula_scopes
         WHERE period_key=ANY(%s) AND candidate_key=ANY(%s)
           AND last_evaluated_at_utc IS NULL
-        ORDER BY scope_key LIMIT %s''',(list(PERIODS),keys,cap)).fetchall()
+        ORDER BY last_evaluated_at_utc ASC NULLS FIRST,scope_key LIMIT %s''',(list(PERIODS),keys,cap)).fetchall()
     refresh=conn.execute('''SELECT scope_key FROM research_ordered_formula_scopes
         WHERE period_key=ANY(%s) AND candidate_key=ANY(%s)
           AND last_evaluated_at_utc IS NOT NULL
-        ORDER BY last_evaluated_at_utc,scope_key LIMIT %s''',(list(PERIODS),keys,cap)).fetchall()
+        ORDER BY last_evaluated_at_utc ASC NULLS FIRST,scope_key LIMIT %s''',(list(PERIODS),keys,cap)).fetchall()
     lanes=(refresh,initial) if ticket%2==0 else (initial,refresh)
     ids=[row['scope_key'] for row in _interleave(*lanes,cap)]
     if not ids:

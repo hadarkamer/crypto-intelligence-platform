@@ -229,6 +229,39 @@ class PostgreSQLFreshnessTests(RelationalFreshnessChecks, unittest.TestCase):
         self.conn.close()
         self.conn = self.connect()
 
+    def test_scope_lanes_use_bounded_existing_index_without_sorting_backlog(self):
+        # Reproduce both a large never-evaluated lane and an old refresh lane.
+        # The production index has NULLS FIRST. An implicit NULLS LAST ORDER
+        # forces sorting the refresh backlog despite its IS NOT NULL filter.
+        self.conn.execute('''CREATE INDEX test_scope_schedule ON
+            research_ordered_formula_scopes(last_evaluated_at_utc ASC NULLS FIRST,scope_key)
+            WHERE period_key IN ('ALL_COMPATIBLE_SINCE_20260816','SINCE_20260904')''')
+        self.conn.execute('''INSERT INTO research_ordered_formula_scopes
+            SELECT md5(i::text),'current',%s,
+                   CASE WHEN i%%2=0 THEN %s::timestamptz-i*INTERVAL '1 second' END,'{}'
+            FROM generate_series(1,20000) AS series(i)''', (PERIOD,NOW))
+        self.conn.execute('ANALYZE research_ordered_formula_scopes')
+        self.conn.commit()
+        selected_queries=[]
+        connection=self.conn
+        class Capture:
+            def execute(self,sql,params=()):
+                if sql.startswith('SELECT scope_key FROM research_ordered_formula_scopes'):
+                    selected_queries.append((sql,params))
+                return connection.execute(sql,params)
+        batch=store.due_scopes(Capture(),8,candidate_keys=['current'])
+        self.assertEqual(len(batch),8)
+        self.assertEqual(len(selected_queries),2)
+        for sql,params in selected_queries:
+            plan=self.conn.execute('EXPLAIN (ANALYZE,FORMAT JSON) '+sql,params).fetchone()['QUERY PLAN'][0]['Plan']
+            def nodes(node):
+                return [node]+[child for nested in node.get('Plans',[]) for child in nodes(nested)]
+            scanned=nodes(plan)
+            self.assertEqual(plan['Actual Rows'],8)
+            self.assertFalse(any(node['Node Type'] in {'Sort','Incremental Sort','Seq Scan'} for node in scanned))
+            index=next(node for node in scanned if node.get('Index Name')=='test_scope_schedule')
+            self.assertLessEqual(index['Actual Rows'],8)
+
     def tearDown(self):
         self.conn.close()
         with self.psycopg.connect(self.dsn, connect_timeout=5, autocommit=True) as conn:
