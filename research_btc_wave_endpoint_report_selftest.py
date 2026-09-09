@@ -183,6 +183,40 @@ def check_refresh_reuses_only_verified_unchanged_closed_paths():
     assert result["reused_complete_closed_source_paths"] == 0 and len(calls) == 2
 
 
+
+def check_perp_contract_and_exact_thresholds():
+    import hyperliquid_perp_price_path as perp
+    hype = event(18, "HYPE", "SHORT", seconds=10)
+    hype["engine_snapshot"] = {"price_source": "hyperliquid", "price_pair": "HYPEUSDT"}
+    hype["current_price"] = 99.
+    def fetch(symbol, start, end):
+        return {**perp.SOURCE, "candles": [candle(i, high=100.1, low=98.) for i in range(1, 60)]}
+    result = report.build_report(waves=[wave()], events=[hype], observed_at=START+timedelta(hours=2),
+                                 include_hype_perp=True, fetcher=fetch)
+    mixed = [row for row in result["records"] if row["source_scope"] == report.PERP_MIXED_SCOPE]
+    assert len(mixed) == 2 and all(row["status"] == "READY" for row in mixed)
+    assert all(row["entry_version"] == "native-hype-next-full-minute-perp-open-v1" for row in mixed)
+    assert all(row["original_alert_reference_price"] == 99 and row["reference_price"] == 100 for row in mixed)
+    assert all(row["source"]["price_kind"] == "TRADE" and row["source"]["market"] == "perpetual" for row in mixed)
+    assert not any(row["source_scope"] in {report.MARK_SCOPE, report.MIXED_SCOPE} for row in result["records"])
+    wrong = report.build_report(waves=[wave()], events=[hype], observed_at=START+timedelta(hours=2),
+                                include_hype_mark=True, fetcher=fetch)
+    assert all(row["status"] == "DATA_MISSING" for row in wrong["records"])
+    for labels in (mixed[0]["thresholds"][:-1], mixed[0]["thresholds"]+[mixed[0]["thresholds"][0]]):
+        try:
+            report.aggregate_records([{**mixed[0], "thresholds": labels}])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Incomplete or duplicate threshold grid accepted")
+    try:
+        report.build_report(waves=[wave()], events=[hype], observed_at=START+timedelta(hours=2),
+                            include_hype_mark=True, include_hype_perp=True, fetcher=fetch)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Two Futures contracts silently mixed")
+
 def main():
     check_full_wave_after_first_touch_and_active()
     check_complete_prefix_and_ambiguity()
@@ -190,6 +224,7 @@ def main():
     check_fullwave_paging_beyond_provider_cap()
     check_real_hype_adapter_and_mixed_contract()
     check_refresh_reuses_only_verified_unchanged_closed_paths()
+    check_perp_contract_and_exact_thresholds()
     print("PASS full-wave endpoint, active prefix, full excursions, all eight thresholds, causal selection, source separation and real HYPE derived entry")
 
 

@@ -283,7 +283,8 @@ class ResearchBTCEpisodeWorker:
             return {"state": "DISABLED"}
         now = policy.utc(now or datetime.now(timezone.utc))
         cutoff = now.replace(second=0, microsecond=0)-timedelta(milliseconds=1)
-        fetch = fetch_candles or binance_spot_price_path.fetch_closed_candles
+        import research_archived_price_path
+        fetch = fetch_candles or research_archived_price_path.fetch_binance
         with psycopg.connect(_database_url(), row_factory=dict_row, connect_timeout=5,
                             options="-c statement_timeout=15000 -c lock_timeout=1000") as conn:
             locked = conn.execute("SELECT pg_try_advisory_lock(%s) AS locked", (_LOCK_ID,)).fetchone()

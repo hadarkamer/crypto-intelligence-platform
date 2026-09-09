@@ -32,7 +32,7 @@ def write_measurement(conn, measurement):
     return shared.write_measurement(conn, measurement)
 
 
-def run(*, database_url, event_ids, observed_at=None, fetch_candles=provider.fetch_closed_candles):
+def run(*, database_url, event_ids, observed_at=None, fetch_candles=None):
     return shared.run(database_url=database_url, event_ids=event_ids, observed_at=observed_at,
         fetch_candles=fetch_candles, adapter_version=ADAPTER_VERSION)
 

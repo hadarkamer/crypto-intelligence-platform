@@ -40,9 +40,15 @@ def fetch_prior_path(symbol,event_time,*,deadline,request_get=None,request_post=
             return response
         return request
     if canonical_price_path.provider_for_symbol(symbol)=='hyperliquid':
-        path=hyperliquid_spot_price_path.fetch_closed_candles(symbol,start,end,request_post=budgeted(request_post or requests.post))
+        import research_price_archive
+        path=research_price_archive.get_path(research_price_archive.HYPERLIQUID_SPOT,
+            symbol,start,end,lambda asset,left,right: hyperliquid_spot_price_path.fetch_closed_candles(
+                asset,left,right,request_post=budgeted(request_post or requests.post)))
     else:
-        path=binance_spot_price_path.fetch_closed_candles(symbol,start,end,request_get=budgeted(request_get or requests.get))
+        import research_price_archive
+        path=research_price_archive.get_path(research_price_archive.BINANCE_SPOT,
+            symbol,start,end,lambda asset,left,right: binance_spot_price_path.fetch_closed_candles(
+                asset,left,right,request_get=budgeted(request_get or requests.get)))
         path={**path,'provenance':'EXCHANGE_API_HISTORICAL_CANDLES_IMPORTED'}
     canonical_price_path.validated_route(symbol,path,require_complete=False)
     if path.get('complete') is True:

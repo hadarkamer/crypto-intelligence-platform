@@ -41,6 +41,9 @@ import research_event_runtime
 import research_event_store
 import research_outcome_worker
 import research_btc_episode_worker
+import research_price_archive_worker
+import research_source_freshness
+import research_btc_wave_report_worker
 import research_formula_ordered_worker
 import research_ordered_experimental_worker
 import research_snapshot_sync_worker
@@ -1676,7 +1679,9 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
     """
     results = {}
     for label, worker in (
+        ("price-archive", research_price_archive_worker.WORKER),
         ("btc-episodes", research_btc_episode_worker.WORKER),
+        ("btc-wave-report", research_btc_wave_report_worker.WORKER),
         ("formula-ordered-v7", research_formula_ordered_worker.WORKER),
         ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
@@ -1695,10 +1700,12 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
 
 async def _stop_ordered_research_workers() -> None:
     for label, worker in (
+        ("btc-wave-report", research_btc_wave_report_worker.WORKER),
         ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
         ("formula-ordered-v7", research_formula_ordered_worker.WORKER),
         ("btc-episodes", research_btc_episode_worker.WORKER),
+        ("price-archive", research_price_archive_worker.WORKER),
     ):
         try:
             await worker.stop()
@@ -6006,6 +6013,9 @@ async def health(request):
         "research_capture": research_event_runtime.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "btc_episodes": research_btc_episode_worker.WORKER.status(),
+        "price_archive": research_price_archive_worker.WORKER.status(),
+        "price_source_freshness": research_source_freshness.status(),
+        "btc_wave_report": research_btc_wave_report_worker.WORKER.status(),
         "formula_ordered_v7": research_formula_ordered_worker.WORKER.status(),
         "ordered_experimental": research_ordered_experimental_worker.WORKER.status(),
         "snapshot_sync": research_snapshot_sync_worker.WORKER.status(),

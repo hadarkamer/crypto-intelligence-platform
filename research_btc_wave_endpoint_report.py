@@ -29,6 +29,8 @@ METHOD_VERSION = "btc-wave-endpoint-closed-1m-v1"
 CANDIDATE = "MAX_PAIN_ALERT score>=65"
 SPOT_SCOPE = "CANONICAL_SPOT_IMMUTABLE_ALERT"
 MARK_SCOPE = "DERIVED_NATIVE_HYPE_MARK"
+PERP_SCOPE = "DERIVED_NATIVE_HYPE_PERP"
+PERP_MIXED_SCOPE = "SPOT_WITH_DERIVED_HYPE_PERP_V1"
 MIXED_SCOPE = "SPOT_WITH_DERIVED_HYPE_MARK_V1"
 REPRESENTATIVE_POLICY = "FIRST_EVENT_TIME_THEN_ID_PER_WAVE_SCOPE_DIRECTION_BEFORE_OUTCOMES"
 ASYMMETRY_METHOD = "SUM_MFE_OVER_SUM_MAE_SAME_COMPLETE_CLOSED_WAVE_COHORT"
@@ -131,18 +133,24 @@ def fetch_full_path(symbol: str, start_time: Any, end_time: Any, *, source_scope
     first = _first_open(start)
     if end - start > timedelta(minutes=MAX_PATH_MINUTES):
         raise ValueError("Full wave exceeds the explicit 31-day path budget")
-    if source_scope not in {SPOT_SCOPE, MARK_SCOPE}:
+    if source_scope not in {SPOT_SCOPE, MARK_SCOPE, PERP_SCOPE}:
         raise ValueError("Unsupported explicit report source scope")
-    if source_scope == MARK_SCOPE and symbol != "HYPE":
+    if source_scope in {MARK_SCOPE, PERP_SCOPE} and symbol != "HYPE":
         raise ValueError("Derived MARK source supports native HYPE only")
-    get = fetcher or (mark_path.fetch_closed_candles if source_scope == MARK_SCOPE
-                      else canonical_price_path.fetch_closed_candles)
+    if source_scope == PERP_SCOPE:
+        import hyperliquid_perp_price_path as perp_path
+        default_fetcher = perp_path.fetch_closed_candles
+    else:
+        default_fetcher = (mark_path.fetch_closed_candles if source_scope == MARK_SCOPE
+                           else canonical_price_path.fetch_closed_candles)
+    get = fetcher or default_fetcher
     cursor, rows, metadata, requests = first, [], None, 0
     while cursor + MINUTE - MILLISECOND <= end:
         stop = min(end, cursor + timedelta(minutes=1440) - MILLISECOND)
         page = dict(get(symbol, cursor, stop))
         route = {key: page.get(key) for key in ("symbol", "exchange", "market", "pair",
-                  "api_coin", "interval", "interval_seconds", "price_kind", "method_version", "provenance")}
+                  "api_coin", "instrument", "margin_currency", "source_url", "interval",
+                  "interval_seconds", "price_kind", "method_version", "provenance")}
         if metadata is not None and any(metadata.get(key) != route[key] for key in route):
             raise ValueError("Price route changed within the full wave")
         metadata = {key: value for key, value in page.items() if key != "candles"}
@@ -185,8 +193,12 @@ def calculate_wave_record(*, event: Mapping, wave: Mapping, path_result: Mapping
         except (TypeError, ValueError) as exc:
             route = None
             errors.append(str(exc))
-    elif source_scope == MARK_SCOPE:
-        from research_native_hype_mark_supplement import ENTRY_VERSION
+    elif source_scope in {MARK_SCOPE, PERP_SCOPE}:
+        if source_scope == PERP_SCOPE:
+            import hyperliquid_perp_price_path as perp_path
+            from research_native_hype_perp_supplement import ENTRY_VERSION
+        else:
+            from research_native_hype_mark_supplement import ENTRY_VERSION
         if (event.get("symbol") != "HYPE" or not derived_entry
                 or derived_entry.get("entry_policy_version") != ENTRY_VERSION
                 or derived_entry.get("source_event_id") != event["event_id"]):
@@ -195,14 +207,20 @@ def calculate_wave_record(*, event: Mapping, wave: Mapping, path_result: Mapping
         reference = _finite_number(derived_entry["entry_price"], name="derived MARK entry")
         if start != original_start.replace(second=0, microsecond=0) + MINUTE:
             raise ValueError("Derived entry must be the first fully post-alert minute")
-        if (path_result.get("symbol") != "HYPE" or path_result.get("exchange") != "binance"
-                or path_result.get("market") != "futures" or path_result.get("pair") != "HYPEUSDT"
-                or path_result.get("price_kind") != "MARK" or path_result.get("interval_seconds") != 60
-                or path_result.get("interval") != "1m" or path_result.get("method_version") != mark_path.METHOD_VERSION
-                or path_result.get("provenance") != mark_path.PROVENANCE):
-            raise ValueError("Exact Binance HYPE Futures MARK path provenance is required")
-        route = {key: path_result.get(key) for key in ("symbol", "exchange", "market", "pair",
-                 "price_kind", "interval", "interval_seconds", "method_version", "provenance")}
+        if source_scope == PERP_SCOPE:
+            expected_source = perp_path.SOURCE
+            if any(path_result.get(key) != value for key, value in expected_source.items()):
+                raise ValueError("Exact Hyperliquid HYPE perpetual TRADE path provenance is required")
+            route = {key: path_result.get(key) for key in expected_source}
+        else:
+            if (path_result.get("symbol") != "HYPE" or path_result.get("exchange") != "binance"
+                    or path_result.get("market") != "futures" or path_result.get("pair") != "HYPEUSDT"
+                    or path_result.get("price_kind") != "MARK" or path_result.get("interval_seconds") != 60
+                    or path_result.get("interval") != "1m" or path_result.get("method_version") != mark_path.METHOD_VERSION
+                    or path_result.get("provenance") != mark_path.PROVENANCE):
+                raise ValueError("Exact Binance HYPE Futures MARK path provenance is required")
+            route = {key: path_result.get(key) for key in ("symbol", "exchange", "market", "pair",
+                     "price_kind", "interval", "interval_seconds", "method_version", "provenance")}
     else:
         raise ValueError("Unsupported source scope")
     if reference <= 0 or now < original_start or cutoff < start:
@@ -224,8 +242,9 @@ def calculate_wave_record(*, event: Mapping, wave: Mapping, path_result: Mapping
                                                 for i, row in enumerate(rows)))
     if not contiguous:
         errors.append("INCOMPLETE_CLOSED_1M_PATH")
-    if source_scope == MARK_SCOPE and rows and rows[0]["open"] != reference:
-        errors.append("DERIVED_ENTRY_DOES_NOT_EQUAL_FIRST_MARK_OPEN")
+    if source_scope in {MARK_SCOPE, PERP_SCOPE} and rows and rows[0]["open"] != reference:
+        errors.append("DERIVED_ENTRY_DOES_NOT_EQUAL_FIRST_MARK_OPEN" if source_scope == MARK_SCOPE
+                      else "DERIVED_ENTRY_DOES_NOT_EQUAL_FIRST_PERP_OPEN")
     prefix_complete = bool(contiguous and not errors and expected > 0)
     if expected == 0:
         errors.append("NO_CLOSED_POST_ENTRY_CANDLES")
@@ -277,6 +296,11 @@ def aggregate_records(records: Iterable[Mapping]) -> list[dict]:
     """
     groups: dict[tuple[str, str, str], list[Mapping]] = {}
     for row in records:
+        if row.get("observed_prefix_complete"):
+            thresholds = [label.get("threshold_bps") for label in row.get("thresholds", [])]
+            if (len(thresholds) != 8 or set(thresholds) != set(range(25, 201, 25))
+                    or row.get("method_version") != METHOD_VERSION):
+                raise ValueError("Complete full-wave record requires the exact eight versioned thresholds")
         groups.setdefault((row["source_scope"], row["coin_scope"], row["direction"]), []).append(row)
     result = []
     for (source, scope, direction), rows in sorted(groups.items()):
@@ -341,8 +365,14 @@ def _unavailable(event: Mapping, wave: Mapping, now: datetime, source: str, reas
 
 
 def build_report(*, waves: Iterable[Mapping], events: Iterable[Mapping], observed_at: Any,
-                 include_hype_mark: bool = False, fetcher: Callable | None = None,
+                 include_hype_mark: bool = False, include_hype_perp: bool = False,
+                 fetcher: Callable | None = None,
                  _verified_closed_cache: Mapping | None = None) -> dict:
+    if include_hype_mark and include_hype_perp:
+        raise ValueError("MARK and PERP require separate explicit full-wave reports")
+    derivative_scope = PERP_SCOPE if include_hype_perp else MARK_SCOPE
+    mixed_scope = PERP_MIXED_SCOPE if include_hype_perp else MIXED_SCOPE
+    include_derivative = include_hype_mark or include_hype_perp
     now, parents = utc(observed_at), [dict(wave) for wave in waves]
     if not 0 < len(parents) <= MAX_WAVES:
         raise ValueError("Specify between 1 and 32 exact parent IDs")
@@ -365,7 +395,7 @@ def build_report(*, waves: Iterable[Mapping], events: Iterable[Mapping], observe
     for event in representatives:
         wave = by_id[event["btc_parent_movement_id"]]
         cutoff = wave_observation_cutoff(wave, now)
-        for source in ([SPOT_SCOPE, MARK_SCOPE] if include_hype_mark and event["symbol"] == "HYPE" else [SPOT_SCOPE]):
+        for source in ([SPOT_SCOPE, derivative_scope] if include_derivative and event["symbol"] == "HYPE" else [SPOT_SCOPE]):
             key = (source, event["event_id"])
             if key not in cache:
                 try:
@@ -379,8 +409,11 @@ def build_report(*, waves: Iterable[Mapping], events: Iterable[Mapping], observe
                     path = fetch_full_path(event["symbol"], event["alert_time_utc"], cutoff,
                                            source_scope=source, fetcher=fetcher)
                     entry = None
-                    if source == MARK_SCOPE:
-                        from research_native_hype_mark_supplement import derive_entry
+                    if source in {MARK_SCOPE, PERP_SCOPE}:
+                        if source == PERP_SCOPE:
+                            from research_native_hype_perp_supplement import derive_entry
+                        else:
+                            from research_native_hype_mark_supplement import derive_entry
                         membership = {"event_id": event["event_id"],
                             "episode_policy_version": event["membership_policy_version"],
                             "btc_parent_movement_id": event["membership_parent_id"],
@@ -393,29 +426,31 @@ def build_report(*, waves: Iterable[Mapping], events: Iterable[Mapping], observe
                 except Exception as exc:
                     cache[key] = _unavailable(event, wave, now, source, f"{type(exc).__name__}: {exc}")
             records.append({**cache[key], "coin_scope": event["coin_scope"]})
-    if include_hype_mark:
+    if include_derivative:
         # Explicit alternative measurement contract requested by the owner.
         # Selection is unchanged: replace only the measurement for that same
         # HYPE representative, never choose a different event after outcomes.
         alternatives = {(row["source_event_id"], row["coin_scope"]): row
-                        for row in records if row["source_scope"] == MARK_SCOPE}
+                        for row in records if row["source_scope"] == derivative_scope}
         mixed = []
         for row in records:
             if row["source_scope"] != SPOT_SCOPE:
                 continue
             component = alternatives[(row["source_event_id"], row["coin_scope"])] if row["symbol"] == "HYPE" else row
-            mixed.append({**component, "source_scope": MIXED_SCOPE,
+            mixed.append({**component, "source_scope": mixed_scope,
                           "component_source_scope": component["source_scope"]})
         records.extend(mixed)
     represented = {event["btc_parent_movement_id"] for event in representatives}
     return {"method_version": METHOD_VERSION, "candidate": CANDIDATE, "observed_at_utc": now,
         "latest_closed_cutoff_utc": latest_closed_cutoff(now),
         "representative_policy": REPRESENTATIVE_POLICY,
-        "source_scope_policy": "CANONICAL_SPOT_AND_MARK_SEPARATE; EXPLICIT_ALTERNATIVE_MIXED_CONTRACT_VERSIONED",
-        "mixed_source_contract": {"source_scope": MIXED_SCOPE,
+        "source_scope_policy": ("CANONICAL_SPOT_AND_PERP_SEPARATE; EXPLICIT_ALTERNATIVE_MIXED_CONTRACT_VERSIONED"
+                                if include_hype_perp else "CANONICAL_SPOT_AND_MARK_SEPARATE; EXPLICIT_ALTERNATIVE_MIXED_CONTRACT_VERSIONED"),
+        "mixed_source_contract": {"source_scope": mixed_scope,
             "non_hype_entry": "IMMUTABLE_ALERT_REFERENCE_AND_CANONICAL_SPOT_PATH",
-            "hype_entry": "NEXT_FULL_MINUTE_BINANCE_FUTURES_MARK_OPEN_AND_MARK_PATH",
-            "production_formula_eligible": False, "original_events_modified": False} if include_hype_mark else None,
+            "hype_entry": ("NEXT_FULL_MINUTE_HYPERLIQUID_PERPETUAL_TRADE_OPEN_AND_TRADE_PATH" if include_hype_perp
+                           else "NEXT_FULL_MINUTE_BINANCE_FUTURES_MARK_OPEN_AND_MARK_PATH"),
+            "production_formula_eligible": False, "original_events_modified": False} if include_derivative else None,
         "boundary_policy": "FIRST_FULL_POST_ENTRY_MINUTE_THROUGH_INCLUSIVE_BTC_REVERSAL_CLOSE_OR_LATEST_CLOSED_MINUTE",
         "fixed_horizon_outcomes_modified": False, "waves": parents,
         "waves_without_qualifying_native_alert": [wave["btc_parent_movement_id"] for wave in parents
@@ -428,9 +463,10 @@ def build_report(*, waves: Iterable[Mapping], events: Iterable[Mapping], observe
             "This explicitly reconstructed contract does not claim to reproduce an unavailable earlier chat calculation."]}
 
 
-def refresh_report(*, previous_report: Mapping, previous_source: Mapping,
+def verified_closed_cache(*, previous_report: Mapping, previous_source: Mapping,
                    waves: Iterable[Mapping], events: Iterable[Mapping], observed_at: Any,
-                   include_hype_mark: bool = False, fetcher: Callable | None = None) -> dict:
+                   include_hype_mark: bool = False, include_hype_perp: bool = False,
+                   fetcher: Callable | None = None) -> dict:
     """Refresh open/missing paths; reuse verified unchanged complete closed paths.
 
     The caller must reread parent metadata and the candidate source cohort.
@@ -456,7 +492,7 @@ def refresh_report(*, previous_report: Mapping, previous_source: Mapping,
     cache = {}
     for row in previous_report["records"]:
         event_id, wave_id = int(row["source_event_id"]), row["btc_parent_movement_id"]
-        if (row["source_scope"] not in {SPOT_SCOPE, MARK_SCOPE} or row["status"] != "READY"
+        if (row["source_scope"] not in {SPOT_SCOPE, PERP_SCOPE if include_hype_perp else MARK_SCOPE} or row["status"] != "READY"
                 or not row.get("path_complete") or not row.get("observation_closed")
                 or event_id not in old_events or event_id not in new_events
                 or wave_id not in old_waves or wave_id not in new_waves):
@@ -464,7 +500,9 @@ def refresh_report(*, previous_report: Mapping, previous_source: Mapping,
         before, after = old_waves[wave_id], new_waves[wave_id]
         if (signature(old_events[event_id]) != signature(new_events[event_id])
                 or any(before.get(key) != after.get(key) for key in (
-                    "episode_policy_version", "start_time_utc", "end_time_utc", "evidence_eligible", "boundary_reason"))
+                    "episode_policy_version", "evidence_eligible", "boundary_reason"))
+                or any((utc(before[key]) if before.get(key) else None) != (utc(after[key]) if after.get(key) else None)
+                       for key in ("start_time_utc", "end_time_utc"))
                 or not after.get("end_time_utc")
                 or utc(after["end_time_utc"]) > utc(observed_at)):
             continue
@@ -474,8 +512,20 @@ def refresh_report(*, previous_report: Mapping, previous_source: Mapping,
         if verified:
             cache[(row["source_scope"], event_id)] = {**row, "closing_boundary_verified": True,
                 "source_reverified_at_utc": utc(observed_at)}
+    return cache
+
+
+def refresh_report(*, previous_report: Mapping, previous_source: Mapping,
+                   waves: Iterable[Mapping], events: Iterable[Mapping], observed_at: Any,
+                   include_hype_mark: bool = False, include_hype_perp: bool = False,
+                   fetcher: Callable | None = None) -> dict:
+    parents, incoming = list(waves), list(events)
+    cache = verified_closed_cache(previous_report=previous_report, previous_source=previous_source,
+        waves=parents, events=incoming, observed_at=observed_at,
+        include_hype_mark=include_hype_mark, include_hype_perp=include_hype_perp)
     result = build_report(waves=parents, events=incoming, observed_at=observed_at,
-        include_hype_mark=include_hype_mark, fetcher=fetcher, _verified_closed_cache=cache)
+        include_hype_mark=include_hype_mark, include_hype_perp=include_hype_perp,
+        fetcher=fetcher, _verified_closed_cache=cache)
     result["reused_complete_closed_source_paths"] = len(cache)
     return result
 
@@ -525,6 +575,7 @@ def main() -> None:
     parser.add_argument("--input", "--input-json", help="Optional JSON containing waves/events instead of readonly PostgreSQL")
     parser.add_argument("--observed-at", required=True, help="Explicit timezone-aware report cutoff")
     parser.add_argument("--include-hype-mark", action="store_true")
+    parser.add_argument("--include-hype-perp", action="store_true")
     parser.add_argument("--previous-report", help="Reuse verified unchanged closed paths from this JSON report")
     parser.add_argument("--previous-source", help="Original waves/events JSON for strict source comparison")
     parser.add_argument("--output", required=True)
@@ -551,7 +602,7 @@ def main() -> None:
     if bool(args.previous_report) != bool(args.previous_source):
         raise ValueError("Refresh requires both --previous-report and --previous-source")
     kwargs = dict(waves=waves, events=events, observed_at=args.observed_at,
-                  include_hype_mark=args.include_hype_mark)
+                  include_hype_mark=args.include_hype_mark, include_hype_perp=args.include_hype_perp)
     result = refresh_report(previous_report=json.loads(Path(args.previous_report).read_text()),
         previous_source=json.loads(Path(args.previous_source).read_text()), **kwargs) if args.previous_report else build_report(**kwargs)
     output = Path(args.output)

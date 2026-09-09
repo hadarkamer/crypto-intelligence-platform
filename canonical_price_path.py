@@ -32,13 +32,14 @@ def provider_for_symbol(symbol: Any) -> str:
 
 
 def fetch_closed_candles(symbol: str, start_time: Any, end_time: Any) -> Dict[str, Any]:
+    import research_archived_price_path
     provider = provider_for_symbol(symbol)
     if provider == "hyperliquid":
-        result = hyperliquid_spot_price_path.fetch_closed_candles(
+        result = research_archived_price_path.fetch_hype_spot(
             symbol, start_time, end_time
         )
     else:
-        result = binance_spot_price_path.fetch_closed_candles(
+        result = research_archived_price_path.fetch_binance(
             symbol, start_time, end_time
         )
         result = dict(result)
