@@ -35,6 +35,7 @@ import coinglass_flow_foundation
 import coinglass_flow_engine
 import time_family_engine
 import market_confidence_engine
+import maxpain_cvd_short_alert
 import ai_agent
 import ai_telegram
 import research_event_runtime
@@ -129,6 +130,7 @@ MAX_PROCESSED_UPDATE_IDS = 500
 ALERT_ACTIVE = False
 CONFIRMATION_STATE: Dict[str, str] = {}
 SCORE_CONFIRMATION_STATE: Dict[str, bool] = {}
+FORMULA_ALERT_SENT_KEYS: Dict[str, None] = {}
 HIGH_SCORE_83_STATE: Dict[str, bool] = {}
 DERIVATIVES_HIGH_STATE: Dict[str, str] = {}
 SPOT_FAMILY_HIGH_STATE: Dict[str, str] = {}
@@ -179,6 +181,7 @@ WATCH_RUNTIME = {
     "last_found": 0,
     "last_candidates": 0,
     "last_sent": 0,
+    "last_formula_sent": 0,
     "last_error": None,
     "last_cycle_status": None,
     "top_score": None,
@@ -2702,12 +2705,18 @@ def _high_score_83_transition_message(item: Dict[str, Any]) -> Optional[str]:
     ])
 
 
-def _special_transition_messages(item: Dict[str, Any]) -> List[str]:
+def _special_transition_messages(
+    item: Dict[str, Any],
+    *,
+    score65_items: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     """Return independent short alerts without changing any scoring logic."""
     messages: List[str] = []
     score_confirmation = _score_confirmation_transition_message(item)
     if score_confirmation:
         messages.append(score_confirmation)
+        if score65_items is not None:
+            score65_items.append(item)
     confirmation = _confirmation_transition_message(item)
     if confirmation:
         messages.append(confirmation)
@@ -2793,14 +2802,80 @@ def _spot_family_high_transition_messages(items: List[Dict[str, Any]]) -> List[s
     return messages
 
 
-def _collect_special_transition_messages(items: List[Dict[str, Any]]) -> List[str]:
+def _collect_special_transition_messages(
+    items: List[Dict[str, Any]],
+    *,
+    score65_items: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     """Evaluate special-alert transitions independently of normal alert ranking."""
     messages: List[str] = []
     for item in items:
-        messages.extend(_special_transition_messages(item))
+        messages.extend(_special_transition_messages(item, score65_items=score65_items))
     messages.extend(_derivatives_high_transition_messages(items))
     messages.extend(_spot_family_high_transition_messages(items))
     return messages
+
+
+async def _send_formula_watch_alerts(
+    bot,
+    chat_id: int,
+    score65_items: List[Dict[str, Any]],
+    *,
+    watch_scan_id: str,
+    decision_time: datetime,
+) -> int:
+    """Send one exact research-formula match per coin in a delivered Watch.
+
+    Input contains only the actual new Score65 transitions selected by the
+    existing alert engine. No scoring, collection, or scheduling is changed.
+    Delivery failure is recorded separately and cannot stop the Watch cycle.
+    """
+    if not watch_scan_id:
+        return 0
+    try:
+        matches = maxpain_cvd_short_alert.select_matches(score65_items)
+    except Exception as exc:
+        print(f"[formula-alert] selection failed open: {exc!r}", flush=True)
+        return 0
+    sent = 0
+    for match in matches:
+        delivery_key = f"{chat_id}|{watch_scan_id}|{match.symbol}"
+        if delivery_key in FORMULA_ALERT_SENT_KEYS:
+            continue
+        attempted_at = datetime.now(timezone.utc)
+        delivered_at = None
+        delivery_status = "DELIVERY_FAILED"
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=maxpain_cvd_short_alert.render_message(match, decision_time),
+                parse_mode="HTML",
+            )
+            delivered_at = datetime.now(timezone.utc)
+            delivery_status = "DELIVERED"
+            FORMULA_ALERT_SENT_KEYS[delivery_key] = None
+            if len(FORMULA_ALERT_SENT_KEYS) > 1024:
+                FORMULA_ALERT_SENT_KEYS.pop(next(iter(FORMULA_ALERT_SENT_KEYS)))
+            sent += 1
+            print(
+                f"[formula-alert] delivered formula={maxpain_cvd_short_alert.FORMULA_ID} "
+                f"symbol={match.symbol} direction={match.direction} watch={watch_scan_id}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[formula-alert] delivery failed {match.symbol}: {exc!r}", flush=True)
+        try:
+            research_event_runtime.capture_formula_match(
+                match,
+                event_time=decision_time,
+                persist=True,
+                delivery_status=delivery_status,
+                delivery_attempted_at_utc=attempted_at,
+                delivered_at_utc=delivered_at,
+            )
+        except Exception as exc:
+            print(f"[formula-alert] capture failed open {match.symbol}: {exc!r}", flush=True)
+    return sent
 
 
 def _combined_group_key(symbol: Any, side: Any) -> str:
@@ -4510,6 +4585,7 @@ async def run_watch_cycle(
     WATCH_RUNTIME["scan_in_progress"] = True
     WATCH_RUNTIME["scan_owner"] = "Watch"
     WATCH_RUNTIME["last_cycle_status"] = "running"
+    WATCH_RUNTIME["last_formula_sent"] = 0
     WATCH_RUNTIME["last_error"] = None
     WATCH_RUNTIME["cycle_number"] = int(WATCH_RUNTIME.get("cycle_number", 0)) + 1
     cycle_number = WATCH_RUNTIME["cycle_number"]
@@ -4569,8 +4645,11 @@ async def run_watch_cycle(
         research_decision_time = datetime.now(timezone.utc)
         # A Magnet-only subscriber must not consume regular or combined alert
         # transitions that were never sent to the general Watch chat.
+        score65_transition_items: List[Dict[str, Any]] = []
         special_messages = (
-            _collect_special_transition_messages(displayable_items)
+            _collect_special_transition_messages(
+                displayable_items, score65_items=score65_transition_items
+            )
             if general_enabled else []
         )
         combined_deliveries = (
@@ -4662,6 +4741,13 @@ async def run_watch_cycle(
                 )
             except Exception as exc:
                 print(f"[research] special transition hook failed: {exc!r}", flush=True)
+            WATCH_RUNTIME["last_formula_sent"] = await _send_formula_watch_alerts(
+                bot_app.bot,
+                chat_id,
+                score65_transition_items,
+                watch_scan_id=watch_scan_id,
+                decision_time=research_decision_time,
+            )
             for combined_delivery in combined_deliveries:
                 attempted_at = datetime.now(timezone.utc)
                 try:
@@ -6026,6 +6112,13 @@ async def health(request):
         "ordered_experimental": research_ordered_experimental_worker.WORKER.status(),
         "snapshot_sync": research_snapshot_sync_worker.WORKER.status(),
         "google_sheets_delivery": google_sheets_sync.status(),
+        "dedicated_formula_alert": {
+            "formula_id": maxpain_cvd_short_alert.FORMULA_ID,
+            "formula_version": maxpain_cvd_short_alert.FORMULA_VERSION,
+            "enabled": bool(WATCH_GENERAL_ENABLED),
+            "scope": "EXISTING_GENERAL_WATCH_SCORE65_TRANSITIONS",
+            "last_cycle_sent": WATCH_RUNTIME.get("last_formula_sent", 0),
+        },
         "watch": {
             "desired_general_enabled": bool(WATCH_GENERAL_ENABLED),
             "mode": WATCH_RUNTIME.get("mode"),
@@ -7086,6 +7179,7 @@ async def main():
         "last_found": 0,
         "last_candidates": 0,
         "last_sent": 0,
+        "last_formula_sent": 0,
         "last_error": None,
         "last_cycle_status": "off_after_startup",
         "top_score": None,

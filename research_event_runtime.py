@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import magnet_v1
 import market_confidence_engine
+import maxpain_cvd_short_alert
 import google_sheets_sync
 import research_event_capture
 import research_event_store
@@ -267,6 +268,65 @@ def capture_sent_maxpain(
     except Exception as exc:
         print(f"[research-dry-run] maxpain capture failed: {exc!r}", flush=True)
         return False
+
+
+def capture_formula_match(
+    match: maxpain_cvd_short_alert.FormulaMatch,
+    *,
+    event_time: Any = None,
+    persist: bool = False,
+    delivery_status: str = "DELIVERED",
+    delivery_attempted_at_utc: Any = None,
+    delivered_at_utc: Any = None,
+) -> bool:
+    """Archive the separately delivered formula card, retaining its source link."""
+    timestamp = _now(event_time)
+    parent = research_event_capture.build_maxpain_event(
+        match.item, event_type="MAX_PAIN_SCORE_65", event_time=timestamp
+    )
+    event = research_event_capture.build_maxpain_event(
+        match.item, event_type=maxpain_cvd_short_alert.FORMULA_ID, event_time=timestamp
+    )
+    if event.direction != match.direction:
+        raise ValueError("Formula price direction differs from source event")
+    snapshot = dict(event.engine_snapshot or {})
+    snapshot["formula_match"] = {
+        "formula_id": maxpain_cvd_short_alert.FORMULA_ID,
+        "formula_version": maxpain_cvd_short_alert.FORMULA_VERSION,
+        "source_event_type": "MAX_PAIN_SCORE_65",
+        "source_event_fingerprint": parent.event_fingerprint,
+        "canonical_event_fingerprint": event.event_fingerprint,
+        "selection_policy": "FIRST_BOTH_TOTAL_CVD_PER_COIN_WATCH_THEN_SHORT",
+        "maxpain_score_minimum": 65.0,
+        "both_total_cvd_strict_minimum": 65.0,
+        "short_quality_inclusive_minimum": 65.0,
+        "futures_total_score": match.futures_score,
+        "spot_total_score": match.spot_score,
+        "futures_short_quality_pct": match.short_quality_pct,
+        "expected_price_direction": match.direction,
+        "experimental": True,
+    }
+    # This card displays the expected PRICE direction directly. Its type does
+    # not contain MAX_PAIN, so _with_watch_context must not label it as the
+    # opposite liquidation side used by the legacy parent card.
+    event = replace(event, engine_snapshot=snapshot)
+    if str(delivery_status or "").upper() == "DELIVERY_FAILED":
+        # The archive intentionally never overwrites existing fingerprints.
+        # A failed attempt must not occupy the successful occurrence's key:
+        # a retry in this same Watch must be able to persist as DELIVERED.
+        attempt = _now(delivery_attempted_at_utc)
+        failed_fingerprint = hashlib.sha256(
+            f"{event.event_fingerprint}|DELIVERY_FAILED|{attempt}".encode("utf-8")
+        ).hexdigest()
+        event = replace(event, event_fingerprint=failed_fingerprint)
+    return _emit(
+        event,
+        persist=persist,
+        capture_stage="TELEGRAM_FORMULA_ALERT",
+        delivery_status=delivery_status,
+        delivery_attempted_at_utc=delivery_attempted_at_utc,
+        delivered_at_utc=delivered_at_utc,
+    )
 
 
 def capture_manual_maxpain_sample(
