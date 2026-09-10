@@ -16,6 +16,7 @@ from contextvars import ContextVar, Token
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
+import formula_readiness_measurement
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import magnet_v1
@@ -60,6 +61,7 @@ def _with_watch_context(
     event: research_event_capture.ResearchEvent,
 ) -> research_event_capture.ResearchEvent:
     context = dict(_WATCH_CONTEXT.get() or {})
+    context.pop("formula_timing", None)  # Persist timing only on formula events.
     snapshot = dict(event.engine_snapshot or {})
     snapshot.update(context)
     analysis_direction = str(event.direction or "NEUTRAL").upper()
@@ -306,6 +308,16 @@ def capture_formula_match(
         "expected_price_direction": match.direction,
         "experimental": True,
     }
+    timing = (_WATCH_CONTEXT.get() or {}).get("formula_timing")
+    if timing:
+        try:
+            snapshot["timing_measurement"] = formula_readiness_measurement.build_observation(
+                timing, match.symbol, timestamp, delivery_attempted_at_utc,
+                delivered_at_utc, delivery_status,
+            )
+        except Exception as exc:
+            # Diagnostics cannot discard an otherwise valid formula event.
+            snapshot["timing_measurement"] = {"status": "CAPTURE_ERROR", "reason": type(exc).__name__}
     # This card displays the expected PRICE direction directly. Its type does
     # not contain MAX_PAIN, so _with_watch_context must not label it as the
     # opposite liquidation side used by the legacy parent card.
