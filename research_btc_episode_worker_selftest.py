@@ -61,6 +61,7 @@ class WorkerTests(unittest.TestCase):
         # Execute the production health handler with isolated external services;
         # aiohttp's real JSON encoder must accept a completed worker status.
         from aiohttp import web
+        import maxpain_cvd_short_alert
         source=ast.parse(Path(__file__).with_name("main.py").read_text())
         handler=next(node for node in source.body
                      if isinstance(node,ast.AsyncFunctionDef) and node.name=="health")
@@ -72,11 +73,15 @@ class WorkerTests(unittest.TestCase):
         # Watch health was added after this fixture: stub its runtime state,
         # not Python's bool/sorted builtins or the handler's JSON encoder.
         namespace.update(web=web,research_btc_episode_worker=SimpleNamespace(WORKER=subject),
+                         maxpain_cvd_short_alert=maxpain_cvd_short_alert,
                          WATCH_GENERAL_ENABLED=False,WATCH_RUNTIME={},
                          MAGNET_V1_WATCHES={},WATCH_TASK=None,WATCH_SUPERVISOR_TASK=None)
         exec(compile(ast.Module(body=[handler],type_ignores=[]),"main.py","exec"),namespace)
         response=asyncio.run(namespace["health"](None))
         self.assertEqual(response.status,200)
+        self.assertEqual(json.loads(response.text)["dedicated_formula_alert"]["formula_id"],
+                         maxpain_cvd_short_alert.FORMULA_ID)
+        self.assertFalse(json.loads(response.text)["dedicated_formula_alert"]["enabled"])
         self.assertEqual(json.loads(response.text)["btc_episodes"]["metrics"]["last_result"]["bars_written"],1)
 
     def test_status_recursively_copies_datetime_lists(self):
