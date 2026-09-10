@@ -2373,6 +2373,8 @@ def _regime_block(item: Dict[str, Any]) -> str:
     windows = regime.get("windows") or {}
     overall = regime.get("overall") or {}
     quality_status = str(regime.get("data_quality_status") or "PASS").upper()
+    if quality_status == "READ_ERROR":
+        return "\n\n📊 <b>מחיר + OI</b>\n⛔ קריאת הנתונים נכשלה; הדגימה לא נכללה באישור."
     if quality_status == "INVALID":
         gap = regime.get("time_gap_seconds")
         gap_text = f"{float(gap):.1f} שניות" if gap is not None else "לא ידוע"
@@ -2497,6 +2499,10 @@ def _flow_detail_block(
             continue
         market = context.get(key) or {}
         windows = market.get("windows") or {}
+        quality = market.get("quality") or {}
+        if not windows and quality.get("reasons"):
+            sections.append("\n\n" + heading + "\n⛔ נתוני CVD לא זמינים עקב כשל בקריאה או באיסוף.")
+            continue
         lines = ["", "━━━━━━━━━━━━━━━━━━━━", heading, _flow_snapshot_line(market)]
         for label in ("30m", "1h", "4h", "12h", "24h", "48h", "72h", "7d"):
             w = windows.get(label) or {}
