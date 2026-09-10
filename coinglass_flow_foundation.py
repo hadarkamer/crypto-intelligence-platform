@@ -344,8 +344,8 @@ def _fetch_chunk(
         "unit": "usd",
     })
     normalized = _normalize(payload)
-    # Continuous values are rebuilt from all stored Buy-Sell deltas after each
-    # symbol/market finishes. The placeholder avoids trusting chunk-relative
+    # Continuous values are rebuilt from saved Buy-Sell deltas in the same
+    # transaction as each chunk. The placeholder avoids trusting chunk-relative
     # API CVD as a cross-request continuous series.
     rows = {ts: (buy, sell, api_cvd, 0.0) for ts, (buy, sell, api_cvd) in normalized.items()}
     time.sleep(REQUEST_PAUSE_SECONDS)
@@ -413,6 +413,7 @@ def _store(
                 with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
                     with conn.cursor() as cur:
                         cur.executemany(sql, values)
+                    _repair_continuous_in_transaction(conn, table, str(symbol).upper())
                     conn.commit()
                 break
             except psycopg.errors.DeadlockDetected:
@@ -437,6 +438,7 @@ def _store(
         """
         with sqlite3.connect(DB_PATH) as conn:
             conn.executemany(sql, values)
+            _repair_continuous_in_transaction(conn, table, str(symbol).upper())
             conn.commit()
     return len(values)
 
@@ -547,48 +549,49 @@ def _is_current(existing: Dict[str, Any], now: Optional[datetime] = None) -> boo
     return latest >= latest_eligible_candle_time(now)
 
 
+def _repair_continuous_in_transaction(conn, table: str, symbol: str) -> int:
+    """Publish raw candles and their cumulative series in the same transaction.
+
+    Update only changed values in one database statement; readers cannot see
+    placeholders and a failed repair rolls back the corresponding raw insert.
+    """
+    placeholder = "%s" if _use_postgres() else "?"
+    conn.execute(f"""
+        WITH computed AS (
+            SELECT candle_time,
+                   SUM(buy_volume_usd - sell_volume_usd) OVER (
+                       ORDER BY candle_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                   ) AS cvd
+            FROM {table} WHERE symbol={placeholder}
+        )
+        UPDATE {table} AS target
+        SET continuous_cum_vol_delta_usd=computed.cvd
+        FROM computed
+        WHERE target.symbol={placeholder}
+          AND target.candle_time=computed.candle_time
+          AND target.continuous_cum_vol_delta_usd <> computed.cvd
+    """, (symbol, symbol))
+    row = conn.execute(
+        f"SELECT COUNT(*) AS count FROM {table} WHERE symbol={placeholder}",
+        (symbol,),
+    ).fetchone()
+    return int(row["count"] if _use_postgres() else row[0])
+
+
 def _rebuild_continuous_cvd(symbol: str, market: str) -> int:
-    """Recompute one deterministic continuous series from saved Buy-Sell deltas."""
+    """Repair interrupted legacy writes, without rewriting unchanged history."""
     init_db()
     table = _table_for_market(market)
     symbol = str(symbol).upper()
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
-            rows = conn.execute(
-                f"SELECT candle_time,buy_volume_usd,sell_volume_usd FROM {table} "
-                "WHERE symbol=%s ORDER BY candle_time",
-                (symbol,),
-            ).fetchall()
-            cumulative = 0.0
-            values = []
-            for row in rows:
-                cumulative += float(row["buy_volume_usd"]) - float(row["sell_volume_usd"])
-                values.append((cumulative, row["candle_time"], symbol))
-            with conn.cursor() as cur:
-                cur.executemany(
-                    f"UPDATE {table} SET continuous_cum_vol_delta_usd=%s WHERE candle_time=%s AND symbol=%s",
-                    values,
-                )
+            total = _repair_continuous_in_transaction(conn, table, symbol)
             conn.commit()
-            return len(values)
+            return total
     with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            f"SELECT candle_time,buy_volume_usd,sell_volume_usd FROM {table} "
-            "WHERE symbol=? ORDER BY candle_time",
-            (symbol,),
-        ).fetchall()
-        cumulative = 0.0
-        values = []
-        for row in rows:
-            cumulative += float(row["buy_volume_usd"]) - float(row["sell_volume_usd"])
-            values.append((cumulative, row["candle_time"], symbol))
-        conn.executemany(
-            f"UPDATE {table} SET continuous_cum_vol_delta_usd=? WHERE candle_time=? AND symbol=?",
-            values,
-        )
+        total = _repair_continuous_in_transaction(conn, table, symbol)
         conn.commit()
-        return len(values)
+        return total
 
 
 def backfill_symbol(
@@ -611,16 +614,14 @@ def backfill_symbol(
     existing = coverage(symbol, market)
 
     if not force and _is_current(existing, now):
-        # A five-minute poll frequently finds that the newest *closed* 30m
-        # candle is already stored.  Rebuilding the entire continuous series in
-        # that no-change path creates needless writes and can contend with OI
-        # and Watch reads.  A real insert still rebuilds deterministically below.
-        total_rows = int(existing.get("count") or 0)
+        # Repair any legacy interrupted rebuild even when source candles are
+        # already current. The set-based repair writes only inconsistent rows.
+        total_rows = _rebuild_continuous_cvd(symbol, market)
         return FlowBackfillResult(
             symbol, market, 0, 0, total_rows,
             existing["min_time"].isoformat() if existing.get("min_time") else requested_start.isoformat(),
             existing["max_time"].isoformat() if existing.get("max_time") else end.isoformat(),
-            True, True, 0, "Already current — skipped without database writes",
+            True, True, 0, "Already current — verified cumulative series; unchanged rows not rewritten",
         ).to_dict()
 
     # Resume from the next 30m candle after the latest successful stored row.

@@ -500,6 +500,14 @@ def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     tolerance = max(1_000.0, abs(independent) * 0.0001)
     cvd_difference = abs(independent - stored)
     cvd_ok = cvd_difference <= tolerance
+    cumulative = 0.0
+    for row in rows:
+        cumulative += float(row["delta"])
+        if abs(float(row["continuous_cvd"]) - cumulative) > max(1_000.0, abs(cumulative) * 0.0001):
+            cvd_difference = abs(float(row["continuous_cvd"]) - cumulative)
+            tolerance = max(1_000.0, abs(cumulative) * 0.0001)
+            cvd_ok = False
+            break
     gaps = []
     largest_gap_seconds = 0.0
     for prev, cur in zip(rows, rows[1:]):
@@ -553,7 +561,13 @@ def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     rows = _load_rows(symbol, market)
     quality = _quality(rows)
-    windows = {label: _window_state(rows, label, steps) for label, steps in WINDOWS}
+    valid_series = quality.get("continuous_cvd_check", False)
+    windows = {
+        label: _window_state(rows, label, steps) if valid_series else {
+            "available": False, "reason": "נתוני CVD אינם עקביים; ממתין לתיקון הסדרה" if rows else "אין נתוני CVD שמורים",
+        }
+        for label, steps in WINDOWS
+    }
     # Stage 90: one shared weighted time-family model is used in regular scans
     # and in confirmation. Keep legacy group fields for backward compatibility.
     weighted = time_family_engine.aggregate(windows, time_family_engine.flow_window_evaluator)
@@ -591,7 +605,7 @@ def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     return {
         "symbol": str(symbol or "").upper(),
         "market": market,
-        "available": bool(rows),
+        "available": bool(rows) and valid_series,
         "quality": quality,
         "current_impulse_30m": latest_impulse,
         "windows": windows,

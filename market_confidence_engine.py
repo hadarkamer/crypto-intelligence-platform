@@ -68,7 +68,7 @@ def capture_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
                 "available": False,
                 "windows": {},
                 "reason": repr(exc),
-                "data_quality_status": "INVALID",
+                "data_quality_status": "READ_ERROR",
             }
         try:
             flow = _cached_flow(symbol)
