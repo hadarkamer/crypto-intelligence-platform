@@ -1395,6 +1395,9 @@ async def collect_live_rows_for_watch(
         live_result["rows"] = rows
         live_result["timeframe_integrity"] = integrity
         live_result["symbol_integrity"] = symbol_audit
+        # Observation only: these operational inputs are complete before the
+        # separate research archive work. This is NOT a formula-ready time.
+        live_result["watch_inputs_ready_at_utc"] = datetime.now(timezone.utc).isoformat()
         if archive_requested:
             # Research gets a separate no-fallback price overlay.  Bot/Watch
             # rows above retain their operational fallback behavior, while the
@@ -4590,10 +4593,12 @@ async def run_watch_cycle(
     WATCH_RUNTIME["cycle_number"] = int(WATCH_RUNTIME.get("cycle_number", 0)) + 1
     cycle_number = WATCH_RUNTIME["cycle_number"]
     watch_scan_id = f"shared-watch:{cycle_started_at.isoformat()}"
+    formula_timing = {"cycle_started_at_utc": cycle_started_at.isoformat()}
     watch_context_token = research_event_runtime.set_watch_context(
         watch_scan_id=watch_scan_id,
         watch_cycle_number=cycle_number,
         watch_started_at_utc=cycle_started_at.isoformat(),
+        formula_timing=formula_timing,
     )
 
     try:
@@ -4601,7 +4606,7 @@ async def run_watch_cycle(
         async def _collect_dom():
             async with scrape_lock:
                 WATCH_RUNTIME["scan_owner"] = "Watch משותף"
-                return await collect_live_rows_for_watch(
+                result = await collect_live_rows_for_watch(
                     archive_context={
                         "cycle_id": watch_scan_id,
                         "cycle_time_utc": cycle_started_at,
@@ -4613,12 +4618,20 @@ async def run_watch_cycle(
                         },
                     }
                 )
+                formula_timing["dom_collection_returned_at_utc"] = datetime.now(timezone.utc).isoformat()
+                return result
+
+        async def _collect_derivatives():
+            result = await _ensure_watch_derivatives_ready()
+            formula_timing["derivatives_refresh_returned_at_utc"] = datetime.now(timezone.utc).isoformat()
+            return result
 
         dom_result, derivatives_status = await asyncio.gather(
             _collect_dom(),
-            _ensure_watch_derivatives_ready(),
+            _collect_derivatives(),
         )
         rows, live_result = dom_result
+        formula_timing["watch_inputs_ready_at_utc"] = live_result.get("watch_inputs_ready_at_utc")
 
         snapshot_symbols = sorted({
             str(_row_get(row, "symbol", "") or "").upper()
@@ -4629,6 +4642,11 @@ async def run_watch_cycle(
             market_confidence_engine.capture_snapshot,
             snapshot_symbols,
         )
+        formula_timing["cvd_observations_by_symbol"] = {
+            symbol: value.get("timing_observation", {})
+            for symbol, value in derivatives_snapshot.items()
+        }
+        formula_timing["snapshot_complete_at_utc"] = datetime.now(timezone.utc).isoformat()
 
         all_items = _build_opportunities_with_regime(
             rows,
@@ -4643,6 +4661,11 @@ async def run_watch_cycle(
             if _is_displayable_opportunity(item)
         ]
         research_decision_time = datetime.now(timezone.utc)
+        formula_timing["signal_ready_at_utc"] = research_decision_time.isoformat()
+        print(
+            "[formula-timing] " + json.dumps(formula_timing, sort_keys=True),
+            flush=True,
+        )
         # A Magnet-only subscriber must not consume regular or combined alert
         # transitions that were never sent to the general Watch chat.
         score65_transition_items: List[Dict[str, Any]] = []

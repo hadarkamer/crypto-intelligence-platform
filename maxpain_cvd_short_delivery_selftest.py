@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import google_sheets_sync
+import formula_readiness_measurement
 import maxpain_cvd_short_alert as formula
 import research_event_capture as capture
 
@@ -179,6 +180,7 @@ def test_runtime_capture_and_sheets():
         "_WATCH_CONTEXT": ContextVar("test_watch", default={}),
         "SINK": capture.DryRunResearchCapture(max_events=20),
         "research_event_capture": capture, "maxpain_cvd_short_alert": formula,
+        "formula_readiness_measurement": formula_readiness_measurement,
         "research_event_store": SimpleNamespace(WRITER=SimpleNamespace(enqueue=enqueue)),
         "google_sheets_sync": SimpleNamespace(enqueue_delivered_event=sheet_enqueue),
     }
@@ -186,7 +188,10 @@ def test_runtime_capture_and_sheets():
         "set_watch_context", "reset_watch_context", "_with_watch_context",
         "_now", "_emit", "capture_formula_match",
     }, scope)
-    token = scope["set_watch_context"](watch_scan_id="watch:source", watch_cycle_number=17)
+    token = scope["set_watch_context"](
+        watch_scan_id="watch:source", watch_cycle_number=17,
+        formula_timing={"cycle_started_at_utc": TIME.isoformat()},
+    )
     try:
         match = formula.select_matches([_item()])[0]
         assert scope["capture_formula_match"](match, event_time=TIME, persist=False)
@@ -195,6 +200,9 @@ def test_runtime_capture_and_sheets():
         assert event.event_kind == "ALERT" and event.event_type == formula.FORMULA_ID
         assert event.direction == "LONG" and event.source_side == "SHORT"
         snapshot = event.engine_snapshot
+        assert snapshot["timing_measurement"]["status"] == "INCOMPLETE"
+        assert snapshot["timing_measurement"]["version"] == "formula-readiness-v1"
+        assert "formula_timing" not in snapshot
         assert snapshot["analysis_direction"] == snapshot["displayed_direction"] == "LONG"
         assert snapshot["watch_scan_id"] == "watch:source" and snapshot["watch_cycle_number"] == 17
         assert snapshot["sheet_snapshot_id"] == hashlib.sha256(b"watch:source|BTC|LONG").hexdigest()

@@ -13,6 +13,7 @@ family contribution. The result never changes the existing Max-Pain score.
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,6 +89,12 @@ def capture_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         snapshot[symbol] = {
             "regime": deepcopy(regime),
             "flow": deepcopy(flow),
+            "timing_observation": {
+                # Cache reads are observations, not provider arrival times.
+                "cvd_observed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "futures_source_close_at_utc": (flow.get("futures", {}).get("quality") or {}).get("candle_close"),
+                "spot_source_close_at_utc": (flow.get("spot", {}).get("quality") or {}).get("candle_close"),
+            },
         }
     return snapshot
 
