@@ -1,0 +1,411 @@
+{
+  "checked_at_utc": "2026-09-13T21:04:09.986196+00:00",
+  "production_commit": "64b5898716a9ec31bb92b7fd84ffe5c1e0247292",
+  "tested_commit": "86ea6c072a89340e87bf581f2e7c67b90e0f730b",
+  "tested_and_production_tree": "2a4bbedd8fa6a9f4718afafb9fe3c3f15f404e4e",
+  "pr": 37,
+  "ci": {
+    "run": 34782050862,
+    "job": 103790726729,
+    "conclusion": "success",
+    "selftest_files": 117,
+    "new_pure_tests": 12,
+    "new_postgres_tests": 6,
+    "local_pure_total": 40
+  },
+  "migration": {
+    "name": "050_watch_scan_btc_context_formulas.sql",
+    "sha256": "078ee33a947e2a45165eb2761b1a7a3447cf420e1a40394233ea408f5cff6fcf",
+    "installation": [
+      {
+        "active": "watch-scan-formulas-v2-maxpain",
+        "current_decisions": 24928,
+        "supports_v3": true
+      }
+    ]
+  },
+  "deploy": {
+    "commit": {
+      "createdAt": "2026-09-13T20:56:42Z",
+      "id": "64b5898716a9ec31bb92b7fd84ffe5c1e0247292",
+      "message": "Merge pull request #37 from hadarkamer/feature/all-watch-scan-prior-price-20260913\n\nAdd causal BTC context for 106 all-Watch formulas"
+    },
+    "createdAt": "2026-09-13T20:56:44.854433Z",
+    "finishedAt": "2026-09-13T20:58:08.370706Z",
+    "id": "dep-dajgs30u01pc7394gfh0",
+    "startedAt": "2026-09-13T20:56:44.83104Z",
+    "status": "live",
+    "trigger": "new_commit",
+    "updatedAt": "2026-09-13T20:58:32.653316Z"
+  },
+  "predeploy_health": {
+    "checked_at_utc": "2026-09-13T20:56:17.720969+00:00",
+    "commit": "d0c72f88aa83add18dc94c67de6146ca78afa91c",
+    "formulas": {
+      "active_evaluation_version": "watch-scan-formulas-v2-maxpain",
+      "catalog_candidates": 298,
+      "cycles": 67,
+      "discovery_enabled": false,
+      "enabled": true,
+      "failures": 0,
+      "feature_version": "watch-captured-total-and-maxpain-features-v2",
+      "last": {
+        "activated": false,
+        "active_evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "catalog": 298,
+        "enqueued": 0,
+        "errors": 0,
+        "locked": false,
+        "processed": 0,
+        "ready": 0
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-13T20:56:03.020731+00:00",
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "promotion_enabled": false,
+      "running": true,
+      "supported_candidates": 82,
+      "version": "watch-scan-formulas-v2-maxpain"
+    },
+    "intake": {
+      "cycles": 68,
+      "enabled": true,
+      "failures": 0,
+      "formula_evaluation_enabled": false,
+      "last": {
+        "accepted": 0,
+        "completed_laps": 49,
+        "cursor": 1266,
+        "high_water": 1267,
+        "locked": false,
+        "processed": 0,
+        "rejected": 0,
+        "scanned_ids": 4
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-13T20:55:57.968031+00:00",
+      "max_bundles_per_pass": 6,
+      "outcomes_enabled": false,
+      "page_size": 64,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "running": true,
+      "version": "watch-all-scan-intake-v1"
+    },
+    "measurement": {
+      "cache_only": true,
+      "cycles": 67,
+      "enabled": true,
+      "failures": 0,
+      "formula_evaluation_enabled": false,
+      "last": {
+        "enqueued": 0,
+        "errors": 0,
+        "locked": false,
+        "missing": 0,
+        "open": 0,
+        "processed": 0,
+        "ready": 0
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-13T20:55:49.837013+00:00",
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "running": true,
+      "version": "watch-scan-measurements-v1"
+    },
+    "watch": {
+      "last_completed_at_utc": "2026-09-13T20:36:06.989015+00:00",
+      "last_cycle_result": "completed",
+      "last_cycle_status": "waiting",
+      "last_error": null,
+      "next_scan_utc": "2026-09-13T21:02:15+00:00"
+    }
+  },
+  "health": {
+    "checked_at_utc": "2026-09-13T21:04:09.986196+00:00",
+    "commit": "64b5898716a9ec31bb92b7fd84ffe5c1e0247292",
+    "watch": {
+      "last_cycle_status": "running",
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "next_scan_utc": "2026-09-13T21:02:15.018600+00:00",
+      "last_error": null
+    },
+    "intake": {
+      "version": "watch-all-scan-intake-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "page_size": 64,
+      "max_bundles_per_pass": 6,
+      "poll_seconds": 30,
+      "outcomes_enabled": false,
+      "formula_evaluation_enabled": false,
+      "cycles": 13,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "accepted": 0,
+        "rejected": 0,
+        "processed": 0,
+        "scanned_ids": 0,
+        "cursor": 1266,
+        "high_water": 1267,
+        "completed_laps": 53
+      },
+      "last_run_utc": "2026-09-13T21:03:57.311741+00:00"
+    },
+    "measurement": {
+      "version": "watch-scan-measurements-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "cache_only": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "formula_evaluation_enabled": false,
+      "cycles": 13,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "enqueued": 0,
+        "processed": 0,
+        "ready": 0,
+        "open": 0,
+        "missing": 0,
+        "errors": 0
+      },
+      "last_run_utc": "2026-09-13T21:04:06.714169+00:00"
+    },
+    "formulas": {
+      "version": "watch-scan-formulas-v3-btc-context",
+      "feature_version": "watch-captured-total-maxpain-and-btc-context-features-v3",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "catalog_candidates": 298,
+      "supported_candidates": 106,
+      "active_evaluation_version": "watch-scan-formulas-v3-btc-context",
+      "discovery_enabled": false,
+      "promotion_enabled": false,
+      "cycles": 12,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "catalog": 298,
+        "enqueued": 0,
+        "processed": 0,
+        "ready": 0,
+        "errors": 0,
+        "activated": false,
+        "active_evaluation_version": "watch-scan-formulas-v3-btc-context"
+      },
+      "last_run_utc": "2026-09-13T21:03:48.460988+00:00"
+    }
+  },
+  "activation": {
+    "activated_at_utc": "2026-09-13T21:02:42.874014Z",
+    "active_evaluation_version": "watch-scan-formulas-v3-btc-context"
+  },
+  "summary": {
+    "active": "watch-scan-formulas-v3-btc-context",
+    "catalog": {
+      "supported": 106,
+      "total": 298,
+      "unsupported": 192
+    },
+    "checked_at_utc": "2026-09-13T21:03:03.930138+00:00",
+    "evaluations": {
+      "candidates": 106,
+      "coins": 8,
+      "match": 2350,
+      "no_match": 29874,
+      "prospective": 0,
+      "total": 32224,
+      "unknown": 0
+    },
+    "intakes": 19,
+    "samples": {
+      "errors": 0,
+      "last_update": "2026-09-13T21:02:42.874014+00:00",
+      "ready": 152,
+      "total": 152,
+      "waiting": 0
+    },
+    "waves": {
+      "distinct_live_waves": 1,
+      "live_coins": 152
+    }
+  },
+  "old_versions_before": [
+    {
+      "evaluation_version": "watch-scan-formulas-v1",
+      "full_payload_digest": "22f8e04e3158ff350add79d0ef94e1dc",
+      "ready_samples": 144
+    },
+    {
+      "evaluation_version": "watch-scan-formulas-v2-maxpain",
+      "full_payload_digest": "7664b6bb9725c6ba4b3e0f9e3d14606b",
+      "ready_samples": 152
+    }
+  ],
+  "old_versions_after": [
+    {
+      "evaluation_version": "watch-scan-formulas-v1",
+      "full_payload_digest": "22f8e04e3158ff350add79d0ef94e1dc",
+      "ready_samples": 144
+    },
+    {
+      "evaluation_version": "watch-scan-formulas-v2-maxpain",
+      "full_payload_digest": "7664b6bb9725c6ba4b3e0f9e3d14606b",
+      "ready_samples": 152
+    }
+  ],
+  "canonical_round_trips": [
+    {
+      "context_matches": true,
+      "context_sha256": "30d34ecb450bf9fd957ac96a7107317d9b57eca544d0f7c56af35e132a5b7e53",
+      "feature_sha256": "eaad0ef40266888a4edf70a582e59b92450e561698499054bff4b5cda1b9776d",
+      "payload_matches": true,
+      "snapshot_set_id": 1231,
+      "symbol": "BTC"
+    },
+    {
+      "context_matches": true,
+      "context_sha256": "30d34ecb450bf9fd957ac96a7107317d9b57eca544d0f7c56af35e132a5b7e53",
+      "feature_sha256": "87831f8078aa6c2df385513bc290e6db6aa54ca23e219d516bc55374dabc381f",
+      "payload_matches": true,
+      "snapshot_set_id": 1231,
+      "symbol": "HYPE"
+    }
+  ],
+  "checks": [
+    {
+      "query": "WITH recent AS MATERIALIZED (\n    SELECT consumer_version,snapshot_set_id,usable_from_utc\n    FROM research_watch_scan_intakes\n    WHERE consumer_version='watch-all-scan-intake-v1' AND intake_status='ACCEPTED'\n    ORDER BY snapshot_set_id DESC LIMIT 128\n), windows AS (\n    SELECT i.snapshot_set_id,i.usable_from_utc,date_trunc('minute',i.usable_from_utc) AS boundary,\n        t.name,t.minutes,t.feature,f.payload->'btc_context_provenance' AS context,\n        f.payload#>'{btc_context_provenance,windows}'->t.name AS proof\n    FROM recent i JOIN research_watch_scan_formula_samples f USING(consumer_version,snapshot_set_id)\n    CROSS JOIN (VALUES ('1h',60,'historical.closed_1m.1h.btc_direction'),\n        ('4h',240,'historical.closed_1m.4h.btc_market_regime')) t(name,minutes,feature)\n    WHERE f.evaluation_version='watch-scan-formulas-v3-btc-context' AND f.status='READY' AND f.symbol='BTC'\n), raw AS (\n    SELECT w.*,a.*,\n        100.0*(a.last_close/a.first_open-1.0) AS raw_return,\n        100.0*(a.raw_high-a.raw_low)/a.first_open AS raw_range\n    FROM windows w CROSS JOIN LATERAL (\n        SELECT count(*) AS n,min(open_time_utc) AS first_time,max(close_time_utc) AS last_time,\n            (array_agg(open ORDER BY open_time_utc))[1] AS first_open,\n            (array_agg(close ORDER BY open_time_utc DESC))[1] AS last_close,\n            max(high) AS raw_high,min(low) AS raw_low\n        FROM research_price_archive_bars b\n        WHERE b.route='BINANCE_SPOT_TRADE_1M' AND b.symbol='BTC'\n            AND b.open_time_utc>=w.boundary-w.minutes*interval '1 minute'\n            AND b.open_time_utc<w.boundary\n            AND b.close_time_utc<w.boundary\n    ) a\n), checked AS (\n    SELECT *,CASE WHEN name='1h' THEN CASE WHEN raw_return>0 THEN 'UP'\n        WHEN raw_return<0 THEN 'DOWN' ELSE 'FLAT' END\n        WHEN raw_range<=0 OR abs(raw_return)/NULLIF(raw_range,0)<0.5 THEN 'RANGE'\n        WHEN raw_return>0 THEN 'UP' WHEN raw_return<0 THEN 'DOWN' ELSE 'RANGE' END AS raw_feature\n    FROM raw\n)\nSELECT count(DISTINCT snapshot_set_id) AS audited_scans,count(*) AS audited_windows,\n    count(*) FILTER(WHERE proof->>'status'='READY') AS frozen_ready_windows,\n    count(*) FILTER(WHERE n=minutes) AS current_cache_complete_windows,\n    count(*) FILTER(WHERE proof->>'status' IS DISTINCT FROM 'READY'\n        AND n>COALESCE((proof->>'path_samples')::int,0)) AS partial_windows_with_more_bars_now,\n    count(*) FILTER(WHERE proof->>'status'='READY' AND (\n        n<>minutes OR (proof->>'path_samples')::int IS DISTINCT FROM n\n        OR (proof->>'expected_candles')::int IS DISTINCT FROM minutes\n        OR (proof->>'path_complete')::boolean IS DISTINCT FROM true\n        OR first_time IS DISTINCT FROM boundary-minutes*interval '1 minute'\n        OR last_time IS DISTINCT FROM boundary-interval '1 millisecond')) AS ready_count_mismatches,\n    count(*) FILTER(WHERE (context->>'cutoff_utc')::timestamptz IS DISTINCT FROM boundary\n        OR (proof->>'window_start_utc')::timestamptz IS DISTINCT FROM boundary-minutes*interval '1 minute'\n        OR (proof->>'window_end_utc')::timestamptz IS DISTINCT FROM boundary-interval '1 millisecond'\n        OR (proof->>'event_time_utc')::timestamptz IS DISTINCT FROM usable_from_utc) AS boundary_mismatches,\n    count(*) FILTER(WHERE proof->>'status'='READY' AND (\n        (abs((proof->>'return_pct')::double precision-raw_return)<=1e-10) IS NOT TRUE\n        OR (abs((proof->>'range_pct')::double precision-raw_range)<=1e-10) IS NOT TRUE\n        OR (proof->>'first_open')::double precision IS DISTINCT FROM first_open\n        OR (proof->>'last_close')::double precision IS DISTINCT FROM last_close\n        OR (proof->>'high')::double precision IS DISTINCT FROM raw_high\n        OR (proof->>'low')::double precision IS DISTINCT FROM raw_low)) AS ready_statistics_mismatches,\n    count(*) FILTER(WHERE proof->>'status'='READY'\n        AND context->'features'->>feature IS DISTINCT FROM raw_feature) AS ready_feature_mismatches,\n    count(*) FILTER(WHERE proof->>'status' IS DISTINCT FROM 'READY'\n        AND context->'features' ? feature) AS unavailable_as_known,\n    count(*) FILTER(WHERE context->>'price_route' IS DISTINCT FROM 'BINANCE_SPOT_TRADE_1M'\n        OR proof#>>'{source,symbol}' IS DISTINCT FROM 'BTC'\n        OR proof#>>'{source,exchange}' IS DISTINCT FROM 'binance'\n        OR proof#>>'{source,market}' IS DISTINCT FROM 'spot'\n        OR proof#>>'{source,pair}' IS DISTINCT FROM 'BTCUSDT') AS source_route_mismatches\nFROM checked",
+      "evidence": [
+        {
+          "audited_scans": 19,
+          "audited_windows": 38,
+          "boundary_mismatches": 0,
+          "current_cache_complete_windows": 38,
+          "frozen_ready_windows": 38,
+          "partial_windows_with_more_bars_now": 0,
+          "ready_count_mismatches": 0,
+          "ready_feature_mismatches": 0,
+          "ready_statistics_mismatches": 0,
+          "source_route_mismatches": 0,
+          "unavailable_as_known": 0
+        }
+      ]
+    },
+    {
+      "query": "WITH recent AS MATERIALIZED (\n    SELECT * FROM research_watch_scan_intakes\n    WHERE consumer_version='watch-all-scan-intake-v1' AND intake_status='ACCEPTED'\n    ORDER BY snapshot_set_id DESC LIMIT 128\n), rows AS (\n    SELECT i.snapshot_set_id,i.consumer_version,i.source_version,i.bundle_sha256,\n        i.parent_payload_sha256,i.usable_from_utc,f.symbol,f.payload,\n        f.payload->'btc_context_provenance' AS context\n    FROM recent i LEFT JOIN research_watch_scan_formula_samples f\n        ON f.consumer_version=i.consumer_version AND f.snapshot_set_id=i.snapshot_set_id\n        AND f.evaluation_version='watch-scan-formulas-v3-btc-context' AND f.status='READY'\n), per_scan AS (\n    SELECT snapshot_set_id,count(symbol) AS coins,count(DISTINCT symbol) AS distinct_coins,\n        count(DISTINCT context->>'context_sha256') AS hashes,count(DISTINCT context) AS contexts,\n        count(*) FILTER(WHERE symbol IS NOT NULL AND (\n            (context->>'context_sha256' ~ '^[0-9a-f]{64}$') IS NOT TRUE\n            OR context->>'version' IS DISTINCT FROM 'watch-prior-btc-spot-closed-1m-v1'\n            OR context->>'consumer_version' IS DISTINCT FROM consumer_version\n            OR (context->>'snapshot_set_id')::bigint IS DISTINCT FROM snapshot_set_id\n            OR context->>'source_version' IS DISTINCT FROM source_version\n            OR context->>'population_version' IS DISTINCT FROM 'watch-all-scan-observations-v1'\n            OR context->>'bundle_sha256' IS DISTINCT FROM bundle_sha256\n            OR context->>'parent_payload_sha256' IS DISTINCT FROM parent_payload_sha256::text\n            OR (context->>'usable_from_utc')::timestamptz IS DISTINCT FROM usable_from_utc\n            OR payload->>'bundle_sha256' IS DISTINCT FROM bundle_sha256\n            OR payload->>'parent_payload_sha256' IS DISTINCT FROM parent_payload_sha256::text\n            OR payload->>'symbol' IS DISTINCT FROM symbol\n            OR (payload->>'snapshot_set_id')::bigint IS DISTINCT FROM snapshot_set_id\n            OR payload#>'{features_by_direction,LONG,features,historical.closed_1m.1h.btc_direction}'\n                IS DISTINCT FROM context#>'{features,historical.closed_1m.1h.btc_direction}'\n            OR payload#>'{features_by_direction,SHORT,features,historical.closed_1m.1h.btc_direction}'\n                IS DISTINCT FROM context#>'{features,historical.closed_1m.1h.btc_direction}'\n            OR payload#>'{features_by_direction,LONG,features,historical.closed_1m.4h.btc_market_regime}'\n                IS DISTINCT FROM context#>'{features,historical.closed_1m.4h.btc_market_regime}'\n            OR payload#>'{features_by_direction,SHORT,features,historical.closed_1m.4h.btc_market_regime}'\n                IS DISTINCT FROM context#>'{features,historical.closed_1m.4h.btc_market_regime}'\n        )) AS identity_or_feature_mismatches\n    FROM rows GROUP BY snapshot_set_id\n)\nSELECT count(*) AS accepted_scans_checked,sum(coins) AS ready_coins,\n    count(*) FILTER(WHERE coins<>8 OR distinct_coins<>8) AS incomplete_scans,\n    count(*) FILTER(WHERE coins>0 AND (hashes<>1 OR contexts<>1)) AS shared_context_mismatches,\n    sum(identity_or_feature_mismatches) AS identity_or_feature_mismatches\nFROM per_scan",
+      "evidence": [
+        {
+          "accepted_scans_checked": 19,
+          "identity_or_feature_mismatches": 0,
+          "incomplete_scans": 0,
+          "ready_coins": 152,
+          "shared_context_mismatches": 0
+        }
+      ]
+    },
+    {
+      "query": "WITH recent AS MATERIALIZED (\n    SELECT consumer_version,snapshot_set_id FROM research_watch_scan_intakes\n    WHERE consumer_version='watch-all-scan-intake-v1' AND intake_status='ACCEPTED'\n    ORDER BY snapshot_set_id DESC LIMIT 128\n), paired AS (\n    SELECT a.consumer_version,a.snapshot_set_id,a.symbol,a.payload->'evaluations' AS old_evaluations,\n        b.payload->'evaluations' AS new_evaluations\n    FROM recent i JOIN research_watch_scan_formula_samples a USING(consumer_version,snapshot_set_id)\n    LEFT JOIN research_watch_scan_formula_samples b\n        ON b.consumer_version=a.consumer_version AND b.snapshot_set_id=a.snapshot_set_id AND b.symbol=a.symbol\n        AND b.evaluation_version='watch-scan-formulas-v3-btc-context' AND b.status='READY'\n    WHERE a.evaluation_version='watch-scan-formulas-v2-maxpain' AND a.status='READY'\n), compared AS (\n    SELECT p.*,x.retained,x.n FROM paired p CROSS JOIN LATERAL (\n        SELECT jsonb_agg(e.value ORDER BY e.ordinality) AS retained,count(*) AS n\n        FROM jsonb_array_elements(COALESCE(p.new_evaluations,'[]'::jsonb)) WITH ORDINALITY e(value,ordinality)\n        JOIN research_watch_scan_formula_catalog c ON c.evaluation_version='watch-scan-formulas-v2-maxpain'\n            AND c.supported AND c.candidate_key=e.value->>'candidate_key'\n    ) x\n)\nSELECT count(*) AS old_coin_samples_checked,count(DISTINCT snapshot_set_id) AS scans_checked,\n    sum(n) AS retained_old_decisions,\n    count(*) FILTER(WHERE new_evaluations IS NULL) AS missing_v3_samples,\n    count(*) FILTER(WHERE n<>164 OR jsonb_array_length(old_evaluations)<>164) AS coverage_mismatches,\n    count(*) FILTER(WHERE old_evaluations IS DISTINCT FROM retained) AS exact_json_mismatches\nFROM compared",
+      "evidence": [
+        {
+          "coverage_mismatches": 0,
+          "exact_json_mismatches": 0,
+          "missing_v3_samples": 0,
+          "old_coin_samples_checked": 152,
+          "retained_old_decisions": 24928,
+          "scans_checked": 19
+        }
+      ]
+    },
+    {
+      "query": "WITH recent AS MATERIALIZED (\n    SELECT consumer_version,snapshot_set_id FROM research_watch_scan_intakes\n    WHERE consumer_version='watch-all-scan-intake-v1' AND intake_status='ACCEPTED'\n    ORDER BY snapshot_set_id DESC LIMIT 128\n), versions AS (\n    SELECT evaluation_version,count(*) AS samples,\n        count(*) FILTER(WHERE status='READY') AS ready,count(*) FILTER(WHERE status='ERROR') AS errors,\n        count(*) FILTER(WHERE next_attempt_at_utc IS NOT NULL) AS pending\n    FROM research_watch_scan_formula_samples GROUP BY evaluation_version\n), evaluations AS (\n    SELECT evaluation_version,count(*) AS decisions,count(DISTINCT candidate_key) AS candidates\n    FROM research_watch_scan_formula_evaluations_by_version GROUP BY evaluation_version\n), current_rows AS (\n    SELECT count(*) AS decisions,count(DISTINCT evaluation_version) AS versions,\n        count(DISTINCT candidate_key) AS candidates,\n        count(*) FILTER(WHERE evaluation_version IS DISTINCT FROM 'watch-scan-formulas-v3-btc-context') AS wrong_version,\n        count(*) FILTER(WHERE qualifies_as_prospective_formula_evidence) AS prospective_rows\n    FROM research_watch_scan_formula_evaluations\n), hype AS (\n    SELECT f.payload->'btc_context_provenance' AS context,m.symbol AS measured_symbol,\n        m.price_route,m.payload->>'price_route' AS payload_price_route\n    FROM recent i JOIN research_watch_scan_formula_samples f USING(consumer_version,snapshot_set_id)\n    LEFT JOIN research_watch_scan_measurements m\n        ON m.consumer_version=f.consumer_version AND m.snapshot_set_id=f.snapshot_set_id AND m.symbol=f.symbol\n        AND m.measurement_version='watch-scan-measurements-v1'\n    WHERE f.evaluation_version='watch-scan-formulas-v3-btc-context' AND f.status='READY' AND f.symbol='HYPE'\n), hype_counts AS (\n    SELECT count(*) AS samples,count(*) FILTER(WHERE measured_symbol IS NULL) AS missing_measurements,\n        count(*) FILTER(WHERE context->>'price_route' IS DISTINCT FROM 'BINANCE_SPOT_TRADE_1M'\n            OR context#>>'{windows,1h,source,symbol}' IS DISTINCT FROM 'BTC'\n            OR context#>>'{windows,4h,source,symbol}' IS DISTINCT FROM 'BTC'\n            OR context#>>'{windows,1h,source,market}' IS DISTINCT FROM 'spot'\n            OR context#>>'{windows,4h,source,market}' IS DISTINCT FROM 'spot') AS bad_context_source,\n        count(*) FILTER(WHERE measured_symbol IS NOT NULL AND (\n            price_route IS DISTINCT FROM 'HYPERLIQUID_HYPE_PERP_TRADE_1M'\n            OR payload_price_route IS DISTINCT FROM 'HYPERLIQUID_HYPE_PERP_TRADE_1M')) AS bad_outcome_route\n    FROM hype\n)\nSELECT (SELECT active_evaluation_version FROM research_watch_scan_formula_runtime WHERE singleton=true) AS active_version,\n    (SELECT jsonb_agg(to_jsonb(v) ORDER BY evaluation_version) FROM versions v) AS sample_counts,\n    (SELECT jsonb_agg(to_jsonb(e) ORDER BY evaluation_version) FROM evaluations e) AS by_version_evaluations,\n    (SELECT to_jsonb(c) FROM current_rows c) AS current_evaluations,\n    (SELECT to_jsonb(h) FROM hype_counts h) AS hype,\n    (SELECT jsonb_build_object('total',count(*),'supported',count(*) FILTER(WHERE supported),\n        'unsupported',count(*) FILTER(WHERE NOT supported)) FROM research_watch_scan_formula_catalog\n        WHERE evaluation_version='watch-scan-formulas-v3-btc-context') AS v3_catalog",
+      "evidence": [
+        {
+          "active_version": "watch-scan-formulas-v3-btc-context",
+          "by_version_evaluations": [
+            {
+              "candidates": 34,
+              "decisions": 9792,
+              "evaluation_version": "watch-scan-formulas-v1"
+            },
+            {
+              "candidates": 82,
+              "decisions": 24928,
+              "evaluation_version": "watch-scan-formulas-v2-maxpain"
+            },
+            {
+              "candidates": 106,
+              "decisions": 32224,
+              "evaluation_version": "watch-scan-formulas-v3-btc-context"
+            }
+          ],
+          "current_evaluations": {
+            "candidates": 106,
+            "decisions": 32224,
+            "prospective_rows": 0,
+            "versions": 1,
+            "wrong_version": 0
+          },
+          "hype": {
+            "bad_context_source": 0,
+            "bad_outcome_route": 0,
+            "missing_measurements": 0,
+            "samples": 19
+          },
+          "sample_counts": [
+            {
+              "errors": 0,
+              "evaluation_version": "watch-scan-formulas-v1",
+              "pending": 0,
+              "ready": 144,
+              "samples": 144
+            },
+            {
+              "errors": 0,
+              "evaluation_version": "watch-scan-formulas-v2-maxpain",
+              "pending": 0,
+              "ready": 152,
+              "samples": 152
+            },
+            {
+              "errors": 0,
+              "evaluation_version": "watch-scan-formulas-v3-btc-context",
+              "pending": 0,
+              "ready": 152,
+              "samples": 152
+            }
+          ],
+          "v3_catalog": {
+            "supported": 106,
+            "total": 298,
+            "unsupported": 192
+          }
+        }
+      ]
+    }
+  ],
+  "limits": {
+    "descriptive_only": true,
+    "independent_btc_waves": 1,
+    "unsupported_candidates": 192,
+    "manual_watch": false,
+    "manual_notifications": false,
+    "new_discovery_started": false,
+    "shared_context_freezes_on_first_ready_coin": true
+  }
+}
