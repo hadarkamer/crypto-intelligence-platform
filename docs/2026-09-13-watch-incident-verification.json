@@ -1,0 +1,608 @@
+{
+  "before": {
+    "archived_watch_scans": [
+      {
+        "created_at_utc": "2026-09-13T08:34:40.452965Z",
+        "cycle_time_utc": "2026-09-13T08:32:15.00194Z",
+        "row_count": 350,
+        "snapshot_set_id": 1212
+      },
+      {
+        "created_at_utc": "2026-09-13T09:04:40.046569Z",
+        "cycle_time_utc": "2026-09-13T09:02:15.002445Z",
+        "row_count": 350,
+        "snapshot_set_id": 1214
+      },
+      {
+        "created_at_utc": "2026-09-13T09:15:09.323785Z",
+        "cycle_time_utc": "2026-09-13T09:12:52.46411Z",
+        "row_count": 350,
+        "snapshot_set_id": 1216
+      },
+      {
+        "created_at_utc": "2026-09-13T09:34:31.367888Z",
+        "cycle_time_utc": "2026-09-13T09:32:15.005086Z",
+        "row_count": 350,
+        "snapshot_set_id": 1217
+      },
+      {
+        "created_at_utc": "2026-09-13T09:39:59.05729Z",
+        "cycle_time_utc": "2026-09-13T09:37:45.812289Z",
+        "row_count": 350,
+        "snapshot_set_id": 1219
+      },
+      {
+        "created_at_utc": "2026-09-13T09:53:15.235804Z",
+        "cycle_time_utc": "2026-09-13T09:51:02.017119Z",
+        "row_count": 350,
+        "snapshot_set_id": 1220
+      },
+      {
+        "created_at_utc": "2026-09-13T10:04:43.956359Z",
+        "cycle_time_utc": "2026-09-13T10:02:15.008055Z",
+        "row_count": 350,
+        "snapshot_set_id": 1221
+      },
+      {
+        "created_at_utc": "2026-09-13T10:29:36.283929Z",
+        "cycle_time_utc": "2026-09-13T10:27:17.29242Z",
+        "row_count": 350,
+        "snapshot_set_id": 1223
+      },
+      {
+        "created_at_utc": "2026-09-13T10:34:45.571481Z",
+        "cycle_time_utc": "2026-09-13T10:32:15.006317Z",
+        "row_count": 350,
+        "snapshot_set_id": 1224
+      },
+      {
+        "created_at_utc": "2026-09-13T11:00:18.896046Z",
+        "cycle_time_utc": "2026-09-13T10:58:02.493912Z",
+        "row_count": 350,
+        "snapshot_set_id": 1226
+      },
+      {
+        "created_at_utc": "2026-09-13T11:04:50.04455Z",
+        "cycle_time_utc": "2026-09-13T11:02:15.001152Z",
+        "row_count": 350,
+        "snapshot_set_id": 1227
+      },
+      {
+        "created_at_utc": "2026-09-13T11:31:51.751345Z",
+        "cycle_time_utc": "2026-09-13T11:28:48.007973Z",
+        "row_count": 350,
+        "snapshot_set_id": 1229
+      },
+      {
+        "created_at_utc": "2026-09-13T11:45:16.218659Z",
+        "cycle_time_utc": "2026-09-13T11:41:39.594804Z",
+        "row_count": 350,
+        "snapshot_set_id": 1231
+      }
+    ],
+    "cvd_scan_timings": [
+      {
+        "cycle_started_at_utc": "2026-09-13T10:58:02.493912+00:00",
+        "derivatives_refresh_returned_at_utc": "2026-09-13T10:58:52.267770+00:00",
+        "dom_collection_returned_at_utc": "2026-09-13T11:00:21.640456+00:00",
+        "signal_ready_at_utc": "2026-09-13T11:01:22.035614+00:00",
+        "snapshot_complete_at_utc": "2026-09-13T11:01:21.901557+00:00",
+        "top8_cvd_observations": {
+          "BNB": {
+            "cvd_observed_at_utc": "2026-09-13T11:00:32.563229+00:00",
+            "futures_source_close_at_utc": "2026-09-13T10:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T10:30:00+00:00"
+          },
+          "BTC": {
+            "cvd_observed_at_utc": "2026-09-13T11:00:38.722473+00:00",
+            "futures_source_close_at_utc": "2026-09-13T10:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T10:30:00+00:00"
+          },
+          "DOGE": {
+            "cvd_observed_at_utc": "2026-09-13T11:00:44.021308+00:00",
+            "futures_source_close_at_utc": "2026-09-13T10:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T10:30:00+00:00"
+          },
+          "ETH": {
+            "cvd_observed_at_utc": "2026-09-13T11:00:49.535526+00:00",
+            "futures_source_close_at_utc": "2026-09-13T10:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T10:30:00+00:00"
+          },
+          "HYPE": {
+            "cvd_observed_at_utc": "2026-09-13T11:00:54.596460+00:00",
+            "futures_source_close_at_utc": "2026-09-13T10:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T10:30:00+00:00"
+          },
+          "SOL": {
+            "cvd_observed_at_utc": "2026-09-13T11:01:02.211886+00:00",
+            "futures_source_close_at_utc": "2026-09-13T10:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T10:30:00+00:00"
+          },
+          "XRP": {
+            "cvd_observed_at_utc": "2026-09-13T11:01:16.420926+00:00",
+            "futures_source_close_at_utc": "2026-09-13T10:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T10:30:00+00:00"
+          },
+          "ZEC": {
+            "cvd_observed_at_utc": "2026-09-13T11:01:21.897381+00:00",
+            "futures_source_close_at_utc": "2026-09-13T10:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T10:30:00+00:00"
+          }
+        },
+        "watch_inputs_ready_at_utc": "2026-09-13T11:00:04.857896+00:00"
+      },
+      {
+        "cycle_started_at_utc": "2026-09-13T11:02:15.001152+00:00",
+        "derivatives_refresh_returned_at_utc": "2026-09-13T11:03:48.895314+00:00",
+        "dom_collection_returned_at_utc": "2026-09-13T11:04:52.771917+00:00",
+        "signal_ready_at_utc": "2026-09-13T11:06:31.940662+00:00",
+        "snapshot_complete_at_utc": "2026-09-13T11:06:31.757582+00:00",
+        "top8_cvd_observations": {
+          "BNB": {
+            "cvd_observed_at_utc": "2026-09-13T11:05:16.955394+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "BTC": {
+            "cvd_observed_at_utc": "2026-09-13T11:05:24.375942+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "DOGE": {
+            "cvd_observed_at_utc": "2026-09-13T11:05:29.502915+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "ETH": {
+            "cvd_observed_at_utc": "2026-09-13T11:05:42.608412+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "HYPE": {
+            "cvd_observed_at_utc": "2026-09-13T11:05:50.131272+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "SOL": {
+            "cvd_observed_at_utc": "2026-09-13T11:06:06.514238+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "XRP": {
+            "cvd_observed_at_utc": "2026-09-13T11:06:25.076935+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "ZEC": {
+            "cvd_observed_at_utc": "2026-09-13T11:06:31.756938+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          }
+        },
+        "watch_inputs_ready_at_utc": "2026-09-13T11:04:35.982585+00:00"
+      },
+      {
+        "cycle_started_at_utc": "2026-09-13T11:28:48.007973+00:00",
+        "derivatives_refresh_returned_at_utc": "2026-09-13T11:29:56.126088+00:00",
+        "dom_collection_returned_at_utc": "2026-09-13T11:31:54.734580+00:00",
+        "signal_ready_at_utc": "2026-09-13T11:31:54.739751+00:00",
+        "snapshot_complete_at_utc": "2026-09-13T11:31:51.415217+00:00",
+        "top8_cvd_observations": {
+          "BNB": {
+            "cvd_observed_at_utc": "2026-09-13T11:31:04.991609+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "BTC": {
+            "cvd_observed_at_utc": "2026-09-13T11:31:10.257098+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "DOGE": {
+            "cvd_observed_at_utc": "2026-09-13T11:31:14.959735+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "ETH": {
+            "cvd_observed_at_utc": "2026-09-13T11:31:22.971582+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "HYPE": {
+            "cvd_observed_at_utc": "2026-09-13T11:31:27.842347+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "SOL": {
+            "cvd_observed_at_utc": "2026-09-13T11:31:36.444521+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "XRP": {
+            "cvd_observed_at_utc": "2026-09-13T11:31:47.183734+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          },
+          "ZEC": {
+            "cvd_observed_at_utc": "2026-09-13T11:31:51.414909+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:00:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:00:00+00:00"
+          }
+        },
+        "watch_inputs_ready_at_utc": "2026-09-13T11:30:55.766424+00:00"
+      },
+      {
+        "cycle_started_at_utc": "2026-09-13T11:41:39.594804+00:00",
+        "derivatives_refresh_returned_at_utc": "2026-09-13T11:43:22.546549+00:00",
+        "dom_collection_returned_at_utc": "2026-09-13T11:45:19.523411+00:00",
+        "signal_ready_at_utc": "2026-09-13T11:45:19.529251+00:00",
+        "snapshot_complete_at_utc": "2026-09-13T11:45:15.882392+00:00",
+        "top8_cvd_observations": {
+          "BNB": {
+            "cvd_observed_at_utc": "2026-09-13T11:44:06.315908+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:30:00+00:00"
+          },
+          "BTC": {
+            "cvd_observed_at_utc": "2026-09-13T11:44:13.467761+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:30:00+00:00"
+          },
+          "DOGE": {
+            "cvd_observed_at_utc": "2026-09-13T11:44:22.352239+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:30:00+00:00"
+          },
+          "ETH": {
+            "cvd_observed_at_utc": "2026-09-13T11:44:31.642434+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:30:00+00:00"
+          },
+          "HYPE": {
+            "cvd_observed_at_utc": "2026-09-13T11:44:38.524845+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:30:00+00:00"
+          },
+          "SOL": {
+            "cvd_observed_at_utc": "2026-09-13T11:44:54.571133+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:30:00+00:00"
+          },
+          "XRP": {
+            "cvd_observed_at_utc": "2026-09-13T11:45:10.565151+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:30:00+00:00"
+          },
+          "ZEC": {
+            "cvd_observed_at_utc": "2026-09-13T11:45:15.881655+00:00",
+            "futures_source_close_at_utc": "2026-09-13T11:30:00+00:00",
+            "spot_source_close_at_utc": "2026-09-13T11:30:00+00:00"
+          }
+        },
+        "watch_inputs_ready_at_utc": "2026-09-13T11:43:55.036361+00:00"
+      }
+    ],
+    "event_groups": [
+      {
+        "decision_first": "2026-09-13T08:36:31.447189Z",
+        "events": 89,
+        "failed": 0,
+        "recorded_first": "2026-09-13T08:36:31.533183Z",
+        "recorded_last": "2026-09-13T08:36:47.293479Z",
+        "scan_id": "shared-watch:2026-09-13T08:32:15.001940+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T09:06:20.763766Z",
+        "events": 99,
+        "failed": 0,
+        "recorded_first": "2026-09-13T09:06:20.836926Z",
+        "recorded_last": "2026-09-13T09:06:43.22673Z",
+        "scan_id": "shared-watch:2026-09-13T09:02:15.002445+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T09:16:00.841995Z",
+        "events": 79,
+        "failed": 0,
+        "recorded_first": "2026-09-13T09:16:01.918793Z",
+        "recorded_last": "2026-09-13T09:16:25.514358Z",
+        "scan_id": "shared-watch:2026-09-13T09:12:52.464110+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T09:36:08.076336Z",
+        "events": 81,
+        "failed": 0,
+        "recorded_first": "2026-09-13T09:36:08.103645Z",
+        "recorded_last": "2026-09-13T09:36:26.145155Z",
+        "scan_id": "shared-watch:2026-09-13T09:32:15.005086+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T09:40:49.335636Z",
+        "events": 88,
+        "failed": 4,
+        "recorded_first": "2026-09-13T09:40:50.82241Z",
+        "recorded_last": "2026-09-13T09:41:19.315028Z",
+        "scan_id": "shared-watch:2026-09-13T09:37:45.812289+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T09:54:15.849323Z",
+        "events": 91,
+        "failed": 4,
+        "recorded_first": "2026-09-13T09:54:16.955891Z",
+        "recorded_last": "2026-09-13T09:54:44.644114Z",
+        "scan_id": "shared-watch:2026-09-13T09:51:02.017119+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T10:06:39.150604Z",
+        "events": 92,
+        "failed": 0,
+        "recorded_first": "2026-09-13T10:06:39.179345Z",
+        "recorded_last": "2026-09-13T10:06:56.247249Z",
+        "scan_id": "shared-watch:2026-09-13T10:02:15.008055+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T10:30:25.387312Z",
+        "events": 82,
+        "failed": 0,
+        "recorded_first": "2026-09-13T10:30:26.518156Z",
+        "recorded_last": "2026-09-13T10:30:49.989015Z",
+        "scan_id": "shared-watch:2026-09-13T10:27:17.292420+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T10:36:18.43534Z",
+        "events": 72,
+        "failed": 0,
+        "recorded_first": "2026-09-13T10:36:18.504698Z",
+        "recorded_last": "2026-09-13T10:36:38.003704Z",
+        "scan_id": "shared-watch:2026-09-13T10:32:15.006317+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T11:01:22.035614Z",
+        "events": 65,
+        "failed": 0,
+        "recorded_first": "2026-09-13T11:01:23.116036Z",
+        "recorded_last": "2026-09-13T11:01:41.730598Z",
+        "scan_id": "shared-watch:2026-09-13T10:58:02.493912+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T11:06:31.940662Z",
+        "events": 82,
+        "failed": 0,
+        "recorded_first": "2026-09-13T11:06:31.985499Z",
+        "recorded_last": "2026-09-13T11:06:55.397505Z",
+        "scan_id": "shared-watch:2026-09-13T11:02:15.001152+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T11:31:54.739751Z",
+        "events": 72,
+        "failed": 0,
+        "recorded_first": "2026-09-13T11:31:55.829992Z",
+        "recorded_last": "2026-09-13T11:32:19.238015Z",
+        "scan_id": "shared-watch:2026-09-13T11:28:48.007973+00:00"
+      },
+      {
+        "decision_first": "2026-09-13T11:45:19.529251Z",
+        "events": 75,
+        "failed": 0,
+        "recorded_first": "2026-09-13T11:45:20.619523Z",
+        "recorded_last": "2026-09-13T11:45:41.569535Z",
+        "scan_id": "shared-watch:2026-09-13T11:41:39.594804+00:00"
+      }
+    ],
+    "failed_magnet_events": [
+      {
+        "alert_time_utc": "2026-09-13T09:41:13.500094Z",
+        "delivery": null,
+        "delivery_status": "DELIVERY_FAILED",
+        "error": null,
+        "event_id": 41840,
+        "event_kind": "ALERT",
+        "event_type": "MAGNET_ALERT",
+        "scan_id": "shared-watch:2026-09-13T09:37:45.812289+00:00",
+        "symbol": "SOL"
+      },
+      {
+        "alert_time_utc": "2026-09-13T09:41:13.500094Z",
+        "delivery": null,
+        "delivery_status": "DELIVERY_FAILED",
+        "error": null,
+        "event_id": 41837,
+        "event_kind": "ALERT",
+        "event_type": "MAGNET_ALERT",
+        "scan_id": "shared-watch:2026-09-13T09:37:45.812289+00:00",
+        "symbol": "SOL"
+      },
+      {
+        "alert_time_utc": "2026-09-13T09:41:13.500094Z",
+        "delivery": null,
+        "delivery_status": "DELIVERY_FAILED",
+        "error": null,
+        "event_id": 41838,
+        "event_kind": "ALERT",
+        "event_type": "MAGNET_ALERT",
+        "scan_id": "shared-watch:2026-09-13T09:37:45.812289+00:00",
+        "symbol": "SOL"
+      },
+      {
+        "alert_time_utc": "2026-09-13T09:41:13.500094Z",
+        "delivery": null,
+        "delivery_status": "DELIVERY_FAILED",
+        "error": null,
+        "event_id": 41839,
+        "event_kind": "ALERT",
+        "event_type": "MAGNET_CONFIRMATION",
+        "scan_id": "shared-watch:2026-09-13T09:37:45.812289+00:00",
+        "symbol": "SOL"
+      },
+      {
+        "alert_time_utc": "2026-09-13T09:54:39.41705Z",
+        "delivery": null,
+        "delivery_status": "DELIVERY_FAILED",
+        "error": null,
+        "event_id": 41980,
+        "event_kind": "ALERT",
+        "event_type": "MAGNET_ALERT",
+        "scan_id": "shared-watch:2026-09-13T09:51:02.017119+00:00",
+        "symbol": "SOL"
+      },
+      {
+        "alert_time_utc": "2026-09-13T09:54:39.41705Z",
+        "delivery": null,
+        "delivery_status": "DELIVERY_FAILED",
+        "error": null,
+        "event_id": 41981,
+        "event_kind": "ALERT",
+        "event_type": "MAGNET_ALERT",
+        "scan_id": "shared-watch:2026-09-13T09:51:02.017119+00:00",
+        "symbol": "SOL"
+      },
+      {
+        "alert_time_utc": "2026-09-13T09:54:39.41705Z",
+        "delivery": null,
+        "delivery_status": "DELIVERY_FAILED",
+        "error": null,
+        "event_id": 41982,
+        "event_kind": "ALERT",
+        "event_type": "MAGNET_CONFIRMATION",
+        "scan_id": "shared-watch:2026-09-13T09:51:02.017119+00:00",
+        "symbol": "SOL"
+      },
+      {
+        "alert_time_utc": "2026-09-13T09:54:39.41705Z",
+        "delivery": null,
+        "delivery_status": "DELIVERY_FAILED",
+        "error": null,
+        "event_id": 41983,
+        "event_kind": "ALERT",
+        "event_type": "MAGNET_ALERT",
+        "scan_id": "shared-watch:2026-09-13T09:51:02.017119+00:00",
+        "symbol": "SOL"
+      }
+    ]
+  },
+  "ci": {
+    "conclusion": "success",
+    "first_attempt_issue": "Isolated health fixture lacked newly exposed numeric constants; fixture updated, complete suite rerun successfully.",
+    "incident_cases": 11,
+    "incident_skipped": 0,
+    "job_id": 103720246344,
+    "postgresql_major": 18,
+    "run_id": 34755957318,
+    "tracked_selftest_files": 105
+  },
+  "ci_run": 34755957318,
+  "confirmed_causes": {
+    "extra_rounds": "Three deployment-restored immediate first scans added to two scheduled rounds during 09:00–10:00 UTC.",
+    "old_cvd_at_01_and_31": "Immediate restart scans before closed-candle grace used prior generation; 11:28 scan also occupied the next regular slot.",
+    "timeout_stage": "SOL Magnet delivery after data collection; original exception/cause not logged, so restart/transport causality is unproven."
+  },
+  "date": "2026-09-13",
+  "manual_scans_triggered": 0,
+  "manual_telegram_messages_sent": 0,
+  "merge": {
+    "merged": true,
+    "message": "Pull Request successfully merged",
+    "sha": "48284fc6ecf1dd4a4e425573ddfdbc1d52cf119f"
+  },
+  "pr": 31,
+  "prior_main": "4243f133e0d0d966ac4189d6891c19311961777c",
+  "prior_regular_round": {
+    "delivered_magnet_symbols": 8,
+    "delivered_native_events": 44,
+    "failed_events": 0,
+    "futures_cvd_close_all_top8": "2026-09-13T12:00:00Z",
+    "health_at_premerge": "waiting",
+    "last_error": null,
+    "last_recorded_utc": "2026-09-13T12:06:08.412028Z",
+    "signal_ready_utc": "2026-09-13T12:05:52.037232+00:00",
+    "spot_cvd_close_all_top8": "2026-09-13T12:00:00Z",
+    "watch_scan_id": "shared-watch:2026-09-13T12:02:15.003576+00:00"
+  },
+  "repo": "hadarkamer/crypto-intelligence-platform",
+  "research_state": "Stage 7 operational-score capture active; Stage 8 statistical research not started.",
+  "tested_head": "aa7b893e21cf64e6549e3d0c2dc188687a4a07a8",
+  "tested_tree": "17a47f6fc0dc2d77a42c496529ad6c99d92f9ee6",
+  "timezone": "UTC unless labelled Israel (UTC+3)",
+  "deployment": {
+    "commit": {
+      "createdAt": "2026-09-13T12:08:26Z",
+      "id": "48284fc6ecf1dd4a4e425573ddfdbc1d52cf119f",
+      "message": "Merge PR #31: align restored Watch and isolate Telegram timeouts\n\nTree 17a47f6fc0dc2d77a42c496529ad6c99d92f9ee6 passed all 105 tracked self-test files (CI 34755957318), including 11 restart/delivery cases with PostgreSQL. Previous scheduled production round completed at 12:06 UTC with all eight Magnet symbols delivered and current 12:00 CVD before this deployment."
+    },
+    "createdAt": "2026-09-13T12:08:28.722318Z",
+    "finishedAt": "2026-09-13T12:09:41.48149Z",
+    "id": "dep-daj94f5ckfvc739jm270",
+    "startedAt": "2026-09-13T12:08:28.699168Z",
+    "status": "live",
+    "trigger": "new_commit",
+    "updatedAt": "2026-09-13T12:09:41.481732Z"
+  },
+  "postdeploy": {
+    "checked_at": "2026-09-13T12:10:51.575694+00:00",
+    "commit": "48284fc6ecf1dd4a4e425573ddfdbc1d52cf119f",
+    "scores": {
+      "attempts": 0,
+      "durable_source": "research_max_pain_snapshot_sets.source_metadata.capture_metadata.operational_scores",
+      "gaps": 0,
+      "hash_version": "json-integer-float-zero-normalized-v1",
+      "last": null,
+      "max_bytes": 262144,
+      "persisted": 0,
+      "population": "all-top8-watch-scans-before-display-v1",
+      "symbols": [
+        "BTC",
+        "ETH",
+        "SOL",
+        "HYPE",
+        "DOGE",
+        "ZEC",
+        "BNB",
+        "XRP"
+      ],
+      "version": "watch-operational-scores-v2"
+    },
+    "watch": {
+      "automatic_start_policy": "NEXT_ALIGNED_SLOT_WITH_DURABLE_CLAIM",
+      "chat_configured": true,
+      "coordinator_running": true,
+      "cycle_stage": null,
+      "desired_general_enabled": true,
+      "interval_minutes": 30,
+      "last_claimed_slot_utc": null,
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "last_cycle_status": "waiting",
+      "last_delivery_errors": [],
+      "last_error": null,
+      "last_scan_utc": "2026-07-13T12:32:04.595021+00:00",
+      "magnet_symbols": [
+        "BNB",
+        "BTC",
+        "DOGE",
+        "ETH",
+        "HYPE",
+        "SOL",
+        "XRP",
+        "ZEC"
+      ],
+      "mode": "top8",
+      "next_scan_utc": "2026-09-13T12:32:15+00:00",
+      "supervisor_restarts": 1,
+      "supervisor_running": true,
+      "sync_grace_seconds": 135
+    }
+  },
+  "postdeploy_status": "RESTORED_WAITING_WITHOUT_IMMEDIATE_SCAN; FIRST_AUTOMATIC_SLOT_NOT_YET_DUE",
+  "postdeploy_interpretation": {
+    "old_last_scan_note": "last_scan_utc is a legacy persisted July value restored by existing subscription logic. It is not evidence of a new-process scan; operational-score attempts=0, cycle_stage=null and waiting/next_scan confirm no startup cycle.",
+    "first_scheduled_scan_verified": false,
+    "next_scheduled_utc": "2026-09-13T12:32:15+00:00"
+  },
+  "after_deploy_archived_scans": [
+    {
+      "created_at_utc": "2026-09-13T12:05:49.957635Z",
+      "cycle_time_utc": "2026-09-13T12:02:15.003576Z",
+      "snapshot_set_id": 1232,
+      "source": "WATCH_SHARED"
+    }
+  ]
+}
