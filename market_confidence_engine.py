@@ -155,6 +155,7 @@ def _positioning_module(regime: Dict[str, Any], expected: str) -> Dict[str, Any]
 
     return {
         "family": "Price+OI",
+        "weighted_score_before_quality": weighted.get("score"),
         "available": available,
         "direction": direction,
         "relation": _relation(direction, expected),
@@ -187,6 +188,7 @@ def _flow_module(data: Dict[str, Any], family: str, expected: str) -> Dict[str, 
             score = 100.0 if raw == "BULLISH" else -100.0
     return {
         "family": family,
+        "weighted_score_before_quality": weighted.get("score"),
         "available": available,
         "direction": direction,
         "relation": _relation(direction, expected),

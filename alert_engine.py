@@ -982,6 +982,7 @@ def build_opportunities(
     limit: int = 30,
     forced_symbol: Optional[str] = None,
     forced_side: Optional[str] = None,
+    capture_by_symbol: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
     """Score LONG and SHORT fully, then select the stronger direction.
 
@@ -1051,6 +1052,27 @@ def build_opportunities(
             selected = next((x for x in candidates if x.get("side") == forced_side), None)
         else:
             selected = _choose_scored_side(row, candidates)
+        # Optional scalar capture uses the very same calculations, including
+        # symbols below the global display limit. Requested symbols only.
+        if capture_by_symbol is not None and symbol in capture_by_symbol:
+            for frozen in maxpain_timeframes.get(symbol, []):
+                if frozen["timeframe"] != timeframe:
+                    continue
+                details = next(c for c in candidates if c["side"] == frozen["source_side"])
+                cluster = details["cluster"]
+                capture_by_symbol[symbol].append({
+                    **frozen, "components": dict(frozen["components"]),
+                    "selected": bool(selected and selected["side"] == frozen["source_side"]),
+                    "allowed_distance_pct": details["allowed_distance"],
+                    "relative_gap_advantage": details["gap"].get("advantage"),
+                    "gap_consensus_supporting": details["gap_consensus_supporting"],
+                    "gap_consensus_total": details["gap_consensus_total"],
+                    "cluster_count": cluster.get("count"),
+                    "cluster_members": list(cluster.get("members") or []),
+                    "cluster_spread_pct": cluster.get("spread_pct"),
+                    "cluster_mean_deviation_pct": cluster.get("mean_deviation_pct"),
+                    "cluster_growth_transition_scores": dict(cluster.get("growth_transition_scores") or {}),
+                })
         if selected is None:
             continue
 

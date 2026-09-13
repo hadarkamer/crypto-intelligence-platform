@@ -53,6 +53,7 @@ import research_formula_schema_admin
 import research_formula_store
 import research_formula_worker
 import research_max_pain_archive
+import research_watch_score_capture
 import research_prospective_anchor_worker
 import research_archive_admin
 from collections import defaultdict
@@ -1220,6 +1221,8 @@ async def _archive_max_pain_collection_attempt(
     failure_reason: Optional[str] = None,
 ) -> None:
     """Best-effort archive write; collection and alerts remain fail-open."""
+    score_block = (archive_context.get("metadata") or {}).get("operational_scores")
+    result = {"persisted": False, "reason": "archive payload not built"}
     try:
         payload = research_max_pain_archive.build_snapshot_payload(
             cycle_id=str(archive_context["cycle_id"]),
@@ -1234,9 +1237,17 @@ async def _archive_max_pain_collection_attempt(
             capture_metadata=dict(archive_context.get("metadata") or {}),
             failure_reason=failure_reason,
         )
-        result = await asyncio.to_thread(
-            research_max_pain_archive.persist_snapshot_payload, payload
-        )
+        # Retry the identical frozen payload once on a transient database
+        # failure. A committed but unacknowledged write is idempotent.
+        for attempt in range(2):
+            try:
+                result = await asyncio.to_thread(
+                    research_max_pain_archive.persist_snapshot_payload, payload
+                )
+                break
+            except Exception as exc:
+                if attempt or not research_max_pain_archive.is_transient_persistence_error(exc):
+                    raise
         set_record = payload["set"]
         print(
             "[maxpain-archive] "
@@ -1247,13 +1258,18 @@ async def _archive_max_pain_collection_attempt(
             flush=True,
         )
     except Exception as exc:
+        result = {"persisted": False, "reason": f"{type(exc).__name__}: {exc}"[:500]}
         print(f"[maxpain-archive] failed open: {exc!r}", flush=True)
+    finally:
+        if score_block is not None:
+            research_watch_score_capture.record_persistence(score_block, result)
 
 
 async def collect_live_rows_for_watch(
     *,
     archive_context: Optional[Mapping[str, Any]] = None,
     archive_only: bool = False,
+    prepare_watch=None,
 ):
     """Collect one complete seven-timeframe live snapshot.
 
@@ -1265,12 +1281,15 @@ async def collect_live_rows_for_watch(
     """
     if archive_only and archive_context is None:
         raise ValueError("archive_only collection requires archive_context")
+    if archive_only and prepare_watch is not None:
+        raise ValueError("passive archive does not calculate operational scores")
     collection_started_at = datetime.now(timezone.utc)
     snapshot: Dict[str, Any] = {}
     live_result: Dict[str, Any] = {}
     archive_live_result: Dict[str, Any] = {}
     archive_rows: List[Dict[str, Any]] = []
     archive_attempted = False
+    official_price_task = None
     archive_requested = bool(
         archive_context is not None and research_max_pain_archive.archive_enabled()
     )
@@ -1399,15 +1418,27 @@ async def collect_live_rows_for_watch(
         # separate research archive work. This is NOT a formula-ready time.
         live_result["watch_inputs_ready_at_utc"] = datetime.now(timezone.utc).isoformat()
         if archive_requested:
+            # Preserve overlap with derivatives readiness: the independent
+            # research price request need not wait for operational scoring.
+            official_price_task = asyncio.create_task(asyncio.to_thread(
+                live_price_provider.enrich_research_snapshot_rows, raw_rows, NON_CRYPTO_SYMBOLS,
+            ))
+        preparation_error = None
+        if prepare_watch is not None:
+            try:
+                await prepare_watch(rows, live_result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Still capture raw research inputs if optional preparation
+                # fails, then preserve the original Watch failure behavior.
+                preparation_error = exc
+        if archive_requested:
             # Research gets a separate no-fallback price overlay.  Bot/Watch
             # rows above retain their operational fallback behavior, while the
             # archive accepts only official closed Spot 1m evidence.
             try:
-                archive_live_result = await asyncio.to_thread(
-                    live_price_provider.enrich_research_snapshot_rows,
-                    raw_rows,
-                    NON_CRYPTO_SYMBOLS,
-                )
+                archive_live_result = await official_price_task
                 archive_rows = [
                     dict(row) for row in archive_live_result.get("rows", [])
                 ]
@@ -1450,6 +1481,8 @@ async def collect_live_rows_for_watch(
                     ),
                 )
 
+        if preparation_error is not None:
+            raise preparation_error
         print(
             f"[scan] complete rows={len(rows)}; "
             f"complete_symbols={len(symbol_audit['complete_symbols'])}; "
@@ -1474,6 +1507,11 @@ async def collect_live_rows_for_watch(
                 failure_reason=f"{type(exc).__name__}: {exc}",
             )
         raise
+    finally:
+        if official_price_task is not None:
+            if not official_price_task.done():
+                official_price_task.cancel()
+            await asyncio.gather(official_price_task, return_exceptions=True)
 
 
 
@@ -4600,14 +4638,14 @@ async def run_watch_cycle(
         watch_started_at_utc=cycle_started_at.isoformat(),
         formula_timing=formula_timing,
     )
+    derivatives_task = None
 
     try:
         scrape_lock = _get_scrape_lock()
         async def _collect_dom():
             async with scrape_lock:
                 WATCH_RUNTIME["scan_owner"] = "Watch משותף"
-                result = await collect_live_rows_for_watch(
-                    archive_context={
+                archive_context = {
                         "cycle_id": watch_scan_id,
                         "cycle_time_utc": cycle_started_at,
                         "source": "WATCH_SHARED",
@@ -4615,8 +4653,34 @@ async def run_watch_cycle(
                             "watch_cycle_number": cycle_number,
                             "top8_only": bool(top8_only),
                             "general_enabled": bool(general_enabled),
+                            "operational_scores": research_watch_score_capture.failure(watch_scan_id, "collection did not reach scoring"),
                         },
                     }
+                async def _prepare(rows, live_result):
+                    try:
+                        await derivatives_task
+                        snapshot_symbols = sorted({str(row.get("symbol") or "").upper() for row in rows if row.get("symbol")})
+                        snapshot = await asyncio.to_thread(market_confidence_engine.capture_snapshot, snapshot_symbols)
+                        formula_timing["cvd_observations_by_symbol"] = {
+                            symbol: value.get("timing_observation", {}) for symbol, value in snapshot.items()
+                        }
+                        formula_timing["snapshot_complete_at_utc"] = datetime.now(timezone.utc).isoformat()
+                        items, frozen, evidence = research_watch_score_capture.prepare(rows, snapshot)
+                        live_result["watch_prepared_items"] = items
+                        live_result["watch_derivatives_snapshot"] = snapshot
+                    except Exception as exc:
+                        archive_context["metadata"]["operational_scores"] = research_watch_score_capture.failure(watch_scan_id, f"{type(exc).__name__}: {exc}")
+                        raise
+                    try:
+                        archive_context["metadata"]["operational_scores"] = research_watch_score_capture.build_bundle(
+                            cycle_id=watch_scan_id, rows=rows, snapshot=snapshot, frozen=frozen, evidence=evidence,
+                            computed_at_utc=datetime.now(timezone.utc), watch_threshold=WATCH_PRIORITY_THRESHOLD,
+                        )
+                    except Exception as exc:
+                        # Capture validation cannot suppress a valid alert.
+                        archive_context["metadata"]["operational_scores"] = research_watch_score_capture.failure(watch_scan_id, f"{type(exc).__name__}: {exc}")
+                result = await collect_live_rows_for_watch(
+                    archive_context=archive_context, prepare_watch=_prepare,
                 )
                 formula_timing["dom_collection_returned_at_utc"] = datetime.now(timezone.utc).isoformat()
                 return result
@@ -4626,33 +4690,14 @@ async def run_watch_cycle(
             formula_timing["derivatives_refresh_returned_at_utc"] = datetime.now(timezone.utc).isoformat()
             return result
 
-        dom_result, derivatives_status = await asyncio.gather(
-            _collect_dom(),
-            _collect_derivatives(),
-        )
+        derivatives_task = asyncio.create_task(_collect_derivatives())
+        dom_result = await _collect_dom()
+        derivatives_status = await derivatives_task
         rows, live_result = dom_result
         formula_timing["watch_inputs_ready_at_utc"] = live_result.get("watch_inputs_ready_at_utc")
 
-        snapshot_symbols = sorted({
-            str(_row_get(row, "symbol", "") or "").upper()
-            for row in rows
-            if str(_row_get(row, "symbol", "") or "").strip()
-        })
-        derivatives_snapshot = await asyncio.to_thread(
-            market_confidence_engine.capture_snapshot,
-            snapshot_symbols,
-        )
-        formula_timing["cvd_observations_by_symbol"] = {
-            symbol: value.get("timing_observation", {})
-            for symbol, value in derivatives_snapshot.items()
-        }
-        formula_timing["snapshot_complete_at_utc"] = datetime.now(timezone.utc).isoformat()
-
-        all_items = _build_opportunities_with_regime(
-            rows,
-            limit=500,
-            derivatives_snapshot=derivatives_snapshot,
-        )
+        derivatives_snapshot = live_result.pop("watch_derivatives_snapshot")
+        all_items = live_result.pop("watch_prepared_items")
         if top8_only:
             all_items = _filter_top8_items(all_items)
         displayable_items = [
@@ -4859,6 +4904,10 @@ async def run_watch_cycle(
             pass
         return {"ok": False, "reason": repr(exc)}
     finally:
+        if derivatives_task is not None:
+            if not derivatives_task.done():
+                derivatives_task.cancel()
+            await asyncio.gather(derivatives_task, return_exceptions=True)
         research_event_runtime.reset_watch_context(watch_context_token)
         WATCH_RUNTIME["scan_in_progress"] = False
         WATCH_RUNTIME["scan_owner"] = None
@@ -4914,6 +4963,7 @@ def max_pain_archive_status() -> Dict[str, Any]:
                 "HYPE/USDT Spot @107 closed 1m; no fallback"
             ),
             "persistence": research_max_pain_archive.persistence_status(),
+            "operational_scores": research_watch_score_capture.status(),
         }
     )
     return json.loads(json.dumps(value, default=str))
