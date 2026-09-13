@@ -286,6 +286,23 @@ class Stage8AcceptanceTests(unittest.TestCase):
                       cherry["common"]["blockers"])
         self.assertEqual(selection["representative_count"], 10)
 
+    def test_replay_downgrade_preserves_selection_but_excludes_that_parent(self):
+        prepared, selection = self.prepare([
+            self.row(n, label="SUCCESS", window=None) for n in range(5)
+        ])
+        prepared[0]["representative_status"] = "UNKNOWN"
+        result = acceptance.evaluate(
+            self.binding, prepared, selection_provenance=selection,
+        )
+        self.assertTrue(result["common"]["selection_provenance_complete"])
+        self.assertEqual(result["common"]["blockers"], [
+            "SHARED_REPRESENTATIVE_PROVENANCE_INVALID",
+        ])
+        self.assertEqual(
+            result["routes"]["PROBABILITY"]["distinct_parent_count"], 4,
+        )
+        self.assertFalse(result["atomic_gate_passed"])
+
     def test_selection_digest_is_outcome_blind_but_event_set_sensitive(self):
         prepared, selection = self.prepare([self.row(n, window=None) for n in range(5)])
         changed_label = deepcopy(prepared)

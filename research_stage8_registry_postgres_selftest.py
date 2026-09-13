@@ -129,12 +129,12 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
         migration_dir = Path(__file__).resolve().parent / "migrations"
         self.base_migrations = [
             path for path in sorted(migration_dir.glob("*.sql"))
-            if int(path.name[:3]) < 46
+            if int(path.name[:3]) < 51
         ]
         for path in self.base_migrations:
             self.admin.execute(self._schema_sql(path), prepare=False)
-        self.migration_046 = migration_dir / "046_stage8_durable_registry.sql"
-        self.admin.execute(self._schema_sql(self.migration_046), prepare=False)
+        self.migration_051 = migration_dir / "051_stage8_durable_registry.sql"
+        self.admin.execute(self._schema_sql(self.migration_051), prepare=False)
         # Seed privileges that existed in earlier local drafts.  A second full
         # execution must converge them away, not merely add the current grants.
         for role in ROLE_NAMES:
@@ -151,7 +151,7 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
             """).format(self.sql.Identifier(registry.READER_ROLE))
         )
         # A second full execution is the migration/ACL idempotency assertion.
-        self.admin.execute(self._schema_sql(self.migration_046), prepare=False)
+        self.admin.execute(self._schema_sql(self.migration_051), prepare=False)
         if self.pglite_compat:
             # PGlite's protocol queue cannot recover from a surfaced ERROR.
             # Catch expected negatives server-side only in the explicitly
@@ -948,6 +948,40 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
             persisted["persistence_payload"]["evaluation"]["research_qualified"],
             False,
         )
+
+        # The evaluator writer cannot replace either historical-selection
+        # digest with another well-formed SHA-256 and then rescue the forgery
+        # by rehashing every caller-owned envelope.
+        for field in (
+            "representative_set_sha256",
+            "attestation_sha256",
+        ):
+            provenance_forgery = deepcopy(
+                outcome_result["persistence_payload"]
+            )
+            original_hash = provenance_forgery["evaluation"][
+                "registry_selection_receipt"
+            ][field]
+            forged_hash = (
+                ("0" if original_hash[0] != "0" else "1")
+                + original_hash[1:]
+            )
+            provenance_forgery["evaluation"][
+                "registry_selection_receipt"
+            ][field] = forged_hash
+            provenance_forgery = self._rehash_persistence_payload(
+                provenance_forgery,
+            )
+            self._expect_rejection(evaluator, """
+                    INSERT INTO research_stage8_evaluation_receipts (
+                      exact_binding_sha256,selection_record_sha256,
+                      persistence_payload)
+                    VALUES (%s,%s,%s::jsonb)
+                """, (
+                    self.binding["binding_sha256"],
+                    durable_selection["selection_record_sha256"],
+                    contract.canonical(provenance_forgery),
+                ))
 
         # A caller cannot pre-claim the server-owned result, even after
         # recomputing every unkeyed payload hash.

@@ -19,7 +19,7 @@ from research_operational_score_source_audit_selftest import _block, _snapshot
 import research_watch_score_capture as capture
 
 
-MIGRATION = Path(__file__).with_name("migrations") / "046_stage8_durable_registry.sql"
+MIGRATION = Path(__file__).with_name("migrations") / "051_stage8_durable_registry.sql"
 
 
 def helper_sql() -> str:

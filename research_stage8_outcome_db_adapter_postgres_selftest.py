@@ -1,7 +1,7 @@
 """Real disposable-PostgreSQL gate for the Stage-8 outcome DB adapter.
 
 Only an explicit local/CI ``TEST_DATABASE_URL`` whose database name is visibly
-test-only is accepted.  The test builds the real migrations 001--046, persists
+test-only is accepted.  The test builds the real migrations 001--051, persists
 five prospective facts and the deterministic selection, inserts authoritative
 outcome rows, then replays the complete fact population and reads both outcome
 routes in one caller-owned read-only REPEATABLE READ transaction. Caller output
@@ -121,9 +121,9 @@ class OutcomeAdapterPostgreSQLTests(unittest.TestCase):
         reader = h._connect(read_only=True, role=registry.READER_ROLE)
         handoff = coverage.read_bounded_attempt_cohort_from_connection(
             reader,
-            start_utc=attempts[0]["source_candle_open_utc"] - timedelta(minutes=1),
+            start_utc=frozen,
             end_utc=attempts[-1]["source_candle_open_utc"] + timedelta(hours=1),
-            symbols=("BTC",),
+            symbols=tuple(self.binding["binding"]["scope"]["symbols"]),
         )
         self.assertEqual(handoff["attempt_ids"], [1, 2, 3, 4, 5])
         projected = projection_adapter.project_exact_binding_attempts_from_connection(
@@ -139,7 +139,10 @@ class OutcomeAdapterPostgreSQLTests(unittest.TestCase):
                 "parent_membership_source": fact_item["parent_membership_source"],
                 "noneligibility_proof": fact_item["noneligibility_proof"],
             })
-            authorities.append(fact_item["fact_authority"])
+            authorities.append({
+                key: fact_item["fact_authority"].get(key)
+                for key in selector._FACT_AUTHORITY_KEYS
+            })
         selected = selector.select_representatives(
             self.binding, source_rows, fact_authorities=authorities,
             population_receipt=handoff["coverage_receipt"],

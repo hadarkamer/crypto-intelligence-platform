@@ -254,7 +254,7 @@ class Stage8RegistryTests(unittest.TestCase):
 
     def test_migration_has_sealed_full_ledger_and_closed_acls(self):
         sql = (Path(registry.__file__).resolve().parent / "migrations" /
-               "046_stage8_durable_registry.sql").read_text()
+               "051_stage8_durable_registry.sql").read_text()
         for token in (
             "research_stage8_projection_fact_batches",
             "research_stage8_projected_fact_ledger",
@@ -270,6 +270,9 @@ class Stage8RegistryTests(unittest.TestCase):
             "DEFERRABLE INITIALLY DEFERRED",
         ):
             self.assertIn(token, sql)
+        self.assertGreaterEqual(
+            sql.count("item->'fact'->>'validation_status' = 'VALID'"), 2,
+        )
         self.assertEqual(sql.count("research_event_btc_movements"), 1)
         self.assertIn(
             "GRANT SELECT ON research_event_btc_movements\n"

@@ -630,6 +630,9 @@ def evaluate(
     parents and nondecisive labels are disclosed and excluded. Duplicate valid
     parent IDs, row-binding mismatches, an incompatible policy, or incomplete
     selection provenance are common blockers and therefore block both routes.
+    Selection provenance is checked over the same exact population with only a
+    replay-time ``UNKNOWN`` status restored to its frozen selection-time
+    ``VALID`` value. Identities and population membership are never substituted.
     """
     common_blockers: list[str] = []
     try:
@@ -661,9 +664,20 @@ def evaluate(
         common_blockers.append("REPRESENTATIVES_NOT_A_SEQUENCE")
     else:
         rows = list(representatives)
+    selection_population = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            selection_population.append(row)
+            continue
+        historical = deepcopy(dict(row))
+        if historical.get("representative_status") == "UNKNOWN":
+            historical["representative_status"] = "VALID"
+        selection_population.append(historical)
     selection_valid = (
         identity is not None
-        and _selection_matches(selection_provenance, exact_binding, rows)
+        and _selection_matches(
+            selection_provenance, exact_binding, selection_population,
+        )
     )
     if not selection_valid:
         common_blockers.append("REGISTRY_SELECTION_ATTESTATION_INVALID")

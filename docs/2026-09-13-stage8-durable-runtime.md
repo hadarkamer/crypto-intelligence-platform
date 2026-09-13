@@ -25,7 +25,7 @@ false in Python and are independently forced false by PostgreSQL.
 
 ## End-to-end sequence
 
-1. Apply migrations `001` through `046` to a staging PostgreSQL 15+ database
+1. Apply migrations `001` through `051` to a staging PostgreSQL 15+ database
    after an administrator has created the five dedicated Stage-8 roles.
 2. Register one exact frozen binding with
    `research_stage8_registrar_v1`. PostgreSQL assigns `frozen_at_utc` and the
@@ -66,7 +66,7 @@ false in Python and are independently forced false by PostgreSQL.
 
 Each write role has a distinct database URL and cannot be replaced by a
 generic application URL. `RESEARCH_STAGE8_DATABASE_SCHEMA` must name the exact
-schema containing migration 046 (normally `public`). Every registry entrypoint
+schema containing migration 051 (normally `public`). Every registry entrypoint
 pins that schema ahead of `pg_catalog` and explicitly places `pg_temp` last,
 then verifies the resolved relation identity. The read-side role has `SELECT`
 only and must have neither schema `CREATE` nor a shadowable `search_path`.
@@ -102,7 +102,7 @@ outcome adapter normalize it to the authoritative
 `selection_fact_identity_sha256` consumed by acceptance.
 
 The persisted prospective attempt, slot, and event rows remain an upstream
-trust boundary. Migration 046 cross-binds their identities, clocks, coverage,
+trust boundary. Migration 051 cross-binds their identities, clocks, coverage,
 feature references, and immutable source rows, but it does not claim to be a
 second implementation of every semantic check in the Python v4 anchor
 validator (including the complete frozen-source family and feature-bundle
@@ -123,7 +123,7 @@ multi-session role isolation.
 
 The release gate is PostgreSQL 15+ with fresh dedicated logins. It must prove:
 
-- clean `001 -> 046` apply and idempotent reapply;
+- clean `001 -> 051` apply and idempotent reapply;
 - fact, seal, selection, outcome replay, and evaluation round trips;
 - rejection of forged facts, subsets, route flags, recomputed hashes, and
   append-only mutations;
@@ -142,7 +142,7 @@ The release gate is PostgreSQL 15+ with fresh dedicated logins. It must prove:
 Deployment is a separate, explicitly approved operation. The safe order is:
 
 1. create roles and staging credentials;
-2. apply migration `046` in staging;
+2. apply migration `051` in staging;
 3. run the native PostgreSQL gate;
 4. register selected exact bindings;
 5. run Shadow and persistence in observation-only mode;

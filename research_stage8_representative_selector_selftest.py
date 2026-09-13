@@ -651,7 +651,7 @@ class RepresentativeSelectorTests(unittest.TestCase):
             self.assertIsNone(predicted[key], key)
         self.assertEqual(
             contract.digest(predicted),
-            "12355ea68891d3814a598acfbc835e7658b686ad1428fa201bd6bbb1db6106f6",
+            "d0e002df6cd6080b0f3b55c236b5d44c2215b81887a7b7708c41f61ec81d373d",
         )
 
     def test_missing_membership_blocks_globally_but_boundary_proof_is_excluded(self):

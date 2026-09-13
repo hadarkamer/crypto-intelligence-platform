@@ -94,7 +94,7 @@ def _definition() -> dict:
         "version": VERSION,
         "hash_version": HASH_VERSION,
         "definition_state": "LOCAL_DEFINITION_ONLY",
-        "source_base_commit": "96bfdd732490464923f2b07dd96af7dff1e3b908",
+        "source_base_commit": "2f36c5f77ef9ed64573d2b578b475f4b9abfc530",
         "source": {
             "version": SOURCE_VERSION,
             "audit_version": "operational-score-source-audit-v2",
@@ -239,7 +239,7 @@ def _definition() -> dict:
 
 # Keep immutable serialized bytes internally; callers receive independent copies.
 _FROZEN_JSON = canonical(_definition())
-MANIFEST_SHA256 = "cb8f23b6cfbefa637fec18f47200c7432ed106bdaa7bc85374cab2b81b5ba262"
+MANIFEST_SHA256 = "5a3ee3af6a73467f3ead09fbe9684a8f60101f97fa7064472b228a31468e6bef"
 
 
 def frozen_manifest() -> dict:

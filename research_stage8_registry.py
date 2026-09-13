@@ -99,7 +99,7 @@ _ARTIFACT_SPECS = {
     ),
     "registry_adapter": ("research_stage8_registry.py", VERSION),
     "registry_migration": (
-        "migrations/046_stage8_durable_registry.sql", "046-stage8-durable-registry-v1",
+        "migrations/051_stage8_durable_registry.sql", "051-stage8-durable-registry-v1",
     ),
     "selector": ("research_stage8_representative_selector.py", selector.VERSION),
     "acceptance": ("research_stage8_acceptance.py", acceptance.VERSION),
@@ -115,7 +115,7 @@ _EXPECTED_VERSIONS = {
     "projection_db_adapter": "stage8-projection-postgres-adapter-v1",
     "outcome_db_adapter": "stage8-durable-outcome-db-adapter-v1",
     "registry_adapter": "stage8-durable-registry-adapter-v1",
-    "registry_migration": "046-stage8-durable-registry-v1",
+    "registry_migration": "051-stage8-durable-registry-v1",
     "selector": "stage8-outcome-blind-representative-selector-v1",
     "acceptance": "stage8-experimental-acceptance-evaluator-v1",
 }
@@ -130,7 +130,7 @@ _RUNTIME_VERSION_GETTERS = {
     "projection_db_adapter": lambda: projection_db_adapter.VERSION,
     "outcome_db_adapter": lambda: "stage8-durable-outcome-db-adapter-v1",
     "registry_adapter": lambda: VERSION,
-    "registry_migration": lambda: "046-stage8-durable-registry-v1",
+    "registry_migration": lambda: "051-stage8-durable-registry-v1",
     "selector": lambda: selector.VERSION,
     "acceptance": lambda: acceptance.VERSION,
 }
@@ -1683,6 +1683,8 @@ def _validate_outcome_persistence_payload(
     evidence_by_parent: dict[str, Mapping[str, Any]] = {}
     probability_values: dict[str, bool] = {}
     asymmetry_values: dict[str, tuple[float, float]] = {}
+    probability_valid_count = 0
+    asymmetry_valid_count = 0
     normalized_rows: list[dict[str, Any]] = []
     representative_binding = acceptance.representative_binding(exact_binding)
     for item in evidence_representatives:
@@ -1768,7 +1770,9 @@ def _validate_outcome_persistence_payload(
                     or not _valid_hash(
                         probability_item.get("source_row_sha256"))):
                 raise ValueError("STAGE8_OUTCOME_PROBABILITY_EVIDENCE_INVALID")
-            probability_values[parent_id] = status == "SUCCESS"
+            probability_valid_count += 1
+            if fact_valid:
+                probability_values[parent_id] = status == "SUCCESS"
         elif (not probability_item.get("reasons")
               or (probability_item.get("source_row_sha256") is not None
                   and not _valid_hash(
@@ -1788,7 +1792,9 @@ def _validate_outcome_persistence_payload(
                     or asymmetry_item.get("zero_denominator")
                         is not (float(mae) == 0.0)):
                 raise ValueError("STAGE8_OUTCOME_ASYMMETRY_EVIDENCE_INVALID")
-            asymmetry_values[parent_id] = (float(mfe), float(mae))
+            asymmetry_valid_count += 1
+            if fact_valid:
+                asymmetry_values[parent_id] = (float(mfe), float(mae))
         elif (not asymmetry_item.get("reasons")
               or asymmetry_item.get("mfe_pct") is not None
               or asymmetry_item.get("mae_pct") is not None
@@ -1875,12 +1881,21 @@ def _validate_outcome_persistence_payload(
                 is not all(row["representative_status"] == "VALID"
                            for row in normalized_rows)
             or evidence.get("probability_evidence_valid_count")
-                != len(probability_values)
+                != probability_valid_count
             or evidence.get("asymmetry_evidence_valid_count")
-                != len(asymmetry_values)):
+                != asymmetry_valid_count):
         raise ValueError("STAGE8_OUTCOME_EVIDENCE_POPULATION_MISMATCH")
+    # The durable selection attestation was frozen before the outcome reader
+    # replayed causal source rows.  A later replay failure downgrades the
+    # representative for acceptance, but it must not rewrite that historical
+    # selection receipt.  Rebuild the original all-valid selection population,
+    # then evaluate the fact-downgraded rows against it exactly as the adapter
+    # does.
+    selection_rows = deepcopy(normalized_rows)
+    for row in selection_rows:
+        row["representative_status"] = "VALID"
     provenance = acceptance.bind_registry_selection_receipt(
-        exact_binding, normalized_rows,
+        exact_binding, selection_rows,
         freeze_id=registry_row["freeze_id"],
         frozen_at_utc=registry_row["frozen_at_utc"],
         registry_record_sha256=registry_row["registry_record_sha256"],

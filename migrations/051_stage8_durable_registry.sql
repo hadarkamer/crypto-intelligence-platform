@@ -559,7 +559,7 @@ $$;
 CREATE TABLE IF NOT EXISTS research_stage8_binding_registry (
     exact_binding JSONB NOT NULL CHECK (jsonb_typeof(exact_binding) = 'object'),
     exact_binding_sha256 TEXT PRIMARY KEY CHECK (exact_binding_sha256 ~ '^[0-9a-f]{64}$'),
-    manifest_sha256 TEXT NOT NULL CHECK (manifest_sha256 = 'cb8f23b6cfbefa637fec18f47200c7432ed106bdaa7bc85374cab2b81b5ba262'),
+    manifest_sha256 TEXT NOT NULL CHECK (manifest_sha256 = '5a3ee3af6a73467f3ead09fbe9684a8f60101f97fa7064472b228a31468e6bef'),
     contract_version TEXT NOT NULL CHECK (contract_version = 'stage8-operational-model-contract-v1'),
     hash_version TEXT NOT NULL CHECK (hash_version = 'stage8-strict-json-sha256-v1'),
     source_version TEXT NOT NULL CHECK (source_version = 'stage8-neutral-v4-watch-v2-source-v1'),
@@ -795,7 +795,7 @@ BEGIN
     END;
     expected_inner := jsonb_build_object(
         'version', 'stage8-operational-model-contract-v1',
-        'manifest_sha256', 'cb8f23b6cfbefa637fec18f47200c7432ed106bdaa7bc85374cab2b81b5ba262',
+        'manifest_sha256', '5a3ee3af6a73467f3ead09fbe9684a8f60101f97fa7064472b228a31468e6bef',
         'scope', research_stage8_expected_scope_v1(NEW.scope_id),
         'candidate', research_stage8_expected_candidate_v1(NEW.candidate_id),
         'source_version', 'stage8-neutral-v4-watch-v2-source-v1',
@@ -869,9 +869,9 @@ BEGIN
        OR NEW.implementation_artifacts->'files'->'registry_adapter'->>'version'
             IS DISTINCT FROM 'stage8-durable-registry-adapter-v1'
        OR NEW.implementation_artifacts->'files'->'registry_migration'->>'path'
-            IS DISTINCT FROM 'migrations/046_stage8_durable_registry.sql'
+            IS DISTINCT FROM 'migrations/051_stage8_durable_registry.sql'
        OR NEW.implementation_artifacts->'files'->'registry_migration'->>'version'
-            IS DISTINCT FROM '046-stage8-durable-registry-v1'
+            IS DISTINCT FROM '051-stage8-durable-registry-v1'
        OR NEW.implementation_artifacts->'files'->'selector'->>'path'
             IS DISTINCT FROM 'research_stage8_representative_selector.py'
        OR NEW.implementation_artifacts->'files'->'selector'->>'version'
@@ -903,7 +903,7 @@ BEGIN
     END IF;
 
     NEW.exact_binding_sha256 := expected_outer->>'binding_sha256';
-    NEW.manifest_sha256 := 'cb8f23b6cfbefa637fec18f47200c7432ed106bdaa7bc85374cab2b81b5ba262';
+    NEW.manifest_sha256 := '5a3ee3af6a73467f3ead09fbe9684a8f60101f97fa7064472b228a31468e6bef';
     NEW.contract_version := 'stage8-operational-model-contract-v1';
     NEW.hash_version := 'stage8-strict-json-sha256-v1';
     NEW.source_version := 'stage8-neutral-v4-watch-v2-source-v1';
@@ -3053,6 +3053,11 @@ DECLARE
     server_blockers JSONB;
     database_clock TIMESTAMPTZ;
     representative_horizons_elapsed BOOLEAN;
+    receipt_binding JSONB;
+    receipt_unsigned JSONB;
+    expected_receipt_representative_count INTEGER;
+    expected_receipt_representative_set_sha256 TEXT;
+    expected_receipt_attestation_sha256 TEXT;
     caller_evaluation_sha256 TEXT;
     persisted_text TEXT;
 BEGIN
@@ -4114,6 +4119,114 @@ BEGIN
             IS DISTINCT FROM 'object' THEN
         RAISE EXCEPTION 'Stage-8 route exclusions are not closed objects';
     END IF;
+    -- Reconstruct the historical, outcome-blind acceptance receipt solely
+    -- from the guarded durable registry and selector row.  The selector's
+    -- transport identity intentionally names its digest
+    -- expected_selection_fact_identity_sha256; the acceptance identity uses
+    -- selection_fact_identity_sha256.  Consequently this hash must not be
+    -- compared with selection_row.representative_set_sha256.
+    receipt_binding := jsonb_build_object(
+        'exact_binding_sha256', NEW.exact_binding_sha256,
+        'manifest_sha256', registry.manifest_sha256,
+        'contract_version', registry.contract_version,
+        'source_version', registry.source_version,
+        'projection_version', registry.projection_version,
+        'label_version', registry.label_version,
+        'independence_version', registry.independence_version,
+        'acceptance_version', registry.acceptance_version,
+        'scope_id', registry.scope_id,
+        'scope_symbols', registry.exact_binding->'binding'->'scope'->'symbols',
+        'scope_price_route',
+            registry.exact_binding->'binding'->'scope'->>'price_route',
+        'candidate_id', registry.candidate_id,
+        'candidate_model',
+            registry.exact_binding->'binding'->'candidate'->>'model',
+        'direction',
+            registry.exact_binding->'binding'->'candidate'->>'direction',
+        'window_minutes', registry.window_minutes,
+        'threshold_bps', registry.threshold_bps,
+        'parent_policy_version', registry.parent_policy_version
+    );
+    WITH acceptance_identities AS (
+        SELECT identity,
+               (identity - 'expected_selection_fact_identity_sha256')
+               || jsonb_build_object(
+                    'selection_fact_identity_sha256',
+                    identity->'expected_selection_fact_identity_sha256'
+                  ) AS acceptance_identity
+        FROM jsonb_array_elements(selection_row.representative_identities)
+             AS selected(identity)
+    ), acceptance_records AS (
+        SELECT jsonb_build_object(
+            'binding', receipt_binding,
+            'btc_parent_movement_id', identity->'btc_parent_movement_id',
+            'parent_start_time_utc', identity->'parent_start_time_utc',
+            'representative_status', 'VALID',
+            'parent_policy_version', registry.parent_policy_version,
+            'membership_status', 'LIVE',
+            'parent_evidence_eligible', true,
+            'freeze_id', registry.freeze_id,
+            'registry_record_sha256', registry.registry_record_sha256,
+            'registry_verification_receipt_sha256',
+                selection_row.registry_verification_receipt_sha256,
+            'representative', acceptance_identity - ARRAY[
+                'version','exact_binding_sha256','btc_parent_movement_id',
+                'parent_start_time_utc'
+            ]::text[],
+            'representative_identity_sha256',
+                research_stage8_json_sha256_v1(acceptance_identity)
+        ) AS record
+        FROM acceptance_identities
+    )
+    SELECT count(*)::integer,
+           research_stage8_json_sha256_v1(jsonb_build_object(
+               'version', 'stage8-outcome-blind-representative-set-v1',
+               'exact_binding_sha256', NEW.exact_binding_sha256,
+               'representatives', COALESCE(jsonb_agg(
+                   record ORDER BY
+                       research_stage8_canonical_json_v1(record) COLLATE "C"
+               ), '[]'::jsonb)
+           ))
+    INTO expected_receipt_representative_count,
+         expected_receipt_representative_set_sha256
+    FROM acceptance_records;
+    receipt_unsigned := jsonb_build_object(
+        'registration_evidence',
+            'CALLER_SUPPLIED_REGISTRY_REFERENCES_NOT_DB_VERIFIED',
+        'freeze_id', registry.freeze_id,
+        'frozen_at_utc', research_stage8_utc_text_v1(registry.frozen_at_utc),
+        'registry_record_sha256', registry.registry_record_sha256,
+        'registry_verification_receipt_sha256',
+            selection_row.registry_verification_receipt_sha256,
+        'status', 'COMPLETE',
+        'exact_binding_sha256', NEW.exact_binding_sha256,
+        'manifest_sha256', registry.manifest_sha256,
+        'acceptance_policy_version', registry.acceptance_version,
+        'acceptance_policy_sha256',
+            '6f07e20e4a24c09ee8ffa8813a1e3a90888e4765ddab14db86eae0f3c0bb424a',
+        'independence_version', registry.independence_version,
+        'parent_policy_version', registry.parent_policy_version,
+        'representative_policy',
+            'EARLIEST_VALID_MATCH_BEFORE_INSPECTING_LABELS',
+        'eligible_parent_rule',
+            'PARENT_START_STRICTLY_AFTER_REAL_DURABLE_FREEZE',
+        'prospective_clock_basis',
+            'DURABLE_REGISTRY_FROZEN_AT_RECEIPT_NOT_LOCAL_CLOCK',
+        'cohort_query_sha256', selection_row.cohort_query_sha256,
+        'population_receipt_sha256',
+            selection_row.outcome_free_population_receipt_sha256,
+        'source_high_water_attempt_id',
+            selection_row.source_high_water_attempt_id,
+        'representative_count', expected_receipt_representative_count,
+        'representative_set_sha256',
+            expected_receipt_representative_set_sha256,
+        'population_coverage_complete', true,
+        'candidate_match_coverage_complete', true,
+        'outcome_blind_selection', true,
+        'truncated', false
+    );
+    expected_receipt_attestation_sha256 :=
+        research_stage8_json_sha256_v1(receipt_unsigned);
     IF evaluation_value->>'acceptance_policy_version'
             IS DISTINCT FROM registry.acceptance_version
        OR evaluation_value->>'acceptance_policy_sha256' IS DISTINCT FROM
@@ -4162,10 +4275,14 @@ BEGIN
        OR NULLIF(evaluation_value->'registry_selection_receipt'
                     ->>'representative_count','')::integer
             IS DISTINCT FROM selection_row.representative_count
-       OR COALESCE(evaluation_value->'registry_selection_receipt'
-                    ->>'representative_set_sha256','') !~ '^[0-9a-f]{64}$'
-       OR COALESCE(evaluation_value->'registry_selection_receipt'
-                    ->>'attestation_sha256','') !~ '^[0-9a-f]{64}$'
+       OR expected_receipt_representative_count
+            IS DISTINCT FROM selection_row.representative_count
+       OR evaluation_value->'registry_selection_receipt'
+                    ->>'representative_set_sha256'
+            IS DISTINCT FROM expected_receipt_representative_set_sha256
+       OR evaluation_value->'registry_selection_receipt'
+                    ->>'attestation_sha256'
+            IS DISTINCT FROM expected_receipt_attestation_sha256
        OR evaluation_value->'registry_selection_receipt'
                     ->'attestation_structurally_valid' IS DISTINCT FROM 'true'::jsonb
        OR evaluation_value->'registry_selection_receipt'
@@ -4200,7 +4317,8 @@ BEGIN
            )::integer
     INTO probability_parent_ids, probability_count, probability_successes
     FROM jsonb_array_elements(evidence->'representatives') AS item
-    WHERE item->'probability'->>'validation_status' = 'VALID';
+    WHERE item->'fact'->>'validation_status' = 'VALID'
+      AND item->'probability'->>'validation_status' = 'VALID';
     probability_failures := probability_count - probability_successes;
     IF probability_count = 0 THEN
         probability_hit_rate := NULL;
@@ -4297,7 +4415,8 @@ BEGIN
     INTO asymmetry_parent_ids, asymmetry_count, asymmetry_sum_mfe,
          asymmetry_sum_mae, asymmetry_dominance, asymmetry_median_edge
     FROM jsonb_array_elements(evidence->'representatives') AS item
-    WHERE item->'asymmetry'->>'validation_status' = 'VALID';
+    WHERE item->'fact'->>'validation_status' = 'VALID'
+      AND item->'asymmetry'->>'validation_status' = 'VALID';
     asymmetry_ratio := CASE
         WHEN asymmetry_count > 0 AND asymmetry_sum_mae > 0.0
             THEN asymmetry_sum_mfe / asymmetry_sum_mae

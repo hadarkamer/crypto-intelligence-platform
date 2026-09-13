@@ -40,7 +40,7 @@ to `repeatable read`, and a positive `statement_timeout` no greater than 10
 seconds. The adapter neither commits nor rolls back.
 
 The frozen contract manifest is
-`cb8f23b6cfbefa637fec18f47200c7432ed106bdaa7bc85374cab2b81b5ba262`, the
+`5a3ee3af6a73467f3ead09fbe9684a8f60101f97fa7064472b228a31468e6bef`, the
 source audit is `operational-score-source-audit-v2`, and the adapter version is
 `stage8-projection-postgres-adapter-v1`.
 

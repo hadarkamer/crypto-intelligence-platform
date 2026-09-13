@@ -12,7 +12,7 @@ this new version.
 The pure declaration is `research_stage8_contract.py`; its SHA-256 is:
 
 ```text
-cb8f23b6cfbefa637fec18f47200c7432ed106bdaa7bc85374cab2b81b5ba262
+5a3ee3af6a73467f3ead09fbe9684a8f60101f97fa7064472b228a31468e6bef
 ```
 
 `frozen_manifest()` returns an independent JSON copy. `validate_manifest()`

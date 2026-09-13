@@ -989,6 +989,38 @@ class OutcomeDatabaseAdapterTests(unittest.TestCase):
         self.assertFalse(replay["all_causal_fact_semantics_verified"])
         self.assertIn("AUTHORITATIVE_FACT_SOURCE_REPLAY_NOT_VERIFIED",
                       result["evaluation"]["qualification_blockers"])
+        evaluation = result["evaluation"]
+        self.assertTrue(evaluation["registry_selection_receipt"][
+            "attestation_structurally_valid"
+        ])
+        self.assertTrue(evaluation["common"]["selection_provenance_complete"])
+        self.assertEqual(evaluation["common"]["blockers"], [
+            "SHARED_REPRESENTATIVE_PROVENANCE_INVALID",
+        ])
+        self.assertEqual(
+            result["evidence_receipt"]["probability_evidence_valid_count"],
+            5,
+        )
+        self.assertEqual(
+            result["evidence_receipt"]["asymmetry_evidence_valid_count"],
+            5,
+        )
+        for route_name in ("PROBABILITY", "ASYMMETRY"):
+            route = evaluation["routes"][route_name]
+            self.assertEqual(route["status"], "UNAVAILABLE")
+            self.assertEqual(route["distinct_parent_count"], 0)
+            self.assertEqual(route["btc_parent_movement_ids"], [])
+        validated = adapter.registry_adapter._validate_outcome_persistence_payload(
+            fixture.binding, result["persistence_payload"],
+            selection_record_sha256=fixture.selection["selection_record_sha256"],
+            registry_row=fixture.registry,
+            selection_row=fixture.selection,
+            durable_fact_rows=[
+                item["fact"] for item in fixture.data["facts"]
+            ],
+        )
+        self.assertFalse(validated["evaluation"]["atomic_gate_passed"])
+        self.assertFalse(validated["evaluation"]["research_qualified"])
 
     def test_transaction_audit_fields_do_not_change_causal_fact_semantics(self):
         fixture = Fixture(count=1)

@@ -17,7 +17,7 @@ class FrozenContractTests(unittest.TestCase):
 
     def test_frozen_digest_is_literal_and_exact(self):
         self.assertEqual(contract.MANIFEST_SHA256,
-                         "cb8f23b6cfbefa637fec18f47200c7432ed106bdaa7bc85374cab2b81b5ba262")
+                         "5a3ee3af6a73467f3ead09fbe9684a8f60101f97fa7064472b228a31468e6bef")
         self.assertEqual(contract.digest(self.manifest), contract.MANIFEST_SHA256)
         contract.validate_manifest(self.manifest)
 
