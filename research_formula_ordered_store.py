@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 import research_formula_ordered_v7 as evaluator
 import research_sheet_outbox
+import research_sheet_publication as publication
 import research_ordered_question_catalog as questions
 import research_ordered_question_store as question_store
 
@@ -534,11 +535,10 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
     evidence_sha=digest({'scope':dict(scope)|{'last_evaluated_at_utc':None,'result':None},'episodes':episodes,'summary':summary})
     conn.execute('UPDATE research_ordered_formula_scopes SET result=%s::jsonb,last_evaluated_at_utc=%s WHERE scope_key=%s',(canonical(summary),now,scope['scope_key']))
     if canonical(summary)==canonical(scope.get('result') or {}):
-        return {'episodes':0,'upserts':0}
+        return {'episodes':0,'upserts':publication.seed_missing_scope(conn,scope,formula_version)}
     conn.execute('''INSERT INTO research_ordered_formula_trials(trial_id,scope_key,evidence_sha256,result,evaluated_at_utc)
         VALUES(%s,%s,%s,%s::jsonb,%s) ON CONFLICT(scope_key,evidence_sha256) DO NOTHING''',
         (digest([scope['scope_key'],evidence_sha]),scope['scope_key'],evidence_sha,canonical(summary),now))
-    by_id={row['event_id']:row for row in rows}
     upserts=[]
     for episode in episodes:
         episode_id=digest([scope['scope_key'],episode['btc_parent_movement_id']])
@@ -546,22 +546,6 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
             VALUES(%s,%s,%s,%s::jsonb,%s::jsonb) ON CONFLICT(scope_key,btc_parent_movement_id) DO UPDATE SET
               representative_event_ids=EXCLUDED.representative_event_ids,evidence=EXCLUDED.evidence,updated_at_utc=NOW()''',
             (episode_id,scope['scope_key'],episode['btc_parent_movement_id'],canonical(episode['event_ids']),canonical(episode)))
-        first=by_id.get(episode['event_ids'][0],{})
-        labels=[by_id[event_id].get('ordered_outcome') or {} for event_id in episode['event_ids'] if event_id in by_id]
-        decisive=[label for label in labels if label.get('status')==episode['status']]
-        audit={**period,'window_minutes':scope['window_minutes'],'threshold_bps':scope['threshold_bps'],'representative_event_ids':episode['event_ids'],
-               'exclusion_reasons':episode['exclusion_reasons'],'metric_scope':'STOP_AT_FIRST_TOUCH','parent_policy_version':PARENT_POLICY,
-               'representative_outcome_statuses':episode.get('representative_outcome_statuses',[]),
-               'status_reporting_version':evaluator.STATUS_REPORTING_VERSION,
-               'same_wave_repeats':'Not additional independent evidence','live_effect':'NONE'}
-        row={'episode_id':episode_id,'candidate_key':scope['candidate_key'],'symbol':scope['symbol'],'direction':scope['direction'],
-             'threshold_pct':scope['threshold_bps']/100,'first_snapshot_id':first.get('snapshot_id'),
-             'opened_at_utc':str(episode['forecast_start_utc']),'entry_price':first.get('entry_price'),
-             'state':'LIVE','result':episode['status'],'closed_at_utc':max((str(label.get('decision_time_utc') or '') for label in decisive),default=''),
-             'close_price':(decisive[0].get('favorable_touch_price') if episode['success'] else decisive[0].get('adverse_touch_price')) if decisive else '',
-             'swallowed_snapshot_count':'','rearmed_snapshot_id':'','rearm_reason':'NO_TIME_RESET_RULE',
-             'btc_parent_movement_id':episode['btc_parent_movement_id'],'policy_version':formula_version,'audit_note':canonical(audit)}
-        upserts.append({'sheet':'Episodes','key':'episode_id','row':row})
     complete=bool(summary.get('source_coverage_complete',True) and summary.get('source_population_complete',True) and summary.get('membership_population_complete',True) and not summary.get('truncated'))
     detail=f"{summary['independent_waves']} {'independent' if complete else 'provisional'} BTC waves; route {summary['count_route']}; research only."
     detail+=' Period='+canonical(period)+'. Coverage='+canonical(summary.get('period_coverage',{}))+'.'
@@ -597,7 +581,9 @@ def persist_scope(conn:Any,scope:Mapping[str,Any],rows:list[dict[str,Any]],resul
         'strongest_failure_pattern':'NOT_TESTED','status':'INCOMPLETE_DECISION_POPULATION' if not complete else summary['validation_status'] if summary['count_eligible'] else 'INSUFFICIENT_INDEPENDENT_EVIDENCE',
         'meets_min_5':complete and summary['independent_waves']>=5,'last_evaluated_at':now.isoformat(),'chat_summary':detail,'formula_version':formula_version}
     if canonical(summary) != canonical(scope.get('result') or {}):
-        upserts.append({'sheet':'Formula_Results','key':'candidate_key,coin_scope,direction,threshold_pct,horizon,formula_version','row':formula_row})
+        projected=publication.project_formula_row(formula_row)
+        if projected is not None:
+            upserts.append(projected)
     research_sheet_outbox.stage_upserts(conn,upserts)
     return {'episodes':len(episodes),'upserts':len(upserts)}
 

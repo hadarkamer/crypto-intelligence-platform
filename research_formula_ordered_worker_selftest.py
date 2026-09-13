@@ -30,7 +30,7 @@ class Connection:
     def rollback(self): self.pending.clear()
 
 
-def exercise(*,source_complete=True,scope_seconds=20,priority_refresh=False):
+def exercise(*,source_complete=True,scope_seconds=20,priority_refresh=False,idle_seed=False):
     conn=Connection()
     clock=[0.0]
     candidate=worker.evaluator.candidate_catalog()[0]
@@ -47,6 +47,9 @@ def exercise(*,source_complete=True,scope_seconds=20,priority_refresh=False):
         scopes[0]['result']={'research_ready':False}
         scopes[0]['evaluation_input_sha256']=worker.store.digest({
             'input':'fixed-input','validation_available':True,'registered_attempts':5})
+    if idle_seed:
+        scopes[0]['evaluation_input_sha256']=worker.store.digest({
+            'input':'fixed-input','validation_available':False,'registered_attempts':5})
 
     def ingest(conn,catalog,*,now,event_limit):
         assert event_limit==32 and now==AS_OF
@@ -87,6 +90,14 @@ def exercise(*,source_complete=True,scope_seconds=20,priority_refresh=False):
             (worker.store,'common_window_rows',lambda *a:{}),
             (worker.store,'period_coverage',lambda *a,**kw:{})]
         for target,name,value in overrides: stack.enter_context(patch.object(target,name,value))
+        if idle_seed:
+            def seed(conn,scope,version):
+                assert scope['scope_key']=='25' and version==worker.store.scope_formula_version(scope)
+                published.append(scope['scope_key'])
+                conn.pending.add(scope['scope_key'])
+                return 1
+            stack.enter_context(patch.object(worker.question_store,'evaluation_input',lambda *a,**kw:'fixed-input'))
+            stack.enter_context(patch.object(worker.store.publication,'seed_missing_scope',seed))
         if priority_refresh:
             def prioritize(conn,ordinary,*,now,limit,candidate_keys):
                 assert ordinary==[] and limit==8 and now==AS_OF
@@ -108,9 +119,12 @@ def exercise(*,source_complete=True,scope_seconds=20,priority_refresh=False):
     if priority_refresh:
         assert first_loaded[0]=='25' and published.count('25')==1
         assert first['scopes_evaluated']==2 and first['unchanged_scopes_skipped']==0
+    if idle_seed:
+        assert published==['25'] and first['unchanged_scopes_skipped']==1
+        assert first['scopes_evaluated']==1 and first['upserts']==2
     payloads=[json.loads(params[2]) for sql,params in conn.calls
               if 'INSERT INTO research_sheet_upsert_outbox' in sql]
-    formulas=[payload['row'] for payload in payloads if payload['sheet']=='Formula_Results']
+    formulas=[payload['row'] for payload in payloads if payload['sheet']=='Formula_Current']
     return first,second,first_committed,first_loaded,conn.committed,formulas,service
 
 
@@ -138,6 +152,7 @@ def run():
         and item['independent_episodes']==0 and item['hit_rate']==''
         and not item['meets_min_5'] for item in formulas)
     exercise(priority_refresh=True)
+    exercise(idle_seed=True)
     print('ordered formula worker: slow intake, bounded committed progress, resume and incomplete coverage PASS')
 
 

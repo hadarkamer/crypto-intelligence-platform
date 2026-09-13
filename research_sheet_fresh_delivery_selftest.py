@@ -102,7 +102,8 @@ def _stage_test():
         {'sheet': 'Formula_Results', 'key': 'formula_id', 'row': {
             'formula_id': 'f1', 'last_evaluated_at': instant}},
     ]
-    assert outbox.stage_upserts(SimpleNamespace(cursor=Cursor), items) == 5
+    assert outbox.stage_upserts(SimpleNamespace(cursor=Cursor), items) == 3
+    assert all(row[0] not in outbox.publication.LEGACY_SHEETS for row in rows)
     assert all(outbox._row_source_time(item) == instant for item in items[1:])
     assert outbox._source_time(json.loads(rows[0][2])['source_time_utc']) == instant
     assert 'source_time_utc' not in items[0], 'staging must not mutate caller payload'
@@ -259,7 +260,8 @@ def run():
     assert outbox._claim_batch(isolated, 8, 'empty') == []
     other = _database()
     _add(other, 'Additional_Sheet', 'undated', None)
-    assert outbox._claim_batch(other, 1, 'fallback')[0]['row_key'] == 'undated'
+    assert outbox._claim_batch(other, 1, 'fallback') == []
+    assert other.conn.execute('SELECT sync_status FROM research_sheet_upsert_outbox').fetchone()[0] == 'PENDING'
 
     # The measured finite report needs 17 proven 8-row HTTP batches. Burst
     # allocation completes it in 22 total turns while ordinary tables continue.
@@ -292,10 +294,10 @@ def run():
     sparse.conn.execute('UPDATE research_sheet_delivery_cursor SET next_slot=3')
     for index in range(8):
         _add(sparse,outbox._WAVE_REPORT_SHEET,f'older-wave-{index}',1,created_at_utc=1)
-        _add(sparse,'Formula_Results',f'newer-formula-{index}',NOW,
+        _add(sparse,outbox.publication.SHEET,f'newer-formula-{index}',NOW,
              created_at_utc=NOW-1,next_attempt_at_utc=NOW-1)
     reserved=outbox._claim_batch(sparse,8,'sparse-reserved')
-    assert len(reserved)==8 and all(row['sheet_name']=='Formula_Results' for row in reserved)
+    assert len(reserved)==8 and all(row['sheet_name']==outbox.publication.SHEET for row in reserved)
     # If every ordinary row is unavailable, that reserved turn may use report
     # capacity instead of becoming idle.
     sparse.conn.execute('UPDATE research_sheet_delivery_cursor SET next_slot=3')

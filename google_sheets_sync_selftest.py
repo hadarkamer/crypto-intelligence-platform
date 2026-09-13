@@ -539,6 +539,7 @@ def run():
     original_receiver_version = google_sheets_sync._RECEIVER_VERSION
     original_batch_fallback = google_sheets_sync._ORDERED_BATCH_FALLBACK
     original_http_seconds = google_sheets_sync._LAST_HTTP_SECONDS
+    original_ack_mode = google_sheets_sync._ACK_MODE
     calls = []
     class Response:
         body = b'{"ok":true}'
@@ -556,6 +557,7 @@ def run():
         raise TimeoutError("simulated webhook timeout")
     try:
         google_sheets_sync.enabled = lambda: True
+        google_sheets_sync._ACK_MODE = "json"  # Explicit legacy rollback contract.
         google_sheets_sync._WEBHOOK_URL = "https://example.invalid/sheets-test"
         google_sheets_sync.urlopen = successful_request
         assert google_sheets_sync.deliver_now({"upserts": []}) is True
@@ -606,6 +608,7 @@ def run():
         google_sheets_sync._RECEIVER_VERSION = original_receiver_version
         google_sheets_sync._ORDERED_BATCH_FALLBACK = original_batch_fallback
         google_sheets_sync._LAST_HTTP_SECONDS = original_http_seconds
+        google_sheets_sync._ACK_MODE = original_ack_mode
     print("google_sheets_sync_selftest: PASS")
 
 

@@ -9,10 +9,14 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
+import hmac
+from html.parser import HTMLParser
 import json
 import math
 import os
 from queue import Empty, Full, Queue
+import secrets
 import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional
@@ -27,6 +31,7 @@ _ENABLED = os.getenv("GOOGLE_SHEETS_SYNC_ENABLED", "").strip().lower() in _TRUE
 _WEBHOOK_URL = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "").strip()
 _WEBHOOK_SECRET = os.getenv("GOOGLE_SHEETS_WEBHOOK_SECRET", "").strip()
 _SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "").strip()
+_ACK_MODE = os.getenv("GOOGLE_SHEETS_ACK_MODE", "html_ack_v1").strip().lower()
 _HTTP_TIMEOUT_SECONDS = max(
     5.0, min(60.0, float(os.getenv("GOOGLE_SHEETS_HTTP_TIMEOUT_SECONDS", "45")))
 )
@@ -40,6 +45,8 @@ _RECEIVER_VERSION: Optional[str] = None
 _LAST_HTTP_SECONDS: Optional[float] = None
 _LAST_HTTP_DIAGNOSTIC: Optional[Dict[str, Any]] = None
 _ACK_RESPONSE_MAX_BYTES = 65_536
+_HTML_ACK_HOSTS = frozenset({"script.google.com", "script.googleusercontent.com"})
+_RECEIVER_ERROR_CODES = frozenset({"WORKBOOK_CAPACITY", "SHEET_CAPACITY"})
 _ORDERED_BATCH_FALLBACK = False
 _DURABLE_SNAPSHOT_MODE = False
 _DELIVERY_LOCK = threading.RLock()
@@ -68,6 +75,7 @@ def status() -> Dict[str, Any]:
         "queue_size": _QUEUE.qsize(),
         "fail_open": True,
         "http_timeout_seconds": _HTTP_TIMEOUT_SECONDS,
+        "ack_mode": _ACK_MODE,
         "receiver_version": _RECEIVER_VERSION,
         "last_http_seconds": _LAST_HTTP_SECONDS,
         "last_http_diagnostic": dict(_LAST_HTTP_DIAGNOSTIC) if _LAST_HTTP_DIAGNOSTIC else None,
@@ -131,6 +139,63 @@ def _response_context(response: Any) -> Dict[str, Any]:
     }
 
 
+class _HTMLAckTitleParser(HTMLParser):
+    """Read only a single complete page title; never execute response content."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.titles = 0
+        self.closed = 0
+        self.inside = False
+        self.invalid = False
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if self.inside:
+            self.invalid = True
+        if tag == "title":
+            self.titles += 1
+            self.inside = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            if not self.inside:
+                self.invalid = True
+            self.closed += 1
+            self.inside = False
+        elif self.inside:
+            self.invalid = True
+
+    def handle_data(self, data: str) -> None:
+        if self.inside:
+            self.parts.append(data)
+
+    def handle_comment(self, data: str) -> None:
+        if self.inside:
+            self.invalid = True
+
+    handle_pi = handle_comment
+    handle_decl = handle_comment
+    unknown_decl = handle_comment
+
+    def matches(self, raw: bytes, expected: str) -> bool:
+        self.feed(raw.decode("utf-8"))
+        self.close()
+        return (
+            not self.invalid and not self.inside and self.titles == self.closed == 1
+            and hmac.compare_digest("".join(self.parts).encode("utf-8"), expected.encode("ascii"))
+        )
+
+
+def _receiver_error_code(body: Any) -> Optional[str]:
+    """Expose only known receiver failures, never its raw error message."""
+    if isinstance(body, dict) and body.get("ok") is False:
+        code = body.get("error_code")
+        if isinstance(code, str) and code in _RECEIVER_ERROR_CODES:
+            return code
+    return None
+
+
 def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool:
     """Post one already-built envelope and report confirmed delivery.
 
@@ -144,14 +209,33 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
         diagnostic: Dict[str, Any] = {
             "response_stage": "REQUEST_OR_REDIRECT", "http_status": None,
             "response_host": None, "content_type": None, "response_bytes": None,
+            "ack_mode": _ACK_MODE,
         }
         outcome = "TRANSPORT_ERROR"
         try:
+            if _ACK_MODE not in {"html_ack_v1", "json"}:
+                outcome = "INVALID_ACK_MODE"
+                raise ValueError(outcome)
+            request_envelope = dict(envelope)
+            if _ACK_MODE == "html_ack_v1":
+                # Fresh per attempt, including retries: an earlier successful
+                # response must never confirm a later request or generation.
+                request_envelope["response_mode"] = "html_ack_v1"
+                request_envelope["ack_nonce"] = secrets.token_hex(16)
+            else:
+                request_envelope.pop("response_mode", None)
+                request_envelope.pop("ack_nonce", None)
+            request_bytes = json.dumps(
+                request_envelope, ensure_ascii=False, default=str
+            ).encode("utf-8")
+            if _ACK_MODE == "html_ack_v1":
+                expected_title = "sheets-ack-v1:" + hmac.new(
+                    _WEBHOOK_SECRET.encode("utf-8"), b"sheets-ack-v1\n" + request_bytes,
+                    hashlib.sha256,
+                ).hexdigest()
             request = Request(
                 _WEBHOOK_URL,
-                data=json.dumps(
-                    dict(envelope), ensure_ascii=False, default=str
-                ).encode("utf-8"),
+                data=request_bytes,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -167,16 +251,49 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
                     if len(raw) > _ACK_RESPONSE_MAX_BYTES:
                         outcome = "RESPONSE_TOO_LARGE"
                         raise ValueError(outcome)
-                    outcome = "INVALID_JSON"
-                    body = json.loads(raw.decode("utf-8"))
+                    if _ACK_MODE == "html_ack_v1":
+                        if diagnostic["http_status"] != 200:
+                            outcome = "INVALID_ACK_STATUS"
+                            raise ValueError(outcome)
+                        response_url = urlsplit(response.geturl())
+                        if (response_url.scheme != "https" or
+                                response_url.hostname not in _HTML_ACK_HOSTS or
+                                response_url.port not in {None, 443} or
+                                response_url.username is not None or response_url.password is not None):
+                            outcome = "INVALID_ACK_HOST"
+                            raise ValueError(outcome)
+                        if diagnostic["content_type"] != "text/html":
+                            # Receiver failures remain JSON. They can explain
+                            # a rejection, but never confirm an HTML-mode POST.
+                            if diagnostic["content_type"] == "application/json":
+                                try:
+                                    code = _receiver_error_code(json.loads(raw.decode("utf-8")))
+                                    if code:
+                                        diagnostic["receiver_error_code"] = code
+                                except (ValueError, UnicodeError):
+                                    pass
+                            outcome = "INVALID_ACK_CONTENT_TYPE"
+                            raise ValueError(outcome)
+                        outcome = "INVALID_HTML_ACK"
+                        if not _HTMLAckTitleParser().matches(raw, expected_title):
+                            raise ValueError(outcome)
+                        # The signed v1 receiver contract confirms a flushed
+                        # batch-v3 upsert, regardless of Google's HTML wrapper.
+                        receiver_version = "sheets-batch-v3"
+                    else:
+                        outcome = "INVALID_JSON"
+                        body = json.loads(raw.decode("utf-8"))
+                        if not isinstance(body, dict):
+                            outcome = "INVALID_ACK_SHAPE"
+                            raise ValueError(outcome)
+                        if body.get("ok") is not True:
+                            code = _receiver_error_code(body)
+                            if code:
+                                diagnostic["receiver_error_code"] = code
+                            outcome = "RECEIVER_REJECTED"
+                            raise RuntimeError(outcome)
+                        receiver_version = str(body.get("version") or "unversioned")
             _LAST_HTTP_SECONDS = round(time.monotonic() - started_at, 3)
-            if not isinstance(body, dict):
-                outcome = "INVALID_ACK_SHAPE"
-                raise ValueError(outcome)
-            if body.get("ok") is not True:
-                outcome = "RECEIVER_REJECTED"
-                raise RuntimeError(outcome)
-            receiver_version = str(body.get("version") or "unversioned")
             if receiver_version != _RECEIVER_VERSION:
                 print(
                     f"[google-sheets] receiver version={receiver_version}",
