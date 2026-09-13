@@ -1,0 +1,839 @@
+{
+  "automatic_audit": {
+    "by_type": {
+      "COMBINED_CONFIRMATION": {
+        "delivered": 721,
+        "missing": 2,
+        "sheet_unique": 719
+      },
+      "FORMULA_MP65_CVD_SHORT": {
+        "delivered": 14,
+        "missing": 0,
+        "sheet_unique": 14
+      },
+      "FUTURES_CVD_HIGH": {
+        "delivered": 260,
+        "missing": 1,
+        "sheet_unique": 259
+      },
+      "MAGNET_ALERT": {
+        "delivered": 11007,
+        "missing": 29,
+        "sheet_unique": 10978
+      },
+      "MAGNET_CONFIRMATION": {
+        "delivered": 246,
+        "missing": 0,
+        "sheet_unique": 246
+      },
+      "MAX_PAIN_ALERT": {
+        "delivered": 1239,
+        "missing": 5,
+        "sheet_unique": 1234
+      },
+      "MAX_PAIN_CONFIRMATION": {
+        "delivered": 334,
+        "missing": 0,
+        "sheet_unique": 334
+      },
+      "MAX_PAIN_SCORE_65": {
+        "delivered": 1044,
+        "missing": 12,
+        "sheet_unique": 1032
+      },
+      "MAX_PAIN_SCORE_83": {
+        "delivered": 14,
+        "missing": 0,
+        "sheet_unique": 14
+      },
+      "OI_PRICE_HIGH": {
+        "delivered": 81,
+        "missing": 0,
+        "sheet_unique": 81
+      },
+      "SPOT_CVD_HIGH": {
+        "delivered": 1368,
+        "missing": 8,
+        "sheet_unique": 1360
+      },
+      "STRONG_MAGNET_CONFIRMATION": {
+        "delivered": 111,
+        "missing": 0,
+        "sheet_unique": 111
+      },
+      "STRONG_MAX_PAIN_CONFIRMATION": {
+        "delivered": 96,
+        "missing": 0,
+        "sheet_unique": 96
+      }
+    },
+    "checked_at": "2026-09-13T13:33:01.769030+00:00",
+    "delivered": 16535,
+    "duplicate_extra_rows": 0,
+    "duplicate_ids": 0,
+    "duplicate_sample": {},
+    "followup": {
+      "all_currently_synced": true,
+      "all_missing_samples_present": true,
+      "by_type": {
+        "COMBINED_CONFIRMATION": 2,
+        "FUTURES_CVD_HIGH": 1,
+        "MAGNET_ALERT": 29,
+        "MAX_PAIN_ALERT": 5,
+        "MAX_PAIN_SCORE_65": 12,
+        "SPOT_CVD_HIGH": 8
+      },
+      "causality_limit": "The follow-up read happened after requeue. Cannot establish whether the 57 rows arrived during the audit or were restored by repair. No remaining demonstrated gap in the checked 65-event cohort.",
+      "cohort_comparison": {
+        "checks_per_event": 5,
+        "diffs": [],
+        "events": 65,
+        "timestamps_normalized": "UTC and fractional-second zero padding"
+      },
+      "expected_by_type": {
+        "COMBINED_CONFIRMATION": 2,
+        "FUTURES_CVD_HIGH": 1,
+        "MAGNET_ALERT": 29,
+        "MAX_PAIN_ALERT": 5,
+        "MAX_PAIN_SCORE_65": 12,
+        "SPOT_CVD_HIGH": 8
+      },
+      "flagged_count": 57,
+      "frozen_last_row": 17193,
+      "matched_after_boundary": 57,
+      "physical_rows": [
+        17194,
+        17250
+      ]
+    },
+    "from_utc": "2026-08-30T12:36:32.685834+00:00",
+    "missing": 57,
+    "missing_sample": [
+      "155ce7aa95ad32ae66490897c65aab866d31f91e00c6110a783f49cd5f088c5d",
+      "16aec258260c0f0be958ff1c473df6afb1bfee26c80bd8c20208d8b708770c27",
+      "1f8a0dc7378d9cbded2b7e9594cffdd0b976d828a2d2619fc1795d1f75d9b15e",
+      "23b173b0ee9b7492f6fd1eece62321426b93ac690a2bc0c358792ef178b4825b",
+      "23cc2dede6e093eaa72799c3969d7dc8726e14fe04f4b9be40d604187e2120aa",
+      "2b6728eb1bae9536c6290effd62d1be699d4c8e45f41f2999418cff28773fa58",
+      "3470e577ca04bbfcf3271de6a4cb8066279140f989391b2765729dfb85a5e4f1",
+      "34f43e82bb7663007342a8ab355d6c0df8a8c8f69ec3b812588492675fb1c35d",
+      "3e2d8d82f9a71d91e92a3fbe9fd7075e3a51c741917b94111b832e258d52f8b1",
+      "43c4a13c241fd0cd9dbbdf90227f3cd0982d60e3f078c731f42dd64c146e1374"
+    ],
+    "next_audit": {
+      "last_row": 17392,
+      "next_row": 1002,
+      "reset_count": 0,
+      "status": "SCANNING"
+    },
+    "normalized_historical_maxpain_rows": 34,
+    "previously_synced_rows_requeued": 57,
+    "sheet_unique": 16478,
+    "through_utc": "2026-09-13T12:36:32.685834+00:00",
+    "unexpected_delivered_ids": 0
+  },
+  "boundaries": {
+    "legacy_outcomes_hold_unchanged": true,
+    "no_formula_or_score_change": true,
+    "no_full_sheet_rescan_by_agent": true,
+    "no_manual_scan": true,
+    "no_production_restart": true,
+    "no_statistical_conclusion": true,
+    "no_test_message": true,
+    "other_alert_families_not_migrated": true
+  },
+  "checked_at_utc": "2026-09-13T13:40:09.283681+00:00",
+  "final_health": {
+    "audit": {
+      "expected": 16656,
+      "last_complete": {
+        "by_type": {
+          "COMBINED_CONFIRMATION": {
+            "delivered": 721,
+            "missing": 2,
+            "sheet_unique": 719
+          },
+          "FORMULA_MP65_CVD_SHORT": {
+            "delivered": 14,
+            "missing": 0,
+            "sheet_unique": 14
+          },
+          "FUTURES_CVD_HIGH": {
+            "delivered": 260,
+            "missing": 1,
+            "sheet_unique": 259
+          },
+          "MAGNET_ALERT": {
+            "delivered": 11007,
+            "missing": 29,
+            "sheet_unique": 10978
+          },
+          "MAGNET_CONFIRMATION": {
+            "delivered": 246,
+            "missing": 0,
+            "sheet_unique": 246
+          },
+          "MAX_PAIN_ALERT": {
+            "delivered": 1239,
+            "missing": 5,
+            "sheet_unique": 1234
+          },
+          "MAX_PAIN_CONFIRMATION": {
+            "delivered": 334,
+            "missing": 0,
+            "sheet_unique": 334
+          },
+          "MAX_PAIN_SCORE_65": {
+            "delivered": 1044,
+            "missing": 12,
+            "sheet_unique": 1032
+          },
+          "MAX_PAIN_SCORE_83": {
+            "delivered": 14,
+            "missing": 0,
+            "sheet_unique": 14
+          },
+          "OI_PRICE_HIGH": {
+            "delivered": 81,
+            "missing": 0,
+            "sheet_unique": 81
+          },
+          "SPOT_CVD_HIGH": {
+            "delivered": 1368,
+            "missing": 8,
+            "sheet_unique": 1360
+          },
+          "STRONG_MAGNET_CONFIRMATION": {
+            "delivered": 111,
+            "missing": 0,
+            "sheet_unique": 111
+          },
+          "STRONG_MAX_PAIN_CONFIRMATION": {
+            "delivered": 96,
+            "missing": 0,
+            "sheet_unique": 96
+          }
+        },
+        "checked_at": "2026-09-13T13:33:01.769030+00:00",
+        "delivered": 16535,
+        "duplicate_extra_rows": 0,
+        "duplicate_ids": 0,
+        "duplicate_sample": {},
+        "from_utc": "2026-08-30T12:36:32.685834+00:00",
+        "missing": 57,
+        "missing_sample": [
+          "155ce7aa95ad32ae66490897c65aab866d31f91e00c6110a783f49cd5f088c5d",
+          "16aec258260c0f0be958ff1c473df6afb1bfee26c80bd8c20208d8b708770c27",
+          "1f8a0dc7378d9cbded2b7e9594cffdd0b976d828a2d2619fc1795d1f75d9b15e",
+          "23b173b0ee9b7492f6fd1eece62321426b93ac690a2bc0c358792ef178b4825b",
+          "23cc2dede6e093eaa72799c3969d7dc8726e14fe04f4b9be40d604187e2120aa",
+          "2b6728eb1bae9536c6290effd62d1be699d4c8e45f41f2999418cff28773fa58",
+          "3470e577ca04bbfcf3271de6a4cb8066279140f989391b2765729dfb85a5e4f1",
+          "34f43e82bb7663007342a8ab355d6c0df8a8c8f69ec3b812588492675fb1c35d",
+          "3e2d8d82f9a71d91e92a3fbe9fd7075e3a51c741917b94111b832e258d52f8b1",
+          "43c4a13c241fd0cd9dbbdf90227f3cd0982d60e3f078c731f42dd64c146e1374"
+        ],
+        "normalized_historical_maxpain_rows": 34,
+        "previously_synced_rows_requeued": 57,
+        "sheet_unique": 16478,
+        "through_utc": "2026-09-13T12:36:32.685834+00:00",
+        "unexpected_delivered_ids": 0
+      },
+      "last_error": null,
+      "last_row": 17392,
+      "next_row": 1002,
+      "reset_count": 0,
+      "seen_unique": null,
+      "status": "SCANNING"
+    },
+    "checked_at": "2026-09-13T13:40:09.283681+00:00",
+    "commit": "8042759a330c655e6bc86f404ea7b3886e9972d6",
+    "outcomes": {
+      "failures": 0,
+      "last_error": null,
+      "last_run_utc": "2026-09-13T13:39:40.118074+00:00",
+      "ordered_first_touch_failures": 0,
+      "ordered_first_touch_last_error": null,
+      "ordered_first_touch_sync_last_confirmed_at_utc": null,
+      "ordered_first_touch_sync_latest_observed_through_utc": null
+    },
+    "sheets": {
+      "metrics": {
+        "delivered": 416,
+        "delivery_failures": 0,
+        "enqueued": 0,
+        "queue_full_drops": 0,
+        "retries": 0
+      },
+      "queue_size": 0,
+      "receiver_version": "sheets-batch-v3",
+      "running": false,
+      "spreadsheet_id": "1ci_T6v2r0MeGc3ErOsaY3ftMFo94m4syGF9U94X0fQQ"
+    },
+    "watch": {
+      "last_completed_at_utc": "2026-09-13T13:36:13.866278+00:00",
+      "last_cycle_result": "completed",
+      "last_error": null,
+      "last_transition_result": {
+        "created_intents": 5,
+        "delivered": 5,
+        "evidence_gaps": 0,
+        "failed": 0,
+        "record_status": "RECORDED",
+        "status": "COMPLETE",
+        "unknown": 0,
+        "watch_scan_id": "shared-watch:2026-09-13T13:32:15.080760+00:00"
+      },
+      "next_scan_utc": "2026-09-13T14:02:15+00:00"
+    }
+  },
+  "first_natural_watch": {
+    "completed_at_utc": "2026-09-13T13:06:09.479047Z",
+    "created_intents": 0,
+    "crossings": 0,
+    "cvd_closed_candle_utc": "2026-09-13T13:00:00Z",
+    "cvd_verified_coins": 8,
+    "cvd_verified_markets": [
+      "futures",
+      "spot"
+    ],
+    "delivery_errors": 0,
+    "observed_at": "2026-09-13T13:05:46.834573Z",
+    "operational_scores": {
+      "coins": 8,
+      "count": 112,
+      "status": "COMPLETE"
+    },
+    "policy_version": "maxpain-score65-reset60-bootstrap-v1",
+    "raw_rows": 350,
+    "raw_snapshot_set": 1236,
+    "rejected_older": false,
+    "result_metadata": {
+      "counts": {
+        "bootstrapped": 54,
+        "bootstrapped_false": 41,
+        "bootstrapped_true": 13,
+        "crossings": 0,
+        "evaluated": 56,
+        "resets": 0,
+        "unknown": 2
+      },
+      "reset_keys": []
+    },
+    "state_rows": 56,
+    "unknown_initial_hysteresis_keys": [
+      "ETH|12h|LONG",
+      "SOL|12h|LONG"
+    ],
+    "watch_scan_id": "shared-watch:2026-09-13T13:02:15.518415+00:00"
+  },
+  "outcomes": {
+    "current_policy": "outcomes-current-latest-evaluated-slot-v1",
+    "current_sheet_sample": {
+      "cells_compared": 170,
+      "diffs": [],
+      "proof": [
+        {
+          "columns_compared": 34,
+          "event_id": "43539",
+          "physical_row": 356,
+          "row_key": "[\"BTC\",\"SHORT\",\"240\",\"100\"]",
+          "watch_scan_id": "shared-watch:2026-09-13T13:02:15.518415+00:00"
+        },
+        {
+          "columns_compared": 34,
+          "event_id": "43539",
+          "physical_row": 369,
+          "row_key": "[\"BTC\",\"SHORT\",\"60\",\"25\"]",
+          "watch_scan_id": "shared-watch:2026-09-13T13:02:15.518415+00:00"
+        },
+        {
+          "columns_compared": 34,
+          "event_id": "43549",
+          "physical_row": 43,
+          "row_key": "[\"ETH\",\"SHORT\",\"60\",\"25\"]",
+          "watch_scan_id": "shared-watch:2026-09-13T13:02:15.518415+00:00"
+        },
+        {
+          "columns_compared": 34,
+          "event_id": "43558",
+          "physical_row": 411,
+          "row_key": "[\"SOL\",\"SHORT\",\"240\",\"100\"]",
+          "watch_scan_id": "shared-watch:2026-09-13T13:02:15.518415+00:00"
+        },
+        {
+          "columns_compared": 34,
+          "event_id": "43558",
+          "physical_row": 424,
+          "row_key": "[\"SOL\",\"SHORT\",\"60\",\"25\"]",
+          "watch_scan_id": "shared-watch:2026-09-13T13:02:15.518415+00:00"
+        }
+      ]
+    },
+    "method": "ordered-first-touch-v7",
+    "new_current_slots": {
+      "note": "Later Magnet events supersede formula in Current slots. Formula history remains canonical. Current pending rows have not yet been claimed as equal.",
+      "rows": [
+        {
+          "queued_event_id": 43789,
+          "row": 184,
+          "sheet_event_id": 43718,
+          "symbol": "DOGE"
+        },
+        {
+          "queued_event_id": 43823,
+          "row": 250,
+          "sheet_event_id": 43562,
+          "symbol": "XRP"
+        }
+      ],
+      "status": "PENDING_AT_READ",
+      "final_read": {
+        "database_observed_at_approx_utc": "2026-09-13T13:41:09Z",
+        "rows": [
+          {
+            "symbol": "DOGE",
+            "event_id": 43789,
+            "status": "PENDING",
+            "attempts": 0,
+            "updated_at_utc": "2026-09-13T13:39:20.125543Z"
+          },
+          {
+            "symbol": "XRP",
+            "event_id": 43823,
+            "status": "PENDING",
+            "attempts": 0,
+            "updated_at_utc": "2026-09-13T13:38:57.722251Z"
+          }
+        ],
+        "all_current_rows": {
+          "PENDING": 368,
+          "IN_FLIGHT": 8,
+          "SYNCED": 72,
+          "RETRY": 0,
+          "FAILED": 0,
+          "rows_with_last_error": 0,
+          "oldest_active_update_age_seconds": 132,
+          "latest_synced_at_utc": "2026-09-13T13:41:02.315270Z"
+        },
+        "conclusion": "Active synchronization without demonstrated failure; the latest two slot revisions have not been verified in actual Sheets."
+      }
+    },
+    "new_formula_events": [
+      {
+        "alert_time_utc": "2026-09-13T13:35:47.061525Z",
+        "direction": "SHORT",
+        "event_id": 43760,
+        "event_type": "FORMULA_MP65_CVD_SHORT",
+        "latest_observed": "2026-09-13T13:36:59.999Z",
+        "measurement_start": "2026-09-13T13:35:47.061525Z",
+        "outcome_rows": 32,
+        "source_mismatches": 0,
+        "symbol": "XRP"
+      },
+      {
+        "alert_time_utc": "2026-09-13T13:35:47.061525Z",
+        "direction": "SHORT",
+        "event_id": 43761,
+        "event_type": "FORMULA_MP65_CVD_SHORT",
+        "latest_observed": "2026-09-13T13:36:59.999Z",
+        "measurement_start": "2026-09-13T13:35:47.061525Z",
+        "outcome_rows": 32,
+        "source_mismatches": 0,
+        "symbol": "DOGE"
+      }
+    ],
+    "older_events": [
+      {
+        "alert_time_utc": "2026-09-13T09:54:15.849323Z",
+        "direction": "SHORT",
+        "earliest_observed": "2026-09-13T10:53:59.999Z",
+        "event_fingerprint": "835d8acefedc31b499f555940cdee152cd3f98193bb6fd044d700b4e1a5ee4e3",
+        "event_id": 41948,
+        "latest_observed": "2026-09-13T13:30:59.999Z",
+        "outcomes": 32,
+        "source_mismatches": 0,
+        "symbol": "BTC",
+        "watch_scan_id": "shared-watch:2026-09-13T09:51:02.017119+00:00"
+      },
+      {
+        "alert_time_utc": "2026-09-13T09:54:15.849323Z",
+        "direction": "SHORT",
+        "earliest_observed": "2026-09-13T10:42:59.999Z",
+        "event_fingerprint": "2b4abb14e48264fa2879d65bf228544f55cb0cf9edf232fd8472b034797c44d4",
+        "event_id": 41949,
+        "latest_observed": "2026-09-13T13:30:59.999Z",
+        "outcomes": 32,
+        "source_mismatches": 0,
+        "symbol": "SOL",
+        "watch_scan_id": "shared-watch:2026-09-13T09:51:02.017119+00:00"
+      },
+      {
+        "alert_time_utc": "2026-09-13T12:35:48.946417Z",
+        "direction": "SHORT",
+        "earliest_observed": "2026-09-13T13:07:59.999Z",
+        "event_fingerprint": "9ed2927ddbef025cbe93530f6392629f8e478121f43a2ec9c697c8e1e65d78c4",
+        "event_id": 43324,
+        "latest_observed": "2026-09-13T13:07:59.999Z",
+        "outcomes": 32,
+        "source_mismatches": 0,
+        "symbol": "BTC",
+        "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+      },
+      {
+        "alert_time_utc": "2026-09-13T12:35:48.946417Z",
+        "direction": "SHORT",
+        "earliest_observed": "2026-09-13T13:06:59.999Z",
+        "event_fingerprint": "a8371bbec2c8875a16048ebc01ef096eed612ded78eefc802e2d9980cf6c8ec8",
+        "event_id": 43325,
+        "latest_observed": "2026-09-13T13:07:59.999Z",
+        "outcomes": 32,
+        "source_mismatches": 0,
+        "symbol": "ETH",
+        "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+      }
+    ]
+  },
+  "production": {
+    "changed_this_step": false,
+    "commit": "8042759a330c655e6bc86f404ea7b3886e9972d6",
+    "deploy_id": "dep-daj9hltckfvc739k0v90",
+    "live_at_utc": "2026-09-13T12:37:52.280145Z",
+    "pr": 32,
+    "tree": "c38270f1ab642ef637fa063f4015256dd7d932d3"
+  },
+  "schema_version": "watch-end-to-end-verification-v1",
+  "scope": "Read-only verification of natural Watch cycles and source/delivery/outcome/Sheets continuity. Component research remains deferred.",
+  "second_natural_watch": {
+    "actual_telegram_sheet_rows": [
+      {
+        "direction": "SHORT",
+        "event_id": 43757,
+        "kind": "MAX_PAIN_SCORE_65",
+        "sheet_rows": [
+          {
+            "row": 17358,
+            "values": [
+              "db8093c2506e4fe08ddddc238366042fae013d11fb2c32564e1d2a4b4ad18547",
+              "ecfa2244686e8635eb451e4a7e383fd94a320130e4eea3ec20d6220694a90781",
+              "",
+              "2026-09-13 13:35:47.061525+00:00",
+              "HYPE",
+              "SHORT",
+              "MAX_PAIN_SCORE_65",
+              "24h",
+              "DELIVERED",
+              "",
+              "LONG",
+              "SHORT",
+              "MAX_PAIN_SCORE_65",
+              "MAX_PAIN_SCORE_65",
+              "maxpain-source-alias-v1"
+            ]
+          }
+        ],
+        "signal_key": "HYPE|24h|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00"
+      },
+      {
+        "direction": "SHORT",
+        "event_id": 43758,
+        "kind": "MAX_PAIN_SCORE_65",
+        "sheet_rows": [
+          {
+            "row": 17347,
+            "values": [
+              "87d5718d749f1d8c2f343e2b7d9305cb03ed9fa83c3e090c3247cb9f274caa28",
+              "4c425347ab6331e9b31c05da17f11818eec5a11025dd2bb305213d401ced777f",
+              "",
+              "2026-09-13 13:35:47.061525+00:00",
+              "XRP",
+              "SHORT",
+              "MAX_PAIN_SCORE_65",
+              "2w",
+              "DELIVERED",
+              "",
+              "LONG",
+              "SHORT",
+              "MAX_PAIN_SCORE_65",
+              "MAX_PAIN_SCORE_65",
+              "maxpain-source-alias-v1"
+            ]
+          }
+        ],
+        "signal_key": "XRP|2w|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00"
+      },
+      {
+        "direction": "SHORT",
+        "event_id": 43759,
+        "kind": "MAX_PAIN_SCORE_65",
+        "sheet_rows": [
+          {
+            "row": 17329,
+            "values": [
+              "2900ed7ea3377f3c0a6f829d4c0271810752a13cee44c157fcd1201b4d8bac93",
+              "5c902a2e53630c2951d3270916411a8716b171eb7f71747f8e4c519626654c46",
+              "",
+              "2026-09-13 13:35:47.061525+00:00",
+              "DOGE",
+              "SHORT",
+              "MAX_PAIN_SCORE_65",
+              "12h",
+              "DELIVERED",
+              "",
+              "LONG",
+              "SHORT",
+              "MAX_PAIN_SCORE_65",
+              "MAX_PAIN_SCORE_65",
+              "maxpain-source-alias-v1"
+            ]
+          }
+        ],
+        "signal_key": "DOGE|12h|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00"
+      },
+      {
+        "direction": "SHORT",
+        "event_id": 43760,
+        "kind": "FORMULA_MP65_CVD_SHORT",
+        "sheet_rows": [
+          {
+            "row": 17343,
+            "values": [
+              "7682f2257c25ec787564c65a2a74b66dfcb60aa7c74ad4c9d9ceb5de3139e9b3",
+              "4c425347ab6331e9b31c05da17f11818eec5a11025dd2bb305213d401ced777f",
+              "",
+              "2026-09-13 13:35:47.061525+00:00",
+              "XRP",
+              "SHORT",
+              "FORMULA_MP65_CVD_SHORT",
+              "2w",
+              "DELIVERED",
+              "",
+              "SHORT",
+              "SHORT",
+              "FORMULA_MP65_CVD_SHORT",
+              "FORMULA_MP65_CVD_SHORT",
+              "maxpain-source-alias-v1"
+            ]
+          }
+        ],
+        "signal_key": "XRP|2w|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00"
+      },
+      {
+        "direction": "SHORT",
+        "event_id": 43761,
+        "kind": "FORMULA_MP65_CVD_SHORT",
+        "sheet_rows": [
+          {
+            "row": 17324,
+            "values": [
+              "0167b22b2a001946daf1d6ce41b5c61b23373aaca035ec739ddca7607d047426",
+              "5c902a2e53630c2951d3270916411a8716b171eb7f71747f8e4c519626654c46",
+              "",
+              "2026-09-13 13:35:47.061525+00:00",
+              "DOGE",
+              "SHORT",
+              "FORMULA_MP65_CVD_SHORT",
+              "12h",
+              "DELIVERED",
+              "",
+              "SHORT",
+              "SHORT",
+              "FORMULA_MP65_CVD_SHORT",
+              "FORMULA_MP65_CVD_SHORT",
+              "maxpain-source-alias-v1"
+            ]
+          }
+        ],
+        "signal_key": "DOGE|12h|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00"
+      }
+    ],
+    "completed_at_utc": "2026-09-13T13:36:13.866278Z",
+    "crossing_keys": [
+      "HYPE|24h|LONG",
+      "XRP|2w|LONG",
+      "DOGE|12h|LONG"
+    ],
+    "delivery_errors": 0,
+    "intents": [
+      {
+        "acknowledged_at": "2026-09-13T13:35:56.775992Z",
+        "alert_time_utc": "2026-09-13T13:35:47.061525Z",
+        "attempted_at": "2026-09-13T13:35:56.468201Z",
+        "delivery_status": "DELIVERED",
+        "direction": "SHORT",
+        "episode": 1,
+        "event_fingerprint": "db8093c2506e4fe08ddddc238366042fae013d11fb2c32564e1d2a4b4ad18547",
+        "event_id": 43757,
+        "intent_id": "2cef1d7d65711e51077b5d8d2ebfcfea98b514e39d652ac3a29631cdea1b6118",
+        "kind": "MAX_PAIN_SCORE_65",
+        "signal_key": "HYPE|24h|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00",
+        "status": "DELIVERED",
+        "sync_status": "SYNCED",
+        "synced_at_utc": "2026-09-13T13:36:45.917016Z",
+        "watch_scan_id": "shared-watch:2026-09-13T13:32:15.080760+00:00"
+      },
+      {
+        "acknowledged_at": "2026-09-13T13:35:57.035316Z",
+        "alert_time_utc": "2026-09-13T13:35:47.061525Z",
+        "attempted_at": "2026-09-13T13:35:56.799733Z",
+        "delivery_status": "DELIVERED",
+        "direction": "SHORT",
+        "episode": 1,
+        "event_fingerprint": "87d5718d749f1d8c2f343e2b7d9305cb03ed9fa83c3e090c3247cb9f274caa28",
+        "event_id": 43758,
+        "intent_id": "84a2170712682fa31a94b37a90f9d3a706397919775bac76f28c98b631f738f2",
+        "kind": "MAX_PAIN_SCORE_65",
+        "signal_key": "XRP|2w|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00",
+        "status": "DELIVERED",
+        "sync_status": "SYNCED",
+        "synced_at_utc": "2026-09-13T13:36:41.400886Z",
+        "watch_scan_id": "shared-watch:2026-09-13T13:32:15.080760+00:00"
+      },
+      {
+        "acknowledged_at": "2026-09-13T13:35:57.393151Z",
+        "alert_time_utc": "2026-09-13T13:35:47.061525Z",
+        "attempted_at": "2026-09-13T13:35:57.080547Z",
+        "delivery_status": "DELIVERED",
+        "direction": "SHORT",
+        "episode": 1,
+        "event_fingerprint": "2900ed7ea3377f3c0a6f829d4c0271810752a13cee44c157fcd1201b4d8bac93",
+        "event_id": 43759,
+        "intent_id": "baceb72c228befafe812369ffbf9b45ca4b3acbd47292825aacc8b1c4d4dff32",
+        "kind": "MAX_PAIN_SCORE_65",
+        "signal_key": "DOGE|12h|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00",
+        "status": "DELIVERED",
+        "sync_status": "SYNCED",
+        "synced_at_utc": "2026-09-13T13:36:23.691929Z",
+        "watch_scan_id": "shared-watch:2026-09-13T13:32:15.080760+00:00"
+      },
+      {
+        "acknowledged_at": "2026-09-13T13:35:57.785685Z",
+        "alert_time_utc": "2026-09-13T13:35:47.061525Z",
+        "attempted_at": "2026-09-13T13:35:57.50696Z",
+        "delivery_status": "DELIVERED",
+        "direction": "SHORT",
+        "episode": 1,
+        "event_fingerprint": "7682f2257c25ec787564c65a2a74b66dfcb60aa7c74ad4c9d9ceb5de3139e9b3",
+        "event_id": 43760,
+        "intent_id": "2c5d1f94a026134ab3ac79be9cbf0c3e00f6aa3b175ec956ad85725440bfe66f",
+        "kind": "FORMULA_MP65_CVD_SHORT",
+        "signal_key": "XRP|2w|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00",
+        "status": "DELIVERED",
+        "sync_status": "SYNCED",
+        "synced_at_utc": "2026-09-13T13:36:36.997112Z",
+        "watch_scan_id": "shared-watch:2026-09-13T13:32:15.080760+00:00"
+      },
+      {
+        "acknowledged_at": "2026-09-13T13:35:58.198983Z",
+        "alert_time_utc": "2026-09-13T13:35:47.061525Z",
+        "attempted_at": "2026-09-13T13:35:57.810487Z",
+        "delivery_status": "DELIVERED",
+        "direction": "SHORT",
+        "episode": 1,
+        "event_fingerprint": "0167b22b2a001946daf1d6ce41b5c61b23373aaca035ec739ddca7607d047426",
+        "event_id": 43761,
+        "intent_id": "144e9691c96b52c93b6db20bc0e85ccbbda8f4a5d9b866b35d22f8eba3182a3a",
+        "kind": "FORMULA_MP65_CVD_SHORT",
+        "signal_key": "DOGE|12h|LONG",
+        "source_time": "2026-09-13T13:35:47.061525+00:00",
+        "status": "DELIVERED",
+        "sync_status": "SYNCED",
+        "synced_at_utc": "2026-09-13T13:36:23.691929Z",
+        "watch_scan_id": "shared-watch:2026-09-13T13:32:15.080760+00:00"
+      }
+    ],
+    "observed_at": "2026-09-13T13:35:47.061525Z",
+    "raw_rows": 350,
+    "raw_snapshot_set": 1238,
+    "result_metadata": {
+      "counts": {
+        "bootstrapped": 2,
+        "bootstrapped_false": 2,
+        "bootstrapped_true": 0,
+        "crossings": 3,
+        "evaluated": 56,
+        "resets": 5,
+        "unknown": 1
+      },
+      "reset_keys": [
+        "BNB|1w|LONG",
+        "BNB|24h|LONG",
+        "BNB|12h|LONG",
+        "BTC|3d|LONG",
+        "BNB|2w|LONG"
+      ]
+    },
+    "sheet_comparison": {
+      "diffs": [],
+      "each_found_once": true,
+      "events": 5
+    },
+    "transitions": [
+      {
+        "current_score": "73.51",
+        "intent_id": "2cef1d7d65711e51077b5d8d2ebfcfea98b514e39d652ac3a29631cdea1b6118",
+        "kind": "MAX_PAIN_SCORE_65",
+        "previous_state": {
+          "active": false,
+          "episode": 0,
+          "observation": "FALSE"
+        },
+        "signal_key": "HYPE|24h|LONG"
+      },
+      {
+        "current_score": "72.67",
+        "intent_id": "84a2170712682fa31a94b37a90f9d3a706397919775bac76f28c98b631f738f2",
+        "kind": "MAX_PAIN_SCORE_65",
+        "previous_state": {
+          "active": false,
+          "episode": 0,
+          "observation": "FALSE"
+        },
+        "signal_key": "XRP|2w|LONG"
+      },
+      {
+        "current_score": "70.15",
+        "intent_id": "baceb72c228befafe812369ffbf9b45ca4b3acbd47292825aacc8b1c4d4dff32",
+        "kind": "MAX_PAIN_SCORE_65",
+        "previous_state": {
+          "active": false,
+          "episode": 0,
+          "observation": "FALSE"
+        },
+        "signal_key": "DOGE|12h|LONG"
+      },
+      {
+        "current_score": "72.67",
+        "intent_id": "2c5d1f94a026134ab3ac79be9cbf0c3e00f6aa3b175ec956ad85725440bfe66f",
+        "kind": "FORMULA_MP65_CVD_SHORT",
+        "previous_state": {
+          "active": false,
+          "episode": 0,
+          "observation": "FALSE"
+        },
+        "signal_key": "XRP|2w|LONG"
+      },
+      {
+        "current_score": "70.15",
+        "intent_id": "144e9691c96b52c93b6db20bc0e85ccbbda8f4a5d9b866b35d22f8eba3182a3a",
+        "kind": "FORMULA_MP65_CVD_SHORT",
+        "previous_state": {
+          "active": false,
+          "episode": 0,
+          "observation": "FALSE"
+        },
+        "signal_key": "DOGE|12h|LONG"
+      }
+    ],
+    "watch_scan_id": "shared-watch:2026-09-13T13:32:15.080760+00:00"
+  }
+}
