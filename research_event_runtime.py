@@ -57,6 +57,12 @@ def reset_watch_context(token: Token) -> None:
     _WATCH_CONTEXT.reset(token)
 
 
+def watch_context_snapshot() -> Dict[str, Any]:
+    """Copy source lineage so recovered deliveries retain their original Watch."""
+    from copy import deepcopy
+    return deepcopy(_WATCH_CONTEXT.get() or {})
+
+
 def _with_watch_context(
     event: research_event_capture.ResearchEvent,
 ) -> research_event_capture.ResearchEvent:
@@ -380,10 +386,43 @@ def capture_manual_maxpain_sample(
         return False
 
 
+def capture_score65_delivery(
+    item: Mapping[str, Any], *, event_time: Any = None,
+    persist: bool = False, delivery_status: str = "DELIVERED",
+    delivery_attempted_at_utc: Any = None, delivered_at_utc: Any = None,
+) -> bool:
+    """Capture an authoritative durable intent, without a second RAM transition."""
+    event = research_event_capture.build_maxpain_event(
+        item, event_type="MAX_PAIN_SCORE_65", event_time=_now(event_time)
+    )
+    return _emit(
+        event, persist=persist, capture_stage="TELEGRAM_SPECIAL_ALERT",
+        delivery_status=delivery_status,
+        delivery_attempted_at_utc=delivery_attempted_at_utc,
+        delivered_at_utc=delivered_at_utc,
+    )
+
+
+def capture_score65_reset(item: Mapping[str, Any], *, event_time: Any, persist: bool = False) -> bool:
+    """Retain a database-confirmed rearm as research evidence only."""
+    score = float(item.get("score", item.get("priority")))
+    side = str(item.get("side") or "").upper()
+    return _emit_state_change(
+        symbol=str(item.get("symbol") or "").upper(), signal_name="MAX_PAIN_SCORE_65",
+        old_state={"active": True, "threshold": SCORE_CONFIRMATION_THRESHOLD},
+        new_state={"active": False, "score": score},
+        direction=_price_direction_from_alert_side(side), source_side=side,
+        score=score, current_price=item.get("current_price"), timeframe=item.get("timeframe"),
+        event_time=event_time, evidence={"reset_below": SCORE_CONFIRMATION_RESET_THRESHOLD},
+        persist=persist,
+    )
+
+
 def capture_special_transitions(
     items: Iterable[Mapping[str, Any]], *, event_time: Any = None,
     persist: bool = False, delivery_status: str = "DELIVERED",
     delivery_attempted_at_utc: Any = None, delivered_at_utc: Any = None,
+    include_score65: bool = True,
 ) -> int:
     """Mirror independent alert transitions and preserve reset/weakening states."""
     timestamp = _now(event_time)
@@ -401,38 +440,39 @@ def capture_special_transitions(
         current_price = item.get("current_price")
         direction = _price_direction_from_alert_side(source_side)
 
-        was_score_active = bool(_SCORE_CONFIRMATION_STATE.get(key, False))
-        score_active = was_score_active
-        if score >= SCORE_CONFIRMATION_THRESHOLD:
-            score_active = True
-        elif score < SCORE_CONFIRMATION_RESET_THRESHOLD:
-            score_active = False
-        _SCORE_CONFIRMATION_STATE[key] = score_active
-        if score_active and not was_score_active:
-            event = research_event_capture.build_maxpain_event(
-                item, event_type="MAX_PAIN_SCORE_65", event_time=timestamp
-            )
-            emitted += int(_emit(
-                event, persist=persist, capture_stage="TELEGRAM_SPECIAL_ALERT",
-                delivery_status=delivery_status,
-                delivery_attempted_at_utc=delivery_attempted_at_utc,
-                delivered_at_utc=delivered_at_utc,
-            ))
-        elif was_score_active and not score_active:
-            emitted += int(_emit_state_change(
-                symbol=symbol,
-                signal_name="MAX_PAIN_SCORE_65",
-                old_state={"active": True, "threshold": SCORE_CONFIRMATION_THRESHOLD},
-                new_state={"active": False, "score": score},
-                direction=direction,
-                source_side=source_side,
-                score=score,
-                current_price=current_price,
-                timeframe=timeframe,
-                event_time=timestamp,
-                evidence={"reset_below": SCORE_CONFIRMATION_RESET_THRESHOLD},
-                persist=persist,
-            ))
+        if include_score65:
+            was_score_active = bool(_SCORE_CONFIRMATION_STATE.get(key, False))
+            score_active = was_score_active
+            if score >= SCORE_CONFIRMATION_THRESHOLD:
+                score_active = True
+            elif score < SCORE_CONFIRMATION_RESET_THRESHOLD:
+                score_active = False
+            _SCORE_CONFIRMATION_STATE[key] = score_active
+            if score_active and not was_score_active:
+                event = research_event_capture.build_maxpain_event(
+                    item, event_type="MAX_PAIN_SCORE_65", event_time=timestamp
+                )
+                emitted += int(_emit(
+                    event, persist=persist, capture_stage="TELEGRAM_SPECIAL_ALERT",
+                    delivery_status=delivery_status,
+                    delivery_attempted_at_utc=delivery_attempted_at_utc,
+                    delivered_at_utc=delivered_at_utc,
+                ))
+            elif was_score_active and not score_active:
+                emitted += int(_emit_state_change(
+                    symbol=symbol,
+                    signal_name="MAX_PAIN_SCORE_65",
+                    old_state={"active": True, "threshold": SCORE_CONFIRMATION_THRESHOLD},
+                    new_state={"active": False, "score": score},
+                    direction=direction,
+                    source_side=source_side,
+                    score=score,
+                    current_price=current_price,
+                    timeframe=timeframe,
+                    event_time=timestamp,
+                    evidence={"reset_below": SCORE_CONFIRMATION_RESET_THRESHOLD},
+                    persist=persist,
+                ))
 
         confirmation = (
             item.get("maxpain_confirmation")
