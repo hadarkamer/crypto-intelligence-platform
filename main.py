@@ -57,6 +57,7 @@ import research_formula_worker
 import research_max_pain_archive
 import research_watch_score_capture
 import research_watch_scan_intake
+import research_watch_scan_measurement_worker
 import research_prospective_anchor_worker
 import research_archive_admin
 from collections import defaultdict
@@ -1727,6 +1728,7 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
     results = {}
     for label, worker in (
         ("watch-scan-intake", research_watch_scan_intake.WORKER),
+        ("watch-scan-measurement", research_watch_scan_measurement_worker.WORKER),
         ("price-archive", research_price_archive_worker.WORKER),
         ("btc-episodes", research_btc_episode_worker.WORKER),
         ("btc-wave-report", research_btc_wave_report_worker.WORKER),
@@ -1749,6 +1751,7 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
 async def _stop_ordered_research_workers() -> None:
     for label, worker in (
         ("watch-scan-intake", research_watch_scan_intake.WORKER),
+        ("watch-scan-measurement", research_watch_scan_measurement_worker.WORKER),
         ("btc-wave-report", research_btc_wave_report_worker.WORKER),
         ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
@@ -6293,6 +6296,7 @@ async def health(request):
         "watch_transitions": watch_transition_delivery.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
+        "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
         "btc_episodes": research_btc_episode_worker.WORKER.status(),
         "price_archive": research_price_archive_worker.WORKER.status(),
         "price_source_freshness": research_source_freshness.status(),
