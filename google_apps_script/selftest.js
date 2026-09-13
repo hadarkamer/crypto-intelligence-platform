@@ -145,3 +145,81 @@ const wrong = context.doPost({postData: {contents: JSON.stringify({secret: "test
 assert.equal(wrong.error, "wrong_workbook");
 assert.equal(opened, 0);
 console.log("google Apps Script event-level rows/authenticated readback: PASS");
+
+// Spreadsheet writes are buffered until flush; exclusive access must cover
+// visibility as well as setValues. A failed commit cannot acknowledge a row.
+const durable = sheet([["outcome_id", "status"]]);
+const committedRange = durable.getRange.bind(durable);
+let held = false;
+let pending = [];
+let flushFailure = null;
+let order = [];
+durable.getRange = function(...args) {
+  const range = committedRange(...args);
+  return {
+    getValues: () => range.getValues(),
+    setValues(values) {
+      assert.equal(held, true, "write requires exclusive lock");
+      const staged = values.map(row => row.slice());
+      pending.push(() => range.setValues(staged));
+    },
+  };
+};
+const committedBook = {getSheetByName: name => name === "Outcomes" ? durable : sheets[name]};
+context.LockService = {getScriptLock: () => ({
+  waitLock() { assert.equal(held, false); held = true; order.push("lock"); },
+  releaseLock() { assert.equal(held, true); held = false; order.push("release"); },
+})};
+context.SpreadsheetApp = {
+  openById: () => committedBook,
+  flush() {
+    assert.equal(held, true, "flush must happen before releaseLock");
+    order.push("flush");
+    if (flushFailure === "before") throw new Error("simulated flush failure");
+    const writes = pending;
+    pending = [];
+    writes.forEach(write => write());
+    if (flushFailure === "after") throw new Error("simulated ambiguous flush failure");
+  },
+};
+const request = id => ({postData: {contents: JSON.stringify({
+  secret: "test-secret", spreadsheet_id: "1ci_T6v2r0MeGc3ErOsaY3ftMFo94m4syGF9U94X0fQQ",
+  payload: {upserts: [{sheet: "Outcomes", key: "outcome_id", row: {outcome_id: id, status: "SUCCESS"}}]},
+})}});
+const committed = context.doPost(request("flush-success"));
+assert.equal(committed.ok, true);
+assert.deepEqual(order, ["lock", "flush", "release"]);
+assert.deepEqual(durable.rows[1], ["flush-success", "SUCCESS"]);
+assert.equal(pending.length, 0);
+
+order = [];
+flushFailure = "after";
+const ambiguous = context.doPost(request("ambiguous"));
+assert.equal(ambiguous.ok, false, "flush failure must not confirm delivery");
+assert.equal(held, false, "flush failure must still release the lock");
+assert.deepEqual(order, ["lock", "flush", "release"]);
+assert.equal(durable.rows.length, 3, "ambiguous failure may already have committed");
+flushFailure = null;
+assert.equal(context.doPost(request("ambiguous")).ok, true);
+assert.equal(durable.rows.length, 3, "retry after ambiguous commit must not duplicate row");
+
+flushFailure = "before";
+assert.equal(context.doPost(request("not-yet-committed")).ok, false);
+assert.equal(held, false);
+assert.equal(durable.rows.length, 3);
+// Model an execution ending without committing its staged writes.
+pending = [];
+flushFailure = null;
+assert.equal(context.doPost(request("not-yet-committed")).ok, true);
+assert.equal(durable.rows.length, 4);
+
+// Audit also writes derived classification columns; its early return must
+// pass through the same flush-and-release boundary, including on failure.
+flushFailure = "before";
+const auditFlushFailure = context.doPost({postData: {contents: JSON.stringify({
+  secret: "test-secret", spreadsheet_id: "1ci_T6v2r0MeGc3ErOsaY3ftMFo94m4syGF9U94X0fQQ",
+  payload: {kind: "telegram_event_audit_page", start_row: 2, page_size: 1},
+})}});
+assert.equal(auditFlushFailure.ok, false);
+assert.equal(held, false);
+console.log("google Apps Script flush/lock/ambiguous retry self-test: PASS");
