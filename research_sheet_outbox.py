@@ -214,10 +214,28 @@ def _validate_target_sheet(target_sheet: str | None) -> None:
         raise ValueError('Target sheet must be an active allowed publication lane')
 
 
+def _validate_batch_size(target_sheet: str | None, batch_size: int) -> None:
+    if type(batch_size) is not int or not 1 <= batch_size <= 32:
+        raise ValueError('Batch size must be an integer between 1 and 32')
+    if batch_size > 8 and target_sheet != 'Telegram_Events':
+        raise ValueError('Batches above 8 require an explicit Telegram_Events target')
+
+
+def _request_batch_limit(batch_size: int) -> int:
+    compatible = google_sheets_sync.ordered_outcome_batch_limit()
+    if batch_size > 8:
+        # Operator-only catch-up uses the verified v3 receiver. Unknown/older
+        # receivers and the existing failure fallback retain one-row requests.
+        return (batch_size if compatible > 1 and
+                google_sheets_sync.status()['receiver_version'] == 'sheets-batch-v3' else 1)
+    return min(batch_size, compatible)
+
+
 def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float = 45,
-                  target_sheet: str | None = None) -> dict[str, Any]:
+                  target_sheet: str | None = None, batch_size: int = 8) -> dict[str, Any]:
     """Acknowledge only a claimed exact generation, never while holding a txn."""
     _validate_target_sheet(target_sheet)
+    _validate_batch_size(target_sheet, batch_size)
     summary = {'claimed': 0, 'synced': 0, 'failed': 0, 'locked': False,
                'publication': publication.status(),
                'outcome_publication': outcome_publication.status()}
@@ -243,7 +261,7 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
                             reason='MISSING_FRESH_DELIVERY_MIGRATION_026')
             while summary['claimed'] < max(1, int(max_rows)) and time.monotonic() < deadline:
                 token = str(uuid.uuid4())
-                count = min(8, google_sheets_sync.ordered_outcome_batch_limit(), int(max_rows)-summary['claimed'])
+                count = min(_request_batch_limit(batch_size), int(max_rows)-summary['claimed'])
                 with _connect(database_url) as conn:
                     rows = (_claim_batch(conn, count, token) if target_sheet is None
                             else _claim_lane(conn, count=count, token=token,
@@ -276,11 +294,12 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
 
 
 def drain(database_url:str,*,max_rows:int=32,max_seconds:float=45,
-          target_sheet:str|None=None)->dict[str,Any]:
+          target_sheet:str|None=None,batch_size:int=8)->dict[str,Any]:
     _validate_target_sheet(target_sheet)
+    _validate_batch_size(target_sheet, batch_size)
     # Coordinate with the ordered-outcome sender BEFORE claiming a DB lease.
     with google_sheets_sync.delivery_slot() as acquired:
         if not acquired:
             return {'claimed':0,'synced':0,'failed':0,'locked':False,'deferred':True}
         return _drain_locked(database_url,max_rows=max_rows,max_seconds=max_seconds,
-                             target_sheet=target_sheet)
+                             target_sheet=target_sheet,batch_size=batch_size)

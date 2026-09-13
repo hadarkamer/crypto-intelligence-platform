@@ -115,6 +115,16 @@ def run():
 
 def _targeted_lane_test():
     from contextlib import nullcontext
+    from itertools import chain, repeat
+    # Bad operator arguments must fail before any transport admission or DB use.
+    invalid=[('Telegram_Events',value) for value in (None,True,False,0,-1,33,8.0,'32')]
+    invalid += [(target,32) for target in (None,'Snapshots','Outcomes_Current','Formula_Current')]
+    for target,size in invalid:
+        with patch.object(outbox.google_sheets_sync,'delivery_slot',side_effect=AssertionError('No invalid admission')):
+            try:outbox.drain('unused',target_sheet=target,batch_size=size)
+            except ValueError:pass
+            else:raise AssertionError('Invalid operator batch accepted')
+
     class Result:
         def __init__(self,value):self.value=value
         def fetchone(self):return self.value
@@ -131,21 +141,44 @@ def _targeted_lane_test():
             assert 'WHERE sheet_name=%s AND row_key=%s AND claim_token=%s::uuid' in query
             assert 'AND payload_sha256=%s AND claimed_payload_sha256=%s' in query
             return SimpleNamespace(rowcount=1)
-    claims=[]
-    sends=[]
-    connections=iter([Lock(),Connection(),Connection()])
-    def claim(conn,*,count,token,sheet,recent):
-        assert sheet=='Telegram_Events' and recent is False and count==8
-        claims.append(token)
-        return [{'sheet_name':sheet,'row_key':str(i),'payload':{'event':i},
-                 'payload_sha256':'generation','attempts':1} for i in range(count)]
-    with patch.object(outbox,'psycopg',object()),patch.object(outbox,'_connect',lambda url:next(connections)),patch.object(
-            outbox,'_claim_lane',claim),patch.object(outbox,'_claim_batch',side_effect=AssertionError('No rotation in targeted pass')),patch.object(
-            outbox.google_sheets_sync,'enabled',lambda:True),patch.object(outbox.google_sheets_sync,'delivery_slot',lambda:nullcontext(True)),patch.object(
-            outbox.google_sheets_sync,'ordered_outcome_batch_limit',lambda:8),patch.object(outbox.google_sheets_sync,'deliver_now',lambda payload,attempts:sends.append(payload) or True):
-        result=outbox.drain('test',max_rows=8,target_sheet='Telegram_Events')
-    assert len(claims)==len(sends)==1
-    assert result['claimed']==result['synced']==8 and result['failed']==0
+
+    def exercise(*,max_rows,target=None,size=None,compatible=8,version='sheets-batch-v3',delivered=True):
+        counts=[]
+        sends=[]
+        connections=chain([Lock()],repeat(Connection()))
+        def rows(count,token,sheet):
+            counts.append(count)
+            return [{'sheet_name':sheet,'row_key':str(i),'payload':{'event':i},
+                     'payload_sha256':'generation','attempts':1} for i in range(count)]
+        def claim(conn,*,count,token,sheet,recent):
+            assert target is not None and sheet==target and recent is False
+            return rows(count,token,sheet)
+        def normal(conn,count,token):
+            assert target is None, 'Targeted operator pass must not rotate lanes'
+            return rows(count,token,'Snapshots')
+        kwargs={'max_rows':max_rows,'target_sheet':target}
+        if size is not None:kwargs['batch_size']=size
+        with patch.object(outbox,'psycopg',object()),patch.object(outbox,'_connect',lambda url:next(connections)),patch.object(
+                outbox,'_claim_lane',claim),patch.object(outbox,'_claim_batch',normal),patch.object(
+                outbox.google_sheets_sync,'enabled',lambda:True),patch.object(outbox.google_sheets_sync,'delivery_slot',lambda:nullcontext(True)),patch.object(
+                outbox.google_sheets_sync,'ordered_outcome_batch_limit',lambda:compatible),patch.object(
+                outbox.google_sheets_sync,'status',lambda:{'receiver_version':version}),patch.object(
+                outbox.google_sheets_sync,'deliver_now',lambda payload,attempts:sends.append(payload) or delivered):
+            result=outbox.drain('test',**kwargs)
+        assert [len(payload['upserts']) for payload in sends]==counts
+        assert result['claimed']==sum(counts)
+        assert result['synced' if delivered else 'failed']==sum(counts)
+        assert result['failed' if delivered else 'synced']==0
+        return counts
+
+    assert exercise(max_rows=16)==[8,8], 'Normal default remains eight'
+    assert exercise(max_rows=8,target='Telegram_Events')==[8]
+    assert exercise(max_rows=35,target='Telegram_Events',size=32)==[32,3]
+    assert exercise(max_rows=6,target='Telegram_Events',size=4)==[4,2]
+    assert exercise(max_rows=2,target='Telegram_Events',size=32,compatible=1)==[1,1]
+    assert exercise(max_rows=2,target='Telegram_Events',size=32,version='unknown')==[1,1]
+    assert exercise(max_rows=2,target='Telegram_Events',size=32,version='sheets-batch-v2')==[1,1]
+    assert exercise(max_rows=64,target='Telegram_Events',size=32,delivered=False)==[32], 'Stop after unconfirmed request'
 
 
 def seed_legacy_outbox_fixture(conn,*,event,window_minutes,outcome,path_result):
