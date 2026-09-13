@@ -1,7 +1,7 @@
 """Bounded evaluation of frozen Watch features, separate from alert research.
 
-No outcome reads, provider requests, discovery, promotions, or delivery. Price
-measurements join through read-only views after immutable feature decisions.
+No outcome reads, provider requests, discovery, promotions, or delivery. Closed
+prior BTC bars supply causal context; outcomes join only after feature decisions.
 """
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 
-import research_watch_scan_formula_maxpain as formula
+import research_watch_scan_formula_btc_context as formula
 import research_watch_scan_intake as intake
+import research_price_archive as prices
 
 LOCK_ID = 48260913201211
 SCAN_PAGE = 32
@@ -159,11 +160,42 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
             source_created_at_utc,source_version,intake_status,capture_phase,models,sources,
             source_time_errors,maxpain_slots FROM research_watch_scan_observations
         WHERE consumer_version=%s AND snapshot_set_id=ANY(%s::bigint[])''', (intake.VERSION, ids)).fetchall()}
+    # The first READY coin freezes BTC context for the entire scan, including
+    # retries and split passes. Later cache enrichment cannot make siblings
+    # disagree. New contexts use one bounded BTC-only read per selected scan.
+    contexts, context_errors = {}, {}
+    if getattr(formula, 'CONTEXT_REQUIRED', False):
+        for snapshot_id in ids:
+            try:
+                with conn.transaction():
+                    source = observations[(snapshot_id, 'BTC')]
+                    frozen = conn.execute('''SELECT payload->'btc_context_provenance' AS context
+                        FROM research_watch_scan_formula_samples WHERE evaluation_version=%s
+                        AND consumer_version=%s AND snapshot_set_id=%s AND status='READY'
+                        ORDER BY symbol LIMIT 1''', (formula.VERSION, intake.VERSION, snapshot_id)).fetchone()
+                    if frozen:
+                        if frozen['context'] is None:
+                            raise ValueError('MISSING_FROZEN_BTC_CONTEXT')
+                        contexts[snapshot_id] = frozen['context']
+                    else:
+                        boundary = intake._utc(source['usable_from_utc']).replace(second=0, microsecond=0)
+                        path = prices.read_path(prices.BINANCE_SPOT, 'BTC',
+                            boundary-timedelta(minutes=240), boundary-timedelta(milliseconds=1), connection=conn)
+                        contexts[snapshot_id] = formula.build_btc_context(source, path, computed_at=now)
+            except Exception as exc:
+                # Savepoints keep another scan usable; do not repeat a failed
+                # source query eight times or persist exception contents.
+                context_errors[snapshot_id] = exc
     for job in jobs:
         try:
             with conn.transaction():
                 observation = observations[(job['snapshot_set_id'], job['symbol'])]
-                result = formula.evaluate_coin(observation)
+                if job['snapshot_set_id'] in context_errors:
+                    raise context_errors[job['snapshot_set_id']]
+                if getattr(formula, 'CONTEXT_REQUIRED', False):
+                    result = formula.evaluate_coin(observation, btc_context=contexts[job['snapshot_set_id']])
+                else:
+                    result = formula.evaluate_coin(observation)
                 write_result(conn, job, result, now=now)
             counts['ready'] += 1
         except Exception as exc:
@@ -188,7 +220,7 @@ def schema_ready():
         return all(conn.execute('SELECT to_regclass(%s) AS relation', ('public.' + name,)).fetchone()['relation']
             for name in ('research_watch_scan_formula_catalog','research_watch_scan_formula_state',
                          'research_watch_scan_formula_samples','research_watch_scan_formula_comparisons',
-                         'research_watch_scan_formula_runtime'))
+                         'research_watch_scan_formula_runtime','research_price_archive_bars'))
 
 
 def run_once():
