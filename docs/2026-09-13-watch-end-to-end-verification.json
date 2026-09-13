@@ -835,5 +835,46 @@
       }
     ],
     "watch_scan_id": "shared-watch:2026-09-13T13:32:15.080760+00:00"
+  },
+  "followup_closure": {
+    "checked_at_utc": "2026-09-13T13:46:26.365009Z",
+    "task": "Close the two previously pending Outcomes_Current slots",
+    "status": "VERIFIED",
+    "comparisons": [
+      {
+        "cells_compared": 34,
+        "diffs": [],
+        "event_id": 43823,
+        "row": 250,
+        "sync_status": "SYNCED",
+        "synced_at_utc": "2026-09-13T13:41:15.665409Z"
+      },
+      {
+        "attempts": 1,
+        "cells_compared": 34,
+        "checked_at_utc": "2026-09-13T13:46:26.365009Z",
+        "diffs": [],
+        "event_id": 43789,
+        "row": 184,
+        "sync_status": "SYNCED",
+        "synced_at_utc": "2026-09-13T13:46:06.963432Z"
+      }
+    ],
+    "cells_compared": 68,
+    "differences": 0,
+    "no_forced_flush": true,
+    "no_manual_watch": true,
+    "no_production_changes": true,
+    "scope_note": "Only the two previously pending revisions are certified. This is not a claim that the entire live queue is empty, nor that OPEN outcomes are final.",
+    "plan_review": {
+      "additional_authorized_development_outside_deferred_research": false,
+      "next_activity": "Automatic collection and maturation of existing formula measurements",
+      "deferred": [
+        "cluster/CVD component research",
+        "B4",
+        "240m normalization",
+        "new formula expansion"
+      ]
+    }
   }
 }
