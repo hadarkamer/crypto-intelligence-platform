@@ -1179,6 +1179,15 @@ def _jsonb(value: Any) -> Any:
     return Jsonb(_json_safe(value)) if Jsonb is not None else _json_safe(value)
 
 
+def is_transient_persistence_error(exc: Exception) -> bool:
+    if psycopg is None:
+        return False
+    return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError)) or (
+        isinstance(exc, psycopg.Error)
+        and getattr(exc, "sqlstate", None) in {"40001", "40P01", "55P03", "57014"}
+    )
+
+
 _SET_COLUMNS = (
     "snapshot_key",
     "archive_schema_version",
