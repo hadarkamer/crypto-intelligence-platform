@@ -11,8 +11,9 @@ from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 import math
 import re
+import time
 from types import SimpleNamespace
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import alert_engine
 import canonical_price_path
@@ -26,7 +27,8 @@ import research_prospective_feature_freeze as features
 import research_watch_score_capture as capture
 
 
-VERSION = "operational-score-source-audit-v1"
+VERSION = "operational-score-source-audit-v2"
+TRANSACTION_IDENTITY_VERSION = "stage8-postgres-transaction-identity-v1"
 MAX_PAGE_SIZE = 100
 _INT64_MAX = 9223372036854775807
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -36,6 +38,10 @@ _CODE_FILES = {
     "coinglass_flow_engine.py", "coinglass_oi_regime_service.py", "live_price_provider.py",
 }
 _SOURCE_SIDE_SEMANTICS = "liquidated-side; SHORT target implies price UP, LONG target price DOWN"
+
+
+class AuditDeadlineExceeded(TimeoutError):
+    """The caller-owned monotonic audit deadline expired."""
 
 
 def _utc(value: Any) -> datetime:
@@ -52,6 +58,42 @@ def _mapping(value: Any) -> Mapping:
 
 def _positive_id(value: Any) -> bool:
     return type(value) is int and 0 < value <= _INT64_MAX
+
+
+def transaction_identity_from_fields(*, backend_pid: int,
+                                     transaction_started_at_utc: Any,
+                                     database_snapshot_id: str) -> dict:
+    """One versioned identity shared by coverage and projection readers.
+
+    Only server-observed backend, transaction start and snapshot identify the
+    transaction. Read-only/isolation/timeout remain separately checked session
+    attributes, never alternative hash definitions. This pure helper performs
+    no SQL, connection discovery or transaction management.
+    """
+    if (not _positive_id(backend_pid)
+            or type(transaction_started_at_utc) not in (str, datetime)
+            or type(database_snapshot_id) is not str
+            or re.fullmatch(r"(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*):"
+                            r"(?:(?:0|[1-9][0-9]*)(?:,(?:0|[1-9][0-9]*))*)?",
+                            database_snapshot_id) is None):
+        raise ValueError("database transaction identity fields are invalid")
+    xmin_text, xmax_text, xip_text = database_snapshot_id.split(":")
+    xmin, xmax = int(xmin_text), int(xmax_text)
+    xips = [int(item) for item in xip_text.split(",")] if xip_text else []
+    if (xmin > xmax or any(item > 18446744073709551615 for item in (xmin, xmax, *xips))
+            or xips != sorted(set(xips))
+            or any(not xmin <= item < xmax for item in xips)):
+        raise ValueError("database transaction snapshot is invalid")
+    payload = {
+        "version": TRANSACTION_IDENTITY_VERSION,
+        "backend_pid": backend_pid,
+        "transaction_started_at_utc": _utc(transaction_started_at_utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+        "database_snapshot_id": database_snapshot_id,
+    }
+    # The payload contains only strings and an integer, so this existing strict
+    # compact sorted codec is identical to Stage-8's PostgreSQL-compatible one.
+    return {**payload, "transaction_identity_sha256": capture.digest(payload)}
 
 
 def _same_time(left: Any, right: Any) -> bool:
@@ -581,8 +623,24 @@ def validate_parent_membership(event: Mapping | None, membership: Mapping | None
     return _result(reasons, membership=membership, parent=parent, btc_bar=btc_bar)
 
 
-def _rows(conn: Any, sql: str, params: Mapping | None = None) -> list[dict]:
+def _rows(conn: Any, sql: str, params: Mapping | None = None, *,
+          absolute_deadline_monotonic: float | None = None,
+          monotonic: Callable[[], float] = time.monotonic) -> list[dict]:
+    if absolute_deadline_monotonic is not None:
+        before = monotonic()
+        if (isinstance(before, bool) or not isinstance(before, (int, float))
+                or not math.isfinite(float(before))):
+            raise ValueError("monotonic clock returned an invalid value")
+        if float(before) >= absolute_deadline_monotonic:
+            raise AuditDeadlineExceeded("source audit deadline expired")
     rows = conn.execute(sql, params or {}).fetchall()
+    if absolute_deadline_monotonic is not None:
+        after = monotonic()
+        if (isinstance(after, bool) or not isinstance(after, (int, float))
+                or not math.isfinite(float(after)) or float(after) < float(before)):
+            raise ValueError("monotonic clock returned an invalid value")
+        if float(after) >= absolute_deadline_monotonic:
+            raise AuditDeadlineExceeded("source audit deadline expired")
     if any(not isinstance(row, Mapping) for row in rows):
         raise ValueError("audit connection must return mapping rows; configure psycopg.rows.dict_row")
     return [dict(row) for row in rows]
@@ -605,6 +663,8 @@ def audit_anchor_attempt_page_from_connection(
     max_capture_age_seconds: float, windows: Sequence[int] = ordered.HORIZONS_MINUTES,
     thresholds_bps: Sequence[int] = ordered.THRESHOLDS_BPS, page_size: int = 100,
     cursor: Mapping | None = None,
+    absolute_deadline_monotonic: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict:
     """Read a bounded page of v4 attempts using caller-owned read-only access.
 
@@ -614,6 +674,19 @@ def audit_anchor_attempt_page_from_connection(
     """
     start, end = _utc(start_utc), _utc(end_utc)
     max_age = _max_age(max_capture_age_seconds)
+    if (absolute_deadline_monotonic is not None
+            and (isinstance(absolute_deadline_monotonic, bool)
+                 or not isinstance(absolute_deadline_monotonic, (int, float))
+                 or not math.isfinite(float(absolute_deadline_monotonic)))):
+        raise ValueError("absolute audit deadline must be a finite monotonic value")
+
+    def read(sql: str, params: Mapping | None = None) -> list[dict]:
+        return _rows(
+            conn, sql, params,
+            absolute_deadline_monotonic=(float(absolute_deadline_monotonic)
+                                         if absolute_deadline_monotonic is not None else None),
+            monotonic=monotonic,
+        )
     if start >= end:
         raise ValueError("start_utc must be earlier than end_utc")
     if isinstance(symbols, (str, bytes)) or not symbols or any(symbol not in capture.SYMBOLS for symbol in symbols):
@@ -640,9 +713,12 @@ def audit_anchor_attempt_page_from_connection(
                 or not 0 <= after <= high_water <= _INT64_MAX
                 or dict(cursor) != _cursor(binding, high_water, after)):
             raise ValueError("cursor is malformed, changed, or bound to a different query")
-    tx_rows = _rows(conn, """/* audit:transaction */ SELECT
+    tx_rows = read("""/* audit:transaction */ SELECT
         current_setting('transaction_read_only') AS read_only,
         current_setting('transaction_isolation') AS isolation,
+        pg_backend_pid() AS backend_pid,
+        transaction_timestamp() AS transaction_started_at_utc,
+        pg_current_snapshot()::text AS transaction_snapshot,
         clock_timestamp() AS observed_at_utc""")
     if len(tx_rows) != 1 or tx_rows[0].get("read_only") not in ("on", True):
         raise ValueError("caller must supply a read-only PostgreSQL connection/transaction")
@@ -650,8 +726,19 @@ def audit_anchor_attempt_page_from_connection(
     observed = _utc(tx["observed_at_utc"])
     isolation = str(tx.get("isolation") or "unknown").lower()
     consistent = isolation in ("repeatable read", "serializable") and getattr(conn, "autocommit", None) is False
+    backend_pid = tx.get("backend_pid")
+    transaction_snapshot = tx.get("transaction_snapshot")
+    if (not _positive_id(backend_pid) or not isinstance(transaction_snapshot, str)
+            or not transaction_snapshot.strip()):
+        raise ValueError("database transaction identity is unavailable")
+    transaction_identity = transaction_identity_from_fields(
+        backend_pid=backend_pid,
+        transaction_started_at_utc=tx.get("transaction_started_at_utc"),
+        database_snapshot_id=transaction_snapshot,
+    )
+    transaction_identity_sha256 = transaction_identity["transaction_identity_sha256"]
     if high_water is None:
-        marks = _rows(conn, """/* audit:high-water */ SELECT COALESCE(MAX(attempt_id), 0) AS high_water_attempt_id
+        marks = read("""/* audit:high-water */ SELECT COALESCE(MAX(attempt_id), 0) AS high_water_attempt_id
             FROM research_prospective_anchor_attempts
             WHERE sampler_version=%(sampler_version)s AND symbol=ANY(%(symbols)s)
               AND source_candle_open_utc >= %(start_utc)s AND source_candle_open_utc < %(end_utc)s""", params)
@@ -660,7 +747,7 @@ def audit_anchor_attempt_page_from_connection(
         high_water = marks[0]["high_water_attempt_id"]
         if type(high_water) is not int or not 0 <= high_water <= _INT64_MAX:
             raise ValueError("invalid attempt high-water mark")
-    attempts = _rows(conn, """/* audit:attempts */ SELECT * FROM research_prospective_anchor_attempts
+    attempts = read("""/* audit:attempts */ SELECT * FROM research_prospective_anchor_attempts
         WHERE sampler_version=%(sampler_version)s AND symbol=ANY(%(symbols)s)
           AND source_candle_open_utc >= %(start_utc)s AND source_candle_open_utc < %(end_utc)s
           AND attempt_id > %(after_attempt_id)s AND attempt_id <= %(high_water_attempt_id)s
@@ -678,7 +765,7 @@ def audit_anchor_attempt_page_from_connection(
             raise ValueError("database attempt page violated its cohort")
         slot, event_rows, capture_row, outcome_rows, memberships, parent_rows, bars = None, [], None, [], [], [], []
         if attempt.get("evaluation_status") == anchors.EVALUABLE:
-            slots = _rows(conn, """/* audit:slot */ SELECT * FROM research_prospective_anchor_slots
+            slots = read("""/* audit:slot */ SELECT * FROM research_prospective_anchor_slots
                 WHERE sampler_version=%(sampler_version)s AND symbol=%(symbol)s
                   AND source_candle_open_utc=%(source_candle_open_utc)s LIMIT 2""", attempt)
             if len(slots) > 1:
@@ -687,24 +774,24 @@ def audit_anchor_attempt_page_from_connection(
                 slot = slots[0]
                 event_ids = [slot.get("long_event_id"), slot.get("short_event_id")]
                 event_ids = [eid for eid in event_ids if _positive_id(eid)]
-                event_rows = _rows(conn, """/* audit:events */ SELECT * FROM research_events
+                event_rows = read("""/* audit:events */ SELECT * FROM research_events
                     WHERE event_id=ANY(%(event_ids)s) ORDER BY event_id LIMIT 2""", {"event_ids": event_ids})
-                outcome_rows = _rows(conn, """/* audit:outcomes */ SELECT * FROM research_ordered_first_touch_outcomes
+                outcome_rows = read("""/* audit:outcomes */ SELECT * FROM research_ordered_first_touch_outcomes
                     WHERE event_id=ANY(%(event_ids)s) AND method_version=%(method_version)s
                       AND window_minutes=ANY(%(windows)s) AND threshold_bps=ANY(%(thresholds_bps)s)
                     ORDER BY event_id, window_minutes, threshold_bps LIMIT %(limit)s""",
                     {"event_ids": event_ids, "method_version": ordered.METHOD_VERSION,
                      "windows": list(selected_windows), "thresholds_bps": list(selected_thresholds),
                      "limit": 2 * len(selected_windows) * len(selected_thresholds)})
-                memberships = _rows(conn, """/* audit:memberships */ SELECT * FROM research_event_btc_movements
+                memberships = read("""/* audit:memberships */ SELECT * FROM research_event_btc_movements
                     WHERE event_id=ANY(%(event_ids)s) AND episode_policy_version=%(parent_policy)s LIMIT 2""",
                     {"event_ids": event_ids, "parent_policy": btc.POLICY_VERSION})
                 parent_ids = list({row["btc_parent_movement_id"] for row in memberships if row.get("btc_parent_movement_id")})
-                parent_rows = _rows(conn, """/* audit:parents */ SELECT * FROM research_btc_parent_movements
+                parent_rows = read("""/* audit:parents */ SELECT * FROM research_btc_parent_movements
                     WHERE btc_parent_movement_id=ANY(%(parent_ids)s) AND episode_policy_version=%(parent_policy)s LIMIT 2""",
                     {"parent_ids": parent_ids, "parent_policy": btc.POLICY_VERSION})
                 close_times = [row["btc_observed_close_utc"] for row in memberships if row.get("btc_observed_close_utc")]
-                bars = _rows(conn, """/* audit:bars */ SELECT * FROM research_btc_price_bars
+                bars = read("""/* audit:bars */ SELECT * FROM research_btc_price_bars
                     WHERE close_time_utc=ANY(%(close_times)s) LIMIT 2""", {"close_times": close_times})
                 for rows, keys, label in (
                         (event_rows, ("event_id",), "events"),
@@ -720,7 +807,7 @@ def audit_anchor_attempt_page_from_connection(
             except (TypeError, ValueError, OverflowError):
                 decision = None
             if decision is not None:
-                captures = _rows(conn, """/* audit:capture */ SELECT * FROM research_max_pain_snapshot_sets
+                captures = read("""/* audit:capture */ SELECT * FROM research_max_pain_snapshot_sets
                     WHERE source='WATCH_SHARED'
                       AND available_at_utc IS NOT NULL AND created_at_utc IS NOT NULL
                       AND GREATEST(available_at_utc, created_at_utc) <= %(decision_time_utc)s
@@ -763,5 +850,6 @@ def audit_anchor_attempt_page_from_connection(
             "population_page_complete": next_cursor is None,
             "snapshot_consistency": "CALLER_TRANSACTION_SNAPSHOT" if consistent else "STATEMENT_SNAPSHOTS_NOT_ATOMIC",
             "transaction_isolation": isolation, "read_started_at_utc": observed,
+            "transaction_identity_sha256": transaction_identity_sha256,
             "cross_page_snapshot_guaranteed": False,
             "interpretation": "Source audit only; no delivery, independence, asymmetry, qualification or approval inference."}

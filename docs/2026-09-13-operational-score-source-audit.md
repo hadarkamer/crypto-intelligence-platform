@@ -22,6 +22,8 @@ audit_anchor_attempt_page_from_connection(
     thresholds_bps=(25, 50, 75, 100, 125, 150, 175, 200),
     page_size=100,
     cursor=None,
+    absolute_deadline_monotonic=None,
+    monotonic=time.monotonic,
 )
 ```
 
@@ -162,9 +164,29 @@ separate page calls share a snapshot merely because they share a cursor. The
 caller must preserve and disclose the actual transaction boundary if a
 single-snapshot audit is required.
 
+When the optional absolute monotonic deadline is supplied, it is checked
+immediately before and after every SQL read. Expiry raises
+`AuditDeadlineExceeded` and returns no half-built page. This is a cooperative
+between-query boundary, not a query-cancellation facility; the caller must
+separately cap each in-flight statement (the coverage runner uses one second).
+
 The returned page exposes `scope`, `rows`, `high_water_attempt_id`,
 `next_cursor`, `snapshot_consistency`, `transaction_isolation` and
-`read_started_at_utc`; `cross_page_snapshot_guaranteed` is always false.
+`read_started_at_utc`. It also exposes `transaction_identity_sha256`, a hash
+of backend, transaction start and PostgreSQL snapshot that a caller can use to
+reject pages from different transactions; `cross_page_snapshot_guaranteed`
+is always false because the standalone adapter does not own later calls.
+Coverage and projection both use the pure
+`transaction_identity_from_fields()` helper in this module. Its exact hashed
+payload is `{version, backend_pid, transaction_started_at_utc,
+database_snapshot_id}`, with version `stage8-postgres-transaction-identity-v1`.
+The timestamp is normalized to UTC with six fractional digits and `Z`; the
+snapshot is canonical PostgreSQL `xmin:xmax:xip-list` text. Missing or invalid
+fields fail closed. Read-only status, isolation, timeout and observation time
+remain separately checked metadata and are not alternative transaction hashes.
+The returned helper dictionary adds `transaction_identity_sha256` to that
+payload. Callers must use this common definition when comparing reader receipts,
+not hash the projection adapter's wider transaction metadata object.
 Each row retains the original `attempt`, separate `anchor_authority` and
 `capture` results, all `outcome_cells`, and `parent_memberships` by direction.
 `delivery_state` is `UNKNOWN_NOT_AUDITED`.

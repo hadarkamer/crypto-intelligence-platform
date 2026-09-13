@@ -118,6 +118,7 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent / "migrations" / "043_native_hype_perp_supplement.sql",
     Path(__file__).resolve().parent / "migrations" / "044_continuous_price_archive.sql",
     Path(__file__).resolve().parent / "migrations" / "045_btc_wave_report_refresh.sql",
+    Path(__file__).resolve().parent / "migrations" / "046_stage8_durable_registry.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 

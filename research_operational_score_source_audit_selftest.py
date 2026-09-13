@@ -162,6 +162,57 @@ def _parent(event):
 
 
 class PureAuditTests(unittest.TestCase):
+    def test_transaction_identity_canonical_timezone_vector(self):
+        expected = {
+            "version": "stage8-postgres-transaction-identity-v1",
+            "backend_pid": 777,
+            "transaction_started_at_utc": "2026-09-13T12:30:00.123456Z",
+            "database_snapshot_id": "10:20:11,14",
+            "transaction_identity_sha256":
+                "c08a62123de1fa2d03e6a0d92fd5775355ee16a3b7abbbcdba24780835f45cd4",
+        }
+        for started in ("2026-09-13T15:30:00.123456+03:00",
+                        "2026-09-13T12:30:00.123456Z",
+                        datetime(2026, 9, 13, 18, 0, 0, 123456,
+                                 tzinfo=timezone(timedelta(hours=5, minutes=30)))):
+            with self.subTest(started=started):
+                self.assertEqual(audit.transaction_identity_from_fields(
+                    backend_pid=777, transaction_started_at_utc=started,
+                    database_snapshot_id="10:20:11,14"), expected)
+
+    def test_transaction_identity_microseconds_and_distinct_transactions(self):
+        arguments = {"backend_pid": 777,
+                     "transaction_started_at_utc": "2026-09-13T12:30:00Z",
+                     "database_snapshot_id": "10:20:"}
+        original = audit.transaction_identity_from_fields(**arguments)
+        self.assertEqual(original["transaction_started_at_utc"], "2026-09-13T12:30:00.000000Z")
+        for changed in ({"backend_pid": 778},
+                        {"transaction_started_at_utc": "2026-09-13T12:30:00.000001Z"},
+                        {"database_snapshot_id": "10:21:"}):
+            self.assertNotEqual(audit.transaction_identity_from_fields(
+                **{**arguments, **changed})["transaction_identity_sha256"],
+                original["transaction_identity_sha256"])
+
+    def test_transaction_identity_missing_or_malformed_fields_fail_closed(self):
+        arguments = {"backend_pid": 777,
+                     "transaction_started_at_utc": "2026-09-13T12:30:00Z",
+                     "database_snapshot_id": "10:20:"}
+        for changed in ({"backend_pid": True}, {"backend_pid": 0},
+                        {"backend_pid": 777.0},
+                        {"transaction_started_at_utc": "2026-09-13T12:30:00"},
+                        {"transaction_started_at_utc": None},
+                        {"database_snapshot_id": ""},
+                        {"database_snapshot_id": "10:20: 11"},
+                        {"database_snapshot_id": "20:10:"},
+                        {"database_snapshot_id": "10:20:11,11"},
+                        {"database_snapshot_id": "10:20:14,11"},
+                        {"database_snapshot_id": "10:20:20"},
+                        {"database_snapshot_id": "10:20:9"},
+                        {"database_snapshot_id": "10:18446744073709551616:"},
+                        {"database_snapshot_id": "010:20:"}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                audit.transaction_identity_from_fields(**{**arguments, **changed})
+
     def setUp(self):
         self.attempt, self.slot, self.events = _anchor()
         self.snapshot = _snapshot()
@@ -649,6 +700,9 @@ class FakeConnection:
         self.calls.append((tag, sql, deepcopy(params)))
         if tag == "transaction":
             rows = [{"read_only": self.read_only, "isolation": self.isolation,
+                     "backend_pid": 4242,
+                     "transaction_started_at_utc": AS_OF - timedelta(seconds=1),
+                     "transaction_snapshot": "100:200:",
                      "observed_at_utc": AS_OF}]
         elif tag == "high-water":
             rows = [{"high_water_attempt_id": max(
@@ -748,6 +802,11 @@ class ReaderAuditTests(unittest.TestCase):
         self.assertIs(result["population_page_complete"], True)
         limits = [params["limit"] for tag, _, params in conn.calls if tag == "attempts"]
         self.assertEqual(limits, [101])
+        expected_transaction = audit.transaction_identity_from_fields(
+            backend_pid=4242, transaction_started_at_utc=AS_OF - timedelta(seconds=1),
+            database_snapshot_id="100:200:")
+        self.assertEqual(result["transaction_identity_sha256"],
+                         expected_transaction["transaction_identity_sha256"])
 
     def test_excluded_unevaluable_missing_labels_and_parent_rows_never_disappear(self):
         conn = FakeConnection(all_attempts=True)
@@ -877,6 +936,16 @@ class ReaderAuditTests(unittest.TestCase):
             result = self.page(FakeConnection(isolation=isolation, autocommit=autocommit))
             self.assertEqual(result["snapshot_consistency"], expected)
             self.assertFalse(result["cross_page_snapshot_guaranteed"])
+
+    def test_absolute_deadline_is_checked_between_source_queries(self):
+        ticks = iter((0.0, 0.1, 0.2, 0.3))
+        conn = FakeConnection()
+        with self.assertRaises(audit.AuditDeadlineExceeded):
+            self.page(
+                conn, absolute_deadline_monotonic=0.25,
+                monotonic=lambda: next(ticks),
+            )
+        self.assertEqual([tag for tag, _, _ in conn.calls], ["transaction", "high-water"])
 
     def test_tuple_row_connection_fails_before_any_cohort_read(self):
         class TupleConnection(FakeConnection):
