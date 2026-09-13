@@ -75,10 +75,13 @@ class WorkerTests(unittest.TestCase):
         namespace.update(web=web,research_btc_episode_worker=SimpleNamespace(WORKER=subject),
                          maxpain_cvd_short_alert=maxpain_cvd_short_alert,
                          WATCH_GENERAL_ENABLED=False,WATCH_RUNTIME={},
+                         WATCH_INTERVAL_MINUTES=30,WATCH_SYNC_GRACE_SECONDS=135,
                          MAGNET_V1_WATCHES={},WATCH_TASK=None,WATCH_SUPERVISOR_TASK=None)
         exec(compile(ast.Module(body=[handler],type_ignores=[]),"main.py","exec"),namespace)
         response=asyncio.run(namespace["health"](None))
         self.assertEqual(response.status,200)
+        self.assertEqual(json.loads(response.text)["watch"]["interval_minutes"],30)
+        self.assertEqual(json.loads(response.text)["watch"]["sync_grace_seconds"],135)
         self.assertEqual(json.loads(response.text)["dedicated_formula_alert"]["formula_id"],
                          maxpain_cvd_short_alert.FORMULA_ID)
         self.assertFalse(json.loads(response.text)["dedicated_formula_alert"]["enabled"])
