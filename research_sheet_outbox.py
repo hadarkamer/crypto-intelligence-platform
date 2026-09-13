@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 import google_sheets_sync
 import research_sheet_publication as publication
+import research_outcome_publication as outcome_publication
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -23,6 +24,7 @@ _SHEET_ROTATION = (
     'Snapshots',
     'תצוגת לייב',
     publication.SHEET,
+    outcome_publication.SHEET,
 )
 _WAVE_REPORT_SHEET = 'MaxPain_Wave_Live'
 _SOURCE_TIMESTAMP = re.compile(
@@ -59,6 +61,7 @@ def _row_source_time(item: Mapping[str, Any]) -> datetime | None:
         'Episodes': 'opened_at_utc',
         'Formula_Results': 'last_evaluated_at',
         publication.SHEET: 'last_evaluated_at',
+        outcome_publication.SHEET: 'measurement_start_utc',
         'MaxPain_Wave_Live': 'last_evaluated_at',
     }.get(str(item['sheet']))
     return _source_time(item['row'].get(field)) if field else None
@@ -67,6 +70,7 @@ def _row_source_time(item: Mapping[str, Any]) -> datetime | None:
 def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
     """Stage complete Sheet rows in the caller's transaction, idempotently."""
     records = {}
+    current_outcomes = 0
     snapshot_times = {
         str(item['row'].get('snapshot_id')): _row_source_time(item)
         for item in upserts if item['sheet'] == 'Snapshots'
@@ -74,7 +78,10 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
     for raw in upserts:
         item = dict(raw)
         sheet = str(item['sheet'])
-        if sheet in publication.LEGACY_SHEETS:
+        if sheet in (*publication.LEGACY_SHEETS, 'Outcomes'):
+            continue
+        if sheet == outcome_publication.SHEET:
+            current_outcomes += outcome_publication.stage_projected(conn, item)
             continue
         if sheet == publication.SHEET:
             projected = publication.project_formula_row(item['row'])
@@ -93,7 +100,7 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
         payload = _json(item)
         records[(sheet, row_key)] = (sheet, row_key, payload, hashlib.sha256(payload.encode()).hexdigest())
     if not records:
-        return 0
+        return current_outcomes
     with conn.cursor() as cur:
         cur.executemany('''
             INSERT INTO research_sheet_upsert_outbox(sheet_name,row_key,payload,payload_sha256)
@@ -122,7 +129,7 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
             WHERE queued.sheet_name=source.sheet_name AND queued.row_key=source.row_key
               AND queued.source_time_utc IS DISTINCT FROM source.source_time_utc
         """, tuple(value for row in source_times for value in row))
-    return len(records)
+    return len(records) + current_outcomes
 
 
 def _connect(url: str):
@@ -202,10 +209,18 @@ def _claim_batch(conn: Any, count: int, token: str) -> list[Mapping[str, Any]]:
     return rows
 
 
-def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float = 45) -> dict[str, Any]:
+def _validate_target_sheet(target_sheet: str | None) -> None:
+    if target_sheet is not None and target_sheet not in (*_SHEET_ROTATION, _WAVE_REPORT_SHEET):
+        raise ValueError('Target sheet must be an active allowed publication lane')
+
+
+def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float = 45,
+                  target_sheet: str | None = None) -> dict[str, Any]:
     """Acknowledge only a claimed exact generation, never while holding a txn."""
+    _validate_target_sheet(target_sheet)
     summary = {'claimed': 0, 'synced': 0, 'failed': 0, 'locked': False,
-               'publication': publication.status()}
+               'publication': publication.status(),
+               'outcome_publication': outcome_publication.status()}
     if not google_sheets_sync.enabled() or not database_url or psycopg is None:
         return summary
     deadline = time.monotonic() + max(1.0, float(max_seconds))
@@ -230,7 +245,9 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
                 token = str(uuid.uuid4())
                 count = min(8, google_sheets_sync.ordered_outcome_batch_limit(), int(max_rows)-summary['claimed'])
                 with _connect(database_url) as conn:
-                    rows = _claim_batch(conn, count, token)
+                    rows = (_claim_batch(conn, count, token) if target_sheet is None
+                            else _claim_lane(conn, count=count, token=token,
+                                             sheet=target_sheet, recent=False))
                 if not rows:
                     break
                 summary['claimed'] += len(rows)
@@ -258,9 +275,12 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
     return summary
 
 
-def drain(database_url:str,*,max_rows:int=32,max_seconds:float=45)->dict[str,Any]:
+def drain(database_url:str,*,max_rows:int=32,max_seconds:float=45,
+          target_sheet:str|None=None)->dict[str,Any]:
+    _validate_target_sheet(target_sheet)
     # Coordinate with the ordered-outcome sender BEFORE claiming a DB lease.
     with google_sheets_sync.delivery_slot() as acquired:
         if not acquired:
             return {'claimed':0,'synced':0,'failed':0,'locked':False,'deferred':True}
-        return _drain_locked(database_url,max_rows=max_rows,max_seconds=max_seconds)
+        return _drain_locked(database_url,max_rows=max_rows,max_seconds=max_seconds,
+                             target_sheet=target_sheet)

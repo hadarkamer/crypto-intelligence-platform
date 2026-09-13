@@ -85,6 +85,10 @@ class PostgreSQLOutcomeFreshnessTests(unittest.TestCase):
         self.assertTrue(self.worker._write_ordered_first_touch_outcome(self.conn,
             event=event, window_minutes=60, reference_source='binance_spot',
             path_result=path_result, outcome=outcome, expected_candles=candles))
+        # Explicit historical fixture; production now stages only finite current slots.
+        from research_outcome_publication_selftest import seed_legacy_outbox_fixture
+        seed_legacy_outbox_fixture(self.conn,event=event,window_minutes=60,
+            outcome=outcome,path_result=path_result)
 
     def seed(self):
         for event_id in range(1, 13):

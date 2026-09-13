@@ -1,6 +1,16 @@
 // Bound Apps Script for the approved research workbook.
 // Set Script Property SHEETS_WEBHOOK_SECRET before deploying as a Web App.
 const SHEETS_ALLOCATED_CELL_SOFT_LIMIT_ = 9000000;
+const OUTCOMES_CURRENT_HEADERS_ = [
+  "event_id", "snapshot_id", "symbol", "direction", "threshold_pct", "measurement_start_utc",
+  "status", "first_touch_side", "decision_time_utc", "minutes_to_decision", "mfe_pct", "mae_pct",
+  "favorable_touch_price", "adverse_touch_price", "max_favorable_price", "max_adverse_price",
+  "market_source", "market_pair", "candle_interval", "candle_count", "data_quality_status",
+  "outcome_method_version", "outcome_id", "window_minutes", "threshold_bps", "observed_from_utc",
+  "observed_through_utc", "terminal_reason", "initial_gap_seconds", "favorable_barrier_price",
+  "adverse_barrier_price", "initial_gap_unobserved", "data_quality_note", "path_complete",
+];
+const OUTCOMES_CURRENT_KEYS_ = ["symbol", "direction", "window_minutes", "threshold_bps"];
 
 function doPost(e) {
   try {
@@ -81,6 +91,9 @@ function upsertBatch_(ss, items) {
       state = {sheet: sheet, headers: headers, originalWidth: width,
         originalRows: originalRows, rowCount: originalRows, rows: new Map(),
         keyColumns: new Map(), indexes: new Map(), extra: extra};
+      if (item.sheet === "Outcomes_Current") {
+        validateOutcomesCurrentHeaders_(state);
+      }
       states.set(item.sheet, state);
     }
     const rowObject = item.row || {};
@@ -93,6 +106,7 @@ function upsertBatch_(ss, items) {
       Telegram_Events: ["timestamp_utc"],
       MaxPain_TF: ["timestamp_utc"],
       Outcomes: ["decision_time_utc"],
+      Outcomes_Current: ["measurement_start_utc", "decision_time_utc", "observed_through_utc"],
       Formula_Current: ["last_evaluated_at"],
     }[item.sheet] || [];
     timeFields.forEach(name => {
@@ -103,6 +117,7 @@ function upsertBatch_(ss, items) {
     });
     const values = state.headers.map(header => rowObject[header] === undefined ? "" : rowObject[header]);
     const keyNames = String(item.key || state.headers[0]).split(",").map(name => name.trim());
+    if (item.sheet === "Outcomes_Current") validateOutcomesCurrentRow_(rowObject, keyNames);
     const keyIndexes = keyNames.map(name => state.headers.indexOf(name));
     if (keyIndexes.some(index => index < 0)) throw new Error("Missing key column in " + item.sheet);
     if (keyIndexes.some(index => values[index] === "" || values[index] === null)) {
@@ -118,13 +133,20 @@ function upsertBatch_(ss, items) {
         const staged = state.rows.get(position);
         const key = staged ? keyOf(staged) : JSON.stringify(keyIndexes.map(column =>
           String(state.keyColumns.has(column) ? state.keyColumns.get(column)[position] : "")));
+        if (item.sheet === "Outcomes_Current") {
+          validateOutcomesCurrentDimensions_(JSON.parse(key));
+          if (index.has(key)) throw new Error("Duplicate Outcomes_Current slot");
+        }
         // Preserve the prior first-match behavior for legacy duplicate rows.
         if (!index.has(key)) index.set(key, position);
       }
       state.indexes.set(signature, index);
     }
     const key = keyOf(values);
-    const target = index.has(key) ? index.get(key) : state.rowCount++;
+    const existing = index.has(key);
+    const target = existing ? index.get(key) : state.rowCount;
+    if (item.sheet === "Outcomes_Current" && existing && olderOutcomeSource_(state, target, rowObject)) return;
+    if (!existing) state.rowCount++;
     state.rows.set(target, values);
     index.set(key, target);
     // Other composite indexes may contain a column changed by this upsert.
@@ -162,6 +184,9 @@ function validateBatchCapacity_(ss, states) {
     if (name === "Formula_Current" && (state.rowCount > 38144 || state.headers.length > 25)) {
       throw capacityError_("SHEET_CAPACITY", "Formula_Current is limited to 38144 data rows and 25 columns");
     }
+    if (name === "Outcomes_Current" && (state.rowCount > 512 || state.headers.length > 34)) {
+      throw capacityError_("SHEET_CAPACITY", "Outcomes_Current is limited to 512 data rows and 34 columns");
+    }
     const rows = state.sheet.getMaxRows();
     const columns = state.sheet.getMaxColumns();
     addedCells += Math.max(rows, state.rowCount + 1) * Math.max(columns, state.headers.length) - rows * columns;
@@ -181,6 +206,80 @@ function capacityError_(code, message) {
   const error = new Error(message);
   error.error_code = code;
   return error;
+}
+
+function validateOutcomesCurrentHeaders_(state) {
+  if (state.originalRows > 512 || state.headers.length > 34) {
+    throw capacityError_("SHEET_CAPACITY", "Outcomes_Current is limited to 512 data rows and 34 columns");
+  }
+  if (state.headers.length !== OUTCOMES_CURRENT_HEADERS_.length ||
+      OUTCOMES_CURRENT_HEADERS_.some(name => state.headers.filter(header => header === name).length !== 1)) {
+    throw new Error("Outcomes_Current requires the complete 34-column ordered outcome contract");
+  }
+}
+
+function validateOutcomesCurrentDimensions_(keyValues) {
+  const domains = [["BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP"],
+    ["LONG", "SHORT"], ["60", "240", "720", "1440"], ["25", "50", "75", "100", "125", "150", "175", "200"]];
+  if (keyValues.length !== domains.length || keyValues.some((value, index) => !domains[index].includes(String(value)))) {
+    throw new Error("Invalid Outcomes_Current slot dimensions");
+  }
+}
+
+function outcomeSource_(measurementStart, eventId) {
+  // Sheet cells can be Dates, while webhook source values are ISO strings.
+  const isDate = Object.prototype.toString.call(measurementStart) === "[object Date]";
+  const iso = typeof measurementStart === "string" ? measurementStart.match(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?(?:Z|[+-]\d{2}:\d{2})$/) : null;
+  if (!isDate && (typeof measurementStart !== "string" ||
+      !iso)) {
+    throw new Error("Invalid Outcomes_Current measurement_start_utc");
+  }
+  const timestamp = isDate ? measurementStart.getTime() : Date.parse(measurementStart);
+  if (!Number.isFinite(timestamp)) throw new Error("Invalid Outcomes_Current measurement_start_utc");
+  if ((typeof eventId !== "string" && typeof eventId !== "number") ||
+      (typeof eventId === "number" && !Number.isSafeInteger(eventId)) || !/^[1-9]\d{0,18}$/.test(String(eventId)) ||
+      (String(eventId).length === 19 && String(eventId) > "9223372036854775807")) {
+    throw new Error("Invalid Outcomes_Current event_id");
+  }
+  return {timestamp: timestamp, submillisecond: iso ? (iso[1] || "").padEnd(9, "0").slice(3) : "000000",
+    eventId: String(eventId)};
+}
+
+function validateOutcomesCurrentRow_(row, keyNames) {
+  if (JSON.stringify(keyNames) !== JSON.stringify(OUTCOMES_CURRENT_KEYS_)) {
+    throw new Error("Outcomes_Current requires its stable composite slot key");
+  }
+  if (Object.keys(row).length !== 34 || OUTCOMES_CURRENT_HEADERS_.some(name =>
+      !Object.prototype.hasOwnProperty.call(row, name))) {
+    throw new Error("Outcomes_Current requires a complete 34-field row");
+  }
+  validateOutcomesCurrentDimensions_(keyNames.map(name => row[name]));
+  if (typeof row.event_id !== "string" || !Number.isInteger(row.window_minutes) || !Number.isInteger(row.threshold_bps)) {
+    throw new Error("Invalid Outcomes_Current source or dimension cell types");
+  }
+  const source = outcomeSource_(row.measurement_start_utc, row.event_id);
+  if (row.outcome_method_version !== "ordered-first-touch-v7" ||
+      row.outcome_id !== [source.eventId, row.window_minutes, row.threshold_bps, row.outcome_method_version].join("|") ||
+      typeof row.threshold_pct !== "number" || row.threshold_pct !== Number(row.threshold_bps) / 100) {
+    throw new Error("Inconsistent Outcomes_Current ordered outcome identity");
+  }
+}
+
+function olderOutcomeSource_(state, position, incoming) {
+  const columns = ["measurement_start_utc", "event_id"].map(name => state.headers.indexOf(name));
+  const staged = state.rows.get(position);
+  if (!staged) loadKeyColumns_(state, columns);
+  const prior = columns.map(column => staged ? staged[column] : state.keyColumns.get(column)[position]);
+  const existing = outcomeSource_(prior[0], prior[1]);
+  const candidate = outcomeSource_(incoming.measurement_start_utc, incoming.event_id);
+  if (candidate.timestamp !== existing.timestamp) return candidate.timestamp < existing.timestamp;
+  if (candidate.submillisecond !== existing.submillisecond) return candidate.submillisecond < existing.submillisecond;
+  // Compare arbitrary-length positive decimal IDs without floating-point loss.
+  if (candidate.eventId.length !== existing.eventId.length) return candidate.eventId.length < existing.eventId.length;
+  // Equal source events are deliberately replaceable: a canonical repair can
+  // move observed_through_utc or decision_time_utc earlier when a gap is filled.
+  return candidate.eventId < existing.eventId;
 }
 
 function loadKeyColumns_(state, keyIndexes) {

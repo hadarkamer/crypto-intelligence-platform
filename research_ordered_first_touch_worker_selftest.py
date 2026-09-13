@@ -38,6 +38,8 @@ class _CaptureConnection:
         self.calls.append(call)
         if "INSERT INTO research_ordered_first_touch_outcomes" in call[0]:
             return _Result(one={"event_id": 7} if self.first_write else None)
+        if "RETURNING row_key" in call[0]:
+            return _Result(one={"row_key":"slot"})
         if "RETURNING queued.event_id" in call[0]:
             return _Result(many=self.rows)
         return _Result(many=self.rows)
@@ -133,179 +135,15 @@ def _event(event_time):
     }
 
 
-def _check_batched_outbox_drain(payload_template) -> None:
-    def exercise(
-        *, budget, row_count, failures=(), request_size=8,
-        request_seconds=0, slot_available=True, stale_acks=(),
-    ):
-        service = worker.ResearchOutcomeWorker()
-        pending = []
-        for index in range(row_count):
-            payload = json.loads(json.dumps(payload_template))
-            payload["row"]["outcome_id"] = (
-                f"{index + 1}|60|25|ordered-first-touch-v7"
-            )
-            pending.append({
-                "event_id": index + 1,
-                "payload": payload,
-                "claim_token": f"claim-{index + 1}",
-                "claimed_payload_sha256": "a" * 64,
-            })
-        operations = []
-        active_connections = 0
-        active_claim = []
-        deliveries = 0
-        elapsed = 0
-
-        class Connection(_ConnectionContext):
-            def __enter__(self):
-                nonlocal active_connections
-                active_connections += 1
-                return self
-
-            def __exit__(self, exc_type, exc, traceback):
-                nonlocal active_connections
-                active_connections -= 1
-                return False
-
-        def claim(conn, limit):
-            nonlocal active_claim
-            assert active_connections == 1
-            assert not active_claim  # Prior batch acknowledged before re-lease.
-            active_claim = pending[:limit]
-            del pending[:limit]
-            operations.append(("claim", limit))
-            return list(active_claim)
-
-        def deliver(payload, *, attempts):
-            nonlocal deliveries, elapsed
-            assert active_connections == 0  # Claim committed before HTTP.
-            assert attempts == 1
-            assert len(active_claim) <= 8
-            assert payload == {
-                "kind": "ordered_first_touch_outcomes",
-                "upserts": [row["payload"] for row in active_claim],
-            }  # Exact stored identities, provenance and values are preserved.
-            deliveries += 1
-            elapsed += request_seconds
-            operations.append(("send", len(active_claim)))
-            return deliveries not in failures
-
-        def finish(conn, claimed, *, delivered, error):
-            nonlocal active_claim
-            assert active_connections == 1
-            assert all(left is right for left, right in zip(claimed, active_claim))
-            assert len(claimed) == len(active_claim)
-            assert delivered == (deliveries not in failures)
-            assert (error is None) == delivered
-            operations.append(("finish", delivered))
-            active_claim = []
-            return len(claimed) - (1 if deliveries in stale_acks else 0)
-
-        confirmed_batches = 0
-        record_freshness = service._record_ordered_sync_freshness
-
-        def record_after_commit(claimed):
-            nonlocal confirmed_batches
-            assert active_connections == 0, "freshness must follow committed ACK"
-            confirmed_batches += 1
-            record_freshness(claimed)
-
-        service._record_ordered_sync_freshness = record_after_commit
-        service._claim_ordered_first_touch_outbox = claim
-        service._finish_ordered_first_touch_outbox = finish
-        with patch.object(
-            worker, "psycopg", SimpleNamespace(connect=lambda *a, **kw: Connection())
-        ), patch.object(
-            worker, "_ORDERED_FIRST_TOUCH_OUTBOX_LIMIT", budget
-        ), patch.object(
-            worker.google_sheets_sync, "enabled", lambda: True
-        ), patch.object(
-            worker.google_sheets_sync, "deliver_now", deliver
-        ), patch.object(
-            worker.google_sheets_sync, "ordered_outcome_batch_limit", lambda: request_size
-        ), patch.object(
-            worker, "_ORDERED_FIRST_TOUCH_OUTBOX_SECONDS", 45
-        ), patch.object(
-            worker.time, "monotonic", lambda: elapsed
-        ), patch.object(
-            worker.google_sheets_sync, "delivery_slot",
-            lambda: nullcontext(slot_available),
-        ):
-            result = service._drain_ordered_first_touch_outbox(
-                "postgresql://selftest"
-            )
-        assert active_connections == 0
-        if not confirmed_batches:
-            assert service.metrics.ordered_first_touch_sync_latest_observed_through_utc is None
-            assert service.metrics.ordered_first_touch_sync_last_confirmed_at_utc is None
-        else:
-            assert service.metrics.ordered_first_touch_sync_latest_observed_through_utc == (
-                datetime.fromisoformat(payload_template["row"]["observed_through_utc"].replace("Z", "+00:00")).isoformat()
-            )
-            assert service.metrics.ordered_first_touch_sync_last_confirmed_at_utc is not None
-        return result, operations, len(pending)
-
-    stale, _, remaining = exercise(budget=8, row_count=8, stale_acks=(1,))
-    assert stale == {"claimed": 8, "synced": 7, "failed": 0}
-    assert remaining == 0  # Partial generation ACK must not advance freshness.
-
-    fallback, fallback_operations, remaining = exercise(
-        budget=3, row_count=5, request_size=1
-    )
-    assert fallback == {"claimed": 3, "synced": 3, "failed": 0}
-    assert remaining == 2
-    assert fallback_operations == [
-        ("claim", 1), ("send", 1), ("finish", True),
-        ("claim", 1), ("send", 1), ("finish", True),
-        ("claim", 1), ("send", 1), ("finish", True),
-    ]
-
-    timed, operations, remaining = exercise(
-        budget=128, row_count=10, request_size=1, request_seconds=30
-    )
-    # Finish the request that crossed the budget, then leave all other rows
-    # unclaimed so the next compute pass is not held behind 128 requests.
-    assert timed == {"claimed": 2, "synced": 2, "failed": 0}
-    assert remaining == 8
-    assert operations == [
-        ("claim", 1), ("send", 1), ("finish", True),
-        ("claim", 1), ("send", 1), ("finish", True),
-    ]
-
-    busy, operations, remaining = exercise(
-        budget=128, row_count=10, slot_available=False
-    )
-    assert busy == {"claimed": 0, "synced": 0, "failed": 0}
-    assert remaining == 10
-    assert operations == []  # A busy receiver creates no database lease.
-
-    completed, operations, remaining = exercise(budget=17, row_count=25)
-    assert completed == {"claimed": 17, "synced": 17, "failed": 0}
-    assert remaining == 8
-    assert operations == [
-        ("claim", 8), ("send", 8), ("finish", True),
-        ("claim", 8), ("send", 8), ("finish", True),
-        ("claim", 1), ("send", 1), ("finish", True),
-    ]
-
-    partial, operations, remaining = exercise(
-        budget=32, row_count=24, failures=(2,)
-    )
-    assert partial == {"claimed": 16, "synced": 8, "failed": 8}
-    assert remaining == 8
-    assert operations == [
-        ("claim", 8), ("send", 8), ("finish", True),
-        ("claim", 8), ("send", 8), ("finish", False),
-    ]
-
-    exhausted, operations, remaining = exercise(budget=32, row_count=10)
-    assert exhausted == {"claimed": 10, "synced": 10, "failed": 0}
-    assert remaining == 0
-    assert operations[-1] == ("claim", 8)
-    assert [item for item in operations if item[0] == "send"] == [
-        ("send", 8), ("send", 2),
-    ]
+def _check_legacy_outbox_held() -> None:
+    service=worker.ResearchOutcomeWorker()
+    with patch.object(worker,'psycopg',SimpleNamespace(connect=lambda *a,**kw: (_ for _ in ()).throw(AssertionError('No legacy DB claim')))), patch.object(
+            worker.google_sheets_sync,'deliver_now',side_effect=AssertionError('No legacy delivery')), patch.object(
+            worker.research_ordered_outcome_recovery_store,'delivery_ids',side_effect=AssertionError('No held recovery loop')):
+        result=service._drain_ordered_first_touch_outbox('postgresql://selftest')
+    assert result['claimed']==result['synced']==result['failed']==0
+    assert result['publication']['legacy_publication'].startswith('HELD_IN_DATABASE')
+    assert service.metrics.ordered_first_touch_sync_last_confirmed_at_utc is None
 
 
 def run() -> None:
@@ -368,7 +206,7 @@ def run() -> None:
         outcome=failure,
         expected_candles=1,
     )
-    assert len(storage.calls) == 2
+    assert len(storage.calls) == 3
     outcome_sql, outcome_params = storage.calls[0]
     stored = json.loads(outcome_params[0])
     assert "research_ordered_first_touch_outcomes" in outcome_sql
@@ -446,20 +284,22 @@ def run() -> None:
         assert not permits({**missing, "status": "OPEN"}, repaired)
 
     outbox_sql, outbox_params = storage.calls[1]
-    assert "research_ordered_first_touch_sync_outbox" in outbox_sql
-    assert "claim_token=CASE" in outbox_sql
-    assert "claimed_payload_sha256=CASE" in outbox_sql
-    sheet_payload = json.loads(outbox_params[5])
+    assert "research_sheet_upsert_outbox" in outbox_sql
+    assert not any("INSERT INTO research_ordered_first_touch_sync_outbox" in query for query,_ in storage.calls)
+    assert "claim_token=NULL" in outbox_sql
+    assert "claimed_payload_sha256=NULL" in outbox_sql
+    sheet_payload = json.loads(outbox_params[2])
     sheet_row = sheet_payload["row"]
-    assert sheet_payload["key"] == "outcome_id"
+    assert sheet_payload["key"] == "symbol,direction,window_minutes,threshold_bps"
+    assert sheet_payload["sheet"] == "Outcomes_Current"
     assert sheet_row["outcome_id"] == (
         "7|60|25|ordered-first-touch-v7"
     )
     assert sheet_row["status"] == "FAILURE"
     assert sheet_row["decision_time_utc"]
     assert sheet_row["adverse_touch_price"] == 99.75
-    assert len(outbox_params[6]) == 64
-    _check_batched_outbox_drain(sheet_payload)
+    assert len(outbox_params[3]) == 64
+    _check_legacy_outbox_held()
 
     no_write = _CaptureConnection(first_write=False)
     assert not worker.ResearchOutcomeWorker._write_ordered_first_touch_outcome(

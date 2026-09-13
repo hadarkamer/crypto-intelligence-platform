@@ -121,14 +121,27 @@ class SheetReconciler:
         # exact current SYNCED generations, leaving active/retrying leases alone.
         # At most 100 idempotent repairs per complete cycle; no new events.
         repaired = 0
-        with research_sheet_outbox._connect(database_url) as conn:
-            for fingerprint in missing[:100]:
-                repaired += conn.execute('''
-                    UPDATE research_sheet_upsert_outbox SET sync_status='PENDING', attempts=0,
+        if missing:
+            with research_sheet_outbox._connect(database_url) as conn:
+                # Apply the repair limit AFTER selecting eligible rows. A
+                # pending/retrying prefix must not starve later SYNCED gaps.
+                # Lock the selected current generations; concurrent claims or
+                # source updates cannot be reset by this repair transaction.
+                repaired = conn.execute('''
+                    WITH repairable AS (
+                        SELECT sheet_name,row_key
+                        FROM research_sheet_upsert_outbox
+                        WHERE sheet_name='Telegram_Events' AND sync_status='SYNCED'
+                          AND row_key=ANY(%s)
+                        ORDER BY row_key LIMIT 100 FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE research_sheet_upsert_outbox target SET sync_status='PENDING', attempts=0,
                         next_attempt_at_utc=NOW(), synced_at_utc=NULL,
                         last_error='ACTUAL_SHEET_ROW_MISSING', updated_at_utc=NOW()
-                    WHERE sheet_name='Telegram_Events' AND row_key=%s AND sync_status='SYNCED'
-                ''', (research_sheet_outbox._json([fingerprint]),)).rowcount
+                    FROM repairable
+                    WHERE target.sheet_name=repairable.sheet_name AND target.row_key=repairable.row_key
+                      AND target.sync_status='SYNCED'
+                ''', ([research_sheet_outbox._json([fingerprint]) for fingerprint in missing],)).rowcount
         summary["previously_synced_rows_requeued"] = repaired
         self.runtime.update(status="GAPS_FOUND" if summary["missing"] or summary["duplicate_ids"] or summary["unexpected_delivered_ids"] else "MATCHED",
                             last_complete=summary, last_error=None)
@@ -155,6 +168,11 @@ class SheetReconciler:
             # prior page; ordinary FIFO contention must not restart the cycle.
             # It remains incomplete and will resume at the next bounded turn.
             self.runtime.update(status="DEFERRED_RECEIVER_BUSY", last_error=None)
+        except google_sheets_sync.SheetAuditTransportRetry as exc:
+            # A transport failure yielded no valid page, so nothing was added
+            # to seen/normalized or advanced. Resume this exact page with the
+            # same frozen population and boundary at the next bounded turn.
+            self.runtime.update(status="DEFERRED_TRANSPORT_RETRY", last_error=str(exc)[:160])
         except Exception as exc:
             self.runtime.update(status="AUDIT_FAILED", last_error=str(exc)[:160])
             # Failures never certify coverage, or reuse an incomplete ID scan.

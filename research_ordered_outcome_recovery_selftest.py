@@ -323,7 +323,7 @@ class RecoveryPostgreSQLTests(unittest.TestCase):
                 [(1,row['window_minutes'],row['method_version'],row['status'],json.dumps(row['result'],default=str)) for row in metrics])
         self.assertEqual(store.finish_success(self.conn,event,now=self.now),'COMPLETE')
         row=self.conn.execute('SELECT status,sheet_pending FROM research_ordered_outcome_recovery').fetchone()
-        self.assertEqual(row,{'status':'COMPLETE','sheet_pending':True})
+        self.assertEqual(row,{'status':'COMPLETE','sheet_pending':False})
         self.conn.rollback()
         self.assertEqual(self.conn.execute('SELECT status FROM research_ordered_outcome_recovery').fetchone()['status'],'PENDING')
         self.assertEqual(self.conn.execute('SELECT COUNT(*) AS n FROM research_ordered_first_touch_outcomes').fetchone()['n'],0)
@@ -384,6 +384,9 @@ class RecoveryDeliveryPostgreSQLTests(unittest.TestCase):
                     event_time=start,candles=path,threshold_pct=bps/100,observation_closed=False)
                 self.worker._write_ordered_first_touch_outcome(self.conn,event=event,window_minutes=window,
                     reference_source='binance_spot',path_result=path_result,outcome=outcome,expected_candles=1)
+                from research_outcome_publication_selftest import seed_legacy_outbox_fixture
+                seed_legacy_outbox_fixture(self.conn,event=event,window_minutes=window,
+                    outcome=outcome,path_result=path_result)
         self.assertEqual(store.delivery_ids(self.conn),[4])
         claimed=self.worker._claim_ordered_first_touch_lane(self.conn,32,recent=False,event_ids=[4])
         self.assertEqual(len(claimed),32)

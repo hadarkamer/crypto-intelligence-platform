@@ -552,3 +552,145 @@ assert.equal(context.doPost(probeRequest({...productionBody,
 })).html, "ACK");
 assert.equal(durable.rows.length, productionRowsAfterAmbiguous, "fresh-nonce retries do not duplicate committed rows");
 console.log("google Apps Script production HTML ACK/nonce/ambiguous retry: PASS");
+
+// Outcomes_Current publishes at most one canonical source event per fixed
+// symbol/direction/window/threshold slot; archival Outcomes is never involved.
+const currentOutcomeHeaders = [
+  "event_id", "snapshot_id", "symbol", "direction", "threshold_pct", "measurement_start_utc",
+  "status", "first_touch_side", "decision_time_utc", "minutes_to_decision", "mfe_pct", "mae_pct",
+  "favorable_touch_price", "adverse_touch_price", "max_favorable_price", "max_adverse_price",
+  "market_source", "market_pair", "candle_interval", "candle_count", "data_quality_status",
+  "outcome_method_version", "outcome_id", "window_minutes", "threshold_bps", "observed_from_utc",
+  "observed_through_utc", "terminal_reason", "initial_gap_seconds", "favorable_barrier_price",
+  "adverse_barrier_price", "initial_gap_unobserved", "data_quality_note", "path_complete",
+];
+const currentOutcomeKey = "symbol,direction,window_minutes,threshold_bps";
+function currentOutcomeRow(changes = {}) {
+  const row = {...Object.fromEntries(currentOutcomeHeaders.map(name => [name, null])),
+    event_id: "1000", snapshot_id: "snapshot-1000", symbol: "BTC", direction: "LONG",
+    measurement_start_utc: "2026-09-13T12:00:00Z", status: "DATA_MISSING", first_touch_side: "NONE",
+    observed_from_utc: "2026-09-13T12:00:00Z", observed_through_utc: "2026-09-13T12:30:00Z",
+    outcome_method_version: "ordered-first-touch-v7", window_minutes: 60, threshold_bps: 25,
+    candle_interval: "1m", initial_gap_seconds: 0, initial_gap_unobserved: false, path_complete: false,
+    ...changes};
+  if (!Object.prototype.hasOwnProperty.call(changes, "threshold_pct")) row.threshold_pct = Number(row.threshold_bps) / 100;
+  if (!Object.prototype.hasOwnProperty.call(changes, "outcome_id")) {
+    row.outcome_id = [row.event_id, row.window_minutes, row.threshold_bps, row.outcome_method_version].join("|");
+  }
+  return row;
+}
+const currentOutcomeItem = row => ({sheet: "Outcomes_Current", key: currentOutcomeKey, row});
+const currentOutcomes = sheet([currentOutcomeHeaders], 513);
+const archivedRows = JSON.stringify(outcomes.rows);
+const archivedWrites = outcomes.writes;
+const currentOutcomesBook = {
+  getSheetByName: name => name === "Outcomes_Current" ? currentOutcomes : outcomes,
+  getSheets: () => [currentOutcomes, outcomes],
+};
+const allCurrentSlots = [];
+for (const symbol of ["BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP"])
+  for (const direction of ["LONG", "SHORT"])
+    for (const window_minutes of [60, 240, 720, 1440])
+      for (const threshold_bps of [25, 50, 75, 100, 125, 150, 175, 200]) {
+        allCurrentSlots.push(currentOutcomeItem(currentOutcomeRow({symbol, direction, window_minutes, threshold_bps})));
+      }
+assert.equal(allCurrentSlots.length, 512);
+context.upsertBatch_(currentOutcomesBook, allCurrentSlots);
+assert.equal(currentOutcomes.rows.length, 513);
+assert.equal(currentOutcomes.writes, 1);
+assert.equal(currentOutcomes.readCells, 34, "empty bounded projection needs only its headers");
+const currentReadCells = currentOutcomes.readCells;
+context.upsertBatch_(currentOutcomesBook, allCurrentSlots);
+assert.equal(currentOutcomes.rows.length, 513, "replaying the complete grid does not grow it");
+assert.equal(currentOutcomes.readCells - currentReadCells, 34 + 6 * 512,
+  "replay reads only four slot and two source columns, at most once each");
+assert.equal(JSON.stringify(outcomes.rows), archivedRows);
+assert.equal(outcomes.writes, archivedWrites, "bounded publication cannot mutate archival Outcomes");
+const currentCell = (position, name) => currentOutcomes.rows[position][currentOutcomeHeaders.indexOf(name)];
+
+// Same-source repairs may legitimately shorten the previously incomplete path.
+context.upsertBatch_(currentOutcomesBook, [currentOutcomeItem(currentOutcomeRow({
+  status: "SUCCESS", first_touch_side: "FAVORABLE", path_complete: true,
+  observed_through_utc: "2026-09-13T12:05:00Z", decision_time_utc: "2026-09-13T12:04:00Z",
+}))]);
+assert.equal(currentCell(1, "status"), "SUCCESS");
+assert.equal(currentCell(1, "observed_through_utc"), "2026-09-13T12:05:00Z");
+
+// Source recency is measurement start then exact decimal event ID. A newer
+// event replaces its slot; a delayed older event becomes a harmless no-op.
+const newerSource = currentOutcomeRow({event_id: "9007199254740993", measurement_start_utc: "2026-09-13T13:00:00Z"});
+context.upsertBatch_(currentOutcomesBook, [currentOutcomeItem(newerSource)]);
+const writesAfterNewer = currentOutcomes.writes;
+context.upsertBatch_(currentOutcomesBook, [currentOutcomeItem(currentOutcomeRow({
+  event_id: "999999999999999999", observed_through_utc: "2026-09-15T12:00:00Z",
+}))]);
+assert.equal(currentOutcomes.writes, writesAfterNewer, "observation time cannot make an older source replace a newer event");
+assert.equal(currentCell(1, "event_id"), "9007199254740993");
+context.upsertBatch_(currentOutcomesBook, [currentOutcomeItem(currentOutcomeRow({
+  event_id: "9007199254740992", measurement_start_utc: newerSource.measurement_start_utc,
+}))]);
+assert.equal(currentOutcomes.writes, writesAfterNewer, "event IDs beyond JS safe integer range compare exactly");
+context.upsertBatch_(currentOutcomesBook, [currentOutcomeItem(currentOutcomeRow({
+  event_id: "9007199254740994", measurement_start_utc: newerSource.measurement_start_utc,
+}))]);
+assert.equal(currentCell(1, "event_id"), "9007199254740994");
+context.upsertBatch_(currentOutcomesBook, [
+  currentOutcomeItem(currentOutcomeRow({event_id: "10", measurement_start_utc: "2026-09-13T14:00:00.123456Z"})),
+  currentOutcomeItem(currentOutcomeRow({event_id: "99999", measurement_start_utc: "2026-09-13T14:00:00.123455Z"})),
+]);
+assert.equal(currentCell(1, "event_id"), "10", "microsecond source ordering wins before event ID, including staged writes");
+context.upsertBatch_(currentOutcomesBook, [currentOutcomeItem(currentOutcomeRow({
+  event_id: "11", measurement_start_utc: "2026-09-13T17:00:00.123456+03:00",
+}))]);
+assert.equal(currentCell(1, "event_id"), "11", "aware source timestamps compare in UTC");
+
+const validOutcomeWrites = currentOutcomes.writes;
+for (const changes of [
+  {symbol: "ADA"}, {direction: "NEUTRAL"}, {window_minutes: 30}, {threshold_bps: 10},
+  {threshold_pct: 1}, {outcome_method_version: "no-dwell-first-touch-v6"}, {outcome_id: "wrong"},
+  {event_id: "0"}, {event_id: 1}, {event_id: "9223372036854775808"}, {event_id: 9007199254740992},
+  {window_minutes: "60"}, {threshold_bps: "25"}, {measurement_start_utc: "2026-09-13 12:00"},
+]) {
+  assert.throws(() => context.upsertBatch_(currentOutcomesBook, [currentOutcomeItem(currentOutcomeRow(changes))]));
+}
+const missingOutcomeField = currentOutcomeRow();
+delete missingOutcomeField.path_complete;
+assert.throws(() => context.upsertBatch_(currentOutcomesBook, [currentOutcomeItem(missingOutcomeField)]), /34-field/);
+assert.throws(() => context.upsertBatch_(currentOutcomesBook, [
+  {...currentOutcomeItem(currentOutcomeRow()), key: "outcome_id"},
+]), /composite slot key/);
+assert.equal(currentOutcomes.writes, validOutcomeWrites);
+
+const oversizedCurrent = sheet([currentOutcomeHeaders,
+  ...Array.from({length: 513}, (_, index) => [String(index + 1)])], 514);
+const oversizedCurrentBook = {getSheetByName: () => oversizedCurrent, getSheets: () => [oversizedCurrent]};
+assert.throws(() => context.upsertBatch_(oversizedCurrentBook, [currentOutcomeItem(currentOutcomeRow())]),
+  error => error.error_code === "SHEET_CAPACITY");
+assert.equal(oversizedCurrent.writes, 0);
+assert.equal(oversizedCurrent.readCells, 34, "oversized corrupt tabs reject before scanning their rows");
+const malformedHeaders = currentOutcomeHeaders.slice();
+malformedHeaders[malformedHeaders.indexOf("observed_through_utc")] = "measurement_start_utc";
+const malformedCurrent = sheet([malformedHeaders]);
+const mixedCurrentBook = {
+  getSheetByName: name => name === "Outcomes_Current" ? malformedCurrent : outcomes,
+  getSheets: () => [malformedCurrent, outcomes],
+};
+const archiveBeforeInvalid = outcomes.writes;
+assert.throws(() => context.upsertBatch_(mixedCurrentBook, [items[0], currentOutcomeItem(currentOutcomeRow())]), /34-column/);
+assert.equal(outcomes.writes, archiveBeforeInvalid, "invalid bounded headers reject the complete batch before any tab writes");
+const oneRow = currentOutcomeHeaders.map(header => currentOutcomeRow()[header]);
+const duplicateCurrent = sheet([currentOutcomeHeaders, oneRow, oneRow]);
+const duplicateCurrentBook = {getSheetByName: () => duplicateCurrent, getSheets: () => [duplicateCurrent]};
+assert.throws(() => context.upsertBatch_(duplicateCurrentBook, [currentOutcomeItem(currentOutcomeRow())]), /Duplicate Outcomes_Current/);
+assert.equal(duplicateCurrent.writes, 0);
+
+const openBeforeCurrentAck = context.SpreadsheetApp.openById;
+context.SpreadsheetApp.openById = () => currentOutcomesBook;
+const currentWritesBeforeStaleAck = currentOutcomes.writes;
+const staleCurrentAck = context.doPost(probeRequest({...productionBody,
+  ack_nonce: "c".repeat(32), payload: {upserts: [currentOutcomeItem(currentOutcomeRow())]},
+}));
+assert.equal(staleCurrentAck.html, "ACK");
+assert.equal(currentOutcomes.writes, currentWritesBeforeStaleAck);
+context.SpreadsheetApp.openById = openBeforeCurrentAck;
+console.log("google Apps Script bounded current outcomes/source recency/canonical repairs: PASS");

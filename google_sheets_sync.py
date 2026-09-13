@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import hashlib
 import hmac
 from html.parser import HTMLParser
+from http.client import IncompleteRead
 import json
 import math
 import os
@@ -20,7 +21,7 @@ import secrets
 import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -1175,6 +1176,20 @@ class SheetReceiverBusy(RuntimeError):
     """No receiver admission occurred; the caller may retain its audit cursor."""
 
 
+class SheetAuditTransportRetry(RuntimeError):
+    """No valid page was received; retry its frozen bounds without counting it."""
+
+
+def _retryable_sheet_audit_http(exc: HTTPError) -> bool:
+    context = _response_context(exc)
+    host, code = context["response_host"], context["http_status"]
+    return bool(
+        host in _HTML_ACK_HOSTS
+        and (code in {408, 429, 500, 502, 503, 504}
+             or (code == 404 and host == "script.googleusercontent.com"))
+    )
+
+
 def read_telegram_audit_page(*, start_row: int = 2, last_row: int | None = None) -> Dict[str, Any]:
     """Read only the bounded, authenticated receiver audit contract."""
     global _RECEIVER_VERSION
@@ -1184,19 +1199,36 @@ def read_telegram_audit_page(*, start_row: int = 2, last_row: int | None = None)
     if last_row is not None:
         payload["last_row"] = last_row
     envelope = {"secret": _WEBHOOK_SECRET, "spreadsheet_id": _SPREADSHEET_ID, "payload": payload}
-    with delivery_slot(wait_seconds=10) as acquired:
+    # Use the same bounded FIFO admission as normal batches. A ten-second
+    # ticket repeatedly expired behind legitimate longer drains and could
+    # prevent a complete audit despite successful write delivery.
+    with delivery_slot(wait_seconds=120) as acquired:
         if not acquired:
             raise SheetReceiverBusy("SHEET_RECEIVER_BUSY")
         request = Request(_WEBHOOK_URL, data=json.dumps(envelope).encode("utf-8"),
                           headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
-            # The receiver emits no raw texts; this bound prevents accidental
-            # HTML or arbitrary download responses from becoming audit data.
-            raw = response.read(512_001)
+        try:
+            with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+                # The receiver emits no raw texts; this bound prevents accidental
+                # HTML or arbitrary download responses from becoming audit data.
+                raw = response.read(512_001)
+        except HTTPError as exc:
+            if _retryable_sheet_audit_http(exc):
+                context = _response_context(exc)
+                raise SheetAuditTransportRetry(
+                    "SHEET_AUDIT_HTTP_" + str(context["http_status"]) + "_" + context["response_stage"]
+                ) from None
+            raise
+        except (TimeoutError, ConnectionError, IncompleteRead):
+            raise SheetAuditTransportRetry("SHEET_AUDIT_CONNECTION_INTERRUPTED") from None
+        except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, ConnectionError)):
+                raise SheetAuditTransportRetry("SHEET_AUDIT_CONNECTION_INTERRUPTED") from None
+            raise
         if len(raw) > 512_000:
             raise ValueError("SHEET_AUDIT_RESPONSE_TOO_LARGE")
         body = json.loads(raw.decode("utf-8"))
-        if body.get("ok") is not True or body.get("version") != "sheets-batch-v3":
+        if not isinstance(body, dict) or body.get("ok") is not True or body.get("version") != "sheets-batch-v3":
             raise ValueError("SHEET_AUDIT_RECEIVER_V3_REQUIRED")
         audit = body.get("audit")
         if not isinstance(audit, dict) or not isinstance(audit.get("rows"), list) or len(audit["rows"]) > 500:

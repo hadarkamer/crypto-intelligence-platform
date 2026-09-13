@@ -20,7 +20,7 @@ class _StorageCapture:
         return self
 
     def fetchone(self):
-        return {"event_id": 7}
+        return {"event_id": 7,"row_key":"slot"}
 
 
 def run() -> None:

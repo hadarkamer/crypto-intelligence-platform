@@ -3,11 +3,12 @@ import contextlib
 from email.message import Message
 import hashlib
 import hmac
+from http.client import IncompleteRead
 import io
 import json
 import unittest
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import google_sheets_sync as sync
 
@@ -290,6 +291,77 @@ class HTMLTransportTest(unittest.TestCase):
                 self.assertEqual(diagnostic.get("receiver_error_code"), expected)
                 self.assertNotIn("PRIVATE", repr(diagnostic))
                 self.assertIsNone(sync._RECEIVER_VERSION)
+
+
+class AuditTransportTest(unittest.TestCase):
+    setUp = TransportTest.setUp
+
+    def test_transient_http_errors_are_narrow_and_never_expose_redirect_url(self):
+        for host, status, retryable in [
+            ("script.googleusercontent.com", 404, True),
+            ("script.google.com", 404, False),
+            ("script.google.com", 403, False),
+            ("script.googleusercontent.com", 401, False),
+            ("script.google.com", 429, True),
+            ("script.google.com", 503, True),
+            ("script.googleusercontent.com", 502, True),
+            ("other.invalid", 503, False),
+        ]:
+            with self.subTest(host=host, status=status):
+                exc = HTTPError("https://" + host + "/macros/echo?user_content_key=PRIVATE", status,
+                                "PRIVATE", {}, io.BytesIO(b"PRIVATE"))
+                expected = sync.SheetAuditTransportRetry if retryable else HTTPError
+                with patch.object(sync, "urlopen", side_effect=exc) as http:
+                    with self.assertRaises(expected) as caught:
+                        sync.read_telegram_audit_page(start_row=502, last_row=13890)
+                self.assertEqual(http.call_count, 1)
+                if retryable:
+                    self.assertNotIn("PRIVATE", str(caught.exception))
+                self.assertIsNone(sync._RECEIVER_VERSION)
+
+    def test_timeouts_reset_connections_and_incomplete_read_are_retryable(self):
+        errors = [TimeoutError("PRIVATE"), ConnectionResetError("PRIVATE"),
+                  IncompleteRead(b"PRIVATE"), URLError(TimeoutError("PRIVATE")),
+                  URLError(ConnectionAbortedError("PRIVATE"))]
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                with patch.object(sync, "urlopen", side_effect=error):
+                    with self.assertRaises(sync.SheetAuditTransportRetry) as caught:
+                        sync.read_telegram_audit_page(start_row=502, last_row=13890)
+                self.assertNotIn("PRIVATE", str(caught.exception))
+        with patch.object(sync, "urlopen", side_effect=URLError("unknown URL type")):
+            with self.assertRaises(URLError):
+                sync.read_telegram_audit_page()
+
+        class PartialResponse(Response):
+            def read(self, size=-1):
+                raise IncompleteRead(b"PRIVATE")
+
+        with patch.object(sync, "urlopen", return_value=PartialResponse(b"")):
+            with self.assertRaises(sync.SheetAuditTransportRetry):
+                sync.read_telegram_audit_page()
+
+    def test_invalid_json_logical_failure_and_corrupt_pages_are_not_retryable_transport(self):
+        for body in [b"", b"<html>PRIVATE</html>", b"\xff", b"[]", b'{"ok":false}',
+                     b'{"ok":true,"version":"wrong"}',
+                     b'{"ok":true,"version":"sheets-batch-v3","audit":{"rows":null}}',
+                     b"x" * 512_001]:
+            with self.subTest(size=len(body)):
+                with patch.object(sync, "urlopen", return_value=Response(body)):
+                    with self.assertRaises(ValueError):
+                        sync.read_telegram_audit_page(start_row=502, last_row=13890)
+                self.assertIsNone(sync._RECEIVER_VERSION)
+
+    def test_audit_uses_bounded_fifo_and_busy_does_not_make_http_request(self):
+        @contextlib.contextmanager
+        def busy_slot(*, wait_seconds):
+            self.assertEqual(wait_seconds, 120)
+            yield False
+
+        with patch.object(sync, "delivery_slot", side_effect=busy_slot), patch.object(sync, "urlopen") as http:
+            with self.assertRaises(sync.SheetReceiverBusy):
+                sync.read_telegram_audit_page(start_row=502, last_row=13890)
+        http.assert_not_called()
 
 
 if __name__ == "__main__":
