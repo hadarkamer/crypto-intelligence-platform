@@ -363,6 +363,27 @@ class AuditTransportTest(unittest.TestCase):
                 sync.read_telegram_audit_page(start_row=502, last_row=13890)
         http.assert_not_called()
 
+    def test_audit_maps_only_exact_bounds_failure_and_retains_safe_http_metadata(self):
+        for error, code, expected in [
+            ("Error: Audit row bounds changed; restart", None, sync.SheetAuditBoundsChanged),
+            ("Audit row bounds changed; restart", None, sync.SheetAuditBoundsChanged),
+            ("PRIVATE", "AUDIT_ROW_BOUNDS_CHANGED", sync.SheetAuditBoundsChanged),
+            ("Error: unauthorized PRIVATE", None, ValueError),
+            ("Audit row bounds changed; restart PRIVATE", None, ValueError),
+        ]:
+            with self.subTest(expected=expected.__name__, code=code):
+                body = json.dumps({"ok": False, "error": error, "error_code": code}).encode()
+                with patch.object(sync, "urlopen", return_value=Response(body)):
+                    with self.assertRaises(expected) as caught:
+                        sync.read_telegram_audit_page(start_row=502, last_row=13890)
+                if expected is ValueError:
+                    self.assertNotIsInstance(caught.exception, sync.SheetAuditBoundsChanged)
+                diagnostic = caught.exception.sheet_audit_diagnostic
+                self.assertEqual(diagnostic["http_status"], 200)
+                self.assertEqual(diagnostic["response_bytes"], len(body))
+                self.assertNotIn("PRIVATE", repr(diagnostic) + str(caught.exception))
+                self.assertIsNone(sync._RECEIVER_VERSION)
+
 
 if __name__ == "__main__":
     unittest.main()
