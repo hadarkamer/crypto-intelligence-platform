@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 import requests
 from tabulate import tabulate
 from telegram import Update
+from telegram.error import TimedOut
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
@@ -4582,7 +4583,7 @@ async def _send_magnet_watch_reports(
                     parse_mode="HTML",
                 )
                 sent += 1
-        except Exception:
+        except Exception as delivery_exc:
             try:
                 research_event_runtime.capture_magnet_watch_symbol(
                     symbol,
@@ -4590,12 +4591,22 @@ async def _send_magnet_watch_reports(
                     derivatives_snapshot,
                     event_time=decision_time,
                     persist=True,
-                    delivery_status="DELIVERY_FAILED",
+                    delivery_status="UNKNOWN" if isinstance(delivery_exc, TimedOut) else "DELIVERY_FAILED",
                     delivery_attempted_at_utc=attempted_at,
                 )
             except Exception as exc:
                 print(f"[research] failed Magnet hook {symbol}: {exc!r}", flush=True)
-            raise
+            error = {
+                "symbol": symbol,
+                "error_type": type(delivery_exc).__name__,
+                "cause_type": type(delivery_exc.__cause__).__name__,
+                "delivery_status": "UNKNOWN" if isinstance(delivery_exc, TimedOut) else "DELIVERY_FAILED",
+            }
+            WATCH_RUNTIME.setdefault("last_delivery_errors", []).append(error)
+            print("[watch-delivery] " + json.dumps(error, sort_keys=True), flush=True)
+            # A timeout can follow successful acceptance by Telegram. Do not
+            # replay this report; continue the other subscribed symbols.
+            continue
         try:
             research_event_runtime.capture_magnet_watch_symbol(
                 symbol,
@@ -4628,6 +4639,8 @@ async def run_watch_cycle(
     WATCH_RUNTIME["last_cycle_status"] = "running"
     WATCH_RUNTIME["last_formula_sent"] = 0
     WATCH_RUNTIME["last_error"] = None
+    WATCH_RUNTIME["last_delivery_errors"] = []
+    WATCH_RUNTIME["cycle_stage"] = "collecting_inputs"
     WATCH_RUNTIME["cycle_number"] = int(WATCH_RUNTIME.get("cycle_number", 0)) + 1
     cycle_number = WATCH_RUNTIME["cycle_number"]
     watch_scan_id = f"shared-watch:{cycle_started_at.isoformat()}"
@@ -4763,6 +4776,7 @@ async def run_watch_cycle(
                 + _watch_derivatives_line(derivatives_status)
             )
 
+        WATCH_RUNTIME["cycle_stage"] = "sending_general"
         if general_enabled:
             await bot_app.bot.send_message(chat_id=chat_id, text=header)
             for index, item in enumerate(result_items, start=1):
@@ -4848,6 +4862,7 @@ async def run_watch_cycle(
                 except Exception as exc:
                     print(f"[research] Combined hook failed: {exc!r}", flush=True)
 
+        WATCH_RUNTIME["cycle_stage"] = "sending_magnet"
         magnet_sent = await _send_magnet_watch_reports(
             bot_app,
             rows,
@@ -4872,7 +4887,25 @@ async def run_watch_cycle(
         WATCH_RUNTIME["top_timeframe"] = (
             top_item.get("timeframe") if top_item else None
         )
-        WATCH_RUNTIME["last_cycle_status"] = "completed"
+        delivery_errors = list(WATCH_RUNTIME.get("last_delivery_errors") or [])
+        WATCH_RUNTIME["last_cycle_status"] = (
+            "completed_with_delivery_errors" if delivery_errors else "completed"
+        )
+        WATCH_RUNTIME["last_cycle_result"] = WATCH_RUNTIME["last_cycle_status"]
+        WATCH_RUNTIME["last_completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        if delivery_errors:
+            failed_symbols = ", ".join(error["symbol"] for error in delivery_errors)
+            WATCH_RUNTIME["last_error"] = f"Magnet delivery incomplete: {failed_symbols}"
+            try:
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=(f"⚠️ מחזור Watch משותף #{cycle_number}: נתוני הסריקה נאספו.\n"
+                          f"שליחת דוחות {failed_symbols} לא הושלמה בוודאות. "
+                          "המשכתי ליתר המטבעות; לא בוצעה שליחה חוזרת של הדוח שנכשל."),
+                )
+            except Exception as exc:
+                print(f"[watch-delivery] summary error={type(exc).__name__}", flush=True)
+        print(f"[watch-cycle] completed scan={watch_scan_id} delivery_errors={len(delivery_errors)}", flush=True)
 
         return {
             "ok": True,
@@ -4881,6 +4914,7 @@ async def run_watch_cycle(
             "sent": len(result_items),
             "combined_sent": len(combined_deliveries) if general_enabled else 0,
             "magnet_sent": magnet_sent,
+            "delivery_errors": delivery_errors,
             "derivatives": derivatives_status,
             "timeframe_integrity": live_result.get("timeframe_integrity"),
         }
@@ -4890,14 +4924,18 @@ async def run_watch_cycle(
         raise
     except Exception as exc:
         WATCH_RUNTIME["last_cycle_status"] = "failed"
+        WATCH_RUNTIME["last_cycle_result"] = "failed"
         WATCH_RUNTIME["last_error"] = repr(exc)
+        stage = WATCH_RUNTIME.get("cycle_stage", "unknown")
+        print(f"[watch-cycle] failed scan={watch_scan_id} stage={stage} error={type(exc).__name__} cause={type(exc.__cause__).__name__}", flush=True)
         try:
             await bot_app.bot.send_message(
                 chat_id=chat_id,
                 text=(
                     f"❌ מחזור Watch משותף #{cycle_number} נכשל\n"
                     f"{exc!r}\n"
-                    f"הלולאה נשארת פעילה ותנסה שוב במועד חצי השעה הבא."
+                    + ("הכשל אירע בשלב שליחת ההודעות.\n" if stage.startswith("sending_") else "הכשל אירע בהכנת נתוני הסריקה.\n")
+                    + "הלולאה נשארת פעילה ותנסה שוב במועד חצי השעה הבא."
                 ),
             )
         except Exception:
@@ -4911,6 +4949,7 @@ async def run_watch_cycle(
         research_event_runtime.reset_watch_context(watch_context_token)
         WATCH_RUNTIME["scan_in_progress"] = False
         WATCH_RUNTIME["scan_owner"] = None
+        WATCH_RUNTIME["cycle_stage"] = None
 
 
 def _watch_consumers_active() -> bool:
@@ -4929,6 +4968,33 @@ def _next_aligned_watch_time(now: Optional[datetime] = None) -> datetime:
     if candidate <= current:
         candidate += timedelta(seconds=interval_seconds)
     return candidate
+
+
+def _claim_watch_slot(slot: datetime) -> bool:
+    """Claim one automatic slot across overlapping Render instances.
+
+    One monotonic settings row is enough; a claimed slot is never replayed
+    after a crash because Telegram may already have accepted its messages.
+    """
+    init_db()
+    value = slot.astimezone(timezone.utc).isoformat(timespec="seconds")
+    sql = (
+        "INSERT INTO bot_settings(key,value) VALUES (?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value "
+        "WHERE bot_settings.value IS NULL OR bot_settings.value < excluded.value "
+        "RETURNING value"
+    )
+    params = ("watch_last_automatic_slot_v1", value)
+    if use_postgres():
+        with psycopg.connect(
+            DATABASE_URL, connect_timeout=5,
+            options="-c statement_timeout=10000 -c lock_timeout=5000",
+        ) as conn:
+            claimed = conn.execute(sql.replace("?", "%s"), params).fetchone() is not None
+    else:
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            claimed = conn.execute(sql, params).fetchone() is not None
+    return claimed
 
 
 def _next_max_pain_archive_schedule(
@@ -5253,7 +5319,9 @@ def _watch_chat_id(fallback: int) -> int:
     return int(fallback)
 
 
-async def watch_loop(bot_app, chat_id: int, top8_only: bool = False):
+async def watch_loop(
+    bot_app, chat_id: int, top8_only: bool = False, *, run_immediately: bool = False,
+):
     """One deadline-anchored coordinator serves regular and Magnet Watch."""
     global WATCH_SCAN_TASK
 
@@ -5266,7 +5334,7 @@ async def watch_loop(bot_app, chat_id: int, top8_only: bool = False):
     try:
         first_cycle = True
         while _watch_consumers_active():
-            if not first_cycle:
+            if not (first_cycle and run_immediately):
                 next_scan = _next_aligned_watch_time()
                 WATCH_RUNTIME["next_scan_utc"] = next_scan.isoformat()
                 WATCH_RUNTIME["last_cycle_status"] = "waiting"
@@ -5277,6 +5345,16 @@ async def watch_loop(bot_app, chat_id: int, top8_only: bool = False):
                 await asyncio.sleep(delay)
                 if not _watch_consumers_active():
                     break
+                try:
+                    claimed = await asyncio.to_thread(_claim_watch_slot, next_scan)
+                except Exception as exc:
+                    WATCH_RUNTIME["last_error"] = f"Watch slot claim: {type(exc).__name__}"
+                    print(f"[watch-schedule] claim failed slot={next_scan.isoformat()} error={type(exc).__name__}", flush=True)
+                    continue
+                if not claimed:
+                    print(f"[watch-schedule] slot already claimed: {next_scan.isoformat()}", flush=True)
+                    continue
+                WATCH_RUNTIME["last_claimed_slot_utc"] = next_scan.isoformat()
 
             WATCH_RUNTIME["last_cycle_status"] = "starting_cycle"
             WATCH_RUNTIME["next_scan_utc"] = datetime.now(
@@ -5326,13 +5404,15 @@ async def watch_loop(bot_app, chat_id: int, top8_only: bool = False):
         print("[watch] loop stopped", flush=True)
 
 
-async def _ensure_watch_coordinator(bot_app, chat_id: int) -> bool:
+async def _ensure_watch_coordinator(
+    bot_app, chat_id: int, *, run_immediately: bool = False,
+) -> bool:
     """Start the one shared coordinator; return True only when newly started."""
     global WATCH_TASK
     if WATCH_TASK is not None and not WATCH_TASK.done():
         return False
     WATCH_TASK = asyncio.create_task(
-        watch_loop(bot_app, chat_id),
+        watch_loop(bot_app, chat_id, run_immediately=run_immediately),
         name="shared-watch-coordinator",
     )
     await asyncio.sleep(0)
@@ -5364,7 +5444,6 @@ async def _watch_supervisor_loop(bot_app) -> None:
                     WATCH_RUNTIME["supervisor_restarts"] = int(
                         WATCH_RUNTIME.get("supervisor_restarts") or 0
                     ) + 1
-                    WATCH_RUNTIME["last_cycle_status"] = "restored_by_supervisor"
                     WATCH_RUNTIME["last_error"] = None
                     print(
                         "[watch] supervisor restored persistent coordinator; "
@@ -5710,7 +5789,7 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _persist_watch_subscriptions()
     try:
         newly_started = await _ensure_watch_coordinator(
-            context.application, chat_id
+            context.application, chat_id, run_immediately=True
         )
     except Exception as error:
         WATCH_RUNTIME["last_cycle_status"] = "supervisor_retry"
@@ -5759,7 +5838,7 @@ async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _persist_watch_subscriptions()
     try:
         newly_started = await _ensure_watch_coordinator(
-            context.application, chat_id
+            context.application, chat_id, run_immediately=True
         )
     except Exception as error:
         WATCH_RUNTIME["last_cycle_status"] = "supervisor_retry"
@@ -5814,7 +5893,7 @@ async def watch_magnet_v1_cmd(
     _persist_watch_subscriptions()
     try:
         newly_started = await _ensure_watch_coordinator(
-            context.application, chat_id
+            context.application, chat_id, run_immediately=True
         )
     except Exception as exc:
         await update.message.reply_text(
@@ -6205,6 +6284,15 @@ async def health(request):
             "last_cycle_status": WATCH_RUNTIME.get("last_cycle_status"),
             "last_scan_utc": WATCH_RUNTIME.get("last_scan_utc"),
             "last_error": WATCH_RUNTIME.get("last_error"),
+            "next_scan_utc": WATCH_RUNTIME.get("next_scan_utc"),
+            "last_claimed_slot_utc": WATCH_RUNTIME.get("last_claimed_slot_utc"),
+            "last_cycle_result": WATCH_RUNTIME.get("last_cycle_result"),
+            "last_completed_at_utc": WATCH_RUNTIME.get("last_completed_at_utc"),
+            "last_delivery_errors": WATCH_RUNTIME.get("last_delivery_errors", []),
+            "cycle_stage": WATCH_RUNTIME.get("cycle_stage"),
+            "interval_minutes": WATCH_INTERVAL_MINUTES,
+            "sync_grace_seconds": WATCH_SYNC_GRACE_SECONDS,
+            "automatic_start_policy": "NEXT_ALIGNED_SLOT_WITH_DURABLE_CLAIM",
         },
         "formula_research": research_formula_worker.WORKER.status(),
         "research_schema": research_schema_status(),
@@ -7310,7 +7398,10 @@ async def main():
         restored_watch = _watch_desired_state()
         print(f"[startup] Watch restore warning: {exc!r}", flush=True)
 
-    bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    bot_app = (
+        ApplicationBuilder().token(TELEGRAM_BOT_TOKEN)
+        .read_timeout(20).write_timeout(20).connect_timeout(10).build()
+    )
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("help", start))
     bot_app.add_handler(CommandHandler("collect", collect_cmd))
