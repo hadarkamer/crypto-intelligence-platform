@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 
-import research_watch_scan_formula as formula
+import research_watch_scan_formula_maxpain as formula
 import research_watch_scan_intake as intake
 
 LOCK_ID = 48260913201211
@@ -105,6 +105,37 @@ def write_result(conn, job, result, *, now):
         (_json(result), now, formula.VERSION, intake.VERSION, job['snapshot_set_id'], job['symbol']))
 
 
+def activate_if_caught_up(conn, *, now):
+    """Switch reports atomically only after complete accepted-source coverage.
+
+    Activation has one explicit predecessor. A retiring process cannot move the
+    active version backwards during a later rolling deployment. The old frozen
+    decisions remain available through the by-version audit views.
+    """
+    row = conn.execute('SELECT active_evaluation_version FROM research_watch_scan_formula_runtime '
+                       'WHERE singleton=true').fetchone()
+    previous = getattr(formula, 'PREVIOUS_VERSION', None)
+    active = row['active_evaluation_version']
+    if active == formula.VERSION or previous is None or active != previous:
+        return {'activated': False, 'active_evaluation_version': active}
+    # The UPDATE's one statement snapshot defines the coverage cutoff. New
+    # observations committed after it are ordinary next-pass work.
+    updated = conn.execute('''UPDATE research_watch_scan_formula_runtime
+        SET active_evaluation_version=%s,activated_at_utc=%s WHERE singleton=true
+        AND active_evaluation_version=%s AND NOT EXISTS (
+            SELECT 1 FROM research_watch_scan_intakes i
+            CROSS JOIN unnest(%s::text[]) coin(symbol)
+            LEFT JOIN research_watch_scan_formula_samples s ON s.evaluation_version=%s
+                AND s.consumer_version=i.consumer_version AND s.snapshot_set_id=i.snapshot_set_id
+                AND s.symbol=coin.symbol
+            WHERE i.consumer_version=%s AND i.intake_status='ACCEPTED'
+                AND s.status IS DISTINCT FROM 'READY'
+        ) RETURNING active_evaluation_version''',
+        (formula.VERSION, now, previous, list(intake.capture.SYMBOLS), formula.VERSION, intake.VERSION)).fetchone()
+    return {'activated': bool(updated),
+            'active_evaluation_version': updated['active_evaluation_version'] if updated else active}
+
+
 def process_page(conn, *, now=None, limit=JOB_LIMIT):
     if type(limit) is not int or not 1 <= limit <= JOB_LIMIT:
         raise ValueError('Invalid Watch formula job budget')
@@ -126,7 +157,7 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
         SELECT consumer_version,population_version,snapshot_set_id,symbol,bundle_sha256,
             parent_payload_sha256,usable_from_utc,observed_at_utc,source_available_at_utc,
             source_created_at_utc,source_version,intake_status,capture_phase,models,sources,
-            source_time_errors FROM research_watch_scan_observations
+            source_time_errors,maxpain_slots FROM research_watch_scan_observations
         WHERE consumer_version=%s AND snapshot_set_id=ANY(%s::bigint[])''', (intake.VERSION, ids)).fetchall()}
     for job in jobs:
         try:
@@ -143,6 +174,7 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
                  formula.VERSION, intake.VERSION, job['snapshot_set_id'], job['symbol']))
             counts['errors'] += 1
         counts['processed'] += 1
+    counts.update(activate_if_caught_up(conn, now=now))
     return counts
 
 
@@ -155,7 +187,8 @@ def schema_ready():
     with intake._connect() as conn:
         return all(conn.execute('SELECT to_regclass(%s) AS relation', ('public.' + name,)).fetchone()['relation']
             for name in ('research_watch_scan_formula_catalog','research_watch_scan_formula_state',
-                         'research_watch_scan_formula_samples','research_watch_scan_formula_comparisons'))
+                         'research_watch_scan_formula_samples','research_watch_scan_formula_comparisons',
+                         'research_watch_scan_formula_runtime'))
 
 
 def run_once():
@@ -173,7 +206,9 @@ class WatchScanFormulaWorker:
                 'population': intake.POPULATION, 'enabled': _enabled(),
                 'running': bool(self._task and not self._task.done()),
                 'max_coins_per_pass': JOB_LIMIT, 'poll_seconds': POLL_SECONDS,
-                'catalog_candidates': 298, 'supported_candidates': 34,
+                'catalog_candidates': getattr(formula, 'CATALOG_SIZE', 298),
+                'supported_candidates': getattr(formula, 'SUPPORTED_COUNT', 34),
+                'active_evaluation_version': (self._metrics.get('last') or {}).get('active_evaluation_version'),
                 'discovery_enabled': False, 'promotion_enabled': False, **self._metrics}
 
     async def start(self):

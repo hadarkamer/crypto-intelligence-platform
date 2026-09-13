@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import research_watch_scan_formula_worker as worker
+import research_watch_scan_formula as legacy_formula
 import research_watch_scan_measurement_worker as measurement_worker
 import research_watch_scan_measurement_postgres_selftest as measurement_tests
 import research_watch_scan_intake as intake
@@ -32,9 +33,15 @@ class WatchScanFormulaPostgresTests(unittest.TestCase):
     seed_wave = measurement_tests.WatchScanMeasurementPostgresTests.seed_wave
 
     def setUp(self):
+        # Keep the original v1 regression suite on its frozen adapter while
+        # production advances to v2. Both versions share the durable engine.
+        legacy_adapter = patch.object(worker, 'formula', legacy_formula)
+        legacy_adapter.start()
+        self.addCleanup(legacy_adapter.stop)
         measurement_tests.WatchScanMeasurementPostgresTests.setUp(self)
         with self.connect() as conn:
             conn.execute((Path(__file__).parent / 'migrations/048_watch_scan_formulas.sql').read_text(), prepare=False)
+            conn.execute((Path(__file__).parent / 'migrations/049_watch_scan_maxpain_formulas.sql').read_text(), prepare=False)
 
     def formula_bundle(self, cycle_id, *, score=70., unknown=(), scores=None):
         rows = inputs()
