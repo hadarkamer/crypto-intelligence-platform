@@ -1,6 +1,7 @@
 """Regression gates for incomplete cohorts, FRESH denominators and idle exports."""
 from datetime import datetime, timezone, timedelta
 import json
+from unittest.mock import patch
 import research_formula_ordered_store as store
 import research_formula_ordered_v7 as evaluator
 from research_formula_ordered_v7_selftest import row as evidence_row, nondecisive_row, AS_OF
@@ -12,6 +13,8 @@ class Capture:
     def execute(self,sql,params):
         self.calls.append((sql,params))
         return self
+    def fetchone(self):
+        return {"present":1}
     def cursor(self):
         return self
     def __enter__(self):
@@ -40,7 +43,8 @@ def run():
     repeated=Capture()
     output=store.persist_scope(repeated,{**scope,'result':stable_summary},[],result,now=now+timedelta(minutes=1))
     assert output=={'episodes':0,'upserts':0}
-    assert len(repeated.calls)==1
+    assert len(repeated.calls)==2
+    assert "WHERE sheet_name=%s AND row_key=%s" in repeated.calls[-1][0]
     incomplete=Capture()
     broken={**result,'independent_waves':5,'source_population_complete':False,'count_eligible':False,'count_route':'INCOMPLETE_DECISION_POPULATION'}
     store.persist_scope(incomplete,scope,[],broken,now=now)
@@ -66,17 +70,31 @@ def run():
     exported=Capture()
     store.persist_scope(exported,{**scope,'threshold_bps':50},states,audited,now=AS_OF)
     payloads=[json.loads(params[2]) for sql,params in exported.calls if 'INSERT INTO research_sheet_upsert_outbox' in sql]
-    formula=next(payload['row'] for payload in payloads if payload['sheet']=='Formula_Results')
+    formula=next(payload['row'] for payload in payloads if payload['sheet']=='Formula_Current')
     assert formula['open_episodes']==1 and audited['excluded_waves']==4
     assert formula['successes']==formula['failures']==1
     assert formula['independent_episodes']==2 and formula['hit_rate']==50
     for status in evaluator.WAVE_STATUSES:
         assert f'"{status}":1' in formula['chat_summary']
-    episodes=[payload['row'] for payload in payloads if payload['sheet']=='Episodes']
-    assert {episode['result'] for episode in episodes}==set(evaluator.WAVE_STATUSES)
+    assert not any(payload['sheet'] in ('Episodes','Formula_Results') for payload in payloads)
+    episodes=[json.loads(params[4]) for sql,params in exported.calls
+              if 'INSERT INTO research_ordered_formula_episodes' in sql]
+    assert {episode['status'] for episode in episodes}==set(evaluator.WAVE_STATUSES)
     assert len(episodes)==6
-    ambiguous=next(episode for episode in episodes if episode['result']=='AMBIGUOUS')
-    assert json.loads(ambiguous['audit_note'])['representative_outcome_statuses'][0]['source_status']=='UNRESOLVED'
+    ambiguous=next(episode for episode in episodes if episode['status']=='AMBIGUOUS')
+    assert ambiguous['representative_outcome_statuses'][0]['source_status']=='UNRESOLVED'
+    # Holding publication must not discard research, either for coin scopes
+    # outside the summary or when the frozen publication contract changes.
+    for held_scope, overrides in (({**scope,'symbol':'BTC'}, {}),
+                                 (scope, {'compatible':False})):
+        held=Capture()
+        with patch.object(store.publication,'catalog_contract',
+                          return_value=overrides or store.publication.catalog_contract()):
+            counts=store.persist_scope(held,held_scope,states,audited,now=AS_OF)
+        assert counts['episodes']==6 and counts['upserts']==0
+        assert sum('INSERT INTO research_ordered_formula_episodes' in sql for sql,_ in held.calls)==6
+        assert any('INSERT INTO research_ordered_formula_trials' in sql for sql,_ in held.calls)
+        assert not any('INSERT INTO research_sheet_upsert_outbox' in sql for sql,_ in held.calls)
     print('ordered Formula store: separated wave statuses, FRESH denominator, stable generation, incomplete cohort gates PASS')
 
 

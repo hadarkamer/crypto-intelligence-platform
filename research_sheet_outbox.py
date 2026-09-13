@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping
 import google_sheets_sync
+import research_sheet_publication as publication
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -21,8 +22,7 @@ _SHEET_ROTATION = (
     'MaxPain_TF',
     'Snapshots',
     'תצוגת לייב',
-    'Episodes',
-    'Formula_Results',
+    publication.SHEET,
 )
 _WAVE_REPORT_SHEET = 'MaxPain_Wave_Live'
 _SOURCE_TIMESTAMP = re.compile(
@@ -58,6 +58,7 @@ def _row_source_time(item: Mapping[str, Any]) -> datetime | None:
         'MaxPain_TF': 'timestamp_utc',
         'Episodes': 'opened_at_utc',
         'Formula_Results': 'last_evaluated_at',
+        publication.SHEET: 'last_evaluated_at',
         'MaxPain_Wave_Live': 'last_evaluated_at',
     }.get(str(item['sheet']))
     return _source_time(item['row'].get(field)) if field else None
@@ -73,6 +74,13 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
     for raw in upserts:
         item = dict(raw)
         sheet = str(item['sheet'])
+        if sheet in publication.LEGACY_SHEETS:
+            continue
+        if sheet == publication.SHEET:
+            projected = publication.project_formula_row(item['row'])
+            if projected is None or item.get('key') != publication.KEY:
+                continue
+            item = projected
         columns = [name.strip() for name in str(item['key']).split(',')]
         row = item['row']
         if any(row.get(name) in (None, '') for name in columns):
@@ -103,7 +111,7 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
     source_times = [
         (sheet, row_key, _row_source_time(json.loads(record[2])))
         for (sheet, row_key), record in records.items()
-        if sheet in {'MaxPain_TF', 'MaxPain_Wave_Live'}
+        if sheet in {'MaxPain_TF', 'MaxPain_Wave_Live', publication.SHEET}
     ]
     if source_times:
         values_sql = ','.join(['(%s,%s,%s::timestamptz)'] * len(source_times))
@@ -122,24 +130,27 @@ def _connect(url: str):
                            options='-c statement_timeout=15000 -c lock_timeout=1000')
 
 
-def _claim_lane(conn: Any, *, count: int, token: str, sheet: str | None,
-                recent: bool, exclude_sheet: str | None = None) -> list[Mapping[str, Any]]:
+def _claim_lane(conn: Any, *, count: int, token: str, sheet: str,
+                recent: bool) -> list[Mapping[str, Any]]:
     if count <= 0:
         return []
-    sheet_filter = 'AND sheet_name=%s' if sheet is not None else ''
-    exclusion_filter = 'AND sheet_name<>%s' if exclude_sheet is not None else ''
+    # Every query uses a leading indexed sheet key. In particular, an empty
+    # live lane must never scan hundreds of thousands of held legacy rows.
+    if sheet not in (*_SHEET_ROTATION, _WAVE_REPORT_SHEET):
+        return []
+    if sheet == publication.SHEET and not publication.catalog_contract()['compatible']:
+        return []
     source_filter = 'AND source_time_utc IS NOT NULL' if recent else ''
     order = ('source_time_utc DESC, next_attempt_at_utc, created_at_utc, row_key'
              if recent else 'next_attempt_at_utc, created_at_utc, row_key')
-    params = (*((sheet,) if sheet is not None else ()),
-              *((exclude_sheet,) if exclude_sheet is not None else ()),count,token)
+    params = (sheet,count,token)
     return conn.execute(f'''
         WITH due AS (
             SELECT sheet_name,row_key FROM research_sheet_upsert_outbox
             WHERE sync_status IN ('PENDING','RETRY','IN_FLIGHT')
               AND ((sync_status IN ('PENDING','RETRY') AND next_attempt_at_utc <= NOW())
                 OR (sync_status='IN_FLIGHT' AND lease_expires_at_utc < NOW()))
-              {sheet_filter} {exclusion_filter} {source_filter}
+              AND sheet_name=%s {source_filter}
             ORDER BY {order}
             FOR UPDATE SKIP LOCKED LIMIT %s
         )
@@ -179,22 +190,22 @@ def _claim_batch(conn: Any, count: int, token: str) -> list[Mapping[str, Any]]:
     if len(rows) < count:
         rows += _claim_lane(conn, count=count-len(rows), token=token,
                             sheet=preferred_sheet, recent=False)
-    # Empty preferred sheets do not waste capacity; the next turn still rotates.
-    # A reserved ordinary turn must check *all* ordinary work before returning
-    # to the report: an empty preferred tab cannot give its guarantee away to
-    # older report rows while another ordinary tab has a due backlog.
-    if len(rows) < count and slot % 4 == 3:
-        rows += _claim_lane(conn,count=count-len(rows),token=token,
-                            sheet=None,recent=False,exclude_sheet=_WAVE_REPORT_SHEET)
-    if len(rows) < count:
+    # Bounded indexed fallbacks replace the former global pending-row scan.
+    # Ordinary turns preserve their guarantee before borrowing report work.
+    start = _SHEET_ROTATION.index(preferred_sheet)
+    fallback = _SHEET_ROTATION[start+1:] + _SHEET_ROTATION[:start]
+    for other_sheet in (*fallback, _WAVE_REPORT_SHEET):
+        if len(rows) >= count:
+            break
         rows += _claim_lane(conn, count=count-len(rows), token=token,
-                            sheet=None, recent=False)
+                            sheet=other_sheet, recent=False)
     return rows
 
 
 def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float = 45) -> dict[str, Any]:
     """Acknowledge only a claimed exact generation, never while holding a txn."""
-    summary = {'claimed': 0, 'synced': 0, 'failed': 0, 'locked': False}
+    summary = {'claimed': 0, 'synced': 0, 'failed': 0, 'locked': False,
+               'publication': publication.status()}
     if not google_sheets_sync.enabled() or not database_url or psycopg is None:
         return summary
     deadline = time.monotonic() + max(1.0, float(max_seconds))

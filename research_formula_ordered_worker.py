@@ -59,6 +59,7 @@ class ResearchFormulaOrderedWorker:
             'research_scope':'Versioned Q01-Q72 captured-feature queue; normal/inverse; finite singles/pairs/justified triples/quads; original delivered-alert wave cohorts',
             'question_map_count':len(questions.question_map()),'feature_version':questions.VERSION,
             'live_effect':'NONE','remaining_validation':'New v3 freezes use an exactly bound acceptance policy; later genuine BTC waves and complete captured features are required. A separate authorized experimental notification worker never executes trades.',
+            'sheet_publication':store.publication.status(),
             'metrics':dict(self.metrics)}
 
     async def start(self)->bool:
@@ -179,6 +180,7 @@ class ResearchFormulaOrderedWorker:
                         or (scope.get('result') or {}).get('research_ready')))
                     if scope.get('evaluation_input_sha256')==input_sha and not refresh_qualification:
                         conn.execute('UPDATE research_ordered_formula_scopes SET last_evaluated_at_utc=%s WHERE scope_key=%s',(now,scope['scope_key']))
+                        summary['upserts']+=store.publication.seed_missing_scope(conn,scope,store.scope_formula_version(scope))
                         conn.commit()
                         summary['unchanged_scopes_skipped']+=1
                         continue

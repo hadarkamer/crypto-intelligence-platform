@@ -1,7 +1,10 @@
 """Network-free HTTP boundary checks: no false ACK, bounded/safe diagnostics."""
 import contextlib
 from email.message import Message
+import hashlib
+import hmac
 import io
+import json
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -42,6 +45,7 @@ class TransportTest(unittest.TestCase):
             patch.object(sync, "_ORDERED_BATCH_FALLBACK", False),
             patch.object(sync, "_LAST_HTTP_DIAGNOSTIC", None),
             patch.object(sync, "_DURABLE_SNAPSHOT_MODE", False),
+            patch.object(sync, "_ACK_MODE", "json"),
         ]
         for item in self.patches:
             item.start()
@@ -112,6 +116,180 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(sync.ordered_outcome_batch_limit(), 1)
         self.assertTrue(self.send(Response(b'{"ok":true,"version":"sheets-batch-v3"}'))[0])
         self.assertEqual(sync.ordered_outcome_batch_limit(), 8)
+
+
+class HTMLTransportTest(unittest.TestCase):
+    setUp = TransportTest.setUp
+    send = TransportTest.send
+
+    def signed_response(self, request, *, raw_request=None, transform=None, **kwargs):
+        raw_request = request.data if raw_request is None else raw_request
+        signature = hmac.new(b"REQUEST_SECRET", b"sheets-ack-v1\n" + raw_request,
+                             hashlib.sha256).hexdigest()
+        title = "sheets-ack-v1:" + signature
+        body = ("<!DOCTYPE html><html><head><title>" + title +
+                "</title></head><body><script>var x = '<title>ignored</title>';</script>" +
+                "<iframe src='https://script.googleusercontent.com/ignored'></iframe></body></html>").encode()
+        if transform:
+            body = transform(body, title)
+        return Response(body, **dict({"url": "https://script.google.com/macros/s/test/exec",
+                                     "content_type": "text/html; charset=utf-8"}, **kwargs))
+
+    def test_signed_ack_covers_exact_unicode_body_and_preserves_payload(self):
+        sync._ACK_MODE = "html_ack_v1"
+        self.payload["upserts"] = [{"sheet": "תצוגת לייב", "row": {"symbol": "BTC", "value": "בדיקה"}}]
+        original_payload = json.dumps(self.payload, ensure_ascii=False)
+        captured = []
+
+        def reply(request, **kwargs):
+            captured.append(request.data)
+            envelope = json.loads(request.data)
+            self.assertEqual(envelope["response_mode"], "html_ack_v1")
+            self.assertRegex(envelope["ack_nonce"], r"^[a-f0-9]{32}$")
+            self.assertEqual(envelope["payload"], self.payload)
+            return self.signed_response(request)
+
+        self.assertTrue(self.send(error=reply)[0])
+        self.assertEqual(json.dumps(self.payload, ensure_ascii=False), original_payload)
+        self.assertEqual(sync.ordered_outcome_batch_limit(), 8)
+        self.assertEqual(sync.status()["ack_mode"], "html_ack_v1")
+        diagnostic = sync.status()["last_http_diagnostic"]
+        self.assertEqual(diagnostic["ack_mode"], "html_ack_v1")
+        self.assertEqual(diagnostic["outcome"], "CONFIRMED")
+        self.assertNotIn(json.loads(captured[0])["ack_nonce"], repr(diagnostic))
+
+    def test_earlier_ack_cannot_confirm_later_request_or_modified_payload(self):
+        sync._ACK_MODE = "html_ack_v1"
+        old_request = []
+
+        def first(request, **kwargs):
+            old_request.append(request.data)
+            return self.signed_response(request)
+
+        self.assertTrue(self.send(error=first)[0])
+        self.payload["upserts"] = [{"sheet": "Snapshots", "row": {"snapshot_id": "next-generation"}}]
+
+        def replay(request, **kwargs):
+            self.assertNotEqual(json.loads(request.data)["ack_nonce"], json.loads(old_request[0])["ack_nonce"])
+            return self.signed_response(request, raw_request=old_request[0])
+
+        self.assertFalse(self.send(error=replay)[0])
+        self.assertEqual(sync.status()["last_http_diagnostic"]["outcome"], "INVALID_HTML_ACK")
+        self.assertEqual(sync.ordered_outcome_batch_limit(), 1)
+
+    def test_each_retry_has_fresh_nonce_and_rejects_prior_attempt_signature(self):
+        sync._ACK_MODE = "html_ack_v1"
+        bodies = []
+
+        def reply(request, **kwargs):
+            bodies.append(request.data)
+            if len(bodies) == 1:
+                raise TimeoutError("PRIVATE")
+            return self.signed_response(request, raw_request=bodies[0])
+
+        with patch.object(sync, "urlopen", side_effect=reply), patch.object(sync.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+            result = sync._deliver_envelope({"secret": "REQUEST_SECRET", "payload": self.payload}, attempts=2)
+        self.assertFalse(result)
+        self.assertEqual(len(bodies), 2)
+        self.assertNotEqual(json.loads(bodies[0])["ack_nonce"], json.loads(bodies[1])["ack_nonce"])
+
+    def test_html_status_host_and_mime_must_all_match(self):
+        sync._ACK_MODE = "html_ack_v1"
+        for changes, expected in [
+            ({"status": 201}, "INVALID_ACK_STATUS"),
+            ({"status": 404}, "INVALID_ACK_STATUS"),
+            ({"url": "https://accounts.google.com/ServiceLogin"}, "INVALID_ACK_HOST"),
+            ({"url": "https://script.google.com.evil.invalid/"}, "INVALID_ACK_HOST"),
+            ({"url": "http://script.google.com/"}, "INVALID_ACK_HOST"),
+            ({"url": "https://script.google.com:8443/"}, "INVALID_ACK_HOST"),
+            ({"url": "https://user@script.google.com/"}, "INVALID_ACK_HOST"),
+            ({"content_type": "application/json"}, "INVALID_ACK_CONTENT_TYPE"),
+            ({"content_type": "text/plain"}, "INVALID_ACK_CONTENT_TYPE"),
+        ]:
+            with self.subTest(changes=changes):
+                self.assertFalse(self.send(error=lambda request, **kw: self.signed_response(request, **changes))[0])
+                self.assertEqual(sync.status()["last_http_diagnostic"]["outcome"], expected)
+                self.assertIsNone(sync._RECEIVER_VERSION)
+
+    def test_html_must_contain_exactly_one_complete_valid_title(self):
+        sync._ACK_MODE = "html_ack_v1"
+        for transform in [
+            lambda body, title: b"",
+            lambda body, title: b"\xff",
+            lambda body, title: b"<html><title>Sign in</title></html>",
+            lambda body, title: body.replace(title.encode(), b"sheets-ack-v1:" + b"0" * 64),
+            lambda body, title: body + ("<title>" + title + "</title>").encode(),
+            lambda body, title: ("<title>" + title).encode(),
+            lambda body, title: ("<title>" + title + "<b></b></title>").encode(),
+            lambda body, title: ("<title>" + title + "<?ignored?></title>").encode(),
+            lambda body, title: ("<script>var title='<title>" + title + "</title>';</script>").encode(),
+            lambda body, title: ("<body>" + title + "</body>").encode(),
+            lambda body, title: ("<title> " + title + " </title>").encode(),
+            lambda body, title: b'{"ok":true,"version":"sheets-batch-v3"}',
+        ]:
+            with self.subTest(transform=transform):
+                self.assertFalse(self.send(error=lambda request, **kw: self.signed_response(request, transform=transform))[0])
+                self.assertEqual(sync.status()["last_http_diagnostic"]["outcome"], "INVALID_HTML_ACK")
+                self.assertIsNone(sync._RECEIVER_VERSION)
+
+    def test_oversized_response_rejected_before_ack_and_json_never_falls_back(self):
+        sync._ACK_MODE = "html_ack_v1"
+        oversized = lambda body, title: body + b"x" * sync._ACK_RESPONSE_MAX_BYTES
+        self.assertFalse(self.send(error=lambda request, **kw: self.signed_response(request, transform=oversized))[0])
+        self.assertEqual(sync.status()["last_http_diagnostic"]["outcome"], "RESPONSE_TOO_LARGE")
+        self.assertFalse(self.send(Response(b'{"ok":true,"version":"sheets-batch-v3"}'))[0])
+        self.assertEqual(sync.status()["last_http_diagnostic"]["outcome"], "INVALID_ACK_CONTENT_TYPE")
+        self.assertIsNone(sync._RECEIVER_VERSION)
+
+    def test_json_rollback_removes_html_fields_and_bad_mode_never_posts(self):
+        envelope = {"secret": "REQUEST_SECRET", "payload": self.payload,
+                    "response_mode": "html_ack_v1", "ack_nonce": "0" * 32}
+
+        def reply(request, **kwargs):
+            actual = json.loads(request.data)
+            self.assertNotIn("response_mode", actual)
+            self.assertNotIn("ack_nonce", actual)
+            return Response(b'{"ok":true}')
+
+        with patch.object(sync, "urlopen", side_effect=reply), contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(sync._deliver_envelope(envelope, attempts=1))
+        sync._ACK_MODE = "unsupported"
+        with patch.object(sync, "urlopen") as http, contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(sync._deliver_envelope(envelope, attempts=1))
+        http.assert_not_called()
+        self.assertEqual(sync.status()["last_http_diagnostic"]["outcome"], "INVALID_ACK_MODE")
+
+    def test_audit_response_keeps_json_contract_even_when_html_mode_is_enabled(self):
+        sync._ACK_MODE = "html_ack_v1"
+
+        def reply(request, **kwargs):
+            envelope = json.loads(request.data)
+            self.assertNotIn("response_mode", envelope)
+            self.assertNotIn("ack_nonce", envelope)
+            self.assertEqual(envelope["payload"]["kind"], "telegram_event_audit_page")
+            return Response(b'{"ok":true,"version":"sheets-batch-v3","audit":{"rows":[]}}')
+
+        with patch.object(sync, "urlopen", side_effect=reply) as http:
+            self.assertEqual(sync.read_telegram_audit_page(start_row=2, last_row=5), {"rows": []})
+        self.assertEqual(http.call_count, 1)
+
+    def test_capacity_json_exposes_only_allowlisted_error_and_never_acks(self):
+        sync._ACK_MODE = "html_ack_v1"
+        for ok, code, expected in [
+            (False, "WORKBOOK_CAPACITY", "WORKBOOK_CAPACITY"),
+            (False, "SHEET_CAPACITY", "SHEET_CAPACITY"),
+            (False, "PRIVATE", None),
+            (False, ["WORKBOOK_CAPACITY"], None),
+            (True, "WORKBOOK_CAPACITY", None),
+            (0, "WORKBOOK_CAPACITY", None),
+        ]:
+            with self.subTest(ok=ok, code=code):
+                raw = json.dumps({"ok": ok, "error_code": code, "error": "PRIVATE"}).encode()
+                self.assertFalse(self.send(Response(raw))[0])
+                diagnostic = sync.status()["last_http_diagnostic"]
+                self.assertEqual(diagnostic.get("receiver_error_code"), expected)
+                self.assertNotIn("PRIVATE", repr(diagnostic))
+                self.assertIsNone(sync._RECEIVER_VERSION)
 
 
 if __name__ == "__main__":

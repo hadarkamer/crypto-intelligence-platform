@@ -149,7 +149,7 @@ class DeliveryFairnessTests(unittest.TestCase):
 
         with patch.object(sync, "enabled", return_value=True), patch.object(
             sync, "_WEBHOOK_URL", "https://example.invalid/local-only"
-        ), patch.object(sync, "urlopen", return_value=Response()) as http:
+        ), patch.object(sync, "_ACK_MODE", "json"), patch.object(sync, "urlopen", return_value=Response()) as http:
             with sync.delivery_slot() as acquired:
                 self.assertTrue(acquired)
                 with sync.delivery_slot(wait_seconds=0) as nested:
