@@ -8,7 +8,7 @@ touch of a frozen favorable width with zero dwell and conservative pre-touch
 MAE.  The v6 rows remain database-only audit evidence.  Additive v7 labels
 instead compare symmetric favorable/adverse barriers at all eight fixed widths
 over 1h, 4h, 12h and 24h, and use a transactional outbox for their Sheets
-mirror.  Eligible delivered Alerts and authorized prospective Decision Samples
+current detail view. Eligible delivered Alerts and authorized prospective Decision Samples
 that match a Shadow formula are polled while their relevant horizon is still
 open, so a verified first touch can be frozen without waiting for the horizon
 to close. Current prospective Shadow labels require the exact decision-time
@@ -44,6 +44,7 @@ except Exception:  # pragma: no cover
 import binance_spot_price_path
 import canonical_price_path
 import google_sheets_sync
+import research_outcome_publication
 import research_feature_matrix
 import research_no_dwell_outcome
 import research_ordered_first_touch
@@ -1103,7 +1104,8 @@ class ResearchOutcomeWorker:
                 "same_candle_both": "UNRESOLVED/AMBIGUOUS",
                 "closed_without_touch": "UNRESOLVED/NONE",
                 "incomplete_path": "DATA_MISSING/NONE",
-                "workbook_export": "v7_only_via_durable_outbox",
+                "workbook_export": "bounded_current_details_via_generic_durable_outbox",
+                "sheet_publication": research_outcome_publication.status(),
                 "legacy_v6_workbook_export": "disabled",
             },
             "price_paths": {
@@ -2180,103 +2182,9 @@ class ResearchOutcomeWorker:
             outcome=normalized,
             quality=quality,
         )
-        payload = {"sheet": "Outcomes", "key": "outcome_id", "row": row}
-        serialized_payload = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        payload_sha256 = hashlib.sha256(
-            serialized_payload.encode("utf-8")
-        ).hexdigest()
-        conn.execute(
-            """
-            INSERT INTO research_ordered_first_touch_sync_outbox (
-                event_id, window_minutes, threshold_bps, method_version,
-                remote_row_key, payload, payload_sha256
-            ) VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
-            ON CONFLICT (
-                event_id, window_minutes, threshold_bps, method_version,
-                destination
-            ) DO UPDATE SET
-                remote_row_key=EXCLUDED.remote_row_key,
-                payload=EXCLUDED.payload,
-                payload_sha256=EXCLUDED.payload_sha256,
-                sync_status=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.sync_status
-                    ELSE 'PENDING'
-                END,
-                attempts=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.attempts
-                    ELSE 0
-                END,
-                next_attempt_at_utc=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.next_attempt_at_utc
-                    ELSE NOW()
-                END,
-                last_attempt_at_utc=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.last_attempt_at_utc
-                    ELSE NULL
-                END,
-                claim_token=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.claim_token
-                    ELSE NULL
-                END,
-                claimed_at_utc=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.claimed_at_utc
-                    ELSE NULL
-                END,
-                lease_expires_at_utc=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.lease_expires_at_utc
-                    ELSE NULL
-                END,
-                claimed_payload_sha256=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.claimed_payload_sha256
-                    ELSE NULL
-                END,
-                synced_at_utc=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.synced_at_utc
-                    ELSE NULL
-                END,
-                last_error=CASE
-                    WHEN research_ordered_first_touch_sync_outbox.payload_sha256
-                            = EXCLUDED.payload_sha256
-                    THEN research_ordered_first_touch_sync_outbox.last_error
-                    ELSE NULL
-                END,
-                updated_at_utc=NOW()
-            """,
-            (
-                int(event["event_id"]),
-                int(window_minutes),
-                int(normalized["threshold_bps"]),
-                _ORDERED_FIRST_TOUCH_METHOD_VERSION,
-                row["outcome_id"],
-                serialized_payload,
-                payload_sha256,
-            ),
-        )
+        # Canonical persistence above remains complete. Only a finite latest-
+        # evaluated detail slot is published; historical queue rows are held.
+        research_outcome_publication.stage(conn,event,row)
         return True
 
     @staticmethod
@@ -2544,84 +2452,14 @@ class ResearchOutcomeWorker:
                     self.metrics.ordered_first_touch_sync_latest_event_id = event_id
 
     def _drain_ordered_first_touch_outbox(self, url: str) -> Dict[str, int]:
-        """Drain the pass budget through small, independently leased requests.
+        """The legacy full-history mirror is retained, not automatically drained.
 
-        Older Sheet receivers update each row separately. Claim at most eight
-        rows just before each request, falling back to one after an unconfirmed
-        request until the improved batch receiver confirms its version. Each
-        acknowledgement is saved before the next lease.
-        Stop starting requests once the elapsed-time budget is exhausted;
-        the active request is always acknowledged before returning.  This
-        keeps one-row compatibility mode from delaying the next compute pass
-        for as many as 128 sequential HTTP requests.
+        Current slots are staged atomically with their canonical outcome and
+        delivered by the shared generic sender. Do not claim old rows or poll
+        recovery delivery checkpoints that cannot fit the historical sheet.
         """
-        summary = {"claimed": 0, "synced": 0, "failed": 0}
-        if not google_sheets_sync.enabled():
-            return summary
-        with google_sheets_sync.delivery_slot() as acquired:
-            if not acquired:
-                return summary
-            deadline = time.monotonic() + _ORDERED_FIRST_TOUCH_OUTBOX_SECONDS
-            while summary["claimed"] < _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT:
-                if summary["claimed"] and time.monotonic() >= deadline:
-                    break
-                request_limit = min(
-                    google_sheets_sync.ordered_outcome_batch_limit(),
-                    _ORDERED_FIRST_TOUCH_OUTBOX_LIMIT - summary["claimed"],
-                )
-                with psycopg.connect(
-                    url,
-                    row_factory=dict_row,
-                    connect_timeout=5,
-                    options="-c statement_timeout=15000 -c lock_timeout=1000",
-                ) as conn:
-                    claimed=[]
-                    recovery_ready=research_ordered_outcome_recovery_store.available(conn)
-                    if recovery_ready:
-                        requested_ids=research_ordered_outcome_recovery_store.delivery_ids(conn)
-                        if requested_ids:
-                            claimed=self._claim_ordered_first_touch_lane(conn,
-                                research_ordered_outcome_recovery_store.delivery_budget(conn,request_limit),
-                                recent=False,event_ids=requested_ids)
-                    if len(claimed)<request_limit:
-                        claimed+=self._claim_ordered_first_touch_outbox(conn,request_limit-len(claimed))
-                if not claimed:
-                    break
-                summary["claimed"] += len(claimed)
-                payloads = [dict(_mapping(row.get("payload"))) for row in claimed]
-                delivered = google_sheets_sync.deliver_now(
-                    {
-                        "kind": "ordered_first_touch_outcomes",
-                        "upserts": payloads,
-                    },
-                    attempts=1,
-                )
-                with psycopg.connect(
-                    url,
-                    row_factory=dict_row,
-                    connect_timeout=5,
-                    options="-c statement_timeout=15000 -c lock_timeout=1000",
-                ) as conn:
-                    finished = self._finish_ordered_first_touch_outbox(
-                        conn,
-                        claimed,
-                        delivered=delivered,
-                        error=(
-                            None
-                            if delivered
-                            else "Google Sheets webhook did not confirm delivery"
-                        ),
-                    )
-                    if recovery_ready and delivered:
-                        research_ordered_outcome_recovery_store.delivery_ids(conn)
-                summary["synced" if delivered else "failed"] += finished
-                if delivered and finished == len(claimed):
-                    self._record_ordered_sync_freshness(claimed)
-                if not delivered:
-                    # The durable queue schedules the failed generation's retry.
-                    # Do not lease later rows while the receiver is struggling.
-                    break
-        return summary
+        return {"claimed":0,"synced":0,"failed":0,
+                "publication":research_outcome_publication.status()}
 
     def _run_ordered_first_touch_locked(
         self, url: str, *, event_limit: int

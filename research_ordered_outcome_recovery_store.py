@@ -206,8 +206,10 @@ def finish_success(conn, event: Mapping, *, now: datetime) -> str | None:
     error='Canonical 32-label / 4-window coverage is incomplete' if state=='RETRY' else None
     next_attempt = (next_open_refresh_at(event['alert_time_utc'],now) if state=='OPEN'
         else utc(now)+timedelta(minutes=RETRY_MINUTES))
+    # Legacy sheet_pending obligations remain unchanged; this recovery now
+    # feeds bounded current details, not another full32-label mirror request.
     row=conn.execute("""UPDATE research_ordered_outcome_recovery SET status=%s,
-        attempts=attempts+1,last_error=%s,sheet_pending=TRUE,
+        attempts=attempts+1,last_error=%s,
         refreshed_through_utc=CASE WHEN %s IN ('OPEN','COMPLETE') THEN %s ELSE refreshed_through_utc END,
         next_attempt_at_utc=%s,updated_at_utc=NOW()
         WHERE event_id=%s AND requested_through_utc=%s RETURNING event_id""",

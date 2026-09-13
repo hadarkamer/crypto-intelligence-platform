@@ -173,7 +173,8 @@ def run():
     assert db.labels[(9001,60,25)]['status']=='SUCCESS'
     assert db.labels[(9001,60,50)]['status']=='UNRESOLVED'
     assert db.labels[(9001,60,25)]['favorable_touch_price']==99.75
-    assert len(db.sheet_payloads)==32 and all(p['row']['event_id']=='9001' for p in db.sheet_payloads)
+    assert db.sheet_payloads==[], 'Derived decision samples stay canonical and outside the delivered-alert current view'
+    assert len(db.labels)==32
     assert store.outcome_event_ids(db,[7])=={7:9001}
     found=store.load_inverse_outcomes(db,[7],60,25)
     assert set(found)=={7} and found[7]['outcome_event_id']==9001
