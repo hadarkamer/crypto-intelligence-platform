@@ -1,0 +1,215 @@
+{
+  "ci_conclusion": "success",
+  "ci_job_id": 103724165460,
+  "ci_postgres_tests": 9,
+  "ci_run_id": 34757446417,
+  "deploy_finished_at_utc": "2026-09-13T12:37:52.280145Z",
+  "deploy_id": "dep-daj9hltckfvc739k0v90",
+  "deploy_status": "live",
+  "head_sha": "1202fbd227e72c1e490338a75aa4cf27eb099bd7",
+  "local_selftest_files": 108,
+  "merge_sha": "8042759a330c655e6bc86f404ea7b3886e9972d6",
+  "postdeploy_table_counts": {
+    "batches": 0,
+    "intents": 0,
+    "last_automatic_slot": "2026-09-13T12:32:15+00:00",
+    "scopes": 0
+  },
+  "prior_fix_natural_cycle": {
+    "completed_at_utc": "2026-09-13T12:36:12.572966986Z",
+    "delivery_counts": [
+      {
+        "delivery_status": "DELIVERED",
+        "event_type": "COMBINED_CONFIRMATION",
+        "first_created_at": "2026-09-13T12:35:57.83403Z",
+        "last_created_at": "2026-09-13T12:35:58.132304Z",
+        "n": 2,
+        "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+      },
+      {
+        "delivery_status": "DELIVERED",
+        "event_type": "FUTURES_CVD_HIGH",
+        "first_created_at": "2026-09-13T12:35:57.580864Z",
+        "last_created_at": "2026-09-13T12:35:57.580864Z",
+        "n": 1,
+        "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+      },
+      {
+        "delivery_status": "DELIVERED",
+        "event_type": "MAGNET_ALERT",
+        "first_created_at": "2026-09-13T12:35:59.947726Z",
+        "last_created_at": "2026-09-13T12:36:11.257178Z",
+        "n": 31,
+        "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+      },
+      {
+        "delivery_status": "DELIVERED",
+        "event_type": "MAX_PAIN_ALERT",
+        "first_created_at": "2026-09-13T12:35:50.087444Z",
+        "last_created_at": "2026-09-13T12:35:51.355644Z",
+        "n": 5,
+        "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+      },
+      {
+        "delivery_status": "DELIVERED",
+        "event_type": "MAX_PAIN_SCORE_65",
+        "first_created_at": "2026-09-13T12:35:57.580864Z",
+        "last_created_at": "2026-09-13T12:35:57.580864Z",
+        "n": 12,
+        "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+      },
+      {
+        "delivery_status": "DELIVERED",
+        "event_type": "SPOT_CVD_HIGH",
+        "first_created_at": "2026-09-13T12:35:57.580864Z",
+        "last_created_at": "2026-09-13T12:35:57.580864Z",
+        "n": 10,
+        "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+      }
+    ],
+    "delivery_errors": 0,
+    "magnet_symbols": {
+      "magnet_symbols": 8,
+      "symbols": [
+        "BNB",
+        "BTC",
+        "DOGE",
+        "ETH",
+        "HYPE",
+        "SOL",
+        "XRP",
+        "ZEC"
+      ]
+    },
+    "operational_score_status": "COMPLETE",
+    "operational_scores": {
+      "coins": 8,
+      "mp65_observations": 112
+    },
+    "raw_rows": 350,
+    "raw_snapshot_set_id": 1234,
+    "signal_ready_at_utc": "2026-09-13T12:35:48.946417+00:00",
+    "source_cvd_by_symbol": {
+      "BNB": {
+        "cvd_observed_at_utc": "2026-09-13T12:34:40.259063+00:00",
+        "futures_source_close_at_utc": "2026-09-13T12:30:00+00:00",
+        "spot_source_close_at_utc": "2026-09-13T12:30:00+00:00"
+      },
+      "BTC": {
+        "cvd_observed_at_utc": "2026-09-13T12:34:47.571208+00:00",
+        "futures_source_close_at_utc": "2026-09-13T12:30:00+00:00",
+        "spot_source_close_at_utc": "2026-09-13T12:30:00+00:00"
+      },
+      "DOGE": {
+        "cvd_observed_at_utc": "2026-09-13T12:34:54.828196+00:00",
+        "futures_source_close_at_utc": "2026-09-13T12:30:00+00:00",
+        "spot_source_close_at_utc": "2026-09-13T12:30:00+00:00"
+      },
+      "ETH": {
+        "cvd_observed_at_utc": "2026-09-13T12:35:05.203724+00:00",
+        "futures_source_close_at_utc": "2026-09-13T12:30:00+00:00",
+        "spot_source_close_at_utc": "2026-09-13T12:30:00+00:00"
+      },
+      "HYPE": {
+        "cvd_observed_at_utc": "2026-09-13T12:35:16.354702+00:00",
+        "futures_source_close_at_utc": "2026-09-13T12:30:00+00:00",
+        "spot_source_close_at_utc": "2026-09-13T12:30:00+00:00"
+      },
+      "SOL": {
+        "cvd_observed_at_utc": "2026-09-13T12:35:27.069105+00:00",
+        "futures_source_close_at_utc": "2026-09-13T12:30:00+00:00",
+        "spot_source_close_at_utc": "2026-09-13T12:30:00+00:00"
+      },
+      "XRP": {
+        "cvd_observed_at_utc": "2026-09-13T12:35:40.748517+00:00",
+        "futures_source_close_at_utc": "2026-09-13T12:30:00+00:00",
+        "spot_source_close_at_utc": "2026-09-13T12:30:00+00:00"
+      },
+      "ZEC": {
+        "cvd_observed_at_utc": "2026-09-13T12:35:45.321755+00:00",
+        "futures_source_close_at_utc": "2026-09-13T12:30:00+00:00",
+        "spot_source_close_at_utc": "2026-09-13T12:30:00+00:00"
+      }
+    },
+    "watch_scan_id": "shared-watch:2026-09-13T12:32:15.014815+00:00"
+  },
+  "pull_request": 32,
+  "repo": "hadarkamer/crypto-intelligence-platform",
+  "schema_present": [
+    "watch_transition_scopes",
+    "watch_transition_batches",
+    "watch_transition_intents"
+  ],
+  "scope": "Durable MP65 + existing formula V1; cluster/CVD research deferred",
+  "tree_sha": "c38270f1ab642ef637fa063f4015256dd7d932d3",
+  "postdeploy_health": {
+    "checked_at": "2026-09-13T12:38:28.778775+00:00",
+    "commit": "8042759a330c655e6bc86f404ea7b3886e9972d6",
+    "formula": {
+      "enabled": true,
+      "formula_id": "FORMULA_MP65_CVD_SHORT",
+      "formula_version": "mp65-cvd-short-v1",
+      "last_cycle_sent": 0,
+      "scope": "EXISTING_GENERAL_WATCH_SCORE65_TRANSITIONS"
+    },
+    "transitions": {
+      "created_intents": 0,
+      "delivered": 0,
+      "delivery_policy_version": "pending-10m-one-attempt-orphan-2m-v1",
+      "evidence_gaps": 0,
+      "failed": 0,
+      "last_counts": {},
+      "last_cycle": {},
+      "last_delivery_at_utc": null,
+      "last_error_type": null,
+      "last_record_status": "NOT_OBSERVED",
+      "last_recorded_at_utc": null,
+      "last_watch_scan_id": null,
+      "orphaned_attempts": 0,
+      "policy_version": "maxpain-score65-reset60-bootstrap-v1",
+      "ready": true,
+      "scope": "GENERAL_WATCH_MP65_AND_FORMULA_V1",
+      "unknown": 0
+    },
+    "watch": {
+      "automatic_start_policy": "NEXT_ALIGNED_SLOT_WITH_DURABLE_CLAIM",
+      "chat_configured": true,
+      "coordinator_running": true,
+      "cycle_stage": null,
+      "desired_general_enabled": true,
+      "interval_minutes": 30,
+      "last_claimed_slot_utc": null,
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "last_cycle_status": "waiting",
+      "last_delivery_errors": [],
+      "last_error": null,
+      "last_scan_utc": "2026-07-13T12:32:04.595021+00:00",
+      "last_transition_result": null,
+      "magnet_symbols": [
+        "BNB",
+        "BTC",
+        "DOGE",
+        "ETH",
+        "HYPE",
+        "SOL",
+        "XRP",
+        "ZEC"
+      ],
+      "mode": "top8",
+      "next_scan_utc": "2026-09-13T13:02:15+00:00",
+      "supervisor_restarts": 1,
+      "supervisor_running": true,
+      "sync_grace_seconds": 135
+    }
+  },
+  "new_policy_first_natural_watch_verified": false,
+  "new_policy_next_scan_utc": "2026-09-13T13:02:15+00:00",
+  "new_policy_first_observation": "BOOTSTRAP; existing high scores do not fabricate crossings",
+  "existing_scope_limit": "Only general Watch MP65 and dedicated formula V1; other alert families retain their existing state implementation",
+  "followup_order": [
+    "Verify first natural post-deploy Watch at 2026-09-13T13:02:15Z and its durable state receipt without manually triggering scans",
+    "Verify delivered formula/native lineage and later outcome/Sheets updates on naturally occurring events",
+    "Keep cluster/CVD contribution research, B4 and 240m normalization deferred pending user direction"
+  ]
+}

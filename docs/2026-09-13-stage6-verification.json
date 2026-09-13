@@ -1,0 +1,210 @@
+{
+  "archive": {
+    "columns": 15,
+    "grid_rows": 16864,
+    "sheet": "Telegram_Archive_20260913",
+    "sheet_id": 26091306
+  },
+  "capacity": {
+    "allocated_cells": 8333173,
+    "maximum_with_fixed_views": 8560228,
+    "soft_limit": 9000000
+  },
+  "ci_job": 103712409086,
+  "ci_run": 34752934342,
+  "deploy_id": "dep-daj82qojo6nc73c575fg",
+  "health": {
+    "audit": {
+      "last_error": "JSONDecodeError",
+      "last_row": 16864,
+      "next_row": 1002,
+      "reset_count": 0,
+      "status": "SCANNING"
+    },
+    "commit": "fe493fe56bfa513670c7da67243694b77ffc283f",
+    "prices": {
+      "BNB": "FRESH",
+      "BTC": "FRESH",
+      "DOGE": "FRESH",
+      "ETH": "FRESH",
+      "HYPE": "FRESH",
+      "SOL": "FRESH",
+      "XRP": "FRESH",
+      "ZEC": "FRESH"
+    },
+    "snapshot": {
+      "error": null,
+      "reconcile": {
+        "current_slots_seeded": 0,
+        "deferred": 0,
+        "groups": 8,
+        "rejected": 0,
+        "sources": 45,
+        "staged_rows": 66
+      },
+      "running": true
+    },
+    "workers": {
+      "formula_ordered_v7": {
+        "failures": 0,
+        "last_error": null,
+        "runs": 3
+      },
+      "research_outcomes": {
+        "failures": 0,
+        "last_error": null,
+        "runs": 4
+      }
+    }
+  },
+  "initial_current_readback": {
+    "counts": {
+      "Live_Current": {
+        "db": 16,
+        "physical_rows": 16,
+        "sheet": 16
+      },
+      "MaxPain_Current": {
+        "db": 112,
+        "physical_rows": 112,
+        "sheet": 112
+      },
+      "Snapshots_Current": {
+        "db": 16,
+        "physical_rows": 16,
+        "sheet": 16
+      }
+    },
+    "mismatches": [],
+    "normalized_date_cells": 32
+  },
+  "live_at_utc": "2026-09-13T10:58:07.327562Z",
+  "notes": [
+    "Seven second-generation rows were PENDING during the first read. A targeted follow-up confirmed all seven SYNCED and matching the exact source identity and UTC time.",
+    "The autonomous audit has resumed but no completed post-deployment automatic cycle is claimed."
+  ],
+  "production_commit": "fe493fe56bfa513670c7da67243694b77ffc283f",
+  "production_tree": "407a6483050a8b225d8a19f4745aa84ee02fad3a",
+  "protocol": "sheets-batch-v3",
+  "pull_request": 28,
+  "receiver_version": 9,
+  "second_generation": {
+    "checks": [
+      {
+        "name": "Live_Current",
+        "rows": 16,
+        "source_newer_than_deploy": 16,
+        "synced": 12
+      },
+      {
+        "name": "Snapshots_Current",
+        "rows": 16,
+        "source_newer_than_deploy": 16,
+        "synced": 16
+      },
+      {
+        "name": "MaxPain_Current",
+        "rows": 112,
+        "source_newer_than_deploy": 35,
+        "synced": 109
+      }
+    ],
+    "issues": [
+      {
+        "key": "[\"ETH\",\"LONG\"]",
+        "name": "Live_Current",
+        "state": "PENDING"
+      },
+      {
+        "key": "[\"ETH\",\"SHORT\"]",
+        "name": "Live_Current",
+        "state": "PENDING"
+      },
+      {
+        "key": "[\"HYPE\",\"LONG\"]",
+        "name": "Live_Current",
+        "state": "PENDING"
+      },
+      {
+        "key": "[\"SOL\",\"LONG\"]",
+        "name": "Live_Current",
+        "state": "PENDING"
+      },
+      {
+        "key": "[\"XRP\",\"2w\",\"LONG\"]",
+        "name": "MaxPain_Current",
+        "state": "PENDING"
+      },
+      {
+        "key": "[\"XRP\",\"3d\",\"LONG\"]",
+        "name": "MaxPain_Current",
+        "state": "PENDING"
+      },
+      {
+        "key": "[\"XRP\",\"48h\",\"LONG\"]",
+        "name": "MaxPain_Current",
+        "state": "PENDING"
+      }
+    ],
+    "paired_snapshot_id_and_time": true,
+    "pending_followup": [
+      {
+        "key": "[\"ETH\",\"LONG\"]",
+        "match": true,
+        "sheet": "Live_Current",
+        "state": "SYNCED"
+      },
+      {
+        "key": "[\"ETH\",\"SHORT\"]",
+        "match": true,
+        "sheet": "Live_Current",
+        "state": "SYNCED"
+      },
+      {
+        "key": "[\"HYPE\",\"LONG\"]",
+        "match": true,
+        "sheet": "Live_Current",
+        "state": "SYNCED"
+      },
+      {
+        "key": "[\"SOL\",\"LONG\"]",
+        "match": true,
+        "sheet": "Live_Current",
+        "state": "SYNCED"
+      },
+      {
+        "key": "[\"XRP\",\"2w\",\"LONG\"]",
+        "match": true,
+        "sheet": "MaxPain_Current",
+        "state": "SYNCED"
+      },
+      {
+        "key": "[\"XRP\",\"3d\",\"LONG\"]",
+        "match": true,
+        "sheet": "MaxPain_Current",
+        "state": "SYNCED"
+      },
+      {
+        "key": "[\"XRP\",\"48h\",\"LONG\"]",
+        "match": true,
+        "sheet": "MaxPain_Current",
+        "state": "SYNCED"
+      }
+    ],
+    "pending_followup_all_matched": true
+  },
+  "selftest_files": 103,
+  "telegram_readback": {
+    "actual": 16149,
+    "cutoff": "2026-09-13T10:58:13.142737Z",
+    "db_count": 16149,
+    "duplicates": 0,
+    "expected": 16149,
+    "full_database_digest_verified": true,
+    "identity_type_md5": "6d03003be9278597209406c761b052ed",
+    "missing": 0,
+    "type_differences": 0,
+    "unexpected": 0
+  }
+}
+

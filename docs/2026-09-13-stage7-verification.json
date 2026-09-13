@@ -1,0 +1,261 @@
+{
+  "stage": 7,
+  "date": "2026-09-13",
+  "production": {
+    "commit": "4243f133e0d0d966ac4189d6891c19311961777c",
+    "tree": "822380ceb78207521b73df8b326124b5d088a545",
+    "deploy": {
+      "commit": {
+        "createdAt": "2026-09-13T11:38:09Z",
+        "id": "4243f133e0d0d966ac4189d6891c19311961777c",
+        "message": "Merge PR #30: normalize operational evidence hashes across JSONB\n\nMake operational score hashes stable across PostgreSQL JSONB"
+      },
+      "createdAt": "2026-09-13T11:38:11.738667Z",
+      "finishedAt": "2026-09-13T11:41:45.575101Z",
+      "id": "dep-daj8m8oae00c73dv6i90",
+      "startedAt": "2026-09-13T11:38:11.688742Z",
+      "status": "live",
+      "trigger": "new_commit",
+      "updatedAt": "2026-09-13T11:42:13.011936Z"
+    },
+    "instance": "srv-d94ek17lk1mc73b4tb90-6b56767757-b4rkg"
+  },
+  "pull_requests": [
+    29,
+    30
+  ],
+  "tested_head": "75383a7f68d5f78de44ac6f71233ab6d4fc0d639",
+  "ci": {
+    "run_id": 34754830158,
+    "job_id": 103717338815,
+    "result": "success",
+    "selftest_files": 104,
+    "capture_test_cases": 9,
+    "postgresql_version": 18,
+    "capture_test_skipped": false
+  },
+  "verification": {
+    "capture_health": {
+      "attempts": 1,
+      "durable_source": "research_max_pain_snapshot_sets.source_metadata.capture_metadata.operational_scores",
+      "gaps": 0,
+      "hash_version": "json-integer-float-zero-normalized-v1",
+      "last": {
+        "at_utc": "2026-09-13T11:45:19.520287+00:00",
+        "capture_status": "COMPLETE",
+        "cycle_id": "shared-watch:2026-09-13T11:41:39.594804+00:00",
+        "idempotent_existing": false,
+        "persisted": true,
+        "research_eligible": true,
+        "row_count": 350,
+        "snapshot_set_id": 1231,
+        "symbol_count": 52
+      },
+      "max_bytes": 262144,
+      "persisted": 1,
+      "population": "all-top8-watch-scans-before-display-v1",
+      "symbols": [
+        "BTC",
+        "ETH",
+        "SOL",
+        "HYPE",
+        "DOGE",
+        "ZEC",
+        "BNB",
+        "XRP"
+      ],
+      "version": "watch-operational-scores-v2"
+    },
+    "commit": "4243f133e0d0d966ac4189d6891c19311961777c",
+    "prices": {
+      "BNB": "FRESH",
+      "BTC": "FRESH",
+      "DOGE": "FRESH",
+      "ETH": "FRESH",
+      "HYPE": "FRESH",
+      "SOL": "FRESH",
+      "XRP": "FRESH",
+      "ZEC": "FRESH"
+    },
+    "recent_sets": [
+      {
+        "collection_status": "COMPLETE",
+        "cycle_id": "shared-watch:2026-09-13T11:41:39.594804+00:00",
+        "row_count": 350,
+        "snapshot_set_id": 1231
+      },
+      {
+        "collection_status": "COMPLETE",
+        "cycle_id": "shared-watch:2026-09-13T11:28:48.007973+00:00",
+        "row_count": 350,
+        "snapshot_set_id": 1229
+      }
+    ],
+    "verification": {
+      "availability_ordered": true,
+      "available_at_utc": "2026-09-13 11:45:16.088373+00:00",
+      "block_bytes": 210190,
+      "code_hashes_match": true,
+      "coins": {
+        "BNB": {
+          "below65": 10,
+          "scored": 14,
+          "source_time_errors": [],
+          "status": "CAPTURED"
+        },
+        "BTC": {
+          "below65": 11,
+          "scored": 14,
+          "source_time_errors": [],
+          "status": "CAPTURED"
+        },
+        "DOGE": {
+          "below65": 10,
+          "scored": 14,
+          "source_time_errors": [],
+          "status": "CAPTURED"
+        },
+        "ETH": {
+          "below65": 11,
+          "scored": 14,
+          "source_time_errors": [],
+          "status": "CAPTURED"
+        },
+        "HYPE": {
+          "below65": 14,
+          "scored": 14,
+          "source_time_errors": [],
+          "status": "CAPTURED"
+        },
+        "SOL": {
+          "below65": 13,
+          "scored": 14,
+          "source_time_errors": [],
+          "status": "CAPTURED"
+        },
+        "XRP": {
+          "below65": 14,
+          "scored": 14,
+          "source_time_errors": [],
+          "status": "CAPTURED"
+        },
+        "ZEC": {
+          "below65": 14,
+          "scored": 14,
+          "source_time_errors": [],
+          "status": "CAPTURED"
+        }
+      },
+      "coins_without_native_maxpain_event": [
+        "HYPE",
+        "XRP"
+      ],
+      "created_at_utc": "2026-09-13 11:45:16.218659+00:00",
+      "cycle_id": "shared-watch:2026-09-13T11:41:39.594804+00:00",
+      "cycle_time_utc": "2026-09-13 11:41:39.594804+00:00",
+      "delivered_coins": [
+        "BNB",
+        "BTC",
+        "DOGE",
+        "ETH",
+        "HYPE",
+        "SOL",
+        "XRP",
+        "ZEC"
+      ],
+      "errors": [],
+      "hash_matches": true,
+      "native_coins_compared": [
+        "BNB",
+        "BTC",
+        "DOGE",
+        "ETH",
+        "SOL",
+        "ZEC"
+      ],
+      "native_events_compared": 25,
+      "snapshot_set_id": 1231,
+      "status": "COMPLETE",
+      "stored_metadata_bytes": 48031,
+      "watch_threshold": 70
+    },
+    "watch": {
+      "chat_configured": true,
+      "coordinator_running": true,
+      "desired_general_enabled": true,
+      "last_cycle_status": "running",
+      "last_error": null,
+      "last_scan_utc": "2026-09-13T11:41:39.594804+00:00",
+      "magnet_symbols": [
+        "BNB",
+        "BTC",
+        "DOGE",
+        "ETH",
+        "HYPE",
+        "SOL",
+        "XRP",
+        "ZEC"
+      ],
+      "mode": "top8",
+      "supervisor_restarts": 1,
+      "supervisor_running": true
+    },
+    "workers": {
+      "formula_ordered_v7": {
+        "failures": 0,
+        "last_error": null,
+        "runs": 2
+      },
+      "research_outcomes": {
+        "failures": 0,
+        "last_error": null,
+        "runs": 4
+      }
+    }
+  },
+  "model_coverage": [
+    {
+      "available": 8,
+      "captured": 8,
+      "family": "futures_flow",
+      "fresh": 8,
+      "unavailable": 0,
+      "warning": 0
+    },
+    {
+      "available": 8,
+      "captured": 8,
+      "family": "positioning",
+      "fresh": 0,
+      "unavailable": 0,
+      "warning": 0
+    },
+    {
+      "available": 8,
+      "captured": 8,
+      "family": "spot_flow",
+      "fresh": 8,
+      "unavailable": 0,
+      "warning": 1
+    }
+  ],
+  "quality_warning": [
+    {
+      "freshness_status": "FRESH",
+      "quality_status": "WARNING",
+      "reasons": [
+        "7 missing 30m interval(s); largest gap 60.0 minutes"
+      ],
+      "symbol": "HYPE"
+    }
+  ],
+  "initial_v1": {
+    "snapshot_set_id": 1229,
+    "negative_zero_members": 7,
+    "original_hash_recovered": true,
+    "numeric_normalization_readback_test_passed": true,
+    "policy": "Preserved immutable audit evidence; future consumers require v2 and a verified hash"
+  },
+  "checkpoint_branch": "checkpoint/research-continuation-20260913"
+}
+
