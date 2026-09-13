@@ -1,0 +1,410 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-09-13",
+  "task": "All Watch scans: causal price/outcome measurement adapter",
+  "repo": "hadarkamer/crypto-intelligence-platform",
+  "authorization": {
+    "completed_scope": "Second implementation step within all-scan research; intake plus measurement now deployed",
+    "ordered_topics": [
+      "מחקר מכל הסקירות",
+      "גילוי נוסחאות חדשות באופן שוטף",
+      "השלמת הארכיון ההיסטורי",
+      "השלמת שילוב HYPE",
+      "אימות נוסחאות על מקרים חדשים"
+    ],
+    "next_scope": "Versioned formula evaluation and comparison-population reader for all-scan measurements, preserving feature availability, price routes, capture phases and BTC-wave grouping",
+    "deferred": [
+      "Cluster/CVD component hypothesis research",
+      "B4",
+      "240m family normalization"
+    ]
+  },
+  "implementation": {
+    "pr": 34,
+    "pr_url": "https://github.com/hadarkamer/crypto-intelligence-platform/pull/34",
+    "main_commit": "3243e20a1869750150838535c07de987412a9cdf",
+    "tested_head": "2c7e1c01ffa19c269886edd02560d1f951695089",
+    "tested_tree": "007fbcdb3bc2ffab206996d0299c9d696091d21c",
+    "measurement_version": "watch-scan-measurements-v1",
+    "entry_version": "watch-next-full-minute-route-open-v1",
+    "population_version": "watch-all-scan-observations-v1",
+    "outcome_method_version": "ordered-first-touch-v7",
+    "windows_minutes": [
+      60,
+      240,
+      720,
+      1440
+    ],
+    "thresholds_bps": [
+      25,
+      50,
+      75,
+      100,
+      125,
+      150,
+      175,
+      200
+    ],
+    "entry_policy": "Route-specific open of floor(usable_from_utc,minute)+1 minute, including exactly aligned times",
+    "price_routes": {
+      "seven_coins": "BINANCE_SPOT_TRADE_1M",
+      "HYPE": "HYPERLIQUID_HYPE_PERP_TRADE_1M"
+    },
+    "read_mode": "Existing immutable archive only; no network or fallback",
+    "membership_decision": "usable_from_utc",
+    "coin_jobs_per_pass": 16,
+    "poll_seconds": 30
+  },
+  "ci": {
+    "run_id": 34776221650,
+    "job_id": 103774712083,
+    "conclusion": "success",
+    "selftest_files_passed": 111,
+    "new_pure_tests_passed": 12,
+    "new_isolated_postgres_tests_passed": 7,
+    "new_tests_skipped": 0
+  },
+  "migration": {
+    "file": "migrations/047_watch_scan_measurements.sql",
+    "sha256": "c603c7d8d4dc0da2474d91b265d8a29ea857dfcaae5c17218164e634814b5d96",
+    "admin_sha256": "128d729f5a547aaf5703aa081fd7a58451c7f1ff94f0ba54198826b2ac529e01",
+    "applied": true,
+    "schema_verified": {
+      "checked_at_utc": "2026-09-13T19:01:20.118686Z",
+      "freeze_trigger": true,
+      "measurement_table": "research_watch_scan_measurements",
+      "threshold_view": "research_watch_scan_threshold_results"
+    },
+    "method": "Exact tested schema admin and migration staged in temporary directory; explicit single-migration installer"
+  },
+  "deployment": {
+    "commit": {
+      "createdAt": "2026-09-13T19:06:54Z",
+      "id": "3243e20a1869750150838535c07de987412a9cdf",
+      "message": "Merge pull request #34 from hadarkamer/feature/all-watch-scan-outcomes-20260913\n\nMeasure all frozen Watch scans with causal entries and shared BTC waves"
+    },
+    "createdAt": "2026-09-13T19:06:56.756563Z",
+    "finishedAt": "2026-09-13T19:08:21.611767Z",
+    "id": "dep-dajf8k5g1s2s73ce7b3g",
+    "startedAt": "2026-09-13T19:06:56.731233Z",
+    "status": "live",
+    "trigger": "new_commit",
+    "updatedAt": "2026-09-13T19:08:47.309726Z"
+  },
+  "watch_before_merge": {
+    "checked_at_utc": "2026-09-13T19:06:27.165738+00:00",
+    "commit": "43ca09b964d04adae95c06be02a0fa83d0c4ba17",
+    "intake": {
+      "cycles": 57,
+      "enabled": true,
+      "failures": 0,
+      "formula_evaluation_enabled": false,
+      "last": {
+        "accepted": 0,
+        "completed_laps": 11,
+        "cursor": 1242,
+        "high_water": 1260,
+        "locked": false,
+        "processed": 0,
+        "rejected": 0,
+        "scanned_ids": 13
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-13T19:06:23.752024+00:00",
+      "max_bundles_per_pass": 6,
+      "outcomes_enabled": false,
+      "page_size": 64,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "running": true,
+      "version": "watch-all-scan-intake-v1"
+    },
+    "measurement": null,
+    "watch": {
+      "last_completed_at_utc": "2026-09-13T19:06:07.254749+00:00",
+      "last_cycle_result": "completed",
+      "last_cycle_status": "waiting",
+      "last_error": null,
+      "next_scan_utc": "2026-09-13T19:32:15+00:00"
+    }
+  },
+  "production_summary": {
+    "checked_at_utc": "2026-09-13T19:13:45.786585Z",
+    "intake": [
+      {
+        "capture_phase": "HISTORICAL_CAPTURE",
+        "intake_status": "REJECTED",
+        "scans": 1
+      },
+      {
+        "capture_phase": "FORWARD_CAPTURE",
+        "intake_status": "ACCEPTED",
+        "scans": 1
+      },
+      {
+        "capture_phase": "HISTORICAL_CAPTURE",
+        "intake_status": "ACCEPTED",
+        "scans": 15
+      }
+    ],
+    "jobs": [
+      {
+        "coin_jobs": 128,
+        "errors": 0,
+        "first_updated": "2026-09-13T19:08:08.9192+00:00",
+        "last_updated": "2026-09-13T19:13:26.640075+00:00",
+        "max_attempts": 2,
+        "min_attempts": 1,
+        "status": "OPEN"
+      }
+    ],
+    "jobs_not_enqueued": 0,
+    "routes_and_waves": [
+      {
+        "btc_membership_status": "LIVE",
+        "btc_parents": 1,
+        "price_route": "BINANCE_SPOT_TRADE_1M",
+        "windows": 896
+      },
+      {
+        "btc_membership_status": "LIVE",
+        "btc_parents": 1,
+        "price_route": "HYPERLIQUID_HYPE_PERP_TRADE_1M",
+        "windows": 128
+      }
+    ],
+    "state": [
+      {
+        "completed_laps": 11,
+        "measurement_version": "watch-scan-measurements-v1",
+        "scan_cursor": 1260,
+        "scan_high_water": 1260,
+        "updated_at_utc": "2026-09-13T19:13:26.640075+00:00"
+      }
+    ],
+    "windows": [
+      {
+        "threshold_results": 256,
+        "window_minutes": 60,
+        "window_status": "OPEN",
+        "windows": 32
+      },
+      {
+        "threshold_results": 1792,
+        "window_minutes": 60,
+        "window_status": "READY",
+        "windows": 224
+      },
+      {
+        "threshold_results": 1024,
+        "window_minutes": 240,
+        "window_status": "OPEN",
+        "windows": 128
+      },
+      {
+        "threshold_results": 1024,
+        "window_minutes": 240,
+        "window_status": "READY",
+        "windows": 128
+      },
+      {
+        "threshold_results": 2048,
+        "window_minutes": 720,
+        "window_status": "OPEN",
+        "windows": 256
+      },
+      {
+        "threshold_results": 2048,
+        "window_minutes": 1440,
+        "window_status": "OPEN",
+        "windows": 256
+      }
+    ]
+  },
+  "production_integrity": {
+    "below_65_feature_window_links": 6824,
+    "capture_phases": [
+      {
+        "capture_phase": "FORWARD_CAPTURE",
+        "scans": 1
+      },
+      {
+        "capture_phase": "HISTORICAL_CAPTURE",
+        "scans": 15
+      }
+    ],
+    "checked_at_utc": "2026-09-13T19:12:14.256776Z",
+    "contract_errors": 0,
+    "direction_errors": 0,
+    "entry_time_errors": 0,
+    "feature_window_links": 7168,
+    "hype_windows": 128,
+    "measured_coin_samples": 128,
+    "measured_scans": 16,
+    "membership_time_errors": 0,
+    "ready_windows": 352,
+    "threshold_coverage_errors": 0,
+    "threshold_records": 8192,
+    "window_coverage_errors": 0,
+    "window_records": 1024,
+    "zero_score_feature_window_links": 904
+  },
+  "independent_sql_check": {
+    "checked_at_utc": "2026-09-13T19:10:20.801576Z",
+    "first_touch_mismatches": 0,
+    "independent_threshold_comparisons": 32,
+    "independently_measured_windows": 4,
+    "metric_details": [
+      {
+        "analysis_direction": "LONG",
+        "entry_time_utc": "2026-09-13T11:46:00+00:00",
+        "mae_pct": 0.08399269137251564,
+        "mfe_pct": 0.11138246187278762,
+        "price_route": "BINANCE_SPOT_TRADE_1M",
+        "reference_price": 76780.49,
+        "samples": 60,
+        "snapshot_set_id": 1231,
+        "sql_mae_pct": 0.0839926913725142,
+        "sql_mfe_pct": 0.11138246187278877,
+        "symbol": "BTC"
+      },
+      {
+        "analysis_direction": "SHORT",
+        "entry_time_utc": "2026-09-13T11:46:00+00:00",
+        "mae_pct": 0.11138246187278762,
+        "mfe_pct": 0.08399269137251564,
+        "price_route": "BINANCE_SPOT_TRADE_1M",
+        "reference_price": 76780.49,
+        "samples": 60,
+        "snapshot_set_id": 1231,
+        "sql_mae_pct": 0.11138246187278877,
+        "sql_mfe_pct": 0.0839926913725142,
+        "symbol": "BTC"
+      },
+      {
+        "analysis_direction": "LONG",
+        "entry_time_utc": "2026-09-13T11:46:00+00:00",
+        "mae_pct": 0.2659814845898631,
+        "mfe_pct": 0.19238466603829735,
+        "price_route": "HYPERLIQUID_HYPE_PERP_TRADE_1M",
+        "reference_price": 77.449,
+        "samples": 60,
+        "snapshot_set_id": 1231,
+        "sql_mae_pct": 0.26598148458986115,
+        "sql_mfe_pct": 0.1923846660383033,
+        "symbol": "HYPE"
+      },
+      {
+        "analysis_direction": "SHORT",
+        "entry_time_utc": "2026-09-13T11:46:00+00:00",
+        "mae_pct": 0.19238466603829735,
+        "mfe_pct": 0.2659814845898631,
+        "price_route": "HYPERLIQUID_HYPE_PERP_TRADE_1M",
+        "reference_price": 77.449,
+        "samples": 60,
+        "snapshot_set_id": 1231,
+        "sql_mae_pct": 0.1923846660383033,
+        "sql_mfe_pct": 0.26598148458986115,
+        "symbol": "HYPE"
+      }
+    ],
+    "metric_mismatches": 0
+  },
+  "automatic_recovery": {
+    "initial_missing_coin_jobs": 8,
+    "reason": "Latest closed minute had not yet reached the shared archive at initial startup",
+    "initial_observed_at_utc": "2026-09-13T19:08:08.919200Z",
+    "retry_completed_at_utc": "2026-09-13T19:13:26.640075Z",
+    "final_missing_coin_jobs": 0,
+    "completed_records_before": {
+      "completed_records": 32,
+      "completed_records_digest": "a9cea424e1f3b7c96b9a17276eba0eb6"
+    },
+    "completed_records_after": {
+      "completed_records": 32,
+      "completed_records_digest": "a9cea424e1f3b7c96b9a17276eba0eb6"
+    }
+  },
+  "worker_health": {
+    "checked_at_utc": "2026-09-13T19:13:54.414994+00:00",
+    "commit": "3243e20a1869750150838535c07de987412a9cdf",
+    "watch": {
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "next_scan_utc": "2026-09-13T19:32:15+00:00",
+      "last_error": null
+    },
+    "intake": {
+      "version": "watch-all-scan-intake-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "page_size": 64,
+      "max_bundles_per_pass": 6,
+      "poll_seconds": 30,
+      "outcomes_enabled": false,
+      "formula_evaluation_enabled": false,
+      "cycles": 12,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "accepted": 0,
+        "rejected": 0,
+        "processed": 0,
+        "scanned_ids": 13,
+        "cursor": 1242,
+        "high_water": 1261,
+        "completed_laps": 14
+      },
+      "last_run_utc": "2026-09-13T19:13:39.839740+00:00"
+    },
+    "measurement": {
+      "version": "watch-scan-measurements-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "cache_only": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "formula_evaluation_enabled": false,
+      "cycles": 11,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "enqueued": 0,
+        "processed": 8,
+        "ready": 0,
+        "open": 8,
+        "missing": 0,
+        "errors": 0
+      },
+      "last_run_utc": "2026-09-13T19:13:28.203100+00:00"
+    }
+  },
+  "conclusions": {
+    "accepted_scans": 16,
+    "historical_scans": 15,
+    "forward_captures": 1,
+    "measured_coin_samples": 128,
+    "window_records": 1024,
+    "threshold_records": 8192,
+    "completed_window_records": 352,
+    "completed_window_threshold_records": 2816,
+    "open_windows": 672,
+    "independent_btc_parents": 1,
+    "initial_jobs_waiting": 0,
+    "source_jobs_not_enqueued": 0,
+    "measurement_errors": 0
+  },
+  "limits": {
+    "formula_evaluation_on_new_population": false,
+    "prospective_formula_validation": false,
+    "trading_execution": false,
+    "full_hype_integration_completed": false,
+    "full_historical_archive_completed": false,
+    "interpretation": "Multiple coin, timeframe, direction, window and threshold rows are not independent statistical evidence; all current scans share one BTC parent. Not all measurement horizons have matured."
+  }
+}
