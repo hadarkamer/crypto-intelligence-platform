@@ -1,0 +1,95 @@
+{
+  "production_commit": "951db14641a3cbfeae805f0b864a0e65a70ac541",
+  "tree": "0c5c6a00f7188c146a8a7b10d32f80ed9d3f0b45",
+  "pull_request": 27,
+  "ci_run": 34751723853,
+  "deploy": "dep-daj7kfojo6nc73c4sv20",
+  "independent_frozen_readback": {
+    "observed_at_utc": "2026-09-13T10:33:27.136536+00:00",
+    "from_utc": "2026-08-30T10:26:05.723500+00:00",
+    "through_utc": "2026-09-13T10:26:05.723500+00:00",
+    "db_count": 16018,
+    "db_identity_type_md5_verified": "d02bd4eb1510692ffdd838990b8bf4bc",
+    "sheet_unique": 16018,
+    "missing": 0,
+    "unexpected": 0,
+    "duplicate_ids": 0,
+    "source_type_mismatches": 0,
+    "missing_sample": [],
+    "mismatches": []
+  },
+  "live_health": {
+    "at_utc": "2026-09-13T10:34:39.637201+00:00",
+    "audit": {
+      "status": "DEFERRED_TRANSPORT_RETRY",
+      "next_row": 2002,
+      "last_row": 16733,
+      "reset_count": 0,
+      "started_at": "2026-09-13T10:28:02.644236+00:00",
+      "last_error": "SHEET_AUDIT_HTTP_404_CONTENT_RESPONSE"
+    },
+    "audit_last_failure": {
+      "at_utc": "2026-09-13T10:34:23.543121+00:00",
+      "phase": "READ",
+      "exception_type": "SheetAuditTransportRetry",
+      "error_code": "SHEET_AUDIT_HTTP_404_CONTENT_RESPONSE",
+      "scan_reset": false,
+      "start_row": 2002,
+      "last_row": 16733,
+      "scan_started_at": "2026-09-13T10:28:02.644236+00:00",
+      "through_utc": "2026-09-13T10:26:01.913392+00:00",
+      "expected": 16018,
+      "seen_unique": 1599,
+      "http": {
+        "http_status": 404,
+        "response_stage": "CONTENT_RESPONSE",
+        "response_host": "script.googleusercontent.com",
+        "content_type": "text/html",
+        "response_bytes": null,
+        "elapsed_seconds": 24.812
+      }
+    },
+    "workers": {
+      "formula_ordered_v7": {
+        "running": true,
+        "runs": 4,
+        "failures": 0,
+        "last_error": null
+      },
+      "research_outcomes": {
+        "running": true,
+        "runs": 7,
+        "failures": 0,
+        "last_error": null
+      },
+      "snapshot_sync": {
+        "running": true,
+        "runs": null,
+        "failures": null,
+        "last_error": null
+      }
+    },
+    "prices": {
+      "BTC": "FRESH",
+      "ETH": "FRESH",
+      "SOL": "FRESH",
+      "HYPE": "FRESH",
+      "DOGE": "FRESH",
+      "ZEC": "FRESH",
+      "BNB": "FRESH",
+      "XRP": "FRESH"
+    },
+    "operator_verification": {
+      "attempts": 19,
+      "next_row": 5502,
+      "last_row": 16733,
+      "status": "DEFERRED_TRANSPORT_RETRY",
+      "reset_count": 0,
+      "resumed_failures": 4
+    }
+  },
+  "automatic_full_scan_complete": false,
+  "operator_verifier_stopped": true,
+  "allocated_sheet_cells": 8059782,
+  "scope": "Invalid audit read recovery; research, delivery and retention policies unchanged"
+}
