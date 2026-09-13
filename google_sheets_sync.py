@@ -16,6 +16,8 @@ from queue import Empty, Full, Queue
 import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 import research_maxpain_sheet_rows
@@ -36,6 +38,8 @@ _SNAPSHOT_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _STOP = threading.Event()
 _RECEIVER_VERSION: Optional[str] = None
 _LAST_HTTP_SECONDS: Optional[float] = None
+_LAST_HTTP_DIAGNOSTIC: Optional[Dict[str, Any]] = None
+_ACK_RESPONSE_MAX_BYTES = 65_536
 _ORDERED_BATCH_FALLBACK = False
 _DURABLE_SNAPSHOT_MODE = False
 _DELIVERY_LOCK = threading.RLock()
@@ -66,6 +70,7 @@ def status() -> Dict[str, Any]:
         "http_timeout_seconds": _HTTP_TIMEOUT_SECONDS,
         "receiver_version": _RECEIVER_VERSION,
         "last_http_seconds": _LAST_HTTP_SECONDS,
+        "last_http_diagnostic": dict(_LAST_HTTP_DIAGNOSTIC) if _LAST_HTTP_DIAGNOSTIC else None,
         "ordered_outcome_batch_limit": ordered_outcome_batch_limit(),
         "durable_snapshot_mode": _DURABLE_SNAPSHOT_MODE,
         "metrics": dict(_METRICS),
@@ -103,6 +108,29 @@ def enqueue(payload: Mapping[str, Any]) -> bool:
         return False
 
 
+def _response_context(response: Any) -> Dict[str, Any]:
+    """Keep only bounded HTTP metadata; never a response URL, query or body."""
+    try:
+        host = urlsplit(response.geturl()).hostname
+    except (AttributeError, TypeError, ValueError):
+        host = None
+    headers = getattr(response, "headers", None)
+    content_type = str(headers.get("Content-Type", "") if headers else "").split(";", 1)[0].strip().lower()
+    if len(content_type) > 80 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789/.-+" for c in content_type):
+        content_type = ""
+    code = getattr(response, "status", None) or getattr(response, "code", None)
+    return {
+        "http_status": code if isinstance(code, int) else None,
+        "response_stage": (
+            "CONTENT_RESPONSE" if host == "script.googleusercontent.com"
+            else "WEBHOOK_RESPONSE" if host == "script.google.com"
+            else "OTHER_RESPONSE" if host else "UNKNOWN_RESPONSE"
+        ),
+        "response_host": host,
+        "content_type": content_type or None,
+    }
+
+
 def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool:
     """Post one already-built envelope and report confirmed delivery.
 
@@ -110,9 +138,14 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
     workers may call :func:`deliver_now` after their database transaction has
     committed, which prevents a Sheet row from preceding its durable source.
     """
-    global _RECEIVER_VERSION, _LAST_HTTP_SECONDS
+    global _RECEIVER_VERSION, _LAST_HTTP_SECONDS, _LAST_HTTP_DIAGNOSTIC
     for attempt in range(1, max(1, int(attempts)) + 1):
         started_at = time.monotonic()
+        diagnostic: Dict[str, Any] = {
+            "response_stage": "REQUEST_OR_REDIRECT", "http_status": None,
+            "response_host": None, "content_type": None, "response_bytes": None,
+        }
+        outcome = "TRANSPORT_ERROR"
         try:
             request = Request(
                 _WEBHOOK_URL,
@@ -128,12 +161,21 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
                 }:
                     return False
                 with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
-                    body = json.loads(response.read().decode("utf-8"))
+                    diagnostic.update(_response_context(response))
+                    raw = response.read(_ACK_RESPONSE_MAX_BYTES + 1)
+                    diagnostic["response_bytes"] = len(raw)
+                    if len(raw) > _ACK_RESPONSE_MAX_BYTES:
+                        outcome = "RESPONSE_TOO_LARGE"
+                        raise ValueError(outcome)
+                    outcome = "INVALID_JSON"
+                    body = json.loads(raw.decode("utf-8"))
             _LAST_HTTP_SECONDS = round(time.monotonic() - started_at, 3)
+            if not isinstance(body, dict):
+                outcome = "INVALID_ACK_SHAPE"
+                raise ValueError(outcome)
             if body.get("ok") is not True:
-                raise RuntimeError(
-                    f"Sheets webhook rejected payload: {body!r}"
-                )
+                outcome = "RECEIVER_REJECTED"
+                raise RuntimeError(outcome)
             receiver_version = str(body.get("version") or "unversioned")
             if receiver_version != _RECEIVER_VERSION:
                 print(
@@ -142,9 +184,16 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
                 )
             _RECEIVER_VERSION = receiver_version
             _METRICS["delivered"] += 1
+            _LAST_HTTP_DIAGNOSTIC = dict(diagnostic, outcome="CONFIRMED", elapsed_seconds=_LAST_HTTP_SECONDS)
             return True
         except Exception as exc:
+            if isinstance(exc, HTTPError):
+                diagnostic.update(_response_context(exc))
+                outcome = "HTTP_ERROR"
             _LAST_HTTP_SECONDS = round(time.monotonic() - started_at, 3)
+            _LAST_HTTP_DIAGNOSTIC = dict(diagnostic, outcome=outcome,
+                                         elapsed_seconds=_LAST_HTTP_SECONDS,
+                                         exception_type=type(exc).__name__)
             _METRICS["delivery_failures"] += 1
             if attempt < max(1, int(attempts)):
                 _METRICS["retries"] += 1
@@ -152,7 +201,7 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
             else:
                 print(
                     "[google-sheets] delivery abandoned after retries: "
-                    f"{exc!r}",
+                    + json.dumps(_LAST_HTTP_DIAGNOSTIC, sort_keys=True),
                     flush=True,
                 )
     return False
@@ -222,8 +271,9 @@ def delivery_slot(*, wait_seconds: float = 120.0):
 def deliver_now(payload: Mapping[str, Any], *, attempts: int = 1) -> bool:
     """Confirm one committed payload; its durable outbox owns later retries.
 
-    One bounded HTTP attempt stays within the outbox lease even when a growing
-    Sheet needs more than the old eight-second timeout to complete its batch.
+    Durable callers use one attempt with the configured socket timeout. This
+    timeout applies to blocking operations, not the entire redirect chain;
+    the outbox owns retries instead of extending a claimed row's HTTP work.
     """
     global _ORDERED_BATCH_FALLBACK
     if not enabled():

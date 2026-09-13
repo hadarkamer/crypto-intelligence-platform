@@ -18,7 +18,14 @@ function doPost(e) {
       }
       upsertBatch_(ss, body.payload.upserts || []);
     } finally {
-      lock.releaseLock();
+      // Spreadsheet writes can remain buffered. Commit while still holding
+      // the lock, including derived audit columns, before confirming success.
+      // A failed flush must reject the request but always release the lock.
+      try {
+        SpreadsheetApp.flush();
+      } finally {
+        lock.releaseLock();
+      }
     }
     return json_({ok: true, version: "sheets-batch-v3"});
   } catch (err) {

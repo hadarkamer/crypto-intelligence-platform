@@ -143,8 +143,9 @@ class DeliveryFairnessTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def read(self):
-                return b'{"ok": true}'
+            def read(self, size=-1):
+                body = b'{"ok": true}'
+                return body if size < 0 else body[:size]
 
         with patch.object(sync, "enabled", return_value=True), patch.object(
             sync, "_WEBHOOK_URL", "https://example.invalid/local-only"
