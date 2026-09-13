@@ -17,7 +17,8 @@ from typing import Any
 import alert_engine
 import market_confidence_engine
 
-VERSION = "watch-operational-scores-v1"
+VERSION = "watch-operational-scores-v2"
+HASH_VERSION = "json-integer-float-zero-normalized-v1"
 POPULATION = "all-top8-watch-scans-before-display-v1"
 SYMBOLS = ("BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP")
 MAX_BYTES = 256 * 1024
@@ -25,8 +26,21 @@ ADDITIVE_COMPONENTS = ("directional_alignment", "target_proximity", "cluster_con
 _METRICS = {"attempts": 0, "persisted": 0, "gaps": 0, "last": None}
 
 
+def _numeric_normalized(value: Any) -> Any:
+    # JSONB normalizes -0.0 and expands exponent notation. Normalize BEFORE
+    # hashing and serializing so database readback has the same identity.
+    # This changes representation only; no decimal rounding is performed.
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _numeric_normalized(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_numeric_normalized(item) for item in value]
+    return value
+
+
 def canonical(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str,
+    return json.dumps(_numeric_normalized(value), sort_keys=True, separators=(",", ":"), default=str,
                       ensure_ascii=False, allow_nan=False)
 
 
@@ -168,6 +182,7 @@ def build_bundle(*, cycle_id: str, rows: list, snapshot: dict, frozen: dict,
         "version": VERSION, "population": POPULATION, "cycle_id": cycle_id,
         "status": "COMPLETE" if all(c["status"] == "CAPTURED" for c in coins.values()) else "PARTIAL",
         "computed_at_utc": computed.isoformat(), "code_sha256": code_versions(),
+        "hash_version": HASH_VERSION,
         "input_universe_sha256": digest(rows), "input_row_count": len(rows),
         "symbols_expected": list(SYMBOLS), "watch_display_threshold": watch_threshold,
         "maxpain_additive_components": list(ADDITIVE_COMPONENTS),
@@ -192,5 +207,6 @@ def record_persistence(block: dict, result: dict) -> None:
 
 def status() -> dict:
     return {"version": VERSION, "population": POPULATION, "symbols": list(SYMBOLS),
+            "hash_version": HASH_VERSION,
             "durable_source": "research_max_pain_snapshot_sets.source_metadata.capture_metadata.operational_scores",
             "max_bytes": MAX_BYTES, **deepcopy(_METRICS)}

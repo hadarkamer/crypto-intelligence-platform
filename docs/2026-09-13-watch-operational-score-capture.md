@@ -9,7 +9,7 @@ formula or an expansion of Ordered V7's delivered-alert research population.
 
 The compact block is `source_metadata.capture_metadata.operational_scores` in
 the existing `research_max_pain_snapshot_sets` row. Its version is
-`watch-operational-scores-v1`; population is
+`watch-operational-scores-v2`; population is
 `all-top8-watch-scans-before-display-v1`. No migration, table, service, raw
 history duplication, Sheets lane or Telegram event is introduced.
 
@@ -68,6 +68,15 @@ require `max(available_at_utc, created_at_utc) <= decision_time`. The inner
 Unknown/future source times are explicitly marked and must not become
 prior-only evidence. Do not update old immutable snapshots, replay old scores
 as real-time scores, or treat repeated identical states as independent waves.
+
+Version 2 normalizes integral floating-point values (including negative zero)
+before JSON serialization and hashing. PostgreSQL JSONB removes negative-zero
+signs and expands exponent notation; the previous v1 representation could
+therefore fail a readback hash check despite equal numeric scores. The v2
+`hash_version` is `json-integer-float-zero-normalized-v1`. No decimal rounding
+is applied. Initial v1 rows remain immutable audit records; new consumers must
+require v2 plus a verified hash. The PostgreSQL test includes negative zero and
+large exponent values and verifies the hash after committed readback.
 
 This stage does not inject these blocks into old neutral anchors, the 298
 formula catalog, Ordered V7, outcome fan-outs or Sheet current views. The next

@@ -89,6 +89,15 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(payload['set']['source_metadata']['capture_metadata']['operational_scores'], block)
         self.assertLess(len(encoded.encode()), capture.MAX_BYTES)
 
+    def test_numeric_hash_survives_jsonb_representations(self):
+        before = {'negative_zero':-0.0, 'large':1e20, 'small':1e-12, 'integer':10.0}
+        after = {'negative_zero':0.0, 'large':100000000000000000000, 'small':0.000000000001, 'integer':10}
+        self.assertEqual(capture.canonical(before),capture.canonical(after))
+        self.assertEqual(capture.digest(before),capture.digest(after))
+        self.assertEqual(json.loads(capture.canonical(before)),before)
+        with self.assertRaises(ValueError):
+            capture.canonical({'invalid':float('nan')})
+
     def test_global_500_cut_keeps_all_top8_and_no_alert_states(self):
         others = tuple(f'A{i:03}' for i in range(75))
         rows = inputs(others)
@@ -230,7 +239,10 @@ class PostgreSQLArchiveTests(unittest.TestCase):
                 dsn=make_conninfo(os.environ['TEST_DATABASE_URL'], dbname=name)
                 with psycopg.connect(dsn) as conn:
                     conn.execute((Path(__file__).parent/'migrations/007_max_pain_watch_archive_v1.sql').read_text(),prepare=False)
-                block,*_=bundle()
+                rows=inputs()
+                rows[0]['short_liquidation_amount']=-0.0
+                rows[0]['long_liquidation_amount']=1e20
+                block,*_=bundle(rows=rows)
                 payload=archive_payload(block)
                 with patch.dict(os.environ,{'MAX_PAIN_ARCHIVE_ENABLED':'1'}):
                     first=archive.persist_snapshot_payload(payload,database_url=dsn)
@@ -249,6 +261,9 @@ class PostgreSQLArchiveTests(unittest.TestCase):
                     actual=conn.execute('SELECT source_metadata,available_at_utc,created_at_utc FROM research_max_pain_snapshot_sets').fetchall()
                     self.assertEqual(len(actual),1)
                     self.assertEqual(actual[0][0]['capture_metadata']['operational_scores'],block)
+                    reloaded=dict(actual[0][0]['capture_metadata']['operational_scores'])
+                    expected_hash=reloaded.pop('payload_sha256')
+                    self.assertEqual(capture.digest(reloaded),expected_hash)
                     self.assertEqual(conn.execute('SELECT count(*) FROM research_max_pain_snapshot_rows').fetchone()[0],56)
                     self.assertLessEqual(capture._utc(block['computed_at_utc']),actual[0][1])
                     self.assertLessEqual(actual[0][1],actual[0][2])
