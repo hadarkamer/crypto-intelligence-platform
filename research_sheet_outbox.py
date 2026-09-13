@@ -10,6 +10,7 @@ from typing import Any, Mapping
 import google_sheets_sync
 import research_sheet_publication as publication
 import research_outcome_publication as outcome_publication
+import research_current_publication as current_publication
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -20,9 +21,9 @@ except ImportError:
 _LOCK_ID = 702094113543720211
 _SHEET_ROTATION = (
     'Telegram_Events',
-    'MaxPain_TF',
-    'Snapshots',
-    'תצוגת לייב',
+    'MaxPain_Current',
+    'Snapshots_Current',
+    'Live_Current',
     publication.SHEET,
     outcome_publication.SHEET,
 )
@@ -58,6 +59,9 @@ def _row_source_time(item: Mapping[str, Any]) -> datetime | None:
         'Snapshots': 'timestamp_utc',
         'Telegram_Events': 'timestamp_utc',
         'MaxPain_TF': 'timestamp_utc',
+        'MaxPain_Current': 'timestamp_utc',
+        'Snapshots_Current': 'timestamp_utc',
+        'Live_Current': 'timestamp_utc',
         'Episodes': 'opened_at_utc',
         'Formula_Results': 'last_evaluated_at',
         publication.SHEET: 'last_evaluated_at',
@@ -79,6 +83,11 @@ def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
         item = dict(raw)
         sheet = str(item['sheet'])
         if sheet in (*publication.LEGACY_SHEETS, 'Outcomes'):
+            continue
+        if sheet in current_publication.CONFIG or sheet in current_publication.BY_SHEET:
+            projected = current_publication.project(item,
+                snapshot_time=snapshot_times.get(str(item['row'].get('snapshot_id'))))
+            current_outcomes += current_publication.stage_projected(conn, projected)
             continue
         if sheet == outcome_publication.SHEET:
             current_outcomes += outcome_publication.stage_projected(conn, item)
@@ -148,6 +157,10 @@ def _claim_lane(conn: Any, *, count: int, token: str, sheet: str,
     if sheet == publication.SHEET and not publication.catalog_contract()['compatible']:
         return []
     source_filter = 'AND source_time_utc IS NOT NULL' if recent else ''
+    if sheet == 'Telegram_Events':
+        # Expired/undated rows stay in their original queue state. Never claim
+        # and acknowledge data outside the receiver's protected rolling window.
+        source_filter += " AND source_time_utc >= NOW() - INTERVAL '16 days'"
     order = ('source_time_utc DESC, next_attempt_at_utc, created_at_utc, row_key'
              if recent else 'next_attempt_at_utc, created_at_utc, row_key')
     params = (sheet,count,token)
@@ -238,7 +251,8 @@ def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float =
     _validate_batch_size(target_sheet, batch_size)
     summary = {'claimed': 0, 'synced': 0, 'failed': 0, 'locked': False,
                'publication': publication.status(),
-               'outcome_publication': outcome_publication.status()}
+               'outcome_publication': outcome_publication.status(),
+               'current_publication': current_publication.status()}
     if not google_sheets_sync.enabled() or not database_url or psycopg is None:
         return summary
     deadline = time.monotonic() + max(1.0, float(max_seconds))

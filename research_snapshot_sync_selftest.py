@@ -156,6 +156,7 @@ def run():
          patch.object(worker, "_database_url", lambda: "postgresql://selftest"), \
          patch.object(sheets, "enabled", lambda: True), \
          patch.object(worker, "reconcile_sources", lambda conn: {"staged_rows": 1}), \
+         patch.object(worker.research_sheet_outbox.current_publication, "seed_legacy", lambda conn: 0), \
          patch.object(worker.research_sheet_outbox, "drain", drain), \
          patch.object(worker.research_sheet_reconciliation.SheetReconciler, "run_due", lambda self, url: {}):
         assert worker.SnapshotSyncWorker().run_once()["delivery"]["synced"] == 1

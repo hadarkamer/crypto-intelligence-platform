@@ -1,6 +1,234 @@
 // Bound Apps Script for the approved research workbook.
 // Set Script Property SHEETS_WEBHOOK_SECRET before deploying as a Web App.
 const SHEETS_ALLOCATED_CELL_SOFT_LIMIT_ = 9000000;
+const CURRENT_PUBLICATION_ = {
+  "MaxPain_Current": {
+    "headers": [
+      "snapshot_id",
+      "symbol",
+      "direction",
+      "timeframe",
+      "current_price",
+      "long_maxpain_price",
+      "short_maxpain_price",
+      "long_score",
+      "short_score",
+      "selected_side",
+      "selected_score",
+      "opposite_score",
+      "score_edge",
+      "score_ratio",
+      "long_liquidity_usd",
+      "short_liquidity_usd",
+      "selected_liquidity_usd",
+      "opposite_liquidity_usd",
+      "gap_score",
+      "proximity_score",
+      "cluster_score",
+      "quality_status",
+      "calculation_version",
+      "event_id",
+      "timestamp_utc",
+      "source_side",
+      "score_direction_basis",
+      "consensus_score",
+      "components_json",
+      "is_alert_timeframe",
+      "target_distance_pct",
+      "selected_liquidity_share_pct",
+      "consensus_hits",
+      "consensus_total",
+      "source_record_type"
+    ],
+    "identity": "event_id",
+    "key": "symbol,timeframe,source_side",
+    "max_rows": 176,
+    "sheet": "MaxPain_Current",
+    "side": "source_side",
+    "symbol": "symbol"
+  },
+  "Snapshots_Current": {
+    "headers": [
+      "snapshot_id",
+      "timestamp_utc",
+      "timestamp_israel",
+      "watch_scan_id",
+      "parent_event_id",
+      "btc_parent_movement_id",
+      "symbol",
+      "direction",
+      "no_alert_snapshot",
+      "reference_price",
+      "market_session",
+      "is_weekend",
+      "data_quality_status",
+      "alert_sent",
+      "alert_types",
+      "primary_alert_type",
+      "telegram_event_count",
+      "price_oi_total_direction",
+      "price_oi_total_score",
+      "futures_cvd_total_direction",
+      "futures_cvd_total_score",
+      "spot_cvd_total_direction",
+      "spot_cvd_total_score",
+      "all_three_aligned",
+      "strict_triple_65_match",
+      "maxpain_selected_timeframe",
+      "maxpain_selected_score",
+      "maxpain_opposite_score",
+      "maxpain_score_edge",
+      "maxpain_score_ratio",
+      "maxpain_direction_average",
+      "maxpain_opposite_average",
+      "maxpain_average_edge",
+      "maxpain_average_ratio",
+      "consensus_hits",
+      "consensus_total",
+      "target_price",
+      "target_distance_pct",
+      "liquidity_balance_pct",
+      "selected_liquidity_usd",
+      "opposite_liquidity_usd",
+      "magnet_exists",
+      "magnet_side",
+      "magnet_rank",
+      "magnet_low",
+      "magnet_high",
+      "magnet_quality",
+      "magnet_spread_pct",
+      "liquidity_edge_pct",
+      "strategy_version",
+      "code_version",
+      "snapshot_written_at",
+      "displayed_direction",
+      "analysis_direction",
+      "liquidity_long_pct",
+      "liquidity_short_pct",
+      "liquidity_timeframe",
+      "liquidity_data_source",
+      "liquidity_by_timeframe_json"
+    ],
+    "identity": "snapshot_id",
+    "key": "symbol,direction",
+    "max_rows": 16,
+    "sheet": "Snapshots_Current",
+    "side": "direction",
+    "symbol": "symbol"
+  },
+  "Live_Current": {
+    "headers": [
+      "זמן סריקה",
+      "מטבע",
+      "כיוון נבדק",
+      "מחיר ייחוס",
+      "נשלחה התראה",
+      "סוג התראה",
+      "Price/OI כולל",
+      "כיוון Price/OI",
+      "Futures CVD כולל",
+      "כיוון Futures",
+      "Spot CVD כולל",
+      "כיוון Spot",
+      "שלישייה 65+",
+      "MaxPain נבחר",
+      "MaxPain נגדי",
+      "פער MaxPain",
+      "ממוצע לכיוון",
+      "ממוצע נגדי",
+      "יעד",
+      "מרחק ליעד",
+      "מאזן נזילות",
+      "סטטוס נתונים",
+      "snapshot_id",
+      "כיוון מוצג",
+      "כיוון ניתוח",
+      "timestamp_utc"
+    ],
+    "identity": "snapshot_id",
+    "key": "מטבע,כיוון נבדק",
+    "max_rows": 16,
+    "sheet": "Live_Current",
+    "side": "כיוון נבדק",
+    "symbol": "מטבע"
+  }
+};
+const CURRENT_SYMBOLS_ = ["BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP"];
+const CURRENT_TIMEFRAMES_ = ["15m", "30m", "1h", "4h", "12h", "24h", "48h", "3d", "1w", "2w", "1m"];
+const TELEGRAM_MAX_ROWS_ = 32000;
+const TELEGRAM_PROTECTED_MS_ = 16 * 24 * 60 * 60 * 1000;
+
+function validateCurrentDimensions_(config, key) {
+  const domains = config.sheet === "MaxPain_Current" ?
+    [CURRENT_SYMBOLS_, CURRENT_TIMEFRAMES_, ["LONG", "SHORT"]] :
+    [CURRENT_SYMBOLS_, ["LONG", "SHORT"]];
+  if (key.length !== domains.length || key.some((value, i) => !domains[i].includes(String(value)))) {
+    throw new Error("Invalid current publication slot");
+  }
+}
+
+function currentSource_(timestamp, identity) {
+  const result = outcomeSource_(timestamp, "1");
+  if (typeof identity !== "string" || !identity) throw new Error("Missing current publication source identity");
+  result.identity = identity;
+  return result;
+}
+
+function validateCurrentRow_(state, config, row, keys) {
+  if (state.headers.length !== config.headers.length ||
+      config.headers.some(name => state.headers.filter(value => value === name).length !== 1) ||
+      Object.keys(row).length !== config.headers.length ||
+      config.headers.some(name => !Object.prototype.hasOwnProperty.call(row, name))) {
+    throw new Error("Current publication requires its complete fixed header contract");
+  }
+  if (keys.join(",") !== config.key) throw new Error("Invalid current publication key");
+  validateCurrentDimensions_(config, keys.map(name => row[name]));
+  currentSource_(row.timestamp_utc, row[config.identity]);
+}
+
+function olderCurrentSource_(state, config, position, incoming) {
+  const columns = ["timestamp_utc", config.identity].map(name => state.headers.indexOf(name));
+  const staged = state.rows.get(position);
+  if (!staged) loadKeyColumns_(state, columns);
+  const prior = columns.map(column => staged ? staged[column] : state.keyColumns.get(column)[position]);
+  const existing = currentSource_(prior[0], prior[1]);
+  const candidate = currentSource_(incoming.timestamp_utc, incoming[config.identity]);
+  if (candidate.timestamp !== existing.timestamp) return candidate.timestamp < existing.timestamp;
+  if (candidate.submillisecond !== existing.submillisecond) return candidate.submillisecond < existing.submillisecond;
+  return candidate.identity < existing.identity;
+}
+
+function telegramTimestamp_(value) {
+  // Existing native exports predate ISO(T) normalization. Never infer dates
+  // from display text, blanks or numbers when deciding a row can be reused.
+  try { return outcomeSource_(typeof value === "string" ? value.replace(" ", "T") : value, "1").timestamp; }
+  catch (error) { return NaN; }
+}
+
+function reusableTelegramRow_(ss, state, row, keyNames) {
+  if (keyNames.join(",") !== "event_id") throw new Error("Telegram retention requires event_id key");
+  if (!ss.getSheetByName("Telegram_Archive_20260913")) {
+    throw capacityError_("SHEET_CAPACITY", "Telegram archive is required before any row can be reused");
+  }
+  const cutoff = Date.now() - TELEGRAM_PROTECTED_MS_;
+  const incoming = telegramTimestamp_(row.timestamp_utc);
+  if (!Number.isFinite(incoming) || incoming < cutoff) {
+    throw capacityError_("SHEET_CAPACITY", "Expired Telegram payload stays held in the database");
+  }
+  const timestampColumn = state.headers.indexOf("timestamp_utc");
+  if (timestampColumn < 0) throw new Error("Missing Telegram source timestamp");
+  loadKeyColumns_(state, [timestampColumn]);
+  let oldest = cutoff, target = null;
+  for (let position = 0; position < state.rowCount; position++) {
+    const staged = state.rows.get(position);
+    const timestamp = telegramTimestamp_(staged ? staged[timestampColumn] : state.keyColumns.get(timestampColumn)[position]);
+    if (timestamp < oldest) { oldest = timestamp; target = position; }
+  }
+  if (target === null) {
+    throw capacityError_("SHEET_CAPACITY", "Telegram protected window exceeds 32000 rows; no recent evidence overwritten");
+  }
+  return target;
+}
 const OUTCOMES_CURRENT_HEADERS_ = [
   "event_id", "snapshot_id", "symbol", "direction", "threshold_pct", "measurement_start_utc",
   "status", "first_touch_side", "decision_time_utc", "minutes_to_decision", "mfe_pct", "mae_pct",
@@ -88,6 +316,10 @@ function upsertBatch_(ss, items) {
       // Additive columns only; preexisting data/headers and demo keys survive.
       headers.push(...extra);
       const originalRows = Math.max(0, sheet.getLastRow() - 1);
+      const bounded = CURRENT_PUBLICATION_[item.sheet];
+      if (bounded && (originalRows > bounded.max_rows || headers.length > bounded.headers.length)) {
+        throw capacityError_("SHEET_CAPACITY", "Current publication exceeds its fixed slot capacity");
+      }
       state = {sheet: sheet, headers: headers, originalWidth: width,
         originalRows: originalRows, rowCount: originalRows, rows: new Map(),
         keyColumns: new Map(), indexes: new Map(), extra: extra};
@@ -118,6 +350,8 @@ function upsertBatch_(ss, items) {
     const values = state.headers.map(header => rowObject[header] === undefined ? "" : rowObject[header]);
     const keyNames = String(item.key || state.headers[0]).split(",").map(name => name.trim());
     if (item.sheet === "Outcomes_Current") validateOutcomesCurrentRow_(rowObject, keyNames);
+    const currentConfig = CURRENT_PUBLICATION_[item.sheet];
+    if (currentConfig) validateCurrentRow_(state, currentConfig, rowObject, keyNames);
     const keyIndexes = keyNames.map(name => state.headers.indexOf(name));
     if (keyIndexes.some(index => index < 0)) throw new Error("Missing key column in " + item.sheet);
     if (keyIndexes.some(index => values[index] === "" || values[index] === null)) {
@@ -137,6 +371,10 @@ function upsertBatch_(ss, items) {
           validateOutcomesCurrentDimensions_(JSON.parse(key));
           if (index.has(key)) throw new Error("Duplicate Outcomes_Current slot");
         }
+        if (currentConfig) {
+          validateCurrentDimensions_(currentConfig, JSON.parse(key));
+          if (index.has(key)) throw new Error("Duplicate current publication slot");
+        }
         // Preserve the prior first-match behavior for legacy duplicate rows.
         if (!index.has(key)) index.set(key, position);
       }
@@ -144,9 +382,15 @@ function upsertBatch_(ss, items) {
     }
     const key = keyOf(values);
     const existing = index.has(key);
-    const target = existing ? index.get(key) : state.rowCount;
+    let target = existing ? index.get(key) : state.rowCount;
     if (item.sheet === "Outcomes_Current" && existing && olderOutcomeSource_(state, target, rowObject)) return;
-    if (!existing) state.rowCount++;
+    if (currentConfig && existing && olderCurrentSource_(state, currentConfig, target, rowObject)) return;
+    if (!existing && item.sheet === "Telegram_Events" && state.rowCount >= TELEGRAM_MAX_ROWS_) {
+      target = reusableTelegramRow_(ss, state, rowObject, keyNames);
+      // Replace one physical row. Every other row number stays stable for
+      // the 14-day auditor, whose cycle must finish within 24 hours.
+      index.forEach((position, oldKey) => { if (position === target) index.delete(oldKey); });
+    } else if (!existing) state.rowCount++;
     state.rows.set(target, values);
     index.set(key, target);
     // Other composite indexes may contain a column changed by this upsert.
@@ -181,6 +425,13 @@ function upsertBatch_(ss, items) {
 function validateBatchCapacity_(ss, states) {
   let addedCells = 0;
   states.forEach((state, name) => {
+    const current = CURRENT_PUBLICATION_[name];
+    if (current && (state.rowCount > current.max_rows || state.headers.length > current.headers.length)) {
+      throw capacityError_("SHEET_CAPACITY", "Current publication exceeds its fixed slot capacity");
+    }
+    if (name === "Telegram_Events" && (state.rowCount > TELEGRAM_MAX_ROWS_ || state.headers.length > 15)) {
+      throw capacityError_("SHEET_CAPACITY", "Telegram_Events is limited to 32000 data rows and 15 columns");
+    }
     if (name === "Formula_Current" && (state.rowCount > 38144 || state.headers.length > 25)) {
       throw capacityError_("SHEET_CAPACITY", "Formula_Current is limited to 38144 data rows and 25 columns");
     }

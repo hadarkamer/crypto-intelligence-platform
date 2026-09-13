@@ -694,3 +694,64 @@ assert.equal(staleCurrentAck.html, "ACK");
 assert.equal(currentOutcomes.writes, currentWritesBeforeStaleAck);
 context.SpreadsheetApp.openById = openBeforeCurrentAck;
 console.log("google Apps Script bounded current outcomes/source recency/canonical repairs: PASS");
+
+// Bounded live views use the real fixed schemas and reject regressing sources.
+const liveConfigs = vm.runInContext("CURRENT_PUBLICATION_", context);
+for (const config of Object.values(liveConfigs)) {
+  const liveSheet = sheet([Array.from(config.headers)], config.max_rows + 1);
+  const book = {getSheetByName: name => name === config.sheet ? liveSheet : null, getSheets: () => [liveSheet]};
+  const row = Object.fromEntries(Array.from(config.headers, name => [name, null]));
+  Object.assign(row, {[config.symbol]: "BTC", [config.side]: "LONG",
+    [config.identity]: "source-a", timestamp_utc: "2026-09-13T10:00:00.123456Z"});
+  if (config.sheet === "MaxPain_Current") row.timeframe = "1m";
+  const envelope = value => ({sheet: config.sheet, key: config.key, row: value});
+  context.upsertBatch_(book, [envelope(row)]);
+  const later = {...row, [config.identity]: "source-b", timestamp_utc: "2026-09-13T10:00:00.123457Z"};
+  context.upsertBatch_(book, [envelope(later), envelope(row)]);
+  assert.equal(liveSheet.rows.length, 2);
+  assert.equal(liveSheet.rows[1][config.headers.indexOf(config.identity)], "source-b");
+  assert.throws(() => context.upsertBatch_(book, [envelope({...later, [config.symbol]: "ADA"})]));
+  assert.throws(() => context.upsertBatch_(book, [{...envelope(later), key: config.identity}]));
+  const incomplete = {...later}; delete incomplete.timestamp_utc;
+  assert.throws(() => context.upsertBatch_(book, [envelope(incomplete)]));
+  const duplicate = sheet([Array.from(config.headers), liveSheet.rows[1], liveSheet.rows[1]]);
+  const corrupt = {getSheetByName: () => duplicate, getSheets: () => [duplicate]};
+  assert.throws(() => context.upsertBatch_(corrupt, [envelope(later)]), /Duplicate current/);
+  assert.equal(duplicate.writes, 0);
+}
+
+// At the real 32000-row cap, expire only old physical positions; a two-page
+// frozen audit observes the same protected IDs even while inserts occur.
+vm.runInContext("Date.now = () => Date.parse('2026-09-13T12:00:00Z')", context);
+const ringHeaders = ["event_id","snapshot_id","telegram_message_id","timestamp_utc","symbol","direction",
+  "record_type","timeframe","verification_status","raw_text","displayed_direction","analysis_direction",
+  "source_record_type","normalized_record_type","classification_version"];
+const ringRow = (id, timestamp) => [id, id, "message", timestamp, "BTC", "LONG", "MAX_PAIN_ALERT", "1h",
+  "DELIVERED", "captured", "LONG", "LONG", "MAX_PAIN_ALERT", "MAX_PAIN_ALERT", "sheet-event-classification-v1"];
+const ring = sheet([ringHeaders, ringRow("expired-a","2026-08-27T00:00:00Z"),
+  ringRow("expired-b","2026-08-28T11:59:59.999Z"),
+  ...Array.from({length:31998},(_, i) => ringRow("protected-"+i, "2026-09-12T12:00:00Z"))], 32001);
+const ringArchive = sheet([ringHeaders]);
+const ringBook = {getSheetByName: name => ({Telegram_Events:ring,Telegram_Archive_20260913:ringArchive})[name],
+  getSheets: () => [ring,ringArchive]};
+const ringItem = (id,time="2026-09-13T11:59:00Z") => ({sheet:"Telegram_Events",key:"event_id",
+  row:Object.fromEntries(ringHeaders.map((name,i) => [name,ringRow(id,time)[i]]))});
+const firstRingPage = context.telegramAuditPage_(ringBook,{start_row:2,page_size:500});
+const protectedBefore = ring.rows.slice(3).map(row=>row[0]);
+context.upsertBatch_(ringBook,[ringItem("new-a"),ringItem("new-b"),ringItem("new-a")]);
+assert.equal(ring.rows.length,32001);
+assert.equal(ring.rows[1][0],"new-a");
+assert.equal(ring.rows[2][0],"new-b");
+assert.deepEqual(ring.rows.slice(3).map(row=>row[0]),protectedBefore);
+const secondRingPage = context.telegramAuditPage_(ringBook,{start_row:502,last_row:32001,page_size:500});
+assert.equal(firstRingPage.last_row,secondRingPage.last_row);
+assert.equal(secondRingPage.rows[0].event_id,"protected-498");
+const ringWrites = ring.writes;
+assert.throws(() => context.upsertBatch_(ringBook,[ringItem("cannot-fit")]),error=>error.error_code==="SHEET_CAPACITY");
+assert.equal(ring.writes,ringWrites);
+assert.throws(() => context.upsertBatch_(ringBook,[ringItem("expired-a","2026-08-27T00:00:00Z")]),
+  error=>error.error_code==="SHEET_CAPACITY");
+const noArchiveBook = {...ringBook,getSheetByName:name=>name==="Telegram_Events"?ring:null};
+assert.throws(() => context.upsertBatch_(noArchiveBook,[ringItem("no-archive")]),/archive is required/);
+assert.equal(ringArchive.writes,0);
+console.log("google Apps Script latest slots/32000-row retention/frozen audit stability: PASS");

@@ -14,7 +14,7 @@ import google_sheets_sync
 import research_sheet_outbox
 
 VERSION = "delivered-sheet-fingerprints-v1"
-MAX_EVENTS = 20_000
+MAX_EVENTS = research_sheet_outbox.current_publication.TELEGRAM_MAX_ROWS
 PAGE_INTERVAL_SECONDS = 60
 CYCLE_INTERVAL_SECONDS = 300
 _SAFE_FAILURE_CODES = frozenset({
@@ -23,7 +23,8 @@ _SAFE_FAILURE_CODES = frozenset({
     "SHEET_AUDIT_RECEIVER_V3_REQUIRED", "INVALID_SHEET_AUDIT_RESPONSE",
     "INVALID_OR_DISCONTINUOUS_SHEET_AUDIT_PAGE", "INVALID_SHEET_AUDIT_ROW",
     "INVALID_SHEET_AUDIT_NORMALIZED_COUNT", "AUDIT_POPULATION_NOT_STARTED",
-    "AUDIT_POPULATION_EXCEEDS_20000", "DUPLICATE_DATABASE_EVENT_FINGERPRINT",
+    "AUDIT_POPULATION_EXCEEDS_32000", "DUPLICATE_DATABASE_EVENT_FINGERPRINT",
+    "SHEET_AUDIT_CYCLE_EXPIRED",
 }) | frozenset(
     "SHEET_AUDIT_HTTP_" + str(code) + "_" + stage
     for code in (404, 408, 429, 500, 502, 503, 504)
@@ -52,6 +53,7 @@ class SheetReconciler:
         self.start: datetime | None = None
         self.cutoff: datetime | None = None
         self.normalized = 0
+        self.scan_deadline: float | None = None
         self.runtime: dict[str, Any] = {"version": VERSION, "status": "NOT_STARTED", "last_complete": None,
                                       "last_error": None, "last_failure": None, "last_reset": None, "reset_count": 0}
 
@@ -70,13 +72,14 @@ class SheetReconciler:
                 ORDER BY event_id LIMIT %s
             ''', (self.start, self.cutoff, MAX_EVENTS + 1)).fetchall()
         if len(rows) > MAX_EVENTS:
-            raise ValueError("AUDIT_POPULATION_EXCEEDS_20000")
+            raise ValueError("AUDIT_POPULATION_EXCEEDS_32000")
         self.expected = {str(row["event_fingerprint"]): dict(row) for row in rows}
         if len(self.expected) != len(rows):
             raise ValueError("DUPLICATE_DATABASE_EVENT_FINGERPRINT")
         self.seen.clear()
         self.unexpected.clear()
         self.next_row, self.last_row, self.normalized = 2, None, 0
+        self.scan_deadline = time.monotonic() + research_sheet_outbox.current_publication.AUDIT_MAX_SECONDS
         self.runtime.update(status="SCANNING", expected=len(self.expected), started_at=datetime.now(timezone.utc).isoformat())
 
     def consume_page(self, page: Mapping[str, Any]) -> bool:
@@ -145,6 +148,7 @@ class SheetReconciler:
             self.unexpected.clear()
             self.next_row, self.last_row, self.normalized = 2, None, 0
             self.start, self.cutoff = None, None
+            self.scan_deadline = None
             self.runtime.update(expected=None, started_at=None)
         # Retained status survives subsequent successful pages; one bounded,
         # sanitized log record also distinguishes resets from process restarts.
@@ -215,10 +219,15 @@ class SheetReconciler:
         try:
             if self.expected is None:
                 self._begin(database_url)
+            phase = "AGE_CHECK"
+            if self.scan_deadline is not None and time.monotonic() >= self.scan_deadline:
+                raise ValueError("SHEET_AUDIT_CYCLE_EXPIRED")
             self.runtime["status"] = "SCANNING"
             phase = "READ"
             page = google_sheets_sync.read_telegram_audit_page(start_row=self.next_row, last_row=self.last_row)
             phase = "CONSUME"
+            if self.scan_deadline is not None and time.monotonic() >= self.scan_deadline:
+                raise ValueError("SHEET_AUDIT_CYCLE_EXPIRED")
             if self.consume_page(page):
                 phase = "FINISH"
                 self._finish(database_url)
