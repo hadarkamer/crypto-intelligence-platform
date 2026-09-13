@@ -37,6 +37,7 @@ import coinglass_flow_engine
 import time_family_engine
 import market_confidence_engine
 import maxpain_cvd_short_alert
+import watch_transition_delivery
 import ai_agent
 import ai_telegram
 import research_event_runtime
@@ -2683,7 +2684,9 @@ def _confirmation_transition_message(item: Dict[str, Any]) -> Optional[str]:
     ])
 
 
-def _score_confirmation_transition_message(item: Dict[str, Any]) -> Optional[str]:
+def _score_confirmation_transition_message(
+    item: Dict[str, Any], *, transition_confirmed: bool = False,
+) -> Optional[str]:
     """Emit the independent Max-Pain score confirmation at 65+.
 
     This is intentionally separate from full derivatives Confirmation.  The
@@ -2691,15 +2694,16 @@ def _score_confirmation_transition_message(item: Dict[str, Any]) -> Optional[str
     """
     key = _confirmation_state_key(item)
     score = float(item.get("score", item.get("priority", 0)) or 0.0)
-    was_active = bool(SCORE_CONFIRMATION_STATE.get(key, False))
-    is_active = was_active
-    if score >= SCORE_CONFIRMATION_THRESHOLD:
-        is_active = True
-    elif score < SCORE_CONFIRMATION_RESET_THRESHOLD:
-        is_active = False
-    SCORE_CONFIRMATION_STATE[key] = is_active
-    if not is_active or was_active:
-        return None
+    if not transition_confirmed:
+        was_active = bool(SCORE_CONFIRMATION_STATE.get(key, False))
+        is_active = was_active
+        if score >= SCORE_CONFIRMATION_THRESHOLD:
+            is_active = True
+        elif score < SCORE_CONFIRMATION_RESET_THRESHOLD:
+            is_active = False
+        SCORE_CONFIRMATION_STATE[key] = is_active
+        if not is_active or was_active:
+            return None
 
     symbol = html.escape(str(item.get("symbol") or "—"))
     timeframe = html.escape(str(item.get("timeframe") or "—"))
@@ -2751,10 +2755,11 @@ def _special_transition_messages(
     item: Dict[str, Any],
     *,
     score65_items: Optional[List[Dict[str, Any]]] = None,
+    include_score65: bool = True,
 ) -> List[str]:
     """Return independent short alerts without changing any scoring logic."""
     messages: List[str] = []
-    score_confirmation = _score_confirmation_transition_message(item)
+    score_confirmation = _score_confirmation_transition_message(item) if include_score65 else None
     if score_confirmation:
         messages.append(score_confirmation)
         if score65_items is not None:
@@ -2848,11 +2853,12 @@ def _collect_special_transition_messages(
     items: List[Dict[str, Any]],
     *,
     score65_items: Optional[List[Dict[str, Any]]] = None,
+    include_score65: bool = True,
 ) -> List[str]:
     """Evaluate special-alert transitions independently of normal alert ranking."""
     messages: List[str] = []
     for item in items:
-        messages.extend(_special_transition_messages(item, score65_items=score65_items))
+        messages.extend(_special_transition_messages(item, score65_items=score65_items, include_score65=include_score65))
     messages.extend(_derivatives_high_transition_messages(items))
     messages.extend(_spot_family_high_transition_messages(items))
     return messages
@@ -3314,6 +3320,8 @@ async def _send_alert_with_confirmation(
         )
     except Exception as exc:
         print(f"[research] sent alert hook failed: {exc!r}", flush=True)
+    if special_transitions_precomputed:
+        return
     separate_messages = _special_transition_messages(item)
     special_attempted_at = datetime.now(timezone.utc)
     try:
@@ -4638,6 +4646,7 @@ async def run_watch_cycle(
     WATCH_RUNTIME["scan_owner"] = "Watch"
     WATCH_RUNTIME["last_cycle_status"] = "running"
     WATCH_RUNTIME["last_formula_sent"] = 0
+    WATCH_RUNTIME["last_transition_result"] = {"status": "NOT_APPLICABLE"}
     WATCH_RUNTIME["last_error"] = None
     WATCH_RUNTIME["last_delivery_errors"] = []
     WATCH_RUNTIME["cycle_stage"] = "collecting_inputs"
@@ -4726,10 +4735,17 @@ async def run_watch_cycle(
         )
         # A Magnet-only subscriber must not consume regular or combined alert
         # transitions that were never sent to the general Watch chat.
-        score65_transition_items: List[Dict[str, Any]] = []
+        if general_enabled:
+            await watch_transition_delivery.record_watch(
+                chat_id, displayable_items, watch_scan_id=watch_scan_id,
+                decision_time=research_decision_time,
+                render_score65=lambda item: _score_confirmation_transition_message(
+                    item, transition_confirmed=True,
+                ),
+            )
         special_messages = (
             _collect_special_transition_messages(
-                displayable_items, score65_items=score65_transition_items
+                displayable_items, include_score65=False,
             )
             if general_enabled else []
         )
@@ -4803,7 +4819,7 @@ async def run_watch_cycle(
             except Exception:
                 try:
                     research_event_runtime.capture_special_transitions(
-                        displayable_items,
+                        displayable_items, include_score65=False,
                         event_time=research_decision_time,
                         persist=True,
                         delivery_status="DELIVERY_FAILED",
@@ -4814,7 +4830,7 @@ async def run_watch_cycle(
                 raise
             try:
                 research_event_runtime.capture_special_transitions(
-                    displayable_items,
+                    displayable_items, include_score65=False,
                     event_time=research_decision_time,
                     persist=True,
                     delivery_status="DELIVERED",
@@ -4823,12 +4839,9 @@ async def run_watch_cycle(
                 )
             except Exception as exc:
                 print(f"[research] special transition hook failed: {exc!r}", flush=True)
-            WATCH_RUNTIME["last_formula_sent"] = await _send_formula_watch_alerts(
-                bot_app.bot,
-                chat_id,
-                score65_transition_items,
-                watch_scan_id=watch_scan_id,
-                decision_time=research_decision_time,
+            WATCH_RUNTIME["last_formula_sent"] = await watch_transition_delivery.drain(
+                bot_app.bot, chat_id,
+                may_deliver=lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
             )
             for combined_delivery in combined_deliveries:
                 attempted_at = datetime.now(timezone.utc)
@@ -4888,8 +4901,15 @@ async def run_watch_cycle(
             top_item.get("timeframe") if top_item else None
         )
         delivery_errors = list(WATCH_RUNTIME.get("last_delivery_errors") or [])
+        transition_result = (
+            watch_transition_delivery.cycle_result(watch_scan_id)
+            if general_enabled else {"status": "NOT_APPLICABLE"}
+        )
+        WATCH_RUNTIME["last_transition_result"] = transition_result
         WATCH_RUNTIME["last_cycle_status"] = (
-            "completed_with_delivery_errors" if delivery_errors else "completed"
+            "completed_with_delivery_errors" if delivery_errors else
+            "completed_with_transition_gaps" if transition_result["status"] not in {"COMPLETE", "NOT_APPLICABLE"}
+            else "completed"
         )
         WATCH_RUNTIME["last_cycle_result"] = WATCH_RUNTIME["last_cycle_status"]
         WATCH_RUNTIME["last_completed_at_utc"] = datetime.now(timezone.utc).isoformat()
@@ -4915,6 +4935,7 @@ async def run_watch_cycle(
             "combined_sent": len(combined_deliveries) if general_enabled else 0,
             "magnet_sent": magnet_sent,
             "delivery_errors": delivery_errors,
+            "transition_result": transition_result,
             "derivatives": derivatives_status,
             "timeframe_integrity": live_result.get("timeframe_integrity"),
         }
@@ -5449,6 +5470,17 @@ async def _watch_supervisor_loop(bot_app) -> None:
                         "[watch] supervisor restored persistent coordinator; "
                         f"restart={WATCH_RUNTIME['supervisor_restarts']}",
                         flush=True,
+                    )
+                if (
+                    WATCH_GENERAL_ENABLED and chat_id is not None
+                    and not WATCH_RUNTIME.get("scan_in_progress")
+                    and WATCH_RUNTIME.get("chat_id") == chat_id
+                ):
+                    await watch_transition_delivery.drain(
+                        bot_app.bot, int(chat_id),
+                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
+                        and not WATCH_RUNTIME.get("scan_in_progress")
+                        and WATCH_RUNTIME.get("chat_id") == chat_id,
                     )
         except asyncio.CancelledError:
             raise
@@ -6255,6 +6287,7 @@ async def health(request):
         "service": "crypto-intelligence-v1",
         "ai": ai_agent.status(),
         "research_capture": research_event_runtime.status(),
+        "watch_transitions": watch_transition_delivery.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "btc_episodes": research_btc_episode_worker.WORKER.status(),
         "price_archive": research_price_archive_worker.WORKER.status(),
@@ -6289,6 +6322,7 @@ async def health(request):
             "last_cycle_result": WATCH_RUNTIME.get("last_cycle_result"),
             "last_completed_at_utc": WATCH_RUNTIME.get("last_completed_at_utc"),
             "last_delivery_errors": WATCH_RUNTIME.get("last_delivery_errors", []),
+            "last_transition_result": WATCH_RUNTIME.get("last_transition_result"),
             "cycle_stage": WATCH_RUNTIME.get("cycle_stage"),
             "interval_minutes": WATCH_INTERVAL_MINUTES,
             "sync_grace_seconds": WATCH_SYNC_GRACE_SECONDS,
@@ -7435,6 +7469,7 @@ async def main():
     bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()
+    await watch_transition_delivery.initialize()
     schema_runtime = await _prepare_research_schema()
     research_schema_ready = bool(schema_runtime.get("ready"))
     await bot_app.start()

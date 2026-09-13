@@ -262,7 +262,10 @@ def test_watch_only_hook_structure():
     for func in tree.body:
         if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for node in ast.walk(func):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_send_formula_watch_alerts":
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "watch_transition_delivery" and node.func.attr == "drain"
+                    and func.name == "run_watch_cycle"):
                     helper_calls.append((func, node))
     assert len(helper_calls) == 1
     watch, helper = helper_calls[0]
