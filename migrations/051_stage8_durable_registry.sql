@@ -2957,14 +2957,14 @@ BEGIN
         FROM projected
     )
     SELECT COALESCE(jsonb_agg(finalized.identity ORDER BY
-               research_stage8_canonical_json_v1(finalized.identity)), '[]'::jsonb),
+               research_stage8_canonical_json_v1(finalized.identity) COLLATE "C"), '[]'::jsonb),
            count(*)::integer,
            research_stage8_json_sha256_v1(jsonb_build_object(
                'version', 'stage8-outcome-blind-representative-set-v1',
                'exact_binding_sha256', NEW.exact_binding_sha256,
                'representatives', COALESCE(jsonb_agg(
                    finalized.representative ORDER BY
-                       research_stage8_canonical_json_v1(finalized.representative)
+                       research_stage8_canonical_json_v1(finalized.representative) COLLATE "C"
                ), '[]'::jsonb)
            ))
     INTO expected_identities, expected_representative_count,

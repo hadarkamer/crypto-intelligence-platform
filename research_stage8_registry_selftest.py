@@ -281,6 +281,19 @@ class Stage8RegistryTests(unittest.TestCase):
         )
         self.assertNotIn("CREATE ROLE research_stage8_", sql)
 
+    def test_selection_guard_uses_python_canonical_collation(self):
+        sql = (Path(registry.__file__).resolve().parent / "migrations" /
+               "051_stage8_durable_registry.sql").read_text()
+        self.assertIn(
+            'research_stage8_canonical_json_v1(finalized.identity) COLLATE "C"',
+            sql,
+        )
+        self.assertIn(
+            'research_stage8_canonical_json_v1(finalized.representative) '
+            'COLLATE "C"',
+            sql,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
