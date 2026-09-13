@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "task": "All Watch scans: durable research intake only",
+  "date_utc": "2026-09-13",
+  "repo": "hadarkamer/crypto-intelligence-platform",
+  "authorization": {
+    "ordered_topics": [
+      "מחקר מכל הסקירות",
+      "גילוי נוסחאות חדשות באופן שוטף",
+      "השלמת הארכיון ההיסטורי",
+      "השלמת שילוב HYPE",
+      "אימות נוסחאות על מקרים חדשים"
+    ],
+    "completed_scope": "First implementation step of topic 1 only",
+    "next_scope": "Versioned causal outcome measurement adapter for all Watch observations; inspect existing measurement and BTC-wave contracts before implementation",
+    "deferred": [
+      "Cluster/CVD component hypothesis research",
+      "B4",
+      "240m normalization"
+    ]
+  },
+  "implementation": {
+    "pr": 33,
+    "pr_url": "https://github.com/hadarkamer/crypto-intelligence-platform/pull/33",
+    "main_commit": "43ca09b964d04adae95c06be02a0fa83d0c4ba17",
+    "tested_tree": "6caaecc66937384390de33b095b8dbfaa3acc2b5",
+    "consumer_version": "watch-all-scan-intake-v1",
+    "population_version": "watch-all-scan-observations-v1",
+    "source_version": "watch-operational-scores-v2",
+    "historical_per_pass": 4,
+    "recent_per_pass": 2,
+    "poll_seconds": 30
+  },
+  "ci": {
+    "run_id": 34774846545,
+    "job_id": 103770962617,
+    "result": "success",
+    "selftest_files_passed": 109,
+    "new_tests_passed": 11,
+    "isolated_postgres_tests_passed": 5,
+    "isolated_postgres_tests_skipped": 0
+  },
+  "migration": {
+    "file": "migrations/046_watch_scan_research_intake.sql",
+    "sha256": "1c671b13b249e4353e17e88d04a694a004d09edbe0d46795b0edca9f2336c207",
+    "applied": true,
+    "method": "Exact tested schema admin and SQL staged in a temporary directory in authenticated Render Shell",
+    "schema_existence_verified_at_utc": "2026-09-13T18:34:43Z"
+  },
+  "deploy": {
+    "commit": {
+      "createdAt": "2026-09-13T18:36:59Z",
+      "id": "43ca09b964d04adae95c06be02a0fa83d0c4ba17",
+      "message": "Merge pull request #33 from hadarkamer/feature/all-watch-scan-intake-20260913\n\nAdmit every frozen Watch scan into a separate research population"
+    },
+    "createdAt": "2026-09-13T18:37:02.037221Z",
+    "finishedAt": "2026-09-13T18:38:29.375596Z",
+    "id": "dep-dajeqjdckfvc739p18c0",
+    "startedAt": "2026-09-13T18:37:02.015354Z",
+    "status": "live",
+    "trigger": "new_commit",
+    "updatedAt": "2026-09-13T18:38:53.425445Z"
+  },
+  "before_deploy_watch": {
+    "commit": "8042759a330c655e6bc86f404ea7b3886e9972d6",
+    "intake": null,
+    "outcome_enabled": "1",
+    "watch": {
+      "last_completed_at_utc": "2026-09-13T18:36:04.047272+00:00",
+      "last_cycle_result": "completed",
+      "last_cycle_status": "waiting",
+      "last_error": null,
+      "next_scan_utc": "2026-09-13T19:02:15+00:00"
+    }
+  },
+  "production_summary": {
+    "backlog": [
+      {
+        "admitted_receipts": 15,
+        "captured_scans": 15,
+        "source_version": "watch-operational-scores-v2"
+      },
+      {
+        "admitted_receipts": 1,
+        "captured_scans": 1,
+        "source_version": "watch-operational-scores-v1"
+      }
+    ],
+    "checked_at_utc": "2026-09-13T18:41:28.29193Z",
+    "receipts": [
+      {
+        "below_65_slots": 0,
+        "capture_phase": "HISTORICAL_CAPTURE",
+        "coin_observations": 0,
+        "first_ingested": "2026-09-13T18:38:18.139506+00:00",
+        "first_observed": null,
+        "first_snapshot_id": 1229,
+        "intake_status": "REJECTED",
+        "last_ingested": "2026-09-13T18:38:18.139506+00:00",
+        "last_observed": null,
+        "last_snapshot_id": 1229,
+        "rejection_reason": "UNSUPPORTED_CAPTURE_VERSION",
+        "scans": 1,
+        "scored_slots": 0,
+        "slots": 0,
+        "source_time_errors": 0,
+        "source_version": "watch-operational-scores-v1",
+        "unavailable_models": 0
+      },
+      {
+        "below_65_slots": 1594,
+        "capture_phase": "HISTORICAL_CAPTURE",
+        "coin_observations": 120,
+        "first_ingested": "2026-09-13T18:38:18.21267+00:00",
+        "first_observed": "2026-09-13T11:45:16.045864+00:00",
+        "first_snapshot_id": 1231,
+        "intake_status": "ACCEPTED",
+        "last_ingested": "2026-09-13T18:39:48.772294+00:00",
+        "last_observed": "2026-09-13T18:35:46.732127+00:00",
+        "last_snapshot_id": 1258,
+        "rejection_reason": null,
+        "scans": 15,
+        "scored_slots": 1680,
+        "slots": 1680,
+        "source_time_errors": 0,
+        "source_version": "watch-operational-scores-v2",
+        "unavailable_models": 0
+      }
+    ],
+    "state": [
+      {
+        "activated_at_utc": "2026-09-13T18:38:17.925494+00:00",
+        "completed_laps": 1,
+        "consumer_version": "watch-all-scan-intake-v1",
+        "scan_cursor": 1242,
+        "scan_high_water": 1259,
+        "updated_at_utc": "2026-09-13T18:41:18.870178+00:00"
+      }
+    ]
+  },
+  "production_view_verification": {
+    "below_65_slots": 1594,
+    "causal_time_errors": 0,
+    "checked_at_utc": "2026-09-13T18:42:14.785698Z",
+    "checked_scans": 15,
+    "coin_observations": 120,
+    "direction_errors": 0,
+    "invalid_scan_coverage": 0,
+    "missing_source_fields": 0,
+    "null_score_slots": 0,
+    "per_coin": [
+      {
+        "slots": 210,
+        "symbol": "BNB"
+      },
+      {
+        "slots": 210,
+        "symbol": "BTC"
+      },
+      {
+        "slots": 210,
+        "symbol": "DOGE"
+      },
+      {
+        "slots": 210,
+        "symbol": "ETH"
+      },
+      {
+        "slots": 210,
+        "symbol": "HYPE"
+      },
+      {
+        "slots": 210,
+        "symbol": "SOL"
+      },
+      {
+        "slots": 210,
+        "symbol": "XRP"
+      },
+      {
+        "slots": 210,
+        "symbol": "ZEC"
+      }
+    ],
+    "slots": 1680,
+    "threshold_counts": [
+      {
+        "above_or_equal_65": 15,
+        "snapshot_set_id": 1231
+      },
+      {
+        "above_or_equal_65": 13,
+        "snapshot_set_id": 1232
+      },
+      {
+        "above_or_equal_65": 12,
+        "snapshot_set_id": 1234
+      },
+      {
+        "above_or_equal_65": 13,
+        "snapshot_set_id": 1236
+      },
+      {
+        "above_or_equal_65": 11,
+        "snapshot_set_id": 1238
+      },
+      {
+        "above_or_equal_65": 9,
+        "snapshot_set_id": 1240
+      },
+      {
+        "above_or_equal_65": 7,
+        "snapshot_set_id": 1242
+      },
+      {
+        "above_or_equal_65": 3,
+        "snapshot_set_id": 1244
+      },
+      {
+        "above_or_equal_65": 2,
+        "snapshot_set_id": 1246
+      },
+      {
+        "above_or_equal_65": 0,
+        "snapshot_set_id": 1248
+      },
+      {
+        "above_or_equal_65": 1,
+        "snapshot_set_id": 1250
+      },
+      {
+        "above_or_equal_65": 0,
+        "snapshot_set_id": 1252
+      },
+      {
+        "above_or_equal_65": 0,
+        "snapshot_set_id": 1254
+      },
+      {
+        "above_or_equal_65": 0,
+        "snapshot_set_id": 1256
+      },
+      {
+        "above_or_equal_65": 0,
+        "snapshot_set_id": 1258
+      }
+    ],
+    "unexpected_research_flags": 0,
+    "zero_score_slots": 226
+  },
+  "production_worker_health": {
+    "commit": "43ca09b964d04adae95c06be02a0fa83d0c4ba17",
+    "watch": {
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "next_scan_utc": "2026-09-13T19:02:15+00:00",
+      "last_error": null
+    },
+    "intake": {
+      "version": "watch-all-scan-intake-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "page_size": 64,
+      "max_bundles_per_pass": 6,
+      "poll_seconds": 30,
+      "outcomes_enabled": false,
+      "formula_evaluation_enabled": false,
+      "cycles": 8,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "accepted": 0,
+        "rejected": 0,
+        "processed": 0,
+        "scanned_ids": 8,
+        "cursor": 1250,
+        "high_water": 1259,
+        "completed_laps": 1
+      },
+      "last_run_utc": "2026-09-13T18:41:48.904172+00:00"
+    },
+    "outcome_enabled": "1"
+  },
+  "conclusions": {
+    "existing_v2_backlog": 0,
+    "accepted_scans": 15,
+    "rejected_legacy_captures": 1,
+    "coin_observations": 120,
+    "slots": 1680,
+    "below_65_slots": 1594,
+    "zero_score_slots": 226,
+    "hype_slots": 210,
+    "scans_without_any_score_at_least_65": 5,
+    "repeated_passes_no_duplicate_receipts": true
+  },
+  "limits": {
+    "all_accepted_captures_are_historical": true,
+    "forward_capture_observed_after_deploy": false,
+    "per_scan_outcomes_implemented": false,
+    "formula_evaluation_on_new_population_implemented": false,
+    "prospective_formula_evidence": false,
+    "no_score_at_least_65_does_not_establish_no_formula_alert": true
+  },
+  "actions_not_taken": [
+    "Manual Watch scan",
+    "Telegram test or manual message",
+    "Score, formula condition or trading direction changes",
+    "Activation of all deferred research topics"
+  ],
+  "next_natural_watch_utc": "2026-09-13T19:02:15Z"
+}
