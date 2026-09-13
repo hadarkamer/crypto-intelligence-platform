@@ -1,7 +1,9 @@
 """Actual readback proves coverage; successful write ACKs alone cannot."""
 from contextlib import contextmanager
+import contextlib
 from datetime import datetime, timezone
 import json
+import io
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -57,19 +59,23 @@ class AuditTests(unittest.TestCase):
         for page in [
             {"start_row": 3, "next_row": 3, "last_row": 8, "complete": False, "rows": []},
             {"start_row": 2, "next_row": 3, "last_row": 8, "complete": True, "rows": [self.row("present")]},
+            {"start_row": 2, "next_row": 4, "last_row": 2, "complete": True,
+             "rows": [self.row("present"), self.row("duplicate")]},
         ]:
             with self.assertRaises(ValueError): a.consume_page(page)
         self.assertIsNone(a.status()["last_complete"])
 
     def test_remote_failure_does_not_repair_or_report_match(self):
         a = self.auditor()
-        with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", side_effect=ValueError("V3_REQUIRED")), \
+        population = a.expected
+        with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", side_effect=ValueError("SHEET_AUDIT_RECEIVER_V3_REQUIRED")), \
              patch.object(a, "_finish") as finish:
             result = a.run_due("test")
         self.assertEqual(result["status"], "AUDIT_FAILED")
-        self.assertEqual(result["last_error"], "V3_REQUIRED")
+        self.assertEqual(result["last_error"], "SHEET_AUDIT_RECEIVER_V3_REQUIRED")
         finish.assert_not_called()
-        self.assertIsNone(a.expected)
+        self.assertIs(a.expected, population)
+        self.assertEqual(result["reset_count"], 0)
 
     def test_busy_after_partial_page_preserves_population_and_resumes_exact_cursor(self):
         a = self.auditor()
@@ -88,6 +94,7 @@ class AuditTests(unittest.TestCase):
         self.assertEqual((a.next_row, a.last_row), (3, 4))
         self.assertEqual(status["status"], "DEFERRED_RECEIVER_BUSY")
         self.assertIsNone(status["last_complete"])
+        self.assertEqual(status["reset_count"], 0)
         self.assertIsNone(status["last_error"])
         a.next_attempt = 0
         with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", return_value={
@@ -115,6 +122,10 @@ class AuditTests(unittest.TestCase):
         self.assertIsNone(a.expected)
         self.assertEqual(status["status"], "AUDIT_FAILED")
         self.assertIsNone(status["last_complete"])
+        self.assertEqual(status["reset_count"], 1)
+        self.assertEqual(status["last_reset"]["phase"], "CONSUME")
+        self.assertEqual((a.next_row, a.last_row, a.normalized), (2, None, 0))
+        self.assertFalse(a.seen)
 
     def test_transient_read_preserves_frozen_population_and_counts_only_resumed_page(self):
         for reason in ["SHEET_AUDIT_HTTP_404_CONTENT_RESPONSE", "SHEET_AUDIT_CONNECTION_INTERRUPTED"]:
@@ -153,8 +164,9 @@ class AuditTests(unittest.TestCase):
                                  (2, 1, 1, 1, 3))
                 self.assertEqual((final["from_utc"], final["through_utc"]), (start.isoformat(), cutoff.isoformat()))
 
-    def test_corrupt_read_after_transient_retry_still_invalidates_scan(self):
+    def test_invalid_json_after_transient_retry_stays_failed_without_losing_scan(self):
         a = self.auditor()
+        population = a.expected
         a.consume_page({"start_row": 2, "next_row": 3, "last_row": 4, "complete": False,
                         "rows": [self.row("present")]})
         with patch.object(audit.google_sheets_sync, "read_telegram_audit_page",
@@ -165,9 +177,111 @@ class AuditTests(unittest.TestCase):
                           side_effect=json.JSONDecodeError("invalid response", "", 0)), patch.object(a, "_finish") as finish:
             status = a.run_due("test")
         finish.assert_not_called()
-        self.assertIsNone(a.expected)
+        self.assertIs(a.expected, population)
         self.assertEqual(status["status"], "AUDIT_FAILED")
         self.assertIsNone(status["last_complete"])
+        self.assertEqual(status["last_failure"]["exception_type"], "JSONDecodeError")
+        self.assertEqual(status["last_failure"]["phase"], "READ")
+        self.assertEqual((a.next_row, a.last_row), (3, 4))
+        self.assertEqual(a.seen, {"present": 1})
+
+    def test_http_200_html_live_regression_preserves_scan_and_retains_safe_diagnostic(self):
+        # Production evidence, 2026-09-13 10:05:13 UTC: HTTP 200 HTML,
+        # 5,500 bytes, JSONDecodeError after earlier valid JSON audit pages.
+        a = self.auditor()
+        population, start, cutoff = a.expected, a.start, a.cutoff
+        a.consume_page({"start_row": 2, "next_row": 3, "last_row": 4, "complete": False,
+                        "rows": [self.row("present")]})
+        raw = b"<html>PRIVATE_BODY" + b" " * (5500 - len(b"<html>PRIVATE_BODY"))
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/html; charset=utf-8"}
+            body = raw
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def geturl(self): return "https://script.googleusercontent.com/macros/echo?user_content_key=PRIVATE_URL"
+            def read(self, size): return self.body[:size]
+
+        output = io.StringIO()
+        with patch.object(audit.google_sheets_sync, "enabled", return_value=True), \
+                patch.object(audit.google_sheets_sync, "_WEBHOOK_URL", "https://script.google.com/macros/s/test/exec"), \
+                patch.object(audit.google_sheets_sync, "_WEBHOOK_SECRET", "PRIVATE_SECRET"), \
+                patch.object(audit.google_sheets_sync, "urlopen", return_value=Response()), \
+                contextlib.redirect_stdout(output):
+            status = a.run_due("test")
+        self.assertEqual(status["status"], "AUDIT_FAILED")
+        self.assertIs(a.expected, population)
+        self.assertEqual((a.start, a.cutoff, a.next_row, a.last_row), (start, cutoff, 3, 4))
+        self.assertEqual(a.seen, {"present": 1})
+        self.assertIsNone(status["last_complete"])
+        failure = status["last_failure"]
+        self.assertEqual((failure["phase"], failure["exception_type"], failure["scan_reset"]),
+                         ("READ", "JSONDecodeError", False))
+        self.assertEqual((failure["http"]["http_status"], failure["http"]["content_type"],
+                          failure["http"]["response_bytes"]), (200, "text/html", 5500))
+        self.assertNotIn("PRIVATE", output.getvalue() + repr(status))
+        a.next_attempt = 0
+        with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", return_value={
+                "start_row": 3, "next_row": 5, "last_row": 4, "complete": True,
+                "rows": [self.row("duplicate"), self.row("missing")]}), \
+                patch.object(a, "_begin") as begin, patch.object(audit.research_sheet_outbox, "_connect") as connect:
+            completed = a.run_due("test")
+        begin.assert_not_called()
+        connect.assert_not_called()
+        self.assertEqual(completed["status"], "MATCHED")
+        self.assertEqual(completed["last_complete"]["sheet_unique"], 3)
+        self.assertEqual(completed["last_failure"], failure, "success must not erase diagnostic evidence")
+        self.assertEqual(completed["reset_count"], 0)
+
+    def test_explicit_invalid_bounds_or_page_during_read_resets_every_scan_component(self):
+        for error in [audit.google_sheets_sync.SheetAuditBoundsChanged("SHEET_AUDIT_BOUNDS_CHANGED"),
+                      audit.google_sheets_sync.SheetAuditPageInvalid("INVALID_SHEET_AUDIT_RESPONSE")]:
+            with self.subTest(error=type(error).__name__):
+                a = self.auditor()
+                a.consume_page({"start_row": 2, "next_row": 4, "last_row": 4, "complete": False,
+                                "normalized_maxpain_rows": 1, "rows": [self.row("present"), self.row("unexpected")]})
+                with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", side_effect=error):
+                    status = a.run_due("test")
+                self.assertEqual(status["status"], "AUDIT_FAILED")
+                self.assertIsNone(a.expected)
+                self.assertEqual((a.next_row, a.last_row, a.normalized, a.start, a.cutoff), (2, None, 0, None, None))
+                self.assertFalse(a.seen)
+                self.assertFalse(a.unexpected)
+                self.assertEqual(status["reset_count"], 1)
+                self.assertTrue(status["last_reset"]["scan_reset"])
+                self.assertEqual(status["last_reset"]["phase"], "READ")
+                prior_reset = status["last_reset"]
+                fresh = self.auditor()
+                a.expected, a.start, a.cutoff = fresh.expected, fresh.start, fresh.cutoff
+                a.next_attempt = 0
+                with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", return_value={
+                        "start_row": 2, "next_row": 5, "last_row": 4, "complete": True,
+                        "rows": [self.row("present"), self.row("duplicate"), self.row("missing")]}):
+                    completed = a.run_due("test")
+                self.assertEqual(completed["status"], "MATCHED")
+                self.assertEqual(completed["last_reset"], prior_reset)
+                self.assertEqual(completed["reset_count"], 1)
+
+    def test_page_consumption_is_atomic_when_later_row_is_corrupt(self):
+        a = self.auditor()
+        a.consume_page({"start_row": 2, "next_row": 3, "last_row": 5, "complete": False,
+                        "normalized_maxpain_rows": 1, "rows": [self.row("present")]})
+        bad = {"start_row": 3, "next_row": 6, "last_row": 5, "complete": True,
+               "normalized_maxpain_rows": 2, "rows": [self.row("duplicate"), self.row("unexpected"), "PRIVATE_CORRUPT_ROW"]}
+        with self.assertRaisesRegex(ValueError, "INVALID_SHEET_AUDIT_ROW"):
+            a.consume_page(bad)
+        self.assertEqual(a.seen, {"present": 1})
+        self.assertFalse(a.unexpected)
+        self.assertEqual((a.next_row, a.last_row, a.normalized), (3, 5, 1))
+        output = io.StringIO()
+        with patch.object(audit.google_sheets_sync, "read_telegram_audit_page", return_value=bad), contextlib.redirect_stdout(output):
+            status = a.run_due("test")
+        self.assertIsNone(a.expected)
+        self.assertEqual(status["reset_count"], 1)
+        self.assertEqual(status["last_reset"]["seen_unique"], 1)
+        self.assertEqual(status["last_reset"]["phase"], "CONSUME")
+        self.assertNotIn("PRIVATE", output.getvalue())
 
     def test_pending_prefix_does_not_hide_later_synced_repairs(self):
         a = self.auditor()

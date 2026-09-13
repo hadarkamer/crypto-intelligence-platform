@@ -1180,6 +1180,14 @@ class SheetAuditTransportRetry(RuntimeError):
     """No valid page was received; retry its frozen bounds without counting it."""
 
 
+class SheetAuditBoundsChanged(ValueError):
+    """The receiver explicitly rejected the frozen row boundary."""
+
+
+class SheetAuditPageInvalid(ValueError):
+    """A parsed receiver response contains an invalid audit page."""
+
+
 def _retryable_sheet_audit_http(exc: HTTPError) -> bool:
     context = _response_context(exc)
     host, code = context["response_host"], context["http_status"]
@@ -1207,31 +1215,54 @@ def read_telegram_audit_page(*, start_row: int = 2, last_row: int | None = None)
             raise SheetReceiverBusy("SHEET_RECEIVER_BUSY")
         request = Request(_WEBHOOK_URL, data=json.dumps(envelope).encode("utf-8"),
                           headers={"Content-Type": "application/json"}, method="POST")
+        started_at = time.monotonic()
+        diagnostic = {"http_status": None, "response_stage": "REQUEST_OR_REDIRECT",
+                      "response_host": None, "content_type": None, "response_bytes": None}
+
+        def diagnosed(exc: Exception) -> Exception:
+            # Exception metadata survives into the reconciler's retained
+            # failure record. Never attach the body, URL, query or secret.
+            safe = dict(diagnostic, elapsed_seconds=round(time.monotonic() - started_at, 3))
+            if safe["response_host"] not in _HTML_ACK_HOSTS | {None}:
+                safe["response_host"] = "OTHER"
+            exc.sheet_audit_diagnostic = safe
+            return exc
+
         try:
             with urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+                diagnostic.update(_response_context(response))
                 # The receiver emits no raw texts; this bound prevents accidental
                 # HTML or arbitrary download responses from becoming audit data.
                 raw = response.read(512_001)
+                diagnostic["response_bytes"] = len(raw)
+            if len(raw) > 512_000:
+                raise ValueError("SHEET_AUDIT_RESPONSE_TOO_LARGE")
+            body = json.loads(raw.decode("utf-8"))
+            if isinstance(body, dict) and body.get("ok") is False and (
+                    body.get("error_code") == "AUDIT_ROW_BOUNDS_CHANGED" or
+                    (isinstance(body.get("error"), str) and body["error"] in
+                     {"Audit row bounds changed; restart", "Error: Audit row bounds changed; restart"})):
+                raise SheetAuditBoundsChanged("SHEET_AUDIT_BOUNDS_CHANGED")
+            if not isinstance(body, dict) or body.get("ok") is not True or body.get("version") != "sheets-batch-v3":
+                raise ValueError("SHEET_AUDIT_RECEIVER_V3_REQUIRED")
+            audit = body.get("audit")
+            if not isinstance(audit, dict) or not isinstance(audit.get("rows"), list) or len(audit["rows"]) > 500:
+                raise SheetAuditPageInvalid("INVALID_SHEET_AUDIT_RESPONSE")
+            _RECEIVER_VERSION = body["version"]
+            return audit
         except HTTPError as exc:
+            diagnostic.update(_response_context(exc))
             if _retryable_sheet_audit_http(exc):
                 context = _response_context(exc)
-                raise SheetAuditTransportRetry(
+                raise diagnosed(SheetAuditTransportRetry(
                     "SHEET_AUDIT_HTTP_" + str(context["http_status"]) + "_" + context["response_stage"]
-                ) from None
-            raise
+                )) from None
+            raise diagnosed(exc)
         except (TimeoutError, ConnectionError, IncompleteRead):
-            raise SheetAuditTransportRetry("SHEET_AUDIT_CONNECTION_INTERRUPTED") from None
+            raise diagnosed(SheetAuditTransportRetry("SHEET_AUDIT_CONNECTION_INTERRUPTED")) from None
         except URLError as exc:
             if isinstance(exc.reason, (TimeoutError, ConnectionError)):
-                raise SheetAuditTransportRetry("SHEET_AUDIT_CONNECTION_INTERRUPTED") from None
-            raise
-        if len(raw) > 512_000:
-            raise ValueError("SHEET_AUDIT_RESPONSE_TOO_LARGE")
-        body = json.loads(raw.decode("utf-8"))
-        if not isinstance(body, dict) or body.get("ok") is not True or body.get("version") != "sheets-batch-v3":
-            raise ValueError("SHEET_AUDIT_RECEIVER_V3_REQUIRED")
-        audit = body.get("audit")
-        if not isinstance(audit, dict) or not isinstance(audit.get("rows"), list) or len(audit["rows"]) > 500:
-            raise ValueError("INVALID_SHEET_AUDIT_RESPONSE")
-        _RECEIVER_VERSION = body["version"]
-        return audit
+                raise diagnosed(SheetAuditTransportRetry("SHEET_AUDIT_CONNECTION_INTERRUPTED")) from None
+            raise diagnosed(exc)
+        except Exception as exc:
+            raise diagnosed(exc)

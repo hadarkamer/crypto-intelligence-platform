@@ -7,6 +7,7 @@ and demos are never counted as native Telegram deliveries. No Telegram actions.
 from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Any, Mapping
 import time
 import google_sheets_sync
@@ -16,6 +17,18 @@ VERSION = "delivered-sheet-fingerprints-v1"
 MAX_EVENTS = 20_000
 PAGE_INTERVAL_SECONDS = 60
 CYCLE_INTERVAL_SECONDS = 300
+_SAFE_FAILURE_CODES = frozenset({
+    "SHEETS_UNCONFIGURED", "SHEET_RECEIVER_BUSY", "SHEET_AUDIT_BOUNDS_CHANGED",
+    "SHEET_AUDIT_CONNECTION_INTERRUPTED", "SHEET_AUDIT_RESPONSE_TOO_LARGE",
+    "SHEET_AUDIT_RECEIVER_V3_REQUIRED", "INVALID_SHEET_AUDIT_RESPONSE",
+    "INVALID_OR_DISCONTINUOUS_SHEET_AUDIT_PAGE", "INVALID_SHEET_AUDIT_ROW",
+    "INVALID_SHEET_AUDIT_NORMALIZED_COUNT", "AUDIT_POPULATION_NOT_STARTED",
+    "AUDIT_POPULATION_EXCEEDS_20000", "DUPLICATE_DATABASE_EVENT_FINGERPRINT",
+}) | frozenset(
+    "SHEET_AUDIT_HTTP_" + str(code) + "_" + stage
+    for code in (404, 408, 429, 500, 502, 503, 504)
+    for stage in ("WEBHOOK_RESPONSE", "CONTENT_RESPONSE")
+)
 
 
 def utc(value: Any) -> datetime | None:
@@ -39,7 +52,8 @@ class SheetReconciler:
         self.start: datetime | None = None
         self.cutoff: datetime | None = None
         self.normalized = 0
-        self.runtime: dict[str, Any] = {"version": VERSION, "status": "NOT_STARTED", "last_complete": None, "last_error": None}
+        self.runtime: dict[str, Any] = {"version": VERSION, "status": "NOT_STARTED", "last_complete": None,
+                                      "last_error": None, "last_failure": None, "last_reset": None, "reset_count": 0}
 
     def status(self) -> dict[str, Any]:
         return dict(self.runtime, next_row=self.next_row, last_row=self.last_row)
@@ -66,19 +80,26 @@ class SheetReconciler:
         self.runtime.update(status="SCANNING", expected=len(self.expected), started_at=datetime.now(timezone.utc).isoformat())
 
     def consume_page(self, page: Mapping[str, Any]) -> bool:
+        if not isinstance(page, Mapping):
+            raise ValueError("INVALID_OR_DISCONTINUOUS_SHEET_AUDIT_PAGE")
         rows = page.get("rows")
         if (not isinstance(rows, list) or len(rows) > 500
             or page.get("start_row") != self.next_row
             or page.get("next_row") != self.next_row + len(rows)
-            or not isinstance(page.get("last_row"), int)
+            or type(page.get("start_row")) is not int or type(page.get("next_row")) is not int
+            or type(page.get("last_row")) is not int
             or page["last_row"] < 1
+            or page["next_row"] > page["last_row"] + 1
             or (self.last_row is not None and page["last_row"] != self.last_row)
             or page.get("complete") is not (page["next_row"] > page["last_row"])
             or (not rows and not page["complete"])):
             raise ValueError("INVALID_OR_DISCONTINUOUS_SHEET_AUDIT_PAGE")
         if self.expected is None or self.start is None or self.cutoff is None:
             raise ValueError("AUDIT_POPULATION_NOT_STARTED")
-        self.last_row = page["last_row"]
+        normalized = page.get("normalized_maxpain_rows", 0)
+        if type(normalized) is not int or not 0 <= normalized <= len(rows):
+            raise ValueError("INVALID_SHEET_AUDIT_NORMALIZED_COUNT")
+        seen, unexpected = Counter(), Counter()
         for row in rows:
             if not isinstance(row, Mapping):
                 raise ValueError("INVALID_SHEET_AUDIT_ROW")
@@ -86,12 +107,49 @@ class SheetReconciler:
             if row.get("verification_status") != "DELIVERED" or not fingerprint:
                 continue
             if fingerprint in self.expected:
-                self.seen[fingerprint] += 1
+                seen[fingerprint] += 1
             elif self.start <= (utc(row.get("timestamp_utc")) or datetime.min.replace(tzinfo=timezone.utc)) <= self.cutoff:
-                self.unexpected[fingerprint] += 1
+                unexpected[fingerprint] += 1
+        # Commit a complete validated page atomically. A malformed later row
+        # must not change earlier counters or any part of the frozen cursor.
+        self.last_row = page["last_row"]
+        self.seen.update(seen)
+        self.unexpected.update(unexpected)
         self.next_row = page["next_row"]
-        self.normalized += int(page.get("normalized_maxpain_rows") or 0)
+        self.normalized += normalized
         return bool(page["complete"])
+
+    def _record_failure(self, exc: Exception, *, phase: str, reset: bool) -> str:
+        error_type = type(exc).__name__
+        message = str(exc)
+        code = message if message in _SAFE_FAILURE_CODES else error_type
+        failure = {
+            "at_utc": datetime.now(timezone.utc).isoformat(), "phase": phase,
+            "exception_type": error_type, "error_code": code, "scan_reset": reset,
+            "start_row": self.next_row, "last_row": self.last_row,
+            "scan_started_at": self.runtime.get("started_at"),
+            "through_utc": self.cutoff.isoformat() if self.cutoff else None,
+            "expected": len(self.expected) if self.expected is not None else None,
+            "seen_unique": len(self.seen),
+        }
+        diagnostic = getattr(exc, "sheet_audit_diagnostic", None)
+        if isinstance(diagnostic, dict):
+            failure["http"] = {key: diagnostic.get(key) for key in (
+                "http_status", "response_stage", "response_host", "content_type", "response_bytes", "elapsed_seconds")}
+        self.runtime["last_failure"] = failure
+        if reset:
+            self.runtime["reset_count"] += 1
+            self.runtime["last_reset"] = failure
+            self.expected = None
+            self.seen.clear()
+            self.unexpected.clear()
+            self.next_row, self.last_row, self.normalized = 2, None, 0
+            self.start, self.cutoff = None, None
+            self.runtime.update(expected=None, started_at=None)
+        # Retained status survives subsequent successful pages; one bounded,
+        # sanitized log record also distinguishes resets from process restarts.
+        print("[sheet-audit] " + json.dumps(failure, sort_keys=True), flush=True)
+        return code
 
     def summarize(self) -> dict[str, Any]:
         expected = self.expected or {}
@@ -153,12 +211,16 @@ class SheetReconciler:
         if now < self.next_attempt:
             return self.status()
         self.next_attempt = now + PAGE_INTERVAL_SECONDS
+        phase = "BEGIN"
         try:
             if self.expected is None:
                 self._begin(database_url)
             self.runtime["status"] = "SCANNING"
+            phase = "READ"
             page = google_sheets_sync.read_telegram_audit_page(start_row=self.next_row, last_row=self.last_row)
+            phase = "CONSUME"
             if self.consume_page(page):
+                phase = "FINISH"
                 self._finish(database_url)
                 self.next_attempt = time.monotonic() + CYCLE_INTERVAL_SECONDS
             self.runtime["last_error"] = None
@@ -172,9 +234,15 @@ class SheetReconciler:
             # A transport failure yielded no valid page, so nothing was added
             # to seen/normalized or advanced. Resume this exact page with the
             # same frozen population and boundary at the next bounded turn.
-            self.runtime.update(status="DEFERRED_TRANSPORT_RETRY", last_error=str(exc)[:160])
+            code = self._record_failure(exc, phase=phase, reset=False)
+            self.runtime.update(status="DEFERRED_TRANSPORT_RETRY", last_error=code)
         except Exception as exc:
-            self.runtime.update(status="AUDIT_FAILED", last_error=str(exc)[:160])
-            # Failures never certify coverage, or reuse an incomplete ID scan.
-            self.expected = None
+            # Any unaccepted READ response, including HTTP-200 HTML or auth
+            # errors, leaves earlier validated pages unchanged. This remains
+            # AUDIT_FAILED until the exact requested page succeeds. Explicit
+            # invalid bounds/pages must instead discard the whole scan.
+            reset = phase != "READ" or isinstance(exc, (
+                google_sheets_sync.SheetAuditBoundsChanged, google_sheets_sync.SheetAuditPageInvalid))
+            code = self._record_failure(exc, phase=phase, reset=reset)
+            self.runtime.update(status="AUDIT_FAILED", last_error=code)
         return self.status()
