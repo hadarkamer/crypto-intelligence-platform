@@ -1,0 +1,343 @@
+{
+  "verified_at_utc": "2026-09-13T19:48:32.924862+00:00",
+  "step": "all-Watch research: existing total-model formula evaluation and descriptive controls",
+  "repository": "hadarkamer/crypto-intelligence-platform",
+  "main_commit": "934d3a633f149e002957ff3317f6aa33836f9e67",
+  "tree_sha": "7341a1dccda06d803cd046fdd6039fd2256ce463",
+  "pr": 35,
+  "pr_url": "https://github.com/hadarkamer/crypto-intelligence-platform/pull/35",
+  "tested_head": "ada05f37debc70313b405790b84e12c58a1d4f17",
+  "ci": {
+    "run_id": 34778323249,
+    "job_id": 103780510070,
+    "conclusion": "success",
+    "selftest_files": 113,
+    "new_pure_tests": 15,
+    "new_postgres_tests": 11,
+    "new_tests_skipped": 0,
+    "postgres_version": 18
+  },
+  "deployment": {
+    "id": "dep-dajfpaqjnfac73f0n5a0",
+    "status": "live",
+    "live_at_utc": "2026-09-13T19:44:00.463871Z",
+    "instance": "cj49m"
+  },
+  "migration": {
+    "ok": true,
+    "returncode": 0,
+    "migration": "048_watch_scan_formulas.sql",
+    "sha256": {
+      "migrations/048_watch_scan_formulas.sql": "8297b87d9b1d2d8acf790bd4065a63008828fa0a978b9f1cfe202f70363cc15e",
+      "research_formula_schema_admin.py": "9eda73108f3ca28425bd9ca1970803f48d37e16ae5ee693d4670148e3149f42f"
+    }
+  },
+  "predeploy_health": {
+    "checked_at_utc": "2026-09-13T19:42:03.007331+00:00",
+    "commit": "3243e20a1869750150838535c07de987412a9cdf",
+    "watch": {
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": "2026-09-13T19:36:11.526117+00:00",
+      "last_cycle_result": "completed",
+      "next_scan_utc": "2026-09-13T20:02:15+00:00",
+      "last_error": null
+    },
+    "intake": {
+      "version": "watch-all-scan-intake-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "page_size": 64,
+      "max_bundles_per_pass": 6,
+      "poll_seconds": 30,
+      "outcomes_enabled": false,
+      "formula_evaluation_enabled": false,
+      "cycles": 68,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "accepted": 0,
+        "rejected": 0,
+        "processed": 0,
+        "scanned_ids": 2,
+        "cursor": 1262,
+        "high_water": 1263,
+        "completed_laps": 23
+      },
+      "last_run_utc": "2026-09-13T19:41:45.266952+00:00"
+    },
+    "measurement": {
+      "version": "watch-scan-measurements-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "cache_only": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "formula_evaluation_enabled": false,
+      "cycles": 67,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "enqueued": 0,
+        "processed": 0,
+        "ready": 0,
+        "open": 0,
+        "missing": 0,
+        "errors": 0
+      },
+      "last_run_utc": "2026-09-13T19:41:49.926597+00:00"
+    },
+    "formulas": null
+  },
+  "health": {
+    "checked_at_utc": "2026-09-13T19:48:19.093602+00:00",
+    "commit": "934d3a633f149e002957ff3317f6aa33836f9e67",
+    "watch": {
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "next_scan_utc": "2026-09-13T20:02:15+00:00",
+      "last_error": null
+    },
+    "intake": {
+      "version": "watch-all-scan-intake-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "page_size": 64,
+      "max_bundles_per_pass": 6,
+      "poll_seconds": 30,
+      "outcomes_enabled": false,
+      "formula_evaluation_enabled": false,
+      "cycles": 9,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "accepted": 0,
+        "rejected": 0,
+        "processed": 0,
+        "scanned_ids": 14,
+        "cursor": 1242,
+        "high_water": 1263,
+        "completed_laps": 26
+      },
+      "last_run_utc": "2026-09-13T19:47:51.897619+00:00"
+    },
+    "measurement": {
+      "version": "watch-scan-measurements-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "cache_only": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "formula_evaluation_enabled": false,
+      "cycles": 9,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "enqueued": 0,
+        "processed": 0,
+        "ready": 0,
+        "open": 0,
+        "missing": 0,
+        "errors": 0
+      },
+      "last_run_utc": "2026-09-13T19:47:54.532547+00:00"
+    },
+    "formulas": {
+      "version": "watch-scan-formulas-v1",
+      "feature_version": "watch-captured-total-model-features-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "catalog_candidates": 298,
+      "supported_candidates": 34,
+      "discovery_enabled": false,
+      "promotion_enabled": false,
+      "cycles": 9,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "catalog": 298,
+        "enqueued": 0,
+        "processed": 8,
+        "ready": 8,
+        "errors": 0
+      },
+      "last_run_utc": "2026-09-13T19:48:01.632417+00:00"
+    }
+  },
+  "summary": {
+    "catalog": {
+      "supported": 34,
+      "total": 298,
+      "unsupported": 264
+    },
+    "checked_at_utc": "2026-09-13T19:48:32.924862+00:00",
+    "evaluations": {
+      "candidates": 34,
+      "coins": 8,
+      "match": 688,
+      "no_match": 8560,
+      "prospective": 0,
+      "total": 9248,
+      "unknown": 0
+    },
+    "intakes": 17,
+    "samples": {
+      "errors": 0,
+      "last_update": "2026-09-13T19:48:01.19138+00:00",
+      "ready": 136,
+      "total": 136,
+      "waiting": 0
+    },
+    "waves": {
+      "distinct_live_waves": 1,
+      "live_coins": 136
+    }
+  },
+  "independent_predicate_check": {
+    "below65_controls": 785,
+    "hype_known_checks": 102,
+    "known_checks": 816,
+    "predicate_mismatches": 0,
+    "raw_checks": 816,
+    "unavailable_used_as_known": 0
+  },
+  "invariants": {
+    "bad_sample_counts": 0,
+    "bad_source_identity": 0,
+    "hype_routes": [
+      "HYPERLIQUID_HYPE_PERP_TRADE_1M"
+    ],
+    "inverse_mismatches": 0,
+    "ready_evaluations_with_timeframe": 0,
+    "unsupported_evaluations": 0
+  },
+  "wave_audit": {
+    "anchor_members": 560,
+    "blocked_members": 0,
+    "candidate_keys": 34,
+    "control_members": 500,
+    "distinct_waves": 1,
+    "matched_members": 60,
+    "max_tied_members": 8
+  },
+  "frozen_features_digest": {
+    "ready_features_digest": "a1b51110789e9c89799b67ab9a41a5ba",
+    "ready_samples": 136
+  },
+  "sample_feature_hash_checks": [
+    {
+      "symbol": "BTC",
+      "snapshot_set_id": 1231,
+      "feature_sha256": "96a4b999145e091e3ea180f4b45685619365cb00cd88b5f426ae46934bbc5d62",
+      "matches": true
+    },
+    {
+      "symbol": "HYPE",
+      "snapshot_set_id": 1231,
+      "feature_sha256": "1314c67fe9cce09dffa78c119d35a5367b975a3c159b7b11fb04a31d45704c43",
+      "matches": true
+    }
+  ],
+  "comparison_example": [
+    {
+      "analysis_direction": "LONG",
+      "base_direction": "LONG",
+      "blocked_arms": 0,
+      "candidate_key": "FUTURES_CVD_TOTAL_65",
+      "control_failure": 0,
+      "control_success": 0,
+      "control_waves": 1,
+      "distinct_waves": 1,
+      "matched_failure": 0,
+      "matched_success": 0,
+      "matched_waves": 0,
+      "missing_arms": 0,
+      "no_touch_arms": 1,
+      "open_arms": 0,
+      "shared_waves": 0,
+      "symbol_scope": "ALL",
+      "threshold_bps": 25,
+      "window_minutes": 60
+    },
+    {
+      "analysis_direction": "LONG",
+      "base_direction": "LONG",
+      "blocked_arms": 0,
+      "candidate_key": "FUTURES_CVD_TOTAL_65",
+      "control_failure": 1,
+      "control_success": 0,
+      "control_waves": 1,
+      "distinct_waves": 1,
+      "matched_failure": 0,
+      "matched_success": 0,
+      "matched_waves": 0,
+      "missing_arms": 0,
+      "no_touch_arms": 0,
+      "open_arms": 0,
+      "shared_waves": 0,
+      "symbol_scope": "ALL",
+      "threshold_bps": 25,
+      "window_minutes": 240
+    },
+    {
+      "analysis_direction": "LONG",
+      "base_direction": "LONG",
+      "blocked_arms": 0,
+      "candidate_key": "FUTURES_CVD_TOTAL_65",
+      "control_failure": 0,
+      "control_success": 0,
+      "control_waves": 1,
+      "distinct_waves": 1,
+      "matched_failure": 0,
+      "matched_success": 0,
+      "matched_waves": 0,
+      "missing_arms": 0,
+      "no_touch_arms": 0,
+      "open_arms": 1,
+      "shared_waves": 0,
+      "symbol_scope": "ALL",
+      "threshold_bps": 25,
+      "window_minutes": 720
+    },
+    {
+      "analysis_direction": "LONG",
+      "base_direction": "LONG",
+      "blocked_arms": 0,
+      "candidate_key": "FUTURES_CVD_TOTAL_65",
+      "control_failure": 0,
+      "control_success": 0,
+      "control_waves": 1,
+      "distinct_waves": 1,
+      "matched_failure": 0,
+      "matched_success": 0,
+      "matched_waves": 0,
+      "missing_arms": 0,
+      "no_touch_arms": 0,
+      "open_arms": 1,
+      "shared_waves": 0,
+      "symbol_scope": "ALL",
+      "threshold_bps": 25,
+      "window_minutes": 1440
+    }
+  ],
+  "limitations": [
+    "264 candidate definitions require unsupported features; no substitute or partial formula match is manufactured.",
+    "Only causal LIVE membership enters wave comparisons; missing measurement membership is outside that comparison until available.",
+    "All 17 scans currently share one BTC wave. No probability, causality, independence or acceptance conclusion follows.",
+    "Raw decisions, inverse aliases, directions, symbol scopes, horizons, barriers and shared arms cannot be added as independent cases.",
+    "Only READY measurement windows contribute SUCCESS/FAILURE; initial OPEN first touches remain OPEN.",
+    "No manual Watch, Telegram messages, market-provider calls, trade execution, discovery or promotions initiated by this step."
+  ]
+}
