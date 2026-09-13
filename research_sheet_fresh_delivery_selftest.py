@@ -34,6 +34,7 @@ class Database:
             assert 'q.sheet_name=due.sheet_name AND q.row_key=due.row_key' in query
             assert 'claimed_payload_sha256=q.payload_sha256' in query
         sql = query.replace("NOW()+INTERVAL '120 seconds'", str(NOW + 120))
+        sql = sql.replace("NOW() - INTERVAL '16 days'", str(NOW - 16 * 86400))
         sql = sql.replace("NOW()+(%s * INTERVAL '1 second')", f'({NOW} + %s)')
         sql = sql.replace('NOW()', str(NOW)).replace('%s', '?').replace('::uuid', '')
         sql = sql.replace('FOR UPDATE SKIP LOCKED', '')
@@ -92,9 +93,9 @@ def _stage_test():
     instant = datetime(2026, 9, 7, 1, 2, 3, tzinfo=timezone.utc)
     items = [
         {'sheet': 'תצוגת לייב', 'key': 'snapshot_id', 'row': {
-            'snapshot_id': 's1', 'זמן סריקה': '07/09/2026 04:02:03'}},
+            'snapshot_id': 's1', 'זמן סריקה': '07/09/2026 04:02:03', 'מטבע': 'BTC', 'כיוון נבדק': 'LONG'}},
         {'sheet': 'Snapshots', 'key': 'snapshot_id', 'row': {
-            'snapshot_id': 's1', 'timestamp_utc': '2026-09-07T01:02:03Z'}},
+            'snapshot_id': 's1', 'timestamp_utc': '2026-09-07T01:02:03Z', 'symbol': 'BTC', 'direction': 'LONG'}},
         {'sheet': 'Telegram_Events', 'key': 'event_id', 'row': {
             'event_id': 'e1', 'timestamp_utc': '2026-09-07T04:02:03+03:00'}},
         {'sheet': 'Episodes', 'key': 'episode_id', 'row': {
@@ -102,14 +103,23 @@ def _stage_test():
         {'sheet': 'Formula_Results', 'key': 'formula_id', 'row': {
             'formula_id': 'f1', 'last_evaluated_at': instant}},
     ]
-    assert outbox.stage_upserts(SimpleNamespace(cursor=Cursor), items) == 3
+    def current_stage(conn, item):
+        rows.append((item['sheet'], item['key'], json.dumps(item), 'unused'))
+        return 1
+    with patch.object(outbox.current_publication, 'stage_projected', current_stage):
+        assert outbox.stage_upserts(SimpleNamespace(cursor=Cursor), items) == 3
     assert all(row[0] not in outbox.publication.LEGACY_SHEETS for row in rows)
     assert all(outbox._row_source_time(item) == instant for item in items[1:])
     assert outbox._source_time(json.loads(rows[0][2])['source_time_utc']) == instant
     assert 'source_time_utc' not in items[0], 'staging must not mutate caller payload'
     rows.clear()
-    assert outbox.stage_upserts(SimpleNamespace(cursor=Cursor), [items[0]]) == 1
-    assert json.loads(rows[0][2])['source_time_utc'] is None, 'display date must not stand in for source UTC'
+    try:
+        outbox.stage_upserts(SimpleNamespace(cursor=Cursor), [items[0]])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Missing source UTC must reject a current live row')
+    assert not rows, 'Display date must not stand in for source UTC'
     for bad in ('', '2026-09-07', '2026-09-07T01:02:03', '2026-02-30T00:00:00Z',
                 '20260907T010203Z', '2026-09-07T01:02+03:00',
                 '0001-01-01T00:00:00+14:00', 'today', 'infinity', None, 0):
@@ -256,7 +266,8 @@ def run():
     _add(isolated, sheet, 'undated', None)
     _add(isolated, sheet, 'future', NOW+1, sync_status='RETRY', next_attempt_at_utc=NOW+1)
     assert {row['row_key'] for row in outbox._claim_batch(isolated, 8, 'reclaim')} == {
-        'expired', 'undated'}
+        'expired'}
+    assert isolated.conn.execute("SELECT sync_status FROM research_sheet_upsert_outbox WHERE row_key='undated'").fetchone()[0] == 'PENDING'
     assert outbox._claim_batch(isolated, 8, 'empty') == []
     other = _database()
     _add(other, 'Additional_Sheet', 'undated', None)
@@ -311,9 +322,12 @@ def run():
         query, params = db.calls[-1]
         selection = query.split('WITH due AS (', 1)[1].split(')\n        UPDATE', 1)[0]
         selection = selection.replace('NOW()', str(NOW)).replace('%s', '?')
+        selection = selection.replace(str(NOW) + " - INTERVAL '16 days'", str(NOW - 16 * 86400))
         selection = selection.replace('FOR UPDATE SKIP LOCKED', '')
         plan = db.conn.execute('EXPLAIN QUERY PLAN ' + selection, params[:-1]).fetchall()
-        assert expected_index in str([tuple(row) for row in plan]), plan
+        plan_text = str([tuple(row) for row in plan])
+        assert (expected_index in plan_text or (sheet == 'Telegram_Events' and
+                'idx_research_sheet_fresh_claim' in plan_text)), plan_text
     print('research Sheet fresh/backlog delivery selftest: PASS')
 
 

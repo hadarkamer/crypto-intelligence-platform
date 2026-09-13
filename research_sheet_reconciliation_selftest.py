@@ -77,6 +77,17 @@ class AuditTests(unittest.TestCase):
         self.assertIs(a.expected, population)
         self.assertEqual(result["reset_count"], 0)
 
+    def test_expired_cycle_never_certifies_rows_eligible_for_future_retention(self):
+        a = self.auditor()
+        a.scan_deadline = 0
+        with patch.object(audit.google_sheets_sync, 'read_telegram_audit_page') as read, patch.object(a, '_finish') as finish:
+            result = a.run_due('test')
+        read.assert_not_called()
+        finish.assert_not_called()
+        self.assertIsNone(a.expected)
+        self.assertEqual(result['last_error'], 'SHEET_AUDIT_CYCLE_EXPIRED')
+        self.assertEqual(result['reset_count'], 1)
+
     def test_busy_after_partial_page_preserves_population_and_resumes_exact_cursor(self):
         a = self.auditor()
         population = a.expected

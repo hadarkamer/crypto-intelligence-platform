@@ -207,6 +207,7 @@ class SnapshotSyncWorker:
     def __init__(self):
         self._task = None
         self._ready = False
+        self._publication_seeded = False
         self._sheet_reconciler = research_sheet_reconciliation.SheetReconciler()
         self._runtime: Dict[str, Any] = {"last_result": None, "last_error": None}
 
@@ -217,6 +218,7 @@ class SnapshotSyncWorker:
             "ready": self._ready,
             "reconcile_version": RECONCILE_VERSION,
             "backfill_days": _BACKFILL_DAYS,
+            "current_publication": research_sheet_outbox.current_publication.status(),
             "telegram_sheet_reconciliation": self._sheet_reconciler.status(),
             **self._runtime,
         }
@@ -238,7 +240,11 @@ class SnapshotSyncWorker:
             return {"skipped": "DISABLED_OR_UNCONFIGURED"}
         with psycopg.connect(url, row_factory=dict_row, connect_timeout=5,
                              options="-c statement_timeout=15000 -c lock_timeout=1000") as conn:
+            seeded = (0 if self._publication_seeded else
+                      research_sheet_outbox.current_publication.seed_legacy(conn))
             staged = reconcile_sources(conn)
+        self._publication_seeded = True
+        staged['current_slots_seeded'] = seeded
         # The connection context committed both payloads and source coverage.
         delivered = research_sheet_outbox.drain(url, max_rows=32, max_seconds=45)
         audit = self._sheet_reconciler.run_due(url)

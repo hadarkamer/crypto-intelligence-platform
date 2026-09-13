@@ -127,7 +127,7 @@ def legacy_lane_test():
     after = [tuple(row) for row in database.conn.execute('SELECT * FROM research_sheet_upsert_outbox')]
     assert before == after, 'Held evidence must keep original queue states and attempts'
     # An empty preferred lane still finds live work through exact indexed lanes.
-    _add(database, 'Snapshots', 'new-live', NOW)
+    _add(database, 'Snapshots_Current', 'new-live', NOW)
     rows = outbox._claim_batch(database, 8, 'live')
     assert [row['row_key'] for row in rows] == ['new-live']
     queries = [(query, params) for query, params in database.calls if 'WITH due AS (' in query]
