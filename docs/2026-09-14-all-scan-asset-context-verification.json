@@ -1,0 +1,596 @@
+{
+  "production": {
+    "repository": "hadarkamer/crypto-intelligence-platform",
+    "pr": 39,
+    "tested_head": "5fd923a5157da08dda9aa12f9e4964b6191bd0a9",
+    "main": "5e2b0e5c0495c4736efcc4ad84062402c37391c0",
+    "tree": "b85a2f044e7be88107cfd1909c7b9c958ea0a8fb",
+    "deployment": {
+      "commit": {
+        "createdAt": "2026-09-14T04:24:47Z",
+        "id": "5e2b0e5c0495c4736efcc4ad84062402c37391c0",
+        "message": "Merge pull request #39 from hadarkamer/feature/all-watch-scan-own-price-20260914\n\nResearch: add prior Spot asset context to all Watch scans"
+      },
+      "createdAt": "2026-09-14T04:24:49.600192Z",
+      "finishedAt": "2026-09-14T04:26:08.249413Z",
+      "id": "dep-dajne48jo6nc73ci7t50",
+      "startedAt": "2026-09-14T04:24:49.580275Z",
+      "status": "live",
+      "trigger": "new_commit",
+      "updatedAt": "2026-09-14T04:26:08.249593Z"
+    }
+  },
+  "ci": {
+    "completed_at": "2026-09-14T04:23:40Z",
+    "conclusion": "success",
+    "job": 103856883738,
+    "local_pure_tests": 53,
+    "new_pg_tests": 6,
+    "new_pure_tests": 13,
+    "new_test_log": "##[group]research_watch_scan_formula_asset_context_postgres_selftest.py\n2026-09-14T04:22:34.8325495Z ......\n2026-09-14T04:22:34.8326247Z ----------------------------------------------------------------------\n2026-09-14T04:22:34.8327021Z Ran 6 tests in 21.050s\n2026-09-14T04:22:34.8327472Z \n2026-09-14T04:22:34.8330096Z OK\n2026-09-14T04:22:34.8793115Z ##[endgroup]\n2026-09-14T04:22:34.8794643Z ##[group]research_watch_scan_formula_asset_context_selftest.py\n2026-09-14T04:22:39.6878067Z .............\n2026-09-14T04:22:39.6878583Z ----------------------------------------------------------------------\n2026-09-14T04:22:39.6879548Z Ran 13 tests in 4.648s\n2026-09-14T04:22:39.6879781Z \n2026-09-14T04:22:39.6879909Z OK\n2026-09-14T04:22:39.7181605Z ##[endgroup]\n2026-09-14T04:22:39.7182342Z",
+    "run": 34805642528,
+    "selftest_files": 119
+  },
+  "migration": {
+    "files_sha256": {
+      "migrations/051_watch_scan_asset_context_formulas.sql": "482a4cc1b95870e69e87291388cbcec9ddeade7cde6c587400ae100e57e5fe8d",
+      "research_formula_schema_admin.py": "962b840f968a1d9942ed0f87585fc85f797fd4a2a211a16904e912a7443af6a1"
+    },
+    "result": {
+      "ok": true,
+      "returncode": 0,
+      "migration": "051_watch_scan_asset_context_formulas.sql",
+      "sha256": "482a4cc1b95870e69e87291388cbcec9ddeade7cde6c587400ae100e57e5fe8d"
+    }
+  },
+  "premerge_health": {
+    "checked_at_utc": "2026-09-14T04:24:35.046093+00:00",
+    "commit": "64b5898716a9ec31bb92b7fd84ffe5c1e0247292",
+    "watch": {
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": "2026-09-14T04:05:55.252864+00:00",
+      "last_cycle_result": "completed",
+      "next_scan_utc": "2026-09-14T04:32:15+00:00",
+      "last_error": null
+    },
+    "intake": {
+      "version": "watch-all-scan-intake-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "page_size": 64,
+      "max_bundles_per_pass": 6,
+      "poll_seconds": 30,
+      "outcomes_enabled": false,
+      "formula_evaluation_enabled": false,
+      "cycles": 891,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "accepted": 0,
+        "rejected": 0,
+        "processed": 0,
+        "scanned_ids": 0,
+        "cursor": 1296,
+        "high_water": 1297,
+        "completed_laps": 161
+      },
+      "last_run_utc": "2026-09-14T04:24:05.151883+00:00"
+    },
+    "measurement": {
+      "version": "watch-scan-measurements-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "cache_only": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "formula_evaluation_enabled": false,
+      "cycles": 873,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "enqueued": 0,
+        "processed": 0,
+        "ready": 0,
+        "open": 0,
+        "missing": 0,
+        "errors": 0
+      },
+      "last_run_utc": "2026-09-14T04:24:34.394078+00:00"
+    },
+    "formulas": {
+      "version": "watch-scan-formulas-v3-btc-context",
+      "feature_version": "watch-captured-total-maxpain-and-btc-context-features-v3",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "catalog_candidates": 298,
+      "supported_candidates": 106,
+      "active_evaluation_version": "watch-scan-formulas-v3-btc-context",
+      "discovery_enabled": false,
+      "promotion_enabled": false,
+      "cycles": 880,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "catalog": 298,
+        "enqueued": 0,
+        "processed": 0,
+        "ready": 0,
+        "errors": 0,
+        "activated": false,
+        "active_evaluation_version": "watch-scan-formulas-v3-btc-context"
+      },
+      "last_run_utc": "2026-09-14T04:24:16.839437+00:00"
+    }
+  },
+  "final_health": {
+    "checked_at_utc": "2026-09-14T04:37:06.831717+00:00",
+    "commit": "5e2b0e5c0495c4736efcc4ad84062402c37391c0",
+    "watch": {
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": "2026-09-14T04:36:05.200032+00:00",
+      "last_cycle_result": "completed",
+      "next_scan_utc": "2026-09-14T05:02:15+00:00",
+      "last_error": null
+    },
+    "intake": {
+      "version": "watch-all-scan-intake-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "page_size": 64,
+      "max_bundles_per_pass": 6,
+      "poll_seconds": 30,
+      "outcomes_enabled": false,
+      "formula_evaluation_enabled": false,
+      "cycles": 23,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "accepted": 0,
+        "rejected": 0,
+        "processed": 0,
+        "scanned_ids": 3,
+        "cursor": 1296,
+        "high_water": 1297,
+        "completed_laps": 163
+      },
+      "last_run_utc": "2026-09-14T04:37:05.920927+00:00"
+    },
+    "measurement": {
+      "version": "watch-scan-measurements-v1",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "cache_only": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "formula_evaluation_enabled": false,
+      "cycles": 22,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "enqueued": 0,
+        "processed": 16,
+        "ready": 0,
+        "open": 1,
+        "missing": 15,
+        "errors": 0
+      },
+      "last_run_utc": "2026-09-14T04:37:04.521605+00:00"
+    },
+    "formulas": {
+      "version": "watch-scan-formulas-v4-asset-context",
+      "feature_version": "watch-captured-total-maxpain-btc-and-asset-context-features-v4",
+      "population": "watch-all-scan-observations-v1",
+      "enabled": true,
+      "running": true,
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "catalog_candidates": 298,
+      "supported_candidates": 158,
+      "active_evaluation_version": "watch-scan-formulas-v4-asset-context",
+      "discovery_enabled": false,
+      "promotion_enabled": false,
+      "cycles": 20,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "catalog": 298,
+        "enqueued": 0,
+        "processed": 0,
+        "ready": 0,
+        "errors": 0,
+        "activated": false,
+        "active_evaluation_version": "watch-scan-formulas-v4-asset-context"
+      },
+      "last_run_utc": "2026-09-14T04:36:49.588311+00:00"
+    }
+  },
+  "verification": {
+    "state": [
+      {
+        "verification": {
+          "accepted_scans": 35,
+          "catalogs": [
+            {
+              "definitions": 298,
+              "evaluation_version": "watch-scan-formulas-v1",
+              "supported": 34,
+              "unsupported": 264
+            },
+            {
+              "definitions": 298,
+              "evaluation_version": "watch-scan-formulas-v2-maxpain",
+              "supported": 82,
+              "unsupported": 216
+            },
+            {
+              "definitions": 298,
+              "evaluation_version": "watch-scan-formulas-v3-btc-context",
+              "supported": 106,
+              "unsupported": 192
+            },
+            {
+              "definitions": 298,
+              "evaluation_version": "watch-scan-formulas-v4-asset-context",
+              "supported": 158,
+              "unsupported": 140
+            }
+          ],
+          "checked_at_utc": "2026-09-14T04:37:01.214047+00:00",
+          "current_evaluations": [
+            {
+              "candidates": 158,
+              "controls": 72852,
+              "decisions": 88480,
+              "evaluation_version": "watch-scan-formulas-v4-asset-context",
+              "matched": 12408,
+              "prospective": 0,
+              "unknown": 3220
+            }
+          ],
+          "expected_coin_samples": 280,
+          "independent_live_btc_waves": 1,
+          "missing_or_pending_coin_samples": 0,
+          "runtime": {
+            "activated_at_utc": "2026-09-14T04:35:08.302785+00:00",
+            "active_evaluation_version": "watch-scan-formulas-v4-asset-context",
+            "singleton": true
+          },
+          "v4_samples": {
+            "all": 280,
+            "bad_decision_coverage": 0,
+            "errors": 0,
+            "latest_usable_utc": "2026-09-14T04:35:48.288049+00:00",
+            "ready": 280,
+            "scans": 35,
+            "symbols": 8,
+            "waiting": 0
+          },
+          "version_cursor": {
+            "completed_laps": 10,
+            "evaluation_version": "watch-scan-formulas-v4-asset-context",
+            "scan_cursor": 1298,
+            "scan_high_water": 1298,
+            "updated_at_utc": "2026-09-14T04:36:49.512581+00:00"
+          }
+        }
+      }
+    ],
+    "parity": [
+      {
+        "verification": {
+          "btc_own_1h_4h_window_mismatches": 0,
+          "catalog_definition_or_orientation_mismatches": 0,
+          "decision_mismatch_examples": null,
+          "frozen_btc_context_mismatches": 0,
+          "newly_supported_definitions": 52,
+          "old_decision_mismatches": 0,
+          "old_decisions_checked": 57664,
+          "old_feature_or_missing_reason_mismatches": 0,
+          "old_ready_samples": 272,
+          "old_samples_missing_v4": 0,
+          "previously_supported_now_unsupported": 0,
+          "source_or_context_binding_mismatches": 0,
+          "split_btc_context_scans": 0,
+          "v4_samples_without_v3": 8
+        }
+      }
+    ],
+    "hype": [
+      {
+        "verification": {
+          "hype_samples": 35,
+          "incorrect_missing_reasons": 0,
+          "incorrectly_known_new_own_features": 0,
+          "new_own_feature_cells_checked": 630,
+          "non_perp_hype_measurements": 0,
+          "own_route_contract_errors": 0,
+          "spot_cvd_changed_cells": 0,
+          "spot_cvd_known_cells": 70
+        }
+      }
+    ],
+    "raw_price_historical_34": [
+      {
+        "verification": {
+          "alignment_feature_errors": 0,
+          "btc_known_nonzero_self_relative": 0,
+          "by_window": [
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 238,
+              "name": "12h",
+              "raw_complete": 238,
+              "window_errors": 0,
+              "windows": 238
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 238,
+              "name": "15m",
+              "raw_complete": 238,
+              "window_errors": 0,
+              "windows": 238
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 238,
+              "name": "1h",
+              "raw_complete": 238,
+              "window_errors": 0,
+              "windows": 238
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 238,
+              "name": "24h",
+              "raw_complete": 238,
+              "window_errors": 0,
+              "windows": 238
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 238,
+              "name": "30m",
+              "raw_complete": 238,
+              "window_errors": 0,
+              "windows": 238
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 238,
+              "name": "4h",
+              "raw_complete": 238,
+              "window_errors": 0,
+              "windows": 238
+            }
+          ],
+          "direction_cells_checked": 2856,
+          "direction_feature_errors": 0,
+          "feature_error_examples": null,
+          "raw_window_checks": 1428,
+          "regime_feature_errors": 0,
+          "relative_error_examples": null,
+          "relative_strength_cells_checked": 476,
+          "relative_strength_errors": 0,
+          "spot_coin_samples": 238,
+          "window_error_examples": null,
+          "window_proof_or_raw_price_errors": 0
+        }
+      }
+    ],
+    "raw_price_new_scan": [
+      {
+        "verification": {
+          "alignment_feature_errors": 0,
+          "btc_known_nonzero_self_relative": 0,
+          "by_window": [
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 7,
+              "name": "12h",
+              "raw_complete": 7,
+              "window_errors": 0,
+              "windows": 7
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 7,
+              "name": "15m",
+              "raw_complete": 7,
+              "window_errors": 0,
+              "windows": 7
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 7,
+              "name": "1h",
+              "raw_complete": 7,
+              "window_errors": 0,
+              "windows": 7
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 7,
+              "name": "24h",
+              "raw_complete": 7,
+              "window_errors": 0,
+              "windows": 7
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 7,
+              "name": "30m",
+              "raw_complete": 7,
+              "window_errors": 0,
+              "windows": 7
+            },
+            {
+              "frozen_missing_now_available": 0,
+              "frozen_ready": 7,
+              "name": "4h",
+              "raw_complete": 7,
+              "window_errors": 0,
+              "windows": 7
+            }
+          ],
+          "direction_cells_checked": 84,
+          "direction_feature_errors": 0,
+          "feature_error_examples": null,
+          "raw_window_checks": 42,
+          "regime_feature_errors": 0,
+          "relative_error_examples": null,
+          "relative_strength_cells_checked": 14,
+          "relative_strength_errors": 0,
+          "spot_coin_samples": 7,
+          "window_error_examples": null,
+          "window_proof_or_raw_price_errors": 0
+        }
+      }
+    ],
+    "hashes": [
+      {
+        "asset_sha256": "a08c56ae7cf304df5de3e1ad01908509128d68243db8059005cc5f32bbdc1e1f",
+        "asset_sha256_valid": true,
+        "btc_sha256": "30d34ecb450bf9fd957ac96a7107317d9b57eca544d0f7c56af35e132a5b7e53",
+        "btc_sha256_valid": true,
+        "payload_sha256": "1daa82f56772ff4bc6512190f1d948d8a73c4b44e45fb055ce10666f868c8742",
+        "payload_sha256_valid": true,
+        "snapshot_set_id": 1231,
+        "symbol": "BTC"
+      },
+      {
+        "asset_sha256": "167bb389acec1da1d04c1ca8aaea502f053dc7498214d21b9db62756d184addd",
+        "asset_sha256_valid": true,
+        "btc_sha256": "30d34ecb450bf9fd957ac96a7107317d9b57eca544d0f7c56af35e132a5b7e53",
+        "btc_sha256_valid": true,
+        "payload_sha256": "03119e37b441b0b0f4137a0dd253b874c5517715b795cce16f6294076d115c44",
+        "payload_sha256_valid": true,
+        "snapshot_set_id": 1231,
+        "symbol": "ETH"
+      },
+      {
+        "asset_sha256": "e72df62359a6de86539470c51eeb6f287795c67261081e8973c61fe7b4cc75ac",
+        "asset_sha256_valid": true,
+        "btc_sha256": "30d34ecb450bf9fd957ac96a7107317d9b57eca544d0f7c56af35e132a5b7e53",
+        "btc_sha256_valid": true,
+        "payload_sha256": "7fb62f3ca97d6f08569af56d52f789ad77994367854e3aea030c56408a9c68d8",
+        "payload_sha256_valid": true,
+        "snapshot_set_id": 1231,
+        "symbol": "HYPE"
+      }
+    ],
+    "baseline_before": [
+      {
+        "errors": 0,
+        "evaluation_version": "watch-scan-formulas-v1",
+        "payload_digest": "595a89ed1ccf20dbc4ab32555373afd7",
+        "ready": 144,
+        "samples": 144
+      },
+      {
+        "errors": 0,
+        "evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "payload_digest": "b37a48c01b52a4a3e8081f0067f0b8f4",
+        "ready": 152,
+        "samples": 152
+      },
+      {
+        "errors": 0,
+        "evaluation_version": "watch-scan-formulas-v3-btc-context",
+        "payload_digest": "347362c6b52d344d16eaea11a5f47b10",
+        "ready": 272,
+        "samples": 272
+      }
+    ],
+    "baseline_after": [
+      {
+        "errors": 0,
+        "evaluation_version": "watch-scan-formulas-v1",
+        "payload_digest": "595a89ed1ccf20dbc4ab32555373afd7",
+        "ready": 144,
+        "samples": 144
+      },
+      {
+        "errors": 0,
+        "evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "payload_digest": "b37a48c01b52a4a3e8081f0067f0b8f4",
+        "ready": 152,
+        "samples": 152
+      },
+      {
+        "errors": 0,
+        "evaluation_version": "watch-scan-formulas-v3-btc-context",
+        "payload_digest": "347362c6b52d344d16eaea11a5f47b10",
+        "ready": 272,
+        "samples": 272
+      },
+      {
+        "errors": 0,
+        "evaluation_version": "watch-scan-formulas-v4-asset-context",
+        "payload_digest": "d5c88d0ec6ba1fb930e020f17c7ca854",
+        "ready": 272,
+        "samples": 272
+      }
+    ],
+    "old_samples_unchanged": [
+      {
+        "unchanged": true,
+        "version": "watch-scan-formulas-v1"
+      },
+      {
+        "unchanged": true,
+        "version": "watch-scan-formulas-v2-maxpain"
+      },
+      {
+        "unchanged": true,
+        "version": "watch-scan-formulas-v3-btc-context"
+      }
+    ],
+    "audit_decisions": [
+      {
+        "decisions": 9792,
+        "evaluation_version": "watch-scan-formulas-v1"
+      },
+      {
+        "decisions": 24928,
+        "evaluation_version": "watch-scan-formulas-v2-maxpain"
+      },
+      {
+        "decisions": 57664,
+        "evaluation_version": "watch-scan-formulas-v3-btc-context"
+      },
+      {
+        "decisions": 88480,
+        "evaluation_version": "watch-scan-formulas-v4-asset-context"
+      }
+    ]
+  },
+  "sql": {
+    "hype": "WITH features(key) AS (VALUES\n    ('historical.closed_1m.15m.direction'),('historical.closed_1m.30m.direction'),\n    ('historical.closed_1m.1h.direction'),('historical.closed_1m.4h.direction'),\n    ('historical.closed_1m.12h.direction'),('historical.closed_1m.24h.direction'),\n    ('historical.closed_1m.4h.market_regime'),('historical.closed_1m.1h.relative_strength_pct'),\n    ('historical.closed_1m.1h.alignment')\n), samples AS (\n    SELECT n.*,o.payload AS old_payload\n    FROM research_watch_scan_formula_samples n\n    LEFT JOIN research_watch_scan_formula_samples o ON o.evaluation_version='watch-scan-formulas-v3-btc-context'\n        AND o.consumer_version=n.consumer_version AND o.snapshot_set_id=n.snapshot_set_id\n        AND o.symbol=n.symbol AND o.status='READY'\n    WHERE n.evaluation_version='watch-scan-formulas-v4-asset-context' AND n.symbol='HYPE' AND n.status='READY'\n), cells AS (\n    SELECT s.snapshot_set_id,b.base,f.key,\n        s.payload->'features_by_direction'->b.base->'features'->f.key AS value,\n        s.payload->'features_by_direction'->b.base->'unavailable_features'->f.key AS reasons\n    FROM samples s CROSS JOIN (VALUES('LONG'),('SHORT')) b(base) CROSS JOIN features f\n), cvd AS (\n    SELECT s.snapshot_set_id,b.base,s.old_payload IS NOT NULL AS has_previous,\n        s.payload->'features_by_direction'->b.base->'features'->'spot_cvd.aligned_score' AS value,\n        s.old_payload->'features_by_direction'->b.base->'features'->'spot_cvd.aligned_score' AS old_value,\n        s.payload->'features_by_direction'->b.base->'unavailable_features'->'spot_cvd.aligned_score' AS reasons,\n        s.old_payload->'features_by_direction'->b.base->'unavailable_features'->'spot_cvd.aligned_score' AS old_reasons\n    FROM samples s CROSS JOIN (VALUES('LONG'),('SHORT')) b(base)\n)\nSELECT jsonb_build_object(\n    'hype_samples',(SELECT count(*) FROM samples),\n    'new_own_feature_cells_checked',(SELECT count(*) FROM cells),\n    'incorrectly_known_new_own_features',(SELECT count(*) FROM cells WHERE value IS NOT NULL),\n    'incorrect_missing_reasons',(SELECT count(*) FROM cells WHERE reasons IS DISTINCT FROM '[\"HYPE_SPOT_LOOKBACK_NOT_ENABLED_FOR_WATCH\"]'::jsonb),\n    'own_route_contract_errors',(SELECT count(*) FROM samples WHERE payload#>>'{asset_context_provenance,price_route}' IS NOT NULL\n        OR payload#>>'{asset_context_provenance,route_validation_reason}' IS DISTINCT FROM 'HYPE_SPOT_LOOKBACK_NOT_ENABLED_FOR_WATCH'),\n    'spot_cvd_known_cells',(SELECT count(*) FROM cvd WHERE value IS NOT NULL),\n    'spot_cvd_changed_cells',(SELECT count(*) FROM cvd WHERE has_previous AND (value IS DISTINCT FROM old_value OR reasons IS DISTINCT FROM old_reasons)),\n    'non_perp_hype_measurements',(SELECT count(*) FROM research_watch_scan_measurements WHERE measurement_version='watch-scan-measurements-v1'\n        AND symbol='HYPE' AND price_route IS DISTINCT FROM 'HYPERLIQUID_HYPE_PERP_TRADE_1M')) AS verification;\n",
+    "parity": "WITH old AS (\n    SELECT * FROM research_watch_scan_formula_samples\n    WHERE evaluation_version='watch-scan-formulas-v3-btc-context' AND status='READY'\n), new AS (\n    SELECT s.*,m.decision_map FROM research_watch_scan_formula_samples s\n    CROSS JOIN LATERAL (SELECT jsonb_object_agg((value->>'candidate_key')||'|'||(value->>'base_direction'),value) AS decision_map\n        FROM jsonb_array_elements(s.payload->'evaluations')) m\n    WHERE evaluation_version='watch-scan-formulas-v4-asset-context' AND status='READY'\n), pairs AS (\n    SELECT o.consumer_version,o.snapshot_set_id,o.symbol,o.payload AS old_payload,\n        n.payload AS new_payload,n.decision_map,n.snapshot_set_id IS NOT NULL AS new_present\n    FROM old o LEFT JOIN new n USING(consumer_version,snapshot_set_id,symbol)\n), decisions AS (\n    SELECT p.snapshot_set_id,p.symbol,o.value AS old_decision,p.decision_map->((o.value->>'candidate_key')||'|'||(o.value->>'base_direction')) AS new_decision\n    FROM pairs p CROSS JOIN LATERAL jsonb_array_elements(p.old_payload->'evaluations') o(value)\n), prior_features AS (\n    SELECT p.snapshot_set_id,p.symbol,b.base,k.key,k.value AS old_value,\n        p.new_payload->'features_by_direction'->b.base->block.kind->k.key AS new_value\n    FROM pairs p CROSS JOIN (VALUES('LONG'),('SHORT')) b(base)\n    CROSS JOIN (VALUES('features'),('unavailable_features')) block(kind)\n    CROSS JOIN LATERAL jsonb_each(p.old_payload->'features_by_direction'->b.base->block.kind) k\n), source_binding AS (\n    SELECT n.*,i.bundle_sha256,i.parent_payload_sha256,\n        n.payload->'asset_context_provenance' AS own_context\n    FROM new n JOIN research_watch_scan_intakes i USING(consumer_version,snapshot_set_id)\n), shared AS (\n    SELECT snapshot_set_id,count(DISTINCT payload->'btc_context_provenance') AS btc_contexts\n    FROM new GROUP BY snapshot_set_id\n), catalog AS (\n    SELECT o.candidate_key AS old_key,n.candidate_key AS new_key,o.definition AS old_definition,\n        n.definition AS new_definition,o.definition_sha256 AS old_hash,n.definition_sha256 AS new_hash,\n        o.orientation AS old_orientation,n.orientation AS new_orientation,\n        o.supported AS old_supported,n.supported AS new_supported\n    FROM (SELECT * FROM research_watch_scan_formula_catalog WHERE evaluation_version='watch-scan-formulas-v3-btc-context') o\n    FULL JOIN (SELECT * FROM research_watch_scan_formula_catalog WHERE evaluation_version='watch-scan-formulas-v4-asset-context') n\n    USING(candidate_key)\n)\nSELECT jsonb_build_object(\n    'old_ready_samples',(SELECT count(*) FROM old),\n    'old_samples_missing_v4',(SELECT count(*) FROM pairs WHERE NOT new_present),\n    'v4_samples_without_v3',(SELECT count(*) FROM new n LEFT JOIN old o USING(consumer_version,snapshot_set_id,symbol) WHERE o.snapshot_set_id IS NULL),\n    'old_decisions_checked',(SELECT count(*) FROM decisions),\n    'old_decision_mismatches',(SELECT count(*) FROM decisions WHERE old_decision IS DISTINCT FROM new_decision),\n    'old_feature_or_missing_reason_mismatches',(SELECT count(*) FROM prior_features WHERE old_value IS DISTINCT FROM new_value),\n    'frozen_btc_context_mismatches',(SELECT count(*) FROM pairs WHERE old_payload->'btc_context_provenance' IS DISTINCT FROM new_payload->'btc_context_provenance'),\n    'split_btc_context_scans',(SELECT count(*) FROM shared WHERE btc_contexts<>1),\n    'source_or_context_binding_mismatches',(SELECT count(*) FROM source_binding WHERE\n        payload->>'bundle_sha256' IS DISTINCT FROM bundle_sha256 OR payload->>'parent_payload_sha256' IS DISTINCT FROM parent_payload_sha256\n        OR own_context->>'symbol' IS DISTINCT FROM symbol\n        OR own_context->>'consumer_version' IS DISTINCT FROM consumer_version\n        OR (own_context->>'snapshot_set_id')::bigint IS DISTINCT FROM snapshot_set_id\n        OR own_context->>'bundle_sha256' IS DISTINCT FROM bundle_sha256\n        OR own_context->>'parent_payload_sha256' IS DISTINCT FROM parent_payload_sha256\n        OR (own_context->>'usable_from_utc')::timestamptz IS DISTINCT FROM usable_from_utc\n        OR (own_context->>'cutoff_utc')::timestamptz IS DISTINCT FROM date_trunc('minute',usable_from_utc)\n        OR own_context->>'btc_context_sha256' IS DISTINCT FROM payload#>>'{btc_context_provenance,context_sha256}'),\n    'btc_own_1h_4h_window_mismatches',(SELECT count(*) FROM new CROSS JOIN (VALUES('1h'),('4h')) w(name)\n        WHERE symbol='BTC' AND payload->'asset_context_provenance'->'windows'->w.name\n            IS DISTINCT FROM payload->'btc_context_provenance'->'windows'->w.name),\n    'catalog_definition_or_orientation_mismatches',(SELECT count(*) FROM catalog WHERE old_key IS NULL OR new_key IS NULL\n        OR old_definition IS DISTINCT FROM new_definition OR old_hash IS DISTINCT FROM new_hash OR old_orientation IS DISTINCT FROM new_orientation),\n    'previously_supported_now_unsupported',(SELECT count(*) FROM catalog WHERE old_supported AND NOT new_supported),\n    'newly_supported_definitions',(SELECT count(*) FROM catalog WHERE NOT old_supported AND new_supported),\n    'decision_mismatch_examples',(SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT * FROM decisions WHERE old_decision IS DISTINCT FROM new_decision LIMIT 10) x)) AS verification;\n",
+    "raw-price": "-- Independent arithmetic from immutable raw Spot bars. No evaluator helpers.\n-- A frozen missing window may now have a complete archive; report that without\n-- treating retrospective enrichment as permission to rewrite the frozen window.\nWITH samples AS (\n    SELECT consumer_version,snapshot_set_id,symbol,usable_from_utc,payload,\n        payload->'asset_context_provenance' AS own_context,\n        payload->'btc_context_provenance' AS btc_context\n    FROM research_watch_scan_formula_samples\n    WHERE evaluation_version='watch-scan-formulas-v4-asset-context' AND status='READY'\n        AND symbol IN ('BTC','ETH','SOL','BNB','XRP','DOGE','ZEC')\n), windows AS (\n    SELECT s.*,w.name,w.minutes,date_trunc('minute',s.usable_from_utc) AS boundary,\n        date_trunc('minute',s.usable_from_utc)-w.minutes*interval '1 minute' AS start_utc,\n        s.own_context->'windows'->w.name AS proof\n    FROM samples s CROSS JOIN (VALUES('15m',15),('30m',30),('1h',60),('4h',240),('12h',720),('24h',1440)) w(name,minutes)\n), prices AS (\n    SELECT w.*,p.*,\n        p.n=w.minutes AND p.first_minute=w.start_utc AND p.last_minute=w.boundary-interval '1 minute'\n            AND p.valid_minutes IS TRUE AS raw_complete,\n        100.0*(p.last_close/NULLIF(p.first_open,0)-1.0) AS raw_return_pct,\n        100.0*(p.highest-p.lowest)/NULLIF(p.first_open,0) AS raw_range_pct\n    FROM windows w LEFT JOIN LATERAL (\n        SELECT count(*) AS n,min(b.open_time_utc) AS first_minute,max(b.open_time_utc) AS last_minute,\n            bool_and(b.open_time_utc=date_trunc('minute',b.open_time_utc)\n                AND b.close_time_utc=b.open_time_utc+interval '1 minute'-interval '1 millisecond'\n                AND b.close_time_utc<w.boundary AND b.low>0 AND b.high<'Infinity'::float8\n                AND b.low<=least(b.open,b.close) AND b.high>=greatest(b.open,b.close)) AS valid_minutes,\n            (array_agg(b.open ORDER BY b.open_time_utc))[1] AS first_open,\n            (array_agg(b.close ORDER BY b.open_time_utc DESC))[1] AS last_close,\n            max(b.high) AS highest,min(b.low) AS lowest\n        FROM research_price_archive_bars b\n        WHERE b.route='BINANCE_SPOT_TRADE_1M' AND b.symbol=w.symbol\n            AND b.open_time_utc>=w.start_utc AND b.open_time_utc<w.boundary\n    ) p ON true\n), raw AS (\n    SELECT p.*,\n        CASE WHEN raw_return_pct>0 THEN 'UP' WHEN raw_return_pct<0 THEN 'DOWN' ELSE 'FLAT' END AS raw_direction,\n        CASE WHEN raw_range_pct<=0 OR abs(raw_return_pct)/NULLIF(raw_range_pct,0)<0.5 THEN 'RANGE'\n             WHEN raw_return_pct>0 THEN 'UP' WHEN raw_return_pct<0 THEN 'DOWN' ELSE 'RANGE' END AS raw_regime,\n        proof->>'status'='READY' AS frozen_ready\n    FROM prices p\n), checks AS (\n    SELECT r.*,\n        frozen_ready AND (\n            raw_complete IS NOT TRUE\n            OR (proof->>'lookback_minutes')::int IS DISTINCT FROM minutes\n            OR (proof->>'path_samples')::int IS DISTINCT FROM minutes\n            OR proof->>'path_complete' IS DISTINCT FROM 'true'\n            OR (proof->>'window_start_utc')::timestamptz IS DISTINCT FROM start_utc\n            OR (proof->>'window_end_utc')::timestamptz IS DISTINCT FROM boundary-interval '1 millisecond'\n            OR (proof->>'event_time_utc')::timestamptz IS DISTINCT FROM usable_from_utc\n            OR proof#>>'{source,symbol}' IS DISTINCT FROM symbol\n            OR proof#>>'{source,exchange}' IS DISTINCT FROM 'binance'\n            OR proof#>>'{source,market}' IS DISTINCT FROM 'spot'\n            OR proof#>>'{source,pair}' IS DISTINCT FROM symbol||'USDT'\n            OR proof#>>'{source,interval}' IS DISTINCT FROM '1m'\n            OR (proof->>'path_sha256' ~ '^[0-9a-f]{64}$') IS NOT TRUE\n            OR proof->>'return_pct' IS NULL OR abs((proof->>'return_pct')::float8-raw_return_pct)>1e-9\n            OR proof->>'range_pct' IS NULL OR abs((proof->>'range_pct')::float8-raw_range_pct)>1e-9\n            OR proof->>'direction' IS DISTINCT FROM raw_direction\n            OR proof->>'market_regime' IS DISTINCT FROM raw_regime\n        ) AS window_error\n    FROM raw r\n), direction_cells AS (\n    SELECT c.*,b.base,\n        c.payload->'features_by_direction'->b.base->'features' AS feature_values,\n        c.payload->'features_by_direction'->b.base->'unavailable_features' AS missing\n    FROM checks c CROSS JOIN (VALUES('LONG'),('SHORT')) b(base)\n), feature_checks AS (\n    SELECT d.*,\n        CASE WHEN frozen_ready THEN feature_values->>('historical.closed_1m.'||name||'.direction') IS DISTINCT FROM raw_direction\n            ELSE feature_values ? ('historical.closed_1m.'||name||'.direction')\n                OR NOT (missing ? ('historical.closed_1m.'||name||'.direction')) END AS direction_error,\n        CASE WHEN name<>'4h' THEN false WHEN frozen_ready\n            THEN feature_values->>'historical.closed_1m.4h.market_regime' IS DISTINCT FROM raw_regime\n            ELSE feature_values ? 'historical.closed_1m.4h.market_regime'\n                OR NOT (missing ? 'historical.closed_1m.4h.market_regime') END AS regime_error,\n        CASE WHEN name<>'1h' THEN false WHEN frozen_ready\n            THEN feature_values->>'historical.closed_1m.1h.alignment' IS DISTINCT FROM\n                CASE WHEN raw_direction='FLAT' THEN 'FLAT'\n                    WHEN (raw_direction='UP')=(base='LONG') THEN 'SUPPORTS' ELSE 'OPPOSES' END\n            ELSE feature_values ? 'historical.closed_1m.1h.alignment'\n                OR NOT (missing ? 'historical.closed_1m.1h.alignment') END AS alignment_error\n    FROM direction_cells d\n), relative_cells AS (\n    SELECT d.snapshot_set_id,d.symbol,d.base,d.frozen_ready,\n        d.btc_context->'features' ? 'historical.closed_1m.1h.btc_direction' AS frozen_btc_ready,\n        btc.raw_complete AS btc_raw_complete,\n        d.raw_return_pct-btc.raw_return_pct AS expected_relative,\n        d.feature_values->>'historical.closed_1m.1h.relative_strength_pct' AS actual_relative,\n        d.missing ? 'historical.closed_1m.1h.relative_strength_pct' AS has_missing_reason\n    FROM direction_cells d LEFT JOIN raw btc ON btc.consumer_version=d.consumer_version\n        AND btc.snapshot_set_id=d.snapshot_set_id AND btc.symbol='BTC' AND btc.name='1h'\n    WHERE d.name='1h'\n), relative_checks AS (\n    SELECT r.*,CASE WHEN frozen_ready AND frozen_btc_ready THEN\n        btc_raw_complete IS NOT TRUE OR expected_relative IS NULL OR actual_relative IS NULL\n            OR abs(actual_relative::float8-expected_relative)>1e-9\n        ELSE actual_relative IS NOT NULL OR NOT has_missing_reason END AS relative_error\n    FROM relative_cells r\n), summary AS (\n    SELECT name,count(*) AS windows,count(*) FILTER(WHERE frozen_ready) AS frozen_ready,\n        count(*) FILTER(WHERE raw_complete) AS raw_complete,\n        count(*) FILTER(WHERE NOT frozen_ready AND raw_complete) AS frozen_missing_now_available,\n        count(*) FILTER(WHERE window_error) AS window_errors\n    FROM checks GROUP BY name\n)\nSELECT jsonb_build_object(\n    'spot_coin_samples',(SELECT count(*) FROM samples),\n    'raw_window_checks',(SELECT count(*) FROM checks),\n    'window_proof_or_raw_price_errors',(SELECT count(*) FROM checks WHERE window_error),\n    'direction_cells_checked',(SELECT count(*) FROM feature_checks),\n    'direction_feature_errors',(SELECT count(*) FROM feature_checks WHERE direction_error),\n    'regime_feature_errors',(SELECT count(*) FROM feature_checks WHERE regime_error),\n    'alignment_feature_errors',(SELECT count(*) FROM feature_checks WHERE alignment_error),\n    'relative_strength_cells_checked',(SELECT count(*) FROM relative_checks),\n    'relative_strength_errors',(SELECT count(*) FROM relative_checks WHERE relative_error),\n    'btc_known_nonzero_self_relative',(SELECT count(*) FROM relative_checks WHERE symbol='BTC' AND actual_relative IS NOT NULL AND actual_relative::float8<>0),\n    'by_window',(SELECT jsonb_agg(to_jsonb(s) ORDER BY name) FROM summary s),\n    'window_error_examples',(SELECT jsonb_agg(to_jsonb(e)) FROM (SELECT snapshot_set_id,symbol,name,n,raw_complete,proof->>'status' AS frozen_status FROM checks WHERE window_error LIMIT 10) e),\n    'feature_error_examples',(SELECT jsonb_agg(to_jsonb(e)) FROM (SELECT snapshot_set_id,symbol,name,base,direction_error,regime_error,alignment_error FROM feature_checks WHERE direction_error OR regime_error OR alignment_error LIMIT 10) e),\n    'relative_error_examples',(SELECT jsonb_agg(to_jsonb(e)) FROM (SELECT * FROM relative_checks WHERE relative_error LIMIT 10) e)\n) AS verification;\n",
+    "state": "WITH current_samples AS (\n    SELECT * FROM research_watch_scan_formula_samples\n    WHERE evaluation_version='watch-scan-formulas-v4-asset-context'\n), accepted AS (\n    SELECT * FROM research_watch_scan_intakes\n    WHERE consumer_version='watch-all-scan-intake-v1' AND intake_status='ACCEPTED'\n), incomplete AS (\n    SELECT i.snapshot_set_id,coin.symbol,s.status\n    FROM accepted i CROSS JOIN unnest(ARRAY['BTC','ETH','SOL','BNB','XRP','DOGE','ZEC','HYPE']) coin(symbol)\n    LEFT JOIN current_samples s ON s.consumer_version=i.consumer_version\n        AND s.snapshot_set_id=i.snapshot_set_id AND s.symbol=coin.symbol\n    WHERE s.status IS DISTINCT FROM 'READY'\n), catalogs AS (\n    SELECT evaluation_version,count(*) AS definitions,count(*) FILTER(WHERE supported) AS supported,\n        count(*) FILTER(WHERE NOT supported) AS unsupported\n    FROM research_watch_scan_formula_catalog GROUP BY evaluation_version\n), evals AS (\n    SELECT evaluation_version,count(*) AS decisions,count(DISTINCT candidate_key) AS candidates,\n        count(*) FILTER(WHERE match_status='MATCH') AS matched,\n        count(*) FILTER(WHERE match_status='NO_MATCH') AS controls,\n        count(*) FILTER(WHERE match_status='UNKNOWN') AS unknown,\n        count(*) FILTER(WHERE qualifies_as_prospective_formula_evidence) AS prospective\n    FROM research_watch_scan_formula_evaluations GROUP BY evaluation_version\n)\nSELECT jsonb_build_object(\n    'checked_at_utc',clock_timestamp(),\n    'runtime',(SELECT to_jsonb(r) FROM research_watch_scan_formula_runtime r WHERE singleton=true),\n    'catalogs',(SELECT jsonb_agg(to_jsonb(c) ORDER BY evaluation_version) FROM catalogs c),\n    'accepted_scans',(SELECT count(*) FROM accepted),\n    'expected_coin_samples',(SELECT count(*)*8 FROM accepted),\n    'missing_or_pending_coin_samples',(SELECT count(*) FROM incomplete),\n    'v4_samples',(SELECT jsonb_build_object('all',count(*),'ready',count(*) FILTER(WHERE status='READY'),\n        'waiting',count(*) FILTER(WHERE status='WAITING'),'errors',count(*) FILTER(WHERE status='ERROR'),\n        'scans',count(DISTINCT snapshot_set_id),'symbols',count(DISTINCT symbol),\n        'bad_decision_coverage',count(*) FILTER(WHERE status='READY' AND jsonb_array_length(payload->'evaluations') IS DISTINCT FROM 316),\n        'latest_usable_utc',max(usable_from_utc)) FROM current_samples),\n    'current_evaluations',(SELECT jsonb_agg(to_jsonb(e)) FROM evals e),\n    'independent_live_btc_waves',(SELECT count(DISTINCT m.payload#>>'{membership,btc_parent_movement_id}')\n        FROM research_watch_scan_measurements m JOIN accepted i USING(consumer_version,snapshot_set_id)\n        WHERE m.measurement_version='watch-scan-measurements-v1'\n            AND m.payload#>>'{membership,membership_status}'='LIVE'\n            AND m.payload#>>'{membership,episode_policy_version}'='btc-parent-close-reversal-200bps-v1'),\n    'version_cursor',(SELECT to_jsonb(st) FROM research_watch_scan_formula_state st\n        WHERE evaluation_version='watch-scan-formulas-v4-asset-context')) AS verification;\n",
+    "new_scan_raw": "-- Independent arithmetic from immutable raw Spot bars. No evaluator helpers.\n-- A frozen missing window may now have a complete archive; report that without\n-- treating retrospective enrichment as permission to rewrite the frozen window.\nWITH samples AS (\n    SELECT consumer_version,snapshot_set_id,symbol,usable_from_utc,payload,\n        payload->'asset_context_provenance' AS own_context,\n        payload->'btc_context_provenance' AS btc_context\n    FROM research_watch_scan_formula_samples\n    WHERE evaluation_version='watch-scan-formulas-v4-asset-context' AND status='READY'\n        AND symbol IN ('BTC','ETH','SOL','BNB','XRP','DOGE','ZEC')\n        AND snapshot_set_id NOT IN (SELECT snapshot_set_id FROM research_watch_scan_formula_samples WHERE evaluation_version='watch-scan-formulas-v3-btc-context' AND status='READY')\n), windows AS (\n    SELECT s.*,w.name,w.minutes,date_trunc('minute',s.usable_from_utc) AS boundary,\n        date_trunc('minute',s.usable_from_utc)-w.minutes*interval '1 minute' AS start_utc,\n        s.own_context->'windows'->w.name AS proof\n    FROM samples s CROSS JOIN (VALUES('15m',15),('30m',30),('1h',60),('4h',240),('12h',720),('24h',1440)) w(name,minutes)\n), prices AS (\n    SELECT w.*,p.*,\n        p.n=w.minutes AND p.first_minute=w.start_utc AND p.last_minute=w.boundary-interval '1 minute'\n            AND p.valid_minutes IS TRUE AS raw_complete,\n        100.0*(p.last_close/NULLIF(p.first_open,0)-1.0) AS raw_return_pct,\n        100.0*(p.highest-p.lowest)/NULLIF(p.first_open,0) AS raw_range_pct\n    FROM windows w LEFT JOIN LATERAL (\n        SELECT count(*) AS n,min(b.open_time_utc) AS first_minute,max(b.open_time_utc) AS last_minute,\n            bool_and(b.open_time_utc=date_trunc('minute',b.open_time_utc)\n                AND b.close_time_utc=b.open_time_utc+interval '1 minute'-interval '1 millisecond'\n                AND b.close_time_utc<w.boundary AND b.low>0 AND b.high<'Infinity'::float8\n                AND b.low<=least(b.open,b.close) AND b.high>=greatest(b.open,b.close)) AS valid_minutes,\n            (array_agg(b.open ORDER BY b.open_time_utc))[1] AS first_open,\n            (array_agg(b.close ORDER BY b.open_time_utc DESC))[1] AS last_close,\n            max(b.high) AS highest,min(b.low) AS lowest\n        FROM research_price_archive_bars b\n        WHERE b.route='BINANCE_SPOT_TRADE_1M' AND b.symbol=w.symbol\n            AND b.open_time_utc>=w.start_utc AND b.open_time_utc<w.boundary\n    ) p ON true\n), raw AS (\n    SELECT p.*,\n        CASE WHEN raw_return_pct>0 THEN 'UP' WHEN raw_return_pct<0 THEN 'DOWN' ELSE 'FLAT' END AS raw_direction,\n        CASE WHEN raw_range_pct<=0 OR abs(raw_return_pct)/NULLIF(raw_range_pct,0)<0.5 THEN 'RANGE'\n             WHEN raw_return_pct>0 THEN 'UP' WHEN raw_return_pct<0 THEN 'DOWN' ELSE 'RANGE' END AS raw_regime,\n        proof->>'status'='READY' AS frozen_ready\n    FROM prices p\n), checks AS (\n    SELECT r.*,\n        frozen_ready AND (\n            raw_complete IS NOT TRUE\n            OR (proof->>'lookback_minutes')::int IS DISTINCT FROM minutes\n            OR (proof->>'path_samples')::int IS DISTINCT FROM minutes\n            OR proof->>'path_complete' IS DISTINCT FROM 'true'\n            OR (proof->>'window_start_utc')::timestamptz IS DISTINCT FROM start_utc\n            OR (proof->>'window_end_utc')::timestamptz IS DISTINCT FROM boundary-interval '1 millisecond'\n            OR (proof->>'event_time_utc')::timestamptz IS DISTINCT FROM usable_from_utc\n            OR proof#>>'{source,symbol}' IS DISTINCT FROM symbol\n            OR proof#>>'{source,exchange}' IS DISTINCT FROM 'binance'\n            OR proof#>>'{source,market}' IS DISTINCT FROM 'spot'\n            OR proof#>>'{source,pair}' IS DISTINCT FROM symbol||'USDT'\n            OR proof#>>'{source,interval}' IS DISTINCT FROM '1m'\n            OR (proof->>'path_sha256' ~ '^[0-9a-f]{64}$') IS NOT TRUE\n            OR proof->>'return_pct' IS NULL OR abs((proof->>'return_pct')::float8-raw_return_pct)>1e-9\n            OR proof->>'range_pct' IS NULL OR abs((proof->>'range_pct')::float8-raw_range_pct)>1e-9\n            OR proof->>'direction' IS DISTINCT FROM raw_direction\n            OR proof->>'market_regime' IS DISTINCT FROM raw_regime\n        ) AS window_error\n    FROM raw r\n), direction_cells AS (\n    SELECT c.*,b.base,\n        c.payload->'features_by_direction'->b.base->'features' AS feature_values,\n        c.payload->'features_by_direction'->b.base->'unavailable_features' AS missing\n    FROM checks c CROSS JOIN (VALUES('LONG'),('SHORT')) b(base)\n), feature_checks AS (\n    SELECT d.*,\n        CASE WHEN frozen_ready THEN feature_values->>('historical.closed_1m.'||name||'.direction') IS DISTINCT FROM raw_direction\n            ELSE feature_values ? ('historical.closed_1m.'||name||'.direction')\n                OR NOT (missing ? ('historical.closed_1m.'||name||'.direction')) END AS direction_error,\n        CASE WHEN name<>'4h' THEN false WHEN frozen_ready\n            THEN feature_values->>'historical.closed_1m.4h.market_regime' IS DISTINCT FROM raw_regime\n            ELSE feature_values ? 'historical.closed_1m.4h.market_regime'\n                OR NOT (missing ? 'historical.closed_1m.4h.market_regime') END AS regime_error,\n        CASE WHEN name<>'1h' THEN false WHEN frozen_ready\n            THEN feature_values->>'historical.closed_1m.1h.alignment' IS DISTINCT FROM\n                CASE WHEN raw_direction='FLAT' THEN 'FLAT'\n                    WHEN (raw_direction='UP')=(base='LONG') THEN 'SUPPORTS' ELSE 'OPPOSES' END\n            ELSE feature_values ? 'historical.closed_1m.1h.alignment'\n                OR NOT (missing ? 'historical.closed_1m.1h.alignment') END AS alignment_error\n    FROM direction_cells d\n), relative_cells AS (\n    SELECT d.snapshot_set_id,d.symbol,d.base,d.frozen_ready,\n        d.btc_context->'features' ? 'historical.closed_1m.1h.btc_direction' AS frozen_btc_ready,\n        btc.raw_complete AS btc_raw_complete,\n        d.raw_return_pct-btc.raw_return_pct AS expected_relative,\n        d.feature_values->>'historical.closed_1m.1h.relative_strength_pct' AS actual_relative,\n        d.missing ? 'historical.closed_1m.1h.relative_strength_pct' AS has_missing_reason\n    FROM direction_cells d LEFT JOIN raw btc ON btc.consumer_version=d.consumer_version\n        AND btc.snapshot_set_id=d.snapshot_set_id AND btc.symbol='BTC' AND btc.name='1h'\n    WHERE d.name='1h'\n), relative_checks AS (\n    SELECT r.*,CASE WHEN frozen_ready AND frozen_btc_ready THEN\n        btc_raw_complete IS NOT TRUE OR expected_relative IS NULL OR actual_relative IS NULL\n            OR abs(actual_relative::float8-expected_relative)>1e-9\n        ELSE actual_relative IS NOT NULL OR NOT has_missing_reason END AS relative_error\n    FROM relative_cells r\n), summary AS (\n    SELECT name,count(*) AS windows,count(*) FILTER(WHERE frozen_ready) AS frozen_ready,\n        count(*) FILTER(WHERE raw_complete) AS raw_complete,\n        count(*) FILTER(WHERE NOT frozen_ready AND raw_complete) AS frozen_missing_now_available,\n        count(*) FILTER(WHERE window_error) AS window_errors\n    FROM checks GROUP BY name\n)\nSELECT jsonb_build_object(\n    'spot_coin_samples',(SELECT count(*) FROM samples),\n    'raw_window_checks',(SELECT count(*) FROM checks),\n    'window_proof_or_raw_price_errors',(SELECT count(*) FROM checks WHERE window_error),\n    'direction_cells_checked',(SELECT count(*) FROM feature_checks),\n    'direction_feature_errors',(SELECT count(*) FROM feature_checks WHERE direction_error),\n    'regime_feature_errors',(SELECT count(*) FROM feature_checks WHERE regime_error),\n    'alignment_feature_errors',(SELECT count(*) FROM feature_checks WHERE alignment_error),\n    'relative_strength_cells_checked',(SELECT count(*) FROM relative_checks),\n    'relative_strength_errors',(SELECT count(*) FROM relative_checks WHERE relative_error),\n    'btc_known_nonzero_self_relative',(SELECT count(*) FROM relative_checks WHERE symbol='BTC' AND actual_relative IS NOT NULL AND actual_relative::float8<>0),\n    'by_window',(SELECT jsonb_agg(to_jsonb(s) ORDER BY name) FROM summary s),\n    'window_error_examples',(SELECT jsonb_agg(to_jsonb(e)) FROM (SELECT snapshot_set_id,symbol,name,n,raw_complete,proof->>'status' AS frozen_status FROM checks WHERE window_error LIMIT 10) e),\n    'feature_error_examples',(SELECT jsonb_agg(to_jsonb(e)) FROM (SELECT snapshot_set_id,symbol,name,base,direction_error,regime_error,alignment_error FROM feature_checks WHERE direction_error OR regime_error OR alignment_error LIMIT 10) e),\n    'relative_error_examples',(SELECT jsonb_agg(to_jsonb(e)) FROM (SELECT * FROM relative_checks WHERE relative_error LIMIT 10) e)\n) AS verification;\n",
+    "baseline": "SELECT evaluation_version,count(*) AS samples,count(*) FILTER(WHERE status='READY') AS ready,count(*) FILTER(WHERE status='ERROR') AS errors,md5(string_agg(snapshot_set_id::text||':'||symbol||':'||payload::text,'|' ORDER BY snapshot_set_id,symbol)) AS payload_digest FROM research_watch_scan_formula_samples GROUP BY evaluation_version ORDER BY evaluation_version",
+    "audit": "SELECT evaluation_version,count(*) AS decisions FROM research_watch_scan_formula_evaluations_by_version GROUP BY evaluation_version ORDER BY evaluation_version"
+  },
+  "limitations": {
+    "descriptive_only": true,
+    "independent_btc_waves": 1,
+    "hype_own_spot_features_unavailable": 9,
+    "remaining_unsupported_definitions": 140
+  }
+}

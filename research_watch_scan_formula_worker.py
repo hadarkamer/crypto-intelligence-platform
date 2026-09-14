@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 
-import research_watch_scan_formula_btc_context as formula
+import research_watch_scan_formula_asset_context as formula
 import research_watch_scan_intake as intake
 import research_price_archive as prices
 
@@ -165,14 +165,16 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
     # disagree. New contexts use one bounded BTC-only read per selected scan.
     contexts, context_errors = {}, {}
     if getattr(formula, 'CONTEXT_REQUIRED', False):
+        context_versions = [formula.VERSION, *getattr(formula, 'BTC_CONTEXT_PREDECESSORS', ())]
         for snapshot_id in ids:
             try:
                 with conn.transaction():
                     source = observations[(snapshot_id, 'BTC')]
                     frozen = conn.execute('''SELECT payload->'btc_context_provenance' AS context
-                        FROM research_watch_scan_formula_samples WHERE evaluation_version=%s
+                        FROM research_watch_scan_formula_samples WHERE evaluation_version=ANY(%s::text[])
                         AND consumer_version=%s AND snapshot_set_id=%s AND status='READY'
-                        ORDER BY symbol LIMIT 1''', (formula.VERSION, intake.VERSION, snapshot_id)).fetchone()
+                        ORDER BY array_position(%s::text[],evaluation_version),symbol LIMIT 1''',
+                        (context_versions, intake.VERSION, snapshot_id, context_versions)).fetchone()
                     if frozen:
                         if frozen['context'] is None:
                             raise ValueError('MISSING_FROZEN_BTC_CONTEXT')
@@ -192,7 +194,18 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
                 observation = observations[(job['snapshot_set_id'], job['symbol'])]
                 if job['snapshot_set_id'] in context_errors:
                     raise context_errors[job['snapshot_set_id']]
-                if getattr(formula, 'CONTEXT_REQUIRED', False):
+                if getattr(formula, 'ASSET_CONTEXT_REQUIRED', False):
+                    boundary = intake._utc(observation['usable_from_utc']).replace(second=0, microsecond=0)
+                    # Original predicates require Spot. HYPE outcome PERP is
+                    # never substituted for an unapproved own-Spot lookback.
+                    path = None if job['symbol'] == 'HYPE' else prices.read_path(
+                        prices.BINANCE_SPOT, job['symbol'], boundary-timedelta(minutes=1440),
+                        boundary-timedelta(milliseconds=1), connection=conn)
+                    context = contexts[job['snapshot_set_id']]
+                    own = formula.build_asset_context(observation, path,
+                        btc_context=context, computed_at=now)
+                    result = formula.evaluate_coin(observation, btc_context=context, asset_context=own)
+                elif getattr(formula, 'CONTEXT_REQUIRED', False):
                     result = formula.evaluate_coin(observation, btc_context=contexts[job['snapshot_set_id']])
                 else:
                     result = formula.evaluate_coin(observation)

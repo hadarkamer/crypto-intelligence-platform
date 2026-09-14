@@ -123,6 +123,7 @@ MIGRATION_PATHS = (
     Path(__file__).resolve().parent / "migrations" / "048_watch_scan_formulas.sql",
     Path(__file__).resolve().parent / "migrations" / "049_watch_scan_maxpain_formulas.sql",
     Path(__file__).resolve().parent / "migrations" / "050_watch_scan_btc_context_formulas.sql",
+    Path(__file__).resolve().parent / "migrations" / "051_watch_scan_asset_context_formulas.sql",
 )
 SCHEMA_LOCK_ID = 94837242
 
