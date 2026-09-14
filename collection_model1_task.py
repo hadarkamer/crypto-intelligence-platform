@@ -1,15 +1,18 @@
-"""Adapter around the existing capture + OpenAI functions; no new provider or login flow."""
+"""Adapter around the existing capture + OpenAI functions; no new provider or login flow.
+
+The legacy modules remain unchanged. This adapter calls their existing public
+signatures, then rejects unreadable or inconsistent visual estimates. No hooks,
+monkey-patching, or changes to source authentication are performed.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
 import math
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 SCHEMA = "coinglass-model1.v1"
 SOURCE = "https://www.coinglass.com/pro/futures/LiquidationHeatMap?coin=BTC&type=symbol"
@@ -71,58 +74,24 @@ def normalize(raw: Any, *, timeframe: str, run_id: str, captured_at: str, image:
             "summary": str(scan.get("short_summary", ""))[:1000], "quality": "visual_estimate"}
 
 
-def verify_public_page(page, timeframe: str) -> None:
-    """Read-only preflight callback before the legacy collector takes its screenshot."""
-    u = urlparse(page.url)
-    if (u.scheme != "https" or u.hostname not in {"coinglass.com", "www.coinglass.com"} or
-        u.username or u.password or u.port not in {None, 443} or
-        u.path != "/pro/futures/LiquidationHeatMap" or
-        parse_qs(u.query).get("coin") != ["BTC"] or parse_qs(u.query).get("type") != ["symbol"]):
-        raise ValueError("Unexpected source")
-    from market_vision.coinglass_heatmap_capture import _first_visible
-    blocked = page.get_by_text(re.compile(r"log\s*in\s+to\s+unlock\s+full\s+data|verify (?:that )?you are human|complete the captcha", re.I))
-    if _first_visible(blocked) is not None:
-        raise ValueError("Source access unavailable")
-    label = "12 hour" if timeframe == "12h" else "24 hour"
-    selector = page.locator('[role="combobox"], [aria-haspopup="listbox"]').filter(has_text=re.compile(r"^" + re.escape(label) + r"$", re.I))
-    if _first_visible(selector) is None:
-        raise ValueError("Timeframe not verified")
-    if _first_visible(page.get_by_text(re.compile(r"BTC.*Liquidation Heatmap", re.I))) is None:
-        raise ValueError("BTC chart not identified")
-    readable = page.evaluate("""() => {
-      const canvases = [...document.querySelectorAll('canvas')].filter(c => {
-        const r=c.getBoundingClientRect(); const s=getComputedStyle(c);
-        return r.width>200 && r.height>100 && s.display!=='none' && s.visibility!=='hidden';
-      });
-      return canvases.length>0 && canvases.every(c => {
-        for(let n=c;n;n=n.parentElement) {
-          const m=/blur\\(\\s*([0-9.]+)/.exec(getComputedStyle(n).filter||'');
-          if(m && Number(m[1])>0) return false;
-        }
-        return true;
-      });
-    }""")
-    if readable is not True:
-        raise ValueError("Chart unavailable or blurred")
-
-
 def main(timeframe: str, run_id: str, output: str) -> None:
     if timeframe not in {"12H", "24H"}:
         raise ValueError("Unsupported timeframe")
-    from market_vision.coinglass_heatmap_capture import capture_heatmaps
+    from market_vision.coinglass_heatmap_capture import capture_heatmaps, COINGLASS_HEATMAP_URL
     from market_vision.openai_heatmap_scanner import analyze_heatmap_images
+    if COINGLASS_HEATMAP_URL != SOURCE:
+        raise ValueError("Unexpected legacy source configuration")
     root = Path(output)
     root.mkdir(parents=True, exist_ok=True)
-    images = capture_heatmaps(root / "capture", timeframes=(timeframe.lower(),), validate_page=verify_public_page)
-    if len(images) != 1:
-        raise ValueError("Capture count mismatch")
+    images = capture_heatmaps(root / "capture", timeframes=(timeframe.lower(),))
+    if len(images) != 1 or images[0].get("timeframe") != timeframe.lower():
+        raise ValueError("Capture count or timeframe mismatch")
     image = Path(images[0]["image"]).read_bytes()
     if len(image) > 4 * 1024 * 1024 or not image.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ValueError("Invalid image evidence")
     captured_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     images[0].pop("liquidity_threshold", None)
-    raw = analyze_heatmap_images(images, symbol="BTC", timeout_seconds=120,
-                                 max_output_tokens=3000, current_active_only=True)
+    raw = analyze_heatmap_images(images, symbol="BTC", timeout_seconds=120)
     result = normalize(raw, timeframe=timeframe, run_id=run_id, captured_at=captured_at, image=image)
     (root / "image.png").write_bytes(image)
     (root / "result.json").write_text(json.dumps(result, ensure_ascii=False, allow_nan=False), encoding="utf-8")
