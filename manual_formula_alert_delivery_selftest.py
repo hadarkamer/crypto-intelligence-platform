@@ -235,6 +235,54 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await task, 1)
         self.assertEqual(self.rows()[0]['status'], 'DELIVERED')
 
+    async def test_watch_waits_for_prior_supervisor_send_then_prepares_entire_group(self):
+        self.seed(4)
+        entered, release = asyncio.Event(), asyncio.Event()
+        scan_started = [False]
+        async def pending(**kwargs):
+            entered.set()
+            await release.wait()
+            return SimpleNamespace(message_id=1)
+        bot = self.bot(side_effect=pending)
+        supervisor = asyncio.create_task(self.run_delivery(bot, may_deliver=lambda: not scan_started[0]))
+        watch = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            scan_started[0] = True
+            with patch.object(delivery.store, 'record_watch_events', return_value={'created_intents': 0}) as record:
+                watch = asyncio.create_task(delivery.run_watch(bot, 1, [], may_deliver=lambda: True))
+                await asyncio.sleep(0)
+                self.assertFalse(watch.done())
+                record.assert_not_called()
+                release.set()
+                self.assertEqual(await asyncio.wait_for(supervisor, timeout=2), 1)
+                self.assertEqual(await asyncio.wait_for(watch, timeout=2), 3)
+            record.assert_called_once()
+            self.assertEqual([row['status'] for row in self.rows()], ['DELIVERED'] * 4)
+            self.assertEqual(bot.send_message.await_count, 4)
+        finally:
+            release.set()
+            await asyncio.gather(supervisor, *([watch] if watch is not None else []), return_exceptions=True)
+
+    async def test_watch_rechecks_destination_after_waiting_for_delivery_lock(self):
+        self.seed(4); active = [True]; bot = self.bot()
+        self.assertTrue(await delivery.initialize(1))
+        await delivery._LOCK.acquire()
+        task = asyncio.create_task(delivery.run_watch(bot, 1, [], may_deliver=lambda: active[0]))
+        try:
+            with patch.object(delivery.store, 'record_watch_events') as record:
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                active[0] = False
+                delivery._LOCK.release()
+                self.assertEqual(await asyncio.wait_for(task, timeout=2), 0)
+            record.assert_not_called()
+            bot.send_message.assert_not_awaited()
+        finally:
+            if delivery._LOCK.locked():
+                delivery._LOCK.release()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def test_collection_failure_never_claims_or_transports(self):
         self.seed(); bot = self.bot()
         with patch.object(delivery.store, 'collect', side_effect=RuntimeError('fixture')), patch.object(delivery.store, 'claim') as claim:

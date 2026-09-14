@@ -74,11 +74,15 @@ async def run_once(bot, chat_id, *, may_deliver=None):
 
 async def run_watch(bot, chat_id, events, *, may_deliver=None):
     """Freeze current Watch matches and send the complete bounded priority group."""
-    return await _run(bot, chat_id, events=events, may_deliver=may_deliver, limit=128)
+    return await _run(bot, chat_id, events=events, may_deliver=may_deliver,
+                      limit=128, wait_for_lock=True)
 
 
-async def _run(bot, chat_id, *, events=None, may_deliver=None, limit):
-    if _LOCK.locked() or may_deliver is None or not may_deliver():
+async def _run(bot, chat_id, *, events=None, may_deliver=None, limit, wait_for_lock=False):
+    # A Watch prelude must wait for an already-started supervisor send. Skipping
+    # its preparation would defer the new scan's experiments until after the
+    # ordinary group. Polling recovery still avoids overlapping work.
+    if (not wait_for_lock and _LOCK.locked()) or may_deliver is None or not may_deliver():
         return 0
     if not await initialize(chat_id):
         return 0
