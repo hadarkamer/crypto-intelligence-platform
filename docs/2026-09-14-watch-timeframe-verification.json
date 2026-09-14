@@ -1,0 +1,530 @@
+{
+  "status": "COMPLETED_AND_VERIFIED",
+  "checked_at_utc": "2026-09-14T06:26:01.817096+00:00",
+  "pr": "https://github.com/hadarkamer/crypto-intelligence-platform/pull/42",
+  "final_head": "3f39da0e46577e97f8d73cfd9462f3d0a14b16af",
+  "tested_tree": "ca93f85dd931212cdaf0ad63d8d73fc09ef5c4bf",
+  "tested_merge": {
+    "sha": "1c4aac492d7122d6e8a94eca599239da3b0f2549",
+    "tree": "ca93f85dd931212cdaf0ad63d8d73fc09ef5c4bf"
+  },
+  "production_commit": "fb66972785826aea9a7c308980317d9cb5d86b03",
+  "ci": {
+    "run_id": 34812489993,
+    "job_id": 103876428747,
+    "conclusion": "success",
+    "groups": [
+      {
+        "name": "research_watch_scan_formula_timeframe_postgres_selftest.py",
+        "summary": [
+          "2026-09-14T06:16:54.1735930Z Ran 7 tests in 18.413s",
+          "2026-09-14T06:16:54.1736309Z OK"
+        ]
+      },
+      {
+        "name": "research_watch_scan_formula_timeframe_selftest.py",
+        "summary": [
+          "2026-09-14T06:16:55.8291735Z Ran 16 tests in 1.457s",
+          "2026-09-14T06:16:55.8292085Z OK"
+        ]
+      },
+      {
+        "name": "research_ordered_runtime_selftest.py",
+        "summary": [
+          "2026-09-14T06:14:32.6645719Z ordered research lifecycle checks passed"
+        ]
+      }
+    ],
+    "selftest_files": "126",
+    "initial_attempt": {
+      "run_id": 34811878924,
+      "conclusion": "failure",
+      "reason": "One PostgreSQL fixture selected SHORT instead of intended LONG because the combined fixture added liquidity growth. Fixture target and amount scale corrected; production code and assertions unchanged."
+    }
+  },
+  "migration": {
+    "ok": true,
+    "returncode": 0,
+    "migration": "054_watch_scan_timeframe_formulas.sql",
+    "sha256": "9e51da79420b9cdcac86006b977be090e601cd9924a20b2c041c1a510cd64cbc",
+    "post_installation": [
+      {
+        "checked_at_utc": "2026-09-14T06:19:02.566443Z",
+        "definitions": 298,
+        "new_active": null,
+        "new_comparisons": "research_watch_scan_tf_formula_comparisons",
+        "new_samples": "research_watch_scan_tf_formula_samples",
+        "old_active": "watch-scan-formulas-v5-score-change",
+        "supported_before_worker": 170
+      }
+    ]
+  },
+  "deployment": {
+    "commit": {
+      "createdAt": "2026-09-14T06:19:14Z",
+      "id": "fb66972785826aea9a7c308980317d9cb5d86b03",
+      "message": "Merge pull request #42 from hadarkamer/feature/all-watch-scan-timeframe-liquidity-20260914\n\nExtend captured-scan research with selected-timeframe liquidity formulas"
+    },
+    "createdAt": "2026-09-14T06:19:16.361055Z",
+    "finishedAt": "2026-09-14T06:20:40.037108Z",
+    "id": "dep-dajp3p7qj5pc73be9fl0",
+    "startedAt": "2026-09-14T06:19:16.334781Z",
+    "status": "live",
+    "trigger": "new_commit",
+    "updatedAt": "2026-09-14T06:21:04.907807Z"
+  },
+  "pre_deploy_health": {
+    "checked_at_utc": "2026-09-14T06:17:26.909676+00:00",
+    "commit": "426d0ada329226bbdb0df6edf390d707c8ecc6ce",
+    "watch": {
+      "desired_general_enabled": true,
+      "chat_configured": true,
+      "coordinator_running": true,
+      "supervisor_running": true,
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": "2026-09-14T06:06:11.502537+00:00",
+      "last_cycle_result": "completed",
+      "next_scan_utc": "2026-09-14T06:32:15+00:00",
+      "last_error": null
+    },
+    "dual": {
+      "rule_id": "captured-question-search-v3-experimental-binding:CORE_FUTURES_CVD_SPOT_CVD_TOTAL_65",
+      "version": "dual-cvd65-experimental-watch-v1",
+      "experimental": true,
+      "statistically_qualified": false,
+      "ready": true,
+      "last_error_type": null,
+      "evidence_gaps": 0,
+      "last_record_status": "ACCEPTED",
+      "last_watch_scan_id": "shared-watch:2026-09-14T06:02:15.084152+00:00",
+      "last_counts": {
+        "evaluated": 8,
+        "MATCH": 0,
+        "NO_MATCH": 8,
+        "UNKNOWN": 0,
+        "episodes_started": 0,
+        "resets": 0,
+        "duplicate_generations": 0
+      },
+      "created_intents": 0,
+      "delivered": 0,
+      "unknown": 0,
+      "failed": 0,
+      "orphaned_attempts": 0,
+      "last_delivery_at_utc": null
+    },
+    "research": {
+      "watch_scan_intake": {
+        "version": "watch-all-scan-intake-v1",
+        "running": true,
+        "supported_candidates": null,
+        "failures": 0,
+        "last_error": null
+      },
+      "watch_scan_measurement": {
+        "version": "watch-scan-measurements-v1",
+        "running": true,
+        "supported_candidates": null,
+        "failures": 0,
+        "last_error": null
+      },
+      "watch_scan_formulas": {
+        "version": "watch-scan-formulas-v5-score-change",
+        "running": true,
+        "supported_candidates": 170,
+        "failures": 0,
+        "last_error": null
+      }
+    },
+    "timeframes": null
+  },
+  "final_health": {
+    "checked_at_utc": "2026-09-14T06:26:01.817096+00:00",
+    "commit": "fb66972785826aea9a7c308980317d9cb5d86b03",
+    "watch": {
+      "desired_general_enabled": true,
+      "chat_configured": true,
+      "coordinator_running": true,
+      "supervisor_running": true,
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "next_scan_utc": "2026-09-14T06:32:15+00:00",
+      "last_error": null
+    },
+    "dual": {
+      "rule_id": "captured-question-search-v3-experimental-binding:CORE_FUTURES_CVD_SPOT_CVD_TOTAL_65",
+      "version": "dual-cvd65-experimental-watch-v1",
+      "experimental": true,
+      "statistically_qualified": false,
+      "ready": true,
+      "last_error_type": null,
+      "evidence_gaps": 0,
+      "last_record_status": "NOT_OBSERVED",
+      "last_watch_scan_id": null,
+      "last_counts": {},
+      "created_intents": 0,
+      "delivered": 0,
+      "unknown": 0,
+      "failed": 0,
+      "orphaned_attempts": 0,
+      "last_delivery_at_utc": null
+    },
+    "research": {
+      "watch_scan_intake": {
+        "version": "watch-all-scan-intake-v1",
+        "running": true,
+        "supported_candidates": null,
+        "failures": 0,
+        "last_error": null
+      },
+      "watch_scan_measurement": {
+        "version": "watch-scan-measurements-v1",
+        "running": true,
+        "supported_candidates": null,
+        "failures": 0,
+        "last_error": null
+      },
+      "watch_scan_formulas": {
+        "version": "watch-scan-formulas-v5-score-change",
+        "running": true,
+        "supported_candidates": 170,
+        "failures": 0,
+        "last_error": null
+      }
+    },
+    "timeframes": {
+      "version": "watch-scan-timeframe-formulas-v1",
+      "feature_version": "watch-captured-selected-timeframe-liquidity-and-score-difference-v1",
+      "population": "watch-all-scan-observations-v1",
+      "unit": "ACTUAL_SELECTED_MAXPAIN_TIMEFRAME",
+      "enabled": true,
+      "running": true,
+      "max_coins_per_pass": 32,
+      "poll_seconds": 30,
+      "supported_timeframe_candidates": 34,
+      "source_timeframes": [
+        "12h",
+        "24h",
+        "48h",
+        "3d",
+        "1w",
+        "2w",
+        "1m"
+      ],
+      "active_evaluation_version": "watch-scan-timeframe-formulas-v1",
+      "discovery_enabled": false,
+      "promotion_enabled": false,
+      "cycles": 11,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "catalog": 34,
+        "enqueued": 0,
+        "processed": 0,
+        "ready": 0,
+        "errors": 0,
+        "activated": false,
+        "active_evaluation_version": "watch-scan-timeframe-formulas-v1"
+      },
+      "last_run_utc": "2026-09-14T06:25:54.144694+00:00"
+    }
+  },
+  "research": {
+    "accepted_scans": 38,
+    "active_coin_samples": {
+      "bad_v5_grid": 0,
+      "evaluation_version": "watch-scan-formulas-v5-score-change",
+      "ready": 304,
+      "samples": 304
+    },
+    "coverage": {
+      "coin": 170,
+      "definition_drift": 0,
+      "definitions": 298,
+      "selected_timeframe": 34,
+      "supported": 204,
+      "unsupported": 94
+    },
+    "expected_tf_coin_samples": 304,
+    "latest_source_usable_utc": "2026-09-14T06:05:53.321152+00:00",
+    "missing_or_not_ready": 0,
+    "tf_catalog": {
+      "definitions": 34,
+      "inverse": 17,
+      "normal": 17,
+      "supported": 34
+    },
+    "tf_runtime": {
+      "activated_at_utc": "2026-09-14T06:25:22.719357+00:00",
+      "active_evaluation_version": "watch-scan-timeframe-formulas-v1",
+      "singleton": true
+    },
+    "tf_samples": {
+      "bad_ready_grid": 0,
+      "bad_ready_lineage": 0,
+      "due": 0,
+      "errors": 0,
+      "ready": 304,
+      "total": 304,
+      "waiting": 0
+    },
+    "tf_state": {
+      "completed_laps": 5,
+      "evaluation_version": "watch-scan-timeframe-formulas-v1",
+      "scan_cursor": 1304,
+      "scan_high_water": 1304,
+      "updated_at_utc": "2026-09-14T06:25:22.719357+00:00"
+    }
+  },
+  "previous_payload_preservation": {
+    "cutoff_snapshot_set_id": 1302,
+    "status": "READY",
+    "query": "SELECT evaluation_version,count(*) AS samples,sum(jsonb_array_length(payload->'evaluations')) AS decisions,md5(string_agg(md5(payload::text),',' ORDER BY snapshot_set_id,symbol)) AS payload_digest FROM research_watch_scan_formula_samples WHERE snapshot_set_id<=1302 AND status='READY' GROUP BY evaluation_version ORDER BY evaluation_version",
+    "before": [
+      {
+        "decisions": 9792,
+        "evaluation_version": "watch-scan-formulas-v1",
+        "payload_digest": "4718d575893f79365edccc4566c14efa",
+        "samples": 144
+      },
+      {
+        "decisions": 24928,
+        "evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "payload_digest": "824a6f538b7c9b6fbbd18fe1b5089ed3",
+        "samples": 152
+      },
+      {
+        "decisions": 57664,
+        "evaluation_version": "watch-scan-formulas-v3-btc-context",
+        "payload_digest": "f350f0ee190bd34a4bcb3f631c024df0",
+        "samples": 272
+      },
+      {
+        "decisions": 88480,
+        "evaluation_version": "watch-scan-formulas-v4-asset-context",
+        "payload_digest": "e9e6703f1723960dc0bf344ef3b3adac",
+        "samples": 280
+      },
+      {
+        "decisions": 100640,
+        "evaluation_version": "watch-scan-formulas-v5-score-change",
+        "payload_digest": "ee79b4f79d8ca8ac1a4db851e7bcf96f",
+        "samples": 296
+      }
+    ],
+    "after": [
+      {
+        "decisions": 9792,
+        "evaluation_version": "watch-scan-formulas-v1",
+        "payload_digest": "4718d575893f79365edccc4566c14efa",
+        "samples": 144
+      },
+      {
+        "decisions": 24928,
+        "evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "payload_digest": "824a6f538b7c9b6fbbd18fe1b5089ed3",
+        "samples": 152
+      },
+      {
+        "decisions": 57664,
+        "evaluation_version": "watch-scan-formulas-v3-btc-context",
+        "payload_digest": "f350f0ee190bd34a4bcb3f631c024df0",
+        "samples": 272
+      },
+      {
+        "decisions": 88480,
+        "evaluation_version": "watch-scan-formulas-v4-asset-context",
+        "payload_digest": "e9e6703f1723960dc0bf344ef3b3adac",
+        "samples": 280
+      },
+      {
+        "decisions": 100640,
+        "evaluation_version": "watch-scan-formulas-v5-score-change",
+        "payload_digest": "ee79b4f79d8ca8ac1a4db851e7bcf96f",
+        "samples": 296
+      }
+    ],
+    "exactly_equal": true
+  },
+  "latest_scan_parity": {
+    "controls": 1558,
+    "decisions": 3808,
+    "invalid_orientation": 0,
+    "invalid_selection_status": 0,
+    "inverse_pairs": 1904,
+    "inverse_predicate_mismatches": 0,
+    "matches": 344,
+    "missing_normal_pairs": 0,
+    "not_applicable": 1904,
+    "not_selected": 1904,
+    "selected": 1904,
+    "snapshot_set_id": 1304,
+    "unique_grid": 3808,
+    "unknown": 2,
+    "unknown_selection": 0
+  },
+  "source_readback": {
+    "coins": 3,
+    "results": [
+      {
+        "snapshot_set_id": 1304,
+        "symbol": "BTC",
+        "feature_sha256": "5ba25d7f0ef19772f0955c5c4729c66f488e6af8dfed1a61849908aab83f8851",
+        "canonical_hash_valid": true,
+        "frozen_source_replay_exact": true,
+        "timeframes": 7
+      },
+      {
+        "snapshot_set_id": 1304,
+        "symbol": "ETH",
+        "feature_sha256": "c6428a3b5be08ae20956b6f23f682ebf1c3553ff2be1a1a72e32da81e33844c0",
+        "canonical_hash_valid": true,
+        "frozen_source_replay_exact": true,
+        "timeframes": 7
+      },
+      {
+        "snapshot_set_id": 1304,
+        "symbol": "HYPE",
+        "feature_sha256": "ab734fe3e305afcc0803e8e7acbd525fd46ab6970a6d24d633e51fa6ec03592d",
+        "canonical_hash_valid": true,
+        "frozen_source_replay_exact": true,
+        "timeframes": 7
+      }
+    ]
+  },
+  "bounded_comparison": {
+    "query": "-- Read-only. Set a short statement timeout in the executing connection.\n-- A zero-row result is valid if this selected-timeframe slice has no anchor.\nSELECT evaluation_version,candidate_key,timeframe,symbol_scope,base_direction,analysis_direction,\n    window_minutes,threshold_bps,distinct_waves,matched_waves,control_waves,shared_waves,\n    blocked_arms,matched_success,matched_failure,control_success,control_failure,\n    open_arms,missing_arms,ambiguous_arms,no_touch_arms,\n    statistical_test_performed,qualifies_as_prospective_formula_evidence\nFROM research_watch_scan_tf_formula_comparisons\nWHERE evaluation_version='watch-scan-timeframe-formulas-v1'\n    AND candidate_key='captured-question-search-v3-experimental-binding:LIQUIDITY_BALANCED'\n    AND timeframe='12h' AND symbol_scope='BTC' AND base_direction='LONG'\n    AND window_minutes=60 AND threshold_bps=25;\n",
+    "plan_top": [
+      {
+        "QUERY PLAN": "Subquery Scan on research_watch_scan_tf_formula_comparisons  (cost=29.92..30.04 rows=1 width=306)"
+      },
+      {
+        "QUERY PLAN": "  ->  GroupAggregate  (cost=29.92..30.03 rows=1 width=690)"
+      },
+      {
+        "QUERY PLAN": "        Group Key: c.definition_sha256, c.orientation, c.feature_version, c.population_version, c.measurement_version, c.entry_version, c.outcome_method_version, c.parent_policy_version, c.selection_version, p.analysis_direction"
+      },
+      {
+        "QUERY PLAN": "        ->  Sort  (cost=29.92..29.93 rows=1 width=585)"
+      },
+      {
+        "QUERY PLAN": "              Sort Key: c.definition_sha256, c.orientation, c.feature_version, c.population_version, c.measurement_version, c.entry_version, c.outcome_method_version, c.parent_policy_version, c.selection_version, p.analysis_direction, p.btc_parent_movement_id"
+      },
+      {
+        "QUERY PLAN": "              ->  Nested Loop  (cost=27.41..29.91 rows=1 width=585)"
+      },
+      {
+        "QUERY PLAN": "                    ->  GroupAggregate  (cost=27.26..27.53 rows=1 width=338)"
+      },
+      {
+        "QUERY PLAN": "                          Group Key: p.analysis_direction, p.btc_parent_movement_id, p.match_status"
+      }
+    ],
+    "result": [
+      {
+        "ambiguous_arms": 0,
+        "analysis_direction": "LONG",
+        "base_direction": "LONG",
+        "blocked_arms": 0,
+        "candidate_key": "captured-question-search-v3-experimental-binding:LIQUIDITY_BALANCED",
+        "control_failure": 0,
+        "control_success": 0,
+        "control_waves": 0,
+        "distinct_waves": 1,
+        "evaluation_version": "watch-scan-timeframe-formulas-v1",
+        "matched_failure": 1,
+        "matched_success": 0,
+        "matched_waves": 1,
+        "missing_arms": 0,
+        "no_touch_arms": 0,
+        "open_arms": 0,
+        "qualifies_as_prospective_formula_evidence": false,
+        "shared_waves": 0,
+        "statistical_test_performed": false,
+        "symbol_scope": "BTC",
+        "threshold_bps": 25,
+        "timeframe": "12h",
+        "window_minutes": 60
+      }
+    ],
+    "statistical_interpretation": "Descriptive pipeline verification only; one independent BTC wave does not establish formula performance."
+  },
+  "dual_scheduled_evaluation": {
+    "checked_at_utc": "2026-09-14T06:06:16.313097Z",
+    "intents_by_status": null,
+    "last_result": {
+      "counts": {
+        "MATCH": 0,
+        "NO_MATCH": 8,
+        "UNKNOWN": 0,
+        "duplicate_generations": 0,
+        "episodes_started": 0,
+        "evaluated": 8,
+        "resets": 0
+      },
+      "created_intents": 0,
+      "record_status": "ACCEPTED"
+    },
+    "last_source": "2026-09-14T06:05:53.032992Z",
+    "receipts": 1
+  },
+  "final_independence_and_dual": {
+    "checked_at_utc": "2026-09-14T06:26:01.947329Z",
+    "dual_intents": 0,
+    "dual_receipts": 1,
+    "independent_live_btc_waves": 1,
+    "last_dual_result": {
+      "counts": {
+        "MATCH": 0,
+        "NO_MATCH": 8,
+        "UNKNOWN": 0,
+        "duplicate_generations": 0,
+        "episodes_started": 0,
+        "evaluated": 8,
+        "resets": 0
+      },
+      "created_intents": 0,
+      "record_status": "ACCEPTED"
+    }
+  },
+  "restart_note": "The new process health resets last-scan counters to NOT_OBSERVED; the persistent ACCEPTED dual receipt survives and is authoritative. No matching live delivery occurred because all eight coins were NO_MATCH.",
+  "remaining": {
+    "all_scan_research": {
+      "supported": 204,
+      "total": 298,
+      "unsupported": 94,
+      "breakdown": {
+        "combined_liquidity": 2,
+        "combined_top_item": 22,
+        "captured_confirmation": 16,
+        "sequence_entry_family": 34,
+        "deferred_maxpain_components": 10,
+        "absent_short_maxpain_horizons": 8,
+        "combined_event": 2
+      }
+    },
+    "next_bounded_step": "Inspect and capture actual Combined identity/top-item and confirmation evidence for future scans; retain old absence as UNKNOWN. Do not infer them from ordinary mean totals.",
+    "ordered_later_topics": [
+      "Continuous formula discovery",
+      "Historical archive completion",
+      "HYPE integration completion",
+      "Validation on new independent cases"
+    ],
+    "still_deferred": [
+      "Cluster/CVD component hypotheses",
+      "B4",
+      "240m family normalization"
+    ]
+  },
+  "guardrails": {
+    "new_manual_watch_runs": 0,
+    "new_manual_test_notifications": 0,
+    "new_trades": 0,
+    "old_reporting_pointer": "watch-scan-formulas-v5-score-change",
+    "discovery_enabled": false,
+    "promotion_enabled": false
+  },
+  "durable_queries": "docs/verification/timeframe/"
+}
