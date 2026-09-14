@@ -1,0 +1,338 @@
+{
+  "ci": {
+    "conclusion": "success",
+    "job_id": 103869478159,
+    "new_suites": [
+      {
+        "name": "dual_cvd65_alert_selftest.py",
+        "result": [
+          "2026-09-14T05:34:13.5088605Z Ran 13 tests in 0.099s",
+          "2026-09-14T05:34:13.5088809Z OK"
+        ]
+      },
+      {
+        "name": "dual_cvd65_delivery_selftest.py",
+        "result": [
+          "2026-09-14T05:34:14.1123047Z [dual-cvd65] delivery status=FAILED watch=source-watch",
+          "2026-09-14T05:34:14.1227343Z Ran 11 tests in 0.153s",
+          "2026-09-14T05:34:14.1227547Z OK"
+        ]
+      },
+      {
+        "name": "dual_cvd65_store_pg_selftest.py",
+        "result": [
+          "2026-09-14T05:34:15.6104623Z Ran 8 tests in 1.356s",
+          "2026-09-14T05:34:15.6104934Z OK"
+        ]
+      }
+    ],
+    "run_id": 34810071955,
+    "selftest_files": "2026-09-14T05:34:12.1619332Z Running 124 self-tests"
+  },
+  "deploy": {
+    "commit": {
+      "createdAt": "2026-09-14T05:39:20Z",
+      "id": "426d0ada329226bbdb0df6edf390d707c8ecc6ce",
+      "message": "Merge pull request #41 from hadarkamer/feature/dual-cvd65-experimental-watch-20260914\n\nAdd standalone experimental dual CVD ≥65 Watch alerts"
+    },
+    "createdAt": "2026-09-14T05:39:22.468442Z",
+    "finishedAt": "2026-09-14T05:40:43.593888Z",
+    "id": "dep-dajoh2lg1s2s73cl7dug",
+    "startedAt": "2026-09-14T05:39:22.444305Z",
+    "status": "live",
+    "trigger": "new_commit",
+    "updatedAt": "2026-09-14T05:40:43.594147Z"
+  },
+  "first_post_activation_scheduled_scan": {
+    "next_scan_utc": "2026-09-14T06:02:15+00:00",
+    "real_notification_observed": false,
+    "status": "AWAITING_NORMAL_SCHEDULE"
+  },
+  "merged_commit": "426d0ada329226bbdb0df6edf390d707c8ecc6ce",
+  "migration": {
+    "migration": "053_dual_cvd65_experimental_watch.sql",
+    "ok": true,
+    "returncode": 0,
+    "sha256": "e7924acf7699b76af6a777ff83eb012238d03d1ec877483fa129700b14d439b8"
+  },
+  "postdeploy_health": {
+    "checked_at_utc": "2026-09-14T05:42:11.413210+00:00",
+    "commit": "426d0ada329226bbdb0df6edf390d707c8ecc6ce",
+    "dual": {
+      "created_intents": 0,
+      "delivered": 0,
+      "evidence_gaps": 0,
+      "experimental": true,
+      "failed": 0,
+      "last_counts": {},
+      "last_delivery_at_utc": null,
+      "last_error_type": null,
+      "last_record_status": "NOT_OBSERVED",
+      "last_watch_scan_id": null,
+      "orphaned_attempts": 0,
+      "ready": true,
+      "rule_id": "captured-question-search-v3-experimental-binding:CORE_FUTURES_CVD_SPOT_CVD_TOTAL_65",
+      "statistically_qualified": false,
+      "unknown": 0,
+      "version": "dual-cvd65-experimental-watch-v1"
+    },
+    "research": {
+      "watch_scan_formulas": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": 170,
+        "version": "watch-scan-formulas-v5-score-change"
+      },
+      "watch_scan_intake": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": null,
+        "version": "watch-all-scan-intake-v1"
+      },
+      "watch_scan_measurement": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": null,
+        "version": "watch-scan-measurements-v1"
+      }
+    },
+    "watch": {
+      "chat_configured": true,
+      "coordinator_running": true,
+      "desired_general_enabled": true,
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "last_cycle_status": "waiting",
+      "last_error": null,
+      "next_scan_utc": "2026-09-14T06:02:15+00:00",
+      "supervisor_running": true
+    }
+  },
+  "poststart_schema_counts": [
+    {
+      "activated_at_utc": "2026-09-14T05:40:39.842537Z",
+      "intents": 0,
+      "receipts": 0,
+      "scopes": 1
+    }
+  ],
+  "pr": 41,
+  "pr_url": "https://github.com/hadarkamer/crypto-intelligence-platform/pull/41",
+  "predeploy_health": {
+    "checked_at_utc": "2026-09-14T05:39:04.186842+00:00",
+    "commit": "6e3e98dd80aa4e190d1de7fb1a060aa502f5eaef",
+    "formulas": {
+      "active_evaluation_version": "watch-scan-formulas-v5-score-change",
+      "catalog_candidates": 298,
+      "cycles": 83,
+      "discovery_enabled": false,
+      "enabled": true,
+      "failures": 0,
+      "feature_version": "watch-captured-total-maxpain-btc-asset-and-score-change-features-v5",
+      "last": {
+        "activated": false,
+        "active_evaluation_version": "watch-scan-formulas-v5-score-change",
+        "catalog": 298,
+        "enqueued": 0,
+        "errors": 0,
+        "locked": false,
+        "processed": 0,
+        "ready": 0
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-14T05:39:01.466703+00:00",
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "promotion_enabled": false,
+      "running": true,
+      "supported_candidates": 170,
+      "version": "watch-scan-formulas-v5-score-change"
+    },
+    "intake": {
+      "cycles": 86,
+      "enabled": true,
+      "failures": 0,
+      "formula_evaluation_enabled": false,
+      "last": {
+        "accepted": 0,
+        "completed_laps": 176,
+        "cursor": 1300,
+        "high_water": 1301,
+        "locked": false,
+        "processed": 0,
+        "rejected": 0,
+        "scanned_ids": 0
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-14T05:38:47.383008+00:00",
+      "max_bundles_per_pass": 6,
+      "outcomes_enabled": false,
+      "page_size": 64,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "running": true,
+      "version": "watch-all-scan-intake-v1"
+    },
+    "measurement": {
+      "cache_only": true,
+      "cycles": 85,
+      "enabled": true,
+      "failures": 0,
+      "formula_evaluation_enabled": false,
+      "last": {
+        "enqueued": 0,
+        "errors": 0,
+        "locked": false,
+        "missing": 0,
+        "open": 0,
+        "processed": 0,
+        "ready": 0
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-14T05:39:01.744234+00:00",
+      "max_coins_per_pass": 16,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "running": true,
+      "version": "watch-scan-measurements-v1"
+    },
+    "watch": {
+      "last_completed_at_utc": "2026-09-14T05:35:47.695580+00:00",
+      "last_cycle_result": "completed",
+      "last_cycle_status": "waiting",
+      "last_error": null,
+      "next_scan_utc": "2026-09-14T06:02:15+00:00"
+    }
+  },
+  "prestart_schema_counts": [
+    {
+      "intents": 0,
+      "receipts": 0,
+      "scopes": 0
+    }
+  ],
+  "readonly_latest_capture_probe": {
+    "bundle_sha256": "65156f989890317f224f5512f8a060b64585e3916e5f5c8fc1c0804b74948367",
+    "counts": {
+      "MATCH": 0,
+      "NO_MATCH": 8,
+      "UNKNOWN": 0
+    },
+    "observations": [
+      {
+        "direction": null,
+        "futures_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "futures_score": -1.874,
+        "generation_key": null,
+        "reasons": [],
+        "spot_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "spot_score": 11.0446,
+        "status": "NO_MATCH",
+        "symbol": "BTC"
+      },
+      {
+        "direction": null,
+        "futures_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "futures_score": 6.616,
+        "generation_key": null,
+        "reasons": [],
+        "spot_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "spot_score": -28.6787,
+        "status": "NO_MATCH",
+        "symbol": "ETH"
+      },
+      {
+        "direction": null,
+        "futures_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "futures_score": -54.2515,
+        "generation_key": null,
+        "reasons": [],
+        "spot_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "spot_score": -51.5459,
+        "status": "NO_MATCH",
+        "symbol": "SOL"
+      },
+      {
+        "direction": null,
+        "futures_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "futures_score": -41.7483,
+        "generation_key": null,
+        "reasons": [],
+        "spot_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "spot_score": -26.0134,
+        "status": "NO_MATCH",
+        "symbol": "HYPE"
+      },
+      {
+        "direction": null,
+        "futures_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "futures_score": 2.046,
+        "generation_key": null,
+        "reasons": [],
+        "spot_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "spot_score": -22.2857,
+        "status": "NO_MATCH",
+        "symbol": "DOGE"
+      },
+      {
+        "direction": null,
+        "futures_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "futures_score": -51.1439,
+        "generation_key": null,
+        "reasons": [],
+        "spot_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "spot_score": -2.5715,
+        "status": "NO_MATCH",
+        "symbol": "ZEC"
+      },
+      {
+        "direction": null,
+        "futures_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "futures_score": -20.1896,
+        "generation_key": null,
+        "reasons": [],
+        "spot_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "spot_score": 12.1302,
+        "status": "NO_MATCH",
+        "symbol": "BNB"
+      },
+      {
+        "direction": null,
+        "futures_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "futures_score": -20.601,
+        "generation_key": null,
+        "reasons": [],
+        "spot_close_at_utc": "2026-09-14T05:30:00+00:00",
+        "spot_score": -8.9807,
+        "status": "NO_MATCH",
+        "symbol": "XRP"
+      }
+    ],
+    "read_only": true,
+    "snapshot_set_id": 1302,
+    "source_at_utc": "2026-09-14T05:35:35.159239+00:00",
+    "watch_scan_id": "shared-watch:2026-09-14T05:32:15.165689+00:00"
+  },
+  "research": {
+    "active_version": "watch-scan-formulas-v5-score-change",
+    "statistical_qualification_unchanged": true,
+    "supported_definitions": 170,
+    "total_definitions": 298,
+    "unsupported_remaining": 128
+  },
+  "rule_id": "captured-question-search-v3-experimental-binding:CORE_FUTURES_CVD_SPOT_CVD_TOTAL_65",
+  "rule_version": "dual-cvd65-experimental-watch-v1",
+  "tested_head": "a6a031186e3b7fb85127bd4a413112f7ca9d1592",
+  "tested_tree": "5b01e7474aefc0975b9796ec2b1c17bb72d03079",
+  "user_request": "Add explicitly experimental standalone dual Futures/Spot CVD >=65 same-direction alert; prediction follows shared supporting direction.",
+  "verdict": "DEPLOYED_AND_ARMED; full CI and read-only deployed capture evaluation verified; first post-activation scheduled scan remains pending",
+  "verification_boundaries": {
+    "manual_telegram_test_messages": 0,
+    "manual_watch_cycles": 0,
+    "trades": 0
+  }
+}
