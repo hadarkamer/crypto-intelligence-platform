@@ -125,6 +125,10 @@ PGlite run is useful for migration syntax, clean apply/reapply, canonical hash
 vectors, and single-session data flow. It is not evidence for native
 multi-session role isolation.
 
+The tracked CI gate supplies `TEST_DATABASE_URL` against PostgreSQL 18 and
+must execute `research_stage8_anchor_sql_parity_selftest.py` without skipping
+its native database test. A skipped native gate is not a passing release result.
+
 The release gate is PostgreSQL 15+ with fresh dedicated logins. It must prove:
 
 - clean `001 -> 051` apply and idempotent reapply;
