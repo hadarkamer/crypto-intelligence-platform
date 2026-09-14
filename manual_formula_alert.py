@@ -1,4 +1,4 @@
-"""Four owner-selected research notifications; no orders or statistical gates.
+"""Owner-selected research notifications; no orders or statistical gates.
 
 Predicates are frozen to the audited definitions. Features must be captured at
 the original native alert, aligned to that alert's *research* direction. That
@@ -15,7 +15,9 @@ import math
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-VERSION = "manual-formula-experimental-alerts-v1"
+VERSION = "manual-formula-experimental-alerts-v2"
+PREVIOUS_VERSION = "manual-formula-experimental-alerts-v1"
+PREVIOUS_RULESET_SHA256 = "7f7be576af92fdbb283398b14f8f5f81527d1353d46732c358cf66e669eb5560"
 SYMBOLS = ("BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP")
 TRIGGER_TTL = timedelta(minutes=10)
 _ISRAEL = ZoneInfo("Asia/Jerusalem")
@@ -57,6 +59,13 @@ RULES = {
                      for coin in ("XRP", "ETH", "BTC")}},
         "conditions_text": "הסכמה מלאה בכל אופקי Max Pain התקפים, עם מיפוי כיוון מקור מאומת.",
     },
+    "C0964": {
+        "name": "C0964 — Magnet והסכמת Spot, בחיזוי הפוך",
+        "threshold_bps": 200,
+        "symbols": ("BTC",),
+        "notes": {"BTC": ("מבוסס בעיקר על אוגוסט ועל עליות",)},
+        "conditions_text": "מגנט עם יתרון נזילות LE של 30% ומעלה, ו־Spot CVD בציון כולל 25 ומעלה בכיוון המגנט.",
+    },
 }
 RULE_IDS = tuple(RULES)
 RULESET_SHA256 = hashlib.sha256(json.dumps(RULES, ensure_ascii=False, sort_keys=True,
@@ -84,7 +93,7 @@ def utc(value: Any) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def source_is_eligible(event: Mapping[str, Any], features: Mapping[str, Any], now: Any) -> bool:
+def source_is_eligible(event: Mapping[str, Any], features: Mapping[str, Any], now: Any, *, planned=False) -> bool:
     """Fail closed on derived/imported/demo/stale sources; do not gate HYPE routes.
 
     This screen observes captured conditions only. It neither evaluates nor
@@ -95,8 +104,17 @@ def source_is_eligible(event: Mapping[str, Any], features: Mapping[str, Any], no
     snapshot = event.get("engine_snapshot")
     direction = event.get("direction")
     fingerprint = event.get("event_fingerprint")
-    if (event.get("event_kind") != "ALERT" or event.get("delivery_status") != "DELIVERED"
-            or type(event.get("event_id")) is not int or event["event_id"] <= 0
+    if planned:
+        valid_source = (event.get("delivery_status") == "NOT_ATTEMPTED"
+                        and event.get("capture_stage") == "WATCH_PLANNED_ALERT"
+                        and event.get("event_id") == "watch:" + str(fingerprint)
+                        and isinstance(snapshot, Mapping)
+                        and isinstance(snapshot.get("watch_scan_id"), str)
+                        and bool(snapshot["watch_scan_id"].strip()))
+    else:
+        valid_source = (event.get("delivery_status") == "DELIVERED"
+                        and type(event.get("event_id")) is int and event["event_id"] > 0)
+    if (event.get("event_kind") != "ALERT" or not valid_source
             or not isinstance(fingerprint, str) or len(fingerprint) != 64
             or any(char not in "0123456789abcdefABCDEF" for char in fingerprint)
             or event.get("symbol") not in SYMBOLS or direction not in _INVERSE
@@ -147,6 +165,13 @@ def _score65(features: Mapping[str, Any], name: str) -> bool:
 
 
 def _matches(rule_id: str, event: Mapping[str, Any], features: Mapping[str, Any]) -> bool:
+    if rule_id == "C0964":
+        magnet = _mapping(_mapping(event.get("engine_snapshot")).get("magnet"))
+        edge = _number(magnet.get("liquidity_edge_pct"))
+        spot = _number(features.get("spot_cvd.aligned_score"))
+        return (event.get("event_type") in _MAGNET_TYPES
+                and edge is not None and edge >= 30
+                and spot is not None and 25 <= spot <= 100)
     if rule_id == "C1274":
         return _c1274(event)
     if rule_id == "PRICE_OI_ENTRY2":
@@ -177,21 +202,21 @@ def render_message(payload: Mapping[str, Any]) -> str:
              f'<b>{escape(payload["symbol"])} | {direction}</b>',
              escape(rule["conditions_text"]),
              "החיזוי הפוך לכיוון המחקר של אירוע המקור.",
-             *["הערה: " + escape(note) for note in rule["notes"].get(payload["symbol"], ())],
+             *["<b>הערה</b>: " + escape(note) for note in rule["notes"].get(payload["symbol"], ())],
              f"זמן ההתראה בישראל: {stamp:%d.%m.%Y %H:%M:%S}",
-             f'אירוע מקור: {payload["event_id"]}',
+             *([] if str(payload["event_id"]).startswith("watch:") else [f'אירוע מקור: {payload["event_id"]}']),
              "הסף הוא סף התנועה שנבדק במחקר, לא יעד רווח מובטח. לא בוצעה עסקה."]
     return "\n".join(lines)
 
 
-def evaluate_event(event: Mapping[str, Any], features: Mapping[str, Any], now: Any) -> list[dict[str, Any]]:
+def evaluate_event(event: Mapping[str, Any], features: Mapping[str, Any], now: Any, *, planned=False) -> list[dict[str, Any]]:
     """Return zero or more exact inverse experimental notifications.
 
     The caller provides canonical event/sequence features and owns activation,
     durable idempotency and delivery. Invalid or absent data never manufacture
     a match, and an event is never inverted twice.
     """
-    if not source_is_eligible(event, features, now):
+    if not source_is_eligible(event, features, now, planned=planned):
         return []
     result = []
     for rule_id, rule in RULES.items():

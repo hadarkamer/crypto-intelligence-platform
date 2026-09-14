@@ -110,7 +110,7 @@ class ReducerTests(unittest.TestCase):
     def test_multiple_rules_for_same_event_are_preserved_and_text_frozen(self):
         state = store._initial(BASE)
         self.assertEqual(store.record_events(state, [pair()], BASE + timedelta(minutes=2)), 4)
-        self.assertEqual({i['payload']['rule_id'] for i in state['intents']}, set(store.rules.RULES))
+        self.assertEqual({i['payload']['rule_id'] for i in state['intents']}, set(store.rules.RULES) - {'C0964'})
         self.assertTrue(all(i['text'] == i['payload']['text'] for i in state['intents']))
         self.assertEqual(len({i['intent_id'] for i in state['intents']}), 4)
 
@@ -161,7 +161,7 @@ class ReducerTests(unittest.TestCase):
                 self.assertEqual(store.record_events(state, [(event, features)], now + timedelta(seconds=2)), 1)
                 self.assertEqual(state['retry'], {})
                 self.assertEqual(len(state['intents']), 4)
-                self.assertEqual({i['payload']['rule_id'] for i in state['intents']}, set(store.rules.RULES))
+                self.assertEqual({i['payload']['rule_id'] for i in state['intents']}, set(store.rules.RULES) - {'C0964'})
                 self.assertEqual(store.record_events(state, [(event, features)], now + timedelta(seconds=3)), 0)
 
     def test_sequence_retry_expires_without_replaying_or_counting_twice(self):
@@ -202,6 +202,88 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(second['activated_at'], store.iso(self.db.now))
         self.assertNotEqual(store.key_for(1), store.key_for(2))
         self.assertTrue(store.schema_ready())
+
+    def test_known_rules_upgrade_preserves_receipts_attempts_and_new_rule_fence(self):
+        self.collect()
+        previous = self.db.read(1)
+        previous.update(rule_version=store.rules.PREVIOUS_VERSION,
+                        ruleset_sha256=store.rules.PREVIOUS_RULESET_SHA256)
+        for item in previous['intents']:
+            item['payload']['predicate_version'] = store.rules.PREVIOUS_VERSION
+            item['text'] = item['text'].replace('<b>הערה</b>:', 'הערה:')
+            item['payload']['text'] = item['text']
+        previous['intents'][0].update(status='IN_FLIGHT', attempt_token='existing-attempt',
+                                     attempted_at=store.iso(BASE + timedelta(minutes=2)))
+        self.db.write(1, previous)
+        upgraded_at = BASE + timedelta(minutes=3)
+        store.initialize_scope(1, upgraded_at)
+        state = self.db.read(1)
+        self.assertEqual(state['activated_at'], previous['activated_at'])
+        self.assertEqual(state['receipts'], previous['receipts'])
+        self.assertEqual(state['dedup'], previous['dedup'])
+        self.assertEqual(state['intents'][0], previous['intents'][0])
+        self.assertEqual(state['rule_activated_at']['C0964'], store.iso(upgraded_at))
+        self.assertTrue(all(i['payload']['predicate_version'] == store.rules.VERSION
+                            for i in state['intents'][1:]))
+        self.assertIn('<b>הערה</b>:', state['intents'][1]['text'])
+        for identifier, minute in ((2, 2.5), (3, 3.1)):
+            event, features = pair(identifier, minute)
+            event['engine_snapshot']['magnet']['liquidity_edge_pct'] = 30
+            store.record_events(state, [(event, features)], BASE + timedelta(minutes=4))
+        self.assertEqual([i['payload']['event_id'] for i in state['intents']
+                          if i['payload']['rule_id'] == 'C0964'], [3])
+        self.db.write(1, state)
+        store.initialize_scope(1, BASE + timedelta(minutes=5))
+        self.assertEqual(self.db.read(1)['rule_activated_at']['C0964'], store.iso(upgraded_at))
+
+    def test_planned_receipts_do_not_enter_integer_source_query_or_resend_native(self):
+        event, features = pair()
+        event.update(event_id='watch:' + event['event_fingerprint'],
+                     delivery_status='NOT_ATTEMPTED', capture_stage='WATCH_PLANNED_ALERT')
+        with patch.object(store.source, 'prepare_watch_pairs', return_value=([(event, features)], {})):
+            result = store.record_watch_events(1, [event], BASE + timedelta(minutes=2))
+        self.assertEqual(result['created_intents'], 4)
+        with patch.object(store.source, 'load_batch', return_value=([pair()], {})) as load:
+            result = store.collect(1, BASE + timedelta(minutes=3))
+        self.assertEqual(load.call_args.kwargs['processed_ids'], [])
+        self.assertEqual(result['created_intents'], 0)
+        self.assertEqual(len(self.db.read(1)['intents']), 4)
+
+    def test_failed_planned_sequence_recovers_only_entry2_from_delivered_sources(self):
+        for chat_id, status in ((10, 'SOURCE_UNAVAILABLE'), (11, 'SOURCE_OVERFLOW')):
+            with self.subTest(status=status):
+                store.initialize_scope(chat_id, BASE)
+                event, features = pair()
+                event.update(event_id='watch:' + event['event_fingerprint'],
+                             delivery_status='NOT_ATTEMPTED', capture_stage='WATCH_PLANNED_ALERT')
+                unavailable = {**features, 'sequence.capture_status': status}
+                with patch.object(store.source, 'prepare_watch_pairs', return_value=([(event, unavailable)], {})):
+                    result = store.record_watch_events(chat_id, [event], BASE + timedelta(minutes=2))
+                self.assertEqual(result['created_intents'], 3)
+                self.assertEqual(result['planned_sequence_recovery_scans'], 1)
+                # A still-unavailable native lookup retains the existing retry
+                # queue, but must not enable a new non-sequence rule.
+                native, ready = pair()
+                native['engine_snapshot']['magnet']['liquidity_edge_pct'] = 30
+                with patch.object(store.source, 'load_batch', return_value=([(native, unavailable)], {})):
+                    result = store.collect(chat_id, BASE + timedelta(minutes=3))
+                self.assertEqual(result['created_intents'], 0)
+                self.assertEqual(result['sequence_retry_pending'], 1)
+                with patch.object(store.source, 'load_batch', side_effect=[([], {}), ([(native, ready)], {})]):
+                    result = store.collect(chat_id, BASE + timedelta(minutes=4))
+                self.assertEqual(result['created_intents'], 1)
+                self.assertEqual(result['planned_sequence_recovery_intents'], 1)
+                state = self.db.read(chat_id)
+                self.assertEqual(state['retry'], {})
+                self.assertEqual([i['payload']['rule_id'] for i in state['intents']].count('PRICE_OI_ENTRY2'), 1)
+                self.assertNotIn('C0964', [i['payload']['rule_id'] for i in state['intents']])
+                self.assertEqual(len(state['intents']), 4)
+                sibling, ready = pair(2, 1.1, scan='scan-1')
+                with patch.object(store.source, 'load_batch', return_value=([(sibling, ready)], {})):
+                    result = store.collect(chat_id, BASE + timedelta(minutes=5))
+                self.assertEqual(result['created_intents'], 0)
+                store.prune(state, BASE + timedelta(minutes=23))
+                self.assertEqual(state['planned_sequence_recovery_scans'], {})
 
     def test_collect_passes_receipts_and_activation_not_max_id(self):
         self.collect([pair(999)])

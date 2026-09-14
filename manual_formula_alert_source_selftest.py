@@ -37,6 +37,66 @@ class Connection:
 
 
 class SourceTests(unittest.TestCase):
+    def planned(self, *, stamp=None, fingerprint='a'):
+        row = event()
+        row.update(event_id='watch:' + fingerprint * 64, event_fingerprint=fingerprint * 64,
+                   delivery_status='NOT_ATTEMPTED', capture_stage='WATCH_PLANNED_ALERT')
+        if stamp is not None: row['alert_time_utc'] = stamp
+        return row
+
+    def test_planned_batch_retains_strict_causal_same_scan_sequence(self):
+        first = self.planned(stamp=NOW-timedelta(minutes=1), fingerprint='a')
+        second = self.planned(stamp=NOW-timedelta(seconds=59), fingerprint='b')
+        tied = self.planned(stamp=first['alert_time_utc'], fingerprint='c')
+        pairs, stats = source.prepare_watch_pairs(Connection([]), [second, tied, first], NOW)
+        ordinals = {e['event_fingerprint']: f['sequence.30m.price_oi.entry_ordinal'] for e, f in pairs}
+        self.assertEqual(ordinals, {'a'*64: 1, 'b'*64: 2, 'c'*64: 1})
+        self.assertEqual(stats['source_lane'], 'WATCH_PLANNED')
+        self.assertTrue(all(e['delivery_status'] == 'NOT_ATTEMPTED' for e, _ in pairs))
+
+    def test_planned_history_failure_preserves_other_formulas(self):
+        row = self.planned()
+        row['engine_snapshot']['market_evidence']['modules']['spot_flow'] = {'score': 70, 'direction': 'LONG'}
+        with patch.object(source, '_sequence_history', side_effect=TimeoutError) as lookup:
+            pairs, stats = source.prepare_watch_pairs(Connection([]), [row], NOW)
+        import manual_formula_alert as rules
+        payloads = rules.evaluate_event(*pairs[0], NOW, planned=True)
+        self.assertEqual([r['rule_id'] for r in payloads], ['PRICE_OI_SPOT65'])
+        self.assertEqual(stats['sequence_error_type'], 'TimeoutError')
+        self.assertEqual(lookup.call_count, 2)
+        self.assertEqual(stats['sequence_lookup_attempts'], 2)
+        self.assertFalse(stats['sequence_retry_recovered'])
+
+    def test_planned_transient_sequence_failure_retries_before_transport(self):
+        row = self.planned()
+        prior = event(1, ago=20, scan='prior')
+        history = [(prior, source.totals.extract_event_features(prior))]
+        with patch.object(source, '_sequence_history', side_effect=[TimeoutError, (history, False)]) as lookup:
+            pairs, stats = source.prepare_watch_pairs(Connection([]), [row], NOW)
+        self.assertEqual(lookup.call_count, 2)
+        self.assertEqual(stats['sequence_lookup_attempts'], 2)
+        self.assertTrue(stats['sequence_retry_recovered'])
+        self.assertIsNone(stats['sequence_error_type'])
+        self.assertEqual(pairs[0][1]['sequence.30m.price_oi.entry_ordinal'], 2)
+        self.assertEqual(pairs[0][1]['sequence.capture_status'], 'READY')
+
+    def test_planned_sequence_overflow_stays_explicit_without_repeating_full_query(self):
+        with patch.object(source, '_sequence_history', return_value=([], True)) as lookup:
+            pairs, stats = source.prepare_watch_pairs(Connection([]), [self.planned()], NOW)
+        self.assertEqual(lookup.call_count, 1)
+        self.assertEqual(pairs[0][1]['sequence.capture_status'], 'SOURCE_OVERFLOW')
+        self.assertFalse(stats['sequence_retry_recovered'])
+
+    def test_c0964_source_projection_uses_captured_le_and_aligned_spot(self):
+        import manual_formula_alert as rules
+        for direction, side, score in (('LONG', 'UPPER', 25), ('SHORT', 'LOWER', -25)):
+            row = event(score=24, direction=direction)
+            row.update(event_type='MAGNET_ALERT', event_fingerprint='a'*64)
+            row['engine_snapshot']['magnet'] = {'side': side, 'liquidity_edge_pct': 30}
+            row['engine_snapshot']['market_evidence']['modules']['spot_flow'] = {'score': score, 'direction': direction}
+            pairs, _ = self.load(Connection([row]))
+            self.assertEqual([r['rule_id'] for r in rules.evaluate_event(*pairs[0], NOW)], ['C0964'])
+
     def load(self, conn, **kwargs):
         return source.load_batch(conn, activated_at=NOW-timedelta(hours=1), now=NOW,
                                  processed_ids=[], **kwargs)

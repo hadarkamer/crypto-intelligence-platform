@@ -162,7 +162,7 @@ def _capture(intent, delivery_status, attempted_at, delivered_at):
         research_event_runtime.reset_watch_context(token)
 
 
-async def drain(bot, chat_id, *, limit=32, may_deliver=None):
+async def drain(bot, chat_id, *, limit=32, may_deliver=None, kinds=None):
     """Claim immediately before one attempt. UNKNOWN/FAILED are terminal.
 
     Only unattempted, unexpired PENDING messages can recover after a restart.
@@ -185,6 +185,7 @@ async def drain(bot, chat_id, *, limit=32, may_deliver=None):
             try:
                 pending = await asyncio.to_thread(
                     store.claim_pending, subscription_scope(chat_id), datetime.now(timezone.utc), limit=1,
+                    **({"kinds": kinds} if kinds is not None else {}),
                 )
             except Exception as exc:
                 _gap("claim", exc, database=True)

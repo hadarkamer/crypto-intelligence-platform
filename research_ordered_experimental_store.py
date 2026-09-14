@@ -136,7 +136,7 @@ def enqueue(conn: Any, *, now: datetime, scope_limit: int = 8) -> dict[str, int]
     return summary
 
 
-def claim(conn: Any, *, now: datetime) -> dict | None:
+def claim(conn: Any, *, now: datetime, chat_id: int | None = None) -> dict | None:
     # Reclaim only a claim known not to have entered a transport call. Once
     # SENDING, process death can mean Telegram accepted it; never auto-retry.
     conn.execute("""UPDATE research_ordered_experimental_deliveries SET
@@ -156,10 +156,24 @@ def claim(conn: Any, *, now: datetime) -> dict | None:
         JOIN research_ordered_experimental_eligibility a ON a.freeze_id=d.freeze_id AND a.evidence_sha256=d.evidence_sha256
         JOIN research_formula_alert_subscriptions s ON s.chat_id=d.chat_id
         WHERE d.status='PENDING' AND d.expires_at_utc>%s AND a.ready AND a.eligible_until_utc>%s AND s.active
+          AND (%s::bigint IS NULL OR d.chat_id=%s)
         ORDER BY d.created_at_utc,d.delivery_id LIMIT 1 FOR UPDATE OF d SKIP LOCKED)
         UPDATE research_ordered_experimental_deliveries d SET status='CLAIMED',claim_token=%s,
         lease_expires_at_utc=%s FROM picked WHERE d.delivery_id=picked.delivery_id RETURNING d.*""",
-        (now,now,uuid4(),now+timedelta(seconds=90))).fetchone()
+        (now,now,chat_id,chat_id,uuid4(),now+timedelta(seconds=90))).fetchone()
+
+
+def release_unsent(conn: Any, item: dict) -> bool:
+    """Only the active owner may defer an item before calling Telegram.
+
+    A resumed/recovered worker must never use this for a SENDING row: it does
+    not know whether transport started. The live owner does, including when a
+    Watch stop/redirection arrives during the begin_send database await.
+    """
+    return bool(conn.execute("""UPDATE research_ordered_experimental_deliveries
+        SET status='PENDING',claim_token=NULL,lease_expires_at_utc=NULL
+        WHERE delivery_id=%s AND claim_token=%s AND status IN ('CLAIMED','SENDING')
+        RETURNING delivery_id""", (item['delivery_id'],item['claim_token'])).fetchone())
 
 
 def begin_send(conn: Any, item: dict, *, now: datetime) -> bool:

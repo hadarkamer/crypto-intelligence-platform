@@ -155,6 +155,76 @@ class ExperimentalTests(unittest.TestCase):
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_poll_waits_for_watch_and_priority_drain_exceeds_poll_budget(self):
+        payload=ExperimentalTests().notify(); busy=True; calls=[]
+        queue=[{'delivery_id':i,'claim_token':str(i),'chat_id':42,'payload':payload}
+               for i in range(3)]+[None]
+        def transact(fn,*args,**kwargs):
+            calls.append(fn.__name__)
+            if fn is store.enqueue:return {'enqueued':3}
+            if fn is store.claim:
+                self.assertEqual(kwargs['chat_id'],42)
+                return queue.pop(0)
+            return True
+        class Bot:
+            async def send_message(self,**kwargs):return SimpleNamespace(message_id=17)
+        obj=worker.OrderedExperimentalWorker();obj.bind_telegram(Bot())
+        obj.bind_watch_busy(lambda:busy)
+        with patch.object(worker,'_ENABLED',True),patch.object(worker,'_transaction',transact):
+            self.assertTrue((await obj.run_once())['watch_busy'])
+            self.assertEqual(calls,[])
+            self.assertEqual((await obj.drain_for_watch(42,may_deliver=lambda:True))['sent'],3)
+            count=len(calls)
+            self.assertTrue((await obj.run_once())['watch_busy'])
+            self.assertEqual(len(calls),count)
+
+    async def test_priority_drain_waits_for_inflight_poll_transport(self):
+        payload=ExperimentalTests().notify(); busy=False; events=[]
+        entered=asyncio.Event(); resume=asyncio.Event()
+        item_={'delivery_id':1,'claim_token':'t','chat_id':42,'payload':payload}
+        queue=[item_,None,None]
+        def transact(fn,*args,**kwargs):
+            if fn is store.enqueue:
+                events.append('enqueue');return {'enqueued':1}
+            if fn is store.claim:return queue.pop(0)
+            return True
+        class Bot:
+            async def send_message(self,**kwargs):
+                events.append('transport_start');entered.set()
+                await resume.wait();events.append('transport_end')
+                return SimpleNamespace(message_id=17)
+        obj=worker.OrderedExperimentalWorker();obj.bind_telegram(Bot())
+        obj.bind_watch_busy(lambda:busy)
+        with patch.object(worker,'_ENABLED',True),patch.object(worker,'_transaction',transact):
+            poll=asyncio.create_task(obj.run_once())
+            await entered.wait();busy=True
+            drain=asyncio.create_task(obj.drain_for_watch(42))
+            await asyncio.sleep(0)
+            self.assertFalse(drain.done())
+            resume.set();await poll;await drain
+            events.append('ordinary_watch')
+            self.assertTrue((await obj.run_once())['watch_busy'])
+        self.assertEqual(events,['enqueue','transport_start','transport_end','enqueue','ordinary_watch'])
+
+    async def test_stop_during_begin_send_defers_known_unsent_item(self):
+        payload=ExperimentalTests().notify(); permitted=True; calls=[]
+        item_={'delivery_id':1,'claim_token':'t','chat_id':42,'payload':payload}
+        def transact(fn,*args,**kwargs):
+            nonlocal permitted
+            calls.append(fn.__name__)
+            if fn is store.enqueue:return {'enqueued':1}
+            if fn is store.claim:return item_
+            if fn is store.begin_send:permitted=False
+            return True
+        class Bot:
+            async def send_message(self,**kwargs):raise AssertionError('stopped Watch sent')
+        obj=worker.OrderedExperimentalWorker();obj.bind_telegram(Bot())
+        with patch.object(worker,'_ENABLED',True),patch.object(worker,'_transaction',transact):
+            result=await obj.drain_for_watch(42,may_deliver=lambda:permitted)
+        self.assertTrue(result['delivery_stopped'])
+        self.assertEqual(result['sent'],0)
+        self.assertEqual(calls,['enqueue','claim','begin_send','release_unsent'])
+
     async def test_commit_before_send_and_confirmed_id(self):
         payload=ExperimentalTests().notify()
         events=[]; item_={'delivery_id':1,'claim_token':'token','chat_id':42,'payload':payload}

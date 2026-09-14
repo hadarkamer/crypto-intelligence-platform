@@ -44,6 +44,32 @@ _COMBINED_STATE: Dict[str, set[str]] = {}
 _WATCH_CONTEXT: ContextVar[Dict[str, Any]] = ContextVar(
     "research_watch_context", default={}
 )
+_PLANNED_CAPTURE: ContextVar[Any] = ContextVar("research_planned_watch_capture", default=None)
+
+
+def preview_watch_sources(capture) -> List[Dict[str, Any]]:
+    """Freeze native Watch evidence without recording a delivery or consuming state.
+
+    The callback is synchronous and must only invoke the existing capture
+    builders. No await occurs while the research transition dictionaries are
+    snapshotted, so this preview cannot consume a live transition. The collector
+    intercepts before either the memory sink, database writer or Sheets.
+    """
+    from copy import deepcopy
+    states = (_CONFIRMATION_STATE, _SCORE_CONFIRMATION_STATE, _HIGH_SCORE_83_STATE,
+              _DERIVATIVES_HIGH_STATE, _SPOT_FAMILY_HIGH_STATE, _MAGNET_STATE,
+              _COMBINED_STATE)
+    originals = [deepcopy(state) for state in states]
+    events = []
+    token = _PLANNED_CAPTURE.set(events)
+    try:
+        capture()
+    finally:
+        _PLANNED_CAPTURE.reset(token)
+        for state, original in zip(states, originals):
+            state.clear()
+            state.update(original)
+    return events
 
 
 def set_watch_context(**values: Any) -> Token:
@@ -196,6 +222,16 @@ def _emit(
     Research Archive.
     """
     event = _with_watch_context(event)
+    planned = _PLANNED_CAPTURE.get()
+    if planned is not None:
+        if event.event_kind == "ALERT":
+            data = event.to_dict()
+            data.update(event_id="watch:" + event.event_fingerprint,
+                        delivery_status="NOT_ATTEMPTED",
+                        capture_stage="WATCH_PLANNED_ALERT", source_scope="LIVE",
+                        planned_source_capture_stage=capture_stage)
+            planned.append(data)
+        return True
     remembered = SINK.emit(event)
     queued = False
     if persist:

@@ -16,6 +16,7 @@ _SCOPES = set()
 _DRAIN_LOCK = asyncio.Lock()
 _STATUS = {
     "rule_id": alert.RULE_ID, "version": alert.VERSION,
+    "notification_symbols": list(alert.NOTIFICATION_SYMBOLS), "threshold_pct": 2,
     "experimental": True, "statistically_qualified": False,
     "ready": False, "last_error_type": None, "evidence_gaps": 0,
     "last_record_status": "NOT_OBSERVED", "last_watch_scan_id": None,
@@ -123,6 +124,12 @@ async def drain(bot, chat_id, *, limit=2, may_deliver=None):
             if not pending:
                 break
             intent = pending[0]
+            # Also guard transport against an in-flight claim from an older
+            # policy; terminal evidence remains available and cannot replay.
+            if intent.get("symbol") not in alert.NOTIFICATION_SYMBOLS:
+                await _finish(intent, "FAILED")
+                _STATUS["failed"] += 1
+                continue
             # Subscription may have changed during the DB await. This is the
             # last synchronous check before scheduling the transport call.
             if not may_deliver():
@@ -141,7 +148,12 @@ async def drain(bot, chat_id, *, limit=2, may_deliver=None):
                 _STATUS["failed"] += 1
                 continue
             try:
-                message = await asyncio.wait_for(bot.send_message(chat_id=chat_id, text=intent["text"],
+                # A queued ZEC intent may have frozen its text before this
+                # presentation change. Do not alter its immutable evidence.
+                text = intent["text"]
+                if not text.startswith(alert.THRESHOLD_HEADER):
+                    text = alert.THRESHOLD_HEADER + text
+                message = await asyncio.wait_for(bot.send_message(chat_id=chat_id, text=text,
                                                                  parse_mode="HTML"), timeout=20)
                 message_id = getattr(message, "message_id", None)
                 terminal = "DELIVERED" if type(message_id) is int and message_id > 0 else "UNKNOWN"

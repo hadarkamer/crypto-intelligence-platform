@@ -58,6 +58,19 @@ def _locked(conn, key, now):
     conn.execute('INSERT INTO bot_settings(key,value) VALUES(%s,%s) ON CONFLICT(key) DO NOTHING',
                  (key, _encode(_initial(now))))
     state = json.loads(conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()['value'])
+    if (state.get('version') == STORE_VERSION
+            and state.get('rule_version') == rules.PREVIOUS_VERSION
+            and state.get('ruleset_sha256') == rules.PREVIOUS_RULESET_SHA256):
+        # Upgrade only the known deployed ruleset. Keep receipts and attempts:
+        # changing notes or adding C0964 must never replay existing alerts.
+        state.update(rule_version=rules.VERSION, ruleset_sha256=rules.RULESET_SHA256)
+        state.setdefault('rule_activated_at', {})['C0964'] = iso(now)
+        for item in state['intents']:
+            if item['status'] == 'PENDING':
+                item['payload']['predicate_version'] = rules.VERSION
+                item['text'] = rules.render_message(item['payload'])
+                item['payload']['text'] = item['text']
+        _save(conn, key, state)
     if (state.get('version') != STORE_VERSION or state.get('rule_version') != rules.VERSION
             or state.get('ruleset_sha256') != rules.RULESET_SHA256):
         raise ValueError('Frozen manual formula version mismatch')
@@ -77,6 +90,9 @@ def prune(state, now):
     now = utc(now)
     for field in ('receipts', 'dedup'):
         state[field] = {k: v for k, v in state[field].items() if utc(v) >= now - RECEIPT_TTL}
+    for field in ('planned_scans', 'planned_sequence_recovery_scans'):
+        state[field] = {k: v for k, v in state.get(field, {}).items()
+                        if utc(v) >= now - RECEIPT_TTL}
     for identity, retry in list(state.setdefault('retry', {}).items()):
         if utc(retry['event_time']) <= now - TTL:
             del state['retry'][identity]
@@ -102,7 +118,7 @@ def _identity(event, payload):
     return hashlib.sha256(json.dumps(raw, separators=(',', ':')).encode()).hexdigest()
 
 
-def record_events(state, pairs, now):
+def record_events(state, pairs, now, *, planned=False):
     """Pure state reducer, also used by offline/concurrency-boundary tests."""
     now = utc(now)
     prune(state, now)
@@ -110,11 +126,28 @@ def record_events(state, pairs, now):
     for event, features in pairs:
         identity = str(event['event_id'])
         when = utc(event['alert_time_utc'])
+        scan = (event.get('engine_snapshot') or {}).get('watch_scan_id')
+        sequence_recovery = (not planned
+                             and scan in state.get('planned_sequence_recovery_scans', {}))
+        if not planned and scan in state.get('planned_scans', {}) and not sequence_recovery:
+            # This scan was already evaluated before ordinary transport. A
+            # later DB delivery receipt must not create tail-of-batch alerts.
+            state['receipts'][identity] = iso(when)
+            state['retry'].pop(identity, None)
+            continue
         if ((identity in state['receipts'] and identity not in state['retry'])
                 or not (utc(state['activated_at']) < when <= now and when > now - TTL)):
             continue
-        payloads = rules.evaluate_event(event, features, now)
+        payloads = rules.evaluate_event(event, features, now, planned=planned)
+        if sequence_recovery:
+            # Only the previously unavailable sequence rule may use this
+            # exception. Never turn later transport receipts into a replay of
+            # the rules already evaluated in the priority group.
+            payloads = [p for p in payloads if p['rule_id'] == 'PRICE_OI_ENTRY2']
         for payload in payloads:
+            activation = state.get('rule_activated_at', {}).get(payload['rule_id'], state['activated_at'])
+            if when <= utc(activation):
+                continue
             dedup = _identity(event, payload)
             if dedup in state['dedup']:
                 continue
@@ -127,8 +160,10 @@ def record_events(state, pairs, now):
             })
             added += 1
             _count(state, 'created')
+            if sequence_recovery:
+                _count(state, 'planned_sequence_recovered')
         state['receipts'][identity] = iso(when)
-        retry_sequence = (event.get('symbol') in rules.RULES['PRICE_OI_ENTRY2']['symbols']
+        retry_sequence = (not planned and event.get('symbol') in rules.RULES['PRICE_OI_ENTRY2']['symbols']
                           and rules.source_is_eligible(event, features, now)
                           and rules._score65(features, 'price_oi')
                           and features.get('sequence.capture_status') in {'SOURCE_UNAVAILABLE', 'SOURCE_OVERFLOW'})
@@ -161,9 +196,10 @@ def collect(chat_id, now, *, database_url=None):
         key = key_for(chat_id)
         state = _locked(conn, key, now)
         prune(state, now)
+        recovered_before = state['counts'].get('planned_sequence_recovered', 0)
         retry_ids = [int(i) for i in sorted(state['retry'], key=lambda i: (state['retry'][i]['last_attempt'], int(i)))[:8]]
         pairs, stats = source.load_batch(conn, activated_at=utc(state['activated_at']), now=now,
-                                         processed_ids=[int(i) for i in state['receipts']], limit=24)
+                                         processed_ids=[int(i) for i in state['receipts'] if i.isdecimal()], limit=24)
         added = record_events(state, pairs, now)
         if retry_ids:
             retry_pairs, retry_stats = source.load_batch(conn, activated_at=utc(state['activated_at']), now=now,
@@ -172,9 +208,37 @@ def collect(chat_id, now, *, database_url=None):
             stats['retry_source'] = retry_stats
         _save(conn, key, state)
         return {**stats, 'created_intents': added, 'activated_at': state['activated_at'],
+                'planned_sequence_recovery_intents': state['counts'].get('planned_sequence_recovered', 0) - recovered_before,
                 'sequence_retry_pending': len(state['retry']),
                 'pending': sum(i['status'] == 'PENDING' for i in state['intents']),
                 'counts': deepcopy(state['counts'])}
+
+
+def record_watch_events(chat_id, events, now, *, database_url=None):
+    """Freeze live planned alerts in the outbox before ordinary Watch transport.
+
+    This never inserts or marks a research event DELIVERED. Real transport
+    captures retain their existing path, while rule/scan dedup joins both lanes.
+    """
+    now = utc(now)
+    with _connect(database_url) as conn:
+        key = key_for(chat_id)
+        state = _locked(conn, key, now)
+        pairs, stats = source.prepare_watch_pairs(conn, events, now)
+        added = record_events(state, pairs, now, planned=True)
+        recovery_scans = set()
+        for event, features in pairs:
+            scan = event['engine_snapshot']['watch_scan_id']
+            state.setdefault('planned_scans', {})[scan] = iso(now)
+            if (event['symbol'] in rules.RULES['PRICE_OI_ENTRY2']['symbols']
+                    and rules._score65(features, 'price_oi')
+                    and features.get('sequence.capture_status') in {'SOURCE_UNAVAILABLE', 'SOURCE_OVERFLOW'}):
+                state.setdefault('planned_sequence_recovery_scans', {})[scan] = iso(now)
+                recovery_scans.add(scan)
+        _save(conn, key, state)
+        return {**stats, 'created_intents': added,
+                'planned_sequence_recovery_scans': len(recovery_scans),
+                'pending': sum(i['status'] == 'PENDING' for i in state['intents'])}
 
 
 def claim(chat_id, now, *, database_url=None):

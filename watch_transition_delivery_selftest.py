@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, TimedOut
 import main
@@ -36,10 +36,10 @@ class MemoryBoundary:
         return {"state": deepcopy(self.state), "intents": created,
                 "crossing_items": crossing, "resets": [], "counts": {}}
 
-    def claim(self, scope, now, limit):
+    def claim(self, scope, now, limit, *, kinds=None):
         assert limit == 1  # Never reserve an entire network-send queue in advance.
         for row in self.intents:
-            if row['status'] == 'PENDING':
+            if row['status'] == 'PENDING' and (kinds is None or row['kind'] in kinds):
                 row.update(status='IN_FLIGHT', attempt_token='attempt-'+row['intent_id'],
                            attempted_at=now.isoformat())
                 return [deepcopy(row)]
@@ -206,6 +206,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, '_ensure_watch_derivatives_ready', AsyncMock(return_value={})), \
              patch.object(main.dual_cvd65_delivery, 'record_watch', AsyncMock()), \
              patch.object(main.dual_cvd65_delivery, 'drain', AsyncMock(return_value=0)), \
+             patch.object(main.manual_formula_alert_delivery, 'run_watch', AsyncMock(return_value=0)), \
              patch.object(main, '_send_magnet_watch_reports', AsyncMock(return_value=0)), \
              patch.object(main, '_collect_combined_confirmation_messages', return_value=[]), \
              patch.object(main, '_collect_special_transition_messages', return_value=[]) as special, \
@@ -222,6 +223,93 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.intents, [])
         self.assertEqual(delivery.status()['last_record_status'], 'EVIDENCE_GAP')
         self.assertEqual(result['transition_result']['status'], 'INCOMPLETE')
+
+    async def test_experimental_kind_can_precede_unattempted_ordinary_mp65(self):
+        await self.prepare()
+        bot = SimpleNamespace(send_message=AsyncMock())
+        self.assertEqual(await delivery.drain(bot, 1, kinds=('FORMULA_MP65_CVD_SHORT',)), 1)
+        self.assertEqual([row['status'] for row in self.db.intents], ['PENDING', 'DELIVERED'])
+        self.assertEqual([event.event_type for event, _ in self.calls], ['FORMULA_MP65_CVD_SHORT'])
+        self.assertEqual(await delivery.drain(bot, 1, kinds=('MAX_PAIN_SCORE_65',)), 0)
+        self.assertEqual([row['status'] for row in self.db.intents], ['DELIVERED', 'DELIVERED'])
+        self.assertEqual(bot.send_message.await_count, 2)
+
+    async def test_real_watch_sends_all_experiments_before_first_ordinary_message(self):
+        item = {**_item(), 'distance_pct': 1}
+        await self.record([{**item, 'score': 59}], name='baseline', when=BASE)
+        output = []
+        async def collect(**kwargs):
+            return [], {'watch_derivatives_snapshot': {}, 'watch_prepared_items': [item]}
+        async def send(**kwargs):
+            output.append(kwargs['text'])
+            return SimpleNamespace(message_id=len(output))
+        async def dual(bot, chat, **kwargs):
+            await bot.send_message(chat_id=chat, text='experimental dual')
+            return 1
+        async def manual(bot, chat, sources, **kwargs):
+            self.assertTrue(sources)
+            self.assertTrue(all(row['delivery_status'] == 'NOT_ATTEMPTED' for row in sources))
+            self.assertTrue(all(row['event_id'].startswith('watch:') for row in sources))
+            self.assertFalse(self.calls, 'Preview cannot claim a native delivery before transport')
+            for label in ('experimental manual A', 'experimental manual B'):
+                await bot.send_message(chat_id=chat, text=label)
+            return 2
+        bot = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(side_effect=send)))
+        with patch.object(main, 'WATCH_GENERAL_ENABLED', True), \
+             patch.object(main, 'WATCH_RUNTIME', {'chat_id': 1}), \
+             patch.object(main, 'MAGNET_V1_WATCHES', {}), \
+             patch.object(main, '_get_scrape_lock', return_value=asyncio.Lock()), \
+             patch.object(main, 'collect_live_rows_for_watch', collect), \
+             patch.object(main, '_ensure_watch_derivatives_ready', AsyncMock(return_value={})), \
+             patch.object(main.dual_cvd65_delivery, 'record_watch', AsyncMock()), \
+             patch.object(main.dual_cvd65_delivery, 'drain', AsyncMock(side_effect=dual)), \
+             patch.object(main.manual_formula_alert_delivery, 'run_watch', AsyncMock(side_effect=manual)), \
+             patch.object(main, '_send_magnet_watch_reports', AsyncMock(return_value=0)), \
+             patch.object(main, '_collect_combined_confirmation_messages', return_value=[]), \
+             patch.object(main, '_collect_special_transition_messages', return_value=[]), \
+             patch.object(main, '_alert_card', return_value='ordinary card'), \
+             patch.object(main, '_persist_watch_runtime'):
+            result = await main.run_watch_cycle(bot, 1, general_enabled=True)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(output[:3], ['experimental dual', 'experimental manual A', 'experimental manual B'])
+        self.assertIn('ניסיוני', output[3])
+        self.assertIn('סריקת', output[4])
+        self.assertEqual(output[5], 'ordinary card')
+        self.assertEqual(self.calls[0][0].event_type, 'FORMULA_MP65_CVD_SHORT')
+
+
+class PlannedCaptureTests(unittest.TestCase):
+    def test_preview_does_not_consume_transitions_or_write_delivered_evidence(self):
+        token = runtime.set_watch_context(watch_scan_id='preview-watch')
+        states = (runtime._CONFIRMATION_STATE, runtime._SCORE_CONFIRMATION_STATE,
+                  runtime._HIGH_SCORE_83_STATE, runtime._DERIVATIVES_HIGH_STATE,
+                  runtime._SPOT_FAMILY_HIGH_STATE, runtime._MAGNET_STATE, runtime._COMBINED_STATE)
+        originals = [deepcopy(state) for state in states]
+        def capture():
+            runtime.capture_sent_maxpain(_item(), event_time=BASE, persist=False,
+                                         delivery_status='NOT_ATTEMPTED')
+            runtime.capture_special_transitions([_item()], event_time=BASE, persist=False,
+                                                delivery_status='NOT_ATTEMPTED')
+        try:
+            with patch.object(runtime.SINK, 'emit', Mock()) as sink, \
+                 patch.object(runtime.research_event_store.WRITER, 'enqueue', Mock()) as writer, \
+                 patch.object(runtime.google_sheets_sync, 'enqueue_delivered_event', Mock()) as sheets:
+                events = runtime.preview_watch_sources(capture)
+            self.assertTrue(events)
+            self.assertTrue(all(row['capture_stage'] == 'WATCH_PLANNED_ALERT' for row in events))
+            self.assertTrue(all(row['engine_snapshot']['watch_scan_id'] == 'preview-watch' for row in events))
+            self.assertTrue(all(row['delivery_status'] == 'NOT_ATTEMPTED' for row in events))
+            sink.assert_not_called(); writer.assert_not_called(); sheets.assert_not_called()
+            self.assertEqual([dict(state) for state in states], originals)
+            def failed():
+                capture()
+                raise ValueError('fixture')
+            with self.assertRaises(ValueError):
+                runtime.preview_watch_sources(failed)
+            self.assertEqual([dict(state) for state in states], originals)
+            self.assertIsNone(runtime._PLANNED_CAPTURE.get())
+        finally:
+            runtime.reset_watch_context(token)
 
 
 if __name__ == '__main__':

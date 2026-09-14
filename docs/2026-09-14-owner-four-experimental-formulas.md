@@ -1,5 +1,10 @@
 # Four explicitly requested experimental alerts
 
+This is the original four-rule rollout. The subsequent
+[scope and priority update](2026-09-14-experimental-alert-priority.md) adds BTC
+C0964 at 2%, bold note labels and pre-delivery Watch evaluation. It supersedes
+the delivery timing described below while retaining the four original rules.
+
 The owner approved activation after the September 14 statistical audit and its
 count/pending-outcome corrections. These are manually selected research
 notifications, labeled **ניסיוני, לא למסחר**, not automatic statistical approval

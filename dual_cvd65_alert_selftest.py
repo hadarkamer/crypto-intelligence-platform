@@ -191,10 +191,11 @@ class DualCvdTests(unittest.TestCase):
 
     def test_render_uses_direct_shared_direction_magnitude_and_experimental_wording(self):
         bundle, now = fixture()
-        set_scores(bundle, -65, -75)
+        set_scores(bundle, -65, -75, symbol='ZEC')
         result = detector.evaluate_bundle(bundle, now)
-        row = result['observations'][0]
+        row = next(row for row in result['observations'] if row['symbol'] == 'ZEC')
         text = detector.render_message(row, result['source_at_utc'])
+        self.assertTrue(text.startswith('<b>סף 2%</b>\n'))
         self.assertIn('ירידה — SHORT', text)
         self.assertIn('65/100', text)
         self.assertIn('75/100', text)
@@ -204,6 +205,9 @@ class DualCvdTests(unittest.TestCase):
         self.assertNotIn('היפוך', text)
         with self.assertRaises(ValueError):
             detector.render_message({**row, 'status': 'UNKNOWN'}, result['source_at_utc'])
+        for symbol in set(detector.SYMBOLS) - {'ZEC'}:
+            with self.assertRaises(ValueError):
+                detector.render_message({**row, 'symbol': symbol}, result['source_at_utc'])
 
 
 if __name__ == '__main__':
