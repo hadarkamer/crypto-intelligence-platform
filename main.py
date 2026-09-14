@@ -60,6 +60,7 @@ import research_watch_score_capture
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
 import research_watch_scan_formula_worker
+import research_watch_scan_formula_timeframe_worker
 import research_prospective_anchor_worker
 import research_archive_admin
 from collections import defaultdict
@@ -1732,6 +1733,7 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
         ("watch-scan-intake", research_watch_scan_intake.WORKER),
         ("watch-scan-measurement", research_watch_scan_measurement_worker.WORKER),
         ("watch-scan-formulas", research_watch_scan_formula_worker.WORKER),
+        ("watch-scan-timeframe-formulas", research_watch_scan_formula_timeframe_worker.WORKER),
         ("price-archive", research_price_archive_worker.WORKER),
         ("btc-episodes", research_btc_episode_worker.WORKER),
         ("btc-wave-report", research_btc_wave_report_worker.WORKER),
@@ -1756,6 +1758,7 @@ async def _stop_ordered_research_workers() -> None:
         ("watch-scan-intake", research_watch_scan_intake.WORKER),
         ("watch-scan-measurement", research_watch_scan_measurement_worker.WORKER),
         ("watch-scan-formulas", research_watch_scan_formula_worker.WORKER),
+        ("watch-scan-timeframe-formulas", research_watch_scan_formula_timeframe_worker.WORKER),
         ("btc-wave-report", research_btc_wave_report_worker.WORKER),
         ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
@@ -6324,6 +6327,7 @@ async def health(request):
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
         "watch_scan_formulas": research_watch_scan_formula_worker.WORKER.status(),
+        "watch_scan_timeframe_formulas": research_watch_scan_formula_timeframe_worker.WORKER.status(),
         "btc_episodes": research_btc_episode_worker.WORKER.status(),
         "price_archive": research_price_archive_worker.WORKER.status(),
         "price_source_freshness": research_source_freshness.status(),
