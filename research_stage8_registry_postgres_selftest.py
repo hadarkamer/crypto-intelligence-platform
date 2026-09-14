@@ -137,6 +137,15 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
         self.admin.execute(self._schema_sql(self.migration_051), prepare=False)
         # Seed privileges that existed in earlier local drafts.  A second full
         # execution must converge them away, not merely add the current grants.
+        anchor_helpers = self.admin.execute("""
+            SELECT p.oid::regprocedure::text AS signature
+            FROM pg_proc AS p JOIN pg_namespace AS n ON n.oid=p.pronamespace
+            WHERE n.nspname=%s AND p.proname LIKE 'research_stage8_anchor_%%'
+        """, (self.schema,)).fetchall()
+        for helper in anchor_helpers:
+            self.admin.execute("GRANT EXECUTE ON FUNCTION " + helper["signature"] + " TO PUBLIC")
+            self.admin.execute(self.sql.SQL("GRANT EXECUTE ON FUNCTION {} TO {}").format(
+                self.sql.SQL(helper["signature"]), self.sql.Identifier(registry.READER_ROLE)))
         for role in ROLE_NAMES:
             self.admin.execute(
                 self.sql.SQL(
@@ -266,11 +275,12 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
         if not self.pglite_compat:
             savepoint = "stage8_expected_rejection"
             conn.execute("SAVEPOINT " + savepoint)
-            with self.assertRaises(self.psycopg.Error):
+            with self.assertRaises(self.psycopg.Error) as raised:
                 conn.execute(statement, params)
             conn.execute("ROLLBACK TO SAVEPOINT " + savepoint)
             conn.execute("RELEASE SAVEPOINT " + savepoint)
-            return None
+            return {"sqlstate": raised.exception.sqlstate,
+                    "message": str(raised.exception)}
         rendered = self.psycopg.ClientCursor(conn).mogrify(statement, params)
         result = conn.execute(
             "SELECT stage8_test_expected_rejection(%s) AS rejection",
@@ -809,6 +819,17 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
         self.assertEqual(durable_fact["seal"]["fact_count"], 2)
         self.assertEqual(durable_selection["representative_count"], 2)
         reader = self._connect(read_only=True, role=registry.READER_ROLE)
+        facts = reader.execute("""
+            SELECT knowledge_status, candidate_match,
+                   fact_record->>'server_projection_status' AS server_projection_status
+            FROM research_stage8_fact_read_v1 WHERE fact_batch_record_sha256=%s
+            ORDER BY attempt_id
+        """, (durable_fact["batch"]["fact_batch_record_sha256"],)).fetchall()
+        self.assertEqual(len(facts), 2)
+        for fact in facts:
+            self.assertEqual(fact["knowledge_status"], "KNOWN")
+            self.assertIs(fact["candidate_match"], True)
+            self.assertEqual(fact["server_projection_status"], "VERIFIED")
         evaluated = registry.evaluate_verified_from_connection(
             reader, self.binding, selected["representatives"],
             selection_record_sha256=durable_selection["selection_record_sha256"],
@@ -897,6 +918,108 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
         evaluator.commit()
         self.assertEqual(persisted["result_scope"], registry.RESEARCH_RESULT_SCOPE)
         self.assertIs(persisted["evaluation"]["research_qualified"], False)
+
+    def test_anchor_helpers_acl_converges_after_full_migration_reapply(self):
+        # setUp deliberately granted PUBLIC and READER obsolete helper access
+        # before applying the full migration a second time.
+        helpers = self.admin.execute("""
+            SELECT p.oid, p.proname,
+                   EXISTS (SELECT 1 FROM aclexplode(COALESCE(
+                     p.proacl,acldefault('f',p.proowner))) AS acl
+                     WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE') AS public_execute,
+                   has_function_privilege(%s,p.oid,'EXECUTE') AS reader_execute
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE n.nspname=%s AND p.proname LIKE 'research_stage8_anchor_%%'
+            ORDER BY p.proname
+        """, (registry.READER_ROLE,self.schema)).fetchall()
+        self.assertTrue(helpers,"anchor authority helpers must be installed")
+        for helper in helpers:
+            with self.subTest(helper=helper["proname"]):
+                self.assertIs(helper["public_execute"],False)
+                self.assertIs(helper["reader_execute"],False)
+
+    def _install_anchor_replay_probe(self,registered):
+        # A disposable trigger harness exercises the trigger-internal replay
+        # from a real FACT_WRITER session without weakening the production API.
+        high_water = self.admin.execute("SELECT COALESCE(max(snapshot_set_id),0) AS high_water FROM research_max_pain_snapshot_sets").fetchone()["high_water"]
+        self.admin.execute("CREATE TABLE stage8_anchor_replay_probe(attempt_id BIGINT,result JSONB)")
+        self.admin.execute(self.sql.SQL("""
+            CREATE FUNCTION stage8_anchor_replay_probe_v1() RETURNS trigger
+            LANGUAGE plpgsql SECURITY INVOKER SET search_path TO {},pg_catalog,pg_temp
+            AS $body$ BEGIN
+              NEW.result := research_stage8_derive_projection_attestation_v1(
+                TG_TABLE_SCHEMA,{},NEW.attempt_id,{},FALSE);
+              RETURN NEW;
+            END $body$
+        """).format(self.sql.Identifier(self.schema),self.sql.Literal(registered["exact_binding_sha256"]),self.sql.Literal(high_water)))
+        self.admin.execute("REVOKE ALL ON FUNCTION stage8_anchor_replay_probe_v1() FROM PUBLIC")
+        self.admin.execute("CREATE TRIGGER stage8_anchor_replay_probe BEFORE INSERT ON stage8_anchor_replay_probe FOR EACH ROW EXECUTE FUNCTION stage8_anchor_replay_probe_v1()")
+        self.admin.execute(self.sql.SQL("GRANT INSERT,SELECT ON stage8_anchor_replay_probe TO {}").format(self.sql.Identifier(registry.FACT_WRITER_ROLE)))
+        self.admin.commit()
+
+    def test_server_replay_rejects_corrupt_unselected_anchor_event(self):
+        """The real replay helper sees both events, not just selected SHORT."""
+        registered, _, _, _, _, _ = self._build_full_path(attempt_count=1)
+        self._reset_admin()
+        self._install_anchor_replay_probe(registered)
+        writer = self._connect(role=registry.FACT_WRITER_ROLE)
+        valid = writer.execute("INSERT INTO stage8_anchor_replay_probe(attempt_id) VALUES (1) RETURNING result").fetchone()["result"]
+        writer.commit()
+        self.assertEqual(valid["status"],"VERIFIED",valid)
+        self.assertEqual(valid["projection_semantics"]["knowledge_status"],"KNOWN",valid)
+        self._reset_admin()
+        # This corruption simulates pre-existing bad source rows, not an
+        # authorized writer bypass; the guard itself is tested separately.
+        self.admin.execute("ALTER TABLE research_events DISABLE TRIGGER trg_prospective_anchor_events_immutable")
+        self.admin.execute("""UPDATE research_events SET current_price=1
+            WHERE event_id=(SELECT long_event_id FROM research_prospective_anchor_slots
+                            WHERE anchor_slot_id=1)""")
+        self.admin.execute("ALTER TABLE research_events ENABLE TRIGGER trg_prospective_anchor_events_immutable")
+        self.admin.commit()
+        writer = self._connect(role=registry.FACT_WRITER_ROLE)
+        invalid = writer.execute("INSERT INTO stage8_anchor_replay_probe(attempt_id) VALUES (1) RETURNING result").fetchone()["result"]
+        writer.commit()
+        # VERIFIED attests that the server derived this UNKNOWN result; it
+        # does not assert that the underlying anchor passed admission.
+        self.assertEqual(invalid["status"],"VERIFIED",invalid)
+        self.assertEqual(invalid["projection_semantics"]["knowledge_status"],"UNKNOWN",invalid)
+        self.assertIsNone(invalid["projection_semantics"]["candidate_match"],invalid)
+
+    def test_non_evaluable_negative_attempt_id_cannot_prove_noneligibility(self):
+        registered = self._backdate_registry_fixture(self._register())
+        frozen = datetime.fromisoformat(registered["frozen_at_utc"].replace("Z","+00:00"))
+        for index,attempt_id in enumerate((1,-1),start=1):
+            base = (frozen+timedelta(hours=index)).replace(minute=0,second=0,microsecond=0)
+            decision = base+timedelta(minutes=34)
+            with mock.patch.object(source_fixtures,"BASE",base), \
+                 mock.patch.object(source_fixtures,"DECISION",decision):
+                attempt,slot,events = _anchor(attempt_id=attempt_id,eligible=False)
+            self.assertIsNone(slot)
+            self.assertEqual(events,[])
+            self._insert("research_prospective_anchor_attempts",attempt)
+        self.admin.commit()
+        self._install_anchor_replay_probe(registered)
+        writer = self._connect(role=registry.FACT_WRITER_ROLE)
+        baseline = writer.execute("INSERT INTO stage8_anchor_replay_probe(attempt_id) VALUES (1) RETURNING result").fetchone()["result"]
+        self.assertEqual(baseline["status"],"PROVEN_NONELIGIBLE",baseline)
+        invalid = writer.execute("INSERT INTO stage8_anchor_replay_probe(attempt_id) VALUES (-1) RETURNING result").fetchone()["result"]
+        self.assertEqual(invalid["status"],"UNKNOWN",invalid)
+        self.assertEqual(invalid["projection_semantics"]["knowledge_status"],"UNKNOWN",invalid)
+        self.assertIsNone(invalid["projection_semantics"]["candidate_match"],invalid)
+
+    def test_anchor_event_immutability_is_not_bypassed_by_temp_slot_shadow(self):
+        self._build_full_path(attempt_count=1)
+        self._reset_admin()
+        event_id = self.admin.execute("SELECT long_event_id FROM research_prospective_anchor_slots WHERE anchor_slot_id=1").fetchone()["long_event_id"]
+        self.admin.execute(self.sql.SQL("""
+            CREATE TEMP VIEW research_prospective_anchor_slots AS
+            SELECT * FROM {}.research_prospective_anchor_slots WHERE FALSE
+        """).format(self.sql.Identifier(self.schema)))
+        self.admin.execute(self.sql.SQL("SET search_path TO pg_temp,{},pg_catalog").format(self.sql.Identifier(self.schema)))
+        rejected = self._expect_rejection(self.admin,self.sql.SQL(
+            "UPDATE {}.research_events SET current_price=1 WHERE event_id=%s"
+        ).format(self.sql.Identifier(self.schema)),(event_id,))
+        self.assertIn("immutable prospective anchor",rejected["message"])
 
     def test_five_parent_atomic_diagnostic_is_promoted_only_by_server_replay(self):
         """Caller stays diagnostic; the trigger alone may mint qualification."""

@@ -517,6 +517,1139 @@ AS $$
     SELECT to_char(value AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
 $$;
 
+-- Sampler v4 hashes Python JSON after archive readback, not the Watch codec:
+-- integral decimal tokens retain .0, while arbitrary-precision integers never
+-- pass through binary64. JSONB has already discarded original exponent text.
+-- Python str.strip includes Unicode whitespace and the four ASCII information
+-- separators; PostgreSQL btrim(text) alone strips only the ordinary space.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_strip_v1(value TEXT)
+RETURNS TEXT LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT btrim(value, U&'\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000')
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_canonical_json_v1(value JSONB)
+RETURNS TEXT LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+SET extra_float_digits = 3
+AS $$
+DECLARE kind TEXT := jsonb_typeof(value); rendered TEXT; raw TEXT;
+        floating DOUBLE PRECISION;
+BEGIN
+    IF kind = 'object' THEN
+        SELECT '{' || COALESCE(string_agg(to_jsonb(item.key)::text || ':' ||
+            research_stage8_anchor_canonical_json_v1(item.value),
+            ',' ORDER BY item.key COLLATE "C"), '') || '}' INTO rendered
+        FROM jsonb_each(value) AS item;
+        RETURN rendered;
+    ELSIF kind = 'array' THEN
+        SELECT '[' || COALESCE(string_agg(
+            research_stage8_anchor_canonical_json_v1(item.value),
+            ',' ORDER BY item.ordinality), '') || ']' INTO rendered
+        FROM jsonb_array_elements(value) WITH ORDINALITY AS item(value, ordinality);
+        RETURN rendered;
+    ELSIF kind = 'number' THEN
+        raw := value::text;
+        IF raw !~ '[.]' THEN
+            -- Match the pinned Python 3.11 default decimal-int codec limit.
+            -- The sign is not a digit; larger JSONB numerics fail closed.
+            IF length(ltrim(raw,'-')) > 4300 THEN
+                RAISE EXCEPTION 'Anchor JSON integer exceeds Python digit limit';
+            END IF;
+            RETURN raw;
+        END IF;
+        floating := raw::double precision;
+        IF floating::text IN ('NaN','Infinity','-Infinity') THEN
+            RAISE EXCEPTION 'Anchor JSON number is not finite';
+        END IF;
+        IF floating = 0 THEN RETURN '0.0'; END IF;
+        rendered := to_json(floating)::text;
+        IF abs(floating) >= 0.0001 AND abs(floating) < 1e16
+           AND rendered ~ '[eE]' THEN rendered := (rendered::numeric)::text; END IF;
+        IF rendered !~ '[.eE]' THEN rendered := rendered || '.0'; END IF;
+        RETURN rendered;
+    END IF;
+    RETURN value::text;
+END;
+$$;
+
+-- Python's `value or ''` and str(...).strip() are not SQL NULL coalescing:
+-- false, numeric zero and empty containers are falsey, but whitespace strings
+-- remain truthy until the subsequent strip operation.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_truthy_v1(value JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT value IS NOT NULL AND value <> ALL(
+        ARRAY['null','false','0','""','[]','{}']::jsonb[])
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_nonempty_v1(value JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT research_stage8_anchor_truthy_v1(value) AND
+        (jsonb_typeof(value) <> 'string' OR research_stage8_anchor_strip_v1(value #>> '{}') <> '')
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_json_sha256_v1(value JSONB)
+RETURNS TEXT LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT encode(sha256(convert_to(
+        research_stage8_anchor_canonical_json_v1(value), 'UTF8')), 'hex')
+$$;
+
+-- Event reference equality uses capture.canonical's integral-float
+-- normalization, unlike the sampler input/bundle hash. Decode an integral
+-- binary64 exactly instead of the lossy float8-to-numeric cast or its shortest
+-- decimal rendering: int(float(1000000000000000100)) is 1000000000000000128.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_reference_canonical_json_v1(value JSONB)
+RETURNS TEXT LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+DECLARE kind TEXT := jsonb_typeof(value); rendered TEXT; raw TEXT;
+        floating DOUBLE PRECISION; bytes BYTEA; exponent_bits INTEGER;
+        exponent_value INTEGER; significand NUMERIC; sign_value INTEGER; i INTEGER;
+BEGIN
+    IF kind = 'object' THEN
+        SELECT '{' || COALESCE(string_agg(to_jsonb(item.key)::text || ':' ||
+            research_stage8_anchor_reference_canonical_json_v1(item.value),
+            ',' ORDER BY item.key COLLATE "C"), '') || '}' INTO rendered
+        FROM jsonb_each(value) AS item;
+        RETURN rendered;
+    ELSIF kind = 'array' THEN
+        SELECT '[' || COALESCE(string_agg(
+            research_stage8_anchor_reference_canonical_json_v1(item.value),
+            ',' ORDER BY item.ordinality), '') || ']' INTO rendered
+        FROM jsonb_array_elements(value) WITH ORDINALITY AS item(value, ordinality);
+        RETURN rendered;
+    ELSIF kind = 'number' THEN
+        raw := value::text;
+        IF raw !~ '[.]' THEN
+            IF length(ltrim(raw,'-')) > 4300 THEN
+                RAISE EXCEPTION 'Anchor reference JSON integer exceeds Python digit limit';
+            END IF;
+            RETURN raw;
+        END IF;
+        floating := raw::double precision;
+        IF floating::text IN ('NaN','Infinity','-Infinity') THEN
+            RAISE EXCEPTION 'Anchor reference JSON number is not finite';
+        END IF;
+        IF floating = trunc(floating) THEN
+            bytes := float8send(floating);
+            exponent_bits := ((get_byte(bytes,0) & 127) * 16) + (get_byte(bytes,1) >> 4);
+            significand := get_byte(bytes,1) & 15;
+            FOR i IN 2..7 LOOP significand := significand * 256 + get_byte(bytes,i); END LOOP;
+            sign_value := CASE WHEN (get_byte(bytes,0) & 128) = 0 THEN 1 ELSE -1 END;
+            IF exponent_bits = 0 THEN exponent_value := -1074;
+            ELSE significand := significand + 4503599627370496; exponent_value := exponent_bits - 1075; END IF;
+            IF exponent_value >= 0 THEN
+                RETURN trunc(sign_value * significand * power(2::numeric,exponent_value))::text;
+            END IF;
+            RETURN div(sign_value * significand,power(2::numeric,-exponent_value))::text;
+        END IF;
+        RETURN research_stage8_anchor_canonical_json_v1(value);
+    END IF;
+    RETURN value::text;
+END;
+$$;
+
+-- Python anchor clocks permit naive ISO timestamps as UTC. Never inherit the
+-- caller timezone or accept PostgreSQL date keywords/leap-second rollover.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_timestamp_v1(value JSONB)
+RETURNS TIMESTAMPTZ LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+SET TimeZone = 'UTC' SET DateStyle = 'ISO, YMD'
+AS $$
+DECLARE raw TEXT := research_stage8_anchor_strip_v1(value #>> '{}'); parsed TIMESTAMPTZ;
+BEGIN
+    IF jsonb_typeof(value) IS DISTINCT FROM 'string'
+       OR raw !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})?$'
+       OR substring(raw FROM 12 FOR 2)::integer > 23
+       OR substring(raw FROM 15 FOR 2)::integer > 59
+       OR substring(raw FROM 18 FOR 2)::integer > 59
+       OR (raw ~ '[+-][0-9]{2}:[0-9]{2}$' AND
+           (right(raw, 2)::integer > 59
+            OR substring(right(raw, 6) FROM 2 FOR 2)::integer > 23)) THEN
+        RETURN NULL;
+    END IF;
+    parsed := raw::timestamptz;
+    IF NOT isfinite(parsed) OR extract(year FROM parsed) NOT BETWEEN 1 AND 9999 THEN
+        RETURN NULL;
+    END IF;
+    RETURN parsed;
+EXCEPTION WHEN OTHERS THEN RETURN NULL;
+END;
+$$;
+
+-- The audit's immutable event/slot identities, unlike producer source clocks,
+-- require an explicit UTC offset. Keep the two Python timestamp contracts apart.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_aware_timestamp_v1(value JSONB)
+RETURNS TIMESTAMPTZ LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+BEGIN
+    IF jsonb_typeof(value) IS DISTINCT FROM 'string'
+       OR (value #>> '{}') IS DISTINCT FROM research_stage8_anchor_strip_v1(value #>> '{}')
+       OR (value #>> '{}') !~ '(Z|[+-][0-9]{2}:[0-9]{2})$' THEN RETURN NULL; END IF;
+    RETURN research_stage8_anchor_timestamp_v1(value);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_finite_number_v1(value JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT research_stage8_watch_finite_number_v1(value)
+$$;
+
+-- _number in the frozen-source producer also accepts numeric strings, but
+-- never booleans, null, NaN or infinities.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_number_v1(value JSONB)
+RETURNS DOUBLE PRECISION LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+DECLARE result DOUBLE PRECISION; raw TEXT;
+BEGIN
+    IF jsonb_typeof(value) IS NULL OR jsonb_typeof(value) NOT IN ('number','string')
+       OR research_stage8_anchor_strip_v1(value #>> '{}') = '' THEN RETURN NULL; END IF;
+    raw := value #>> '{}';
+    IF jsonb_typeof(value) = 'string' THEN
+        -- str.strip() removes these ASCII separators, but Python float()
+        -- rejects them even at the boundary. Do not erase that distinction.
+        IF raw ~ U&'[\001C-\001F]' THEN RETURN NULL; END IF;
+        raw := research_stage8_anchor_strip_v1(raw);
+        -- PostgreSQL float8 accepts hexadecimal strings that Python float()
+        -- rejects. Admit only the producer's ASCII decimal syntax; underscores
+        -- and non-ASCII digits intentionally remain fail-closed.
+        IF raw !~ '^[+-]?(([0-9]+([.][0-9]*)?)|([.][0-9]+))([eE][+-]?[0-9]+)?$' THEN
+            RETURN NULL;
+        END IF;
+    END IF;
+    result := raw::double precision;
+    IF result::text IN ('NaN','Infinity','-Infinity') THEN RETURN NULL; END IF;
+    RETURN result;
+EXCEPTION WHEN OTHERS THEN RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_round6_v1(value DOUBLE PRECISION)
+RETURNS DOUBLE PRECISION LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+DECLARE bytes BYTEA := float8send(value); exponent_bits INTEGER; exponent_value INTEGER;
+        significand NUMERIC; numerator NUMERIC; denominator NUMERIC;
+        quotient NUMERIC; remainder_value NUMERIC; sign_value INTEGER; byte_index INTEGER;
+BEGIN
+    exponent_bits := ((get_byte(bytes,0) & 127) * 16) + (get_byte(bytes,1) >> 4);
+    IF exponent_bits = 2047 THEN RAISE EXCEPTION 'Anchor round requires finite input'; END IF;
+    sign_value := CASE WHEN (get_byte(bytes,0) & 128) = 0 THEN 1 ELSE -1 END;
+    significand := get_byte(bytes,1) & 15;
+    FOR byte_index IN 2..7 LOOP significand := significand * 256 + get_byte(bytes,byte_index); END LOOP;
+    IF exponent_bits = 0 THEN exponent_value := -1074;
+    ELSE significand := significand + 4503599627370496; exponent_value := exponent_bits - 1075; END IF;
+    IF exponent_value >= 0 THEN RETURN value; END IF;
+    numerator := significand * 1000000;
+    denominator := power(2::numeric,-exponent_value);
+    quotient := div(numerator,denominator); remainder_value := mod(numerator,denominator);
+    IF remainder_value * 2 > denominator OR
+       (remainder_value * 2 = denominator AND mod(quotient,2) = 1) THEN quotient := quotient + 1; END IF;
+    RETURN (sign_value * quotient / 1000000)::double precision;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_coverage_valid_v1(
+    value JSONB, symbol TEXT, decision_time TIMESTAMPTZ)
+RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+DECLARE expected JSONB := '{"coverage_policy_version":"prospective-coverage-v3-completed-fully-validated-replay-run:no-dwell-first-touch-v6:historical-raw-opportunity-replay-v2-balanced-prior-session-width","method_version":"no-dwell-first-touch-v6","replay_version":"historical-raw-opportunity-replay-v2-balanced-prior-session-width","coverage_scope_version":"bounded-balanced-coherent-current-replay-all-horizons-v1","movement_width_calibration_version":"prior-only-session-width-v2","canonical_price_method_version":"canonical-spot-1m-ohlc-path-v3","canonical_price_provenance_version":"canonical-spot-reference-provenance-v1"}'::jsonb;
+        field RECORD; horizon INTEGER; item JSONB; as_of_time TIMESTAMPTZ;
+        completed TIMESTAMPTZ; first_time TIMESTAMPTZ; last_time TIMESTAMPTZ;
+BEGIN
+    IF jsonb_typeof(value) IS DISTINCT FROM 'object' OR decision_time IS NULL
+       OR upper(research_stage8_anchor_strip_v1(value->>'symbol')) IS DISTINCT FROM symbol
+       OR value->'eligible' IS DISTINCT FROM 'true'::jsonb
+       OR value->'failed_gates' IS DISTINCT FROM '[]'::jsonb
+       OR jsonb_typeof(value->'horizons') IS DISTINCT FROM 'object'
+       OR jsonb_typeof(value->'replay_run_id') IS DISTINCT FROM 'number'
+       OR COALESCE(value->>'replay_run_id','') !~ '^[0-9]+$'
+       OR (value->>'replay_run_id')::numeric <= 0 THEN RETURN FALSE; END IF;
+    FOR field IN SELECT * FROM jsonb_each(expected) LOOP
+        IF value->field.key IS DISTINCT FROM field.value THEN RETURN FALSE; END IF;
+    END LOOP;
+    as_of_time := research_stage8_anchor_timestamp_v1(value->'as_of_utc');
+    completed := research_stage8_anchor_timestamp_v1(value->'replay_completed_at_utc');
+    IF as_of_time IS NULL OR completed IS NULL OR as_of_time > decision_time
+       OR completed > as_of_time THEN RETURN FALSE; END IF;
+    FOREACH horizon IN ARRAY ARRAY[60,240,720,1440] LOOP
+        item := value->'horizons'->horizon::text;
+        IF jsonb_typeof(item) IS DISTINCT FROM 'object'
+           OR item->'eligible' IS DISTINCT FROM 'true'::jsonb
+           OR item->'failed_gates' IS DISTINCT FROM '[]'::jsonb
+           OR jsonb_typeof(item->'anchors') IS DISTINCT FROM 'number'
+           OR COALESCE(item->>'anchors','') !~ '^[0-9]+$'
+           OR (item->>'anchors')::numeric < 250
+           OR jsonb_typeof(item->'utc_dates') IS DISTINCT FROM 'number'
+           OR COALESCE(item->>'utc_dates','') !~ '^[0-9]+$'
+           OR (item->>'utc_dates')::numeric < 14
+           OR NOT research_stage8_anchor_finite_number_v1(item->'span_hours')
+           OR (item->>'span_hours')::double precision < 336 THEN RETURN FALSE; END IF;
+        first_time := research_stage8_anchor_timestamp_v1(item->'min_anchor_time_utc');
+        last_time := research_stage8_anchor_timestamp_v1(item->'max_anchor_time_utc');
+        IF first_time IS NULL OR last_time IS NULL OR first_time > last_time
+           OR last_time > as_of_time OR last_time + make_interval(mins => horizon) > completed
+           OR abs((item->>'span_hours')::double precision
+                  - extract(epoch FROM last_time-first_time)::double precision / 3600.0) > 1e-6 THEN
+            RETURN FALSE;
+        END IF;
+    END LOOP;
+    RETURN TRUE;
+EXCEPTION WHEN OTHERS THEN RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_sources_valid_v1(
+    frozen JSONB, timestamps JSONB, provenance JSONB, symbol TEXT,
+    slot_open TIMESTAMPTZ, slot_close TIMESTAMPTZ,
+    base_eligible TIMESTAMPTZ, decision_time TIMESTAMPTZ)
+RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+DECLARE family TEXT; clock JSONB; prov JSONB; values_json JSONB; key TEXT;
+        expected_keys TEXT[]; refresh_time TIMESTAMPTZ; observed TIMESTAMPTZ;
+        upstream TIMESTAMPTZ; timestamp_mode TEXT; number_value DOUBLE PRECISION;
+        exchanges TEXT[]; price_pair TEXT;
+BEGIN
+    IF jsonb_typeof(frozen) IS DISTINCT FROM 'object'
+       OR jsonb_typeof(timestamps) IS DISTINCT FROM 'object'
+       OR jsonb_typeof(provenance) IS DISTINCT FROM 'object'
+       OR slot_open IS NULL OR slot_close IS NULL OR base_eligible IS NULL
+       OR decision_time IS NULL THEN RETURN FALSE; END IF;
+    FOREACH family IN ARRAY ARRAY['official_price','price_oi','futures_cvd','spot_cvd'] LOOP
+        clock := timestamps->family; prov := provenance->family; values_json := frozen->family;
+        expected_keys := CASE family WHEN 'official_price' THEN ARRAY['observed_at_utc','refresh_completed_at_utc']
+            WHEN 'price_oi' THEN ARRAY['observation_time_utc','oi_fetched_at_utc','price_fetched_at_utc','refresh_completed_at_utc']
+            ELSE ARRAY['refresh_completed_at_utc','source_candle_time_utc'] END;
+        IF jsonb_typeof(clock) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(prov) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(values_json) IS DISTINCT FROM 'object'
+           OR (SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys(clock) AS keys(k))
+                IS DISTINCT FROM expected_keys
+           OR EXISTS (SELECT 1 FROM jsonb_object_keys(prov) AS keys(k) WHERE k <> ALL(ARRAY[
+                'source','quality_status','price_exchange','price_market','price_pair','price_instrument_id',
+                'price_timeframe','exchange_list','upstream_source','source_table','source_record_id',
+                'price_source','oi_source','fallback_used','fallback_policy','candle_timestamp_mode',
+                'refresh_time_semantics','quality_status_basis']))
+           OR upper(research_stage8_anchor_strip_v1(COALESCE((CASE
+                WHEN research_stage8_anchor_truthy_v1(prov->'quality_status') THEN prov->'quality_status'
+                WHEN research_stage8_anchor_truthy_v1(values_json->'quality_status') THEN values_json->'quality_status'
+                ELSE values_json->'data_quality_status' END) #>> '{}',''))) <> 'PASS' THEN RETURN FALSE; END IF;
+        -- Reconstruction overlays provenance/timestamps onto the frozen values,
+        -- exactly as prospective_frozen_source_rows; absent provenance values
+        -- can use the producer's frozen value-level provenance fallback.
+        prov := (values_json || prov) || jsonb_build_object('source',CASE
+            WHEN research_stage8_anchor_truthy_v1(prov->'source') THEN prov->'source'
+            ELSE values_json->'source' END);
+        refresh_time := research_stage8_anchor_timestamp_v1(clock->'refresh_completed_at_utc');
+        IF refresh_time IS NULL OR refresh_time < base_eligible OR refresh_time > decision_time THEN RETURN FALSE; END IF;
+        IF family = 'official_price' THEN
+            observed := research_stage8_anchor_timestamp_v1(clock->'observed_at_utc');
+            -- Python isalnum retains Unicode letters/digits. Never erase them
+            -- into a different, apparently canonical ASCII instrument identity.
+            IF octet_length(COALESCE(prov->>'price_pair','')) <> length(COALESCE(prov->>'price_pair','')) THEN
+                RETURN FALSE;
+            END IF;
+            price_pair := regexp_replace(upper(research_stage8_anchor_strip_v1(COALESCE(prov->>'price_pair',''))),'[^A-Z0-9]','','g');
+            IF observed IS NULL OR observed > decision_time OR decision_time-observed > interval '120 seconds'
+               OR refresh_time < observed OR lower(research_stage8_anchor_strip_v1(COALESCE(prov->>'price_timeframe',''))) <> '1m'
+               OR prov->'fallback_used' IS DISTINCT FROM 'false'::jsonb
+               OR upper(research_stage8_anchor_strip_v1(COALESCE(prov->>'fallback_policy',''))) <> 'PROVIDER_ATTESTED_NO_FALLBACK'
+               OR upper(research_stage8_anchor_strip_v1(COALESCE(prov->>'price_market',''))) <> 'SPOT'
+               OR price_pair <> symbol || 'USDT' THEN RETURN FALSE; END IF;
+            IF symbol = 'HYPE' THEN
+                IF lower(research_stage8_anchor_strip_v1(COALESCE(prov->>'source',''))) <> 'hyperliquid_spot_@107'
+                   OR upper(research_stage8_anchor_strip_v1(COALESCE(prov->>'price_exchange',''))) <> 'HYPERLIQUID'
+                   OR upper(research_stage8_anchor_strip_v1(COALESCE(prov->>'price_instrument_id',''))) <> '@107' THEN RETURN FALSE; END IF;
+            ELSIF lower(research_stage8_anchor_strip_v1(COALESCE(prov->>'source',''))) <> 'binance_spot'
+               OR upper(research_stage8_anchor_strip_v1(COALESCE(prov->>'price_exchange',''))) <> 'BINANCE' THEN RETURN FALSE;
+            END IF;
+            expected_keys := ARRAY['price'];
+        ELSIF family = 'price_oi' THEN
+            observed := research_stage8_anchor_timestamp_v1(clock->'observation_time_utc');
+            IF observed IS NULL OR observed < base_eligible OR observed > decision_time
+               OR lower(research_stage8_anchor_strip_v1(COALESCE(prov->>'source_table',''))) <> 'oi_regime_snapshots'
+               OR NOT research_stage8_anchor_nonempty_v1(prov->'price_source')
+               OR NOT research_stage8_anchor_nonempty_v1(prov->'oi_source') THEN RETURN FALSE; END IF;
+            FOREACH key IN ARRAY ARRAY['price_fetched_at_utc','oi_fetched_at_utc'] LOOP
+                upstream := research_stage8_anchor_timestamp_v1(clock->key);
+                IF upstream IS NULL OR upstream < slot_close OR upstream > observed THEN RETURN FALSE; END IF;
+            END LOOP;
+            expected_keys := ARRAY['price_close','oi_close_usd'];
+        ELSE
+            observed := research_stage8_anchor_timestamp_v1(clock->'source_candle_time_utc');
+            timestamp_mode := lower(research_stage8_anchor_strip_v1(COALESCE(prov->>'candle_timestamp_mode','')));
+            IF observed IS NULL OR timestamp_mode NOT IN ('open','close')
+               OR observed IS DISTINCT FROM (CASE timestamp_mode WHEN 'open' THEN slot_open ELSE slot_close END)
+               OR lower(research_stage8_anchor_strip_v1(COALESCE(prov->>'source',''))) IS DISTINCT FROM
+                    (CASE family WHEN 'futures_cvd' THEN 'coinglass_futures_aggregated_cvd'
+                                ELSE 'coinglass_spot_aggregated_cvd' END) THEN RETURN FALSE; END IF;
+            SELECT array_agg(DISTINCT upper(research_stage8_anchor_strip_v1(part)) ORDER BY upper(research_stage8_anchor_strip_v1(part))) INTO exchanges
+            FROM unnest(string_to_array(COALESCE(prov->>'exchange_list',''),',')) AS parts(part)
+            WHERE research_stage8_anchor_strip_v1(part) <> '';
+            IF exchanges IS DISTINCT FROM ARRAY['BINANCE','BYBIT','OKX'] THEN RETURN FALSE; END IF;
+            expected_keys := ARRAY['continuous_cum_vol_delta_usd'];
+        END IF;
+        FOREACH key IN ARRAY expected_keys LOOP
+            number_value := research_stage8_anchor_number_v1(values_json->key);
+            IF number_value IS NULL OR (family IN ('official_price','price_oi') AND number_value <= 0) THEN
+                RETURN FALSE;
+            END IF;
+        END LOOP;
+    END LOOP;
+    RETURN TRUE;
+EXCEPTION WHEN OTHERS THEN RETURN FALSE;
+END;
+$$;
+
+-- Pure anchor feature-width validation. Dependencies supplied by the anchor
+-- validator: anchor_timestamp_v1(JSONB), anchor_finite_number_v1(JSONB), and
+-- anchor_round6_v1(DOUBLE PRECISION), all prefixed research_stage8_.
+-- These functions read neither source tables nor outcomes.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_session_ratios_v1(
+    window_start TIMESTAMPTZ, window_end TIMESTAMPTZ
+)
+RETURNS TABLE(active_ratio DOUBLE PRECISION, weekend_ratio DOUBLE PRECISION, segments INTEGER)
+LANGUAGE plpgsql
+IMMUTABLE SECURITY INVOKER PARALLEL SAFE
+AS $$
+DECLARE
+    current_day DATE;
+    last_day DATE;
+    boundary TIMESTAMPTZ;
+    boundaries TIMESTAMPTZ[];
+    left_point TIMESTAMPTZ;
+    right_point TIMESTAMPTZ;
+    local_point TIMESTAMP;
+    local_weekday INTEGER;
+    seconds_value DOUBLE PRECISION;
+    active_seconds DOUBLE PRECISION := 0.0;
+    weekend_seconds DOUBLE PRECISION := 0.0;
+    total_seconds DOUBLE PRECISION;
+BEGIN
+    IF window_start IS NULL OR window_end IS NULL
+       OR NOT isfinite(window_start) OR NOT isfinite(window_end) THEN
+        RETURN;
+    END IF;
+    IF window_end <= window_start THEN
+        active_ratio := 1.0; weekend_ratio := 0.0; segments := 0;
+        RETURN NEXT; RETURN;
+    END IF;
+    boundaries := ARRAY[window_start, window_end];
+    current_day := (window_start AT TIME ZONE 'America/New_York')::date - 1;
+    last_day := (window_end AT TIME ZONE 'America/New_York')::date + 1;
+    WHILE current_day <= last_day LOOP
+        IF extract(isodow FROM current_day) = 5 THEN
+            boundary := (current_day + time '20:00') AT TIME ZONE 'America/New_York';
+        ELSIF extract(isodow FROM current_day) = 7 THEN
+            boundary := (current_day + time '18:00') AT TIME ZONE 'America/New_York';
+        ELSE
+            boundary := NULL;
+        END IF;
+        IF boundary > window_start AND boundary < window_end THEN
+            boundaries := array_append(boundaries, boundary);
+        END IF;
+        current_day := current_day + 1;
+    END LOOP;
+    left_point := window_start;
+    FOR right_point IN SELECT DISTINCT p FROM unnest(boundaries) AS t(p) ORDER BY p LOOP
+        IF right_point <= left_point THEN CONTINUE; END IF;
+        seconds_value := extract(epoch FROM (right_point - left_point))::double precision;
+        -- There is no boundary inside this half-open segment, so its left
+        -- endpoint has the same session as Python's rounded midpoint.
+        local_point := left_point AT TIME ZONE 'America/New_York';
+        local_weekday := extract(isodow FROM local_point)::integer;
+        IF local_weekday <= 4
+           OR (local_weekday = 5 AND local_point::time < time '20:00')
+           OR (local_weekday = 7 AND local_point::time >= time '18:00') THEN
+            active_seconds := active_seconds + seconds_value;
+        ELSE
+            weekend_seconds := weekend_seconds + seconds_value;
+        END IF;
+        left_point := right_point;
+    END LOOP;
+    total_seconds := active_seconds + weekend_seconds;
+    active_ratio := active_seconds / total_seconds;
+    weekend_ratio := weekend_seconds / total_seconds;
+    -- This is the Python diagnostic 30-minute segment count, not the number
+    -- of exact calendar segments used above.
+    segments := greatest(1, ceil(total_seconds / 1800.0)::integer);
+    RETURN NEXT;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_width_error_v1(
+    reference JSONB, expected_symbol TEXT, event_time TIMESTAMPTZ, horizon_minutes INTEGER
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE SECURITY INVOKER PARALLEL SAFE
+AS $$
+DECLARE
+    field_name TEXT;
+    symbol TEXT;
+    as_of_utc TIMESTAMPTZ;
+    composition_tolerance DOUBLE PRECISION;
+    floor_scale DOUBLE PRECISION;
+    threshold_scale DOUBLE PRECISION;
+    applied BOOLEAN;
+    active_ratio DOUBLE PRECISION;
+    weekend_ratio DOUBLE PRECISION;
+    segments INTEGER;
+    composition TEXT;
+    stored_active DOUBLE PRECISION;
+    stored_weekend DOUBLE PRECISION;
+    reason TEXT;
+    evidence_names TEXT[] := ARRAY[
+        'prior_points', 'session_matched_samples',
+        'session_matched_effective_samples', 'active_reference_samples',
+        'active_reference_effective_samples',
+        'session_matched_abs_return_p90_pct', 'active_reference_abs_return_p90_pct'
+    ];
+    prior_points NUMERIC;
+    matched_samples NUMERIC;
+    active_samples NUMERIC;
+    matched_effective DOUBLE PRECISION;
+    active_effective DOUBLE PRECISION;
+    matched_p90 DOUBLE PRECISION;
+    active_p90 DOUBLE PRECISION;
+    sufficient BOOLEAN;
+    expected_scale DOUBLE PRECISION;
+    expected_applied BOOLEAN;
+    expected_reason TEXT;
+BEGIN
+    IF jsonb_typeof(reference) IS DISTINCT FROM 'object'
+       OR event_time IS NULL OR NOT isfinite(event_time)
+       OR horizon_minutes IS NULL THEN
+        RETURN 'movement-width reference context is malformed';
+    END IF;
+    FOREACH field_name IN ARRAY ARRAY[
+        'horizon_minutes', 'lookback_days', 'minimum_effective_samples', 'session_segments'
+    ] LOOP
+        IF jsonb_typeof(reference->field_name) IS DISTINCT FROM 'number'
+           OR (reference->>field_name) !~ '^-?(0|[1-9][0-9]*)$' THEN
+            RETURN 'movement-width integer fields are malformed';
+        END IF;
+    END LOOP;
+    symbol := upper(research_stage8_anchor_strip_v1(coalesce(expected_symbol, '')));
+    IF symbol = '' OR upper(research_stage8_anchor_strip_v1(coalesce(reference->>'symbol', ''))) <> symbol THEN
+        RETURN 'movement-width symbol differs from the decision symbol';
+    END IF;
+    IF reference->>'calibration_version' IS DISTINCT FROM 'prior-only-session-width-v2' THEN
+        RETURN 'movement-width calibration version is incompatible';
+    END IF;
+    IF reference->>'policy' IS DISTINCT FROM
+       'prior raw price width; same-symbol session-composition matched; weekend width only' THEN
+        RETURN 'movement-width policy is incompatible';
+    END IF;
+    IF upper(coalesce(reference->>'source_kind', '')) <> 'PRIOR_ONLY_SESSION_CALIBRATION' THEN
+        RETURN 'movement-width source is not prior-only';
+    END IF;
+    IF (reference->>'horizon_minutes')::numeric <> horizon_minutes THEN
+        RETURN 'movement-width horizon differs from formula horizon';
+    END IF;
+    IF research_stage8_anchor_finite_number_v1(reference->'composition_tolerance') IS NOT TRUE THEN
+        RETURN 'movement-width calibration parameters are incompatible';
+    END IF;
+    composition_tolerance := (reference->>'composition_tolerance')::double precision;
+    IF (reference->>'lookback_days')::numeric <> 180
+       OR (reference->>'minimum_effective_samples')::numeric <> 30
+       OR abs(composition_tolerance - 0.25::double precision) > 1e-12::double precision THEN
+        RETURN 'movement-width calibration parameters are incompatible';
+    END IF;
+    as_of_utc := research_stage8_anchor_timestamp_v1(reference->'as_of_utc');
+    IF as_of_utc IS NULL THEN RETURN 'movement-width reference context is malformed'; END IF;
+    IF as_of_utc > event_time THEN
+        RETURN 'movement-width calibration is newer than decision time';
+    END IF;
+    IF research_stage8_anchor_finite_number_v1(reference->'floor_scale_factor') IS NOT TRUE
+       OR research_stage8_anchor_finite_number_v1(reference->'threshold_scale_factor') IS NOT TRUE THEN
+        RETURN 'movement-width scale fields are invalid or inconsistent';
+    END IF;
+    floor_scale := (reference->>'floor_scale_factor')::double precision;
+    threshold_scale := (reference->>'threshold_scale_factor')::double precision;
+    IF threshold_scale < 0.50 OR threshold_scale > 1.00
+       OR abs(floor_scale - threshold_scale) > 1e-12::double precision THEN
+        RETURN 'movement-width scale fields are invalid or inconsistent';
+    END IF;
+    IF jsonb_typeof(reference->'applied') IS DISTINCT FROM 'boolean' THEN
+        RETURN 'movement-width applied flag differs from scale';
+    END IF;
+    applied := (reference->>'applied')::boolean;
+    IF applied <> (threshold_scale < 1.0::double precision - 1e-9::double precision) THEN
+        RETURN 'movement-width applied flag differs from scale';
+    END IF;
+    SELECT ratios.active_ratio, ratios.weekend_ratio, ratios.segments
+      INTO active_ratio, weekend_ratio, segments
+      FROM research_stage8_anchor_session_ratios_v1(
+          event_time, event_time + make_interval(mins => horizon_minutes)
+      ) AS ratios;
+    composition := CASE
+        WHEN active_ratio >= 1.0::double precision - 1e-9::double precision THEN 'ACTIVE_ONLY'
+        WHEN active_ratio <= 1e-9::double precision THEN 'WEEKEND_ONLY'
+        ELSE 'MIXED'
+    END;
+    IF research_stage8_anchor_finite_number_v1(reference->'session_active_ratio') IS NOT TRUE
+       OR research_stage8_anchor_finite_number_v1(reference->'session_weekend_ratio') IS NOT TRUE THEN
+        RETURN 'movement-width session context differs from New York calendar';
+    END IF;
+    stored_active := (reference->>'session_active_ratio')::double precision;
+    stored_weekend := (reference->>'session_weekend_ratio')::double precision;
+    IF active_ratio IS NULL OR weekend_ratio IS NULL OR segments IS NULL
+       OR abs(stored_active - active_ratio) > 1e-6::double precision
+       OR abs(stored_weekend - weekend_ratio) > 1e-6::double precision
+       OR (reference->>'session_segments')::numeric <> segments
+       OR reference->>'session_composition' IS DISTINCT FROM composition THEN
+        RETURN 'movement-width session context differs from New York calendar';
+    END IF;
+    IF weekend_ratio <= 1e-9::double precision
+       AND threshold_scale < 1.0::double precision - 1e-9::double precision THEN
+        RETURN 'ACTIVE-only horizon cannot relax movement width';
+    END IF;
+    reason := coalesce(reference->>'reason', '');
+    IF reason = 'historical horizon unavailable' THEN
+        IF reference ?| evidence_names OR abs(threshold_scale - 1.0::double precision) > 1e-12::double precision THEN
+            RETURN 'unavailable movement-width history has forged evidence';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF NOT (reference ?& evidence_names) THEN
+        RETURN 'movement-width evidence summary is incomplete';
+    END IF;
+    FOREACH field_name IN ARRAY ARRAY['prior_points', 'session_matched_samples', 'active_reference_samples'] LOOP
+        IF jsonb_typeof(reference->field_name) IS DISTINCT FROM 'number'
+           OR (reference->>field_name) !~ '^-?(0|[1-9][0-9]*)$'
+           OR (reference->>field_name)::numeric < 0 THEN
+            RETURN 'movement-width sample evidence is malformed';
+        END IF;
+    END LOOP;
+    IF research_stage8_anchor_finite_number_v1(reference->'session_matched_effective_samples') IS NOT TRUE
+       OR research_stage8_anchor_finite_number_v1(reference->'active_reference_effective_samples') IS NOT TRUE
+       OR (reference->'session_matched_abs_return_p90_pct' <> 'null'::jsonb
+           AND research_stage8_anchor_finite_number_v1(reference->'session_matched_abs_return_p90_pct') IS NOT TRUE)
+       OR (reference->'active_reference_abs_return_p90_pct' <> 'null'::jsonb
+           AND research_stage8_anchor_finite_number_v1(reference->'active_reference_abs_return_p90_pct') IS NOT TRUE) THEN
+        RETURN 'movement-width sample evidence is malformed';
+    END IF;
+    prior_points := (reference->>'prior_points')::numeric;
+    matched_samples := (reference->>'session_matched_samples')::numeric;
+    active_samples := (reference->>'active_reference_samples')::numeric;
+    matched_effective := (reference->>'session_matched_effective_samples')::double precision;
+    active_effective := (reference->>'active_reference_effective_samples')::double precision;
+    matched_p90 := (reference->>'session_matched_abs_return_p90_pct')::double precision;
+    active_p90 := (reference->>'active_reference_abs_return_p90_pct')::double precision;
+    IF matched_samples > prior_points OR active_samples > prior_points
+       OR matched_effective < 0.0 OR active_effective < 0.0
+       OR matched_effective > matched_samples::double precision + 1e-6::double precision
+       OR active_effective > active_samples::double precision + 1e-6::double precision
+       OR (matched_samples = 0) <> (matched_p90 IS NULL)
+       OR (active_samples = 0) <> (active_p90 IS NULL)
+       OR matched_p90 < 0.0 OR active_p90 < 0.0 THEN
+        RETURN 'movement-width sample evidence is malformed';
+    END IF;
+    sufficient := matched_effective >= 30 AND active_effective >= 30
+        AND matched_p90 IS NOT NULL AND matched_p90 >= 0.0
+        AND active_p90 IS NOT NULL AND active_p90 > 0.0;
+    IF NOT sufficient THEN
+        IF reason <> 'insufficient prior-only width calibration evidence' THEN
+            RETURN 'insufficient movement-width evidence has an invalid reason';
+        END IF;
+        IF abs(threshold_scale - 1.0::double precision) > 1e-12::double precision THEN
+            RETURN 'insufficient movement-width evidence cannot relax width';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF weekend_ratio <= 1e-9::double precision THEN
+        IF reason <> 'ACTIVE-only horizon keeps the static movement width'
+           OR abs(threshold_scale - 1.0::double precision) > 1e-12::double precision THEN
+            RETURN 'ACTIVE-only movement-width decision is inconsistent';
+        END IF;
+        RETURN NULL;
+    END IF;
+    -- Python permits an overflowing positive division to become infinity;
+    -- clamp before division in this branch to obtain the same bounded result.
+    expected_scale := CASE WHEN matched_p90 >= active_p90 THEN 1.0
+        WHEN matched_p90 <= active_p90 * 0.50 THEN 0.50 ELSE
+        research_stage8_anchor_round6_v1(greatest(0.50::double precision, matched_p90 / active_p90))
+    END;
+    expected_applied := expected_scale < 1.0::double precision - 1e-9::double precision;
+    expected_reason := CASE WHEN expected_applied THEN
+        'weekend/mixed width floor calibrated from prior raw price history'
+        ELSE 'session width was not below the ACTIVE reference' END;
+    IF abs(threshold_scale - expected_scale) > 1e-12::double precision
+       OR applied IS DISTINCT FROM expected_applied OR reason <> expected_reason THEN
+        RETURN 'movement-width scale does not match frozen evidence';
+    END IF;
+    RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+    RETURN 'movement-width reference context is malformed';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_width_valid_v1(
+    reference JSONB, expected_symbol TEXT, event_time TIMESTAMPTZ, horizon_minutes INTEGER
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE SECURITY INVOKER PARALLEL SAFE
+AS $$
+    SELECT research_stage8_anchor_width_error_v1($1, $2, $3, $4) IS NULL;
+$$;
+
+-- Pure validation of the v4 producer's outcome-free, model-ABSENT feature bundle.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_feature_name_valid_v1(p_name TEXT)
+RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS $$
+DECLARE
+    parts TEXT[];
+    field TEXT;
+    ending TEXT;
+BEGIN
+    IF p_name IS NULL OR p_name = '' OR p_name <> research_stage8_anchor_strip_v1(p_name) THEN
+        RETURN FALSE;
+    END IF;
+    IF p_name = ANY (ARRAY[
+        'event.symbol', 'event.event_type', 'event.source_side', 'event.timeframe',
+        'time.is_market_weekend', 'time.market_session', 'time.market_regime',
+        'time.market_session_timezone', 'time.market_session_definition',
+        'time.market_local_hour', 'time.market_local_minute',
+        'time.market_local_weekday', 'time.market_local_weekday_name',
+        'time.market_time_bucket', 'historical.event_market_session'
+    ]) THEN RETURN TRUE; END IF;
+    parts := string_to_array(p_name, '.');
+    IF parts[1] = 'latest' THEN
+        RETURN cardinality(parts) = 3
+            AND parts[2] = ANY (ARRAY['price_oi', 'futures_cvd', 'spot_cvd'])
+            AND parts[3] = 'buy_sell_ratio';
+    ELSIF parts[1] = ANY (ARRAY['raw', 'aligned', 'aligned_log', 'historical']) THEN
+        IF cardinality(parts) <> 3
+           OR NOT (parts[2] = ANY (ARRAY['30m', '60m', '240m', '720m', '1440m']))
+        THEN RETURN FALSE; END IF;
+        field := parts[3];
+        IF parts[1] = 'raw' THEN
+            RETURN field = ANY (ARRAY[
+                'session_active_ratio', 'session_weekend_ratio', 'session_composition',
+                'price_change_pct', 'oi_change_pct', 'futures_continuous_cvd_change_usd',
+                'spot_continuous_cvd_change_usd', 'futures_api_cvd_change_usd',
+                'spot_api_cvd_change_usd', 'spot_to_futures_abs_cvd_ratio',
+                'price_oi_state', 'spot_futures_alignment', 'price_spot_alignment',
+                'price_futures_alignment'
+            ]);
+        ELSIF parts[1] = ANY (ARRAY['aligned', 'aligned_log']) THEN
+            RETURN field = ANY (ARRAY[
+                'price_change_pct', 'futures_continuous_cvd_change_usd',
+                'spot_continuous_cvd_change_usd', 'futures_api_cvd_change_usd',
+                'spot_api_cvd_change_usd'
+            ]);
+        ELSE
+            RETURN field = ANY (ARRAY[
+                'session_active_ratio', 'session_weekend_ratio', 'session_composition'
+            ]) OR field ~ '^(price_change_pct|oi_change_pct|futures_continuous_cvd_change_usd|spot_continuous_cvd_change_usd)_(percentile_session_matched|abs_percentile_session_matched|median_session_matched|abs_median_session_matched)$';
+        END IF;
+    ELSIF parts[1] = 'max_pain' THEN
+        IF cardinality(parts) = 3 AND parts[2] = 'aggregate' THEN
+            RETURN parts[3] = ANY (ARRAY[
+                'upside_active_timeframe_count', 'downside_active_timeframe_count',
+                'closer_upside_count', 'closer_downside_count', 'consensus_direction',
+                'consensus_count', 'consensus_ratio', 'upside_liquidity_usd',
+                'downside_liquidity_usd', 'short_liquidity_usd', 'long_liquidity_usd',
+                'upside_downside_liquidity_ratio', 'short_long_liquidity_ratio',
+                'liquidity_imbalance_pct', 'median_upside_active_distance_pct',
+                'median_downside_active_distance_pct', 'upside_cluster_count_1pct',
+                'upside_cluster_spread_pct', 'upside_all_target_spread_pct',
+                'downside_cluster_count_1pct', 'downside_cluster_spread_pct',
+                'downside_all_target_spread_pct'
+            ]);
+        ELSIF p_name = 'max_pain.delta.minutes_since_previous_snapshot' THEN
+            RETURN TRUE;
+        ELSIF cardinality(parts) = 3 AND parts[2] = 'delta' THEN
+            field := parts[3];
+            FOREACH ending IN ARRAY ARRAY['_change_pct', '_change', '_trend'] LOOP
+                IF right(field, length(ending)) = ending THEN
+                    RETURN left(field, length(field) - length(ending)) = ANY (ARRAY[
+                        'upside_liquidity_usd', 'downside_liquidity_usd',
+                        'liquidity_imbalance_pct', 'closer_upside_count',
+                        'closer_downside_count', 'upside_cluster_count_1pct',
+                        'downside_cluster_count_1pct', 'upside_cluster_spread_pct',
+                        'downside_cluster_spread_pct'
+                    ]);
+                END IF;
+            END LOOP;
+        ELSIF cardinality(parts) = 4 AND parts[2] = 'delta'
+              AND parts[3] = ANY (ARRAY['12h', '24h', '48h', '3d', '1w', '2w', '1m'])
+        THEN
+            field := parts[4];
+            FOREACH ending IN ARRAY ARRAY['_change', '_trend'] LOOP
+                IF right(field, length(ending)) = ending THEN
+                    RETURN left(field, length(field) - length(ending)) = ANY (ARRAY[
+                        'upside_liquidity_usd', 'downside_liquidity_usd',
+                        'upside_active_distance_pct', 'downside_active_distance_pct',
+                        'short_target_signed_distance_pct', 'long_target_signed_distance_pct'
+                    ]);
+                END IF;
+            END LOOP;
+        ELSIF cardinality(parts) = 3
+              AND parts[2] = ANY (ARRAY['12h', '24h', '48h', '3d', '1w', '2w', '1m'])
+        THEN
+            RETURN parts[3] = ANY (ARRAY[
+                'short_target_signed_distance_pct', 'long_target_signed_distance_pct',
+                'upside_active_distance_pct', 'downside_active_distance_pct',
+                'upside_liquidity_usd', 'downside_liquidity_usd',
+                'short_liquidity_usd', 'long_liquidity_usd',
+                'upside_downside_liquidity_ratio', 'short_long_liquidity_ratio',
+                'liquidity_imbalance_pct', 'closer_active_direction'
+            ]);
+        END IF;
+    END IF;
+    RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_forbidden_bundle_key_v1(p_value JSONB)
+RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS $$
+DECLARE item RECORD; element JSONB;
+BEGIN
+    IF p_value IS NULL THEN RETURN TRUE; END IF;
+    IF jsonb_typeof(p_value) = 'object' THEN
+        FOR item IN SELECT key, value FROM jsonb_each(p_value) LOOP
+            IF item.key = '' OR lower(research_stage8_anchor_strip_v1(item.key)) = ANY (ARRAY[
+                'outcome_label', 'mfe', 'mfe_pct', 'mae', 'mae_pct',
+                'full_horizon_mae_pct', 'path_success', 'first_touch_status',
+                'price_at_horizon', 'raw_return_pct', 'directional_return_pct',
+                'target_reached', 'time_to_mfe_seconds', 'time_to_target_seconds',
+                'time_to_first_progress_seconds'
+            ]) OR research_stage8_anchor_forbidden_bundle_key_v1(item.value) THEN
+                RETURN TRUE;
+            END IF;
+        END LOOP;
+    ELSIF jsonb_typeof(p_value) = 'array' THEN
+        FOR element IN SELECT value FROM jsonb_array_elements(p_value) LOOP
+            IF research_stage8_anchor_forbidden_bundle_key_v1(element) THEN RETURN TRUE; END IF;
+        END LOOP;
+    END IF;
+    RETURN FALSE;
+EXCEPTION WHEN OTHERS THEN RETURN TRUE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_series_valid_v1(
+    p_manifest JSONB, p_decision TIMESTAMPTZ
+) RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS $$
+DECLARE
+    n NUMERIC;
+    first_time TIMESTAMPTZ;
+    last_time TIMESTAMPTZ;
+    versions JSONB;
+    canonical_versions JSONB;
+    version_count INTEGER;
+BEGIN
+    IF p_manifest IS NULL OR p_decision IS NULL
+       OR jsonb_typeof(p_manifest) <> 'object' THEN RETURN FALSE; END IF;
+    IF NOT (p_manifest ?& ARRAY['count', 'first_decision_time_utc',
+        'last_decision_time_utc', 'sha256', 'sampler_versions'])
+       OR (SELECT count(*) FROM jsonb_object_keys(p_manifest)) <> 5
+       OR jsonb_typeof(p_manifest->'count') IS DISTINCT FROM 'number'
+       OR (p_manifest->>'count') !~ '^(0|[1-9][0-9]*)$'
+       OR jsonb_typeof(p_manifest->'sha256') IS DISTINCT FROM 'string'
+       OR (p_manifest->>'sha256') !~ '^[0-9a-f]{64}$'
+       OR jsonb_typeof(p_manifest->'sampler_versions') IS DISTINCT FROM 'array'
+    THEN RETURN FALSE; END IF;
+    n := (p_manifest->>'count')::NUMERIC;
+    versions := p_manifest->'sampler_versions';
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(versions) AS e(value)
+        WHERE jsonb_typeof(e.value) <> 'string'
+           OR (e.value #>> '{}') NOT IN (
+                'prospective-neutral-anchor-v3-max-pain-frozen',
+                'prospective-neutral-anchor-v4-decision-features-frozen')
+    ) THEN RETURN FALSE; END IF;
+    SELECT count(*), coalesce(jsonb_agg(v ORDER BY v COLLATE "C"), '[]'::JSONB)
+      INTO version_count, canonical_versions
+      FROM (SELECT DISTINCT value #>> '{}' AS v FROM jsonb_array_elements(versions)) AS s;
+    IF jsonb_array_length(versions) <> version_count OR versions <> canonical_versions
+    THEN RETURN FALSE; END IF;
+    IF n = 0 THEN
+        RETURN p_manifest->'first_decision_time_utc' = 'null'::JSONB
+           AND p_manifest->'last_decision_time_utc' = 'null'::JSONB
+           AND versions = '[]'::JSONB;
+    END IF;
+    first_time := research_stage8_anchor_timestamp_v1(p_manifest->'first_decision_time_utc');
+    last_time := research_stage8_anchor_timestamp_v1(p_manifest->'last_decision_time_utc');
+    RETURN coalesce(first_time IS NOT NULL AND last_time IS NOT NULL
+        AND first_time <= last_time AND last_time <= p_decision
+        AND version_count > 0
+        AND p_manifest->>'first_decision_time_utc' = research_stage8_utc_text_v1(first_time)
+        AND p_manifest->>'last_decision_time_utc' = research_stage8_utc_text_v1(last_time), FALSE);
+EXCEPTION WHEN OTHERS THEN RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION research_stage8_anchor_bundle_valid_v1(
+    p_bundle JSONB, p_symbol TEXT, p_decision TIMESTAMPTZ, p_expected_hash TEXT
+) RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS $$
+DECLARE
+    bundle_symbol TEXT;
+    bundle_time TIMESTAMPTZ;
+    features JSONB;
+    direction TEXT;
+    feature RECORD;
+    horizon INTEGER;
+    context JSONB;
+    session_context JSONB;
+    width JSONB;
+    active_ratio DOUBLE PRECISION;
+    weekend_ratio DOUBLE PRECISION;
+    composition TEXT;
+BEGIN
+    IF p_bundle IS NULL OR p_symbol IS NULL OR p_decision IS NULL OR p_expected_hash IS NULL
+       OR jsonb_typeof(p_bundle) <> 'object' THEN RETURN FALSE; END IF;
+    IF NOT (p_bundle ?& ARRAY[
+        'bundle_schema_version', 'feature_policy_version', 'feature_schema_version',
+        'decision_time_utc', 'symbol', 'source_series_manifest', 'features_by_direction',
+        'horizon_context', 'model_score_status'])
+       OR (SELECT count(*) FROM jsonb_object_keys(p_bundle)) <> 9
+       OR p_bundle->>'bundle_schema_version' IS DISTINCT FROM 'prospective-decision-feature-bundle-schema-v1'
+       OR p_bundle->>'feature_policy_version' IS DISTINCT FROM 'prospective-decision-feature-bundle-v1'
+       OR p_bundle->>'model_score_status' IS DISTINCT FROM 'ABSENT'
+       OR NOT research_stage8_anchor_nonempty_v1(p_bundle->'feature_schema_version')
+       OR jsonb_typeof(p_bundle->'symbol') IS DISTINCT FROM 'string'
+       OR lower(research_stage8_anchor_strip_v1(p_expected_hash)) !~ '^[0-9a-f]{64}$'
+    THEN RETURN FALSE; END IF;
+    bundle_symbol := upper(research_stage8_anchor_strip_v1(p_bundle->>'symbol'));
+    IF bundle_symbol !~ '^[A-Z0-9-]{1,20}$'
+       OR replace(bundle_symbol, '-', '') = ''
+       OR bundle_symbol <> upper(research_stage8_anchor_strip_v1(p_symbol)) THEN RETURN FALSE; END IF;
+    bundle_time := research_stage8_anchor_timestamp_v1(p_bundle->'decision_time_utc');
+    IF bundle_time IS NULL OR bundle_time <> p_decision
+       OR p_bundle->>'decision_time_utc' IS DISTINCT FROM research_stage8_utc_text_v1(bundle_time)
+       OR research_stage8_anchor_forbidden_bundle_key_v1(p_bundle)
+       OR NOT research_stage8_anchor_series_valid_v1(p_bundle->'source_series_manifest', bundle_time)
+    THEN RETURN FALSE; END IF;
+    features := p_bundle->'features_by_direction';
+    IF jsonb_typeof(features) IS DISTINCT FROM 'object'
+       OR NOT (features ?& ARRAY['LONG', 'SHORT'])
+       OR (SELECT count(*) FROM jsonb_object_keys(features)) <> 2
+    THEN RETURN FALSE; END IF;
+    FOREACH direction IN ARRAY ARRAY['LONG', 'SHORT'] LOOP
+        IF jsonb_typeof(features->direction) IS DISTINCT FROM 'object' THEN RETURN FALSE; END IF;
+        FOR feature IN SELECT key, value FROM jsonb_each(features->direction) LOOP
+            IF NOT research_stage8_anchor_feature_name_valid_v1(feature.key)
+               OR jsonb_typeof(feature.value) NOT IN ('boolean', 'number', 'string')
+               OR (jsonb_typeof(feature.value) = 'number' AND feature.value::text LIKE '%.%'
+                   AND NOT research_stage8_anchor_finite_number_v1(feature.value))
+            THEN RETURN FALSE; END IF;
+        END LOOP;
+    END LOOP;
+    IF jsonb_typeof(p_bundle->'horizon_context') IS DISTINCT FROM 'object'
+       OR NOT ((p_bundle->'horizon_context') ?& ARRAY['60', '240', '720', '1440'])
+       OR (SELECT count(*) FROM jsonb_object_keys(p_bundle->'horizon_context')) <> 4
+    THEN RETURN FALSE; END IF;
+    FOREACH horizon IN ARRAY ARRAY[60, 240, 720, 1440] LOOP
+        context := p_bundle->'horizon_context'->horizon::TEXT;
+        IF jsonb_typeof(context) IS DISTINCT FROM 'object'
+           OR NOT (context ?& ARRAY['session', 'movement_width_reference'])
+           OR (SELECT count(*) FROM jsonb_object_keys(context)) <> 2
+        THEN RETURN FALSE; END IF;
+        session_context := context->'session';
+        IF jsonb_typeof(session_context) IS DISTINCT FROM 'object'
+           OR NOT (session_context ?& ARRAY['active_ratio', 'weekend_ratio', 'composition', 'segments'])
+           OR (SELECT count(*) FROM jsonb_object_keys(session_context)) <> 4
+           OR NOT research_stage8_anchor_finite_number_v1(session_context->'active_ratio')
+           OR NOT research_stage8_anchor_finite_number_v1(session_context->'weekend_ratio')
+           OR jsonb_typeof(session_context->'segments') IS DISTINCT FROM 'number'
+           OR (session_context->>'segments') !~ '^(0|[1-9][0-9]*)$'
+        THEN RETURN FALSE; END IF;
+        active_ratio := (session_context->>'active_ratio')::DOUBLE PRECISION;
+        weekend_ratio := (session_context->>'weekend_ratio')::DOUBLE PRECISION;
+        composition := CASE WHEN active_ratio >= 1.0 - 1e-9 THEN 'ACTIVE_ONLY'
+                            WHEN active_ratio <= 1e-9 THEN 'WEEKEND_ONLY' ELSE 'MIXED' END;
+        IF abs(active_ratio + weekend_ratio - 1.0) > 1e-6
+           OR session_context->>'composition' IS DISTINCT FROM composition
+        THEN RETURN FALSE; END IF;
+        width := context->'movement_width_reference';
+        IF research_stage8_anchor_width_valid_v1(width, bundle_symbol, bundle_time, horizon) IS DISTINCT FROM TRUE
+           OR width->>'as_of_utc' IS DISTINCT FROM research_stage8_utc_text_v1(
+                research_stage8_anchor_timestamp_v1(width->'as_of_utc'))
+        THEN RETURN FALSE; END IF;
+        IF abs(active_ratio - (width->>'session_active_ratio')::DOUBLE PRECISION) > 1e-6
+           OR abs(weekend_ratio - (width->>'session_weekend_ratio')::DOUBLE PRECISION) > 1e-6
+           OR session_context->>'composition' IS DISTINCT FROM width->>'session_composition'
+           OR (session_context->>'segments')::NUMERIC IS DISTINCT FROM (width->>'session_segments')::NUMERIC
+        THEN RETURN FALSE; END IF;
+    END LOOP;
+    RETURN coalesce(research_stage8_anchor_json_sha256_v1(p_bundle) = lower(research_stage8_anchor_strip_v1(p_expected_hash)), FALSE);
+EXCEPTION WHEN OTHERS THEN RETURN FALSE;
+END;
+$$;
+
+-- All inputs below are read by the pinned derivation from the durable source
+-- graph. This pure function grants no authority to a caller-supplied receipt.
+CREATE OR REPLACE FUNCTION research_stage8_anchor_errors_v1(
+    attempt JSONB, slot JSONB, events JSONB)
+RETURNS TEXT[] LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+SET TimeZone = 'UTC'
+AS $$
+DECLARE errors TEXT[] := ARRAY[]::TEXT[]; field TEXT; direction TEXT;
+        opened TIMESTAMPTZ; closed TIMESTAMPTZ; base_time TIMESTAMPTZ;
+        expires TIMESTAMPTZ; decision TIMESTAMPTZ; event JSONB; ref JSONB;
+        input_payload JSONB; fingerprint TEXT; anchor_key TEXT;
+        expected_event_id JSONB; official_price DOUBLE PRECISION; event_price DOUBLE PRECISION;
+        symbol TEXT; policy TEXT := 'prospective-coverage-v3-completed-fully-validated-replay-run:no-dwell-first-touch-v6:historical-raw-opportunity-replay-v2-balanced-prior-session-width';
+BEGIN
+    IF jsonb_typeof(attempt) IS DISTINCT FROM 'object'
+       OR attempt->>'sampler_version' IS DISTINCT FROM 'prospective-neutral-anchor-v4-decision-features-frozen'
+       OR attempt->>'coverage_policy_version' IS DISTINCT FROM policy
+       OR COALESCE(attempt->>'evaluation_status','') NOT IN ('EVALUABLE','UNEVALUABLE','COVERAGE_EXCLUDED')
+       OR NOT research_stage8_anchor_nonempty_v1(attempt->'evaluation_reason')
+       OR jsonb_typeof(attempt->'attempt_id') IS DISTINCT FROM 'number'
+       OR COALESCE(attempt->>'attempt_id','') !~ '^[0-9]+$'
+       OR (attempt->>'attempt_id')::numeric NOT BETWEEN 1 AND 9223372036854775807 THEN
+        RETURN ARRAY['ANCHOR_ATTEMPT_AUTHORITY_INVALID'];
+    END IF;
+    IF attempt->>'evaluation_status' <> 'EVALUABLE' THEN
+        IF COALESCE(attempt->'decision_time_utc','null'::jsonb) <> 'null'::jsonb THEN
+            RETURN ARRAY['ANCHOR_NON_EVALUABLE_HAS_DECISION'];
+        END IF;
+        RETURN errors;
+    END IF;
+    IF jsonb_typeof(slot) IS DISTINCT FROM 'object'
+       OR jsonb_typeof(slot->'anchor_slot_id') IS DISTINCT FROM 'number'
+       OR COALESCE(slot->>'anchor_slot_id','') !~ '^[0-9]+$'
+       OR (slot->>'anchor_slot_id')::numeric NOT BETWEEN 1 AND 9223372036854775807 THEN
+        RETURN ARRAY['ANCHOR_SLOT_INVALID'];
+    END IF;
+    FOREACH field IN ARRAY ARRAY['sampler_version','coverage_policy_version','symbol','interval_minutes',
+        'feature_bundle_policy_version','feature_bundle_sha256','input_fingerprint',
+        'coverage_snapshot','source_timestamps','source_provenance','frozen_inputs'] LOOP
+        IF research_stage8_anchor_canonical_json_v1(attempt->field) IS DISTINCT FROM
+           research_stage8_anchor_canonical_json_v1(slot->field) THEN
+            errors := array_append(errors,'ANCHOR_ATTEMPT_SLOT_MISMATCH:' || field);
+        END IF;
+    END LOOP;
+    FOREACH field IN ARRAY ARRAY['source_candle_open_utc','source_candle_close_utc',
+        'base_eligible_at_utc','expires_at_utc','decision_time_utc'] LOOP
+        IF research_stage8_anchor_aware_timestamp_v1(attempt->field) IS NULL
+           OR research_stage8_anchor_aware_timestamp_v1(attempt->field) IS DISTINCT FROM
+              research_stage8_anchor_aware_timestamp_v1(slot->field) THEN
+            errors := array_append(errors,'ANCHOR_ATTEMPT_SLOT_TIME_MISMATCH:' || field);
+        END IF;
+    END LOOP;
+    opened := research_stage8_anchor_aware_timestamp_v1(slot->'source_candle_open_utc');
+    closed := research_stage8_anchor_aware_timestamp_v1(slot->'source_candle_close_utc');
+    base_time := research_stage8_anchor_aware_timestamp_v1(slot->'base_eligible_at_utc');
+    expires := research_stage8_anchor_aware_timestamp_v1(slot->'expires_at_utc');
+    decision := research_stage8_anchor_aware_timestamp_v1(slot->'decision_time_utc');
+    symbol := slot->>'symbol';
+    IF opened IS NULL OR decision IS NULL
+       OR slot->'interval_minutes' IS DISTINCT FROM '30'::jsonb
+       OR date_trunc('minute',opened) IS DISTINCT FROM opened
+       OR extract(minute FROM opened)::integer % 30 <> 0
+       OR closed IS DISTINCT FROM opened + interval '30 minutes'
+       OR base_time IS DISTINCT FROM opened + interval '32 minutes'
+       OR expires IS DISTINCT FROM opened + interval '62 minutes'
+       OR decision < base_time OR decision >= expires
+       OR research_stage8_anchor_aware_timestamp_v1(attempt->'checked_at_utc') IS DISTINCT FROM decision
+       OR attempt->'missing_sources' IS DISTINCT FROM '[]'::jsonb
+       OR symbol IS NULL OR symbol !~ '^[A-Z0-9-]{1,20}$'
+       OR replace(symbol,'-','') = '' THEN
+        errors := array_append(errors,'ANCHOR_DECISION_INTERVAL_INVALID');
+    END IF;
+    IF NOT research_stage8_anchor_coverage_valid_v1(slot->'coverage_snapshot',symbol,decision) THEN
+        errors := array_append(errors,'ANCHOR_COVERAGE_INVALID');
+    END IF;
+    IF NOT research_stage8_anchor_sources_valid_v1(slot->'frozen_inputs',slot->'source_timestamps',
+            slot->'source_provenance',symbol,opened,closed,base_time,decision) THEN
+        errors := array_append(errors,'ANCHOR_SOURCE_INVALID');
+    END IF;
+    IF slot->>'feature_bundle_policy_version' IS DISTINCT FROM 'prospective-decision-feature-bundle-v1'
+       OR NOT research_stage8_anchor_bundle_valid_v1(slot->'decision_feature_bundle',symbol,
+            decision,slot->>'feature_bundle_sha256') THEN
+        errors := array_append(errors,'ANCHOR_FEATURE_BUNDLE_INVALID');
+    END IF;
+    input_payload := jsonb_build_object(
+        'sampler_version',slot->'sampler_version','coverage_policy_version',slot->'coverage_policy_version',
+        'coverage_snapshot',slot->'coverage_snapshot','symbol',symbol,
+        'source_candle_open_utc',research_stage8_utc_text_v1(opened),
+        'source_candle_close_utc',research_stage8_utc_text_v1(closed),
+        'base_eligible_at_utc',research_stage8_utc_text_v1(base_time),
+        'expires_at_utc',research_stage8_utc_text_v1(expires),
+        'evaluation_status','EVALUABLE','decision_time_utc',research_stage8_utc_text_v1(decision),
+        'source_timestamps',slot->'source_timestamps','source_provenance',slot->'source_provenance',
+        'frozen_formula_visible_inputs',slot->'frozen_inputs',
+        'feature_bundle_policy_version',slot->'feature_bundle_policy_version',
+        'feature_bundle_sha256',slot->'feature_bundle_sha256');
+    fingerprint := research_stage8_anchor_json_sha256_v1(input_payload);
+    IF fingerprint IS DISTINCT FROM research_stage8_anchor_strip_v1(slot->>'input_fingerprint')
+       OR fingerprint IS DISTINCT FROM research_stage8_anchor_strip_v1(attempt->>'input_fingerprint') THEN
+        errors := array_append(errors,'ANCHOR_INPUT_FINGERPRINT_MISMATCH');
+    END IF;
+    IF jsonb_typeof(events) IS DISTINCT FROM 'array' OR jsonb_array_length(events) <> 2
+       OR slot->'long_event_id' IS NOT DISTINCT FROM slot->'short_event_id' THEN
+        RETURN array_append(errors,'ANCHOR_EXACT_EVENT_PAIR_MISMATCH');
+    END IF;
+    anchor_key := research_stage8_anchor_json_sha256_v1(jsonb_build_object(
+        'sampler_version',slot->'sampler_version','symbol',symbol,
+        'source_candle_open_utc',research_stage8_utc_text_v1(opened)));
+    official_price := research_stage8_anchor_number_v1(slot->'frozen_inputs'->'official_price'->'price');
+    FOREACH direction IN ARRAY ARRAY['LONG','SHORT'] LOOP
+        expected_event_id := slot->CASE direction WHEN 'LONG' THEN 'long_event_id' ELSE 'short_event_id' END;
+        IF jsonb_typeof(expected_event_id) IS DISTINCT FROM 'number'
+           OR COALESCE(expected_event_id #>> '{}','') !~ '^[0-9]+$'
+           OR (expected_event_id #>> '{}')::numeric NOT BETWEEN 1 AND 9223372036854775807
+           OR (SELECT count(*) FROM jsonb_array_elements(events) AS e(value)
+               WHERE e.value->'event_id' = expected_event_id) <> 1 THEN
+            errors := array_append(errors,'ANCHOR_EVENT_ID_INVALID:' || direction);
+            CONTINUE;
+        END IF;
+        SELECT value INTO event FROM jsonb_array_elements(events) AS e(value)
+        WHERE value->'event_id' = expected_event_id;
+        ref := event->'engine_snapshot'->'prospective_anchor';
+        IF jsonb_typeof(event) IS DISTINCT FROM 'object'
+           OR event->>'schema_version' IS DISTINCT FROM 'research-event-v1'
+           OR event->>'direction' IS DISTINCT FROM direction OR event->>'symbol' IS DISTINCT FROM symbol
+           OR event->>'event_kind' IS DISTINCT FROM 'DECISION_SAMPLE'
+           OR event->>'event_type' IS DISTINCT FROM 'PROSPECTIVE_NEUTRAL_30M'
+           OR event->>'source_side' IS DISTINCT FROM 'RAW_NEUTRAL'
+           OR event->>'timeframe' IS DISTINCT FROM '30m'
+           OR event->>'capture_stage' IS DISTINCT FROM 'SILENT_NEUTRAL_ANCHOR'
+           OR event->>'strategy_version' IS DISTINCT FROM 'formula-prospective-neutral-v4'
+           OR event->>'delivery_status' IS DISTINCT FROM 'NOT_APPLICABLE'
+           OR length(COALESCE(event->>'setup_key','')) <> 64
+           OR octet_length(convert_to(research_stage8_anchor_canonical_json_v1(
+                event->'engine_snapshot'),'UTF8')) > 32000
+           OR research_stage8_anchor_aware_timestamp_v1(event->'alert_time_utc') IS DISTINCT FROM decision
+           OR jsonb_typeof(ref) IS DISTINCT FROM 'object'
+           OR ref ? 'decision_feature_bundle'
+           OR ref->>'anchor_key' IS DISTINCT FROM anchor_key
+           OR ref->>'sampling_frame' IS DISTINCT FROM 'NEUTRAL_30M_BOTH_DIRECTIONS'
+           OR ref->>'delivery_status' IS DISTINCT FROM 'NOT_APPLICABLE'
+           OR ref->'telegram_delivery_allowed' IS DISTINCT FROM 'false'::jsonb
+           OR ref->'trade_execution_allowed' IS DISTINCT FROM 'false'::jsonb
+           OR ref->'coverage_eligible' IS DISTINCT FROM 'true'::jsonb
+           OR COALESCE(event->'score','null'::jsonb) <> 'null'::jsonb
+           OR COALESCE(event->'target_price','null'::jsonb) <> 'null'::jsonb
+           OR COALESCE(event->'initial_target_distance_pct','null'::jsonb) <> 'null'::jsonb THEN
+            errors := array_append(errors,'ANCHOR_EVENT_AUTHORITY_INVALID:' || direction);
+        END IF;
+        IF event->>'event_fingerprint' IS DISTINCT FROM research_stage8_anchor_json_sha256_v1(jsonb_build_object(
+            'sampler_version',slot->'sampler_version','event_type','PROSPECTIVE_NEUTRAL_30M',
+            'symbol',symbol,'direction',direction,'source_candle_open_utc',research_stage8_utc_text_v1(opened))) THEN
+            errors := array_append(errors,'ANCHOR_EVENT_FINGERPRINT_MISMATCH:' || direction);
+        END IF;
+        FOREACH field IN ARRAY ARRAY['sampler_version','coverage_policy_version','coverage_snapshot',
+            'input_fingerprint','source_timestamps','source_provenance','frozen_inputs',
+            'feature_bundle_policy_version','feature_bundle_sha256'] LOOP
+            IF research_stage8_anchor_reference_canonical_json_v1(ref->field) IS DISTINCT FROM
+               research_stage8_anchor_reference_canonical_json_v1(slot->field) THEN
+                errors := array_append(errors,'ANCHOR_EVENT_REFERENCE_MISMATCH:' || direction || ':' || field);
+            END IF;
+        END LOOP;
+        FOREACH field IN ARRAY ARRAY['source_candle_open_utc','source_candle_close_utc',
+            'base_eligible_at_utc','expires_at_utc','decision_time_utc'] LOOP
+            IF research_stage8_anchor_aware_timestamp_v1(ref->field) IS NULL
+               OR research_stage8_anchor_aware_timestamp_v1(ref->field) IS DISTINCT FROM
+                  research_stage8_anchor_aware_timestamp_v1(slot->field) THEN
+                errors := array_append(errors,'ANCHOR_EVENT_REFERENCE_TIME_MISMATCH:' || direction || ':' || field);
+            END IF;
+        END LOOP;
+        event_price := research_stage8_anchor_number_v1(event->'current_price');
+        IF official_price IS NULL OR event_price IS NULL
+           OR abs(event_price-official_price) > 1e-12 * greatest(abs(event_price),abs(official_price)) THEN
+            errors := array_append(errors,'ANCHOR_REFERENCE_PRICE_MISMATCH:' || direction);
+        END IF;
+    END LOOP;
+    RETURN errors;
+EXCEPTION WHEN OTHERS THEN RETURN array_append(errors,'ANCHOR_AUTHORITY_MALFORMED');
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION research_stage8_expected_scope_v1(value TEXT)
 RETURNS JSONB
 LANGUAGE sql
@@ -1201,6 +2334,7 @@ DECLARE
     source_attempt research_prospective_anchor_attempts%ROWTYPE;
     source_slot research_prospective_anchor_slots%ROWTYPE;
     source_event research_events%ROWTYPE;
+    source_anchor_events JSONB;
     source_snapshot research_max_pain_snapshot_sets%ROWTYPE;
     source_parent research_btc_parent_movements%ROWTYPE;
     source_bar research_btc_price_bars%ROWTYPE;
@@ -1254,6 +2388,10 @@ BEGIN
     FROM research_prospective_anchor_attempts
     WHERE attempt_id = requested_attempt_id;
 
+    IF source_attempt.attempt_id <= 0 THEN
+        reasons := array_append(reasons, 'ANCHOR_ATTEMPT_ID_INVALID');
+    END IF;
+
     candidate := registry.exact_binding->'binding'->'candidate';
     direction := candidate->>'direction';
     model_name := candidate->>'model';
@@ -1276,7 +2414,7 @@ BEGIN
     END IF;
     IF source_attempt.coverage_policy_version IS DISTINCT FROM
            'prospective-coverage-v3-completed-fully-validated-replay-run:no-dwell-first-touch-v6:historical-raw-opportunity-replay-v2-balanced-prior-session-width'
-       OR btrim(COALESCE(source_attempt.evaluation_reason,'')) = '' THEN
+       OR research_stage8_anchor_strip_v1(COALESCE(source_attempt.evaluation_reason,'')) = '' THEN
         reasons := array_append(reasons,'ATTEMPT_COVERAGE_OR_STATUS_INVALID');
     END IF;
     IF source_attempt.attempt_fingerprint !~ '^[0-9a-f]{64}$' THEN
@@ -1318,6 +2456,14 @@ BEGIN
         IF NOT slot_found THEN
             reasons := array_append(reasons, 'ANCHOR_SLOT_MISSING');
         ELSE
+            -- Validate the complete persisted neutral pair, including the
+            -- opposite-direction event. No caller anchor receipt is read.
+            SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.event_id), '[]'::jsonb)
+            INTO source_anchor_events
+            FROM research_events AS e
+            WHERE e.event_id IN (source_slot.long_event_id, source_slot.short_event_id);
+            reasons := reasons || research_stage8_anchor_errors_v1(
+                to_jsonb(source_attempt), to_jsonb(source_slot), source_anchor_events);
             IF source_slot.input_fingerprint
                     IS DISTINCT FROM source_attempt.input_fingerprint
                OR source_slot.decision_time_utc
@@ -1727,6 +2873,27 @@ BEGIN
         'source_rows', source_rows,
         'source_rows_sha256', research_stage8_json_sha256_v1(source_rows)
     );
+END;
+$$;
+
+-- Harden the earlier archive trigger as well: an invoker's temporary slot
+-- relation must not hide that an event belongs to an immutable anchor. Keep
+-- its original UPDATE/DELETE behavior and do not add source-write authority.
+CREATE OR REPLACE FUNCTION prevent_prospective_anchor_event_mutation()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY INVOKER AS $$
+DECLARE anchor_owned BOOLEAN;
+BEGIN
+    PERFORM pg_catalog.set_config('search_path',
+        pg_catalog.quote_ident(TG_TABLE_SCHEMA) || ',pg_catalog,pg_temp', true);
+    EXECUTE pg_catalog.format(
+        'SELECT EXISTS (SELECT 1 FROM %I.research_prospective_anchor_slots AS slot '
+        || 'WHERE slot.long_event_id = $1 OR slot.short_event_id = $1)', TG_TABLE_SCHEMA)
+    INTO anchor_owned USING OLD.event_id;
+    IF anchor_owned THEN
+        RAISE EXCEPTION 'Research Event % belongs to an immutable prospective anchor', OLD.event_id;
+    END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
 END;
 $$;
 
@@ -4847,6 +6014,30 @@ REVOKE EXECUTE ON FUNCTION research_stage8_watch_capture_errors_v1(
 REVOKE EXECUTE ON FUNCTION research_stage8_has_forbidden_evidence_key_v1(JSONB)
     FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION research_stage8_utc_text_v1(TIMESTAMPTZ) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION
+    research_stage8_anchor_canonical_json_v1(JSONB),
+    research_stage8_anchor_strip_v1(TEXT),
+    research_stage8_anchor_truthy_v1(JSONB),
+    research_stage8_anchor_nonempty_v1(JSONB),
+    research_stage8_anchor_reference_canonical_json_v1(JSONB),
+    research_stage8_anchor_json_sha256_v1(JSONB),
+    research_stage8_anchor_timestamp_v1(JSONB),
+    research_stage8_anchor_aware_timestamp_v1(JSONB),
+    research_stage8_anchor_finite_number_v1(JSONB),
+    research_stage8_anchor_number_v1(JSONB),
+    research_stage8_anchor_round6_v1(DOUBLE PRECISION),
+    research_stage8_anchor_coverage_valid_v1(JSONB, TEXT, TIMESTAMPTZ),
+    research_stage8_anchor_sources_valid_v1(JSONB, JSONB, JSONB, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ),
+    research_stage8_anchor_session_ratios_v1(TIMESTAMPTZ, TIMESTAMPTZ),
+    research_stage8_anchor_width_error_v1(JSONB, TEXT, TIMESTAMPTZ, INTEGER),
+    research_stage8_anchor_width_valid_v1(JSONB, TEXT, TIMESTAMPTZ, INTEGER),
+    research_stage8_anchor_feature_name_valid_v1(TEXT),
+    research_stage8_anchor_forbidden_bundle_key_v1(JSONB),
+    research_stage8_anchor_series_valid_v1(JSONB, TIMESTAMPTZ),
+    research_stage8_anchor_bundle_valid_v1(JSONB, TEXT, TIMESTAMPTZ, TEXT),
+    research_stage8_anchor_errors_v1(JSONB, JSONB, JSONB)
+    FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION prevent_prospective_anchor_event_mutation() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION research_stage8_expected_scope_v1(TEXT) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION research_stage8_expected_candidate_v1(TEXT) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION research_stage8_derive_projection_attestation_v1(
@@ -4954,6 +6145,31 @@ BEGIN
                 JSONB, TEXT, JSONB, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ)
             TO research_stage8_fact_writer_v1;
     END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'research_stage8_fact_writer_v1') THEN
+        GRANT EXECUTE ON FUNCTION
+            research_stage8_anchor_canonical_json_v1(JSONB),
+            research_stage8_anchor_strip_v1(TEXT),
+            research_stage8_anchor_truthy_v1(JSONB),
+            research_stage8_anchor_nonempty_v1(JSONB),
+            research_stage8_anchor_reference_canonical_json_v1(JSONB),
+            research_stage8_anchor_json_sha256_v1(JSONB),
+            research_stage8_anchor_timestamp_v1(JSONB),
+            research_stage8_anchor_aware_timestamp_v1(JSONB),
+            research_stage8_anchor_finite_number_v1(JSONB),
+            research_stage8_anchor_number_v1(JSONB),
+            research_stage8_anchor_round6_v1(DOUBLE PRECISION),
+            research_stage8_anchor_coverage_valid_v1(JSONB, TEXT, TIMESTAMPTZ),
+            research_stage8_anchor_sources_valid_v1(JSONB, JSONB, JSONB, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ),
+            research_stage8_anchor_session_ratios_v1(TIMESTAMPTZ, TIMESTAMPTZ),
+            research_stage8_anchor_width_error_v1(JSONB, TEXT, TIMESTAMPTZ, INTEGER),
+            research_stage8_anchor_width_valid_v1(JSONB, TEXT, TIMESTAMPTZ, INTEGER),
+            research_stage8_anchor_feature_name_valid_v1(TEXT),
+            research_stage8_anchor_forbidden_bundle_key_v1(JSONB),
+            research_stage8_anchor_series_valid_v1(JSONB, TIMESTAMPTZ),
+            research_stage8_anchor_bundle_valid_v1(JSONB, TEXT, TIMESTAMPTZ, TEXT),
+            research_stage8_anchor_errors_v1(JSONB, JSONB, JSONB)
+            TO research_stage8_fact_writer_v1;
+    END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'research_stage8_selector_writer_v1') THEN
         EXECUTE format('GRANT USAGE ON SCHEMA %I TO research_stage8_selector_writer_v1', target_schema);
         GRANT INSERT ON research_stage8_selection_receipts TO research_stage8_selector_writer_v1;
@@ -5030,6 +6246,31 @@ BEGIN
             research_stage8_watch_components_match_v1(JSONB, JSONB),
             research_stage8_watch_capture_errors_v1(
                 JSONB, TEXT, JSONB, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ)
+            TO research_stage8_evaluator_writer_v1;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'research_stage8_evaluator_writer_v1') THEN
+        GRANT EXECUTE ON FUNCTION
+            research_stage8_anchor_canonical_json_v1(JSONB),
+            research_stage8_anchor_strip_v1(TEXT),
+            research_stage8_anchor_truthy_v1(JSONB),
+            research_stage8_anchor_nonempty_v1(JSONB),
+            research_stage8_anchor_reference_canonical_json_v1(JSONB),
+            research_stage8_anchor_json_sha256_v1(JSONB),
+            research_stage8_anchor_timestamp_v1(JSONB),
+            research_stage8_anchor_aware_timestamp_v1(JSONB),
+            research_stage8_anchor_finite_number_v1(JSONB),
+            research_stage8_anchor_number_v1(JSONB),
+            research_stage8_anchor_round6_v1(DOUBLE PRECISION),
+            research_stage8_anchor_coverage_valid_v1(JSONB, TEXT, TIMESTAMPTZ),
+            research_stage8_anchor_sources_valid_v1(JSONB, JSONB, JSONB, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ),
+            research_stage8_anchor_session_ratios_v1(TIMESTAMPTZ, TIMESTAMPTZ),
+            research_stage8_anchor_width_error_v1(JSONB, TEXT, TIMESTAMPTZ, INTEGER),
+            research_stage8_anchor_width_valid_v1(JSONB, TEXT, TIMESTAMPTZ, INTEGER),
+            research_stage8_anchor_feature_name_valid_v1(TEXT),
+            research_stage8_anchor_forbidden_bundle_key_v1(JSONB),
+            research_stage8_anchor_series_valid_v1(JSONB, TIMESTAMPTZ),
+            research_stage8_anchor_bundle_valid_v1(JSONB, TEXT, TIMESTAMPTZ, TEXT),
+            research_stage8_anchor_errors_v1(JSONB, JSONB, JSONB)
             TO research_stage8_evaluator_writer_v1;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'research_stage8_reader_v1') THEN

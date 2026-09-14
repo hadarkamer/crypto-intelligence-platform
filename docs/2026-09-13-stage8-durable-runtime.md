@@ -102,16 +102,20 @@ outcome adapter normalize it to the authoritative
 `selection_fact_identity_sha256` consumed by acceptance.
 
 The persisted prospective attempt, slot, and event rows remain an upstream
-trust boundary. Migration 051 cross-binds their identities, clocks, coverage,
-feature references, and immutable source rows, but it does not claim to be a
-second implementation of every semantic check in the Python v4 anchor
-validator (including the complete frozen-source family and feature-bundle
-calendar rules). None of the five Stage-8 roles has DML authority on those
-source tables. Staging must therefore admit anchor rows only through the
-existing validated prospective producer and reject any broad/direct source
-table writer grant. Closing that boundary cryptographically would require a
-separately authorized validator identity or a full server-side validator port;
-it must not be approximated by trusting a caller-supplied `VALID` flag or hash.
+trust boundary. Migration 051 independently revalidates the complete v4
+authority needed by Stage 8: coverage, all four frozen-source families, both
+silent event directions, canonical input and bundle hashes, the exact feature
+namespace, source-series manifest, New York session/DST composition, and the
+prior-only movement-width evidence. The derivation reads those rows itself;
+it never accepts a caller-supplied `VALID` flag or receipt. A malformed graph
+remains `UNKNOWN`, with scores and candidate match forced to null.
+
+None of the five Stage-8 roles has DML authority on those source tables. The
+prospective producer remains the only writer, while the Stage-8 fact and
+evaluator roles receive only the source reads and pure helper execution needed
+for server derivation. The legacy anchor-event immutability trigger also pins
+and schema-qualifies its slot lookup so a temporary relation cannot redirect
+that ownership check.
 
 ## Verification gates
 
@@ -127,6 +131,9 @@ The release gate is PostgreSQL 15+ with fresh dedicated logins. It must prove:
 - fact, seal, selection, outcome replay, and evaluation round trips;
 - rejection of forged facts, subsets, route flags, recomputed hashes, and
   append-only mutations;
+- differential agreement between the Python v4 authority and PostgreSQL over
+  canonical positives, coherently rehashed semantic mutations, numeric codec
+  boundaries, Unicode whitespace, session/DST, and both anchor events;
 - rejection of future source reads and evaluation before the latest selected
   representative's fixed 60-minute horizon;
 - exact role grants, absence of writer cross-capabilities, no schema `CREATE`,
