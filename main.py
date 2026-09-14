@@ -38,6 +38,7 @@ import time_family_engine
 import market_confidence_engine
 import maxpain_cvd_short_alert
 import watch_transition_delivery
+import dual_cvd65_delivery
 import ai_agent
 import ai_telegram
 import research_event_runtime
@@ -4707,6 +4708,7 @@ async def run_watch_cycle(
                             cycle_id=watch_scan_id, rows=rows, snapshot=snapshot, frozen=frozen, evidence=evidence,
                             computed_at_utc=datetime.now(timezone.utc), watch_threshold=WATCH_PRIORITY_THRESHOLD,
                         )
+                        live_result["watch_dual_cvd_bundle"] = archive_context["metadata"]["operational_scores"]
                     except Exception as exc:
                         # Capture validation cannot suppress a valid alert.
                         archive_context["metadata"]["operational_scores"] = research_watch_score_capture.failure(watch_scan_id, f"{type(exc).__name__}: {exc}")
@@ -4729,6 +4731,18 @@ async def run_watch_cycle(
 
         derivatives_snapshot = live_result.pop("watch_derivatives_snapshot")
         all_items = live_result.pop("watch_prepared_items")
+        # The user's standalone rule consumes the same frozen all-coin scores,
+        # before display thresholds, Max Pain filtering or other Telegram sends.
+        dual_cvd_bundle = live_result.pop("watch_dual_cvd_bundle", None)
+        if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
+            await dual_cvd65_delivery.record_watch(
+                chat_id, dual_cvd_bundle, watch_scan_id=watch_scan_id,
+                decision_time=datetime.now(timezone.utc),
+            )
+            await dual_cvd65_delivery.drain(
+                bot_app.bot, chat_id,
+                may_deliver=lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
+            )
         if top8_only:
             all_items = _filter_top8_items(all_items)
         displayable_items = [
@@ -5485,6 +5499,12 @@ async def _watch_supervisor_loop(bot_app) -> None:
                     and not WATCH_RUNTIME.get("scan_in_progress")
                     and WATCH_RUNTIME.get("chat_id") == chat_id
                 ):
+                    await dual_cvd65_delivery.drain(
+                        bot_app.bot, int(chat_id),
+                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
+                        and not WATCH_RUNTIME.get("scan_in_progress")
+                        and WATCH_RUNTIME.get("chat_id") == chat_id,
+                    )
                     await watch_transition_delivery.drain(
                         bot_app.bot, int(chat_id),
                         may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
@@ -5828,6 +5848,7 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["mode"] = "all"
     WATCH_RUNTIME["chat_id"] = chat_id
     _persist_watch_subscriptions()
+    await dual_cvd65_delivery.initialize(chat_id)
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id, run_immediately=True
@@ -5877,6 +5898,7 @@ async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["mode"] = "top8"
     WATCH_RUNTIME["chat_id"] = chat_id
     _persist_watch_subscriptions()
+    await dual_cvd65_delivery.initialize(chat_id)
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id, run_immediately=True
@@ -6297,6 +6319,7 @@ async def health(request):
         "ai": ai_agent.status(),
         "research_capture": research_event_runtime.status(),
         "watch_transitions": watch_transition_delivery.status(),
+        "dual_cvd65_experimental": dual_cvd65_delivery.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
@@ -7482,6 +7505,9 @@ async def main():
 
     await bot_app.initialize()
     await watch_transition_delivery.initialize()
+    await dual_cvd65_delivery.initialize(
+        WATCH_RUNTIME.get("chat_id") if WATCH_GENERAL_ENABLED else None,
+    )
     schema_runtime = await _prepare_research_schema()
     research_schema_ready = bool(schema_runtime.get("ready"))
     await bot_app.start()

@@ -204,6 +204,8 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, '_get_scrape_lock', return_value=asyncio.Lock()), \
              patch.object(main, 'collect_live_rows_for_watch', collect), \
              patch.object(main, '_ensure_watch_derivatives_ready', AsyncMock(return_value={})), \
+             patch.object(main.dual_cvd65_delivery, 'record_watch', AsyncMock()), \
+             patch.object(main.dual_cvd65_delivery, 'drain', AsyncMock(return_value=0)), \
              patch.object(main, '_send_magnet_watch_reports', AsyncMock(return_value=0)), \
              patch.object(main, '_collect_combined_confirmation_messages', return_value=[]), \
              patch.object(main, '_collect_special_transition_messages', return_value=[]) as special, \

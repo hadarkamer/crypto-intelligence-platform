@@ -105,6 +105,7 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "WATCH_SUPERVISOR_INTERVAL_SECONDS": 15,
             "_ensure_watch_coordinator": ensure,
             "watch_transition_delivery": SimpleNamespace(drain=drain),
+            "dual_cvd65_delivery": SimpleNamespace(drain=AsyncMock(return_value=0)),
         })
         load_main({"_watch_consumers_active", "_watch_supervisor_loop"}, scope)
         with self.assertRaises(asyncio.CancelledError):
