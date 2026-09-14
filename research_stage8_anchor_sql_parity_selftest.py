@@ -26,7 +26,7 @@ import research_session_width as width
 from research_session_width_selftest import _series
 
 
-MIGRATION = Path(__file__).with_name("migrations") / "053_stage8_durable_registry.sql"
+MIGRATION = Path(__file__).with_name("migrations") / "056_stage8_durable_registry.sql"
 UTC = timezone.utc
 INPUT_FIELDS = (
     "sampler_version", "coverage_policy_version", "coverage_snapshot", "symbol",

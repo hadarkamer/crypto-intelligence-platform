@@ -38,6 +38,7 @@ import time_family_engine
 import market_confidence_engine
 import maxpain_cvd_short_alert
 import watch_transition_delivery
+import dual_cvd65_delivery
 import ai_agent
 import ai_telegram
 import research_event_runtime
@@ -56,9 +57,11 @@ import research_formula_store
 import research_formula_worker
 import research_max_pain_archive
 import research_watch_score_capture
+import research_watch_decision_capture
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
 import research_watch_scan_formula_worker
+import research_watch_scan_formula_timeframe_worker
 import research_prospective_anchor_worker
 import research_archive_admin
 from collections import defaultdict
@@ -1731,6 +1734,7 @@ async def _start_ordered_research_workers(*, schema_ready: bool) -> Dict[str, An
         ("watch-scan-intake", research_watch_scan_intake.WORKER),
         ("watch-scan-measurement", research_watch_scan_measurement_worker.WORKER),
         ("watch-scan-formulas", research_watch_scan_formula_worker.WORKER),
+        ("watch-scan-timeframe-formulas", research_watch_scan_formula_timeframe_worker.WORKER),
         ("price-archive", research_price_archive_worker.WORKER),
         ("btc-episodes", research_btc_episode_worker.WORKER),
         ("btc-wave-report", research_btc_wave_report_worker.WORKER),
@@ -1755,6 +1759,7 @@ async def _stop_ordered_research_workers() -> None:
         ("watch-scan-intake", research_watch_scan_intake.WORKER),
         ("watch-scan-measurement", research_watch_scan_measurement_worker.WORKER),
         ("watch-scan-formulas", research_watch_scan_formula_worker.WORKER),
+        ("watch-scan-timeframe-formulas", research_watch_scan_formula_timeframe_worker.WORKER),
         ("btc-wave-report", research_btc_wave_report_worker.WORKER),
         ("ordered-experimental", research_ordered_experimental_worker.WORKER),
         ("snapshot-sync", research_snapshot_sync_worker.WORKER),
@@ -2955,7 +2960,8 @@ def _magnet_alert_side(magnet_side: Any) -> Optional[str]:
 
 
 def _combined_magnet_confirmations(
-    rows: List[Dict[str, Any]], items: List[Dict[str, Any]]
+    rows: List[Dict[str, Any]], items: List[Dict[str, Any]],
+    *, capture_evaluations: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Evaluate Magnet for every scanned coin from the shared Watch snapshot.
 
@@ -2976,6 +2982,12 @@ def _combined_magnet_confirmations(
         alert_side = _magnet_alert_side(magnet.get("side"))
         expected_direction = magnet_v1.expected_price_direction(magnet.get("side"))
         if source is None or alert_side is None:
+            if capture_evaluations is not None:
+                capture_evaluations.append({
+                    "symbol": symbol, "alert_side": alert_side, "magnet": magnet,
+                    "source_item": source, "evaluation_status": "NOT_EVALUATED",
+                    "reason": "MISSING_SOURCE_ITEM" if source is None else "INVALID_MAGNET_SIDE",
+                })
             continue
         try:
             evidence = market_confidence_engine.combine(
@@ -2987,6 +2999,12 @@ def _combined_magnet_confirmations(
             )
             result = magnet_v1.evaluate_confirmation(magnet, evidence)
         except Exception as exc:
+            if capture_evaluations is not None:
+                capture_evaluations.append({
+                    "symbol": symbol, "alert_side": alert_side, "magnet": magnet,
+                    "source_item": source, "evaluation_status": "ERROR",
+                    "error_type": type(exc).__name__,
+                })
             print(
                 f"[combined-confirmation] magnet evaluation failed "
                 f"symbol={symbol} side={alert_side}: {exc!r}",
@@ -2994,6 +3012,12 @@ def _combined_magnet_confirmations(
             )
             continue
 
+        if capture_evaluations is not None:
+            capture_evaluations.append({
+                "symbol": symbol, "alert_side": alert_side, "magnet": magnet,
+                "source_item": source, "evaluation_status": "EVALUATED",
+                "confirmation": result,
+            })
         status = str(result.get("status") or "").upper()
         if status not in {"CONFIRMED", "STRONG_CONFIRMED"}:
             continue
@@ -3025,7 +3049,9 @@ def _combined_magnet_confirmations(
 
 
 def _combined_confirmation_candidates(
-    items: List[Dict[str, Any]], rows: List[Dict[str, Any]]
+    items: List[Dict[str, Any]], rows: List[Dict[str, Any]],
+    *, capture_groups: Optional[List[Dict[str, Any]]] = None,
+    capture_magnet_evaluations: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Aggregate independent Watch evidence by coin and direction.
 
@@ -3041,7 +3067,9 @@ def _combined_confirmation_candidates(
         if symbol and side in {"LONG", "SHORT"}:
             grouped[_combined_group_key(symbol, side)].append(item)
 
-    magnet_by_group = _combined_magnet_confirmations(rows, items)
+    magnet_by_group = _combined_magnet_confirmations(
+        rows, items, capture_evaluations=capture_magnet_evaluations,
+    )
     candidates: List[Dict[str, Any]] = []
     for key, group_items in grouped.items():
         ordered_items = sorted(
@@ -3126,9 +3154,7 @@ def _combined_confirmation_candidates(
                 + ",".join(magnet.get("members") or [])
             )
 
-        if len(signal_keys) < COMBINED_MIN_SIGNALS:
-            continue
-        candidates.append({
+        candidate = {
             "key": key,
             "symbol": symbol,
             "side": side,
@@ -3142,7 +3168,12 @@ def _combined_confirmation_candidates(
             "derivatives_high": derivatives_high,
             "magnet": magnet,
             "top_item": ordered_items[0],
-        })
+        }
+        qualified = len(signal_keys) >= COMBINED_MIN_SIGNALS
+        if capture_groups is not None:
+            capture_groups.append({**candidate, "qualified": qualified, "ordered_items": ordered_items})
+        if qualified:
+            candidates.append(candidate)
 
     candidates.sort(key=lambda candidate: (
         -int(candidate.get("signal_count") or 0),
@@ -3255,9 +3286,13 @@ def _collect_combined_confirmation_messages(
     include_metadata: bool = False,
     event_time: Any = None,
     persist_research: bool = False,
+    precomputed_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Any]:
     """Emit only on entry or when genuinely new evidence joins an active setup."""
-    candidates = _combined_confirmation_candidates(items, rows)
+    candidates = (
+        _combined_confirmation_candidates(items, rows)
+        if precomputed_candidates is None else precomputed_candidates
+    )
     # Research-only lifecycle tracking: preserve Combined weakening, component
     # loss and deactivation even when Telegram correctly emits no new alert.
     # This sidecar does not change COMBINED_CONFIRMATION_STATE or strategy logic.
@@ -4685,6 +4720,7 @@ async def run_watch_cycle(
                             "top8_only": bool(top8_only),
                             "general_enabled": bool(general_enabled),
                             "operational_scores": research_watch_score_capture.failure(watch_scan_id, "collection did not reach scoring"),
+                            "operational_decisions": research_watch_decision_capture.failure(watch_scan_id, "collection did not reach decisions"),
                         },
                     }
                 async def _prepare(rows, live_result):
@@ -4707,9 +4743,44 @@ async def run_watch_cycle(
                             cycle_id=watch_scan_id, rows=rows, snapshot=snapshot, frozen=frozen, evidence=evidence,
                             computed_at_utc=datetime.now(timezone.utc), watch_threshold=WATCH_PRIORITY_THRESHOLD,
                         )
+                        live_result["watch_dual_cvd_bundle"] = archive_context["metadata"]["operational_scores"]
                     except Exception as exc:
                         # Capture validation cannot suppress a valid alert.
                         archive_context["metadata"]["operational_scores"] = research_watch_score_capture.failure(watch_scan_id, f"{type(exc).__name__}: {exc}")
+                    # Pure Combined evaluation uses exactly the original Watch
+                    # input population. Delivery/lifecycle state is still read
+                    # and mutated only at its original point below.
+                    combined_items = _filter_top8_items(items) if top8_only else items
+                    combined_items = [item for item in combined_items if _is_displayable_opportunity(item)]
+                    combined_groups, magnet_evaluations = [], []
+                    try:
+                        combined_candidates = _combined_confirmation_candidates(
+                            combined_items, rows, capture_groups=combined_groups,
+                            capture_magnet_evaluations=magnet_evaluations,
+                        )
+                        live_result["watch_combined_candidates"] = combined_candidates
+                    except Exception as exc:
+                        # Preserve the legacy evaluation failure at its normal
+                        # lifecycle point, without a second calculation.
+                        live_result["watch_combined_precompute_error"] = exc
+                        archive_context["metadata"]["operational_decisions"] = research_watch_decision_capture.failure(
+                            watch_scan_id, "PRECOMPUTE:" + type(exc).__name__,
+                        )
+                    else:
+                        try:
+                            archive_context["metadata"]["operational_decisions"] = research_watch_decision_capture.build_bundle(
+                                cycle_id=watch_scan_id,
+                                score_bundle=archive_context["metadata"]["operational_scores"],
+                                prepared_items=items, displayable_items=combined_items,
+                                combined_candidates=combined_candidates, combined_groups=combined_groups,
+                                magnet_evaluations=magnet_evaluations,
+                                computed_at_utc=datetime.now(timezone.utc),
+                                top8_only=top8_only, general_enabled=general_enabled,
+                            )
+                        except Exception as exc:
+                            archive_context["metadata"]["operational_decisions"] = research_watch_decision_capture.failure(
+                                watch_scan_id, "CAPTURE:" + research_watch_decision_capture.error_reason(exc),
+                            )
                 result = await collect_live_rows_for_watch(
                     archive_context=archive_context, prepare_watch=_prepare,
                 )
@@ -4729,6 +4800,20 @@ async def run_watch_cycle(
 
         derivatives_snapshot = live_result.pop("watch_derivatives_snapshot")
         all_items = live_result.pop("watch_prepared_items")
+        combined_candidates = live_result.pop("watch_combined_candidates", None)
+        combined_precompute_error = live_result.pop("watch_combined_precompute_error", None)
+        # The user's standalone rule consumes the same frozen all-coin scores,
+        # before display thresholds, Max Pain filtering or other Telegram sends.
+        dual_cvd_bundle = live_result.pop("watch_dual_cvd_bundle", None)
+        if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
+            await dual_cvd65_delivery.record_watch(
+                chat_id, dual_cvd_bundle, watch_scan_id=watch_scan_id,
+                decision_time=datetime.now(timezone.utc),
+            )
+            await dual_cvd65_delivery.drain(
+                bot_app.bot, chat_id,
+                may_deliver=lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
+            )
         if top8_only:
             all_items = _filter_top8_items(all_items)
         displayable_items = [
@@ -4758,6 +4843,8 @@ async def run_watch_cycle(
             )
             if general_enabled else []
         )
+        if general_enabled and combined_precompute_error is not None:
+            raise combined_precompute_error
         combined_deliveries = (
             _collect_combined_confirmation_messages(
                 displayable_items,
@@ -4765,6 +4852,7 @@ async def run_watch_cycle(
                 include_metadata=True,
                 event_time=research_decision_time,
                 persist_research=True,
+                precomputed_candidates=combined_candidates,
             )
             if general_enabled else []
         )
@@ -5485,6 +5573,12 @@ async def _watch_supervisor_loop(bot_app) -> None:
                     and not WATCH_RUNTIME.get("scan_in_progress")
                     and WATCH_RUNTIME.get("chat_id") == chat_id
                 ):
+                    await dual_cvd65_delivery.drain(
+                        bot_app.bot, int(chat_id),
+                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
+                        and not WATCH_RUNTIME.get("scan_in_progress")
+                        and WATCH_RUNTIME.get("chat_id") == chat_id,
+                    )
                     await watch_transition_delivery.drain(
                         bot_app.bot, int(chat_id),
                         may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
@@ -5828,6 +5922,7 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["mode"] = "all"
     WATCH_RUNTIME["chat_id"] = chat_id
     _persist_watch_subscriptions()
+    await dual_cvd65_delivery.initialize(chat_id)
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id, run_immediately=True
@@ -5877,6 +5972,7 @@ async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["mode"] = "top8"
     WATCH_RUNTIME["chat_id"] = chat_id
     _persist_watch_subscriptions()
+    await dual_cvd65_delivery.initialize(chat_id)
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id, run_immediately=True
@@ -6297,10 +6393,12 @@ async def health(request):
         "ai": ai_agent.status(),
         "research_capture": research_event_runtime.status(),
         "watch_transitions": watch_transition_delivery.status(),
+        "dual_cvd65_experimental": dual_cvd65_delivery.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
         "watch_scan_formulas": research_watch_scan_formula_worker.WORKER.status(),
+        "watch_scan_timeframe_formulas": research_watch_scan_formula_timeframe_worker.WORKER.status(),
         "btc_episodes": research_btc_episode_worker.WORKER.status(),
         "price_archive": research_price_archive_worker.WORKER.status(),
         "price_source_freshness": research_source_freshness.status(),
@@ -7482,6 +7580,9 @@ async def main():
 
     await bot_app.initialize()
     await watch_transition_delivery.initialize()
+    await dual_cvd65_delivery.initialize(
+        WATCH_RUNTIME.get("chat_id") if WATCH_GENERAL_ENABLED else None,
+    )
     schema_runtime = await _prepare_research_schema()
     research_schema_ready = bool(schema_runtime.get("ready"))
     await bot_app.start()

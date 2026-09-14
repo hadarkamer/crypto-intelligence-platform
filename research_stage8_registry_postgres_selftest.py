@@ -129,12 +129,12 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
         migration_dir = Path(__file__).resolve().parent / "migrations"
         self.base_migrations = [
             path for path in sorted(migration_dir.glob("*.sql"))
-            if int(path.name[:3]) < 53
+            if int(path.name[:3]) < 56
         ]
         for path in self.base_migrations:
             self.admin.execute(self._schema_sql(path), prepare=False)
-        self.migration_053 = migration_dir / "053_stage8_durable_registry.sql"
-        self.admin.execute(self._schema_sql(self.migration_053), prepare=False)
+        self.migration_056 = migration_dir / "056_stage8_durable_registry.sql"
+        self.admin.execute(self._schema_sql(self.migration_056), prepare=False)
         # Seed privileges that existed in earlier local drafts.  A second full
         # execution must converge them away, not merely add the current grants.
         anchor_helpers = self.admin.execute("""
@@ -160,7 +160,7 @@ class Stage8RegistryPostgreSQLTests(unittest.TestCase):
             """).format(self.sql.Identifier(registry.READER_ROLE))
         )
         # A second full execution is the migration/ACL idempotency assertion.
-        self.admin.execute(self._schema_sql(self.migration_053), prepare=False)
+        self.admin.execute(self._schema_sql(self.migration_056), prepare=False)
         if self.pglite_compat:
             # PGlite's protocol queue cannot recover from a surfaced ERROR.
             # Catch expected negatives server-side only in the explicitly

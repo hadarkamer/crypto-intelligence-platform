@@ -99,7 +99,7 @@ _ARTIFACT_SPECS = {
     ),
     "registry_adapter": ("research_stage8_registry.py", VERSION),
     "registry_migration": (
-        "migrations/053_stage8_durable_registry.sql", "053-stage8-durable-registry-v1",
+        "migrations/056_stage8_durable_registry.sql", "056-stage8-durable-registry-v1",
     ),
     "selector": ("research_stage8_representative_selector.py", selector.VERSION),
     "acceptance": ("research_stage8_acceptance.py", acceptance.VERSION),
@@ -115,7 +115,7 @@ _EXPECTED_VERSIONS = {
     "projection_db_adapter": "stage8-projection-postgres-adapter-v1",
     "outcome_db_adapter": "stage8-durable-outcome-db-adapter-v1",
     "registry_adapter": "stage8-durable-registry-adapter-v1",
-    "registry_migration": "053-stage8-durable-registry-v1",
+    "registry_migration": "056-stage8-durable-registry-v1",
     "selector": "stage8-outcome-blind-representative-selector-v1",
     "acceptance": "stage8-experimental-acceptance-evaluator-v1",
 }
@@ -130,7 +130,7 @@ _RUNTIME_VERSION_GETTERS = {
     "projection_db_adapter": lambda: projection_db_adapter.VERSION,
     "outcome_db_adapter": lambda: "stage8-durable-outcome-db-adapter-v1",
     "registry_adapter": lambda: VERSION,
-    "registry_migration": lambda: "053-stage8-durable-registry-v1",
+    "registry_migration": lambda: "056-stage8-durable-registry-v1",
     "selector": lambda: selector.VERSION,
     "acceptance": lambda: acceptance.VERSION,
 }
