@@ -119,6 +119,18 @@ class PostgreSQLDeliveryTests(unittest.TestCase):
         self.conn.execute('UPDATE research_ordered_experimental_eligibility SET ready=FALSE,eligible_until_utc=NULL')
         self.assertFalse(store.begin_send(self.conn,item,now=self.now))
 
+    def test_watch_claim_is_destination_scoped_and_unsent_release_is_owned(self):
+        self.assertEqual(store.enqueue(self.conn,now=self.now)['enqueued'],1)
+        self.assertIsNone(store.claim(self.conn,now=self.now,chat_id=99))
+        item=store.claim(self.conn,now=self.now,chat_id=42)
+        self.assertEqual(item['chat_id'],42)
+        self.assertTrue(store.begin_send(self.conn,item,now=self.now))
+        self.assertFalse(store.release_unsent(self.conn,{**item,'claim_token':'00000000-0000-0000-0000-000000000000'}))
+        self.assertTrue(store.release_unsent(self.conn,item))
+        again=store.claim(self.conn,now=self.now,chat_id=42)
+        self.assertEqual(again['delivery_id'],item['delivery_id'])
+        self.assertNotEqual(again['claim_token'],item['claim_token'])
+
 
 if __name__=='__main__':
     unittest.main()

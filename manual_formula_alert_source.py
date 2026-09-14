@@ -15,6 +15,7 @@ import research_ordered_question_catalog as questions
 MAX_BATCH = 32
 MAX_PROCESSED_IDS = 8192
 MAX_SEQUENCE_ROWS = 4096
+MAX_WATCH_EVENTS = 256
 SOURCE_TTL = timedelta(minutes=10)
 
 # Preserve actual provenance keys, including explicit JSON nulls.  Synthesizing
@@ -107,6 +108,64 @@ def _sequence_history(conn, candidates):
     if len(rows) > MAX_SEQUENCE_ROWS:
         return [], True
     return [(row, totals.extract_event_features(row)) for row in rows], False
+
+
+def prepare_watch_pairs(conn, events, now):
+    """Use exact live planned native captures plus strictly earlier evidence.
+
+    Planned sources have an explicit non-database identity; they are never
+    inserted into the delivered research population. Equal timestamps do not
+    create a sequence entry, as in the existing research sequence contract.
+    """
+    import manual_formula_alert as rules
+    if not isinstance(events, (list, tuple)) or len(events) > MAX_WATCH_EVENTS:
+        raise ValueError('Invalid or oversized planned Watch batch')
+    pairs, seen = [], set()
+    for event in events:
+        features = totals.extract_event_features(event)
+        features.update(questions.extended_features(event))
+        if not rules.source_is_eligible(event, features, now, planned=True):
+            continue
+        if event['event_id'] in seen:
+            continue
+        seen.add(event['event_id'])
+        pairs.append((event, features))
+    stats = {'selected_events': len(pairs), 'source_lane': 'WATCH_PLANNED',
+             'sequence_source_rows': 0, 'sequence_error_type': None,
+             'sequence_lookup_attempts': 0, 'sequence_retry_recovered': False}
+    candidates = [event for event, features in pairs
+                  if rules._score65(features, 'price_oi')
+                  and event['symbol'] in rules.RULES['PRICE_OI_ENTRY2']['symbols']]
+    if not candidates:
+        return pairs, stats
+    # One immediate retry in a fresh savepoint preserves priority on a transient
+    # lookup error. Persistent failures retain an explicit native ENTRY2-only
+    # recovery lane in the outbox; other rules remain usable immediately.
+    for attempt in range(2):
+        stats['sequence_lookup_attempts'] += 1
+        try:
+            with conn.transaction():
+                history, overflow = _sequence_history(conn, candidates)
+            stats['sequence_retry_recovered'] = bool(attempt and not overflow)
+            break
+        except Exception as exc:
+            if not attempt:
+                stats['sequence_first_error_type'] = type(exc).__name__
+                continue
+            stats['sequence_error_type'] = type(exc).__name__
+            for _, features in pairs:
+                features['sequence.capture_status'] = 'SOURCE_UNAVAILABLE'
+            return pairs, stats
+    if overflow:
+        for _, features in pairs:
+            features['sequence.capture_status'] = 'SOURCE_OVERFLOW'
+        return pairs, stats
+    stats['sequence_source_rows'] = len(history)
+    # Include earlier captured siblings of this same scan, never later ones.
+    # The shared sequence function deduplicates real scan IDs and excludes ties.
+    for event, features in pairs:
+        features.update(questions.sequence_features(event, features, history + pairs))
+    return pairs, stats
 
 
 def load_batch(conn, *, activated_at, now, processed_ids, limit=MAX_BATCH, retry_event_ids=None):

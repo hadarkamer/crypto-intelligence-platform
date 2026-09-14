@@ -185,6 +185,22 @@ class PostgreSQLTransitionTests(unittest.TestCase):
         self.assertFalse(store.complete_attempt(delivery['intent_id'], delivery['attempt_token'], 'UNKNOWN',
                                               BASE+timedelta(minutes=2), database_url=self.dsn))
 
+    def test_kind_filter_claims_experimental_without_consuming_ordinary_pending(self):
+        self.cycle('base', 0, [card(59)])
+        def factory(crossing):
+            return intents(crossing) + [{'kind': 'FORMULA_MP65_CVD_SHORT',
+                'signal_key': store.signal_key(crossing[0]), 'payload': {'text': 'experimental'}}]
+        self.cycle('cross', 1, [card(70)], factory)
+        now = BASE + timedelta(minutes=2)
+        selected = store.claim_pending(self.scope, now, database_url=self.dsn,
+                                       kinds=('FORMULA_MP65_CVD_SHORT',))
+        self.assertEqual([row['kind'] for row in selected], ['FORMULA_MP65_CVD_SHORT'])
+        self.assertEqual(store.claim_pending(self.scope, now, database_url=self.dsn,
+                                            kinds=('FORMULA_MP65_CVD_SHORT',)), [])
+        ordinary = store.claim_pending(self.scope, now, database_url=self.dsn,
+                                       kinds=('MAX_PAIN_SCORE_65',))
+        self.assertEqual([row['kind'] for row in ordinary], ['MAX_PAIN_SCORE_65'])
+
     def test_concurrent_cycles_and_claims_use_fresh_connections(self):
         self.cycle('base', 0, [card(59)])
         barrier = Barrier(6)

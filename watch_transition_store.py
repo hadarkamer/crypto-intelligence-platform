@@ -338,18 +338,22 @@ def record_cycle(subscription_scope, watch_scan_id, observed_at, items, intent_f
                 'resets': [_freeze(by_key[key]) for key in metadata['reset_keys']], **metadata}
 
 
-def claim_pending(subscription_scope, now, limit=32, database_url=None):
+def claim_pending(subscription_scope, now, limit=32, database_url=None, *, kinds=None):
     scope = _name(subscription_scope, "subscription_scope")
     moment = _utc(now)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_CLAIM_LIMIT:
         raise ValueError("invalid pending claim limit")
+    selected_kinds = None if kinds is None else [_name(kind, "kind") for kind in kinds]
+    if selected_kinds == []:
+        return []
     with _connect(database_url) as conn:
         conn.execute("""UPDATE watch_transition_intents SET status='EXPIRED'
             WHERE subscription_scope=%s AND status='PENDING' AND expires_at<=%s""", (scope, moment))
         rows = conn.execute("""SELECT intent_id FROM watch_transition_intents
             WHERE subscription_scope=%s AND status='PENDING' AND observed_at<=%s AND expires_at>%s
+              AND (%s::text[] IS NULL OR kind=ANY(%s::text[]))
             ORDER BY created_at,ordinal,intent_id LIMIT %s FOR UPDATE SKIP LOCKED""",
-            (scope, moment, moment, limit)).fetchall()
+            (scope, moment, moment, selected_kinds, selected_kinds, limit)).fetchall()
         claimed = []
         for row in rows:
             token = uuid4().hex

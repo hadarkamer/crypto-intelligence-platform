@@ -7,17 +7,21 @@ prediction follows that shared direction. This is the standalone existing
 
 ## Behavior
 
+Update: [experimental alert priority](2026-09-14-experimental-alert-priority.md)
+limits notifications to ZEC and prefixes **סף 2%**. The all-coin source capture
+and original episode identities below remain unchanged.
+
 - A signed bullish total of +65 and bullish Spot total of +65 qualifies LONG;
   bearish -65/-65 qualifies SHORT. Equality is included. Opposing directions
   and either valid magnitude below 65 are NO_MATCH.
 - Consume the exact frozen operational score bundle from each new shared Watch
-  scan, for all eight captured symbols, before display filtering. HYPE is
-  eligible on the same valid captured CVD evidence as other symbols.
+  scan, for all eight captured symbols, before display filtering. Only ZEC is
+  eligible for this notification; other coins remain available to research.
 - Missing, malformed, stale, future-dated or inconsistent source evidence is
   UNKNOWN. Model WARNING scores are already adjusted by their producing model
   and are not penalized a second time.
 - The first fresh qualifying scan after activation creates one experimental
-  alert per coin. Continued same-direction matches do not repeat. Valid
+  alert for ZEC. Continued same-direction matches do not repeat. Valid
   NO_MATCH resets immediately; UNKNOWN preserves the prior active state.
   Direction changes can create a new alert. Reusing the same pair of CVD
   candle closes and direction cannot create another delivery.

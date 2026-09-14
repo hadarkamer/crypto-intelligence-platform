@@ -19,6 +19,9 @@ CAPTURE_VERSION = 'watch-operational-scores-v2'
 CAPTURE_HASH_VERSION = 'json-integer-float-zero-normalized-v1'
 CAPTURE_POPULATION = 'all-top8-watch-scans-before-display-v1'
 SYMBOLS = ('BTC', 'ETH', 'SOL', 'HYPE', 'DOGE', 'ZEC', 'BNB', 'XRP')
+# Capture and evaluation still cover all eight coins; this is delivery policy.
+NOTIFICATION_SYMBOLS = ('ZEC',)
+THRESHOLD_HEADER = '<b>סף 2%</b>\n'
 MAX_BUNDLE_BYTES = 256 * 1024 + 100
 MAX_CVD_AGE_MINUTES = 30
 MIN_SCORE = 65
@@ -155,7 +158,8 @@ def evaluate_bundle(bundle, observed_at) -> dict:
 def render_message(observation, source_at_utc) -> str:
     """A small experimental notification of the shared CVD direction only."""
     if (not isinstance(observation, Mapping) or observation.get('status') != 'MATCH'
-            or observation.get('direction') not in ('LONG', 'SHORT')):
+            or observation.get('direction') not in ('LONG', 'SHORT')
+            or observation.get('symbol') not in NOTIFICATION_SYMBOLS):
         raise ValueError('Only a matching dual-CVD observation can be rendered')
     values = [observation.get(key) for key in ('futures_score', 'spot_score')]
     if any(not source_features._finite(value) or not MIN_SCORE <= abs(value) <= 100 for value in values):
@@ -164,6 +168,7 @@ def render_message(observation, source_at_utc) -> str:
     direction = 'עלייה — LONG' if observation['direction'] == 'LONG' else 'ירידה — SHORT'
     scores = [f'{abs(value):.4f}'.rstrip('0').rstrip('.') for value in values]
     return (
+        THRESHOLD_HEADER +
         '🧪 <b>ניסיוני: הסכמת שני CVD — 65 ומעלה</b>\n'
         f"<b>{escape(str(observation['symbol']))} | {direction}</b>\n"
         f'Futures CVD: <b>{scores[0]}/100</b>\n'

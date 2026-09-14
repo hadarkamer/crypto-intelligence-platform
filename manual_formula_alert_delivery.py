@@ -69,7 +69,20 @@ async def _finish(chat_id, intent, terminal, message_id=None):
 
 async def run_once(bot, chat_id, *, may_deliver=None):
     """Bounded collection and two attempts; destination checked after every await."""
-    if _LOCK.locked() or may_deliver is None or not may_deliver():
+    return await _run(bot, chat_id, may_deliver=may_deliver, limit=2)
+
+
+async def run_watch(bot, chat_id, events, *, may_deliver=None):
+    """Freeze current Watch matches and send the complete bounded priority group."""
+    return await _run(bot, chat_id, events=events, may_deliver=may_deliver,
+                      limit=128, wait_for_lock=True)
+
+
+async def _run(bot, chat_id, *, events=None, may_deliver=None, limit, wait_for_lock=False):
+    # A Watch prelude must wait for an already-started supervisor send. Skipping
+    # its preparation would defer the new scan's experiments until after the
+    # ordinary group. Polling recovery still avoids overlapping work.
+    if (not wait_for_lock and _LOCK.locked()) or may_deliver is None or not may_deliver():
         return 0
     if not await initialize(chat_id):
         return 0
@@ -78,14 +91,17 @@ async def run_once(bot, chat_id, *, may_deliver=None):
         if not may_deliver():
             return 0
         try:
-            result = await asyncio.to_thread(store.collect, chat_id, _now())
+            if events is None:
+                result = await asyncio.to_thread(store.collect, chat_id, _now())
+            else:
+                result = await asyncio.to_thread(store.record_watch_events, chat_id, events, _now())
             _STATUS['last_summary'] = result
             _STATUS['created_intents'] += result.get('created_intents', 0)
             _STATUS['runs'] += 1
         except Exception as exc:
             _gap('collect', exc)
             return 0
-        for _ in range(2):
+        for _ in range(limit):
             if not may_deliver():
                 break
             try:

@@ -38,10 +38,16 @@ class OrderedExperimentalWorker:
     def __init__(self):
         self._bot = None
         self._task = None
+        self._watch_busy = lambda: False
+        self._delivery_lock = asyncio.Lock()
         self.metrics = {"runs":0,"sent":0,"unknown":0,"failures":0,"last_error":None,"last_summary":None}
 
     def bind_telegram(self, bot: Any):
         self._bot = bot
+
+    def bind_watch_busy(self, predicate):
+        """Suspend autonomous sends while a half-hour Watch batch is active."""
+        self._watch_busy = predicate
 
     def status(self):
         return {"enabled":_ENABLED,"configured":bool(_database_url()),
@@ -81,18 +87,56 @@ class OrderedExperimentalWorker:
                 self.metrics["last_error"] = type(exc).__name__
             await asyncio.sleep(_POLL)
 
-    async def run_once(self):
+    async def drain_for_watch(self, chat_id: int, *, may_deliver=None):
+        """Send currently qualified notifications before ordinary Watch output.
+
+        Waiting on the shared lock finishes any earlier poll transport first.
+        The busy callback keeps subsequent polls out until the whole Watch
+        batch ends. Newly qualified notifications still use the existing
+        autonomous route outside that batch; no source/TTL gate is changed.
+        """
+        return await self.run_once(chat_id=chat_id, max_deliveries=256,
+                                   allow_watch=True, may_deliver=may_deliver)
+
+    async def run_once(self, *, chat_id=None, max_deliveries=2,
+                       allow_watch=False, may_deliver=None):
         if not _ENABLED or self._bot is None:
             return {"sent":0,"disabled":True}
-        summary = await asyncio.to_thread(_transaction,store.enqueue,now=datetime.now(timezone.utc))
+        async with self._delivery_lock:
+            if not allow_watch and self._watch_busy():
+                return {"sent":0,"watch_busy":True}
+            if may_deliver is not None and not may_deliver():
+                return {"sent":0,"delivery_stopped":True}
+            delivery_allowed = lambda: (allow_watch or not self._watch_busy()) and (
+                may_deliver is None or may_deliver())
+            return await self._deliver(chat_id=chat_id, max_deliveries=max_deliveries,
+                                       may_deliver=delivery_allowed, allow_watch=allow_watch)
+
+    async def _deliver(self, *, chat_id, max_deliveries, may_deliver, allow_watch):
+        summary = await asyncio.to_thread(_transaction,store.enqueue,
+            now=datetime.now(timezone.utc),scope_limit=32 if allow_watch else 8)
         summary.update(sent=0,unknown=0)
-        for _ in range(2):
-            item = await asyncio.to_thread(_transaction,store.claim,now=datetime.now(timezone.utc))
+        for _ in range(max_deliveries):
+            if may_deliver is not None and not may_deliver():
+                summary["delivery_stopped"] = True
+                break
+            item = await asyncio.to_thread(_transaction,store.claim,
+                now=datetime.now(timezone.utc),chat_id=chat_id)
             if not item:
+                break
+            if may_deliver is not None and not may_deliver():
+                await asyncio.to_thread(_transaction,store.release_unsent,item)
+                summary["delivery_stopped"] = True
                 break
             text = contract.render(item["payload"])
             if not await asyncio.to_thread(_transaction,store.begin_send,item,now=datetime.now(timezone.utc)):
                 continue
+            if may_deliver is not None and not may_deliver():
+                # This live owner knows no transport call has started. A
+                # recovered SENDING lease still becomes UNKNOWN, as before.
+                await asyncio.to_thread(_transaction,store.release_unsent,item)
+                summary["delivery_stopped"] = True
+                break
             # Cancellation/crash leaves committed SENDING; expiry becomes
             # UNKNOWN, so recovery cannot send the same notification twice.
             try:

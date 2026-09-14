@@ -4678,6 +4678,38 @@ async def _send_magnet_watch_reports(
     return sent
 
 
+def _preview_watch_formula_sources(
+    chat_id, result_items, displayable_items, combined_deliveries,
+    transition_record, rows, derivatives_snapshot, research_decision_time,
+):
+    """Use the same native captures before transport, without delivery side effects."""
+    def capture():
+        kwargs = {"persist": False, "delivery_status": "NOT_ATTEMPTED"}
+        for item in result_items:
+            research_event_runtime.capture_sent_maxpain(item, **kwargs)
+        research_event_runtime.capture_special_transitions(
+            displayable_items, include_score65=False,
+            event_time=research_decision_time, **kwargs,
+        )
+        for intent in (transition_record or {}).get("intents", []):
+            if intent.get("kind") == "MAX_PAIN_SCORE_65":
+                research_event_runtime.capture_score65_delivery(
+                    intent["payload"]["item"],
+                    event_time=intent["payload"]["decision_time"], **kwargs,
+                )
+        for delivery in combined_deliveries:
+            research_event_runtime.capture_combined_confirmation(
+                delivery["candidate"], event_time=delivery["decision_time"], **kwargs,
+            )
+        for symbol, watch in list(MAGNET_V1_WATCHES.items()):
+            if int(watch.get("chat_id")) == int(chat_id):
+                research_event_runtime.capture_magnet_watch_symbol(
+                    symbol, rows, derivatives_snapshot,
+                    event_time=datetime.now(timezone.utc), **kwargs,
+                )
+    return research_event_runtime.preview_watch_sources(capture)
+
+
 async def run_watch_cycle(
     bot_app,
     chat_id: int,
@@ -4813,6 +4845,7 @@ async def run_watch_cycle(
             )
             await dual_cvd65_delivery.drain(
                 bot_app.bot, chat_id,
+                wait_for_lock=True,
                 may_deliver=lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
             )
         if top8_only:
@@ -4830,8 +4863,9 @@ async def run_watch_cycle(
         )
         # A Magnet-only subscriber must not consume regular or combined alert
         # transitions that were never sent to the general Watch chat.
+        transition_record = None
         if general_enabled:
-            await watch_transition_delivery.record_watch(
+            transition_record = await watch_transition_delivery.record_watch(
                 chat_id, displayable_items, watch_scan_id=watch_scan_id,
                 decision_time=research_decision_time,
                 render_score65=lambda item: _score_confirmation_transition_message(
@@ -4890,6 +4924,37 @@ async def run_watch_cycle(
                 + _watch_derivatives_line(derivatives_status)
             )
 
+        # Experimental conditions are already known from this frozen scan.
+        # Send their durable notifications before ordinary Watch transport;
+        # native delivery captures below still depend on real Telegram results.
+        WATCH_RUNTIME["cycle_stage"] = "sending_experimental"
+        may_deliver_general = lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id
+        if general_enabled and may_deliver_general():
+            try:
+                await research_ordered_experimental_worker.WORKER.drain_for_watch(
+                    chat_id, may_deliver=may_deliver_general,
+                )
+            except Exception as exc:
+                print(f"[ordered-experimental] watch preparation gap: {type(exc).__name__}", flush=True)
+            try:
+                planned_sources = _preview_watch_formula_sources(
+                    chat_id, result_items, displayable_items, combined_deliveries,
+                    transition_record, rows, derivatives_snapshot, research_decision_time,
+                )
+                await manual_formula_alert_delivery.run_watch(
+                    bot_app.bot, chat_id, planned_sources,
+                    may_deliver=may_deliver_general,
+                )
+            except Exception as exc:
+                # Preparation/delivery cannot suppress the ordinary reports.
+                # The existing fresh delivered-event lane remains recoverable.
+                print(f"[manual-formulas] watch preparation gap: {type(exc).__name__}", flush=True)
+            WATCH_RUNTIME["last_formula_sent"] = await watch_transition_delivery.drain(
+                bot_app.bot, chat_id, kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
+                wait_for_lock=True,
+                may_deliver=may_deliver_general,
+            )
+
         WATCH_RUNTIME["cycle_stage"] = "sending_general"
         if general_enabled:
             await bot_app.bot.send_message(chat_id=chat_id, text=header)
@@ -4937,8 +5002,9 @@ async def run_watch_cycle(
                 )
             except Exception as exc:
                 print(f"[research] special transition hook failed: {exc!r}", flush=True)
-            WATCH_RUNTIME["last_formula_sent"] = await watch_transition_delivery.drain(
+            await watch_transition_delivery.drain(
                 bot_app.bot, chat_id,
+                kinds=("MAX_PAIN_SCORE_65",),
                 may_deliver=lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
             )
             for combined_delivery in combined_deliveries:
@@ -5580,14 +5646,22 @@ async def _watch_supervisor_loop(bot_app) -> None:
                         and not WATCH_RUNTIME.get("scan_in_progress")
                         and WATCH_RUNTIME.get("chat_id") == chat_id,
                     )
-                    await watch_transition_delivery.drain(
+                    await manual_formula_alert_delivery.run_once(
                         bot_app.bot, int(chat_id),
                         may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
                         and not WATCH_RUNTIME.get("scan_in_progress")
                         and WATCH_RUNTIME.get("chat_id") == chat_id,
                     )
-                    await manual_formula_alert_delivery.run_once(
+                    await watch_transition_delivery.drain(
                         bot_app.bot, int(chat_id),
+                        kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
+                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
+                        and not WATCH_RUNTIME.get("scan_in_progress")
+                        and WATCH_RUNTIME.get("chat_id") == chat_id,
+                    )
+                    await watch_transition_delivery.drain(
+                        bot_app.bot, int(chat_id),
+                        kinds=("MAX_PAIN_SCORE_65",),
                         may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
                         and not WATCH_RUNTIME.get("scan_in_progress")
                         and WATCH_RUNTIME.get("chat_id") == chat_id,
@@ -7601,6 +7675,9 @@ async def main():
     await bot_app.start()
     research_formula_worker.WORKER.bind_telegram(bot_app.bot)
     research_ordered_experimental_worker.WORKER.bind_telegram(bot_app.bot)
+    research_ordered_experimental_worker.WORKER.bind_watch_busy(
+        lambda: bool(WATCH_RUNTIME.get("scan_in_progress")),
+    )
 
     if research_schema_ready:
         try:

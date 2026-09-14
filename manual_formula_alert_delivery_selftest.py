@@ -66,6 +66,59 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         for call, row in zip(bot.send_message.await_args_list, self.rows()):
             self.assertEqual(call.kwargs, {'chat_id': 1, 'text': row['text'], 'parse_mode': 'HTML'})
 
+    async def test_watch_priority_group_drains_more_than_two_before_return(self):
+        self.seed(4); bot = self.bot()
+        with patch.object(delivery.store, 'record_watch_events', return_value={'created_intents': 0}) as record:
+            self.assertEqual(await delivery.run_watch(bot, 1, [], may_deliver=lambda: True), 4)
+        record.assert_called_once()
+        self.assertEqual([r['status'] for r in self.rows()], ['DELIVERED'] * 4)
+        self.assertEqual(bot.send_message.await_count, 4)
+
+    async def test_watch_recipient_revocation_during_preparation_prevents_send(self):
+        self.seed(4); active = [True]; bot = self.bot()
+        def record(*args):
+            active[0] = False
+            return {'created_intents': 0}
+        with patch.object(delivery.store, 'record_watch_events', side_effect=record), \
+             patch.object(delivery.store, 'claim', wraps=delivery.store.claim) as claim:
+            self.assertEqual(await delivery.run_watch(bot, 1, [], may_deliver=lambda: active[0]), 0)
+        claim.assert_not_called(); bot.send_message.assert_not_awaited()
+
+    async def test_actual_btc_magnet_preview_creates_c0964_without_native_delivery(self):
+        import main
+        import research_event_runtime as runtime
+        self.seed(0)
+        stamp = BASE + timedelta(minutes=1)
+        magnet = {'symbol': 'BTC', 'side': 'UPPER', 'count': 3,
+                  'members': ['12h', '24h', '48h'], 'min_target': 102,
+                  'max_target': 103, 'average_target': 102.5, 'spread_pct': .5,
+                  'magnet_quality': 80, 'liquidity_edge_pct': 30}
+        evidence = {'modules': {'spot_flow': {'available': True, 'score': 25, 'direction': 'BULLISH'}}}
+        token = runtime.set_watch_context(watch_scan_id='current-c0964-watch')
+        try:
+            with patch.object(main, 'MAGNET_V1_WATCHES', {'BTC': {'chat_id': 1}}), \
+                 patch.object(main, 'datetime', SimpleNamespace(now=lambda tz: stamp)), \
+                 patch.object(runtime.magnet_v1, 'build_magnets', return_value=[magnet]), \
+                 patch.object(runtime.magnet_v1, 'evaluate_confirmation', return_value={'status': 'OBSERVATION'}), \
+                 patch.object(runtime.market_confidence_engine, 'combine', return_value=evidence), \
+                 patch.object(runtime.research_event_store.WRITER, 'enqueue') as writer:
+                events = main._preview_watch_formula_sources(
+                    1, [], [], [], None, [{'symbol': 'BTC', 'current_price': 100}], {}, stamp,
+                )
+                bot = self.bot()
+                self.assertEqual(await delivery.run_watch(bot, 1, events, may_deliver=lambda: True), 1)
+                await bot.send_message(chat_id=1, text='ordinary Watch header')
+            writer.assert_not_called()
+            text = bot.send_message.await_args_list[0].kwargs['text']
+            self.assertIn('C0964', text)
+            self.assertIn('סף 2%', text)
+            self.assertIn('<b>הערה</b>: מבוסס בעיקר על אוגוסט ועל עליות', text)
+            self.assertEqual(self.rows()[0]['payload']['rule_id'], 'C0964')
+            self.assertEqual(self.rows()[0]['payload']['direction'], 'SHORT')
+            self.assertTrue(all(event['delivery_status'] == 'NOT_ATTEMPTED' for event in events))
+        finally:
+            runtime.reset_watch_context(token)
+
     async def test_no_callback_or_revocation_before_initialize_never_claims(self):
         self.seed(); bot = self.bot()
         with patch.object(delivery.store, 'claim', wraps=delivery.store.claim) as claim:
@@ -181,6 +234,54 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             self.assertEqual(await task, 1)
         self.assertEqual(self.rows()[0]['status'], 'DELIVERED')
+
+    async def test_watch_waits_for_prior_supervisor_send_then_prepares_entire_group(self):
+        self.seed(4)
+        entered, release = asyncio.Event(), asyncio.Event()
+        scan_started = [False]
+        async def pending(**kwargs):
+            entered.set()
+            await release.wait()
+            return SimpleNamespace(message_id=1)
+        bot = self.bot(side_effect=pending)
+        supervisor = asyncio.create_task(self.run_delivery(bot, may_deliver=lambda: not scan_started[0]))
+        watch = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            scan_started[0] = True
+            with patch.object(delivery.store, 'record_watch_events', return_value={'created_intents': 0}) as record:
+                watch = asyncio.create_task(delivery.run_watch(bot, 1, [], may_deliver=lambda: True))
+                await asyncio.sleep(0)
+                self.assertFalse(watch.done())
+                record.assert_not_called()
+                release.set()
+                self.assertEqual(await asyncio.wait_for(supervisor, timeout=2), 1)
+                self.assertEqual(await asyncio.wait_for(watch, timeout=2), 3)
+            record.assert_called_once()
+            self.assertEqual([row['status'] for row in self.rows()], ['DELIVERED'] * 4)
+            self.assertEqual(bot.send_message.await_count, 4)
+        finally:
+            release.set()
+            await asyncio.gather(supervisor, *([watch] if watch is not None else []), return_exceptions=True)
+
+    async def test_watch_rechecks_destination_after_waiting_for_delivery_lock(self):
+        self.seed(4); active = [True]; bot = self.bot()
+        self.assertTrue(await delivery.initialize(1))
+        await delivery._LOCK.acquire()
+        task = asyncio.create_task(delivery.run_watch(bot, 1, [], may_deliver=lambda: active[0]))
+        try:
+            with patch.object(delivery.store, 'record_watch_events') as record:
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                active[0] = False
+                delivery._LOCK.release()
+                self.assertEqual(await asyncio.wait_for(task, timeout=2), 0)
+            record.assert_not_called()
+            bot.send_message.assert_not_awaited()
+        finally:
+            if delivery._LOCK.locked():
+                delivery._LOCK.release()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def test_collection_failure_never_claims_or_transports(self):
         self.seed(); bot = self.bot()

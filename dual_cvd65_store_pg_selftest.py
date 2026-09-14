@@ -19,7 +19,7 @@ import dual_cvd65_store as store
 BASE = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
 
 
-def observation(*, symbol='BTC', status='MATCH', direction='LONG', score=65., close=None):
+def observation(*, symbol='ZEC', status='MATCH', direction='LONG', score=65., close=None):
     close = close or BASE
     signed = abs(score) if direction == 'LONG' else -abs(score)
     return detector._observation(symbol, status=status,
@@ -100,15 +100,15 @@ class DualCvd65StorePostgresTests(unittest.TestCase):
         self.assertEqual(self.cycle('first', 1)['created_intents'], 1)
         self.assertEqual(self.cycle('continuous', 2)['created_intents'], 0)
         self.assertEqual(self.cycle('missing', 3, [observation(status='UNKNOWN')])['counts']['UNKNOWN'], 1)
-        self.assertEqual(self.state()['BTC']['active_direction'], 'LONG')
+        self.assertEqual(self.state()['ZEC']['active_direction'], 'LONG')
         self.assertEqual(self.cycle('still-active', 4)['created_intents'], 0)
         reset = self.cycle('reset-at64', 5, [observation(status='NO_MATCH', score=64., close=BASE+timedelta(minutes=5))])
         self.assertEqual(reset['counts']['resets'], 1)
-        self.assertIsNone(self.state()['BTC']['active_direction'])
+        self.assertIsNone(self.state()['ZEC']['active_direction'])
         self.assertEqual(self.cycle('at65-again', 6)['created_intents'], 1)
         self.assertEqual(self.cycle('switch', 7, [observation(direction='SHORT', close=BASE+timedelta(minutes=7))])['created_intents'], 1)
-        self.assertEqual(self.state()['BTC']['active_direction'], 'SHORT')
-        self.assertEqual(self.state()['BTC']['episode'], 3)
+        self.assertEqual(self.state()['ZEC']['active_direction'], 'SHORT')
+        self.assertEqual(self.state()['ZEC']['episode'], 3)
         rows = self.intents()
         self.assertEqual([row['direction'] for row in rows], ['LONG', 'LONG', 'SHORT'])
         self.assertTrue(all('ניסיוני' in row['text'] for row in rows))
@@ -116,6 +116,26 @@ class DualCvd65StorePostgresTests(unittest.TestCase):
         with store._connect(self.dsn) as conn:
             for name in ('watch_transition_scopes', 'research_events', 'research_watch_scan_formula_samples'):
                 self.assertIsNone(conn.execute('SELECT to_regclass(%s) AS relation', (name,)).fetchone()['relation'])
+
+    def test_all_eight_observations_are_retained_but_only_zec_can_notify(self):
+        rows = [observation(symbol=symbol, close=BASE+timedelta(minutes=1))
+                for symbol in detector.SYMBOLS]
+        result = self.cycle('all-eight', 1, rows)
+        self.assertEqual((result['counts']['evaluated'], result['counts']['MATCH']), (8, 8))
+        self.assertEqual(result['created_intents'], 1)
+        self.assertEqual([row['symbol'] for row in self.intents()], ['ZEC'])
+
+    def test_previous_policy_pending_other_coins_expire_without_replaying_zec(self):
+        rows = [observation(symbol=symbol, close=BASE+timedelta(minutes=1))
+                for symbol in ('BTC', 'ZEC')]
+        with patch.object(detector, 'NOTIFICATION_SYMBOLS', ('BTC', 'ZEC')):
+            self.assertEqual(self.cycle('previous-policy', 1, rows)['created_intents'], 2)
+        claimed = self.claim(2, limit=8)
+        self.assertEqual([row['symbol'] for row in claimed], ['ZEC'])
+        self.assertEqual({row['symbol']: row['status'] for row in self.intents()},
+                         {'BTC': 'EXPIRED', 'ZEC': 'IN_FLIGHT'})
+        self.assertEqual(self.cycle('same-episode-new-policy', 3)['created_intents'], 0)
+        self.assertEqual(self.state()['ZEC']['episode'], 1)
 
     def test_activation_replay_changed_identity_out_of_order_and_future_are_safe(self):
         self.assertEqual(self.cycle('preactivation', -1)['record_status'], 'PRE_ACTIVATION')
@@ -133,7 +153,7 @@ class DualCvd65StorePostgresTests(unittest.TestCase):
         self.assertEqual(self.cycle('same-time', 2, [observation(status='NO_MATCH', score=64.)])['record_status'], 'OUT_OF_ORDER')
         with self.assertRaisesRegex(ValueError, 'future'):
             self.cycle('future', 5, now=BASE+timedelta(minutes=4))
-        self.assertEqual(self.state()['BTC']['active_direction'], 'LONG')
+        self.assertEqual(self.state()['ZEC']['active_direction'], 'LONG')
         self.assertEqual(len(self.intents()), 1)
         original = store.initialize_scope(self.scope, BASE+timedelta(days=1), database_url=self.dsn)
         self.assertEqual(original['activated_at_utc'], store._iso(BASE))
@@ -176,14 +196,14 @@ class DualCvd65StorePostgresTests(unittest.TestCase):
         self.assertEqual(self.intents()[-1]['status'], 'EXPIRED')
         self.cycle('reset-stale', 18, [observation(status='NO_MATCH', score=64., close=BASE+timedelta(minutes=18))])
         self.assertEqual(self.cycle('too-late-to-record', 19, now=BASE+timedelta(minutes=29))['record_status'], 'EXPIRED')
-        self.assertIsNone(self.state()['BTC']['active_direction'])
+        self.assertIsNone(self.state()['ZEC']['active_direction'])
         self.assertEqual(self.cycle('next-fresh', 30)['created_intents'], 1)
 
     def test_render_or_sql_error_rolls_back_receipt_state_and_all_intents(self):
         items = [observation(), observation(symbol='ETH')]
         original = detector.render_message
         def broken(row, source):
-            if row['symbol'] == 'ETH':
+            if row['symbol'] == 'ZEC':
                 raise RuntimeError('fixture-render-failure')
             return original(row, source)
         with patch.object(detector, 'render_message', side_effect=broken):
@@ -199,7 +219,7 @@ class DualCvd65StorePostgresTests(unittest.TestCase):
                 self.cycle('atomic', 1, items)
         self.assertEqual(self.state(), {})
         self.assertEqual(self.intents(), [])
-        self.assertEqual(self.cycle('atomic', 1, items)['created_intents'], 2)
+        self.assertEqual(self.cycle('atomic', 1, items)['created_intents'], 1)
 
     def test_concurrent_record_and_claim_commit_one_attempt_and_terminal_evidence_is_immutable(self):
         barrier = Barrier(4)

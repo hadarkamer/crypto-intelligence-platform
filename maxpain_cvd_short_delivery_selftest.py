@@ -178,6 +178,7 @@ def test_runtime_capture_and_sheets():
     scope = {
         "datetime": datetime, "timezone": timezone, "replace": replace, "hashlib": hashlib,
         "_WATCH_CONTEXT": ContextVar("test_watch", default={}),
+        "_PLANNED_CAPTURE": ContextVar("test_planned", default=None),
         "SINK": capture.DryRunResearchCapture(max_events=20),
         "research_event_capture": capture, "maxpain_cvd_short_alert": formula,
         "formula_readiness_measurement": formula_readiness_measurement,
@@ -267,8 +268,8 @@ def test_watch_only_hook_structure():
                     and node.func.value.id == "watch_transition_delivery" and node.func.attr == "drain"
                     and func.name == "run_watch_cycle"):
                     helper_calls.append((func, node))
-    assert len(helper_calls) == 1
-    watch, helper = helper_calls[0]
+    assert len(helper_calls) == 2
+    watch, helper = max(helper_calls, key=lambda pair: pair[1].lineno)
     assert watch.name == "run_watch_cycle"
     guarded = [node for node in ast.walk(watch) if isinstance(node, ast.If)
                and isinstance(node.test, ast.Name) and node.test.id == "general_enabled"

@@ -107,6 +107,7 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "watch_transition_delivery": SimpleNamespace(drain=drain),
             "dual_cvd65_delivery": SimpleNamespace(drain=AsyncMock(return_value=0)),
             "manual_formula_alert_delivery": SimpleNamespace(run_once=AsyncMock(return_value=0)),
+            "maxpain_cvd_short_alert": SimpleNamespace(FORMULA_ID="FORMULA_MP65_CVD_SHORT"),
         })
         load_main({"_watch_consumers_active", "_watch_supervisor_loop"}, scope)
         with self.assertRaises(asyncio.CancelledError):
@@ -118,7 +119,9 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_coordinator_still_recovers_pending_messages(self):
         scope, drain, ensure, bot = await self.one_pass()
         ensure.assert_not_awaited()
-        drain.assert_awaited_once()
+        self.assertEqual(drain.await_count, 2)
+        self.assertEqual([call.kwargs["kinds"] for call in drain.await_args_list],
+                         [("FORMULA_MP65_CVD_SHORT",), ("MAX_PAIN_SCORE_65",)])
         self.assertEqual(drain.await_args.args, (bot, 99))
         may_deliver = drain.await_args.kwargs["may_deliver"]
         manual = scope["manual_formula_alert_delivery"].run_once
@@ -144,7 +147,7 @@ class SupervisorRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_also_runs_after_coordinator_restore(self):
         scope, drain, ensure, _ = await self.one_pass(coordinator_alive=False)
         ensure.assert_awaited_once()
-        drain.assert_awaited_once()
+        self.assertEqual(drain.await_count, 2)
         scope["manual_formula_alert_delivery"].run_once.assert_awaited_once()
         self.assertEqual(scope["WATCH_RUNTIME"]["supervisor_restarts"], 1)
 

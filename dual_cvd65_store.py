@@ -115,9 +115,11 @@ def _cleanup(conn, scope, moment):
 def _expire(conn, scope, moment):
     conn.execute('''WITH old AS (
         SELECT intent_id FROM dual_cvd65_intents WHERE subscription_scope=%s AND status='PENDING'
-        AND expires_at<=%s ORDER BY expires_at LIMIT %s FOR UPDATE SKIP LOCKED)
+        AND (expires_at<=%s OR (source_at_utc<=%s AND NOT (symbol=ANY(%s))))
+        ORDER BY expires_at LIMIT %s FOR UPDATE SKIP LOCKED)
         UPDATE dual_cvd65_intents i SET status='EXPIRED',finished_at_utc=%s
-        FROM old WHERE i.intent_id=old.intent_id''', (scope, moment, CLEANUP_LIMIT, moment))
+        FROM old WHERE i.intent_id=old.intent_id''',
+        (scope, moment, moment, list(detector.NOTIFICATION_SYMBOLS), CLEANUP_LIMIT, moment))
 
 
 def record_cycle(scope, evaluation, now, *, database_url=None):
@@ -161,6 +163,10 @@ def record_cycle(scope, evaluation, now, *, database_url=None):
                 symbol, observed = observation['symbol'], observation['status']
                 counts['evaluated'] += 1
                 counts[observed] += 1
+                # Keep the complete capture/receipt, but only eligible coins
+                # participate in live notification episodes.
+                if symbol not in detector.NOTIFICATION_SYMBOLS:
+                    continue
                 previous = state.get(symbol) or {'active_direction': None, 'episode': 0}
                 direction, episode = previous['active_direction'], previous['episode']
                 if observed == 'NO_MATCH':
@@ -213,8 +219,9 @@ def claim_pending(scope, now, limit=1, *, database_url=None):
         _expire(conn, scope, moment)
         rows = conn.execute('''SELECT intent_id FROM dual_cvd65_intents
             WHERE subscription_scope=%s AND status='PENDING' AND source_at_utc<=%s AND expires_at>%s
+              AND symbol=ANY(%s)
             ORDER BY source_at_utc,intent_id LIMIT %s FOR UPDATE SKIP LOCKED''',
-            (scope, moment, moment, limit)).fetchall()
+            (scope, moment, moment, list(detector.NOTIFICATION_SYMBOLS), limit)).fetchall()
         claimed = []
         for row in rows:
             claimed.append(_public(conn.execute('''UPDATE dual_cvd65_intents

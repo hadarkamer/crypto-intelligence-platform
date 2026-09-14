@@ -34,10 +34,11 @@ class MemoryStore:
         self.records.append((scope, deepcopy(evaluation), now))
         return {'record_status': 'RECORDED', 'created_intents': 0, 'counts': {}}
 
-    def seed(self, count=1, *, expired=False):
+    def seed(self, count=1, *, expired=False, symbol='ZEC'):
         for _ in range(count):
             identity = str(len(self.rows) + 1)
-            self.rows.append({'intent_id': identity, 'text': 'frozen dual-CVD ' + identity,
+            self.rows.append({'intent_id': identity, 'symbol': symbol,
+                'text': delivery.alert.THRESHOLD_HEADER + 'frozen dual-CVD ' + identity,
                 'status': 'PENDING', 'attempt_token': None, 'watch_scan_id': 'source-watch',
                 'expires_at': datetime.now(timezone.utc) + timedelta(minutes=-1 if expired else 30)})
 
@@ -126,6 +127,39 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await delivery.drain(bot, 1), 0)
         self.assertEqual(self.db.claim_calls, 0)
         bot.send_message.assert_not_awaited()
+
+    async def test_priority_waits_for_existing_send_and_rechecks_authorization(self):
+        await delivery.initialize(1)
+        self.db.seed()
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+        for authorized, expected in ((False, 0), (True, 1)):
+            active = [True]
+            await delivery._DRAIN_LOCK.acquire()
+            # Supervisor recovery remains nonblocking.
+            self.assertEqual(await self.drain(bot), 0)
+            task = asyncio.create_task(self.drain(bot, limit=1, wait_for_lock=True,
+                                                 may_deliver=lambda: active[0]))
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                bot.send_message.assert_not_awaited()
+                active[0] = authorized
+            finally:
+                delivery._DRAIN_LOCK.release()
+            self.assertEqual(await task, expected)
+        self.assertEqual(self.db.claim_calls, 1)
+        bot.send_message.assert_awaited_once()
+
+    async def test_old_non_zec_claim_is_blocked_and_legacy_zec_gets_threshold_header(self):
+        self.db.seed(symbol='BTC')
+        self.db.seed()
+        self.db.rows[1]['text'] = 'legacy ZEC notification'
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+        self.assertEqual(await self.drain(bot), 1)
+        self.assertEqual([row['status'] for row in self.db.rows], ['FAILED', 'DELIVERED'])
+        bot.send_message.assert_awaited_once()
+        self.assertEqual(bot.send_message.call_args.kwargs['text'],
+                         '<b>סף 2%</b>\nlegacy ZEC notification')
 
     async def test_revocation_before_claim_or_after_first_send_prevents_further_transport(self):
         self.db.seed(2)
@@ -245,9 +279,10 @@ class WatchHookTests(unittest.IsolatedAsyncioTestCase):
                 (main, '_filter_top8_items', display_filter),
                 (main.dual_cvd65_delivery, 'record_watch', AsyncMock(side_effect=record)),
                 (main.dual_cvd65_delivery, 'drain', AsyncMock(side_effect=drain)),
-                (main.watch_transition_delivery, 'record_watch', AsyncMock()),
+                (main.watch_transition_delivery, 'record_watch', AsyncMock(return_value={})),
                 (main.watch_transition_delivery, 'drain', AsyncMock(return_value=0)),
                 (main.watch_transition_delivery, 'cycle_result', lambda scan: {'status': 'COMPLETE'}),
+                (main.manual_formula_alert_delivery, 'run_watch', AsyncMock(return_value=0)),
                 (main, '_collect_special_transition_messages', lambda *a, **k: []),
                 (main, '_collect_combined_confirmation_messages', lambda *a, **k: []),
                 (main, '_send_magnet_watch_reports', AsyncMock(return_value=0)),
@@ -274,6 +309,7 @@ class WatchHookTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(main, 'WATCH_TASK', SimpleNamespace(done=lambda: False)))
             stack.enter_context(patch.object(main, '_watch_consumers_active', return_value=True))
             stack.enter_context(patch.object(main.watch_transition_delivery, 'drain', AsyncMock(return_value=0)))
+            stack.enter_context(patch.object(main.manual_formula_alert_delivery, 'run_once', AsyncMock(return_value=0)))
             pending = stack.enter_context(patch.object(main.dual_cvd65_delivery, 'drain', AsyncMock(return_value=0)))
             stack.enter_context(patch.object(main.asyncio, 'sleep', AsyncMock(side_effect=asyncio.CancelledError)))
             with self.assertRaises(asyncio.CancelledError):

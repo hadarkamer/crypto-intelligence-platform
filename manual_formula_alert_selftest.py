@@ -30,6 +30,46 @@ def result_ids(event, features, now=NOW):
 
 
 class ManualFormulaTests(unittest.TestCase):
+    def test_c0964_exact_predicate_btc_both_directions_and_note(self):
+        for symbol in rules.SYMBOLS:
+            for direction in ('LONG', 'SHORT'):
+                event, features = fixture(symbol, direction)
+                event['engine_snapshot']['magnet']['liquidity_edge_pct'] = 30
+                features['spot_cvd.aligned_score'] = 25
+                rows = {r['rule_id']: r for r in rules.evaluate_event(event, features, NOW)}
+                self.assertEqual('C0964' in rows, symbol == 'BTC')
+                if symbol == 'BTC':
+                    row = rows['C0964']
+                    self.assertEqual(row['threshold_bps'], 200)
+                    self.assertEqual(row['direction'], 'SHORT' if direction == 'LONG' else 'LONG')
+                    self.assertIn('<b>הערה</b>: מבוסס בעיקר על אוגוסט ועל עליות', row['text'])
+        for field, bad_values in (('edge', (29.999, None, True, float('inf'), float('nan'))),
+                                  ('spot', (24.999, -25, None, True, 101, float('nan')))):
+            for bad in bad_values:
+                event, features = fixture()
+                event['engine_snapshot']['magnet']['liquidity_edge_pct'] = 30
+                features['spot_cvd.aligned_score'] = 25
+                if field == 'edge': event['engine_snapshot']['magnet']['liquidity_edge_pct'] = bad
+                else: features['spot_cvd.aligned_score'] = bad
+                self.assertNotIn('C0964', result_ids(event, features))
+        event, features = fixture()
+        event['engine_snapshot']['magnet']['liquidity_edge_pct'] = 30
+        event['event_type'] = 'PRICE_OI_ALERT'
+        self.assertNotIn('C0964', result_ids(event, features))
+
+    def test_planned_sources_require_explicit_lane_and_original_provenance(self):
+        event, features = fixture()
+        event.update(event_id='watch:' + event['event_fingerprint'],
+                     capture_stage='WATCH_PLANNED_ALERT', delivery_status='NOT_ATTEMPTED')
+        event['engine_snapshot']['watch_scan_id'] = 'current-watch'
+        self.assertFalse(rules.evaluate_event(event, features, NOW))
+        self.assertEqual(len(rules.evaluate_event(event, features, NOW, planned=True)), 4)
+        for field, bad in (('capture_stage', 'OBSERVED'), ('event_id', 123), ('delivery_status', 'DELIVERED')):
+            changed = deepcopy(event); changed[field] = bad
+            self.assertFalse(rules.evaluate_event(changed, features, NOW, planned=True))
+        event['engine_snapshot']['archive_only'] = True
+        self.assertFalse(rules.evaluate_event(event, features, NOW, planned=True))
+
     def test_all_eight_coin_filters_are_exact(self):
         expected = {"C1274": {"BTC", "BNB", "DOGE", "HYPE", "SOL"},
                     "PRICE_OI_ENTRY2": {"BTC", "BNB", "DOGE", "ETH", "SOL", "XRP"},
@@ -51,7 +91,7 @@ class ManualFormulaTests(unittest.TestCase):
                 with self.subTest(symbol=symbol, rule=row["rule_id"]):
                     self.assertEqual(row["threshold_bps"], 100 if row["rule_id"] in ("C1274", "PRICE_OI_ENTRY2") else 200)
                     self.assertTrue(row["text"].startswith(f'🧪 <b>סף {row["threshold_bps"] / 100:g}% — ניסיוני, לא למסחר</b>'))
-                    notes = [line.removeprefix("הערה: ") for line in row["text"].splitlines() if line.startswith("הערה: ")]
+                    notes = [line.removeprefix("<b>הערה</b>: ") for line in row["text"].splitlines() if line.startswith("<b>הערה</b>: ")]
                     self.assertEqual(notes, expected[row["rule_id"]].get(symbol, []))
                     self.assertNotIn("שיעור הצלחה", row["text"])
 
