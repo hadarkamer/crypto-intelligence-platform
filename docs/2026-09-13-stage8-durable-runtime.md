@@ -25,7 +25,7 @@ false in Python and are independently forced false by PostgreSQL.
 
 ## End-to-end sequence
 
-1. Apply migrations `001` through `051` to a staging PostgreSQL 15+ database
+1. Apply migrations `001` through `053` to a staging PostgreSQL 15+ database
    after an administrator has created the five dedicated Stage-8 roles.
 2. Register one exact frozen binding with
    `research_stage8_registrar_v1`. PostgreSQL assigns `frozen_at_utc` and the
@@ -66,7 +66,7 @@ false in Python and are independently forced false by PostgreSQL.
 
 Each write role has a distinct database URL and cannot be replaced by a
 generic application URL. `RESEARCH_STAGE8_DATABASE_SCHEMA` must name the exact
-schema containing migration 051 (normally `public`). Every registry entrypoint
+schema containing migration 053 (normally `public`). Every registry entrypoint
 pins that schema ahead of `pg_catalog` and explicitly places `pg_temp` last,
 then verifies the resolved relation identity. The read-side role has `SELECT`
 only and must have neither schema `CREATE` nor a shadowable `search_path`.
@@ -102,7 +102,7 @@ outcome adapter normalize it to the authoritative
 `selection_fact_identity_sha256` consumed by acceptance.
 
 The persisted prospective attempt, slot, and event rows remain an upstream
-trust boundary. Migration 051 independently revalidates the complete v4
+trust boundary. Migration 053 independently revalidates the complete v4
 authority needed by Stage 8: coverage, all four frozen-source families, both
 silent event directions, canonical input and bundle hashes, the exact feature
 namespace, source-series manifest, New York session/DST composition, and the
@@ -131,7 +131,7 @@ its native database test. A skipped native gate is not a passing release result.
 
 The release gate is PostgreSQL 15+ with fresh dedicated logins. It must prove:
 
-- clean `001 -> 051` apply and idempotent reapply;
+- clean `001 -> 053` apply and idempotent reapply;
 - fact, seal, selection, outcome replay, and evaluation round trips;
 - rejection of forged facts, subsets, route flags, recomputed hashes, and
   append-only mutations;
@@ -153,7 +153,7 @@ The release gate is PostgreSQL 15+ with fresh dedicated logins. It must prove:
 Deployment is a separate, explicitly approved operation. The safe order is:
 
 1. create roles and staging credentials;
-2. apply migration `051` in staging;
+2. apply migration `053` in staging;
 3. run the native PostgreSQL gate;
 4. register selected exact bindings;
 5. run Shadow and persistence in observation-only mode;

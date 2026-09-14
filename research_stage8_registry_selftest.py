@@ -254,7 +254,7 @@ class Stage8RegistryTests(unittest.TestCase):
 
     def test_migration_has_sealed_full_ledger_and_closed_acls(self):
         sql = (Path(registry.__file__).resolve().parent / "migrations" /
-               "051_stage8_durable_registry.sql").read_text()
+               "053_stage8_durable_registry.sql").read_text()
         for token in (
             "research_stage8_projection_fact_batches",
             "research_stage8_projected_fact_ledger",
@@ -283,7 +283,7 @@ class Stage8RegistryTests(unittest.TestCase):
 
     def test_selection_guard_uses_python_canonical_collation(self):
         sql = (Path(registry.__file__).resolve().parent / "migrations" /
-               "051_stage8_durable_registry.sql").read_text()
+               "053_stage8_durable_registry.sql").read_text()
         self.assertIn(
             'research_stage8_canonical_json_v1(finalized.identity) COLLATE "C"',
             sql,

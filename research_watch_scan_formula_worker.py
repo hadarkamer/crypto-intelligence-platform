@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 
-import research_watch_scan_formula_btc_context as formula
+import research_watch_scan_formula_score_change as formula
 import research_watch_scan_intake as intake
 import research_price_archive as prices
 
@@ -137,6 +137,48 @@ def activate_if_caught_up(conn, *, now):
             'active_evaluation_version': updated['active_evaluation_version'] if updated else active}
 
 
+def _score_change_predecessor_ids(conn, observation, observations):
+    """Freeze one scan selection across all coins, including a saved absence."""
+    frozen = conn.execute('''SELECT symbol,payload->'score_change_context_provenance' AS context
+        FROM research_watch_scan_formula_samples WHERE evaluation_version=%s
+        AND consumer_version=%s AND snapshot_set_id=%s AND status='READY'
+        ORDER BY symbol LIMIT 1''',
+        (formula.VERSION, intake.VERSION, observation['snapshot_set_id'])).fetchone()
+    if frozen:
+        if frozen['context'] is None:
+            raise ValueError('MISSING_FROZEN_SCORE_CHANGE_CONTEXT')
+        formula.validate_score_change_context(
+            observations[(observation['snapshot_set_id'], frozen['symbol'])], frozen['context'])
+        return [row['snapshot_set_id'] for row in frozen['context']['predecessors']]
+    rows = conn.execute('''SELECT snapshot_set_id,usable_from_utc
+        FROM research_watch_scan_intakes WHERE consumer_version=%s AND intake_status='ACCEPTED'
+        AND watch_scan_id<>%s AND observed_at_utc<%s
+        AND usable_from_utc>=%s AND usable_from_utc<%s
+        ORDER BY usable_from_utc DESC,snapshot_set_id LIMIT 2''',
+        (intake.VERSION, observation['watch_scan_id'], observation['observed_at_utc'],
+         observation['usable_from_utc']-timedelta(minutes=30), observation['usable_from_utc'])).fetchall()
+    # The ID orders the evidence deterministically; a latest-time tie remains
+    # ambiguous and is never resolved by selecting the lower ID.
+    if len(rows) == 2 and rows[1]['usable_from_utc'] != rows[0]['usable_from_utc']:
+        rows = rows[:1]
+    return [row['snapshot_set_id'] for row in rows]
+
+
+def _score_change_predecessors(conn, observation, ids):
+    if not ids:
+        return []
+    rows = conn.execute('''SELECT consumer_version,population_version,snapshot_set_id,symbol,
+        bundle_sha256,parent_payload_sha256,watch_scan_id,usable_from_utc,observed_at_utc,
+        source_available_at_utc,source_created_at_utc,source_version,intake_status,capture_phase,
+        models,sources,source_time_errors FROM research_watch_scan_observations
+        WHERE consumer_version=%s AND symbol=%s AND snapshot_set_id=ANY(%s::bigint[])
+        ORDER BY usable_from_utc DESC,snapshot_set_id''',
+        (intake.VERSION, observation['symbol'], ids)).fetchall()
+    if len(rows) != len(ids):
+        raise ValueError('MISSING_FROZEN_SCORE_CHANGE_PREDECESSOR')
+    return rows
+
+
 def process_page(conn, *, now=None, limit=JOB_LIMIT):
     if type(limit) is not int or not 1 <= limit <= JOB_LIMIT:
         raise ValueError('Invalid Watch formula job budget')
@@ -156,23 +198,25 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
     ids = sorted({j['snapshot_set_id'] for j in jobs})
     observations = {(r['snapshot_set_id'], r['symbol']): r for r in conn.execute('''
         SELECT consumer_version,population_version,snapshot_set_id,symbol,bundle_sha256,
-            parent_payload_sha256,usable_from_utc,observed_at_utc,source_available_at_utc,
+            parent_payload_sha256,watch_scan_id,usable_from_utc,observed_at_utc,source_available_at_utc,
             source_created_at_utc,source_version,intake_status,capture_phase,models,sources,
             source_time_errors,maxpain_slots FROM research_watch_scan_observations
         WHERE consumer_version=%s AND snapshot_set_id=ANY(%s::bigint[])''', (intake.VERSION, ids)).fetchall()}
     # The first READY coin freezes BTC context for the entire scan, including
     # retries and split passes. Later cache enrichment cannot make siblings
     # disagree. New contexts use one bounded BTC-only read per selected scan.
-    contexts, context_errors = {}, {}
+    contexts, context_errors, predecessor_ids = {}, {}, {}
     if getattr(formula, 'CONTEXT_REQUIRED', False):
+        context_versions = [formula.VERSION, *getattr(formula, 'BTC_CONTEXT_PREDECESSORS', ())]
         for snapshot_id in ids:
             try:
                 with conn.transaction():
                     source = observations[(snapshot_id, 'BTC')]
                     frozen = conn.execute('''SELECT payload->'btc_context_provenance' AS context
-                        FROM research_watch_scan_formula_samples WHERE evaluation_version=%s
+                        FROM research_watch_scan_formula_samples WHERE evaluation_version=ANY(%s::text[])
                         AND consumer_version=%s AND snapshot_set_id=%s AND status='READY'
-                        ORDER BY symbol LIMIT 1''', (formula.VERSION, intake.VERSION, snapshot_id)).fetchone()
+                        ORDER BY array_position(%s::text[],evaluation_version),symbol LIMIT 1''',
+                        (context_versions, intake.VERSION, snapshot_id, context_versions)).fetchone()
                     if frozen:
                         if frozen['context'] is None:
                             raise ValueError('MISSING_FROZEN_BTC_CONTEXT')
@@ -182,6 +226,8 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
                         path = prices.read_path(prices.BINANCE_SPOT, 'BTC',
                             boundary-timedelta(minutes=240), boundary-timedelta(milliseconds=1), connection=conn)
                         contexts[snapshot_id] = formula.build_btc_context(source, path, computed_at=now)
+                    if getattr(formula, 'SCORE_CHANGE_CONTEXT_REQUIRED', False):
+                        predecessor_ids[snapshot_id] = _score_change_predecessor_ids(conn, source, observations)
             except Exception as exc:
                 # Savepoints keep another scan usable; do not repeat a failed
                 # source query eight times or persist exception contents.
@@ -192,7 +238,33 @@ def process_page(conn, *, now=None, limit=JOB_LIMIT):
                 observation = observations[(job['snapshot_set_id'], job['symbol'])]
                 if job['snapshot_set_id'] in context_errors:
                     raise context_errors[job['snapshot_set_id']]
-                if getattr(formula, 'CONTEXT_REQUIRED', False):
+                if getattr(formula, 'ASSET_CONTEXT_REQUIRED', False):
+                    context = contexts[job['snapshot_set_id']]
+                    own_versions = list(getattr(formula, 'ASSET_CONTEXT_PREDECESSORS', ()))
+                    frozen = conn.execute('''SELECT payload->'asset_context_provenance' AS context
+                        FROM research_watch_scan_formula_samples WHERE evaluation_version=ANY(%s::text[])
+                        AND consumer_version=%s AND snapshot_set_id=%s AND symbol=%s AND status='READY'
+                        ORDER BY array_position(%s::text[],evaluation_version) LIMIT 1''',
+                        (own_versions, intake.VERSION, job['snapshot_set_id'], job['symbol'], own_versions)
+                        ).fetchone() if own_versions else None
+                    if frozen:
+                        if frozen['context'] is None:
+                            raise ValueError('MISSING_FROZEN_ASSET_CONTEXT')
+                        own = frozen['context']
+                    else:
+                        boundary = intake._utc(observation['usable_from_utc']).replace(second=0, microsecond=0)
+                        # HYPE outcome PERP cannot substitute for own Spot.
+                        path = None if job['symbol'] == 'HYPE' else prices.read_path(
+                            prices.BINANCE_SPOT, job['symbol'], boundary-timedelta(minutes=1440),
+                            boundary-timedelta(milliseconds=1), connection=conn)
+                        own = formula.build_asset_context(observation, path, btc_context=context, computed_at=now)
+                    extra = {}
+                    if getattr(formula, 'SCORE_CHANGE_CONTEXT_REQUIRED', False):
+                        prior = _score_change_predecessors(conn, observation, predecessor_ids[job['snapshot_set_id']])
+                        extra['score_change_context'] = formula.build_score_change_context(
+                            observation, prior, computed_at=now)
+                    result = formula.evaluate_coin(observation, btc_context=context, asset_context=own, **extra)
+                elif getattr(formula, 'CONTEXT_REQUIRED', False):
                     result = formula.evaluate_coin(observation, btc_context=contexts[job['snapshot_set_id']])
                 else:
                     result = formula.evaluate_coin(observation)

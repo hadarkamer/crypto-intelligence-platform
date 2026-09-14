@@ -1,7 +1,7 @@
 """Real disposable-PostgreSQL gate for the Stage-8 outcome DB adapter.
 
 Only an explicit local/CI ``TEST_DATABASE_URL`` whose database name is visibly
-test-only is accepted.  The test builds the real migrations 001--051, persists
+test-only is accepted.  The test builds the real migrations 001--053, persists
 five prospective facts and the deterministic selection, inserts authoritative
 outcome rows, then replays the complete fact population and reads both outcome
 routes in one caller-owned read-only REPEATABLE READ transaction. Caller output
