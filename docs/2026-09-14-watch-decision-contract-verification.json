@@ -1,0 +1,486 @@
+{
+  "ci": {
+    "conclusion": "success",
+    "core_tests": 15,
+    "job_id": 103894297279,
+    "probe_tests": 6,
+    "run_id": 34818467670,
+    "selftest_files": 131,
+    "status": "completed"
+  },
+  "deploy": {
+    "commit": {
+      "createdAt": "2026-09-14T07:39:39Z",
+      "id": "9cfc211a9e33562ef6a060ef57ab6e4f8065e879",
+      "message": "Merge pull request #44 from hadarkamer/feature/watch-decision-contract-20260914\n\nDefine inactive Watch decision populations and verify frozen predicates"
+    },
+    "createdAt": "2026-09-14T07:39:41.891822Z",
+    "finishedAt": "2026-09-14T07:41:28.077423Z",
+    "id": "dep-dajq9f8ae00c73ee1tn0",
+    "startedAt": "2026-09-14T07:39:41.863833Z",
+    "status": "live",
+    "trigger": "new_commit",
+    "updatedAt": "2026-09-14T07:41:49.797714Z"
+  },
+  "deployed_probe": {
+    "catalog_summary": {
+      "blocked": 4,
+      "evaluable": 38,
+      "structurally_unreachable": 4,
+      "total": 42
+    },
+    "code_sha256": {
+      "research_watch_decision_contract.py": "59ee0bef4c8d5f2b85a9218fe074860acf6bd50d4af3c8e03fe8a47777d91b6d",
+      "research_watch_decision_contract_probe.py": "a5bd3014f3b6468a12890975a5d4326c2786d4de77f4ff6b21bdae1f8413c863"
+    },
+    "cohort_eligible": false,
+    "commit": "9cfc211a9e33562ef6a060ef57ab6e4f8065e879",
+    "contract_status": "VALID",
+    "matches_staged_payload": true,
+    "payload_sha256": "f345de76d47d355b099aaf0a1e83eed53cd408bb52124fcd1a4aefd0da5b8e88",
+    "returncode": 0,
+    "snapshot_set_id": 1308,
+    "source_gate": {
+      "reasons": [],
+      "status": "VALIDATED"
+    }
+  },
+  "dual_scheduled_delivery": [
+    {
+      "attempted_at_utc": "2026-09-14T07:35:54.056289Z",
+      "direction": "LONG",
+      "finished_at_utc": "2026-09-14T07:35:54.699869Z",
+      "source_at_utc": "2026-09-14T07:35:52.401981Z",
+      "status": "DELIVERED",
+      "symbol": "ZEC"
+    }
+  ],
+  "final_state": {
+    "accepted_scans": 41,
+    "checked_at_utc": "2026-09-14T07:41:32.31693+00:00",
+    "coin_runtime": "watch-scan-formulas-v5-score-change",
+    "coin_samples": {
+      "errors": 0,
+      "ready": 328
+    },
+    "coverage": {
+      "definition_drift": 0,
+      "definitions": 298,
+      "supported": 204
+    },
+    "dual_intents": 1,
+    "dual_receipts": 4,
+    "independent_live_btc_waves": 1,
+    "last_dual_result": {
+      "counts": {
+        "MATCH": 1,
+        "NO_MATCH": 7,
+        "UNKNOWN": 0,
+        "duplicate_generations": 0,
+        "episodes_started": 1,
+        "evaluated": 8,
+        "resets": 0
+      },
+      "created_intents": 1,
+      "record_status": "ACCEPTED"
+    },
+    "last_dual_source": "2026-09-14T07:35:52.401981+00:00",
+    "timeframe_runtime": "watch-scan-timeframe-formulas-v1",
+    "timeframe_samples": {
+      "errors": 0,
+      "ready": 328
+    }
+  },
+  "health_after_deploy": {
+    "checked_at_utc": "2026-09-14T07:42:42.140497+00:00",
+    "commit": "9cfc211a9e33562ef6a060ef57ab6e4f8065e879",
+    "dual": {
+      "created_intents": 0,
+      "delivered": 0,
+      "evidence_gaps": 0,
+      "experimental": true,
+      "failed": 0,
+      "last_counts": {},
+      "last_delivery_at_utc": null,
+      "last_error_type": null,
+      "last_record_status": "NOT_OBSERVED",
+      "last_watch_scan_id": null,
+      "orphaned_attempts": 0,
+      "ready": true,
+      "rule_id": "captured-question-search-v3-experimental-binding:CORE_FUTURES_CVD_SPOT_CVD_TOTAL_65",
+      "statistically_qualified": false,
+      "unknown": 0,
+      "version": "dual-cvd65-experimental-watch-v1"
+    },
+    "research": {
+      "watch_scan_formulas": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": 170,
+        "version": "watch-scan-formulas-v5-score-change"
+      },
+      "watch_scan_intake": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": null,
+        "version": "watch-all-scan-intake-v1"
+      },
+      "watch_scan_measurement": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": null,
+        "version": "watch-scan-measurements-v1"
+      }
+    },
+    "timeframes": {
+      "active_evaluation_version": "watch-scan-timeframe-formulas-v1",
+      "cycles": 3,
+      "discovery_enabled": false,
+      "enabled": true,
+      "failures": 0,
+      "feature_version": "watch-captured-selected-timeframe-liquidity-and-score-difference-v1",
+      "last": {
+        "activated": false,
+        "active_evaluation_version": "watch-scan-timeframe-formulas-v1",
+        "catalog": 34,
+        "enqueued": 0,
+        "errors": 0,
+        "locked": false,
+        "processed": 0,
+        "ready": 0
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-14T07:42:19.522939+00:00",
+      "max_coins_per_pass": 32,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "promotion_enabled": false,
+      "running": true,
+      "source_timeframes": [
+        "12h",
+        "24h",
+        "48h",
+        "3d",
+        "1w",
+        "2w",
+        "1m"
+      ],
+      "supported_timeframe_candidates": 34,
+      "unit": "ACTUAL_SELECTED_MAXPAIN_TIMEFRAME",
+      "version": "watch-scan-timeframe-formulas-v1"
+    },
+    "watch": {
+      "chat_configured": true,
+      "coordinator_running": true,
+      "desired_general_enabled": true,
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "last_cycle_status": "waiting",
+      "last_error": null,
+      "next_scan_utc": "2026-09-14T08:02:15+00:00",
+      "supervisor_running": true
+    }
+  },
+  "health_before": {
+    "checked_at_utc": "2026-09-14T07:30:22.948470+00:00",
+    "commit": "b1ad1e49b6506620dcff3262bcc715089c4a876d",
+    "research": {
+      "watch_scan_formulas": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": 170,
+        "version": "watch-scan-formulas-v5-score-change"
+      },
+      "watch_scan_intake": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": null,
+        "version": "watch-all-scan-intake-v1"
+      },
+      "watch_scan_measurement": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": null,
+        "version": "watch-scan-measurements-v1"
+      }
+    },
+    "timeframes": {
+      "failures": 0,
+      "running": true
+    },
+    "watch": {
+      "chat_configured": true,
+      "coordinator_running": true,
+      "desired_general_enabled": true,
+      "last_completed_at_utc": "2026-09-14T07:06:17.283446+00:00",
+      "last_cycle_result": "completed",
+      "last_cycle_status": "waiting",
+      "last_error": null,
+      "next_scan_utc": "2026-09-14T07:32:15+00:00",
+      "supervisor_running": true
+    }
+  },
+  "local_tests": {
+    "core": 15,
+    "passed": true,
+    "probe": 6,
+    "total": 21
+  },
+  "merge_and_live_validation": "COMPLETE",
+  "next_bounded_step": "Persistent incremental samples and population-specific cohorts using the inactive contract, with source/entry/outcome and conservative UNKNOWN blocking; activate only after integration verification.",
+  "operational_note": "ZEC LONG dual-CVD65 delivered during the ordinary07:32Watch before PR44 deployment. This is the first durable delivered intent observed for the new rule. No manual scan/testsend occurred. In-memory dual counters reset after deployment; durable DELIVERED receipt remains authoritative.",
+  "preservation": {
+    "after": [
+      {
+        "evaluation_version": "watch-scan-formulas-v1",
+        "layer": "coin",
+        "payload_digest": "4718d575893f79365edccc4566c14efa",
+        "samples": 144
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "layer": "coin",
+        "payload_digest": "824a6f538b7c9b6fbbd18fe1b5089ed3",
+        "samples": 152
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v3-btc-context",
+        "layer": "coin",
+        "payload_digest": "f350f0ee190bd34a4bcb3f631c024df0",
+        "samples": 272
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v4-asset-context",
+        "layer": "coin",
+        "payload_digest": "e9e6703f1723960dc0bf344ef3b3adac",
+        "samples": 280
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v5-score-change",
+        "layer": "coin",
+        "payload_digest": "4c0dae4a1d6cea44487b0e2dc780f0dc",
+        "samples": 320
+      },
+      {
+        "evaluation_version": "watch-scan-timeframe-formulas-v1",
+        "layer": "timeframe",
+        "payload_digest": "ad7fc96e9fc704eaa30b92603719cc1c",
+        "samples": 320
+      }
+    ],
+    "before": [
+      {
+        "evaluation_version": "watch-scan-formulas-v1",
+        "layer": "coin",
+        "payload_digest": "4718d575893f79365edccc4566c14efa",
+        "samples": 144
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "layer": "coin",
+        "payload_digest": "824a6f538b7c9b6fbbd18fe1b5089ed3",
+        "samples": 152
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v3-btc-context",
+        "layer": "coin",
+        "payload_digest": "f350f0ee190bd34a4bcb3f631c024df0",
+        "samples": 272
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v4-asset-context",
+        "layer": "coin",
+        "payload_digest": "e9e6703f1723960dc0bf344ef3b3adac",
+        "samples": 280
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v5-score-change",
+        "layer": "coin",
+        "payload_digest": "4c0dae4a1d6cea44487b0e2dc780f0dc",
+        "samples": 320
+      },
+      {
+        "evaluation_version": "watch-scan-timeframe-formulas-v1",
+        "layer": "timeframe",
+        "payload_digest": "ad7fc96e9fc704eaa30b92603719cc1c",
+        "samples": 320
+      }
+    ],
+    "cutoff": {
+      "accepted_scans": 40,
+      "cutoff": 1308
+    },
+    "exact_match": true,
+    "query": "SELECT 'coin' AS layer,evaluation_version,count(*) AS samples,md5(string_agg(md5(payload::text),',' ORDER BY snapshot_set_id,symbol)) AS payload_digest FROM research_watch_scan_formula_samples WHERE snapshot_set_id<=1308 AND status='READY' GROUP BY evaluation_version UNION ALL SELECT 'timeframe' AS layer,evaluation_version,count(*) AS samples,md5(string_agg(md5(payload::text),',' ORDER BY snapshot_set_id,symbol)) AS payload_digest FROM research_watch_scan_tf_formula_samples WHERE snapshot_set_id<=1308 AND status='READY' GROUP BY evaluation_version ORDER BY layer,evaluation_version\n"
+  },
+  "release": {
+    "base": "b1ad1e49b6506620dcff3262bcc715089c4a876d",
+    "head": "f5ea5383f072d2341758e1dcf602ce007dd099f8",
+    "local_commit": "0789f79657e78a442e96d689d32eebeb9a4176fc",
+    "merge_sha": "9cfc211a9e33562ef6a060ef57ab6e4f8065e879",
+    "merged_tree": "35b1f76e07b9a3bb0c789bb11032adcfb8c67262",
+    "pr": 44,
+    "tested_tree": "35b1f76e07b9a3bb0c789bb11032adcfb8c67262",
+    "url": "https://github.com/hadarkamer/crypto-intelligence-platform/pull/44"
+  },
+  "scope": {
+    "active_catalog_size": 298,
+    "active_supported": 204,
+    "catalog_definitions": 42,
+    "changes_to_schema": false,
+    "changes_to_watch": false,
+    "cohorts_or_outcomes_created": false,
+    "event_identity_blocked": 4,
+    "maxpain_literal_unreachable": 4,
+    "new_worker": false,
+    "predicate_evaluable": 38,
+    "type": "INACTIVE_READ_ONLY_CONTRACT_PROBE"
+  },
+  "staged_probe": {
+    "by_coin": {
+      "1306": {},
+      "1308": {
+        "BNB": {
+          "MATCH": 6,
+          "NOT_APPLICABLE": 44,
+          "NO_MATCH": 74
+        },
+        "BTC": {
+          "MATCH": 8,
+          "NOT_APPLICABLE": 22,
+          "NO_MATCH": 80
+        },
+        "DOGE": {
+          "MATCH": 10,
+          "NOT_APPLICABLE": 22,
+          "NO_MATCH": 86
+        },
+        "ETH": {
+          "MATCH": 6,
+          "NOT_APPLICABLE": 22,
+          "NO_MATCH": 96
+        },
+        "HYPE": {
+          "MATCH": 8,
+          "NO_MATCH": 102
+        },
+        "SOL": {
+          "MATCH": 6,
+          "NOT_APPLICABLE": 22,
+          "NO_MATCH": 96
+        },
+        "XRP": {
+          "MATCH": 6,
+          "NOT_APPLICABLE": 44,
+          "NO_MATCH": 74
+        },
+        "ZEC": {
+          "MATCH": 4,
+          "NO_MATCH": 98
+        }
+      }
+    },
+    "manifest": {
+      "decision_contract_audit_runner.py": "8fe79015b8376a54a7d8113c9d98aeabb96fc05321090d0f5f4b7dced39a30ac",
+      "research_watch_decision_contract.py": "59ee0bef4c8d5f2b85a9218fe074860acf6bd50d4af3c8e03fe8a47777d91b6d",
+      "research_watch_decision_contract_probe.py": "a5bd3014f3b6468a12890975a5d4326c2786d4de77f4ff6b21bdae1f8413c863"
+    },
+    "note": "Predicate truth, not success/failure. The54MATCH rows are literal negative/observation Magnet labels including inverses; no performance test was run.",
+    "snapshots": [
+      {
+        "all_execution_flags_inactive": true,
+        "capture_status": "COMPLETE",
+        "catalog_summary": {
+          "blocked": 4,
+          "evaluable": 38,
+          "structurally_unreachable": 4,
+          "total": 42
+        },
+        "contract_status": "VALID",
+        "contract_version": "watch-decision-contract-v1",
+        "jsonb_canonical_hash_matches": true,
+        "payload_sha256": "f345de76d47d355b099aaf0a1e83eed53cd408bb52124fcd1a4aefd0da5b8e88",
+        "populations": {
+          "MAGNET_CLUSTER": {
+            "evaluations": {
+              "MATCH": 54,
+              "NO_MATCH": 170
+            },
+            "missing_features": {},
+            "selection": {
+              "SELECTED": 28
+            },
+            "units": 28
+          },
+          "MAXPAIN_SELECTED_ITEM": {
+            "evaluations": {
+              "NO_MATCH": 448
+            },
+            "missing_features": {},
+            "selection": {
+              "SELECTED": 56
+            },
+            "units": 56
+          },
+          "QUALIFIED_COMBINED_GROUP": {
+            "evaluations": {
+              "NOT_APPLICABLE": 176,
+              "NO_MATCH": 88
+            },
+            "missing_features": {},
+            "selection": {
+              "NOT_APPLICABLE": 8,
+              "SELECTED": 4
+            },
+            "units": 12
+          }
+        },
+        "snapshot_set_id": 1308,
+        "source_binding": {
+          "parent_hash": true,
+          "score_hash": true,
+          "source_availability": true
+        },
+        "source_gate": {
+          "reasons": [],
+          "status": "VALIDATED"
+        },
+        "source_status": "BOUND"
+      },
+      {
+        "all_execution_flags_inactive": true,
+        "capture_status": null,
+        "catalog_summary": {
+          "blocked": 4,
+          "evaluable": 38,
+          "structurally_unreachable": 4,
+          "total": 42
+        },
+        "contract_status": "UNKNOWN",
+        "contract_version": "watch-decision-contract-v1",
+        "jsonb_canonical_hash_matches": true,
+        "payload_sha256": "72e756e838231b553af95d2cc4fbb2196d274dcb830bb1cf85ca5650ed7ae55f",
+        "populations": {},
+        "snapshot_set_id": 1306,
+        "source_binding": {
+          "parent_hash": true,
+          "score_hash": true,
+          "source_availability": true
+        },
+        "source_gate": {
+          "reasons": [
+            "MISSING_DECISION_CAPTURE"
+          ],
+          "status": "UNKNOWN"
+        },
+        "source_status": "BOUND"
+      }
+    ]
+  }
+}
