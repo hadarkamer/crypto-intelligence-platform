@@ -205,7 +205,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WatchHookTests(unittest.IsolatedAsyncioTestCase):
-    async def test_complete_bundle_reaches_rule_before_display_filters_and_ordinary_messages(self):
+    async def test_complete_bundle_reaches_rule_before_output_filter_and_ordinary_messages(self):
         order = []
         bundle = {'cycle_id': None, 'coins': {s: {'source': s} for s in ('BTC','ETH','SOL','HYPE','DOGE','ZEC','BNB','XRP')}}
         # No displayed MaxPain opportunity exists. The CVD rule still receives
@@ -258,7 +258,10 @@ class WatchHookTests(unittest.IsolatedAsyncioTestCase):
             result = await main.run_watch_cycle(bot, 1, top8_only=True, general_enabled=True)
         self.assertTrue(result['ok'], result)
         self.assertEqual(order.count('record_dual'), 1)
-        self.assertLess(order.index('record_dual'), order.index('display_filter'))
+        # Research precomputes the pure Combined input subset before capture.
+        # The full eight-coin CVD bundle still precedes ordinary output filtering.
+        output_filter = max(i for i, stage in enumerate(order) if stage == 'display_filter')
+        self.assertLess(order.index('record_dual'), output_filter)
         self.assertLess(order.index('drain_dual'), order.index('ordinary_send'))
         self.assertEqual(len(bundle['coins']), 8)
 

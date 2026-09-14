@@ -57,6 +57,7 @@ import research_formula_store
 import research_formula_worker
 import research_max_pain_archive
 import research_watch_score_capture
+import research_watch_decision_capture
 import research_watch_scan_intake
 import research_watch_scan_measurement_worker
 import research_watch_scan_formula_worker
@@ -2959,7 +2960,8 @@ def _magnet_alert_side(magnet_side: Any) -> Optional[str]:
 
 
 def _combined_magnet_confirmations(
-    rows: List[Dict[str, Any]], items: List[Dict[str, Any]]
+    rows: List[Dict[str, Any]], items: List[Dict[str, Any]],
+    *, capture_evaluations: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Evaluate Magnet for every scanned coin from the shared Watch snapshot.
 
@@ -2980,6 +2982,12 @@ def _combined_magnet_confirmations(
         alert_side = _magnet_alert_side(magnet.get("side"))
         expected_direction = magnet_v1.expected_price_direction(magnet.get("side"))
         if source is None or alert_side is None:
+            if capture_evaluations is not None:
+                capture_evaluations.append({
+                    "symbol": symbol, "alert_side": alert_side, "magnet": magnet,
+                    "source_item": source, "evaluation_status": "NOT_EVALUATED",
+                    "reason": "MISSING_SOURCE_ITEM" if source is None else "INVALID_MAGNET_SIDE",
+                })
             continue
         try:
             evidence = market_confidence_engine.combine(
@@ -2991,6 +2999,12 @@ def _combined_magnet_confirmations(
             )
             result = magnet_v1.evaluate_confirmation(magnet, evidence)
         except Exception as exc:
+            if capture_evaluations is not None:
+                capture_evaluations.append({
+                    "symbol": symbol, "alert_side": alert_side, "magnet": magnet,
+                    "source_item": source, "evaluation_status": "ERROR",
+                    "error_type": type(exc).__name__,
+                })
             print(
                 f"[combined-confirmation] magnet evaluation failed "
                 f"symbol={symbol} side={alert_side}: {exc!r}",
@@ -2998,6 +3012,12 @@ def _combined_magnet_confirmations(
             )
             continue
 
+        if capture_evaluations is not None:
+            capture_evaluations.append({
+                "symbol": symbol, "alert_side": alert_side, "magnet": magnet,
+                "source_item": source, "evaluation_status": "EVALUATED",
+                "confirmation": result,
+            })
         status = str(result.get("status") or "").upper()
         if status not in {"CONFIRMED", "STRONG_CONFIRMED"}:
             continue
@@ -3029,7 +3049,9 @@ def _combined_magnet_confirmations(
 
 
 def _combined_confirmation_candidates(
-    items: List[Dict[str, Any]], rows: List[Dict[str, Any]]
+    items: List[Dict[str, Any]], rows: List[Dict[str, Any]],
+    *, capture_groups: Optional[List[Dict[str, Any]]] = None,
+    capture_magnet_evaluations: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Aggregate independent Watch evidence by coin and direction.
 
@@ -3045,7 +3067,9 @@ def _combined_confirmation_candidates(
         if symbol and side in {"LONG", "SHORT"}:
             grouped[_combined_group_key(symbol, side)].append(item)
 
-    magnet_by_group = _combined_magnet_confirmations(rows, items)
+    magnet_by_group = _combined_magnet_confirmations(
+        rows, items, capture_evaluations=capture_magnet_evaluations,
+    )
     candidates: List[Dict[str, Any]] = []
     for key, group_items in grouped.items():
         ordered_items = sorted(
@@ -3130,9 +3154,7 @@ def _combined_confirmation_candidates(
                 + ",".join(magnet.get("members") or [])
             )
 
-        if len(signal_keys) < COMBINED_MIN_SIGNALS:
-            continue
-        candidates.append({
+        candidate = {
             "key": key,
             "symbol": symbol,
             "side": side,
@@ -3146,7 +3168,12 @@ def _combined_confirmation_candidates(
             "derivatives_high": derivatives_high,
             "magnet": magnet,
             "top_item": ordered_items[0],
-        })
+        }
+        qualified = len(signal_keys) >= COMBINED_MIN_SIGNALS
+        if capture_groups is not None:
+            capture_groups.append({**candidate, "qualified": qualified, "ordered_items": ordered_items})
+        if qualified:
+            candidates.append(candidate)
 
     candidates.sort(key=lambda candidate: (
         -int(candidate.get("signal_count") or 0),
@@ -3259,9 +3286,13 @@ def _collect_combined_confirmation_messages(
     include_metadata: bool = False,
     event_time: Any = None,
     persist_research: bool = False,
+    precomputed_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Any]:
     """Emit only on entry or when genuinely new evidence joins an active setup."""
-    candidates = _combined_confirmation_candidates(items, rows)
+    candidates = (
+        _combined_confirmation_candidates(items, rows)
+        if precomputed_candidates is None else precomputed_candidates
+    )
     # Research-only lifecycle tracking: preserve Combined weakening, component
     # loss and deactivation even when Telegram correctly emits no new alert.
     # This sidecar does not change COMBINED_CONFIRMATION_STATE or strategy logic.
@@ -4689,6 +4720,7 @@ async def run_watch_cycle(
                             "top8_only": bool(top8_only),
                             "general_enabled": bool(general_enabled),
                             "operational_scores": research_watch_score_capture.failure(watch_scan_id, "collection did not reach scoring"),
+                            "operational_decisions": research_watch_decision_capture.failure(watch_scan_id, "collection did not reach decisions"),
                         },
                     }
                 async def _prepare(rows, live_result):
@@ -4715,6 +4747,40 @@ async def run_watch_cycle(
                     except Exception as exc:
                         # Capture validation cannot suppress a valid alert.
                         archive_context["metadata"]["operational_scores"] = research_watch_score_capture.failure(watch_scan_id, f"{type(exc).__name__}: {exc}")
+                    # Pure Combined evaluation uses exactly the original Watch
+                    # input population. Delivery/lifecycle state is still read
+                    # and mutated only at its original point below.
+                    combined_items = _filter_top8_items(items) if top8_only else items
+                    combined_items = [item for item in combined_items if _is_displayable_opportunity(item)]
+                    combined_groups, magnet_evaluations = [], []
+                    try:
+                        combined_candidates = _combined_confirmation_candidates(
+                            combined_items, rows, capture_groups=combined_groups,
+                            capture_magnet_evaluations=magnet_evaluations,
+                        )
+                        live_result["watch_combined_candidates"] = combined_candidates
+                    except Exception as exc:
+                        # Preserve the legacy evaluation failure at its normal
+                        # lifecycle point, without a second calculation.
+                        live_result["watch_combined_precompute_error"] = exc
+                        archive_context["metadata"]["operational_decisions"] = research_watch_decision_capture.failure(
+                            watch_scan_id, "PRECOMPUTE:" + type(exc).__name__,
+                        )
+                    else:
+                        try:
+                            archive_context["metadata"]["operational_decisions"] = research_watch_decision_capture.build_bundle(
+                                cycle_id=watch_scan_id,
+                                score_bundle=archive_context["metadata"]["operational_scores"],
+                                prepared_items=items, displayable_items=combined_items,
+                                combined_candidates=combined_candidates, combined_groups=combined_groups,
+                                magnet_evaluations=magnet_evaluations,
+                                computed_at_utc=datetime.now(timezone.utc),
+                                top8_only=top8_only, general_enabled=general_enabled,
+                            )
+                        except Exception as exc:
+                            archive_context["metadata"]["operational_decisions"] = research_watch_decision_capture.failure(
+                                watch_scan_id, "CAPTURE:" + research_watch_decision_capture.error_reason(exc),
+                            )
                 result = await collect_live_rows_for_watch(
                     archive_context=archive_context, prepare_watch=_prepare,
                 )
@@ -4734,6 +4800,8 @@ async def run_watch_cycle(
 
         derivatives_snapshot = live_result.pop("watch_derivatives_snapshot")
         all_items = live_result.pop("watch_prepared_items")
+        combined_candidates = live_result.pop("watch_combined_candidates", None)
+        combined_precompute_error = live_result.pop("watch_combined_precompute_error", None)
         # The user's standalone rule consumes the same frozen all-coin scores,
         # before display thresholds, Max Pain filtering or other Telegram sends.
         dual_cvd_bundle = live_result.pop("watch_dual_cvd_bundle", None)
@@ -4775,6 +4843,8 @@ async def run_watch_cycle(
             )
             if general_enabled else []
         )
+        if general_enabled and combined_precompute_error is not None:
+            raise combined_precompute_error
         combined_deliveries = (
             _collect_combined_confirmation_messages(
                 displayable_items,
@@ -4782,6 +4852,7 @@ async def run_watch_cycle(
                 include_metadata=True,
                 event_time=research_decision_time,
                 persist_research=True,
+                precomputed_candidates=combined_candidates,
             )
             if general_enabled else []
         )
