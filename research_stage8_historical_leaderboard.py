@@ -156,6 +156,12 @@ def _count(value: Any, name: str, *, positive: bool = False) -> int:
     return value
 
 
+def _parent_id(value: Any, name: str) -> str:
+    if type(value) is not str or _HEX_RE.fullmatch(value) is None:
+        raise ValueError(name + " must be a lowercase SHA-256")
+    return value
+
+
 def _finite(value: Any, name: str, *, nullable: bool = False) -> float | None:
     if value is None and nullable:
         return None
@@ -198,18 +204,28 @@ def _route_provenance(
     route: dict[str, Any], *, binding_sha: str, route_name: str, count: int,
 ) -> dict[str, Any]:
     included = route["included_btc_parent_movement_ids"]
-    if (type(included) is not list
-            or any(type(v) is not int or not 1 <= v <= MAX_INT64 for v in included)
-            or included != sorted(set(included)) or len(included) != count):
-        raise ValueError(route_name + " included parent IDs must be sorted, unique, and equal n")
+    if type(included) is not list or len(included) != count:
+        raise ValueError(
+            route_name
+            + " included parent IDs must be sorted, unique lowercase SHA-256 values, and equal n"
+        )
+    for parent_id in included:
+        _parent_id(parent_id, route_name + " included parent")
+    if included != sorted(set(included)):
+        raise ValueError(
+            route_name
+            + " included parent IDs must be sorted, unique lowercase SHA-256 values, and equal n"
+        )
     excluded_raw = route["excluded_btc_parents"]
     if type(excluded_raw) is not list:
         raise ValueError(route_name + " excluded parent provenance must be a list")
     excluded: list[dict[str, Any]] = []
-    excluded_ids: set[int] = set()
+    excluded_ids: set[str] = set()
     for raw in excluded_raw:
         item = _strict_dict(raw, {"btc_parent_movement_id", "reason_code"}, route_name + " exclusion")
-        parent_id = _count(item["btc_parent_movement_id"], route_name + " excluded parent", positive=True)
+        parent_id = _parent_id(
+            item["btc_parent_movement_id"], route_name + " excluded parent"
+        )
         reason = item["reason_code"]
         if (parent_id in excluded_ids or parent_id in included
                 or type(reason) is not str or _REASON_RE.fullmatch(reason) is None):
