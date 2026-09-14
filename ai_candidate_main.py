@@ -24,6 +24,7 @@ import research_event_capture_selftest
 import research_event_runtime_selftest
 import research_event_store
 import research_shadow_replay
+from collection_bridge import register_collection_routes
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
@@ -73,6 +74,7 @@ async def start_web_server(bot_app) -> web.AppRunner:
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     app.router.add_post("/telegram", telegram_webhook)
+    register_collection_routes(app)
 
     runner = web.AppRunner(app)
     await runner.setup()
