@@ -96,11 +96,13 @@ class WatchScanTimeframePostgresTests(unittest.TestCase):
         for row in rows:
             row.update(short_max_pain=101., long_max_pain=95.)
             if (row['symbol'], row['timeframe']) in long_selected:
-                row.update(short_max_pain=110., long_max_pain=99.)
+                row.update(short_max_pain=120., long_max_pain=99.)
             if row['symbol'] == 'HYPE':
                 row.update(price_source='binance_futures', price_pair='HYPEUSDT', price_market='PERP', price_instrument='HYPEUSDT')
             if row['timeframe'] in opposed_timeframes:
-                row.update(short_liquidation_amount=100., long_liquidation_amount=200.)
+                # Keep the 1/3 selected share without inventing a 24h-to-48h
+                # amount increase that would change the intended 12h winner.
+                row.update(short_liquidation_amount=200., long_liquidation_amount=400.)
             if (row['symbol'], row['timeframe']) in inactive:
                 row.update(short_max_pain=None, long_max_pain=None)
             distance = live_price_provider.recalculate_distances(row['current_price'], row['short_max_pain'], row['long_max_pain'])
