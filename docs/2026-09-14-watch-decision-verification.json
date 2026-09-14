@@ -1,0 +1,521 @@
+{
+  "ci": {
+    "conclusion": "success",
+    "head": "9729760da688ff02be37fcda2274ee7af5498306",
+    "job_id": 103884116992,
+    "new_postgres_tests": 6,
+    "new_pure_tests": 13,
+    "new_watch_tests": 8,
+    "run_id": 34815129451,
+    "selftest_files": 129,
+    "tested_tree": "c8d8fd7233c5f5880fe4373310ea16af06e45fa6"
+  },
+  "deploy": {
+    "commit": {
+      "createdAt": "2026-09-14T06:56:01Z",
+      "id": "b1ad1e49b6506620dcff3262bcc715089c4a876d",
+      "message": "Merge pull request #43 from hadarkamer/feature/watch-combined-capture-20260914\n\nPreserve Combined and confirmation evidence from normal Watch scans"
+    },
+    "createdAt": "2026-09-14T06:56:03.199674Z",
+    "finishedAt": "2026-09-14T06:57:27.511937Z",
+    "id": "dep-dajpl0oae00c73edf4pg",
+    "startedAt": "2026-09-14T06:56:03.158147Z",
+    "status": "live",
+    "trigger": "new_commit",
+    "updatedAt": "2026-09-14T06:57:27.512231Z"
+  },
+  "health_after_deploy": {
+    "checked_at_utc": "2026-09-14T06:57:57.082783+00:00",
+    "commit": "b1ad1e49b6506620dcff3262bcc715089c4a876d",
+    "dual": {
+      "created_intents": 0,
+      "delivered": 0,
+      "evidence_gaps": 0,
+      "experimental": true,
+      "failed": 0,
+      "last_counts": {},
+      "last_delivery_at_utc": null,
+      "last_error_type": null,
+      "last_record_status": "NOT_OBSERVED",
+      "last_watch_scan_id": null,
+      "orphaned_attempts": 0,
+      "ready": true,
+      "rule_id": "captured-question-search-v3-experimental-binding:CORE_FUTURES_CVD_SPOT_CVD_TOTAL_65",
+      "statistically_qualified": false,
+      "unknown": 0,
+      "version": "dual-cvd65-experimental-watch-v1"
+    },
+    "research": {
+      "watch_scan_formulas": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": 170,
+        "version": "watch-scan-formulas-v5-score-change"
+      },
+      "watch_scan_intake": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": null,
+        "version": "watch-all-scan-intake-v1"
+      },
+      "watch_scan_measurement": {
+        "failures": 0,
+        "last_error": null,
+        "running": true,
+        "supported_candidates": null,
+        "version": "watch-scan-measurements-v1"
+      }
+    },
+    "timeframes": {
+      "active_evaluation_version": "watch-scan-timeframe-formulas-v1",
+      "cycles": 2,
+      "discovery_enabled": false,
+      "enabled": true,
+      "failures": 0,
+      "feature_version": "watch-captured-selected-timeframe-liquidity-and-score-difference-v1",
+      "last": {
+        "activated": false,
+        "active_evaluation_version": "watch-scan-timeframe-formulas-v1",
+        "catalog": 34,
+        "enqueued": 0,
+        "errors": 0,
+        "locked": false,
+        "processed": 0,
+        "ready": 0
+      },
+      "last_error": null,
+      "last_run_utc": "2026-09-14T06:57:50.446542+00:00",
+      "max_coins_per_pass": 32,
+      "poll_seconds": 30,
+      "population": "watch-all-scan-observations-v1",
+      "promotion_enabled": false,
+      "running": true,
+      "source_timeframes": [
+        "12h",
+        "24h",
+        "48h",
+        "3d",
+        "1w",
+        "2w",
+        "1m"
+      ],
+      "supported_timeframe_candidates": 34,
+      "unit": "ACTUAL_SELECTED_MAXPAIN_TIMEFRAME",
+      "version": "watch-scan-timeframe-formulas-v1"
+    },
+    "watch": {
+      "chat_configured": true,
+      "coordinator_running": true,
+      "desired_general_enabled": true,
+      "last_completed_at_utc": null,
+      "last_cycle_result": null,
+      "last_cycle_status": "waiting",
+      "last_error": null,
+      "next_scan_utc": "2026-09-14T07:02:15+00:00",
+      "supervisor_running": true
+    }
+  },
+  "migration": {
+    "migration": "055_watch_scan_decision_captures.sql",
+    "ok": true,
+    "returncode": 0,
+    "sha256": "78d1e0a8b00614f6a14e19422f2d3bdda0c425423867b28fe1dd40ba2274ab0d"
+  },
+  "next_normal_scan_verification": "PASSED",
+  "preservation": {
+    "before": [
+      {
+        "evaluation_version": "watch-scan-formulas-v1",
+        "layer": "coin",
+        "payload_digest": "4718d575893f79365edccc4566c14efa",
+        "samples": 144
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "layer": "coin",
+        "payload_digest": "824a6f538b7c9b6fbbd18fe1b5089ed3",
+        "samples": 152
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v3-btc-context",
+        "layer": "coin",
+        "payload_digest": "f350f0ee190bd34a4bcb3f631c024df0",
+        "samples": 272
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v4-asset-context",
+        "layer": "coin",
+        "payload_digest": "e9e6703f1723960dc0bf344ef3b3adac",
+        "samples": 280
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v5-score-change",
+        "layer": "coin",
+        "payload_digest": "2925df10f03275d96e33e9a69f8727ea",
+        "samples": 312
+      },
+      {
+        "evaluation_version": "watch-scan-timeframe-formulas-v1",
+        "layer": "timeframe",
+        "payload_digest": "848f2d257ee4a39294ffbac53204cdda",
+        "samples": 312
+      }
+    ],
+    "cutoff": {
+      "accepted_scans": 39,
+      "checked_at_utc": "2026-09-14T06:42:39.104307Z",
+      "cutoff": 1306
+    },
+    "query": "SELECT 'coin' AS layer,evaluation_version,count(*) AS samples,md5(string_agg(md5(payload::text),',' ORDER BY snapshot_set_id,symbol)) AS payload_digest FROM research_watch_scan_formula_samples WHERE snapshot_set_id<=1306 AND status='READY' GROUP BY evaluation_version UNION ALL SELECT 'timeframe' AS layer,evaluation_version,count(*) AS samples,md5(string_agg(md5(payload::text),',' ORDER BY snapshot_set_id,symbol)) AS payload_digest FROM research_watch_scan_tf_formula_samples WHERE snapshot_set_id<=1306 AND status='READY' GROUP BY evaluation_version ORDER BY layer,evaluation_version",
+    "after": [
+      {
+        "evaluation_version": "watch-scan-formulas-v1",
+        "layer": "coin",
+        "payload_digest": "4718d575893f79365edccc4566c14efa",
+        "samples": 144
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v2-maxpain",
+        "layer": "coin",
+        "payload_digest": "824a6f538b7c9b6fbbd18fe1b5089ed3",
+        "samples": 152
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v3-btc-context",
+        "layer": "coin",
+        "payload_digest": "f350f0ee190bd34a4bcb3f631c024df0",
+        "samples": 272
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v4-asset-context",
+        "layer": "coin",
+        "payload_digest": "e9e6703f1723960dc0bf344ef3b3adac",
+        "samples": 280
+      },
+      {
+        "evaluation_version": "watch-scan-formulas-v5-score-change",
+        "layer": "coin",
+        "payload_digest": "2925df10f03275d96e33e9a69f8727ea",
+        "samples": 312
+      },
+      {
+        "evaluation_version": "watch-scan-timeframe-formulas-v1",
+        "layer": "timeframe",
+        "payload_digest": "848f2d257ee4a39294ffbac53204cdda",
+        "samples": 312
+      }
+    ],
+    "exact_match": true
+  },
+  "release": {
+    "head": "9729760da688ff02be37fcda2274ee7af5498306",
+    "merge_sha": "b1ad1e49b6506620dcff3262bcc715089c4a876d",
+    "pr": 43,
+    "tree": "c8d8fd7233c5f5880fe4373310ea16af06e45fa6"
+  },
+  "capture_readback": {
+    "all_code_hashes_match": true,
+    "canonical_hash_matches": true,
+    "capture_status": "COMPLETE",
+    "computed_at_utc": "2026-09-14T07:05:58.629251+00:00",
+    "decision_bytes": 206575,
+    "decision_sha256": "ee279759881986dbd370bf8c6152b9a40dddf86f6bba8eb151bc8d49a640699b",
+    "literal_magnet_confirmation_statuses": {
+      "LIQUIDITY_CONFLICT": 1,
+      "NOT_CONFIRMED": 18,
+      "OBSERVATION": 9
+    },
+    "literal_magnet_evaluation_statuses": {
+      "EVALUATED": 28
+    },
+    "literal_maxpain_statuses": {
+      "BELOW_SCORE": 56
+    },
+    "snapshot_set_id": 1308,
+    "source_available_at_utc": "2026-09-14 07:05:58.725348+00:00",
+    "source_binding": {
+      "parent_hash": true,
+      "score_hash": true,
+      "source_availability": true
+    },
+    "source_range": "AFTER_1306",
+    "totals": {
+      "candidates": 4,
+      "displayable_items": 56,
+      "groups": 12,
+      "magnets": 28,
+      "prepared_items": 56,
+      "qualified_groups": 4
+    },
+    "validation": "PASSED",
+    "verification": "PASSED",
+    "coins": {
+      "BNB": {
+        "candidates": 0,
+        "groups": 2,
+        "magnets": 3,
+        "missing_reason_count": 0,
+        "missing_reasons": [],
+        "prepared_items": 7,
+        "status": "COMPLETE"
+      },
+      "BTC": {
+        "candidates": 0,
+        "groups": 1,
+        "magnets": 4,
+        "missing_reason_count": 0,
+        "missing_reasons": [],
+        "prepared_items": 7,
+        "status": "COMPLETE"
+      },
+      "DOGE": {
+        "candidates": 0,
+        "groups": 1,
+        "magnets": 5,
+        "missing_reason_count": 0,
+        "missing_reasons": [],
+        "prepared_items": 7,
+        "status": "COMPLETE"
+      },
+      "ETH": {
+        "candidates": 1,
+        "groups": 2,
+        "magnets": 3,
+        "missing_reason_count": 0,
+        "missing_reasons": [],
+        "prepared_items": 7,
+        "status": "COMPLETE"
+      },
+      "HYPE": {
+        "candidates": 1,
+        "groups": 1,
+        "magnets": 4,
+        "missing_reason_count": 0,
+        "missing_reasons": [],
+        "prepared_items": 7,
+        "status": "COMPLETE"
+      },
+      "SOL": {
+        "candidates": 1,
+        "groups": 2,
+        "magnets": 3,
+        "missing_reason_count": 0,
+        "missing_reasons": [],
+        "prepared_items": 7,
+        "status": "COMPLETE"
+      },
+      "XRP": {
+        "candidates": 0,
+        "groups": 2,
+        "magnets": 3,
+        "missing_reason_count": 0,
+        "missing_reasons": [],
+        "prepared_items": 7,
+        "status": "COMPLETE"
+      },
+      "ZEC": {
+        "candidates": 1,
+        "groups": 1,
+        "magnets": 3,
+        "missing_reason_count": 0,
+        "missing_reasons": [],
+        "prepared_items": 7,
+        "status": "COMPLETE"
+      }
+    },
+    "watch_scan_id": "shared-watch:2026-09-14T07:02:15.033813+00:00",
+    "operational_input_counts": {
+      "combined_candidates": 4,
+      "combined_groups": 12,
+      "displayable_items": 56,
+      "magnet_evaluations": 107,
+      "prepared_items": 224
+    }
+  },
+  "capture_binding": [
+    {
+      "binding_status": "SOURCE_BOUND",
+      "capture_status": "COMPLETE",
+      "capture_version": "watch-operational-decisions-v1",
+      "coin_rows": 8,
+      "invalid_evidence_flags": 0,
+      "scans": 1,
+      "source_range": "AFTER_1306"
+    },
+    {
+      "binding_status": "NOT_CAPTURED",
+      "capture_status": "NOT_CAPTURED",
+      "capture_version": null,
+      "coin_rows": 312,
+      "invalid_evidence_flags": 0,
+      "scans": 39,
+      "source_range": "AT_OR_BEFORE_1306"
+    }
+  ],
+  "final_state": {
+    "accepted_scans": 40,
+    "checked_at_utc": "2026-09-14T07:08:04.215115+00:00",
+    "coin_runtime": "watch-scan-formulas-v5-score-change",
+    "coin_samples": {
+      "errors": 0,
+      "ready": 320
+    },
+    "coverage": {
+      "definition_drift": 0,
+      "definitions": 298,
+      "supported": 204
+    },
+    "dual_intents": 0,
+    "dual_receipts": 3,
+    "independent_live_btc_waves": 1,
+    "last_dual_result": {
+      "counts": {
+        "MATCH": 0,
+        "NO_MATCH": 8,
+        "UNKNOWN": 0,
+        "duplicate_generations": 0,
+        "episodes_started": 0,
+        "evaluated": 8,
+        "resets": 0
+      },
+      "created_intents": 0,
+      "record_status": "ACCEPTED"
+    },
+    "last_dual_source": "2026-09-14T07:05:58.578478+00:00",
+    "timeframe_runtime": "watch-scan-timeframe-formulas-v1",
+    "timeframe_samples": {
+      "errors": 0,
+      "ready": 320
+    }
+  },
+  "health_after_normal_scan": {
+    "checked_at_utc": "2026-09-14T07:06:59.642116+00:00",
+    "commit": "b1ad1e49b6506620dcff3262bcc715089c4a876d",
+    "watch": {
+      "desired_general_enabled": true,
+      "chat_configured": true,
+      "coordinator_running": true,
+      "supervisor_running": true,
+      "last_cycle_status": "waiting",
+      "last_completed_at_utc": "2026-09-14T07:06:17.283446+00:00",
+      "last_cycle_result": "completed",
+      "next_scan_utc": "2026-09-14T07:32:15+00:00",
+      "last_error": null
+    },
+    "dual": {
+      "rule_id": "captured-question-search-v3-experimental-binding:CORE_FUTURES_CVD_SPOT_CVD_TOTAL_65",
+      "version": "dual-cvd65-experimental-watch-v1",
+      "experimental": true,
+      "statistically_qualified": false,
+      "ready": true,
+      "last_error_type": null,
+      "evidence_gaps": 0,
+      "last_record_status": "ACCEPTED",
+      "last_watch_scan_id": "shared-watch:2026-09-14T07:02:15.033813+00:00",
+      "last_counts": {
+        "evaluated": 8,
+        "MATCH": 0,
+        "NO_MATCH": 8,
+        "UNKNOWN": 0,
+        "episodes_started": 0,
+        "resets": 0,
+        "duplicate_generations": 0
+      },
+      "created_intents": 0,
+      "delivered": 0,
+      "unknown": 0,
+      "failed": 0,
+      "orphaned_attempts": 0,
+      "last_delivery_at_utc": null
+    },
+    "research": {
+      "watch_scan_intake": {
+        "version": "watch-all-scan-intake-v1",
+        "running": true,
+        "supported_candidates": null,
+        "failures": 0,
+        "last_error": null
+      },
+      "watch_scan_measurement": {
+        "version": "watch-scan-measurements-v1",
+        "running": true,
+        "supported_candidates": null,
+        "failures": 0,
+        "last_error": null
+      },
+      "watch_scan_formulas": {
+        "version": "watch-scan-formulas-v5-score-change",
+        "running": true,
+        "supported_candidates": 170,
+        "failures": 0,
+        "last_error": null
+      }
+    },
+    "timeframes": {
+      "version": "watch-scan-timeframe-formulas-v1",
+      "feature_version": "watch-captured-selected-timeframe-liquidity-and-score-difference-v1",
+      "population": "watch-all-scan-observations-v1",
+      "unit": "ACTUAL_SELECTED_MAXPAIN_TIMEFRAME",
+      "enabled": true,
+      "running": true,
+      "max_coins_per_pass": 32,
+      "poll_seconds": 30,
+      "supported_timeframe_candidates": 34,
+      "source_timeframes": [
+        "12h",
+        "24h",
+        "48h",
+        "3d",
+        "1w",
+        "2w",
+        "1m"
+      ],
+      "active_evaluation_version": "watch-scan-timeframe-formulas-v1",
+      "discovery_enabled": false,
+      "promotion_enabled": false,
+      "cycles": 19,
+      "failures": 0,
+      "last_error": null,
+      "last": {
+        "locked": false,
+        "catalog": 34,
+        "enqueued": 8,
+        "processed": 8,
+        "ready": 8,
+        "errors": 0,
+        "activated": false,
+        "active_evaluation_version": "watch-scan-timeframe-formulas-v1"
+      },
+      "last_run_utc": "2026-09-14T07:06:42.680864+00:00"
+    }
+  },
+  "verification_notes": [
+    "Readback validates frozen data; it does not re-run operational scoring or fetch providers.",
+    "The global operational counts include non-core symbols. Per-coin retained evidence covers the eight core symbols; do not conflate these totals.",
+    "First verification raced accepted intake and returned NO_ACCEPTED_DECISION_CAPTURE_YET; final snapshot1308 passed after intake completed.",
+    "A large terminal output scrolled out of view. Final readback was saved on the deployed temporary filesystem and rendered in two compact parts.",
+    "No formula support or prospective qualification was added. There remains one independent LIVE BTC wave.",
+    "The scheduled dual-CVD receipt has eight NO_MATCH and zero intents; matching alert delivery is not yet observed."
+  ],
+  "remaining": {
+    "supported": 204,
+    "total": 298,
+    "unsupported": 94,
+    "capture_related_definitions": 42,
+    "next_bounded_step": "Versioned all-scan Combined/confirmation source, selection and population contract; preserve original event semantics and UNKNOWN cases before enabling an evaluator.",
+    "ordered_topics": [
+      "Research from all scans",
+      "Continuous formula discovery",
+      "Historical archive completion",
+      "HYPE integration completion",
+      "Validation on new independent cases"
+    ],
+    "deferred": [
+      "Cluster/CVD component hypotheses",
+      "B4",
+      "240m family normalization"
+    ]
+  }
+}
