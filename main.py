@@ -39,6 +39,7 @@ import market_confidence_engine
 import maxpain_cvd_short_alert
 import watch_transition_delivery
 import dual_cvd65_delivery
+import manual_formula_alert_delivery
 import ai_agent
 import ai_telegram
 import research_event_runtime
@@ -5585,6 +5586,12 @@ async def _watch_supervisor_loop(bot_app) -> None:
                         and not WATCH_RUNTIME.get("scan_in_progress")
                         and WATCH_RUNTIME.get("chat_id") == chat_id,
                     )
+                    await manual_formula_alert_delivery.run_once(
+                        bot_app.bot, int(chat_id),
+                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
+                        and not WATCH_RUNTIME.get("scan_in_progress")
+                        and WATCH_RUNTIME.get("chat_id") == chat_id,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -5923,6 +5930,7 @@ async def watch_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["chat_id"] = chat_id
     _persist_watch_subscriptions()
     await dual_cvd65_delivery.initialize(chat_id)
+    await manual_formula_alert_delivery.initialize(chat_id)
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id, run_immediately=True
@@ -5973,6 +5981,7 @@ async def watch_on_top8(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WATCH_RUNTIME["chat_id"] = chat_id
     _persist_watch_subscriptions()
     await dual_cvd65_delivery.initialize(chat_id)
+    await manual_formula_alert_delivery.initialize(chat_id)
     try:
         newly_started = await _ensure_watch_coordinator(
             context.application, chat_id, run_immediately=True
@@ -6394,6 +6403,7 @@ async def health(request):
         "research_capture": research_event_runtime.status(),
         "watch_transitions": watch_transition_delivery.status(),
         "dual_cvd65_experimental": dual_cvd65_delivery.status(),
+        "manual_formula_experimental": manual_formula_alert_delivery.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
@@ -7585,6 +7595,9 @@ async def main():
     )
     schema_runtime = await _prepare_research_schema()
     research_schema_ready = bool(schema_runtime.get("ready"))
+    await manual_formula_alert_delivery.initialize(
+        WATCH_RUNTIME.get("chat_id") if WATCH_GENERAL_ENABLED else None,
+    )
     await bot_app.start()
     research_formula_worker.WORKER.bind_telegram(bot_app.bot)
     research_ordered_experimental_worker.WORKER.bind_telegram(bot_app.bot)
