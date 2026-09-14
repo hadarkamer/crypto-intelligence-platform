@@ -1,59 +1,59 @@
 # CoinGlass Model 1: reuse the existing collector
 
-Status: code integration, NOT a deployed/live-verified connection. This branch is based on ai-lab-capabilities, NOT on the production trading main branch. Do not merge the entire old lab branch into production. Identify the actual existing candidate service before deployment.
+**Status: code integration, not deployed or live-verified.** Branch `integration/coinglass-app-bridge-20260914` is based on `ai-lab-capabilities`. Never merge the entire old lab branch into trading `main`; first identify the actual candidate service.
 
-## Flow
+## One collection path
 
-Decision Hub authenticated button -> app backend -> this API -> existing capture_heatmaps -> existing analyze_heatmap_images (OpenAI, once) -> durable PostgreSQL result -> app's existing atomic worksheet commit. GET/poll/save retries do not recapture or re-analyze. No Firecrawl or Gemini on this route. No Telegram messages are used to transfer results. No hourly source schedule is enabled.
+Decision Hub button -> authenticated app backend -> Model 1 jobs API -> existing `capture_heatmaps` -> existing `analyze_heatmap_images` (OpenAI, once) -> durable PostgreSQL result -> app's existing atomic worksheet commit.
 
-`market_vision/coinglass_heatmap_capture.py`, `market_vision/openai_heatmap_scanner.py`, and their authentication behavior are UNCHANGED. The adapter uses their existing public signatures. The original collector can still fail if the source/session/browser is unavailable; local code tests are not evidence of live access. OpenAI remains configured on the collector, not copied into the app. The old scanner does not expose usage in its return value, so usage may correctly be null.
+GET/poll/save retries do not recapture or re-analyze. No Firecrawl, Gemini, or Telegram relay is used on this path. No hourly source schedule is enabled.
 
-Only 12H and 24H are exposed: the existing legacy selector maps unsupported horizons to 24H. The app must not label that as 48H. Numeric results are visual estimates, not verified monetary totals or price predictions.
+The existing files `market_vision/coinglass_heatmap_capture.py` and `market_vision/openai_heatmap_scanner.py`, including their source authentication behavior, are UNCHANGED. The new adapter calls their existing public signatures. Source access, browser availability, chart correctness, and current OpenAI configuration still require a real runtime test. The scanner currently does not return usage; `usage: null` is honest, not proof of zero cost.
 
-## API
+Only 12H and 24H are supported for automatic collection. The legacy selector maps unsupported horizons to 24H, so do not offer automatic48H. Manual48H remains available. Visual concentration is not a verified dollar amount or price prediction. The adapter requires high confidence in current price, excludes low-confidence/null zones, rejects invalid sides/ranges, and maps very_strong/strong -> many, medium -> normal, weak -> few.
 
-All routes require `Authorization: Bearer <dedicated bridge token>`. The token is NOT the OpenAI key and must exist only in server secrets. No client-side CORS/proxy or arbitrary-source input is supported.
+## API contract v1
 
-- POST `/api/collection/model1/jobs`: JSON with exactly `request_id` (UUID) and `timeframe` (`12H`/`24H`). Returns 202 for queued/running, 200 for ready/failed. Same request ID always refers to the same job within the seven-day retained history. A request ID reused with a different timeframe gives 409. Separate requests can reuse the same active job or a successful capture <=10 minutes old. Quota failures return 429.
-- GET `/api/collection/model1/jobs/{job_id}`: reads persisted status/result only. Never starts a capture. Returns 404 if unavailable.
-- GET `/api/collection/model1/jobs/{job_id}/evidence`: authenticated PNG evidence, retained for six hours. No screenshot secret URL is exposed.
+Every route requires `Authorization: Bearer <dedicated bridge token>`. This credential is NOT the OpenAI key; keep it only in both backends' secret stores. No client-side direct connection or arbitrary source URL is accepted.
+
+- POST `/api/collection/model1/jobs`: exact JSON `{request_id: UUID, timeframe: '12H'|'24H'}`. 202 queued/running, 200 ready/failed. Same request ID retains the same job within seven-day history; different timeframe with same request gives409. Other request IDs reuse active jobs or ready captures at most10min old. Budget errors return429.
+- GET `/api/collection/model1/jobs/{job_id}`: stored status/result only; never initiates work. Missing404.
+- GET `/api/collection/model1/jobs/{job_id}/evidence`: authenticated PNG, available for six hours.
 
 Envelope: `schema_version: coinglass-model1.v1`, `job_id`, `timeframe`, `status: queued|running|ready|failed`, `result`, `error`.
 
-Ready result: `schema_version`, `run_id`, fixed `source_url`, `symbol: BTC`, `heatmap_model: 1`, `timeframe`, actual `captured_at`, `source_updated_at: null`, `provider: OpenAI`, actual `model`, `usage` or null, `observed_price`, `zones` (side/price_low/price_high/intensity), `evidence` (sha256/artifact_id/content_type), `summary`, `quality: visual_estimate`.
+Ready result: `schema_version`, `run_id` (same as job_id), fixed `source_url`, `symbol: BTC`, `heatmap_model: 1`, timeframe, actual `captured_at`, `source_updated_at: null`, `provider: OpenAI`, actual model, usage object or null, observed_price, zones (side/price_low/price_high/intensity), evidence (sha256/artifact_id equal to job_id/content_type), summary, `quality: visual_estimate`.
 
-Intensity mapping is deterministic: very_strong/strong -> many, medium -> normal, weak -> few. Low-confidence/null bounds are not invented. Invalid ranges, sides or current-price confidence fail the job. The app must revalidate before saving and preserve the original timestamp.
+The application validates this contract and preserves the original capture timestamp. It signs a short-lived ticket bound to user/workspace/sheet/field/original version, then polls the SAME job. A failed save retains the stored result reference; retry must not start a paid collection again.
 
-## Deployment (not performed by committing)
+## Runtime configuration — not performed by committing
 
-First confirm the Render workspace and identify the candidate service actually running these modules. Never replace production `main.py` with this older branch. The small registration in `ai_candidate_main.py` preserves existing candidate routes and Telegram behavior.
+First confirm the Render workspace, identify the candidate service and verify its currently deployed branch and configuration. Do not replace production main with this older branch.
 
-Collector settings:
-- existing DATABASE_URL, existing OPENAI_API_KEY/model configuration, existing supported source access, installed Chromium;
-- new `COLLECTION_BRIDGE_ENABLED=true` after deployment review;
-- new `COINGLASS_COLLECTOR_TOKEN`: randomly generated dedicated bridge credential, >=32 bytes, securely provisioned to both backends;
-- optional `COLLECTION_BRIDGE_HOURLY_LIMIT=4` (default, maximum20).
+Collector keeps existing DATABASE_URL, OPENAI_API_KEY/model, source access and Chromium. Add only after deployment review:
 
-App server settings:
-- `COINGLASS_COLLECTOR_URL`: the verified HTTPS origin of this deployed candidate server;
-- the SAME dedicated `COINGLASS_COLLECTOR_TOKEN`. No OpenAI key, browser session or source login is transferred to the app.
+- `COLLECTION_BRIDGE_ENABLED=true` (default disabled)
+- `COINGLASS_COLLECTOR_TOKEN`: new dedicated random bridge credential, >=32 bytes, provisioned securely to both backends
+- optional `COLLECTION_BRIDGE_HOURLY_LIMIT=4` (default; maximum20)
 
-Do not paste keys into a chat, commit them, or print them in logs. No secrets have been created or changed by this code-only integration. A new OpenAI subscription/key in the app is not required for this architecture.
+App server needs `COINGLASS_COLLECTOR_URL`, the actual verified HTTPS origin, and that same dedicated `COINGLASS_COLLECTOR_TOKEN`. No OpenAI key or browser session is copied into the app. Do not paste credentials into chat or Git. No credentials were created or changed in this code-only integration.
 
-When enabled, startup initializes ONLY `ai_collection_bridge_jobs` and `ai_collection_bridge_requests` on the configured PostgreSQL database. Existing trading/research tables are not changed. A source scan occurs only after an authenticated POST; worker polling an empty job queue does not contact sources. Ready results persist before app writes. Images <=4MB are retained six hours; result JSON and request IDs seven days. Cleanup is performed on new POSTs. Interrupted/failed paid attempts are not replayed automatically. Child processing has a 300-second deadline; this is not an exact dollar/token spending cap. Existing scanner output limits remain unchanged.
+Enabled startup creates ONLY the two isolated tables `ai_collection_bridge_jobs` and `ai_collection_bridge_requests`. It does not change trading/research tables. The queue worker only scans after an authenticated job POST. Ready results are stored before app writes; interrupted/failed attempts are not automatically replayed. Child processing deadline300s is a time/call bound, not an exact monetary/token cap. Image retention6h, result/request retention7days; cleanup runs on new POSTs.
 
-## Before user publication
-
-1. Run the offline suite, including isolated PostgreSQL tests.
-2. Deploy disabled to the confirmed candidate service; verify normal candidate health and unchanged bot behavior.
-3. Securely configure the bridge, then perform ONE authorized 12H capture/analysis. Read the persisted job and evidence; verify actual source visibility and chart time.
-4. From an existing authorized app editor, verify save in the correct field/session, reload, and compare the untouched 24H/48H/manual fields. Verify failed-save retry uses GET only and duplicate polls do not duplicate the commit.
-5. Only then recommend publishing the app. Scheduling remains a separate step.
-
-The code checks do not resolve the previously observed app workspace membership issue. Do not grant a test account permissions or impersonate the workspace owner to force a test to pass.
-
-## Tests
+## Actual testing status
 
 `python -m unittest discover -s tests -p test_collection_bridge.py -v`
 
-Without `TEST_DATABASE_URL`, the seven PostgreSQL tests are explicitly skipped. CI supplies a temporary PostgreSQL service with dummy credentials, never the production DATABASE_URL. Tests use synthetic source/model fixtures and do not call CoinGlass or OpenAI.
+Local execution: **20 tests passed, 7 PostgreSQL integration tests skipped** because no isolated TEST_DATABASE_URL was available. Compilation of the new Python modules passed. Tests use a local HTTP server plus synthetic source/model fixtures, never CoinGlass/OpenAI or production DB.
+
+PostgreSQL tests are provided but have not run. They must use a disposable database via TEST_DATABASE_URL, never the production DATABASE_URL. The attempted CI workflow was not created; do not report CI as running or passing.
+
+## Before publication
+
+1. Complete isolated database tests and application tests; report any unresolved failures.
+2. Deploy disabled to the confirmed candidate service, preserving its existing behavior.
+3. Configure bridge secrets securely; run ONE authorized12H source/analysis test and inspect stored evidence.
+4. Verify the app save and reload from an existing authorized editor account. Compare unaffected horizons/fields and ensure retry uses GET only.
+5. Only then recommend frontend publication. Hourly scheduling remains separate.
+
+Code tests do not resolve the previously observed app-workspace membership issue. Do not widen permissions or impersonate an owner to force a test to pass.
