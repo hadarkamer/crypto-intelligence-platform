@@ -4845,6 +4845,7 @@ async def run_watch_cycle(
             )
             await dual_cvd65_delivery.drain(
                 bot_app.bot, chat_id,
+                wait_for_lock=True,
                 may_deliver=lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
             )
         if top8_only:
@@ -4950,6 +4951,7 @@ async def run_watch_cycle(
                 print(f"[manual-formulas] watch preparation gap: {type(exc).__name__}", flush=True)
             WATCH_RUNTIME["last_formula_sent"] = await watch_transition_delivery.drain(
                 bot_app.bot, chat_id, kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
+                wait_for_lock=True,
                 may_deliver=may_deliver_general,
             )
 

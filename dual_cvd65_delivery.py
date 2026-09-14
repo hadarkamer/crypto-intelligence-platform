@@ -101,13 +101,17 @@ async def _finish(intent, terminal):
         _gap("acknowledgement", exc)
 
 
-async def drain(bot, chat_id, *, limit=2, may_deliver=None):
+async def drain(bot, chat_id, *, limit=2, may_deliver=None, wait_for_lock=False):
     """One transport attempt per intent; uncertain outcomes are never retried."""
-    if _DRAIN_LOCK.locked() or not await initialize(chat_id):
+    if (_DRAIN_LOCK.locked() and not wait_for_lock) or not await initialize(chat_id):
         return 0
     sent = 0
     scope = subscription_scope(chat_id)
     async with _DRAIN_LOCK:
+        # Priority Watch delivery waits for a previous supervisor send. Recheck
+        # authorization after that wait before claiming anything for this scan.
+        if may_deliver is None or not may_deliver():
+            return 0
         try:
             _STATUS["orphaned_attempts"] += await asyncio.to_thread(store.settle_orphans, scope, _now())
         except Exception as exc:

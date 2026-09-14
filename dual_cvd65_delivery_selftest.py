@@ -128,6 +128,28 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.claim_calls, 0)
         bot.send_message.assert_not_awaited()
 
+    async def test_priority_waits_for_existing_send_and_rechecks_authorization(self):
+        await delivery.initialize(1)
+        self.db.seed()
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+        for authorized, expected in ((False, 0), (True, 1)):
+            active = [True]
+            await delivery._DRAIN_LOCK.acquire()
+            # Supervisor recovery remains nonblocking.
+            self.assertEqual(await self.drain(bot), 0)
+            task = asyncio.create_task(self.drain(bot, limit=1, wait_for_lock=True,
+                                                 may_deliver=lambda: active[0]))
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                bot.send_message.assert_not_awaited()
+                active[0] = authorized
+            finally:
+                delivery._DRAIN_LOCK.release()
+            self.assertEqual(await task, expected)
+        self.assertEqual(self.db.claim_calls, 1)
+        bot.send_message.assert_awaited_once()
+
     async def test_old_non_zec_claim_is_blocked_and_legacy_zec_gets_threshold_header(self):
         self.db.seed(symbol='BTC')
         self.db.seed()

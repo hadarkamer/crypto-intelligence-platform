@@ -234,6 +234,34 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row['status'] for row in self.db.intents], ['DELIVERED', 'DELIVERED'])
         self.assertEqual(bot.send_message.await_count, 2)
 
+    async def test_watch_waits_for_prior_supervisor_before_sending_formula(self):
+        await self.prepare()
+        entered, release = asyncio.Event(), asyncio.Event()
+        scan_started = [False]
+        async def send(**kwargs):
+            entered.set()
+            await release.wait()
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=send))
+        supervisor = asyncio.create_task(delivery.drain(bot, 1, may_deliver=lambda: not scan_started[0]))
+        watch = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            scan_started[0] = True
+            watch = asyncio.create_task(delivery.drain(
+                bot, 1, kinds=('FORMULA_MP65_CVD_SHORT',), wait_for_lock=True,
+                may_deliver=lambda: True,
+            ))
+            await asyncio.sleep(0)
+            self.assertFalse(watch.done())
+            release.set()
+            self.assertEqual(await asyncio.wait_for(supervisor, timeout=2), 0)
+            self.assertEqual(await asyncio.wait_for(watch, timeout=2), 1)
+            self.assertEqual([row['status'] for row in self.db.intents], ['DELIVERED', 'DELIVERED'])
+            self.assertEqual(bot.send_message.await_count, 2)
+        finally:
+            release.set()
+            await asyncio.gather(supervisor, *([watch] if watch is not None else []), return_exceptions=True)
+
     async def test_real_watch_sends_all_experiments_before_first_ordinary_message(self):
         item = {**_item(), 'distance_pct': 1}
         await self.record([{**item, 'score': 59}], name='baseline', when=BASE)
