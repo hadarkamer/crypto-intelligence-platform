@@ -2,3 +2,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 coinglass.db
+
+# Local paper run data must never be published.
+*.paper.sqlite3*
+*.paper.jsonl
+*.paper-report.json
