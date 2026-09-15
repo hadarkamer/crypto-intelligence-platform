@@ -22,11 +22,21 @@ TIMEOUT_SECONDS = 20
 _MINUTE = timedelta(minutes=1)
 _ISRAEL = ZoneInfo('Asia/Jerusalem')
 _STATUS = {'version': VERSION, 'last_cycle_id': None, 'ready_references': 0,
-           'missing_references': 0, 'last_error_type': None}
+           'missing_references': 0, 'last_error_type': None,
+           'missing_by_symbol': {}, 'error_types_by_symbol': {}}
 
 
 def status():
-    return deepcopy(_STATUS)
+    value = deepcopy(_STATUS)
+    try:
+        import binance_futures_mark_price_path as hype_mark
+        value['hype_mark_transport'] = hype_mark.transport_status()
+    except Exception:
+        value['hype_mark_transport'] = {
+            'version': 'binance-futures-mark-egress-v1',
+            'last_error_type': 'STATUS_UNAVAILABLE',
+        }
+    return value
 
 
 def _utc(value):
@@ -208,6 +218,7 @@ with the current market price. Thread results cannot mutate returned references.
     except (KeyError, ValueError, TypeError, OverflowError):
         return {}
     _STATUS['last_error_type'] = None
+    errors_by_symbol = {}
     output = {symbol: _inputs(bundle['coins'].get(symbol) or {}, symbol, computed) for symbol in SYMBOLS}
     pending = {}
     for symbol, refs in output.items():
@@ -241,10 +252,19 @@ with the current market price. Thread results cannot mutate returned references.
                     output[symbol][component] = _validated(record)
             except Exception as exc:
                 _STATUS['last_error_type'] = type(exc).__name__
+                errors_by_symbol[symbol] = type(exc).__name__
                 for component, record in list(output[symbol].items()):
                     if record.get('status') == 'NEEDS_QUOTE':
                         output[symbol][component] = _missing('REFERENCE_PRICE_UNAVAILABLE')
     ready = sum(r.get('status') == 'READY' for refs in output.values() for r in refs.values())
+    missing_by_symbol = {
+        symbol: [component for component in COMPONENTS
+                 if refs[component].get('status') != 'READY']
+        for symbol, refs in output.items()
+        if any(refs[component].get('status') != 'READY' for component in COMPONENTS)
+    }
     _STATUS.update(last_cycle_id=bundle.get('cycle_id'), ready_references=ready,
-                   missing_references=len(COMPONENTS)*len(SYMBOLS)-ready)
+                   missing_references=len(COMPONENTS)*len(SYMBOLS)-ready,
+                   missing_by_symbol=missing_by_symbol,
+                   error_types_by_symbol=errors_by_symbol)
     return output

@@ -50,7 +50,32 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(chosen['component'],'FUTURES_CVD')
 
     def test_hype_remains_binance_futures_mark(self):
-        self.assertEqual(self.prepare()['HYPE']['MAX_PAIN']['source'],'BINANCE_HYPE_FUTURES_MARK_1M')
+        out = self.prepare()
+        self.assertEqual(out['HYPE']['MAX_PAIN']['source'],'BINANCE_HYPE_FUTURES_MARK_1M')
+        self.assertEqual(refs.status()['ready_references'], 32)
+        self.assertEqual(refs.status()['missing_by_symbol'], {})
+
+    def test_hype_transport_failure_isolated_to_three_quote_components(self):
+        from binance_futures_mark_price_path import BinanceFuturesMarkPathError
+
+        def fetch(symbol, boundaries):
+            if symbol == 'HYPE':
+                raise BinanceFuturesMarkPathError('blocked')
+            return bars(symbol, boundaries)
+
+        out = self.prepare(fetch=fetch)
+        self.assertEqual(out['HYPE']['PRICE_OI']['status'], 'READY')
+        self.assertEqual(
+            [component for component in refs.COMPONENTS
+             if out['HYPE'][component]['status'] != 'READY'],
+            ['MAX_PAIN', 'FUTURES_CVD', 'SPOT_CVD'])
+        status = refs.status()
+        self.assertEqual(status['ready_references'], 29)
+        self.assertEqual(status['missing_references'], 3)
+        self.assertEqual(status['missing_by_symbol'], {
+            'HYPE': ['MAX_PAIN', 'FUTURES_CVD', 'SPOT_CVD']})
+        self.assertEqual(status['error_types_by_symbol'], {
+            'HYPE': 'BinanceFuturesMarkPathError'})
 
     def test_earlier_oi_uses_its_clock_without_later_price(self):
         b=bundle()
