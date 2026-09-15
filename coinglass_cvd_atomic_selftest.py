@@ -13,6 +13,48 @@ import coinglass_flow_foundation as foundation
 import coinglass_flow_engine as engine
 
 
+def check_gap_fail_closed():
+    """A correct cumulative sum cannot make a gapped 30m series usable."""
+    base = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(
+        hours=61
+    )
+    rows = []
+    cumulative = 0.0
+    for index in range(122):
+        if index == 60:
+            continue
+        cumulative += 5.0
+        rows.append({
+            "time": base + timedelta(minutes=30 * index),
+            "buy": 8.0,
+            "sell": 3.0,
+            "delta": 5.0,
+            "api_cvd": cumulative,
+            "continuous_cvd": cumulative,
+        })
+
+    with patch.object(foundation, "candle_age_minutes", return_value=0.0):
+        quality = engine._quality(rows)
+        assert quality["continuous_cvd_check"]
+        assert quality["missing_30m_intervals"] == 1
+        assert not quality["usable_for_confirmation"]
+
+        with patch.object(engine, "_load_rows", return_value=rows), patch.object(
+            engine,
+            "_window_state",
+            side_effect=AssertionError("gapped series evaluated"),
+        ), patch.object(engine, "_baseline", return_value=None):
+            result = engine.analyze_market("BTC", "futures")
+
+    assert not result["available"]
+    assert not result["quality"]["usable_for_confirmation"]
+    assert all(not window["available"] for window in result["windows"].values())
+    assert all(
+        "חסרים נרות 30 דקות" in window["reason"]
+        for window in result["windows"].values()
+    )
+
+
 def exercise(connect, postgres):
     with ExitStack() as stack:
         stack.enter_context(patch.object(foundation, "_use_postgres", return_value=postgres))
@@ -82,6 +124,7 @@ def exercise(connect, postgres):
 
 
 def main():
+    check_gap_fail_closed()
     real_sqlite_connect = sqlite3.connect
     with tempfile.TemporaryDirectory() as folder:
         db = str(Path(folder)/"cvd.db")
@@ -107,7 +150,7 @@ def main():
     exec(compile(ast.Module(body=[node], type_ignores=[]), "main.py", "exec"), scope)
     text = scope["_regime_block"]({"market_regime": {"data_quality_status": "READ_ERROR"}})
     assert "קריאת הנתונים נכשלה" in text and "60" not in text
-    print("Atomic CVD and read-error regression checks passed")
+    print("Atomic CVD, gap guard and read-error regression checks passed")
 
 
 if __name__ == "__main__":
