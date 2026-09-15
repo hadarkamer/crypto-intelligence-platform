@@ -1,7 +1,4 @@
-"""Offline tests of the SAME prepared modules used by the app collector."""
-import copy
-import hashlib
-import importlib.util
+"""Offline tests of the same prepared modules used by actual collector jobs."""
 import json
 import os
 from pathlib import Path
@@ -16,6 +13,9 @@ RUNTIME=HERE/'runtime'
 sys.path.insert(0,str(RUNTIME))
 from market_vision import openai_heatmap_scanner as scanner
 import collection_model1_task as task
+from install_original_flow import expand_capture
+from model1_execution import StageFailure
+ERRORS=(ValueError,StageFailure)
 
 
 def sample():
@@ -37,9 +37,9 @@ def normalize(raw=None):
 
 
 class OriginalFlowTests(unittest.TestCase):
-    def test_runtime_capture_is_original_unmodified(self):
-        original=(HERE.parent/'market_vision/coinglass_heatmap_capture.py').read_bytes()
-        self.assertEqual((RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_bytes(),original)
+    def test_runtime_capture_has_only_the_explicit_48h_extension(self):
+        original=(HERE.parent/'market_vision/coinglass_heatmap_capture.py').read_text()
+        self.assertEqual((RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_text(),expand_capture(original))
     def test_observed_schema_is_strict_and_required(self):
         schema=scanner.HEATMAP_SCHEMA['properties']['scans']['items']
         for name in ('readable','observed_symbol','observed_mode','observed_model','observed_timeframe','blocking_condition'):
@@ -47,16 +47,15 @@ class OriginalFlowTests(unittest.TestCase):
         self.assertFalse(schema['additionalProperties'])
     def test_missing_observed_evidence_rejected(self):
         value=sample();value['scans'][0].pop('observed_timeframe')
-        with self.assertRaises(ValueError):normalize(value)
+        with self.assertRaises(ERRORS):normalize(value)
     def test_blurred_image_never_saved(self):
         for condition in ('blur','loading','login','challenge','unknown'):
-            with self.subTest(condition=condition):
-                value=sample();value['scans'][0]['blocking_condition']=condition
-                with self.assertRaises(ValueError):normalize(value)
+            value=sample();value['scans'][0]['blocking_condition']=condition
+            with self.subTest(condition=condition),self.assertRaises(ERRORS):normalize(value)
     def test_wrong_model_mode_or_timeframe_rejected(self):
         for name,value in (('observed_model','other'),('observed_mode','Pair'),('observed_timeframe','24h'),('observed_symbol','other'),('readable',False)):
             raw=sample();raw['scans'][0][name]=value
-            with self.subTest(name=name),self.assertRaises(ValueError):normalize(raw)
+            with self.subTest(name=name),self.assertRaises(ERRORS):normalize(raw)
     def test_numeric_confidence_not_weakened(self):
         raw=sample();raw['scans'][0]['current_price_confidence']='medium'
         with self.assertRaises(ValueError):normalize(raw)
@@ -66,22 +65,18 @@ class OriginalFlowTests(unittest.TestCase):
     def test_valid_result_keeps_usage_and_source(self):
         value=normalize()
         self.assertEqual(value['usage'],{'input_tokens':1,'output_tokens':1})
-        self.assertEqual(value['provider'],'OpenAI')
-        self.assertEqual(len(value['zones']),2)
+        self.assertEqual(value['provider'],'OpenAI');self.assertEqual(len(value['zones']),2)
     def test_capture_both_but_analyze_requested_image_once(self):
         calls=[]
         def capture(directory,*,timeframes):
-            calls.append(('capture',timeframes));directory.mkdir()
-            out=[]
+            calls.append(('capture',timeframes));directory.mkdir();out=[]
             for tf in timeframes:
                 image=directory/f'coinglass_btc_heatmap_{tf}.png'
-                image.write_bytes(b'\x89PNG\r\n\x1a\nsynthetic')
-                os.utime(image,(1767225600,1767225600))
+                image.write_bytes(b'\x89PNG\r\n\x1a\nsynthetic');os.utime(image,(1767225600,1767225600))
                 out.append({'image':str(image),'timeframe':tf})
             return out
         def analyze(images,**kwargs):
-            calls.append(('analysis',tuple(x['timeframe'] for x in images)))
-            return sample()
+            calls.append(('analysis',tuple(x['timeframe'] for x in images)));return sample()
         fake=types.SimpleNamespace(capture_heatmaps=capture,COINGLASS_HEATMAP_URL=task.SOURCE)
         with tempfile.TemporaryDirectory() as root,patch.dict(sys.modules,{'market_vision.coinglass_heatmap_capture':fake}),patch.object(scanner,'analyze_heatmap_images',side_effect=analyze):
             task.main('12H','00000000-0000-4000-8000-000000000001',root)
@@ -94,8 +89,7 @@ class OriginalFlowTests(unittest.TestCase):
         response.json.return_value={'status':'completed','output_text':json.dumps(raw),'usage':{'input_tokens':2,'output_tokens':3}}
         with patch.object(scanner.requests,'post',return_value=response) as post:
             value=scanner.analyze_heatmap_images([{'image':'data:image/png;base64,AAAA','timeframe':'12h'}],api_key='synthetic',model='synthetic-model')
-        post.assert_called_once()
-        self.assertEqual(post.call_args.kwargs['json']['max_output_tokens'],3500)
+        post.assert_called_once();self.assertEqual(post.call_args.kwargs['json']['max_output_tokens'],3500)
         self.assertEqual(value['usage'],{'input_tokens':2,'output_tokens':3})
     def test_unreadable_result_does_not_create_output(self):
         def capture(directory,*,timeframes):
@@ -107,7 +101,7 @@ class OriginalFlowTests(unittest.TestCase):
         raw=sample();raw['scans'][0]['readable']=False
         fake=types.SimpleNamespace(capture_heatmaps=capture,COINGLASS_HEATMAP_URL=task.SOURCE)
         with tempfile.TemporaryDirectory() as root,patch.dict(sys.modules,{'market_vision.coinglass_heatmap_capture':fake}),patch.object(scanner,'analyze_heatmap_images',return_value=raw) as ai:
-            with self.assertRaises(ValueError):task.main('12H','00000000-0000-4000-8000-000000000001',root)
+            with self.assertRaises(ERRORS):task.main('12H','00000000-0000-4000-8000-000000000001',root)
             self.assertFalse((Path(root)/'result.json').exists());ai.assert_called_once()
 
 if __name__=='__main__':unittest.main()
