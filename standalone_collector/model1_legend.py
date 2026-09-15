@@ -1,7 +1,8 @@
-"""Close ONLY the public Legend NEW help card using its normal X control.
+"""Close only the public Legend NEW card via its ordinary X control.
 
-Selector verified from the public page HTML. No CSS hiding, account/session
-changes, generic close clicks, or bypass of authentication/challenge controls.
+UI preparation is not a chart-readability verdict. If the optional card cannot
+be closed, preserve the actual unmodified screenshot for the existing strict
+vision and numeric validators. Never hide DOM or bypass account/challenge UI.
 """
 from pathlib import Path
 
@@ -36,12 +37,28 @@ def dismiss_legend(page,timeout_ms=3000):
     return True
 
 
+def prepare_legend_for_capture(page,timeout_ms=10000):
+    """Best-effort UI preparation, never authorization or acceptance of data.
+
+    Return a small status only. Do not suppress failure of the screenshot,
+    its observed-identity check, range validation, or any account challenge.
+    There is at most one ordinary click and no reload/retry/navigation.
+    """
+    try:
+        closed=dismiss_legend(page,timeout_ms=max(1,min(timeout_ms,10000)))
+        return 'closed' if closed else 'absent'
+    except Exception:
+        # A selector/action timeout is not evidence that the chart is illegible.
+        # Continue to the real screenshot; downstream validation is mandatory.
+        return 'unresolved'
+
+
 def expand_legend_capture(text):
     marker='            chart_rect = page.evaluate('
     if text.count(marker)!=1:raise RuntimeError('Legend capture insertion point changed')
     return text.replace(marker,
-        '            from model1_legend import dismiss_legend\n'
-        '            dismiss_legend(page)\n'+marker,1)
+        '            from model1_legend import prepare_legend_for_capture\n'
+        '            prepare_legend_for_capture(page)\n'+marker,1)
 
 
 def install(runtime:Path):
