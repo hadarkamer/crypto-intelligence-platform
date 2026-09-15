@@ -24,8 +24,8 @@ def expand_detail_capture(text):
     text=replace_once(text,'            page.screenshot(path=str(path), full_page=True)',
         '            from price_detail_input import make_detail_file\n'
         '            chart_rect = page.evaluate('+repr(RECT_SCRIPT)+')\n'
-        '            page.screenshot(path=str(path), full_page=True)\'
-        '\n            price_detail = make_detail_file(path, chart_rect)')
+        '            page.screenshot(path=str(path), full_page=True)\n'
+        '            price_detail = make_detail_file(path, chart_rect)')
     return replace_once(text,'                    "liquidity_threshold": 0.85,',
         '                    "liquidity_threshold": 0.85,\n'
         '                    "price_detail": price_detail,')
