@@ -10,6 +10,24 @@ CONFIG_NAMES = ('HL_TESTNET_RUNTIME_MODE', 'HL_TESTNET_ACCOUNT_ADDRESS',
 
 
 def startup_check():
+    raw = os.environ.get('HL_TESTNET_REVIEW_SIGNAL', '')
+    if raw:
+        # This route can only inspect. No environment value enables submission.
+        from .checks import decode
+        from .guarded_execution import review_only
+        try:
+            if len(raw) > 2048 or os.environ.get('HL_TESTNET_RUNTIME_MODE', 'read_only') != 'read_only':
+                raise ValueError()
+            report = review_only(decode(raw),
+                account=os.environ.get('HL_TESTNET_ACCOUNT_ADDRESS', ''),
+                agent=os.environ.get('HL_TESTNET_AGENT_ADDRESS', ''),
+                journal=os.environ.get('HL_TESTNET_JOURNAL_PATH') or None,
+                exit_type=os.environ.get('HL_TESTNET_EXIT_TYPE') or None)
+        except Exception:
+            report = {'phase': 'review_only', 'status': 'REVIEW_CONFIGURATION_INVALID',
+                      'order_requests_sent': 0, 'signing_tested': False}
+        print(json.dumps({'testnet_submission_review': report}, sort_keys=True), flush=True)
+        return
     config = {name: os.environ.get(name, '') for name in CONFIG_NAMES if name in os.environ}
     report = run_check(config)
     # Only fixed status codes/booleans/source label. Never config, amounts, keys.

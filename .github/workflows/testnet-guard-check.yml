@@ -1,0 +1,23 @@
+name: Testnet Budget to Sender Integration
+on:
+  push:
+    branches: [paper-trading-v1]
+    paths:
+      - 'hl_testnet_runtime/**'
+      - 'hyperliquid_testnet_executor*.py'
+      - '.github/workflows/testnet-guard-check.yml'
+permissions:
+  contents: read
+concurrency:
+  group: testnet-dispatch-guard-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Existing budget, sender, guard and integrated fake-exchange tests
+        run: python3 -m unittest -v hl_testnet_runtime.test_runtime hyperliquid_testnet_executor_selftest hl_testnet_runtime.test_guarded_execution hl_testnet_runtime.test_guarded_integration
