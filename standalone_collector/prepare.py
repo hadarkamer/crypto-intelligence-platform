@@ -60,9 +60,8 @@ def prepare():
     for name in ['model1_readiness.py','model1_diagnostics.py','model1_page_flow.py']:
         shutil.copy2(HERE / name, RUNTIME / name)
 
-    # Keep the source loaders/context and original navigation/control helpers.
-    # Only the isolated app copy gains bounded UI initialization synchronization.
-    # Both the real job and the source probe import THIS SAME prepared module.
+    # Keep source loaders and context. Only the isolated app copy gains bounded
+    # initialization/readiness checks. Production validation is not weakened.
     path = RUNTIME / 'market_vision/coinglass_heatmap_capture.py'
     text = path.read_text()
     page_marker='        page = context.new_page()\n'
@@ -88,17 +87,22 @@ def prepare():
         'browser_requirements': BROWSER_REQUIREMENTS,
         'app_copy_change': 'wait for site UI initialization before controls; bounded chart readiness',
         'same_module_for_probe_and_jobs':True,'bot_started':False}, indent=2))
-    subprocess.run([sys.executable,'-m','unittest','test_page_flow','-q'],
+    subprocess.run([sys.executable,'-m','unittest','test_page_flow','test_august_replay','-q'],
                    cwd=HERE,check=True,timeout=30)
     print('Standalone package prepared; source SHA checks passed; no bot imported.',flush=True)
 
-    # Explicit maintenance opt-in, not an automatic hourly task. It must be
-    # cleared after this one validation deploy. Never calls a model or saves sheets.
+    # Each mode is an explicit maintenance opt-in, never a periodic source job.
     if os.getenv('MODEL1_FLOW_VALIDATION','') == '20260915-ui-sequence':
         subprocess.run([sys.executable,'-m','unittest','test_readiness','test_configuration_check','-q'],
                        cwd=HERE,check=True,timeout=45)
         subprocess.run([sys.executable,str(HERE/'app.py'),'--source-probe'],
                        cwd=ROOT,check=True,timeout=200)
+    elif os.getenv('MODEL1_AUGUST_REPLAY','') == '20260915-original-two-views':
+        # The separate baseline script uses the unchanged original capture.
+        # At most one source visit, two screenshots and one bounded visual review;
+        # no sheet writes, no automatic retry, no alteration of source controls.
+        subprocess.run([sys.executable,str(HERE/'august_replay.py')],
+                       cwd=ROOT,check=True,timeout=240)
 
 if __name__ == '__main__':
     prepare()
