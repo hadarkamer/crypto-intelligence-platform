@@ -14,6 +14,7 @@ from market_vision import openai_heatmap_scanner as scanner
 import collection_model1_task as task
 from install_original_flow import expand_capture
 from install_price_detail import expand_detail_capture
+from model1_legend import expand_legend_capture
 from model1_execution import StageFailure
 ERRORS=(ValueError,StageFailure)
 
@@ -34,7 +35,7 @@ def normalize(raw=None):
 class OriginalFlowTests(unittest.TestCase):
     def test_runtime_has_only_reviewed_capture_adaptation(self):
         original=(HERE.parent/'market_vision/coinglass_heatmap_capture.py').read_text()
-        expected=expand_detail_capture(expand_capture(original))
+        expected=expand_legend_capture(expand_detail_capture(expand_capture(original)))
         self.assertEqual((RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_text(),expected)
     def test_observed_schema_is_strict_and_required(self):
         schema=scanner.HEATMAP_SCHEMA['properties']['scans']['items']
