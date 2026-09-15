@@ -1,8 +1,9 @@
 """Independent Model 1 service; no bot process and no scheduled collection.
 
---probe reuses the configured CoinGlass session for ONE 12H capture. Without a
-session it stops before opening a browser. It never calls OpenAI or writes sheets.
-Authenticated diagnostics are private; the previous public image URL is retired.
+--probe (legacy build command) now checks configuration and OpenAI model metadata
+ONLY, never photographs the source. --source-probe explicitly runs ONE existing
+12H capture using the configured source session. It never calls OpenAI or writes
+sheets. Authenticated diagnostics remain private.
 """
 import asyncio
 import contextlib
@@ -46,9 +47,9 @@ def _save_report(directory, report):
 def probe(*, capture_fn=None, directory=None):
     """Reuse the legacy session-loading path; no extraction or transfer of secrets.
 
-    Render invokes this on an explicitly initiated build. One call means at most
-    one capture, no retries, no AI call. Presence does not prove a valid login.
-    capture_fn and directory exist for offline tests only, never HTTP input.
+    Explicit --source-probe only. One call means at most one capture, no retries,
+    no AI call. Presence does not prove a valid login. capture_fn and directory
+    exist for offline tests only, never HTTP input.
     """
     directory = Path(directory) if directory is not None else DIAG
     _private_directory(directory)
@@ -241,8 +242,22 @@ def create_app():
     return application
 
 
+def deployment_check():
+    """Build checks are configuration-only; never re-run a known failing scan."""
+    import unittest
+    from configuration_check import main as check_configuration
+    suite = unittest.defaultTestLoader.loadTestsFromName('test_configuration_check')
+    checked = unittest.TextTestRunner(verbosity=1).run(suite)
+    if not checked.wasSuccessful():
+        raise SystemExit(1)
+    check_configuration()
+    print('MODEL1_SOURCE_PROBE_SKIPPED explicit --source-probe required; no browser or inference started', flush=True)
+
+
 if __name__ == '__main__':
-    if '--probe' in sys.argv:
+    if '--probe' in sys.argv or '--check-config' in sys.argv:
+        deployment_check()
+    elif '--source-probe' in sys.argv:
         probe()
     else:
         from aiohttp import web
