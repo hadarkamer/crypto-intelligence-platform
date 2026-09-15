@@ -1,4 +1,4 @@
-"""Build app-owned collector with a same-frame price detail; no live source calls."""
+"""Build app-owned collector with explicit ranges and private evidence retention."""
 from pathlib import Path
 import ast
 import hashlib
@@ -50,31 +50,40 @@ def prepare():
     for name in ('collection_bridge.py','collection_model1_task.py'):
         shutil.copy2(ROOT/name,RUNTIME/name)
     for name in ('model1_readiness.py','model1_diagnostics.py','model1_page_flow.py',
-                 'model1_execution.py','image_detail.py','price_detail_input.py'):
+                 'model1_execution.py','image_detail.py','price_detail_input.py',
+                 'model1_price_range.py','model1_evidence_format.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
+    from install_price_range import install as install_range
     install(RUNTIME)
     task_path=RUNTIME/'collection_model1_task.py'
-    original_validator=validator_ast(task_path.read_text())
+    point_validator=validator_ast(task_path.read_text())
     install_detail(RUNTIME)
-    if validator_ast(task_path.read_text())!=original_validator:
-        raise RuntimeError('Price detail must not alter the existing numeric validator')
+    if validator_ast(task_path.read_text())!=point_validator:
+        raise RuntimeError('Image detail changed the point validator')
+    # Range support is an explicit user-requested alternate representation.
+    # The installer preserves the legacy exact-price validator by AST comparison.
+    install_range(RUNTIME)
     original=(ROOT/'market_vision/coinglass_heatmap_capture.py').read_text()
     actual=(RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_text()
     if actual!=expand_detail_capture(expand_capture(original)):
         raise RuntimeError('Unexpected capture adaptation')
     if actual.count('page.screenshot(')!=original.count('page.screenshot('):
-        raise RuntimeError('Price detail must not add a source screenshot')
+        raise RuntimeError('Range support must not add a source screenshot')
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
         'capture_flow':'one selected horizon; same saved PNG plus enlarged right-edge crop',
         'supported_timeframes':['12H','24H','48H'],
-        'analysis':'one request, full screenshot and same-image price detail, one scan',
-        'price_detail_scale':2,'numeric_validator_unchanged':True,
+        'analysis':'one model request, full screenshot and same-image detail, one scan',
+        'price_reference':'explicit visual range, or validated legacy point; never fake midpoint',
+        'initial_max_range_fraction':0.01,'range_limit_is_accuracy_claim':False,
+        'legacy_point_validator_unchanged':True,
+        'failed_evidence':'private original PNG and numeric metadata retained before cleanup; images6h',
         'bot_started':False,'automatic_source_checks':False},indent=2))
     subprocess.run([sys.executable,'-m','unittest','test_original_flow','test_august_replay',
-        'test_page_flow','test_48h_execution','test_image_detail','-q'],cwd=HERE,check=True,timeout=45)
-    print('MODEL1_PRICE_DETAIL_INSTALLED full_plus_detail=one_request scale=2 numeric_validator=unchanged source_scans=0',flush=True)
+        'test_page_flow','test_48h_execution','test_image_detail','test_price_range','-q'],
+        cwd=HERE,check=True,timeout=60)
+    print('MODEL1_RANGE_INSTALLED price=explicit_range legacy_point=unchanged evidence=private source_scans=0',flush=True)
 
 if __name__=='__main__':prepare()
