@@ -30,8 +30,8 @@ class MemoryStore:
         self.scopes.append(scope)
         return {'scope': scope, 'activated_at': now.isoformat()}
 
-    def record_cycle(self, scope, evaluation, now):
-        self.records.append((scope, deepcopy(evaluation), now))
+    def record_cycle(self, scope, evaluation, now, *, price_references=None):
+        self.records.append((scope, deepcopy(evaluation), now, deepcopy(price_references)))
         return {'record_status': 'RECORDED', 'created_intents': 0, 'counts': {}}
 
     def seed(self, count=1, *, expired=False, symbol='ZEC'):
@@ -108,6 +108,18 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.records[0][1], evaluation)
         evaluation['coins'].clear()
         self.assertEqual(len(self.db.records[0][1]['coins']), 8)
+
+    async def test_price_references_pass_separately_from_canonical_evaluation(self):
+        bundle = {'cycle_id': 'source-watch'}
+        evaluation = {'watch_scan_id': 'source-watch', 'source': 'frozen'}
+        references = {'ZEC': {'SPOT_CVD': {'price': '100'}}}
+        with patch.object(delivery.alert, 'evaluate_bundle', return_value=evaluation):
+            await delivery.record_watch(1, bundle, watch_scan_id='source-watch',
+                decision_time=datetime.now(timezone.utc), price_references=references)
+        self.assertEqual(self.db.records[0][1], evaluation)
+        self.assertEqual(self.db.records[0][3], references)
+        self.assertNotIn('price_references', evaluation)
+        self.assertEqual(bundle, {'cycle_id': 'source-watch'})
 
     async def test_claims_are_bounded_and_positive_ack_is_never_resent(self):
         self.db.seed(3)

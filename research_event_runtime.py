@@ -94,8 +94,12 @@ def _with_watch_context(
 ) -> research_event_capture.ResearchEvent:
     context = dict(_WATCH_CONTEXT.get() or {})
     context.pop("formula_timing", None)  # Persist timing only on formula events.
+    reference_map = context.pop('experimental_reference_prices_by_symbol', {})
     snapshot = dict(event.engine_snapshot or {})
     snapshot.update(context)
+    if isinstance(reference_map, Mapping) and event.symbol in reference_map:
+        from copy import deepcopy
+        snapshot['experimental_price_references'] = deepcopy(reference_map[event.symbol])
     analysis_direction = str(event.direction or "NEUTRAL").upper()
     source_side = str(event.source_side or "").upper()
     inverse_display_family = (

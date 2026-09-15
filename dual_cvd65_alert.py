@@ -1,6 +1,6 @@
 """Pure, explicitly experimental delivery screen for the existing dual-CVD rule.
 
-Only one frozen operational bundle is inspected. No scoring, prices, events,
+Only one frozen operational bundle is inspected. No scoring changes, price fetching, events,
 historical backfill, statistical acceptance or network calls belong here.
 """
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 import research_watch_scan_formula as source_features
+from experimental_reference_price import render_reference_levels
 
 RULE_ID = 'captured-question-search-v3-experimental-binding:CORE_FUTURES_CVD_SPOT_CVD_TOTAL_65'
 VERSION = 'dual-cvd65-experimental-watch-v1'
@@ -156,7 +157,7 @@ def evaluate_bundle(bundle, observed_at) -> dict:
 
 
 def render_message(observation, source_at_utc) -> str:
-    """A small experimental notification of the shared CVD direction only."""
+    """Render the shared CVD direction and any frozen display price levels."""
     if (not isinstance(observation, Mapping) or observation.get('status') != 'MATCH'
             or observation.get('direction') not in ('LONG', 'SHORT')
             or observation.get('symbol') not in NOTIFICATION_SYMBOLS):
@@ -167,10 +168,12 @@ def render_message(observation, source_at_utc) -> str:
     stamp = _utc(source_at_utc).astimezone(_ISRAEL)
     direction = 'עלייה — LONG' if observation['direction'] == 'LONG' else 'ירידה — SHORT'
     scores = [f'{abs(value):.4f}'.rstrip('0').rstrip('.') for value in values]
+    levels = render_reference_levels(observation.get('price_reference'), 200, observation['direction'])
     return (
         THRESHOLD_HEADER +
         '🧪 <b>ניסיוני: הסכמת שני CVD — 65 ומעלה</b>\n'
         f"<b>{escape(str(observation['symbol']))} | {direction}</b>\n"
+        f'{levels}\n'
         f'Futures CVD: <b>{scores[0]}/100</b>\n'
         f'Spot CVD: <b>{scores[1]}/100</b>\n'
         'שני הציונים באותו כיוון; זה כיוון התחזית.\n'

@@ -15,6 +15,8 @@ import math
 from typing import Any, Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo
 
+from experimental_reference_price import render_reference_levels, select_reference
+
 
 FORMULA_ID = "FORMULA_MP65_CVD_SHORT"
 FORMULA_VERSION = "mp65-cvd-short-v1"
@@ -156,16 +158,21 @@ def render_message(match: FormulaMatch, decision_time: datetime) -> str:
     price = f"{match.reference_price:.10f}".rstrip("0").rstrip(".")
     source = str(match.item.get("price_source") or "").strip()
     source_line = f"\nמקור מחיר: {escape(source)}" if source else ""
+    reference = select_reference(match.item.get('experimental_price_references'),
+                                 ('MAX_PAIN', 'FUTURES_CVD', 'SPOT_CVD'),
+                                 symbol=match.symbol, as_of=decision_time)
+    levels = render_reference_levels(reference, None, match.direction)
     return (
         "🧪 <b>ניסיוני — התאמה לנוסחת מחקר</b>\n"
         f"<b>{escape(match.symbol)} | {direction_he}</b>\n"
+        f'{levels}\n'
         "Max Pain 65+ · שני CVD כוללים מעל 65 · Futures קצר 65+\n\n"
         f"ציון Max Pain: <b>{_score_text(match.maxpain_score)}</b>"
         f" | טווח: {escape(match.timeframe) or 'לא צוין'}\n"
         f"Futures CVD — ציון כולל: <b>{_score_text(match.futures_score, signed=True)}</b>\n"
         f"Spot CVD — ציון כולל: <b>{_score_text(match.spot_score, signed=True)}</b>\n"
         f"Futures קצר (1h + 4h): <b>{_score_text(match.short_quality_pct)}</b> — {short_he}\n"
-        f"מחיר ייחוס: <b>{price}</b>{source_line}\n"
+        f"מחיר שנשמר בסקירה: <b>{price}</b>{source_line}\n"
         f"זמן הבדיקה בישראל: {decision_time.astimezone(_ISRAEL):%d.%m.%Y %H:%M:%S}\n\n"
         "הכיוון לעיל הוא כיוון המחיר הצפוי לאחר היפוך צד ה־Max Pain.\n"
         "זו התאמה לתנאי הנוסחה; הסתברות ואסימטריה אינן נקבעות מהופעה אחת."

@@ -15,6 +15,7 @@ import research_ordered_question_catalog as questions
 import research_ordered_validation as validation
 import research_formula_ordered_store as formula_store
 import research_ordered_inverse_store as inverse_store
+from experimental_reference_price import components_for_conditions, render_reference_levels, select_reference
 
 VERSION = "ordered-v7-experimental-delivery-v1"
 QUALIFICATION_TTL = timedelta(minutes=30)
@@ -131,6 +132,9 @@ def notification(registration: Mapping[str, Any], result: Mapping[str, Any],
             "event_id": event["event_id"], "event_fingerprint": event.get("event_fingerprint"),
             "symbol": event["symbol"], "direction": b["direction"], "orientation": mode,
             "alert_time_utc": when.isoformat(), "entry_price": price,
+            "price_reference": select_reference(snapshot.get('experimental_price_references'),
+                components_for_conditions(b['conditions'], event.get('event_type')),
+                symbol=event['symbol'], as_of=when),
             "btc_parent_movement_id": parent, "threshold_bps": b["threshold_bps"],
             "window_minutes": b["window_minutes"], "period_key": b["period_key"],
             "conditions": b["conditions"], "route": q["route"], "metrics": q["metrics"],
@@ -147,8 +151,10 @@ def render(payload: Mapping[str, Any]) -> str:
     conditions = "; ".join(f"{c['feature']} {c['operator']} {c['value']}" for c in payload["conditions"])
     return "\n".join([
         "🧪 ניסיוני, לא למסחר", f"{payload['symbol']} | {direction}",
-        f"התראה חדשה: {payload['alert_time_utc']} | מחיר בעת ההתראה: {payload['entry_price']:g}",
         f"סף שנבדק: {payload['threshold_bps'] / 100:g}% לכל כיוון | חלון: {payload['window_minutes']} דקות",
+        render_reference_levels(payload.get('price_reference'), payload['threshold_bps'],
+                                payload['direction'], html=False),
+        f"התראה חדשה: {payload['alert_time_utc']} | מחיר שנשמר באירוע המחקר: {payload['entry_price']:g}",
         "מסלול: " + ("מוקדם — ראיות מ־14 הימים האחרונים" if payload["route"] == "FRESH" else "רגיל"),
         f"גלים עתידיים עצמאיים שהוכרעו: {m['resolved_waves']} | הצלחה: {m['hit_rate_pct']:.1f}%",
         f"גבול הסתברות תחתון: {m['wilson_95_lower_pct']:.1f}% | יחס תנועה חיובית/נגדית: {m['common_window_asymmetry_ratio']:.2f}",
