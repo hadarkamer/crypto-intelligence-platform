@@ -3,6 +3,7 @@ import asyncio
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import unittest
+from threading import Event
 from unittest.mock import patch
 
 import experimental_reference_price as refs
@@ -77,6 +78,22 @@ class ReferenceTests(unittest.TestCase):
 
     def test_unknown_reference_does_not_suppress_plain_explanation(self):
         self.assertIn('לא חושבו',refs.render_reference_levels(None,200,'LONG'))
+
+    def test_quote_deadline_returns_missing_without_late_repricing(self):
+        release=Event()
+        def slow_fetch(symbol,boundaries):
+            release.wait(timeout=1)
+            return bars(symbol,boundaries)
+        async def run():
+            try:
+                with patch.object(refs,'TIMEOUT_SECONDS',0.001):
+                    return await refs.prepare_reference_prices(bundle(),fetch_coin=slow_fetch)
+            finally:
+                release.set()
+        out=asyncio.run(run())  # waits for released threads before inspecting output
+        for row in out.values():
+            self.assertEqual(row['PRICE_OI']['status'],'READY')
+            self.assertEqual(row['SPOT_CVD']['status'],'UNAVAILABLE')
 
     def test_wrong_coin_and_future_component_fail_closed(self):
         r=self.prepare()['BTC']

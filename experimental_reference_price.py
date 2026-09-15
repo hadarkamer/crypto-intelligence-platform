@@ -18,7 +18,7 @@ from experimental_price_levels import calculate_price_levels, render_price_level
 VERSION = 'experimental-input-reference-v1'
 COMPONENTS = ('PRICE_OI', 'MAX_PAIN', 'FUTURES_CVD', 'SPOT_CVD')
 SYMBOLS = ('BTC', 'ETH', 'SOL', 'HYPE', 'DOGE', 'ZEC', 'BNB', 'XRP')
-TIMEOUT_SECONDS = 6
+TIMEOUT_SECONDS = 20
 _MINUTE = timedelta(minutes=1)
 _ISRAEL = ZoneInfo('Asia/Jerusalem')
 _STATUS = {'version': VERSION, 'last_cycle_id': None, 'ready_references': 0,
