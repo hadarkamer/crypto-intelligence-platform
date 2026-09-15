@@ -5,6 +5,8 @@ on:
     branches: [paper-trading-v1]
     paths:
       - 'paper_execution*.py'
+      - 'dual_cvd65_delivery.py'
+      - 'manual_formula_alert_delivery.py'
       - '.github/workflows/paper-feed-check.yml'
 
 permissions:
@@ -22,23 +24,55 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Offline paper tests only
-        run: python3 -m unittest -v paper_execution_selftest paper_execution_feed_selftest
-      - name: Public price read only - no account or orders
+      - name: Offline paper and actual delivery-boundary tests
+        run: python3 -m unittest -v paper_execution_selftest paper_execution_feed_selftest paper_execution_bridge_selftest
+      - name: Synthetic instruction plus public prices - local paper only
         timeout-minutes: 1
         run: |
           python3 - <<'PY'
+          import asyncio
+          from datetime import timedelta
+          from decimal import Decimal, ROUND_CEILING
           import json
+          from pathlib import Path
+          import tempfile
           import time
-          from paper_execution_feed import PublicInfo, asset_contexts, book_quote, utc_now
-          client = PublicInfo(allow_public_reads=True)
-          started = time.monotonic()
-          assets = asset_contexts(client.read('metaAndAssetCtxs'), ('BTC',))
-          book = client.read('l2Book', 'BTC')
-          quote = book_quote(book, 'BTC', assets['BTC']['mark'], utc_now())
-          assert time.monotonic() - started <= 10, 'Acquisition window exceeded'
-          print(json.dumps({'public_read_verified': True, 'asset': 'BTC',
-                            'source_at': quote['at'], 'public_requests': client.calls,
-                            'exchange_orders_sent': 0,
-                            'warning': 'Public connectivity only; no bot feed or profitability validation'}))
+          from paper_execution_bridge import forward_delivered
+          from paper_execution_feed import PaperFeed, intake_once, utc_now
+          with tempfile.TemporaryDirectory() as temp:
+              root = Path(temp)
+              inbox = root / 'inbox.paper.jsonl'
+              feed = PaperFeed(root / 'ci.paper.sqlite3', symbols=('BTC',),
+                               accounts=('paper-a', 'paper-b'), fee_bps='5', allow_public_reads=True)
+              try:
+                  # Generated ONLY for this technical test, never a strategy alert.
+                  center = int(Decimal(feed.assets['BTC']['mark']).to_integral_value(rounding=ROUND_CEILING))
+                  now = utc_now()
+                  plan = {'symbol': 'BTC', 'side': 'LONG', 'entry': str(center+1000),
+                          'stop': str(center-1000), 'take_profit': str(center+2000), 'at': now.isoformat()}
+                  item = {'intent_id': 'ci-synthetic-notification', 'expires_at': (now+timedelta(minutes=1)).isoformat(),
+                          'payload': {'source_at_utc': now.isoformat(), 'execution_plan': plan,
+                                      'observation': {'symbol': 'BTC', 'direction': 'LONG', 'status': 'MATCH'}}}
+                  result = asyncio.run(forward_delivered(item, source='dual-cvd65',
+                      environ={'PAPER_BOT_BRIDGE': 'paper', 'PAPER_BOT_INBOX': str(inbox)}))
+                  assert result['status'] == 'PUBLISHED', result['status']
+                  assert intake_once(feed, inbox) == {'accepted': 1, 'replayed': 0, 'rejected': 0}
+                  processed = 0
+                  for _ in range(3):
+                      time.sleep(1)
+                      result = feed.poll_once()
+                      processed += sum(r.get('status') == 'PROCESSED' for r in result['results'])
+                  state = feed.snapshot()
+                  assert processed > 0, 'No fresh public snapshot was processed'
+                  trade = state['snapshot']['trades'][0]
+                  assert len(state['snapshot']['trades']) == 1
+                  assert all(Decimal(trade[k]) == Decimal(plan[k]) for k in ('entry','stop','take_profit'))
+                  assert state['exchange_orders_sent'] == 0
+                  print(json.dumps({'synthetic_instruction': True, 'real_bot_connected': False,
+                                    'public_quote_cycles_processed': processed,
+                                    'local_paper_records': 1, 'simulated_fill_count': len(trade['fills']),
+                                    'three_prices_preserved': True, 'exchange_orders_sent': 0,
+                                    'testnet_connected': False, 'continuous_service_started': False}))
+              finally:
+                  feed.close()
           PY

@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import time
 
+import paper_execution_bridge
 import manual_formula_alert as rules
 import manual_formula_alert_store as store
 
@@ -114,6 +115,8 @@ async def run_once(bot, chat_id, *, may_deliver=None):
             if terminal == 'DELIVERED':
                 sent += 1
                 _STATUS['last_delivery_at'] = _now().isoformat()
+                _STATUS['paper_bridge'] = await paper_execution_bridge.forward_delivered(
+                    intent, source='manual-formulas')
             print(f'[manual-formulas] delivery rule={intent["payload"]["rule_id"]} status={terminal}', flush=True)
             if not _READY:
                 break

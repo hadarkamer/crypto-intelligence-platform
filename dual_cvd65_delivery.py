@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import time
 
+import paper_execution_bridge
 import dual_cvd65_alert as alert
 import dual_cvd65_store as store
 from watch_transition_delivery import subscription_scope
@@ -156,6 +157,9 @@ async def drain(bot, chat_id, *, limit=2, may_deliver=None):
                 sent += 1
                 _STATUS["last_delivery_at_utc"] = _now().isoformat()
             await _finish(intent, terminal)
+            if terminal == "DELIVERED":
+                _STATUS["paper_bridge"] = await paper_execution_bridge.forward_delivered(
+                    intent, source="dual-cvd65")
             print(f"[dual-cvd65] delivery status={terminal} watch={intent['watch_scan_id']}", flush=True)
             if not _READY:
                 break
