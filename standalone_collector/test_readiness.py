@@ -36,4 +36,13 @@ class Tests(unittest.TestCase):
     def test_no_48h(self):
         with self.assertRaises(SourceNotReady): ensure_ready(Page({}),'48h',Path('unused'))
 
+
+def load_tests(loader, tests, pattern):
+    # The existing Render command runs this suite. Include the new offline
+    # session and private-evidence checks without changing the service command.
+    import test_authenticated_probe
+    tests.addTests(loader.loadTestsFromModule(test_authenticated_probe))
+    return tests
+
+
 if __name__=='__main__': unittest.main()
