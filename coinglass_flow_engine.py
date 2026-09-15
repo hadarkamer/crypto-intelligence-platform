@@ -541,7 +541,7 @@ def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "status": "PASS" if cvd_ok and not gaps else "WARNING",
         "freshness_status": "STALE" if stale else "FRESH",
-        "usable_for_confirmation": not stale and cvd_ok,
+        "usable_for_confirmation": not stale and cvd_ok and not gaps,
         "stale": stale,
         "age_minutes": age_minutes,
         "max_age_minutes": flow_foundation.MAX_CVD_AGE_MINUTES,
@@ -561,10 +561,19 @@ def _quality(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 def analyze_market(symbol: str, market: str) -> Dict[str, Any]:
     rows = _load_rows(symbol, market)
     quality = _quality(rows)
-    valid_series = quality.get("continuous_cvd_check", False)
+    valid_series = bool(quality.get("continuous_cvd_check", False)) and int(
+        quality.get("missing_30m_intervals") or 0
+    ) == 0
+    invalid_reason = (
+        "אין נתוני CVD שמורים"
+        if not rows
+        else "חסרים נרות 30 דקות בסדרת ה־CVD; ממתין להשלמת הרצף"
+        if int(quality.get("missing_30m_intervals") or 0) > 0
+        else "נתוני CVD אינם עקביים; ממתין לתיקון הסדרה"
+    )
     windows = {
         label: _window_state(rows, label, steps) if valid_series else {
-            "available": False, "reason": "נתוני CVD אינם עקביים; ממתין לתיקון הסדרה" if rows else "אין נתוני CVD שמורים",
+            "available": False, "reason": invalid_reason,
         }
         for label, steps in WINDOWS
     }
