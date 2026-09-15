@@ -19,8 +19,8 @@ class Reader:
         self.spot = {'balances':[{'coin':'USDC','token':0,'total':'1000','hold':'100'}]}
         self.perp = {'marginSummary':{'accountValue':'0'},'withdrawable':'0'}
         self.capacity = {'user':A,'coin':'BTC','availableToTrade':['500','500'],
-                         'maxTradeSzs':['5','5'],'markPx':'100'}
-        self.meta = {'universe':[{'name':'BTC','szDecimals':2}]}
+                         'maxTradeSzs':['5','5'],'markPx':'100','leverage':{'type':'cross','value':1}}
+        self.meta = {'universe':[{'name':'BTC','szDecimals':2,'maxLeverage':10}]}
         self.role = {'role':'agent','data':{'user':A}}
     def read(self, kind, *, user=None, coin=None):
         self.calls += 1
@@ -106,7 +106,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(self.plan_case({**PLAN,'side':'SHORT','stop':'110','take_profit':'90'})['test_plan_checked'])
     def test_quantity_cap_not_bypassed(self):
         self.reader.capacity['maxTradeSzs'] = ['1','5']
-        self.assertEqual(self.plan_case()['status'],'OUTSIDE_CONSERVATIVE_LAB_BUDGET')
+        self.assertEqual(self.plan_case()['status'],'QUANTITY_EXCEEDS_EXCHANGE_CAP')
     def test_available_budget_uses_conservative_side(self):
         self.reader.capacity['availableToTrade'] = ['500','201']
         self.assertFalse(self.plan_case()['test_plan_checked'])
@@ -208,6 +208,127 @@ class RuntimeTests(unittest.TestCase):
     def test_invalid_secret_never_imports_sdk(self):
         with patch.object(checks.importlib.metadata,'version',side_effect=AssertionError('No SDK for invalid input')):
             with self.assertRaises(checks.Blocked):checks.key_matches('not-a-secret',B)
+
+
+    def test_legacy_budget_components_are_reported_separately(self):
+        self.reader.capacity['maxTradeSzs'] = ['1','5']
+        self.reader.capacity['availableToTrade'] = ['100','100']
+        self.reader.spot['balances'][0]['hold'] = '900'
+        report = self.plan_case()['budget_diagnostics']
+        self.assertEqual(report['legacy_checks_same_sample'], {
+            'quantity_within_exchange_cap': False,
+            'full_cash_within_unheld_balance': False,
+            'full_cash_within_exchange_available': False})
+        self.assertEqual(len(report['failed_checks']),3)
+    def test_existing_leverage_resolves_cash_only_false_rejection(self):
+        self.reader.capacity['leverage']['value'] = 5
+        self.reader.capacity['availableToTrade'] = ['100','100']
+        result = self.plan_case()
+        self.assertTrue(result['test_plan_checked'])
+        report = result['budget_diagnostics']
+        self.assertFalse(report['legacy_passed'])
+        self.assertTrue(report['current_settings_passed'])
+        self.assertEqual(report['existing_leverage_used'],5)
+        self.assertFalse(report['account_settings_changed'])
+        self.assertFalse(report['order_authorization'])
+    def test_one_x_does_not_bypass_cash_shortage(self):
+        self.reader.capacity['availableToTrade'] = ['100','100']
+        self.assertEqual(self.plan_case()['status'],'ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE')
+    def test_unheld_usdc_cap_remains_enforced(self):
+        self.reader.capacity['leverage']['value'] = 5
+        self.reader.spot['balances'][0]['hold'] = '970'
+        self.assertEqual(self.plan_case()['status'],'ESTIMATED_MARGIN_EXCEEDS_UNHELD_USDC')
+    def test_reserve_is_not_divided_by_leverage(self):
+        self.reader.capacity['leverage']['value'] = 5
+        self.reader.capacity['availableToTrade'] = ['41','41']
+        self.assertFalse(self.plan_case()['test_plan_checked'])
+        self.reader.capacity['availableToTrade'] = ['42','42']
+        self.assertTrue(self.plan_case()['test_plan_checked'])
+    def test_all_current_budget_failures_are_preserved(self):
+        self.reader.capacity['availableToTrade'] = ['1','1']
+        self.reader.spot['balances'][0]['hold'] = '999'
+        result = self.plan_case()
+        self.assertEqual(result['budget_diagnostics']['failed_checks'],[
+            'estimated_margin_within_unheld_balance','estimated_margin_within_exchange_available'])
+    def test_missing_or_invalid_leverage_blocks_no_default(self):
+        for value in (None,{}, {'type':'cross','value':0}, {'type':'cross','value':True},
+                      {'type':'cross','value':1.5}, {'type':'other','value':5},
+                      {'type':'cross','value':11}):
+            self.reader.capacity['leverage'] = value
+            result=self.plan_case()
+            self.assertEqual(result['status'],'CURRENT_LEVERAGE_NOT_VERIFIED')
+            self.assertFalse(result['test_plan_checked'])
+    def test_metadata_leverage_cap_required(self):
+        del self.reader.meta['universe'][0]['maxLeverage']
+        self.assertEqual(self.plan_case()['status'],'CURRENT_LEVERAGE_NOT_VERIFIED')
+    def test_existing_isolated_setting_is_only_read(self):
+        self.reader.capacity['leverage'] = {'type':'isolated','value':5,'rawUsd':'0'}
+        result = self.plan_case()
+        self.assertTrue(result['test_plan_checked'])
+        self.assertEqual(result['budget_diagnostics']['margin_mode'],'isolated')
+        self.assertFalse(result['budget_diagnostics']['account_settings_changed'])
+    def test_adverse_entry_price_is_not_ignored_long(self):
+        self.reader.capacity['markPx']='80'
+        self.reader.capacity['leverage']['value']=5
+        self.reader.capacity['availableToTrade']=['40','40']
+        result=self.plan_case()
+        self.assertFalse(result['test_plan_checked'])
+        self.assertTrue(result['budget_diagnostics']['adverse_entry_mark_loss_included'])
+    def test_adverse_entry_price_is_not_ignored_short(self):
+        self.reader.capacity['markPx']='120'
+        self.reader.capacity['leverage']['value']=5
+        self.reader.capacity['availableToTrade']=['60','60']
+        result=self.plan_case({**PLAN,'side':'SHORT','stop':'110','take_profit':'90'})
+        self.assertFalse(result['test_plan_checked'])
+        self.assertTrue(result['budget_diagnostics']['adverse_entry_mark_loss_included'])
+    def test_quantity_cap_still_applies_with_leverage(self):
+        self.reader.capacity['leverage']['value']=5
+        self.reader.capacity['maxTradeSzs']=['1','5']
+        self.assertEqual(self.plan_case()['status'],'QUANTITY_EXCEEDS_EXCHANGE_CAP')
+    def test_capacity_array_order_is_not_guessed(self):
+        self.reader.capacity['leverage']['value']=5
+        for pair in (['41','500'],['500','41']):
+            self.reader.capacity['availableToTrade']=pair
+            self.assertFalse(self.plan_case()['test_plan_checked'])
+    def test_key_match_is_independent_of_budget_failure(self):
+        self.reader.capacity['availableToTrade']=['1','1']
+        result=self.run_case({**ENV,'HL_TESTNET_CHECK_PLAN':json.dumps(PLAN),
+                             'HL_TESTNET_AGENT_KEY':'FAKE'}, local_key_check=Mock(return_value=True))
+        self.assertFalse(result['test_plan_checked'])
+        self.assertTrue(result['local_key_address_checked'])
+        self.assertFalse(result['signing_tested'])
+    def test_account_state_and_plan_are_not_mutated(self):
+        original = deepcopy(self.reader.__dict__)
+        plan = deepcopy(PLAN)
+        self.plan_case(plan)
+        for name in ('spot','perp','capacity','meta','role'):
+            self.assertEqual(self.reader.__dict__[name],original[name])
+        self.assertEqual(plan,PLAN)
+    def test_missing_plan_never_manufactures_budget(self):
+        self.assertIsNone(self.run_case()['budget_diagnostics'])
+    def test_plan_digest_bound_to_actual_input(self):
+        one=self.plan_case()['budget_diagnostics']['plan_sha256']
+        two=self.plan_case(dict(reversed(list(PLAN.items()))))['budget_diagnostics']['plan_sha256']
+        three=self.plan_case({**PLAN,'take_profit':'111'})['budget_diagnostics']['plan_sha256']
+        self.assertEqual(one,two)
+        self.assertNotEqual(one,three)
+    def test_mark_value_lab_bound_not_raised(self):
+        self.reader.capacity['markPx']='3000'
+        self.reader.capacity['availableToTrade']=['100000','100000']
+        self.reader.spot['balances'][0]['total']='100000'
+        result=self.plan_case()
+        self.assertFalse(result['test_plan_checked'])
+        self.assertIn('mark_notional_within_lab_cap',result['budget_diagnostics']['failed_checks'])
+    def test_twenty_dollar_risk_does_not_shrink_to_make_budget_pass(self):
+        self.reader.capacity['leverage']['value']=5
+        # 20/(100-99) = 20 units, not 2; cap deliberately excludes it.
+        result=self.plan_case({**PLAN,'stop':'99'})
+        self.assertEqual(result['status'],'QUANTITY_EXCEEDS_EXCHANGE_CAP')
+        self.assertFalse(result['budget_diagnostics']['risk_rule_changed'])
+    def test_legacy_wrapper_remains_conservative_without_context(self):
+        from decimal import Decimal as D
+        with self.assertRaises(checks.Blocked):
+            checks.plan_check(PLAN,'BTC',2,D('100'),D('100'),D('5'))
 
 
 if __name__ == '__main__':

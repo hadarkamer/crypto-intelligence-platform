@@ -7,6 +7,7 @@ All output is a fixed, redacted report. A pass is not order acceptance.
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, localcontext
 import http.client
+import hashlib
 import importlib.metadata
 import json
 import re
@@ -16,6 +17,7 @@ HOST = 'api.hyperliquid-testnet.xyz'
 ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}\Z')
 SYMBOL = re.compile(r'[A-Z][A-Z0-9]{0,19}\Z')
 MAX_BYTES = 2 * 1024 * 1024
+BUDGET_VERSION = 'current-settings-budget-v2'
 
 
 class Blocked(ValueError):
@@ -132,18 +134,27 @@ def capacity(data, account, symbol):
     return tuple(values)
 
 
-def plan_check(plan, symbol, decimals, unheld, available, max_size):
-    """Pure lab check; prices remain unchanged. NOT an order authorization.
+def plan_check(plan, symbol, decimals, unheld, available, max_size, *,
+               active=None, metadata_max_leverage=None, diagnostics=None):
+    """Read-only estimate using the account's EXISTING leverage, never setting it.
 
-    Use $20 distance-based sizing as requested. Require full notional plus 1%
-    cash reserve in BOTH unheld balance and exchange-reported capacity. This
-    conservative lab bound may refuse affordable leveraged orders. It never
-    changes account leverage, size to force acceptance, or the supplied prices.
+    $20 distance risk and original prices/quantity are unchanged. Margin follows
+    Hyperliquid's size * mark / leverage, plus adverse entry-vs-mark loss and a
+    separate 1% notional lab reserve (not a claim about actual fees).
+    Exchange size and available-margin caps AND unheld USDC remain enforced.
+    Both array minima remain conservative; no undocumented side index is assumed.
+
+    With no active context retain the v1 cash-only check for offline callers.
+    Production run_check always supplies active context; invalid/missing leverage
+    then blocks, never falls back to a convenient multiplier. This is not order
+    authorization, liquidation validation, or proof of future available funds.
     """
     if not isinstance(plan, dict) or set(plan) != {'symbol', 'side', 'entry', 'stop', 'take_profit'}:
         raise Blocked('INVALID_TEST_PLAN')
     if plan['symbol'] != symbol or plan['side'] not in ('LONG', 'SHORT'):
         raise Blocked('INVALID_TEST_PLAN')
+    if type(decimals) is not int or not 0 <= decimals <= 6:
+        raise Blocked('ASSET_UNAVAILABLE')
     entry, stop, take = (number(plan[k]) for k in ('entry', 'stop', 'take_profit'))
     if min(entry, stop, take) <= 0 or not (stop < entry < take if plan['side'] == 'LONG' else take < entry < stop):
         raise Blocked('INVALID_TEST_PLAN')
@@ -158,8 +169,62 @@ def plan_check(plan, symbol, decimals, unheld, available, max_size):
         notional = size * entry
         if size <= 0 or not Decimal(10) <= notional <= Decimal(5000):
             raise Blocked('OUTSIDE_LAB_SIZE_BOUNDS')
-        if size > max_size or notional * Decimal('1.01') > min(unheld, available):
-            raise Blocked('OUTSIDE_CONSERVATIVE_LAB_BUDGET')
+        full_cash = notional * Decimal('1.01')
+        legacy = {
+            'quantity_within_exchange_cap': size <= max_size,
+            'full_cash_within_unheld_balance': full_cash <= unheld,
+            'full_cash_within_exchange_available': full_cash <= available,
+        }
+        if diagnostics is not None:
+            diagnostics.update(version=BUDGET_VERSION,
+                plan_sha256=hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                legacy_checks_same_sample=legacy, legacy_passed=all(legacy.values()),
+                capacity_selection='minimum_of_both_sides', current_settings_checks=None,
+                failed_checks=[], existing_leverage_used=None, account_settings_changed=False,
+                prices_changed=False, risk_rule_changed=False, order_authorization=False)
+        if active is None:
+            if not all(legacy.values()):
+                raise Blocked('OUTSIDE_CONSERVATIVE_LAB_BUDGET')
+            return True
+        leverage = active.get('leverage') if isinstance(active, dict) else None
+        if (not isinstance(leverage, dict) or leverage.get('type') not in ('cross', 'isolated')
+                or type(leverage.get('value')) is not int or leverage['value'] < 1
+                or type(metadata_max_leverage) is not int
+                or not 1 <= metadata_max_leverage <= 100
+                or leverage['value'] > metadata_max_leverage):
+            raise Blocked('CURRENT_LEVERAGE_NOT_VERIFIED')
+        mark = number(active.get('markPx'))
+        if mark <= 0:
+            raise Blocked('INVALID_CAPACITY')
+        initial_margin = size * mark / Decimal(leverage['value'])
+        # Conservative check at the requested limit, not a promised fill price.
+        adverse_price = max(entry - mark if plan['side'] == 'LONG' else mark - entry, Decimal(0))
+        adverse_loss = size * adverse_price
+        reserve = size * max(entry, mark) * Decimal('0.01')
+        required = initial_margin + adverse_loss + reserve
+        current = {
+            'quantity_within_exchange_cap': size <= max_size,
+            'estimated_margin_within_unheld_balance': required <= unheld,
+            'estimated_margin_within_exchange_available': required <= available,
+            'mark_notional_within_lab_cap': size * mark <= Decimal(5000),
+        }
+        failures = [name for name, passed in current.items() if not passed]
+        if diagnostics is not None:
+            diagnostics.update(current_settings_checks=current, failed_checks=failures,
+                existing_leverage_used=leverage['value'], margin_mode=leverage['type'],
+                adverse_entry_mark_loss_included=adverse_loss > 0,
+                reserve_basis='one_percent_of_max_entry_mark_notional',
+                # A market-context warning only; not an invented entry filter.
+                mark_within_supplied_exit_range=min(stop, take) <= mark <= max(stop, take),
+                current_settings_passed=not failures)
+        if failures:
+            codes = {
+                'quantity_within_exchange_cap': 'QUANTITY_EXCEEDS_EXCHANGE_CAP',
+                'estimated_margin_within_unheld_balance': 'ESTIMATED_MARGIN_EXCEEDS_UNHELD_USDC',
+                'estimated_margin_within_exchange_available': 'ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE',
+                'mark_notional_within_lab_cap': 'MARK_NOTIONAL_EXCEEDS_LAB_CAP',
+            }
+            raise Blocked(codes[failures[0]])
     return True
 
 
@@ -187,6 +252,7 @@ def run_check(env, *, client=None, local_key_check=key_matches):
               'positive_usdc_observed': False, 'unheld_balance_observed': False,
               'exchange_capacity_observed': False, 'test_plan_checked': False,
               'local_key_address_checked': False, 'signing_tested': False,
+              'budget_diagnostics': None,
               'order_requests_sent': 0, 'public_reads': 0,
               'checked_at_utc': datetime.now(timezone.utc).isoformat()}
     started = time.monotonic()
@@ -232,8 +298,12 @@ def run_check(env, *, client=None, local_key_check=key_matches):
             raise Blocked('ACCOUNT_MODE_REQUIRES_REVIEW')
         result['positive_usdc_observed'] = total > 0
         result['unheld_balance_observed'] = unheld > 0
-        available, max_size = capacity(client.read('activeAssetData', user=account, coin=symbol), account, symbol)
+        active = client.read('activeAssetData', user=account, coin=symbol)
+        available, max_size = capacity(active, account, symbol)
         result['exchange_capacity_observed'] = available > 0 and max_size > 0
+        key = env.get('HL_TESTNET_AGENT_KEY', '')
+        if key:
+            result['local_key_address_checked'] = local_key_check(key, agent)
         if plan is not None:
             meta = client.read('meta')
             universe = meta.get('universe') if isinstance(meta, dict) else None
@@ -243,10 +313,11 @@ def run_check(env, *, client=None, local_key_check=key_matches):
             if (len(assets) != 1 or assets[0].get('isDelisted', False) is not False
                     or type(assets[0].get('szDecimals')) is not int or not 0 <= assets[0]['szDecimals'] <= 6):
                 raise Blocked('ASSET_UNAVAILABLE')
-            result['test_plan_checked'] = plan_check(plan, symbol, assets[0]['szDecimals'], unheld, available, max_size)
-        key = env.get('HL_TESTNET_AGENT_KEY', '')
-        if key:
-            result['local_key_address_checked'] = local_key_check(key, agent)
+            result['budget_diagnostics'] = {}
+            result['test_plan_checked'] = plan_check(
+                plan, symbol, assets[0]['szDecimals'], unheld, available, max_size,
+                active=active, metadata_max_leverage=assets[0].get('maxLeverage'),
+                diagnostics=result['budget_diagnostics'])
         if time.monotonic() - started > 20:
             raise Blocked('SAMPLE_EXPIRED')
         if not result['positive_usdc_observed'] or not result['exchange_capacity_observed'] or unheld <= 0:
