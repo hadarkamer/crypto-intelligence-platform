@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from collections.abc import Mapping
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import replace
@@ -177,6 +178,7 @@ def test_runtime_capture_and_sheets():
         return True
     scope = {
         "datetime": datetime, "timezone": timezone, "replace": replace, "hashlib": hashlib,
+        "Mapping": Mapping,
         "_WATCH_CONTEXT": ContextVar("test_watch", default={}),
         "_PLANNED_CAPTURE": ContextVar("test_planned", default=None),
         "SINK": capture.DryRunResearchCapture(max_events=20),
