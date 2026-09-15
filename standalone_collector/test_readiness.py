@@ -16,7 +16,7 @@ class Tests(unittest.TestCase):
     def test_correct_source(self): self.assertTrue(valid_source(SOURCE))
     def test_other_model(self): self.assertFalse(valid_source(SOURCE.replace('HeatMap','HeatMapNew')))
     def test_wrong_coin(self): self.assertFalse(valid_source(SOURCE.replace('BTC','ETH')))
-    def test_duplicate_coin(self): self.assertFalse(valid_source(SOURCE+'&coin=BTC')))
+    def test_duplicate_coin(self): self.assertFalse(valid_source(SOURCE+'&coin=BTC'))
     def test_nonsecure(self): self.assertFalse(valid_source(SOURCE.replace('https:','http:')))
     def test_wrong_host(self): self.assertFalse(valid_source(SOURCE.replace('www.coinglass.com','evil.example')))
     def test_ready(self):
