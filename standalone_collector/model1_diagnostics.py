@@ -1,5 +1,6 @@
-"""Passive public-source diagnostics: status counts only, no API bodies or credentials."""
+"""Passive source diagnostics: host/status counts only, no response bodies or credentials."""
 from collections import Counter
+import atexit
 import json
 import os
 from urllib.parse import urlsplit
@@ -8,21 +9,22 @@ from urllib.parse import urlsplit
 def attach(page):
     if os.getenv('MODEL1_NETWORK_DIAGNOSTICS','').lower() != 'true':
         return
-    statuses=Counter()
-    failures=Counter()
-    js_errors=Counter()
+    statuses,failures,js_errors=Counter(),Counter(),Counter()
+    reported=False
     def response_seen(response):
         if response.status >= 400:
-            host=urlsplit(response.url).hostname or 'unknown'
-            statuses[f'{host}:{response.status}']+=1
+            statuses[f'{urlsplit(response.url).hostname or "unknown"}:{response.status}']+=1
     def request_failed(request):
         host=urlsplit(request.url).hostname or 'unknown'
-        error=str(request.failure or 'network-failure').split('\n')[0][:100]
-        # Record host and error category only, never URL paths/queries/headers.
-        failures[f'{host}:{error}']+=1
+        failure=str(request.failure or 'network-failure')
+        category=failure if failure.startswith('net::ERR_') and len(failure)<80 else 'network-failure'
+        failures[f'{host}:{category}']+=1
     def page_error(error):
         js_errors[type(error).__name__]+=1
-    def closed(*args):
+    def report(*args):
+        nonlocal reported
+        if reported: return
+        reported=True
         print('MODEL1_NETWORK_DIAGNOSTIC '+json.dumps({
             'http_errors':dict(statuses.most_common(12)),
             'network_errors':dict(failures.most_common(12)),
@@ -31,4 +33,5 @@ def attach(page):
     page.on('response',response_seen)
     page.on('requestfailed',request_failed)
     page.on('pageerror',page_error)
-    page.on('close',closed)
+    page.on('close',report)
+    atexit.register(report)
