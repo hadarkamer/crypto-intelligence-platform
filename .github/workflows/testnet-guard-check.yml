@@ -20,4 +20,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Existing budget, sender, guard and integrated fake-exchange tests
-        run: python3 -m unittest -v hl_testnet_runtime.test_runtime hyperliquid_testnet_executor_selftest hl_testnet_runtime.test_guarded_execution hl_testnet_runtime.test_guarded_integration
+        env:
+          HL_TESTNET_REVIEW_SIGNAL: '{}'
+          HL_TESTNET_RUNTIME_MODE: read_only
+        run: python3 -m unittest -v hl_testnet_runtime.test_runtime hyperliquid_testnet_executor_selftest hl_testnet_runtime.test_guarded_execution hl_testnet_runtime.test_guarded_integration hl_testnet_runtime.test_review_startup
