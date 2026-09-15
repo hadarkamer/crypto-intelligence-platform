@@ -1,8 +1,7 @@
 """Configuration-only deployment check. No source visit, inference, or DB writes.
 
 The saved OpenAI key stays on the server. At most one fixed-origin GET retrieves
-model metadata. A successful metadata request does not prove billing balance or
-that a Responses API inference will succeed. No response/error body is logged.
+model metadata. No response/error body or credential values are logged.
 """
 from __future__ import annotations
 
@@ -25,6 +24,31 @@ def configuration_status(env: Mapping[str, str]) -> dict:
         'bridge_token_configured': len(env.get('COINGLASS_COLLECTOR_TOKEN', '').strip()) >= 32,
         'storage_configured': present('DATABASE_URL'),
         'collection_enabled': env.get('COLLECTION_BRIDGE_ENABLED', '').lower() == 'true',
+    }
+
+
+def source_setting_structure(env: Mapping[str, str]) -> dict:
+    """Only booleans about input structure, never values or validity of a login.
+
+    The public site's logout code identifies 'obe' as a session cookie. Merely
+    having some non-empty tracking cookies is not equivalent to supplying it.
+    This check neither modifies the header nor requests any website resource.
+    """
+    raw=env.get('COINGLASS_COOKIE_HEADER','').strip()
+    reasonable=len(raw)<=65536
+    session_present=False
+    if reasonable:
+        for part in raw.split(';'):
+            name, separator, value=part.strip().partition('=')
+            if separator and name.strip()=='obe' and value.strip():
+                session_present=True
+    return {
+        'cookie_header_present':bool(raw),
+        'session_cookie_present':session_present,
+        'cookie_header_has_linebreaks': '\r' in raw or '\n' in raw,
+        'cookie_header_has_field_prefix':raw.lower().startswith('cookie:'),
+        'cookie_header_length_allowed':reasonable,
+        'storage_state_alternative_present':bool(env.get('COINGLASS_STORAGE_STATE_JSON','').strip()),
     }
 
 
@@ -79,12 +103,12 @@ def check_configuration(*, env=None, http_get=None) -> dict:
             report['openai_check'] = 'model_metadata_access_confirmed'
             report['model_id_matches_requested'] = payload['id'] == model
     except Exception:
-        # Never stringify errors, headers, secrets, or provider response bodies.
         report['openai_check'] = 'metadata_request_failed'
     return report
 
 
 def main() -> None:
+    print('MODEL1_SOURCE_SETTING_STRUCTURE ' + json.dumps(source_setting_structure(os.environ)), flush=True)
     print('MODEL1_CONFIG_CHECK ' + json.dumps(check_configuration()), flush=True)
 
 
