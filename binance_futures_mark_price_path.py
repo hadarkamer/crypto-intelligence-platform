@@ -7,27 +7,49 @@ core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
+import os
+from threading import Lock
 from typing import Any, Callable
+import urllib.error
 from urllib.parse import urlencode
+from urllib.parse import urlsplit
 import urllib.request
+
+import requests
 
 from research_btc_parent_movement import validate_candle
 
 METHOD_VERSION = "binance-futures-hype-mark-1m-v1"
 SOURCE_URL = "https://fapi.binance.com/fapi/v1/markPriceKlines"
 PROVENANCE = "OFFICIAL_BINANCE_USDM_HYPEUSDT_MARK_PRICE_KLINES_1M"
+TRANSPORT_VERSION = "binance-futures-mark-egress-v1"
+HTTPS_PROXY_ENV = "BINANCE_FUTURES_MARK_HTTPS_PROXY"
 MAX_WINDOW_MINUTES = 1440
 PAGE_LIMIT = 1500
 REQUEST_TIMEOUT_SECONDS = 15
 MAX_RESPONSE_BYTES = 2_000_000
+RESPONSE_CHUNK_BYTES = 64 * 1024
 INTERVAL = "1m"
 INTERVAL_SECONDS = 60
 INTERVAL_MS = 60_000
 _MINUTE = timedelta(minutes=1)
 _MILLISECOND = timedelta(milliseconds=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_STATUS_LOCK = Lock()
+_ATTEMPT_SEQUENCE = 0
+_STATUS = {
+    "version": TRANSPORT_VERSION,
+    "target": "OFFICIAL_BINANCE_USDM_MARK_PRICE_KLINES",
+    "proxy_configured": False,
+    "last_transport": None,
+    "last_attempt_at_utc": None,
+    "last_http_status": None,
+    "last_error_type": None,
+    "last_attempt_sequence": 0,
+}
 
 
 class BinanceFuturesMarkPathError(RuntimeError):
@@ -52,17 +74,188 @@ class _StdlibResponse:
         return json.loads(self._body)
 
 
+def _begin_attempt(*, proxy_configured: bool, attempted_at: str) -> int:
+    global _ATTEMPT_SEQUENCE
+    with _STATUS_LOCK:
+        _ATTEMPT_SEQUENCE += 1
+        sequence = _ATTEMPT_SEQUENCE
+        _STATUS.update(
+            proxy_configured=proxy_configured,
+            last_transport="DEDICATED_HTTPS_PROXY" if proxy_configured else "DIRECT",
+            last_attempt_at_utc=attempted_at,
+            last_http_status=None,
+            last_error_type=None,
+            last_attempt_sequence=sequence,
+        )
+        return sequence
+
+
+def _finish_attempt(sequence: int, **changes: Any) -> None:
+    with _STATUS_LOCK:
+        if _STATUS["last_attempt_sequence"] == sequence:
+            _STATUS.update(changes)
+
+
+def transport_status() -> dict[str, Any]:
+    """Return diagnostics without exposing the proxy address or credentials."""
+    with _STATUS_LOCK:
+        value = deepcopy(_STATUS)
+    value["proxy_configured"] = bool(os.getenv(HTTPS_PROXY_ENV, "").strip())
+    return value
+
+
+def _https_proxy() -> tuple[str | None, str | None]:
+    raw = os.getenv(HTTPS_PROXY_ENV, "").strip()
+    if not raw:
+        return None, None
+    invalid = False
+    try:
+        parsed = urlsplit(raw)
+        # A path, query or fragment can silently turn a forward-proxy setting
+        # into a request-rewriting endpoint. Only an authority is accepted.
+        if (parsed.scheme != "https" or not parsed.hostname
+                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+            invalid = True
+        _ = parsed.port
+    except (TypeError, ValueError):
+        invalid = True
+    if invalid:
+        return None, "INVALID_PROXY_CONFIGURATION"
+    if urllib.request.proxy_bypass("fapi.binance.com"):
+        return None, "PROXY_BYPASS_CONFIGURATION"
+    return raw.rstrip("/"), None
+
+
+def _requests_proxy_fetch(
+    url: str, *, params: dict, timeout: int, proxy: str
+) -> tuple[int | None, bytes, str | None, bool]:
+    """Read one bounded response through an explicitly configured proxy.
+
+    Requests/urllib3 supports TLS to an ``https://`` forward proxy. Disabling
+    ``trust_env`` ensures ambient proxy and bypass variables cannot alter the
+    selected route. Exceptions stay inside this helper so their messages,
+    which can contain proxy credentials, are never retained on the public
+    error's exception chain.
+    """
+    session = None
+    response = None
+    status_code = None
+    body = b""
+    transport_error_type = None
+    response_too_large = False
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        response = session.get(
+            url,
+            params=params,
+            timeout=timeout,
+            allow_redirects=False,
+            stream=True,
+            proxies={"https": proxy},
+            verify=True,
+        )
+        status_code = int(response.status_code)
+        if status_code == 200:
+            chunks = []
+            total_bytes = 0
+            for chunk in response.iter_content(chunk_size=RESPONSE_CHUNK_BYTES):
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if total_bytes > MAX_RESPONSE_BYTES:
+                    response_too_large = True
+                    break
+                chunks.append(chunk)
+            if not response_too_large:
+                body = b"".join(chunks)
+    except Exception as exc:
+        transport_error_type = type(exc).__name__
+
+    # Close outside the request handler. If either close fails, keep only its
+    # class name; never retain a proxy-bearing exception object.
+    if response is not None:
+        try:
+            response.close()
+        except Exception as exc:
+            if transport_error_type is None:
+                transport_error_type = type(exc).__name__
+    if session is not None:
+        try:
+            session.close()
+        except Exception as exc:
+            if transport_error_type is None:
+                transport_error_type = type(exc).__name__
+    return status_code, body, transport_error_type, response_too_large
+
+
 def _stdlib_get(url: str, *, params: dict, timeout: int, allow_redirects: bool = False):
-    """Match the injectable GET interface using only the standard library."""
+    """Match the injectable GET interface with a fixed, explicit transport."""
     if url != SOURCE_URL or allow_redirects:
         raise BinanceFuturesMarkPathError("Only the fixed non-redirecting MARK source is supported")
-    request = urllib.request.Request(url + "?" + urlencode(params), method="GET")
-    opener = urllib.request.build_opener(_RejectRedirects())
-    with opener.open(request, timeout=timeout) as response:
-        body = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(body) > MAX_RESPONSE_BYTES:
-            raise BinanceFuturesMarkPathError("Futures MARK response exceeds the byte budget")
-        return _StdlibResponse(response.status, body)
+    attempted_at = datetime.now(timezone.utc).isoformat()
+    proxy_configured = bool(os.getenv(HTTPS_PROXY_ENV, "").strip())
+    sequence = _begin_attempt(proxy_configured=proxy_configured, attempted_at=attempted_at)
+    proxy, configuration_error = _https_proxy()
+    if configuration_error:
+        _finish_attempt(sequence, last_error_type=configuration_error)
+        if configuration_error == "PROXY_BYPASS_CONFIGURATION":
+            raise BinanceFuturesMarkPathError(
+                "Configured Futures MARK HTTPS proxy is bypassed"
+            )
+        raise BinanceFuturesMarkPathError(
+            "Configured Futures MARK HTTPS proxy is invalid"
+        )
+    http_error_status = None
+    transport_error_type = None
+    response_too_large = False
+    status_code = None
+    body = b""
+    if proxy:
+        status_code, body, transport_error_type, response_too_large = (
+            _requests_proxy_fetch(url, params=params, timeout=timeout, proxy=proxy)
+        )
+        # Do not retain a credential-bearing URL in a frame that can raise.
+        proxy = None
+    else:
+        request = urllib.request.Request(url + "?" + urlencode(params), method="GET")
+        try:
+            # An explicit empty handler prevents ambient HTTPS_PROXY settings
+            # from changing a route reported as DIRECT.
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _RejectRedirects()
+            )
+            with opener.open(request, timeout=timeout) as response:
+                status_code = int(response.status)
+                body = response.read(MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            http_error_status = int(exc.code)
+        except Exception as exc:
+            transport_error_type = type(exc).__name__
+    # Raise only after leaving the handler so proxy-bearing exceptions are not
+    # retained in __context__ or __cause__.
+    if http_error_status is not None:
+        _finish_attempt(sequence, last_http_status=http_error_status,
+                        last_error_type="HTTPError")
+        raise BinanceFuturesMarkPathError(
+            f"Futures MARK source returned HTTP {http_error_status}"
+        )
+    if transport_error_type is not None:
+        _finish_attempt(sequence, last_http_status=status_code,
+                        last_error_type=transport_error_type)
+        raise BinanceFuturesMarkPathError("Futures MARK transport failed")
+    if status_code != 200:
+        _finish_attempt(sequence, last_http_status=status_code,
+                        last_error_type="UNEXPECTED_HTTP_STATUS")
+        raise BinanceFuturesMarkPathError(
+            f"Futures MARK source returned HTTP {status_code}"
+        )
+    if response_too_large or len(body) > MAX_RESPONSE_BYTES:
+        _finish_attempt(sequence, last_http_status=status_code,
+                        last_error_type="RESPONSE_TOO_LARGE")
+        raise BinanceFuturesMarkPathError("Futures MARK response exceeds the byte budget")
+    _finish_attempt(sequence, last_http_status=status_code, last_error_type=None)
+    return _StdlibResponse(status_code, body)
 
 
 def _utc(value: Any) -> datetime:
@@ -144,6 +337,8 @@ def fetch_closed_candles(
         if response.status_code != 200:
             raise BinanceFuturesMarkPathError("Futures MARK source did not return HTTP 200")
         payload = response.json()
+    except BinanceFuturesMarkPathError:
+        raise
     except Exception as exc:
         raise BinanceFuturesMarkPathError("Official Futures MARK request failed") from exc
     if not isinstance(payload, list) or len(payload) > PAGE_LIMIT:
