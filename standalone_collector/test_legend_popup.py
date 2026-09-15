@@ -28,7 +28,11 @@ class LegendTests(unittest.TestCase):
     def tearDown(self):self.context.close()
     def test_normal_x_closes_help_not_account_gate(self):
         self.page.set_content(HTML)
-        self.page.evaluate("document.querySelector('#help > div').onclick=()=>document.querySelector('#help').remove()")
+        # Returning an assigned function would make evaluate invoke it. The
+        # explicit setup function returns nothing, so only the later click closes.
+        self.page.evaluate("() => { document.querySelector('#help > div').onclick=()=>document.querySelector('#help').remove(); }")
+        self.assertEqual(self.page.locator(CARD).count(),1)
+        self.assertTrue(self.page.locator('#help').is_visible())
         self.assertTrue(dismiss_legend(self.page,timeout_ms=500))
         self.assertEqual(self.page.locator(CARD).count(),0)
         self.assertTrue(self.page.locator('#account').is_visible())
