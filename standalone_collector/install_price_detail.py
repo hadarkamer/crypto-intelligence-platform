@@ -22,13 +22,11 @@ def replace_once(text,old,new):
 
 def expand_detail_capture(text):
     text=replace_once(text,'            page.screenshot(path=str(path), full_page=True)',
-        '            from price_detail_input import make_detail_file\n'
         '            chart_rect = page.evaluate('+repr(RECT_SCRIPT)+')\n'
-        '            page.screenshot(path=str(path), full_page=True)\n'
-        '            price_detail = make_detail_file(path, chart_rect)')
+        '            page.screenshot(path=str(path), full_page=True)')
     return replace_once(text,'                    "liquidity_threshold": 0.85,',
         '                    "liquidity_threshold": 0.85,\n'
-        '                    "price_detail": price_detail,')
+        '                    "price_geometry": chart_rect,')
 
 
 def install(runtime:Path):
@@ -39,6 +37,12 @@ def install(runtime:Path):
     text=replace_once(text,'        count += 1','        content.extend(detail_content(image))\n        count += 1')
     compile(text,str(path),'exec');path.write_text(text,encoding='utf-8')
     path=runtime/'collection_model1_task.py';text=path.read_text()
+    text=replace_once(text,'    images[0].pop("liquidity_threshold", None)',
+        '    images[0].pop("liquidity_threshold", None)\n'
+        '    if "price_geometry" in images[0]:\n'
+        '        from price_detail_input import make_detail_file\n'
+        '        images[0]["price_detail"] = make_detail_file(\n'
+        '            images[0]["image"], images[0]["price_geometry"])')
     needle='    result = normalize(raw, timeframe=timeframe, run_id=run_id, captured_at=captured_at, image=image)'
     text=replace_once(text,needle,needle+'\n'
         '    from price_detail_input import detail_provenance\n'
