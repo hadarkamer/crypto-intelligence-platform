@@ -1,0 +1,44 @@
+name: Paper Feed Safety Check
+
+on:
+  push:
+    branches: [paper-trading-v1]
+    paths:
+      - 'paper_execution*.py'
+      - '.github/workflows/paper-feed-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paper-feed-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Offline paper tests only
+        run: python3 -m unittest -v paper_execution_selftest paper_execution_feed_selftest
+      - name: Public price read only - no account or orders
+        timeout-minutes: 1
+        run: |
+          python3 - <<'PY'
+          import json
+          import time
+          from paper_execution_feed import PublicInfo, asset_contexts, book_quote, utc_now
+          client = PublicInfo(allow_public_reads=True)
+          started = time.monotonic()
+          assets = asset_contexts(client.read('metaAndAssetCtxs'), ('BTC',))
+          book = client.read('l2Book', 'BTC')
+          quote = book_quote(book, 'BTC', assets['BTC']['mark'], utc_now())
+          assert time.monotonic() - started <= 10, 'Acquisition window exceeded'
+          print(json.dumps({'public_read_verified': True, 'asset': 'BTC',
+                            'source_at': quote['at'], 'public_requests': client.calls,
+                            'exchange_orders_sent': 0,
+                            'warning': 'Public connectivity only; no bot feed or profitability validation'}))
+          PY
