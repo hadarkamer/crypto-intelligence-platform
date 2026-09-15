@@ -7,6 +7,7 @@ is supplied by the caller; this module never reads later observations.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from html import escape
 import hashlib
@@ -14,6 +15,8 @@ import json
 import math
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
+
+from experimental_reference_price import render_reference_levels, select_reference
 
 VERSION = "manual-formula-experimental-alerts-v2"
 PREVIOUS_VERSION = "manual-formula-experimental-alerts-v1"
@@ -70,6 +73,17 @@ RULES = {
 RULE_IDS = tuple(RULES)
 RULESET_SHA256 = hashlib.sha256(json.dumps(RULES, ensure_ascii=False, sort_keys=True,
                                          separators=(',', ':')).encode()).hexdigest()
+
+# Display provenance is separate from the frozen matching rules and dedup IDs.
+# A combination begins at its earliest required component anchor. The shared
+# selector validates captured references; detection never fetches a newer quote.
+_REFERENCE_COMPONENTS = {
+    "C1274": ("MAX_PAIN", "FUTURES_CVD"),
+    "PRICE_OI_ENTRY2": ("PRICE_OI",),
+    "PRICE_OI_SPOT65": ("PRICE_OI", "SPOT_CVD"),
+    "CONSENSUS_FULL": ("MAX_PAIN",),
+    "C0964": ("MAX_PAIN", "SPOT_CVD"),
+}
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -200,6 +214,8 @@ def render_message(payload: Mapping[str, Any]) -> str:
     lines = [f'🧪 <b>סף {rule["threshold_bps"] / 100:g}% — ניסיוני, לא למסחר</b>',
              f'<b>{escape(rule["name"])}</b>',
              f'<b>{escape(payload["symbol"])} | {direction}</b>',
+             render_reference_levels(payload.get("price_reference"),
+                                     rule["threshold_bps"], payload["direction"], html=True),
              escape(rule["conditions_text"]),
              "החיזוי הפוך לכיוון המחקר של אירוע המקור.",
              *["<b>הערה</b>: " + escape(note) for note in rule["notes"].get(payload["symbol"], ())],
@@ -226,6 +242,10 @@ def evaluate_event(event: Mapping[str, Any], features: Mapping[str, Any], now: A
                    "symbol": event["symbol"], "direction": _INVERSE[event["direction"]],
                    "event_id": event["event_id"], "event_time": utc(event["alert_time_utc"]).isoformat(),
                    "source_direction": event["direction"], "predicate_version": VERSION}
+        references = _mapping(event.get("engine_snapshot")).get("experimental_price_references")
+        reference = select_reference(references, _REFERENCE_COMPONENTS[rule_id],
+                                     symbol=event["symbol"], as_of=event["alert_time_utc"])
+        payload["price_reference"] = deepcopy(reference)
         payload["text"] = render_message(payload)
         result.append(payload)
     return result

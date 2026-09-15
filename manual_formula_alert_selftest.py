@@ -29,7 +29,132 @@ def result_ids(event, features, now=NOW):
     return {row["rule_id"] for row in rules.evaluate_event(event, features, now)}
 
 
+def captured_references():
+    """Distinct component anchors expose using a shared current quote by mistake."""
+    return {
+        component: {"status": "READY", "component": component, "symbol": "BTC",
+                    "price": price,
+                    "price_time_utc": "2026-09-14T11:59:00Z" if component == "MAX_PAIN" else stamp,
+                    "anchor_time_utc": stamp,
+                    "source": "BINANCE_SPOT_TRADE_1M", "precision": precision}
+        for component, price, stamp, precision in (
+            ("FUTURES_CVD", "90", "2026-09-14T11:57:00Z", "CLOSED_1M"),
+            ("SPOT_CVD", "100", "2026-09-14T11:58:00Z", "CLOSED_1M"),
+            ("PRICE_OI", "110", "2026-09-14T11:59:10Z", "EXACT_CAPTURE"),
+            ("MAX_PAIN", "120", "2026-09-14T11:59:20Z", "CLOSED_1M"),
+        )
+    }
+
+
 class ManualFormulaTests(unittest.TestCase):
+    def test_each_formula_uses_its_earliest_required_anchor_and_final_direction(self):
+        expected = {"C1274": ("FUTURES_CVD", "90"),
+                    "PRICE_OI_ENTRY2": ("PRICE_OI", "110"),
+                    "PRICE_OI_SPOT65": ("SPOT_CVD", "100"),
+                    "CONSENSUS_FULL": ("MAX_PAIN", "120"),
+                    "C0964": ("SPOT_CVD", "100")}
+        expected_lower_upper = {"C1274": ("89.1", "90.9"),
+                                "PRICE_OI_ENTRY2": ("108.9", "111.1"),
+                                "PRICE_OI_SPOT65": ("98", "102"),
+                                "CONSENSUS_FULL": ("117.6", "122.4"),
+                                "C0964": ("98", "102")}
+        for source_direction, final_direction in (("LONG", "SHORT"), ("SHORT", "LONG")):
+            event, features = fixture(direction=source_direction)
+            event["engine_snapshot"]["magnet"]["liquidity_edge_pct"] = 30
+            event["engine_snapshot"]["experimental_price_references"] = captured_references()
+            rows = rules.evaluate_event(event, features, NOW)
+            self.assertEqual({row["rule_id"] for row in rows}, set(expected))
+            for row in rows:
+                with self.subTest(rule=row["rule_id"], direction=final_direction):
+                    component, price = expected[row["rule_id"]]
+                    self.assertEqual(row["price_reference"]["component"], component)
+                    self.assertEqual(float(row["price_reference"]["price"]), float(price))
+                    self.assertEqual(row["direction"], final_direction)
+                    levels = rules.render_reference_levels(row["price_reference"],
+                                                           row["threshold_bps"], final_direction, html=True)
+                    self.assertIn(levels, row["text"])
+                    lower, upper = expected_lower_upper[row["rule_id"]]
+                    stop, target = (lower, upper) if final_direction == "LONG" else (upper, lower)
+                    self.assertIn("<b>סטופלוס:</b> " + stop + "\n", row["text"])
+                    self.assertIn("<b>טייק פרופיט:</b> " + target + "\n", row["text"])
+                    self.assertLess(row["text"].index(levels),
+                                    row["text"].index(rules.RULES[row["rule_id"]]["conditions_text"]))
+
+    def test_reference_is_frozen_and_rerender_does_not_reprice(self):
+        event, features = fixture()
+        event["engine_snapshot"]["experimental_price_references"] = captured_references()
+        payload = rules.evaluate_event(event, features, NOW)[0]
+        frozen = deepcopy(payload)
+        event["current_price"] = 999
+        for reference in event["engine_snapshot"]["experimental_price_references"].values():
+            reference["price"] = "888"
+            reference["anchor_time_utc"] = "2026-09-14T12:01:00Z"
+        self.assertEqual(payload, frozen)
+        self.assertEqual(rules.render_message(payload), frozen["text"])
+
+    def test_missing_or_invalid_reference_never_substitutes_current_price(self):
+        for references in (None, False, {}, {"SPOT_CVD": False},
+                           {"SPOT_CVD": {"status": "READY", "price": 0}}):
+            with self.subTest(references=references):
+                event, features = fixture()
+                event["current_price"] = 987654.321
+                event["engine_snapshot"]["magnet"]["liquidity_edge_pct"] = 30
+                event["engine_snapshot"]["experimental_price_references"] = references
+                rows = rules.evaluate_event(event, features, NOW)
+                self.assertEqual(len(rows), 5)
+                for row in rows:
+                    self.assertNotEqual((row["price_reference"] or {}).get("status"), "READY")
+                    self.assertIn(rules.render_reference_levels(None, row["threshold_bps"],
+                                                               row["direction"], html=True), row["text"])
+                    self.assertNotIn("987654", row["text"])
+
+    def test_partial_combination_reference_is_unavailable_and_old_payload_can_render(self):
+        event, features = fixture()
+        references = captured_references()
+        del references["SPOT_CVD"]
+        event["engine_snapshot"]["experimental_price_references"] = references
+        rows = {row["rule_id"]: row for row in rules.evaluate_event(event, features, NOW)}
+        self.assertNotEqual((rows["PRICE_OI_SPOT65"]["price_reference"] or {}).get("status"), "READY")
+        self.assertEqual(rows["PRICE_OI_ENTRY2"]["price_reference"]["status"], "READY")
+        old_payload = {key: value for key, value in rows["C1274"].items()
+                       if key not in ("price_reference", "text")}
+        message = rules.render_message(old_payload)
+        self.assertIn(rules.render_reference_levels(None, old_payload["threshold_bps"],
+                                                   old_payload["direction"], html=True), message)
+
+    def test_wrong_coin_and_future_reference_do_not_produce_prices(self):
+        for fault in ("symbol", "future"):
+            with self.subTest(fault=fault):
+                event, features = fixture()
+                event["engine_snapshot"]["magnet"]["liquidity_edge_pct"] = 30
+                references = captured_references()
+                for reference in references.values():
+                    if fault == "symbol":
+                        reference["symbol"] = "ETH"
+                    else:
+                        reference["anchor_time_utc"] = "2026-09-14T12:01:00Z"
+                        reference["price_time_utc"] = "2026-09-14T12:01:00Z"
+                event["engine_snapshot"]["experimental_price_references"] = references
+                rows = rules.evaluate_event(event, features, NOW)
+                self.assertEqual(len(rows), 5)
+                self.assertTrue(all(row["price_reference"]["status"] == "UNAVAILABLE" for row in rows))
+                self.assertTrue(all("<b>סטופלוס:</b>" not in row["text"] for row in rows))
+
+    def test_later_required_component_cannot_be_from_after_event(self):
+        event, features = fixture()
+        references = captured_references()
+        references["MAX_PAIN"]["anchor_time_utc"] = "2026-09-14T12:01:00Z"
+        references["MAX_PAIN"]["price_time_utc"] = "2026-09-14T12:01:00Z"
+        event["engine_snapshot"]["experimental_price_references"] = references
+        rows = {row["rule_id"]: row for row in rules.evaluate_event(event, features, NOW)}
+        self.assertEqual(rows["C1274"]["price_reference"]["status"], "UNAVAILABLE")
+        self.assertEqual(rows["PRICE_OI_SPOT65"]["price_reference"]["status"], "READY")
+
+    def test_price_display_does_not_change_matching_version_or_ruleset(self):
+        self.assertEqual(rules.VERSION, "manual-formula-experimental-alerts-v2")
+        self.assertEqual(rules.RULESET_SHA256,
+                         "9d28a33d38faae8bafce6f03b3ce400a1f928aca16f36edecb46b9450dd234c8")
+
     def test_c0964_exact_predicate_btc_both_directions_and_note(self):
         for symbol in rules.SYMBOLS:
             for direction in ('LONG', 'SHORT'):

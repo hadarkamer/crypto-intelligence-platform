@@ -12,6 +12,7 @@ import re
 from uuid import uuid4
 
 import dual_cvd65_alert as detector
+from experimental_reference_price import select_reference
 from watch_transition_store import _connect, _digest, _freeze, _iso, _name, canonical
 
 RULE_ID = detector.RULE_ID
@@ -122,7 +123,7 @@ def _expire(conn, scope, moment):
         (scope, moment, moment, list(detector.NOTIFICATION_SYMBOLS), CLEANUP_LIMIT, moment))
 
 
-def record_cycle(scope, evaluation, now, *, database_url=None):
+def record_cycle(scope, evaluation, now, *, database_url=None, price_references=None):
     """Atomically freeze one fresh source, symbol episodes and outgoing text.
 
     A first fresh MATCH fires. UNKNOWN preserves the prior direction; a valid
@@ -176,11 +177,16 @@ def record_cycle(scope, evaluation, now, *, database_url=None):
                     direction, episode = observation['direction'], episode+1
                     counts['episodes_started'] += 1
                     intent_id = _digest([scope, RULE_ID, symbol, observation['generation_key']])
-                    message = detector.render_message(observation, source)
+                    # Display evidence is frozen only when the intent is created.
+                    # It must not change the capture, receipt hash or CVD episode.
+                    references = price_references if isinstance(price_references, dict) else {}
+                    display_observation = {**observation, 'price_reference': select_reference(
+                        references.get(symbol), ('FUTURES_CVD', 'SPOT_CVD'), symbol=symbol, as_of=source)}
+                    message = detector.render_message(display_observation, source)
                     if not isinstance(message, str) or not message or len(message.encode('utf-8')) > 16 * 1024:
                         raise ValueError('Invalid dual CVD rendered message')
                     payload = {'rule_id': RULE_ID, 'watch_scan_id': watch, 'source_at_utc': _iso(source),
-                        'bundle_sha256': frozen['bundle_sha256'], 'observation': observation, 'text': message}
+                        'bundle_sha256': frozen['bundle_sha256'], 'observation': display_observation, 'text': message}
                     expires = min(source+DELIVERY_TTL, *(_utc(observation[key])+timedelta(minutes=30)
                         for key in ('futures_close_at_utc', 'spot_close_at_utc')))
                     result = conn.execute('''INSERT INTO dual_cvd65_intents

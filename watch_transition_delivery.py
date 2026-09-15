@@ -99,7 +99,14 @@ async def record_watch(chat_id, items, *, watch_scan_id, decision_time, render_s
         } for item in crossing_items]
         # This is the existing V1 selector: freeze the first both-CVD match
         # before testing short-family quality, with no later substitution.
-        for match in maxpain_cvd_short_alert.select_matches(crossing_items):
+        # Reference quotes are display evidence in the outgoing intent only.
+        # They must never alter the transition input or its same-scan hash.
+        references = context.get('experimental_reference_prices_by_symbol') or {}
+        if not isinstance(references, dict):
+            references = {}
+        formula_items = [{**item, 'experimental_price_references': deepcopy(
+            references.get(str(item.get('symbol') or '').upper(), {}))} for item in crossing_items]
+        for match in maxpain_cvd_short_alert.select_matches(formula_items):
             intents.append({
                 "kind": maxpain_cvd_short_alert.FORMULA_ID,
                 "signal_key": store.signal_key(match.item),

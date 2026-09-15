@@ -164,7 +164,33 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(params[0], NOW-timedelta(minutes=10))
         self.assertIn('time_families,long,quality', sql)
         self.assertIn('inverse_analysis', params[6])
+        self.assertIn('experimental_price_references', params[6])
         self.assertIn('capture_stage', sql)
+
+    def test_captured_reference_reaches_native_and_planned_detector_unchanged(self):
+        import manual_formula_alert as detector
+        reference = {'status': 'READY', 'component': 'PRICE_OI', 'symbol': 'BTC',
+                     'price': '87.5', 'anchor_time_utc': '2026-09-14T10:58:30Z',
+                     'price_time_utc': '2026-09-14T10:58:30Z',
+                     'source': 'BINANCE_SPOT_TRADE_1M', 'precision': 'EXACT_CAPTURE'}
+        current = event()
+        current['event_fingerprint'] = 'a' * 64
+        current['engine_snapshot']['experimental_price_references'] = {'PRICE_OI': reference}
+        prior = event(1, ago=20, scan='prior')
+        pairs, _ = self.load(Connection([current], [prior]))
+        payloads = detector.evaluate_event(*pairs[0], NOW)
+        self.assertEqual([p['rule_id'] for p in payloads], ['PRICE_OI_ENTRY2'])
+        self.assertEqual(payloads[0]['price_reference']['price'], '87.5')
+        self.assertEqual(pairs[0][0]['engine_snapshot']['experimental_price_references'],
+                         {'PRICE_OI': reference})
+        planned = self.planned()
+        planned['engine_snapshot']['experimental_price_references'] = {'PRICE_OI': reference}
+        history = [(prior, source.totals.extract_event_features(prior))]
+        with patch.object(source, '_sequence_history', return_value=(history, False)):
+            pairs, _ = source.prepare_watch_pairs(Connection([]), [planned], NOW)
+        payloads = detector.evaluate_event(*pairs[0], NOW, planned=True)
+        self.assertEqual([p['rule_id'] for p in payloads], ['PRICE_OI_ENTRY2'])
+        self.assertEqual(payloads[0]['price_reference']['price'], '87.5')
 
     def test_invalid_projection_never_evaluated(self):
         for current in ([event(ago=11)], [event(ago=-1)], [event(10), event(10)]):

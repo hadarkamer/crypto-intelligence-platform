@@ -39,6 +39,7 @@ import market_confidence_engine
 import maxpain_cvd_short_alert
 import watch_transition_delivery
 import dual_cvd65_delivery
+import experimental_reference_price
 import manual_formula_alert_delivery
 import ai_agent
 import ai_telegram
@@ -4731,11 +4732,13 @@ async def run_watch_cycle(
     cycle_number = WATCH_RUNTIME["cycle_number"]
     watch_scan_id = f"shared-watch:{cycle_started_at.isoformat()}"
     formula_timing = {"cycle_started_at_utc": cycle_started_at.isoformat()}
+    experimental_references = {}
     watch_context_token = research_event_runtime.set_watch_context(
         watch_scan_id=watch_scan_id,
         watch_cycle_number=cycle_number,
         watch_started_at_utc=cycle_started_at.isoformat(),
         formula_timing=formula_timing,
+        experimental_reference_prices_by_symbol=experimental_references,
     )
     derivatives_task = None
 
@@ -4838,10 +4841,19 @@ async def run_watch_cycle(
         # The user's standalone rule consumes the same frozen all-coin scores,
         # before display thresholds, Max Pain filtering or other Telegram sends.
         dual_cvd_bundle = live_result.pop("watch_dual_cvd_bundle", None)
+        # Freeze source-clock references before any experimental intent. This is
+        # a display-only contract; native outcome entry prices remain unchanged.
+        try:
+            experimental_references.update(
+                await experimental_reference_price.prepare_reference_prices(dual_cvd_bundle)
+            )
+        except Exception as exc:
+            print(f"[experimental-reference] unavailable: {type(exc).__name__}", flush=True)
         if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
             await dual_cvd65_delivery.record_watch(
                 chat_id, dual_cvd_bundle, watch_scan_id=watch_scan_id,
                 decision_time=datetime.now(timezone.utc),
+                price_references=experimental_references,
             )
             await dual_cvd65_delivery.drain(
                 bot_app.bot, chat_id,
@@ -6477,6 +6489,7 @@ async def health(request):
         "research_capture": research_event_runtime.status(),
         "watch_transitions": watch_transition_delivery.status(),
         "dual_cvd65_experimental": dual_cvd65_delivery.status(),
+        "experimental_reference_prices": experimental_reference_price.status(),
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),

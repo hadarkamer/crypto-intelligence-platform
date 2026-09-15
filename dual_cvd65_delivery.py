@@ -65,7 +65,7 @@ async def initialize(chat_id=None):
     return True
 
 
-async def record_watch(chat_id, bundle, *, watch_scan_id, decision_time):
+async def record_watch(chat_id, bundle, *, watch_scan_id, decision_time, price_references=None):
     """Freeze one decision from the full capture before ordinary Watch sends."""
     _STATUS.update(last_watch_scan_id=watch_scan_id, last_record_status="PERSISTENCE_UNAVAILABLE")
     if not await initialize(chat_id):
@@ -77,6 +77,7 @@ async def record_watch(chat_id, bundle, *, watch_scan_id, decision_time):
             return None
         result = await asyncio.to_thread(
             store.record_cycle, subscription_scope(chat_id), evaluation, _now(),
+            price_references=price_references,
         )
     except Exception as exc:
         _STATUS["last_record_status"] = "EVIDENCE_GAP"

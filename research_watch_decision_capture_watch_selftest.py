@@ -8,8 +8,12 @@ from __future__ import annotations
 import ast
 import asyncio
 from collections import defaultdict
+from collections.abc import Mapping
+from contextvars import ContextVar
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 import html
 import json
 from pathlib import Path
@@ -28,16 +32,25 @@ HELPERS = {
 }
 
 
-def load_main(names, scope):
-    tree = ast.parse((ROOT / 'main.py').read_text())
+def load_main(names, scope, *, filename='main.py'):
+    tree = ast.parse((ROOT / filename).read_text())
     nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
              and node.name in names]
     if {node.name for node in nodes} != names:
         raise AssertionError('A tested production entry point is missing')
     future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
     module = ast.fix_missing_locations(ast.Module(body=[future, *nodes], type_ignores=[]))
-    exec(compile(module, str(ROOT / 'main.py'), 'exec'), scope)
+    exec(compile(module, str(ROOT / filename), 'exec'), scope)
     return scope
+
+
+@dataclass(frozen=True)
+class ContextSourceEvent:
+    symbol: str
+    direction: str
+    source_side: str
+    event_type: str
+    engine_snapshot: dict
 
 
 def item(symbol='BTC', timeframe='12h', *, score=81.0, share=60.0, distance=1.0):
@@ -160,6 +173,15 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         order, archives, captures = [], [], []
         items = [] if empty else [item(), item(timeframe='24h', score=99, distance=None), item('ADA', score=99)]
         base_bundle = {'version': 'watch-operational-scores-v2', 'payload_sha256': 'a' * 64}
+        references = {'BTC': {'PRICE_OI': {
+            'status': 'READY', 'component': 'PRICE_OI', 'symbol': 'BTC', 'price': '100',
+            'price_time_utc': '2026-09-15T12:02:16Z',
+            'anchor_time_utc': '2026-09-15T12:02:16Z',
+            'source': 'BINANCE_SPOT', 'precision': 'EXACT_CAPTURE'}}}
+        context_scope = load_main({'set_watch_context', 'reset_watch_context', '_with_watch_context'}, {
+            '_WATCH_CONTEXT': ContextVar('test_watch_context', default=None),
+            'Mapping': Mapping, 'hashlib': hashlib, 'replace': replace,
+        }, filename='research_event_runtime.py')
         rows = [{'symbol': 'BTC'}, {'symbol': 'ADA'}]
         def failed(cycle_id, reason):
             return {'status': 'FAILED', 'cycle_id': cycle_id, 'reason': reason}
@@ -184,6 +206,29 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         async def dual_record(chat_id, value, **kwargs):
             order.append('dual')
             self.assertIs(value, base_bundle)
+            self.assertEqual(kwargs['price_references'], references)
+            self.assertIs(kwargs['price_references'],
+                          context_scope['_WATCH_CONTEXT'].get()['experimental_reference_prices_by_symbol'])
+        async def prepare_references(value):
+            order.append('prepare_references')
+            self.assertIs(value, base_bundle)
+            return deepcopy(references)
+        def preview_sources(*args, **kwargs):
+            order.append('preview_manual_sources')
+            if empty:
+                return []
+            event = context_scope['_with_watch_context'](ContextSourceEvent(
+                symbol='BTC', direction='LONG', source_side='UPPER',
+                event_type='MAGNET_ALERT', engine_snapshot={}))
+            self.assertEqual(event.engine_snapshot['experimental_price_references'], references['BTC'])
+            return [{'symbol': event.symbol, 'direction': event.direction,
+                     'event_type': event.event_type, 'engine_snapshot': event.engine_snapshot}]
+        async def manual_delivery(bot, chat_id, planned_sources, **kwargs):
+            order.append('manual')
+            if not empty:
+                self.assertEqual(planned_sources[0]['engine_snapshot']['experimental_price_references'],
+                                 references['BTC'])
+            return 0
         async def send(**kwargs):
             order.append('send')
             return SimpleNamespace(message_id=1)
@@ -196,7 +241,8 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             return []
         scope['market_confidence_engine'].capture_snapshot = Mock(return_value={})
         scope['research_event_runtime'] = SimpleNamespace(
-            set_watch_context=Mock(return_value='context'), reset_watch_context=Mock(),
+            set_watch_context=Mock(side_effect=context_scope['set_watch_context']),
+            reset_watch_context=Mock(side_effect=context_scope['reset_watch_context']),
             capture_special_transitions=Mock(), capture_combined_confirmation=Mock(),
             capture_combined_state_changes=Mock(side_effect=lifecycle))
         scope.update({
@@ -208,12 +254,13 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             'research_watch_decision_capture': SimpleNamespace(failure=failed,
                 error_reason=lambda exc: type(exc).__name__, build_bundle=Mock(side_effect=decision_bundle)),
             'dual_cvd65_delivery': SimpleNamespace(record_watch=AsyncMock(side_effect=dual_record), drain=AsyncMock(return_value=0)),
+            'experimental_reference_price': SimpleNamespace(prepare_reference_prices=AsyncMock(side_effect=prepare_references)),
             'watch_transition_delivery': SimpleNamespace(record_watch=AsyncMock(), drain=AsyncMock(return_value=0),
                 cycle_result=Mock(return_value={'status': 'COMPLETE'})),
-            'manual_formula_alert_delivery': SimpleNamespace(run_watch=AsyncMock(return_value=0)),
+            'manual_formula_alert_delivery': SimpleNamespace(run_watch=AsyncMock(side_effect=manual_delivery)),
             'research_ordered_experimental_worker': SimpleNamespace(WORKER=SimpleNamespace(drain_for_watch=AsyncMock())),
             'maxpain_cvd_short_alert': SimpleNamespace(FORMULA_ID='FORMULA_MP65_CVD_SHORT'),
-            '_preview_watch_formula_sources': Mock(return_value=[]),
+            '_preview_watch_formula_sources': Mock(side_effect=preview_sources),
             '_collect_special_transition_messages': specials, '_watch_derivatives_line': lambda status: '',
             '_send_alert_with_confirmation': AsyncMock(), '_alert_card': lambda *args: 'ordinary card',
             'alert_summary': SimpleNamespace(format_alert_count_summary=lambda items: 'count'),
@@ -229,7 +276,28 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         load_main({'run_watch_cycle'}, scope)
         bot = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(side_effect=send)))
         result = await scope['run_watch_cycle'](bot, 1, top8_only=True, general_enabled=general)
+        self.assertIsNone(context_scope['_WATCH_CONTEXT'].get())
         return scope, result, order, archives, captures, bot, base_bundle
+
+    async def test_formula_references_are_frozen_before_dual_and_manual_delivery(self):
+        scope, result, order, archives, captures, bot, base = await self.run_cycle()
+        self.assertTrue(result['ok'], result)
+        scope['experimental_reference_price'].prepare_reference_prices.assert_awaited_once_with(base)
+        self.assertLess(order.index('archive'), order.index('prepare_references'))
+        self.assertLess(order.index('prepare_references'), order.index('dual'))
+        self.assertLess(order.index('prepare_references'), order.index('preview_manual_sources'))
+        self.assertLess(order.index('preview_manual_sources'), order.index('manual'))
+        self.assertLess(order.index('manual'), order.index('send'))
+        scope['dual_cvd65_delivery'].record_watch.assert_awaited_once()
+        scope['manual_formula_alert_delivery'].run_watch.assert_awaited_once()
+        context = scope['research_event_runtime'].set_watch_context.call_args.kwargs
+        expected = context['experimental_reference_prices_by_symbol']['BTC']
+        planned = scope['manual_formula_alert_delivery'].run_watch.call_args.args[2]
+        self.assertEqual(planned[0]['engine_snapshot']['experimental_price_references'], expected)
+        self.assertIsNot(planned[0]['engine_snapshot']['experimental_price_references'], expected)
+        # Once captured, later context changes cannot reprice a queued manual source.
+        expected['PRICE_OI']['price'] = '999'
+        self.assertEqual(planned[0]['engine_snapshot']['experimental_price_references']['PRICE_OI']['price'], '100')
 
     async def test_capture_precedes_archive_and_delivery_and_candidates_are_computed_once(self):
         scope, result, order, archives, captures, bot, base = await self.run_cycle()
