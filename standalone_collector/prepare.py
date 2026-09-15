@@ -3,6 +3,9 @@ from pathlib import Path
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
+from importlib.metadata import version, PackageNotFoundError
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -11,8 +14,33 @@ PINNED = {
     'market_vision/coinglass_heatmap_capture.py': 'd1d75f2c99ea3c1fd72c7e1f9cfb1ec29a0890ab',
     'market_vision/openai_heatmap_scanner.py': '9dd18b993d6d87cf326848720fa08d1d6a554087',
 }
+# Match the two dependencies recorded in the successful August source run.
+# This build hook affects only this service's virtual environment. Original
+# bot requirements and source files remain unchanged. No source/model calls.
+BROWSER_REQUIREMENTS = {'playwright': '1.55.0', 'requests': '2.32.5'}
+
+
+def prepare_browser():
+    needs_install = False
+    for package, expected in BROWSER_REQUIREMENTS.items():
+        try:
+            needs_install = needs_install or version(package) != expected
+        except PackageNotFoundError:
+            needs_install = True
+    if needs_install:
+        subprocess.run([sys.executable, '-m', 'pip', 'install',
+                        *[f'{p}=={v}' for p, v in BROWSER_REQUIREMENTS.items()]],
+                       check=True, timeout=180)
+    subprocess.run([sys.executable, '-m', 'playwright', 'install', 'chromium'],
+                   check=True, timeout=240)
+    for package, expected in BROWSER_REQUIREMENTS.items():
+        if version(package) != expected:
+            raise RuntimeError('Standalone browser dependency mismatch')
+    print('MODEL1_BROWSER_RUNTIME playwright=1.55.0 requests=2.32.5', flush=True)
+
 
 def prepare():
+    prepare_browser()
     (RUNTIME / 'market_vision').mkdir(parents=True, exist_ok=True)
     manifest = {}
     for name, expected in PINNED.items():
@@ -44,6 +72,7 @@ def prepare():
                    '            path = out /')
     path.write_text(text.replace(marker, replacement), encoding='utf-8')
     (RUNTIME / 'provenance.json').write_text(json.dumps({'source_blobs': manifest,
+        'browser_requirements': BROWSER_REQUIREMENTS,
         'app_copy_change': 'bounded read-only readiness check and optional passive diagnostics',
         'bot_started': False}, indent=2))
     print('Standalone package prepared; source SHA checks passed; no bot imported.')
