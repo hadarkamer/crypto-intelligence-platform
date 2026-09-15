@@ -1,4 +1,4 @@
-"""Build the app-owned copy of the proven collector. No source scans at build time."""
+"""Build and test app-owned collector adapters. No source or inference calls."""
 from pathlib import Path
 import hashlib
 import json
@@ -46,26 +46,24 @@ def prepare():
     (RUNTIME/'market_vision/__init__.py').write_text('"""App-owned Model1 source copy."""\n')
     for name in ('collection_bridge.py','collection_model1_task.py'):
         shutil.copy2(ROOT/name,RUNTIME/name)
-    # Keep diagnostic modules for offline tests, but do not inject them into the
-    # original capture sequence. No synthetic CSS readiness result is treated
-    # as visual proof. Actual screenshot validation is mandatory in the model
-    # output and normalizer before a job can become ready.
-    for name in ('model1_readiness.py','model1_diagnostics.py','model1_page_flow.py'):
+    for name in ('model1_readiness.py','model1_diagnostics.py','model1_page_flow.py','model1_execution.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
-    from install_original_flow import install
+    from install_original_flow import install, expand_capture
     install(RUNTIME)
-    if (RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_bytes()!=(ROOT/'market_vision/coinglass_heatmap_capture.py').read_bytes():
-        raise RuntimeError('Original capture was unexpectedly modified')
+    original=(ROOT/'market_vision/coinglass_heatmap_capture.py').read_text()
+    if (RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_text()!=expand_capture(original):
+        raise RuntimeError('Unexpected change outside the explicit timeframe selector')
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'browser_requirements':BROWSER_REQUIREMENTS,
-        'capture_flow':'original unmodified 12h then 24h in one browser',
+        'capture_flow':'original 12h then 24h; append actual 48h only when requested',
+        'supported_timeframes':['12H','24H','48H'],
         'analysis':'one requested screenshot, observed settings and readability required',
-        'capture_validation':'strict image evidence plus existing numeric validator',
+        'acceptance':'strict image evidence plus existing numeric validator',
+        'failure_diagnostics':'stage and allowlisted code, no raw errors',
         'bot_started':False,'automatic_source_checks':False},indent=2))
-    subprocess.run([sys.executable,'-m','unittest','test_original_flow','test_august_replay','test_page_flow','-q'],
-                   cwd=HERE,check=True,timeout=45)
-    # Maintenance flags from earlier experiments are deliberately ignored.
-    # Deploying or editing an environment variable never scans or analyzes.
-    print('MODEL1_ORIGINAL_FLOW_INSTALLED capture=unmodified requested_analysis=one automatic_source_calls=0',flush=True)
+    subprocess.run([sys.executable,'-m','unittest','test_original_flow','test_august_replay',
+                   'test_page_flow','test_48h_execution','-q'],cwd=HERE,check=True,timeout=45)
+    # Old experiment flags are ignored. A deployment never starts a source job.
+    print('MODEL1_ORIGINAL_FLOW_INSTALLED horizons=12H,24H,48H requested_analysis=one automatic_source_calls=0',flush=True)
 
 if __name__=='__main__':prepare()
