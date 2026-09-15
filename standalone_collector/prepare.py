@@ -51,12 +51,14 @@ def prepare():
         shutil.copy2(ROOT/name,RUNTIME/name)
     for name in ('model1_readiness.py','model1_diagnostics.py','model1_page_flow.py',
                  'model1_execution.py','image_detail.py','price_detail_input.py',
-                 'model1_price_range.py','model1_evidence_format.py','model1_legend.py'):
+                 'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
+                 'model1_cache_policy.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
     from install_price_range import install as install_range
     from model1_legend import install as install_legend,expand_legend_capture
+    from model1_cache_policy import install as install_cache
     install(RUNTIME)
     task_path=RUNTIME/'collection_model1_task.py'
     point_validator=validator_ast(task_path.read_text())
@@ -65,6 +67,7 @@ def prepare():
         raise RuntimeError('Image detail changed the point validator')
     install_range(RUNTIME)
     install_legend(RUNTIME)
+    install_cache(RUNTIME)
     original=(ROOT/'market_vision/coinglass_heatmap_capture.py').read_text()
     actual=(RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_text()
     expected=expand_legend_capture(expand_detail_capture(expand_capture(original)))
@@ -80,10 +83,11 @@ def prepare():
         'initial_max_range_fraction':0.01,'range_limit_is_accuracy_claim':False,
         'legacy_point_validator_unchanged':True,'numeric_axis_order':'smaller price then larger price',
         'failed_evidence':'private original PNG and numeric metadata; authenticated image access6h',
-        'bot_started':False,'automatic_source_checks':False},indent=2))
+        'auto_reuse_minutes':15,'saved_review_max_hours':6,'saved_review_starts_capture':False,
+        'capture_limit_unchanged':True,'bot_started':False,'automatic_source_checks':False},indent=2))
     subprocess.run([sys.executable,'-m','unittest','test_original_flow','test_august_replay',
-        'test_page_flow','test_48h_execution','test_image_detail','test_price_range','test_legend_popup','-q'],
-        cwd=HERE,check=True,timeout=60)
-    print('MODEL1_RANGE_INSTALLED price=explicit_range legend=normal_close evidence=private source_scans=0',flush=True)
+        'test_page_flow','test_48h_execution','test_image_detail','test_price_range','test_legend_popup',
+        'test_cache_policy','-q'],cwd=HERE,check=True,timeout=60)
+    print('MODEL1_CACHE_POLICY_INSTALLED auto_reuse_minutes=15 saved_read=GET_ONLY source_scans=0',flush=True)
 
 if __name__=='__main__':prepare()
