@@ -5,7 +5,7 @@ import unittest
 from playwright.sync_api import sync_playwright
 HERE=Path(__file__).resolve().parent
 sys.path.insert(0,str(HERE/'runtime'))
-from model1_legend import dismiss_legend,CARD
+from model1_legend import dismiss_legend,prepare_legend_for_capture,CARD
 from model1_execution import StageFailure
 from model1_price_range import validate_price_range
 
@@ -28,8 +28,6 @@ class LegendTests(unittest.TestCase):
     def tearDown(self):self.context.close()
     def test_normal_x_closes_help_not_account_gate(self):
         self.page.set_content(HTML)
-        # Returning an assigned function would make evaluate invoke it. The
-        # explicit setup function returns nothing, so only the later click closes.
         self.page.evaluate("() => { document.querySelector('#help > div').onclick=()=>document.querySelector('#help').remove(); }")
         self.assertEqual(self.page.locator(CARD).count(),1)
         self.assertTrue(self.page.locator('#help').is_visible())
@@ -57,5 +55,31 @@ class LegendTests(unittest.TestCase):
                'confidence':'medium','basis':'last_candle_axis_bracket'}
         with self.assertRaises(StageFailure):validate_price_range(value)
         self.assertEqual(validate_price_range({**value,'axis_low':74000,'axis_high':78000})['high'],76050)
+    def test_unresolved_help_does_not_destroy_screenshot_evidence(self):
+        self.page.set_content(HTML)
+        self.assertEqual(prepare_legend_for_capture(self.page,timeout_ms=200),'unresolved')
+        raw=self.page.screenshot()
+        self.assertTrue(raw.startswith(b'\x89PNG\r\n\x1a\n'))
+        self.assertTrue(self.page.locator('#help').is_visible())
+        self.assertTrue(self.page.locator('#account').is_visible())
+        self.assertEqual(self.page.url,'about:blank')
+    def test_preparation_distinguishes_absent_and_closed(self):
+        self.page.set_content('<p>No help card</p>')
+        self.assertEqual(prepare_legend_for_capture(self.page,timeout_ms=200),'absent')
+        self.page.set_content(HTML)
+        self.page.evaluate("() => { document.querySelector('#help > div').onclick=()=>document.querySelector('#help').remove(); }")
+        self.assertEqual(prepare_legend_for_capture(self.page,timeout_ms=500),'closed')
+        self.assertTrue(self.page.locator('#account').is_visible())
+    def test_no_guess_when_close_markup_changes(self):
+        self.page.set_content(HTML.replace('data-first-child','data-other'))
+        self.assertEqual(prepare_legend_for_capture(self.page,timeout_ms=200),'unresolved')
+        self.assertTrue(self.page.locator('#help').is_visible())
+    def test_unresolved_help_is_not_a_numeric_approval(self):
+        from test_original_flow import sample
+        import collection_model1_task as task
+        raw=sample();raw['scans'][0]['readable']=False
+        with self.assertRaises((ValueError,StageFailure)):
+            task.normalize(raw,timeframe='12H',run_id='00000000-0000-4000-8000-000000000001',
+                captured_at='2026-01-01T00:00:00Z',image=b'synthetic')
 
 if __name__=='__main__':unittest.main()
