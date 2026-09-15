@@ -2,7 +2,6 @@
 import contextlib
 import io
 import json
-import os
 from pathlib import Path
 import sys
 import tempfile
@@ -57,7 +56,7 @@ class TimeframeTests(unittest.TestCase):
         with self.assertRaises(execution.StageFailure) as ctx:
             task.normalize(raw,timeframe='48H',run_id=str(uuid4()),captured_at='2026-01-01T00:00:00Z',image=b'fixture')
         self.assertEqual(ctx.exception.code,'screenshot_identity_mismatch')
-    def test48_job_uses_one_analysis_only_on48(self):
+    def test48_job_captures_and_analyzes_only48(self):
         calls=[]
         def cap(directory,*,timeframes):
             calls.append(('capture',timeframes));directory.mkdir();out=[]
@@ -71,7 +70,7 @@ class TimeframeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d,patch.dict(sys.modules,{'market_vision.coinglass_heatmap_capture':fake}),patch.object(scanner,'analyze_heatmap_images',side_effect=analyze):
             task.main('48H',str(uuid4()),d)
             self.assertEqual(json.loads((Path(d)/'result.json').read_text())['timeframe'],'48H')
-        self.assertEqual(calls,[('capture',('12h','24h','48h')),('analysis',('48h',))])
+        self.assertEqual(calls,[('capture',('48h',)),('analysis',('48h',))])
     def test_existing_db_constraint_is_extended_not_table_dropped(self):
         conn=Mock();conn.__enter__=Mock(return_value=conn);conn.__exit__=Mock(return_value=False)
         conn.execute.return_value.fetchone.return_value={'definition':"CHECK(timeframe IN ('12H','24H'))"}
@@ -124,5 +123,32 @@ class FailureTests(unittest.TestCase):
             self.assertEqual(execution.run_task(main,'48H',str(uuid4()),d),0)
             self.assertFalse((Path(d)/'error.json').exists())
         main.assert_called_once()
+    def test_capture_substep_survives_wrapped_timeout(self):
+        def _select_timeframe(page,timeframe):
+            try:raise TimeoutError('PRIVATE_URL')
+            except TimeoutError as exc:raise RuntimeError('PRIVATE_HEADER') from exc
+        def main(*args):
+            execution.stage('capture');execution.control(_select_timeframe,Mock(),'48h')
+        with tempfile.TemporaryDirectory() as d:
+            execution.run_task(main,'48H',str(uuid4()),d)
+            result=json.loads((Path(d)/'error.json').read_text())
+            self.assertEqual(result['code'],'source_timeout')
+            self.assertEqual(result['capture_phase'],'select_48h')
+            self.assertEqual(result['exception_kind'],'TimeoutError')
+            self.assertNotIn('PRIVATE',json.dumps(result))
+    def test_context_filter_never_blocks_source_assets_or_auth(self):
+        for url in ('https://coinglass.com/pro/futures/LiquidationHeatMap',
+                    'https://www.coinglass.com/login','https://s3.coinglass.com/a.js',
+                    'https://capi.coinglass.com/api','https://challenges.cloudflare.com/a.js',
+                    'https://accounts.google.com/login'):
+            self.assertIsNone(execution.AD_HOSTS.match(url))
+        self.assertIsNotNone(execution.AD_HOSTS.match('https://ad.doubleclick.net/advert'))
+        self.assertIsNotNone(execution.AD_HOSTS.match('https://www.google-analytics.com/tracking'))
+    def test_context_filter_is_bounded_to_one_host_pattern(self):
+        context=Mock();execution.prepare_context(context)
+        context.route.assert_called_once()
+        pattern,handler=context.route.call_args.args
+        self.assertIs(pattern,execution.AD_HOSTS)
+        route=Mock();handler(route);route.abort.assert_called_once()
 
 if __name__=='__main__':unittest.main()
