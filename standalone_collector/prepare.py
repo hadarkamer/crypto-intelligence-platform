@@ -25,11 +25,17 @@ def prepare():
     (RUNTIME / 'market_vision/__init__.py').write_text('"""App-owned Model1 source copy."""\n')
     for name in ['collection_bridge.py', 'collection_model1_task.py']:
         shutil.copy2(ROOT / name, RUNTIME / name)
-    shutil.copy2(HERE / 'model1_readiness.py', RUNTIME / 'model1_readiness.py')
-    # The original repository source is NOT changed. Only the app-owned copy
-    # receives a bounded readiness check immediately before its screenshot.
+    for name in ['model1_readiness.py','model1_diagnostics.py']:
+        shutil.copy2(HERE / name, RUNTIME / name)
+    # Original repository source remains unchanged. Only its app-owned copy
+    # receives readiness checks and optional passive network-error observations.
     path = RUNTIME / 'market_vision/coinglass_heatmap_capture.py'
     text = path.read_text()
+    page_marker='        page = context.new_page()\n'
+    if text.count(page_marker)!=1:
+        raise RuntimeError('Expected page creation stage not found')
+    text=text.replace(page_marker, page_marker +
+        '        from model1_diagnostics import attach\n        attach(page)\n')
     marker = '            page.wait_for_timeout(500)\n\n            path = out /'
     if text.count(marker) != 1:
         raise RuntimeError('Expected final screenshot stage not found')
@@ -38,7 +44,7 @@ def prepare():
                    '            path = out /')
     path.write_text(text.replace(marker, replacement), encoding='utf-8')
     (RUNTIME / 'provenance.json').write_text(json.dumps({'source_blobs': manifest,
-        'app_copy_change': 'bounded read-only readiness check before screenshot',
+        'app_copy_change': 'bounded read-only readiness check and optional passive diagnostics',
         'bot_started': False}, indent=2))
     print('Standalone package prepared; source SHA checks passed; no bot imported.')
 
