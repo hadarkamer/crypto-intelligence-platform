@@ -59,10 +59,12 @@ class CardStore:
         payload, digest = cards.canonical(card), cards.checksum(card)
         with self.journal._transaction() as conn:
             self.ready(conn)
-            # Unique index arbitrates concurrent/restarted deliveries. No overwrite.
+            # Both card_id and (source_stream,event_id) are unique. Concurrent
+            # copies can hit either index. Handle both, then verify the exact
+            # immutable identity and content below; a collision is not success.
             inserted = conn.execute(f'''INSERT INTO {SCHEMA}.cards
                 (card_id,source_stream,event_id,digest,manifest) VALUES(%s,%s,%s,%s,%s::jsonb)
-                ON CONFLICT(source_stream,event_id) DO NOTHING RETURNING card_id''',
+                ON CONFLICT DO NOTHING RETURNING card_id''',
                 (card['card_id'],card['source_stream'],card['event_id'],digest,payload)).fetchone()
             row = conn.execute(f'''SELECT card_id,digest FROM {SCHEMA}.cards
                 WHERE source_stream=%s AND event_id=%s''',
