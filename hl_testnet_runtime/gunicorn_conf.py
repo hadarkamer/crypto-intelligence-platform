@@ -1,4 +1,4 @@
-"""Default read-only tasks; expiring entry test and cancellation execution are separate."""
+"""Read-only defaults; explicit Testnet entry test and registered-order monitoring."""
 workers = 1
 worker_class = 'sync'
 accesslog = None
@@ -11,7 +11,10 @@ preload_app = False
 def post_worker_init(worker):
     import os
     mode = os.environ.get('HL_TESTNET_RUNTIME_MODE','read_only')
-    if mode in ('single_testnet_attempt_v1','inspect_testnet_attempt_v1'):
+    if mode == 'cancel_monitor_testnet_v1':
+        from hl_testnet_runtime.pending_cancel_monitor import start
+        start()
+    elif mode in ('single_testnet_attempt_v1','inspect_testnet_attempt_v1'):
         import threading
         from hl_testnet_runtime.controlled_attempt import startup_single_attempt
         threading.Thread(target=startup_single_attempt,daemon=True,name='explicit-single-testnet').start()
@@ -27,3 +30,8 @@ def post_worker_init(worker):
     else:
         from hl_testnet_runtime.app import start_read_only_check
         start_read_only_check()
+
+
+def worker_exit(server, worker):
+    from hl_testnet_runtime.pending_cancel_monitor import stop
+    stop()

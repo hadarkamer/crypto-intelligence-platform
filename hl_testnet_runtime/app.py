@@ -53,10 +53,17 @@ def application(environ, start_response):
         status, body = '404 Not Found', b'Not found\n'
     else:
         status = '200 OK'
-        controlled = os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'single_testnet_attempt_v1'
-        body = json.dumps({'service':'hyperliquid-testnet-preflight','running':True,
-            'read_only':not controlled,'single_attempt_configured':controlled,
-            'public_order_controls':False,'continuous_trading':False}).encode()
+        mode = os.environ.get('HL_TESTNET_RUNTIME_MODE')
+        controlled = mode == 'single_testnet_attempt_v1'
+        monitoring = mode == 'cancel_monitor_testnet_v1'
+        report = {'service':'hyperliquid-testnet-preflight','running':True,
+            'read_only':not (controlled or monitoring),'single_attempt_configured':controlled,
+            'public_order_controls':False,'continuous_trading':False,
+            'cancellation_monitor_configured':monitoring}
+        if monitoring:
+            from .pending_cancel_monitor import health
+            report['monitor'] = health()
+        body = json.dumps(report).encode()
     headers = [('Content-Type', 'application/json' if status == '200 OK' else 'text/plain'),
                ('Content-Length', str(len(body))), ('Cache-Control', 'no-store'),
                ('X-Content-Type-Options', 'nosniff'), ('Referrer-Policy', 'no-referrer'),
