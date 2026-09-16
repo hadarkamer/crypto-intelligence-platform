@@ -22,6 +22,7 @@ MAX_STATE_BYTES = 1024 * 1024
 MAX_RECEIPTS = 4096
 TTL = timedelta(minutes=10)
 RECEIPT_TTL = timedelta(minutes=20)
+C1274_RECEIPT_TTL = timedelta(hours=48)
 TERMINAL_TTL = timedelta(hours=1)
 ORPHAN_TTL = timedelta(minutes=2)
 
@@ -44,12 +45,14 @@ def key_for(chat_id):
 def _initial(now):
     return {'version': STORE_VERSION, 'rule_version': rules.VERSION, 'ruleset_sha256': rules.RULESET_SHA256,
             'activated_at': iso(now), 'receipts': {}, 'dedup': {}, 'retry': {},
+            'c1274_candles': {},
             'intents': [], 'counts': {'checked': 0, 'created': 0}}
 
 
 def _encode(state):
     value = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
-    if len(value.encode()) > MAX_STATE_BYTES or len(state['receipts']) > MAX_RECEIPTS:
+    if (len(value.encode()) > MAX_STATE_BYTES
+            or len(state['receipts']) + len(state.get('c1274_candles', {})) > MAX_RECEIPTS):
         raise ValueError('Manual formula state capacity exceeded; no partial commit')
     return value
 
@@ -61,12 +64,19 @@ def _locked(conn, key, now):
     if (state.get('version') == STORE_VERSION
             and state.get('rule_version') == rules.PREVIOUS_VERSION
             and state.get('ruleset_sha256') == rules.PREVIOUS_RULESET_SHA256):
-        # Upgrade only the known deployed ruleset. Keep receipts and attempts:
-        # changing notes or adding C0964 must never replay existing alerts.
+        # Upgrade only the known deployed ruleset. C1274 changed definition,
+        # symbol scope and threshold; old pending alerts must remain frozen and
+        # must never be re-rendered as the new Futures-only formula.
         state.update(rule_version=rules.VERSION, ruleset_sha256=rules.RULESET_SHA256)
-        state.setdefault('rule_activated_at', {})['C0964'] = iso(now)
+        state.setdefault('rule_activated_at', {})['C1274'] = iso(now)
+        state.setdefault('c1274_candles', {})
         for item in state['intents']:
             if item['status'] == 'PENDING':
+                if item.get('payload', {}).get('rule_id') == 'C1274':
+                    item.update(status='CANCELLED', acknowledged_at=iso(now),
+                                cancellation_reason='C1274_RULE_REPLACED')
+                    _count(state, 'cancelled')
+                    continue
                 item['payload']['predicate_version'] = rules.VERSION
                 item['text'] = rules.render_message(item['payload'])
                 item['payload']['text'] = item['text']
@@ -93,6 +103,10 @@ def prune(state, now):
     for field in ('planned_scans', 'planned_sequence_recovery_scans'):
         state[field] = {k: v for k, v in state.get(field, {}).items()
                         if utc(v) >= now - RECEIPT_TTL}
+    state['c1274_candles'] = {
+        key: value for key, value in state.get('c1274_candles', {}).items()
+        if utc(value['observed_at']) >= now - C1274_RECEIPT_TTL
+    }
     for identity, retry in list(state.setdefault('retry', {}).items()):
         if utc(retry['event_time']) <= now - TTL:
             del state['retry'][identity]
@@ -116,6 +130,53 @@ def _identity(event, payload):
     scan = snapshot.get('watch_scan_id') or utc(event['alert_time_utc']).replace(second=0, microsecond=0).isoformat()
     raw = [payload['rule_id'], str(scan), payload['symbol'], payload['direction']]
     return hashlib.sha256(json.dumps(raw, separators=(',', ':')).encode()).hexdigest()
+
+
+def _c1274_identity(payload):
+    raw = [payload['rule_id'], payload['symbol'], payload['source_candle_close_utc'],
+           payload['direction']]
+    return hashlib.sha256(json.dumps(raw, separators=(',', ':')).encode()).hexdigest()
+
+
+def record_c1274_scan(state, bundle, references, now):
+    """Freeze at most one C1274 decision for each observed Futures candle."""
+    now = utc(now)
+    result = rules.evaluate_c1274_scan(bundle, references, now)
+    candle_key = hashlib.sha256(
+        ("C1274|SOL|" + result['source_candle_close_utc']).encode()
+    ).hexdigest()
+    existing = state.setdefault('c1274_candles', {}).get(candle_key)
+    if existing is not None:
+        status = ('DUPLICATE' if existing.get('bundle_sha256') == result['bundle_sha256']
+                  else 'SOURCE_REVISION_IGNORED')
+        _count(state, 'c1274_' + status.lower())
+        return 0, status
+    state['c1274_candles'][candle_key] = {
+        'observed_at': iso(now), 'source_candle_close_utc': result['source_candle_close_utc'],
+        'watch_scan_id': result['watch_scan_id'], 'bundle_sha256': result['bundle_sha256'],
+        'matched': result['payload'] is not None,
+    }
+    _count(state, 'c1274_scans_checked')
+    payload = result['payload']
+    if payload is None:
+        return 0, 'NO_MATCH'
+    when = utc(payload['event_time'])
+    activation = state.get('rule_activated_at', {}).get('C1274', state['activated_at'])
+    if when <= utc(activation) or not (when <= now and when > now - TTL):
+        return 0, 'BEFORE_ACTIVATION_OR_STALE'
+    dedup = _c1274_identity(payload)
+    if dedup in state['dedup']:
+        return 0, 'DUPLICATE'
+    state['dedup'][dedup] = iso(when)
+    state['intents'].append({
+        'intent_id': uuid4().hex, 'dedup_key': dedup, 'payload': payload,
+        'text': payload['text'], 'status': 'PENDING', 'created_at': iso(now),
+        'expires_at': iso(when + TTL), 'attempt_token': None,
+        'attempted_at': None, 'acknowledged_at': None,
+    })
+    _count(state, 'created')
+    _count(state, 'c1274_created')
+    return 1, 'MATCH'
 
 
 def record_events(state, pairs, now, *, planned=False):
@@ -214,7 +275,8 @@ def collect(chat_id, now, *, database_url=None):
                 'counts': deepcopy(state['counts'])}
 
 
-def record_watch_events(chat_id, events, now, *, database_url=None):
+def record_watch_events(chat_id, events, now, *, c1274_bundle=None,
+                        price_references=None, database_url=None):
     """Freeze live planned alerts in the outbox before ordinary Watch transport.
 
     This never inserts or marks a research event DELIVERED. Real transport
@@ -226,6 +288,18 @@ def record_watch_events(chat_id, events, now, *, database_url=None):
         state = _locked(conn, key, now)
         pairs, stats = source.prepare_watch_pairs(conn, events, now)
         added = record_events(state, pairs, now, planned=True)
+        c1274_status = 'NOT_PROVIDED'
+        if c1274_bundle is not None:
+            try:
+                c1274_added, c1274_status = record_c1274_scan(
+                    state, c1274_bundle, price_references or {}, now,
+                )
+                added += c1274_added
+            except Exception as exc:
+                # One malformed optional score bundle cannot suppress the
+                # other four event-based experimental rules.
+                c1274_status = 'INVALID:' + type(exc).__name__
+                _count(state, 'c1274_invalid')
         recovery_scans = set()
         for event, features in pairs:
             scan = event['engine_snapshot']['watch_scan_id']
@@ -237,6 +311,7 @@ def record_watch_events(chat_id, events, now, *, database_url=None):
                 recovery_scans.add(scan)
         _save(conn, key, state)
         return {**stats, 'created_intents': added,
+                'c1274_scan_status': c1274_status,
                 'planned_sequence_recovery_scans': len(recovery_scans),
                 'pending': sum(i['status'] == 'PENDING' for i in state['intents'])}
 

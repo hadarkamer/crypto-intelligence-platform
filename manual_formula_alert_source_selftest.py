@@ -203,7 +203,7 @@ class SourceTests(unittest.TestCase):
         with patch.object(source, 'MAX_PROCESSED_IDS', 1), self.assertRaises(ValueError):
             source.load_batch(Connection([]), activated_at=NOW, now=NOW, processed_ids=[1, 2])
 
-    def test_c1274_captured_long_family_reaches_native_detector(self):
+    def test_c1274_never_uses_a_native_magnet_carrier(self):
         import manual_formula_alert as detector
         current = event(score=24)
         current.update(event_type='MAGNET_ALERT', event_fingerprint='a'*64)
@@ -213,7 +213,7 @@ class SourceTests(unittest.TestCase):
             'time_families': {'long': {'direction': 'BEARISH', 'quality': 0.65}}}
         pairs, _ = self.load(Connection([current]))
         payloads = detector.evaluate_event(*pairs[0], NOW)
-        self.assertEqual([(p['rule_id'], p['direction']) for p in payloads], [('C1274', 'SHORT')])
+        self.assertNotIn('C1274', [p['rule_id'] for p in payloads])
 
     def test_maxpain_original_direction_inverted_exactly_once(self):
         import manual_formula_alert as detector

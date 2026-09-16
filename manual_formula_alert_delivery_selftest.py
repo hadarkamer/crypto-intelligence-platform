@@ -57,25 +57,25 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.read(2)['activated_at'], delivery.store.iso(BASE))
 
     async def test_two_attempt_limit_html_and_confirmed_ids_never_retry(self):
-        self.seed(4); bot = self.bot()
+        self.seed(3); bot = self.bot()
         self.assertEqual(await self.run_delivery(bot), 2)
-        self.assertEqual([r['status'] for r in self.rows()], ['DELIVERED', 'DELIVERED', 'PENDING', 'PENDING'])
-        self.assertEqual(await self.run_delivery(bot), 2)
+        self.assertEqual([r['status'] for r in self.rows()], ['DELIVERED', 'DELIVERED', 'PENDING'])
+        self.assertEqual(await self.run_delivery(bot), 1)
         self.assertEqual(await self.run_delivery(bot), 0)
-        self.assertEqual(bot.send_message.await_count, 4)
+        self.assertEqual(bot.send_message.await_count, 3)
         for call, row in zip(bot.send_message.await_args_list, self.rows()):
             self.assertEqual(call.kwargs, {'chat_id': 1, 'text': row['text'], 'parse_mode': 'HTML'})
 
     async def test_watch_priority_group_drains_more_than_two_before_return(self):
-        self.seed(4); bot = self.bot()
+        self.seed(3); bot = self.bot()
         with patch.object(delivery.store, 'record_watch_events', return_value={'created_intents': 0}) as record:
-            self.assertEqual(await delivery.run_watch(bot, 1, [], may_deliver=lambda: True), 4)
+            self.assertEqual(await delivery.run_watch(bot, 1, [], may_deliver=lambda: True), 3)
         record.assert_called_once()
-        self.assertEqual([r['status'] for r in self.rows()], ['DELIVERED'] * 4)
-        self.assertEqual(bot.send_message.await_count, 4)
+        self.assertEqual([r['status'] for r in self.rows()], ['DELIVERED'] * 3)
+        self.assertEqual(bot.send_message.await_count, 3)
 
     async def test_watch_recipient_revocation_during_preparation_prevents_send(self):
-        self.seed(4); active = [True]; bot = self.bot()
+        self.seed(3); active = [True]; bot = self.bot()
         def record(*args):
             active[0] = False
             return {'created_intents': 0}
@@ -118,6 +118,85 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(event['delivery_status'] == 'NOT_ATTEMPTED' for event in events))
         finally:
             runtime.reset_watch_context(token)
+
+    async def test_watch_delivers_frozen_sol_c1274_bundle_at_one_point_five_percent(self):
+        delivery.store.initialize_scope(1, BASE)
+        computed = BASE + timedelta(minutes=1)
+        coins = {symbol: {} for symbol in delivery.rules.SYMBOLS}
+        coins['SOL'] = {
+            'status': 'PARTIAL',
+            'source_time_errors': [],
+            'models': {'futures_flow': {
+                'available': True,
+                'capture_status': 'AVAILABLE',
+                'quality_status': 'PASS',
+                'freshness_status': 'FRESH',
+                'score': 25,
+                'time_families': {
+                    'long': {'quality': .65, 'direction': 'BULLISH'},
+                },
+            }},
+            'sources': {'futures': {'quality': {
+                'candle_close': BASE.isoformat(),
+            }}},
+        }
+        bundle = {
+            'version': delivery.rules._WATCH_SCORE_VERSION,
+            'population': delivery.rules._WATCH_SCORE_POPULATION,
+            'hash_version': delivery.rules._WATCH_SCORE_HASH_VERSION,
+            'status': 'PARTIAL',
+            'symbols_expected': list(delivery.rules.SYMBOLS),
+            'cycle_id': 'delivery-c1274-watch',
+            'computed_at_utc': computed.isoformat(),
+            'coins': coins,
+        }
+        bundle['payload_sha256'] = delivery.rules._watch_digest(bundle)
+        references = {'SOL': {'FUTURES_CVD': {
+            'status': 'READY', 'component': 'FUTURES_CVD', 'symbol': 'SOL',
+            'price': '100', 'price_time_utc': BASE.isoformat(),
+            'anchor_time_utc': BASE.isoformat(), 'source': 'BINANCE_SPOT_TRADE_1M',
+            'precision': 'CLOSED_1M',
+        }}}
+        bot = self.bot()
+        original = delivery.store.record_watch_events
+        with patch.object(delivery.store, 'record_watch_events', wraps=original) as record:
+            self.assertEqual(await delivery.run_watch(
+                bot, 1, [], c1274_bundle=bundle, price_references=references,
+                may_deliver=lambda: True,
+            ), 1)
+        record.assert_called_once()
+        self.assertEqual(record.call_args.kwargs['c1274_bundle'], bundle)
+        self.assertEqual(record.call_args.kwargs['price_references'], references)
+        row = self.rows()[0]
+        self.assertEqual(row['status'], 'DELIVERED')
+        self.assertEqual(row['payload']['rule_id'], 'C1274')
+        self.assertEqual(row['payload']['symbol'], 'SOL')
+        self.assertEqual(row['payload']['direction'], 'LONG')
+        self.assertEqual(row['payload']['threshold_bps'], 150)
+        self.assertEqual(row['payload']['price_reference']['price'], '100')
+        text = bot.send_message.await_args.kwargs['text']
+        self.assertIn('סף 1.5%', text)
+        self.assertIn('<b>סטופלוס:</b> 98.5', text)
+        self.assertIn('<b>טייק פרופיט:</b> 101.5', text)
+        self.assertNotIn('מגנט', text)
+        self.assertNotIn('החיזוי הפוך', text)
+
+    async def test_later_event_pass_does_not_hide_c1274_scan_status(self):
+        bot = self.bot()
+        direct = {'created_intents': 0, 'c1274_scan_status': 'NO_MATCH', 'pending': 0}
+        legacy = {'created_intents': 0, 'c1274_scan_status': 'NOT_PROVIDED', 'pending': 0}
+        with patch.object(delivery.store, 'record_watch_events', side_effect=(direct, legacy)):
+            self.assertEqual(await delivery.run_watch(
+                bot, 1, [], c1274_bundle={'fixture': True},
+                price_references={}, may_deliver=lambda: True,
+            ), 0)
+            self.assertEqual(await delivery.run_watch(
+                bot, 1, [], may_deliver=lambda: True,
+            ), 0)
+        current = delivery.status()
+        self.assertEqual(current['last_summary'], legacy)
+        self.assertEqual(current['last_c1274_scan_status'], 'NO_MATCH')
+        self.assertEqual(current['last_c1274_summary'], direct)
 
     async def test_no_callback_or_revocation_before_initialize_never_claims(self):
         self.seed(); bot = self.bot()
@@ -236,7 +315,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows()[0]['status'], 'DELIVERED')
 
     async def test_watch_waits_for_prior_supervisor_send_then_prepares_entire_group(self):
-        self.seed(4)
+        self.seed(3)
         entered, release = asyncio.Event(), asyncio.Event()
         scan_started = [False]
         async def pending(**kwargs):
@@ -256,16 +335,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 record.assert_not_called()
                 release.set()
                 self.assertEqual(await asyncio.wait_for(supervisor, timeout=2), 1)
-                self.assertEqual(await asyncio.wait_for(watch, timeout=2), 3)
+                self.assertEqual(await asyncio.wait_for(watch, timeout=2), 2)
             record.assert_called_once()
-            self.assertEqual([row['status'] for row in self.rows()], ['DELIVERED'] * 4)
-            self.assertEqual(bot.send_message.await_count, 4)
+            self.assertEqual([row['status'] for row in self.rows()], ['DELIVERED'] * 3)
+            self.assertEqual(bot.send_message.await_count, 3)
         finally:
             release.set()
             await asyncio.gather(supervisor, *([watch] if watch is not None else []), return_exceptions=True)
 
     async def test_watch_rechecks_destination_after_waiting_for_delivery_lock(self):
-        self.seed(4); active = [True]; bot = self.bot()
+        self.seed(3); active = [True]; bot = self.bot()
         self.assertTrue(await delivery.initialize(1))
         await delivery._LOCK.acquire()
         task = asyncio.create_task(delivery.run_watch(bot, 1, [], may_deliver=lambda: active[0]))
