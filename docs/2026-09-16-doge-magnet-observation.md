@@ -95,3 +95,39 @@ Deployment verification must show ruleset v4 ready, exactly `C1274` and
 rules in `paused_rule_ids`, and `ordinary_alerts_enabled=false`. General Watch
 and DOGE Magnet collection must remain enabled. Do not stop the whole Watch
 subsystem to pause its ordinary notifications.
+
+## Restore ordinary notifications while retaining the experimental selection
+
+The owner then requested restoring ordinary notifications while leaving the
+paused experimental notifications paused. Use
+`ALERT_DELIVERY_PROFILE=ORDINARY_AND_SELECTED_EXPERIMENTAL` after deploying the
+code that supports it. Do not use `ALL`: that would also restore the paused
+experimental rules.
+
+| Profile | Ordinary alerts | DOGE and C1274 | Other experimental alerts |
+| --- | --- | --- | --- |
+| `ALL` | Enabled | Enabled | Enabled |
+| `SELECTED_EXPERIMENTAL_ONLY` | Paused | Enabled | Paused |
+| `ORDINARY_AND_SELECTED_EXPERIMENTAL` | Enabled | Enabled | Paused |
+
+The restored ordinary paths include Watch cards and headers, Max Pain score-65
+transitions, confirmations, Combined, Magnet reports, and any active specific
+watches. Existing subscription settings still apply. The separate experimental
+gate keeps dual-CVD, the Max Pain/CVD formula, ordered experimental notifications
+and research-formula live notifications paused, in addition to the four paused
+manual rules. No formula definitions or activation fences change.
+
+The mixed transition queue filters allowed kinds before claiming messages and
+rechecks the claimed kind before transport. Pending experimental messages cannot
+send or block an ordinary message. New muted formula intents are not created.
+
+The earlier mute preserved raw scans, scores, source previews and price data,
+but ordinary native research events were coupled to ordinary delivery and
+stopped accumulating. Restoring those paths resumes their prospective capture;
+this change does not backfill the muted interval or relabel undelivered events.
+
+After rollout, health must report the new profile, ordinary delivery enabled,
+other experimental delivery disabled, and exactly the same two active manual
+rules. Regression checks cover a full Watch cycle, supervisor recovery, mixed
+queue filtering, independent experimental workers and profile changes during
+awaited claims.

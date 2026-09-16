@@ -96,7 +96,7 @@ async def _check() -> None:
         research_formula_store.load_pending_live_deliveries = originals["load_pending"]
 
 
-async def _check_delivery_policy() -> None:
+async def _check_delivery_policy(profile: str) -> None:
     # Exercise the profile independently of the current outcome quarantine.
     with (
         patch.object(research_formula_worker, "_NATIVE_PIPELINE_COMPATIBLE", True),
@@ -105,7 +105,7 @@ async def _check_delivery_policy() -> None:
         patch.object(research_formula_worker, "_LIVE_ALERTS_ENABLED", True),
         patch.object(research_formula_store, "load_pending_live_deliveries") as load,
         patch.object(research_formula_store, "mark_live_delivery") as mark,
-        patch.dict(os.environ, {"ALERT_DELIVERY_PROFILE": "SELECTED_EXPERIMENTAL_ONLY"}),
+        patch.dict(os.environ, {"ALERT_DELIVERY_PROFILE": profile}),
     ):
         worker = research_formula_worker.FormulaResearchWorker()
         bot = Mock(send_message=AsyncMock())
@@ -115,6 +115,9 @@ async def _check_delivery_policy() -> None:
         mark.assert_not_called()
         bot.send_message.assert_not_awaited()
         state = worker.status()
+        assert research_formula_worker.delivery_policy.ordinary_alerts_enabled() is (
+            profile == "ORDINARY_AND_SELECTED_EXPERIMENTAL"
+        )
         assert state["discovery_enabled"] is True
         assert state["shadow_enabled"] is True
         assert state["live_alerts_enabled"] is False
@@ -123,7 +126,7 @@ async def _check_delivery_policy() -> None:
 
         # A profile change while awaiting the pending read still blocks sending.
         def pending_after_profile_change():
-            os.environ["ALERT_DELIVERY_PROFILE"] = "SELECTED_EXPERIMENTAL_ONLY"
+            os.environ["ALERT_DELIVERY_PROFILE"] = profile
             return [{"delivery_id": 1, "chat_id": 2}]
 
         os.environ["ALERT_DELIVERY_PROFILE"] = "ALL"
@@ -145,7 +148,8 @@ async def _check_delivery_policy() -> None:
 
 def run() -> None:
     asyncio.run(_check())
-    asyncio.run(_check_delivery_policy())
+    for profile in ("SELECTED_EXPERIMENTAL_ONLY", "ORDINARY_AND_SELECTED_EXPERIMENTAL"):
+        asyncio.run(_check_delivery_policy(profile))
     print("Formula worker ordered-first-touch quarantine self-test: PASS")
 
 

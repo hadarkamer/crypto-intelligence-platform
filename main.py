@@ -2895,7 +2895,7 @@ async def _send_formula_watch_alerts(
     Delivery failure is recorded separately and cannot stop the Watch cycle.
     """
     import alert_delivery_policy
-    if not watch_scan_id or not alert_delivery_policy.ordinary_alerts_enabled():
+    if not watch_scan_id or not alert_delivery_policy.other_experimental_alerts_enabled():
         return 0
     try:
         matches = maxpain_cvd_short_alert.select_matches(score65_items)
@@ -2904,7 +2904,7 @@ async def _send_formula_watch_alerts(
         return 0
     sent = 0
     for match in matches:
-        if not alert_delivery_policy.ordinary_alerts_enabled():
+        if not alert_delivery_policy.other_experimental_alerts_enabled():
             break
         delivery_key = f"{chat_id}|{watch_scan_id}|{match.symbol}"
         if delivery_key in FORMULA_ALERT_SENT_KEYS:
@@ -4887,7 +4887,7 @@ async def run_watch_cycle(
                 # The ordinary Watch and the other experimental formulas retain
                 # their existing independent recovery paths.
                 print(f"[manual-formulas] C1274 preparation gap: {type(exc).__name__}", flush=True)
-            if alert_delivery_policy.ordinary_alerts_enabled():
+            if alert_delivery_policy.other_experimental_alerts_enabled():
                 await dual_cvd65_delivery.record_watch(
                     chat_id, dual_cvd_bundle, watch_scan_id=watch_scan_id,
                     decision_time=datetime.now(timezone.utc),
@@ -4896,7 +4896,7 @@ async def run_watch_cycle(
                 await dual_cvd65_delivery.drain(
                     bot_app.bot, chat_id,
                     wait_for_lock=True,
-                    may_deliver=lambda: alert_delivery_policy.ordinary_alerts_enabled()
+                    may_deliver=lambda: alert_delivery_policy.other_experimental_alerts_enabled()
                     and bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
                 )
         if top8_only:
@@ -4982,11 +4982,12 @@ async def run_watch_cycle(
         WATCH_RUNTIME["cycle_stage"] = "sending_experimental"
         may_deliver_general = lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id
         may_deliver_ordinary = lambda: alert_delivery_policy.ordinary_alerts_enabled() and may_deliver_general()
+        may_deliver_other_experimental = lambda: alert_delivery_policy.other_experimental_alerts_enabled() and may_deliver_general()
         if general_enabled and may_deliver_general():
             try:
-                if may_deliver_ordinary():
+                if may_deliver_other_experimental():
                     await research_ordered_experimental_worker.WORKER.drain_for_watch(
-                        chat_id, may_deliver=may_deliver_ordinary,
+                        chat_id, may_deliver=may_deliver_other_experimental,
                     )
             except Exception as exc:
                 print(f"[ordered-experimental] watch preparation gap: {type(exc).__name__}", flush=True)
@@ -5003,11 +5004,11 @@ async def run_watch_cycle(
                 # Preparation/delivery cannot suppress the ordinary reports.
                 # The existing fresh delivered-event lane remains recoverable.
                 print(f"[manual-formulas] watch preparation gap: {type(exc).__name__}", flush=True)
-            if may_deliver_ordinary():
+            if may_deliver_other_experimental():
                 WATCH_RUNTIME["last_formula_sent"] = await watch_transition_delivery.drain(
                     bot_app.bot, chat_id, kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
                     wait_for_lock=True,
-                    may_deliver=may_deliver_ordinary,
+                    may_deliver=may_deliver_other_experimental,
                 )
 
         WATCH_RUNTIME["cycle_stage"] = "sending_general"
@@ -5700,10 +5701,10 @@ async def _watch_supervisor_loop(bot_app) -> None:
                     and not WATCH_RUNTIME.get("scan_in_progress")
                     and WATCH_RUNTIME.get("chat_id") == chat_id
                 ):
-                    if alert_delivery_policy.ordinary_alerts_enabled():
+                    if alert_delivery_policy.other_experimental_alerts_enabled():
                         await dual_cvd65_delivery.drain(
                             bot_app.bot, int(chat_id),
-                            may_deliver=lambda: alert_delivery_policy.ordinary_alerts_enabled()
+                            may_deliver=lambda: alert_delivery_policy.other_experimental_alerts_enabled()
                             and bool(WATCH_GENERAL_ENABLED)
                             and not WATCH_RUNTIME.get("scan_in_progress")
                             and WATCH_RUNTIME.get("chat_id") == chat_id,
@@ -5714,15 +5715,16 @@ async def _watch_supervisor_loop(bot_app) -> None:
                         and not WATCH_RUNTIME.get("scan_in_progress")
                         and WATCH_RUNTIME.get("chat_id") == chat_id,
                     )
-                    if alert_delivery_policy.ordinary_alerts_enabled():
+                    if alert_delivery_policy.other_experimental_alerts_enabled():
                         await watch_transition_delivery.drain(
                             bot_app.bot, int(chat_id),
                             kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
-                            may_deliver=lambda: alert_delivery_policy.ordinary_alerts_enabled()
+                            may_deliver=lambda: alert_delivery_policy.other_experimental_alerts_enabled()
                             and bool(WATCH_GENERAL_ENABLED)
                             and not WATCH_RUNTIME.get("scan_in_progress")
                             and WATCH_RUNTIME.get("chat_id") == chat_id,
                         )
+                    if alert_delivery_policy.ordinary_alerts_enabled():
                         await watch_transition_delivery.drain(
                             bot_app.bot, int(chat_id),
                             kinds=("MAX_PAIN_SCORE_65",),
@@ -6570,7 +6572,7 @@ async def health(request):
         "dedicated_formula_alert": {
             "formula_id": maxpain_cvd_short_alert.FORMULA_ID,
             "formula_version": maxpain_cvd_short_alert.FORMULA_VERSION,
-            "enabled": bool(WATCH_GENERAL_ENABLED) and alert_delivery_policy.ordinary_alerts_enabled(),
+            "enabled": bool(WATCH_GENERAL_ENABLED) and alert_delivery_policy.other_experimental_alerts_enabled(),
             "scope": "EXISTING_GENERAL_WATCH_SCORE65_TRANSITIONS",
             "last_cycle_sent": WATCH_RUNTIME.get("last_formula_sent", 0),
         },

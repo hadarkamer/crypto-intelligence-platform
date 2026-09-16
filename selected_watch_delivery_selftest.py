@@ -53,6 +53,48 @@ class SelectedWatchTests(unittest.IsolatedAsyncioTestCase):
         scope['dual_cvd65_delivery'].drain.assert_not_awaited()
         transition.assert_not_awaited()
 
+    async def test_restored_ordinary_watch_keeps_only_selected_experimental_paths(self):
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}):
+            fixture = shared_fixture.SharedWatchCaptureTests()
+            scope, result, order, archives, captures, bot, bundle = await fixture.run_cycle()
+            self.assertTrue(result['ok'], result)
+            self.assertTrue(archives)
+            self.assertIn('archive', order)
+            self.assertIn('preview_manual_sources', order)
+            self.assertIn('send', order)
+            self.assertGreater(bot.bot.send_message.await_count, 0)
+            self.assertGreater(scope['_send_alert_with_confirmation'].await_count, 0)
+            scope['_send_magnet_watch_reports'].assert_awaited_once()
+            scope['watch_transition_delivery'].record_watch.assert_awaited_once()
+            transition = scope['watch_transition_delivery'].drain
+            transition.assert_awaited_once()
+            self.assertEqual(transition.await_args.kwargs['kinds'], ('MAX_PAIN_SCORE_65',))
+            self.assertTrue(transition.await_args.kwargs['may_deliver']())
+            self.assertGreater(result['sent'], 0)
+            self.assertGreater(result['combined_sent'], 0)
+            self.assertEqual(scope['WATCH_RUNTIME']['last_formula_sent'], 0)
+            scope['research_event_runtime'].capture_special_transitions.assert_called_once()
+            scope['research_event_runtime'].capture_combined_confirmation.assert_called_once()
+            self.assertEqual(scope['manual_formula_alert_delivery'].run_watch.await_count, 2)
+            direct, planned = scope['manual_formula_alert_delivery'].run_watch.await_args_list
+            self.assertIs(direct.kwargs['c1274_bundle'], bundle)
+            self.assertTrue(planned.args[2])
+            self.assertTrue(direct.kwargs['may_deliver']())
+            self.assertTrue(planned.kwargs['may_deliver']())
+            scope['dual_cvd65_delivery'].record_watch.assert_not_awaited()
+            scope['dual_cvd65_delivery'].drain.assert_not_awaited()
+            scope['research_ordered_experimental_worker'].WORKER.drain_for_watch.assert_not_awaited()
+
+    async def test_restored_supervisor_recovers_ordinary_and_manual_but_not_other_experiments(self):
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}):
+            scope, transition, ensure, bot = await watch_fixture.SupervisorRecoveryTests().one_pass()
+            scope['manual_formula_alert_delivery'].run_once.assert_awaited_once()
+            self.assertTrue(scope['manual_formula_alert_delivery'].run_once.await_args.kwargs['may_deliver']())
+            scope['dual_cvd65_delivery'].drain.assert_not_awaited()
+            transition.assert_awaited_once()
+            self.assertEqual(transition.await_args.kwargs['kinds'], ('MAX_PAIN_SCORE_65',))
+            self.assertTrue(transition.await_args.kwargs['may_deliver']())
+
     async def test_specific_watch_keeps_collection_but_sends_no_automatic_messages(self):
         rows = [{'symbol': 'DOGE', 'current_price': .1}]
         collect = AsyncMock(return_value=(rows, {}))

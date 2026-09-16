@@ -1,5 +1,6 @@
 """Network-free real-policy causal qualification and notification regressions."""
 import asyncio
+import os
 from copy import deepcopy
 from datetime import timedelta
 from types import SimpleNamespace
@@ -155,7 +156,7 @@ class ExperimentalTests(unittest.TestCase):
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
-    async def test_selected_only_profile_blocks_pending_poll_and_watch_delivery(self):
+    async def test_selected_profiles_block_pending_poll_and_watch_delivery(self):
         pending = {'delivery_id':1,'claim_token':'t','chat_id':42,'payload':ExperimentalTests().notify()}
         def transact(fn, *args, **kwargs):
             if fn is store.claim:
@@ -166,41 +167,49 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError('Suppressed worker sent a notification')
         obj = worker.OrderedExperimentalWorker()
         obj.bind_telegram(Bot())
-        with patch.object(worker, '_ENABLED', True), \
-             patch.object(worker.delivery_policy, 'ordinary_alerts_enabled', return_value=False), \
-             patch.object(worker, '_transaction', side_effect=transact) as transaction:
-            self.assertFalse(await obj.start())
-            self.assertTrue((await obj.run_once())['disabled'])
-            self.assertTrue((await obj.drain_for_watch(42, may_deliver=lambda: True))['disabled'])
-            self.assertFalse(obj.status()['enabled'])
-            self.assertEqual(obj.status()['live_effect'], 'NONE')
-        transaction.assert_not_called()
+        for profile in ('SELECTED_EXPERIMENTAL_ONLY', 'ORDINARY_AND_SELECTED_EXPERIMENTAL'):
+            with self.subTest(profile=profile), \
+                 patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': profile}), \
+                 patch.object(worker, '_ENABLED', True), \
+                 patch.object(worker, '_transaction', side_effect=transact) as transaction:
+                self.assertFalse(await obj.start())
+                self.assertTrue((await obj.run_once())['disabled'])
+                self.assertTrue((await obj.drain_for_watch(42, may_deliver=lambda: True))['disabled'])
+                self.assertFalse(obj.status()['enabled'])
+                self.assertFalse(obj.status()['delivery_allowed_by_profile'])
+                self.assertEqual(obj.status()['live_effect'], 'NONE')
+            transaction.assert_not_called()
 
-    async def test_profile_change_during_begin_send_releases_before_transport(self):
+    async def test_profile_change_during_claim_or_begin_send_releases_before_transport(self):
         item_ = {'delivery_id':1,'claim_token':'t','chat_id':42,'payload':ExperimentalTests().notify()}
-        allowed = [True]
-        calls = []
-        def transact(fn, *args, **kwargs):
-            calls.append(fn.__name__)
-            if fn is store.enqueue:
-                return {'enqueued':1}
-            if fn is store.claim:
-                return item_
-            if fn is store.begin_send:
-                allowed[0] = False
-            return True
         class Bot:
             async def send_message(self, **kwargs):
                 raise AssertionError('Profile changed before the transport attempt')
-        obj = worker.OrderedExperimentalWorker()
-        obj.bind_telegram(Bot())
-        with patch.object(worker, '_ENABLED', True), \
-             patch.object(worker.delivery_policy, 'ordinary_alerts_enabled', side_effect=lambda: allowed[0]), \
-             patch.object(worker, '_transaction', transact):
-            result = await obj.drain_for_watch(42, may_deliver=lambda: True)
-        self.assertEqual(result['sent'], 0)
-        self.assertTrue(result['delivery_stopped'])
-        self.assertEqual(calls, ['enqueue', 'claim', 'begin_send', 'release_unsent'])
+        for profile in ('SELECTED_EXPERIMENTAL_ONLY', 'ORDINARY_AND_SELECTED_EXPERIMENTAL'):
+            for switch_at in (store.claim, store.begin_send):
+                calls = []
+                def transact(fn, *args, **kwargs):
+                    calls.append(fn.__name__)
+                    if fn is switch_at:
+                        os.environ['ALERT_DELIVERY_PROFILE'] = profile
+                    if fn is store.enqueue:
+                        return {'enqueued':1}
+                    if fn is store.claim:
+                        return item_
+                    return True
+                obj = worker.OrderedExperimentalWorker()
+                obj.bind_telegram(Bot())
+                with self.subTest(profile=profile, switch_at=switch_at.__name__), \
+                     patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ALL'}), \
+                     patch.object(worker, '_ENABLED', True), \
+                     patch.object(worker, '_transaction', transact):
+                    result = await obj.drain_for_watch(42, may_deliver=lambda: True)
+                self.assertEqual(result['sent'], 0)
+                self.assertTrue(result['delivery_stopped'])
+                expected = ['enqueue', 'claim']
+                if switch_at is store.begin_send:
+                    expected.append('begin_send')
+                self.assertEqual(calls, expected + ['release_unsent'])
 
     async def test_poll_waits_for_watch_and_priority_drain_exceeds_poll_budget(self):
         payload=ExperimentalTests().notify(); busy=True; calls=[]

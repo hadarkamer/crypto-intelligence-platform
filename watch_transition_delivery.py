@@ -29,8 +29,22 @@ _STATUS = {
 
 
 def status():
+    ordinary = delivery_policy.ordinary_alerts_enabled()
+    formula = delivery_policy.other_experimental_alerts_enabled()
     return {**deepcopy(_STATUS),
-            "delivery_allowed_by_profile": delivery_policy.ordinary_alerts_enabled()}
+            "delivery_allowed_by_profile": ordinary or formula,
+            "ordinary_delivery_allowed_by_profile": ordinary,
+            "formula_delivery_allowed_by_profile": formula}
+
+
+def _allowed_kinds(requested=None):
+    """Intersect the caller's queue selection with the current profile."""
+    allowed = []
+    if delivery_policy.ordinary_alerts_enabled():
+        allowed.append("MAX_PAIN_SCORE_65")
+    if delivery_policy.other_experimental_alerts_enabled():
+        allowed.append(maxpain_cvd_short_alert.FORMULA_ID)
+    return tuple(kind for kind in allowed if requested is None or kind in requested)
 
 
 def cycle_result(watch_scan_id):
@@ -103,19 +117,20 @@ async def record_watch(chat_id, items, *, watch_scan_id, decision_time, render_s
         # before testing short-family quality, with no later substitution.
         # Reference quotes are display evidence in the outgoing intent only.
         # They must never alter the transition input or its same-scan hash.
-        references = context.get('experimental_reference_prices_by_symbol') or {}
-        if not isinstance(references, dict):
-            references = {}
-        formula_items = [{**item, 'experimental_price_references': deepcopy(
-            references.get(str(item.get('symbol') or '').upper(), {}))} for item in crossing_items]
-        for match in maxpain_cvd_short_alert.select_matches(formula_items):
-            intents.append({
-                "kind": maxpain_cvd_short_alert.FORMULA_ID,
-                "signal_key": store.signal_key(match.item),
-                "payload": {"text": maxpain_cvd_short_alert.render_message(match, decision_time),
-                            "match": asdict(match), "watch_context": context,
-                            "decision_time": source_time},
-            })
+        if delivery_policy.other_experimental_alerts_enabled():
+            references = context.get('experimental_reference_prices_by_symbol') or {}
+            if not isinstance(references, dict):
+                references = {}
+            formula_items = [{**item, 'experimental_price_references': deepcopy(
+                references.get(str(item.get('symbol') or '').upper(), {}))} for item in crossing_items]
+            for match in maxpain_cvd_short_alert.select_matches(formula_items):
+                intents.append({
+                    "kind": maxpain_cvd_short_alert.FORMULA_ID,
+                    "signal_key": store.signal_key(match.item),
+                    "payload": {"text": maxpain_cvd_short_alert.render_message(match, decision_time),
+                                "match": asdict(match), "watch_context": context,
+                                "decision_time": source_time},
+                })
         return intents
 
     try:
@@ -177,13 +192,14 @@ async def drain(bot, chat_id, *, limit=32, may_deliver=None, kinds=None, wait_fo
     Only unattempted, unexpired PENDING messages can recover after a restart.
     A crashed IN_FLIGHT attempt is settled UNKNOWN by the store, never resent.
     """
-    if not delivery_policy.ordinary_alerts_enabled():
+    requested_kinds = None if kinds is None else tuple(kinds)
+    if not _allowed_kinds(requested_kinds):
         return 0
     if (not wait_for_lock and _DRAIN_LOCK.locked()) or not await initialize():
         return 0
     formula_sent = 0
     async with _DRAIN_LOCK:
-        if (not delivery_policy.ordinary_alerts_enabled()
+        if (not _allowed_kinds(requested_kinds)
                 or (may_deliver is not None and not may_deliver())):
             return 0
         try:
@@ -194,13 +210,14 @@ async def drain(bot, chat_id, *, limit=32, may_deliver=None, kinds=None, wait_fo
             _gap("orphan_settlement", exc, database=True)
             return 0
         for _ in range(min(max(int(limit), 0), 128)):
-            if (not delivery_policy.ordinary_alerts_enabled()
+            allowed_kinds = _allowed_kinds(requested_kinds)
+            if (not allowed_kinds
                     or (may_deliver is not None and not may_deliver())):
                 break
             try:
                 pending = await asyncio.to_thread(
                     store.claim_pending, subscription_scope(chat_id), datetime.now(timezone.utc), limit=1,
-                    **({"kinds": kinds} if kinds is not None else {}),
+                    kinds=allowed_kinds,
                 )
             except Exception as exc:
                 _gap("claim", exc, database=True)
@@ -208,7 +225,7 @@ async def drain(bot, chat_id, *, limit=32, may_deliver=None, kinds=None, wait_fo
             if not pending:
                 break
             intent = pending[0]
-            if (not delivery_policy.ordinary_alerts_enabled()
+            if (intent["kind"] not in _allowed_kinds(requested_kinds)
                     or (may_deliver is not None and not may_deliver())):
                 # Eligibility can change while the database claim is awaited.
                 # No network attempt has begun: release only this reservation.
@@ -220,7 +237,10 @@ async def drain(bot, chat_id, *, limit=32, may_deliver=None, kinds=None, wait_fo
                         raise RuntimeError("unattempted reservation was not released")
                 except Exception as exc:
                     _gap("unattempted_release", exc, database=True)
-                break
+                if (not _READY or not _allowed_kinds(requested_kinds)
+                        or (may_deliver is not None and not may_deliver())):
+                    break
+                continue
             attempted_at = intent["attempted_at"]
             delivered_at = None
             error_type = None

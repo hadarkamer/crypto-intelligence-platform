@@ -15,12 +15,14 @@ class PolicyTests(unittest.TestCase):
     def test_all_profile_preserves_existing_behavior(self):
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ALL'}):
             self.assertTrue(policy.ordinary_alerts_enabled())
+            self.assertTrue(policy.other_experimental_alerts_enabled())
             self.assertTrue(all(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
             self.assertTrue(policy.status()['configuration_valid'])
 
     def test_selected_profile_allows_exactly_two_manual_rules(self):
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'SELECTED_EXPERIMENTAL_ONLY'}):
             self.assertFalse(policy.ordinary_alerts_enabled())
+            self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertEqual([rule for rule in store.rules.RULE_IDS if policy.manual_rule_enabled(rule)],
                              ['C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'])
             self.assertFalse(policy.manual_rule_enabled('unknown'))
@@ -29,10 +31,26 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(set(delivery.status()['paused_rule_ids']),
                              {'PRICE_OI_ENTRY2', 'PRICE_OI_SPOT65', 'CONSENSUS_FULL', 'C0964'})
 
+    def test_ordinary_and_selected_preserves_exact_experimental_selection(self):
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}):
+            self.assertTrue(policy.ordinary_alerts_enabled())
+            self.assertFalse(policy.other_experimental_alerts_enabled())
+            self.assertFalse(policy.manual_rule_enabled('unknown'))
+            self.assertEqual(delivery.status()['active_rule_ids'],
+                             ['C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'])
+            self.assertEqual(set(delivery.status()['paused_rule_ids']),
+                             {'PRICE_OI_ENTRY2', 'PRICE_OI_SPOT65', 'CONSENSUS_FULL', 'C0964'})
+            self.assertEqual(policy.status(), {
+                'profile': 'ORDINARY_AND_SELECTED_EXPERIMENTAL', 'configuration_valid': True,
+                'ordinary_alerts_enabled': True, 'other_experimental_alerts_enabled': False,
+                'manual_rule_allowlist': ['C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'],
+            })
+
     def test_unknown_profile_fails_closed(self):
         for profile in ('', 'SELECTED', 'OFF'):
             with self.subTest(profile=profile), patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': profile}):
                 self.assertFalse(policy.ordinary_alerts_enabled())
+                self.assertFalse(policy.other_experimental_alerts_enabled())
                 self.assertFalse(any(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
                 self.assertFalse(policy.status()['configuration_valid'])
 
@@ -56,9 +74,15 @@ class SelectedDeliveryTests(unittest.IsolatedAsyncioTestCase):
     run_delivery = delivery_tests.DeliveryTests.run_delivery
 
     async def test_only_selected_alerts_send_and_existing_other_pending_alerts_cancel(self):
+        await self._assert_selected_delivery('SELECTED_EXPERIMENTAL_ONLY')
+
+    async def test_restored_ordinary_profile_keeps_other_manual_alerts_cancelled(self):
+        await self._assert_selected_delivery('ORDINARY_AND_SELECTED_EXPERIMENTAL')
+
+    async def _assert_selected_delivery(self, profile):
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ALL'}):
             self.seed(3)
-        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'SELECTED_EXPERIMENTAL_ONLY'}):
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': profile}):
             state = self.db.read(1)
             self.assertEqual(store.record_events(state, [observation_pair(20)], self.clock[0]), 1)
             self.assertEqual(store.record_c1274_scan(state, c1274_bundle(), c1274_references(), self.clock[0]),
