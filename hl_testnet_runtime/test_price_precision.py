@@ -185,8 +185,8 @@ class IntegrationTests(unittest.TestCase):
     def test_quantity_recomputed_after_rounding_and_floored(self):
         p=pp.build_prepared_orders(sample(),metadata(),self.a,exit_type='limit')
         size=Decimal(p['action']['orders'][0]['s']);gap=Decimal('96.88')-Decimal('94.942')
-        self.assertLessEqual(size*gap,Decimal('20'))
-        self.assertGreater((size+Decimal('0.01'))*gap,Decimal('20'))
+        self.assertLessEqual(size*gap,Decimal('10'))
+        self.assertGreater((size+Decimal('0.01'))*gap,Decimal('10'))
     def test_both_exit_types_preserve_trigger_and_no_new_policy(self):
         import hyperliquid_testnet_executor as sender
         for mode in ('limit','market'):

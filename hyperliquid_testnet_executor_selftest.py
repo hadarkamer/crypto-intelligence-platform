@@ -84,7 +84,7 @@ class FakeExchange:
         if path == '/exchange':
             if self.reply is not None: return self.reply
             return {'status': 'ok', 'response': {'type': 'order', 'data': {'statuses': [
-                {'resting': {'oid': 101}} if self.pending else {'filled': {'oid': 101, 'totalSz': '10', 'avgPx': '100'}},
+                {'resting': {'oid': 101}} if self.pending else {'filled': {'oid': 101, 'totalSz': body['action']['orders'][0]['s'], 'avgPx': '100'}},
                 'waitingForFill' if self.pending else {'resting': {'oid': 102}},
                 'waitingForFill' if self.pending else {'resting': {'oid': 103}}]}}}
         kind = body['type']
@@ -128,13 +128,13 @@ class BuildTests(unittest.TestCase):
         self.assertEqual([o['b'] for o in action(signal(side='SHORT'))['orders']], [False, True, True])
     def test_exits_only_reduce(self):
         self.assertEqual([o['r'] for o in action()['orders']], [False, True, True])
-    def test_risk_quantity_is_not_twenty_dollars_notional(self):
+    def test_risk_quantity_is_not_ten_dollars_notional(self):
         orders = action()['orders']
-        self.assertEqual(orders[0]['s'], '10')
-        self.assertEqual(Decimal(orders[0]['s']) * Decimal(orders[0]['p']), 1000)
+        self.assertEqual(orders[0]['s'], '5')
+        self.assertEqual(Decimal(orders[0]['s']) * Decimal(orders[0]['p']), 500)
     def test_size_floored_not_prices(self):
         msg = signal(); msg['stop'] = '97'
-        self.assertEqual(action(msg)['orders'][0]['s'], '6.66')
+        self.assertEqual(action(msg)['orders'][0]['s'], '3.33')
     def test_exit_type_must_be_explicit(self):
         with self.assertRaises(mod.TestnetError): action(mode='automatic')
     def test_limit_exit_copies_trigger_and_limit(self):
