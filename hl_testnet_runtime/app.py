@@ -23,6 +23,12 @@ def review_configured_signal():
     try:
         if not raw or len(raw) > 2048 or os.environ.get('HL_TESTNET_RUNTIME_MODE', 'read_only') != 'read_only':
             raise ValueError()
+        policy = os.environ.get('HL_TESTNET_PRICE_ROUNDING', '')
+        if policy:
+            from .price_precision import POLICY, review_rounded_signal
+            if policy != POLICY:
+                raise ValueError()
+            review_only = review_rounded_signal
         report = review_only(decode(raw),
             account=os.environ.get('HL_TESTNET_ACCOUNT_ADDRESS', ''),
             agent=os.environ.get('HL_TESTNET_AGENT_ADDRESS', ''),
