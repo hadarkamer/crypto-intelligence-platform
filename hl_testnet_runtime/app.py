@@ -1,4 +1,7 @@
-"""Read-only HTTP health page. Requests never trigger checks or orders."""
+"""Public read-only health, plus separate authenticated record-only intake.
+
+No HTTP path can sign or submit exchange orders.
+"""
 import json
 import os
 import threading
@@ -47,6 +50,9 @@ def start_read_only_check():
 def application(environ, start_response):
     method = environ.get('REQUEST_METHOD', '')
     path = environ.get('PATH_INFO', '')
+    if path == '/internal/testnet-cards/v1':
+        from .alert_cards_intake import application as intake
+        return intake(environ, start_response)
     if method not in ('GET', 'HEAD'):
         status, body = '405 Method Not Allowed', b'No public controls. No input accepted.\n'
     elif path not in ('/', '/healthz') or environ.get('QUERY_STRING'):

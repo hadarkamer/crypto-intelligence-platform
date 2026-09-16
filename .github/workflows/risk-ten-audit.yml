@@ -2,7 +2,7 @@ name: Ten Dollar Risk and Full Testnet Regression
 on:
   push:
     branches: [paper-trading-v1]
-    paths: ['hl_testnet_runtime/**', 'hyperliquid_testnet_executor*.py', '.github/workflows/risk-ten-audit.yml']
+    paths: ['hl_testnet_runtime/**', 'hyperliquid_testnet_executor*.py', 'alert_cards*.py', '.github/workflows/risk-ten-audit.yml']
 permissions:
   contents: read
 concurrency:
@@ -30,12 +30,12 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m pip install 'psycopg[binary]==3.2.3'
-      - name: Current risk, immutable legacy actions and all Testnet regressions
+      - name: Current risk, immutable legacy actions, authenticated card intake and all regressions
         run: |
           python3 - <<'PY'
           import pathlib, unittest
           modules = ['hl_testnet_runtime.'+p.stem for p in sorted(pathlib.Path('hl_testnet_runtime').glob('test_*.py'))]
-          modules += ['hyperliquid_testnet_executor_selftest']
+          modules += ['hyperliquid_testnet_executor_selftest', 'alert_cards_forwarder_selftest']
           suite=unittest.defaultTestLoader.loadTestsFromNames(modules)
           result=unittest.TextTestRunner(verbosity=1).run(suite)
           raise SystemExit(not result.wasSuccessful())
