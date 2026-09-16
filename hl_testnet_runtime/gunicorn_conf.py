@@ -1,4 +1,4 @@
-"""Read-only defaults; explicit Testnet entry test and registered-order monitoring."""
+"""Read-only defaults; explicitly selected Testnet tasks only."""
 workers = 1
 worker_class = 'sync'
 accesslog = None
@@ -11,7 +11,11 @@ preload_app = False
 def post_worker_init(worker):
     import os
     mode = os.environ.get('HL_TESTNET_RUNTIME_MODE','read_only')
-    if mode == 'cancel_monitor_testnet_v1':
+    if mode in ('cancel_rehearsal_testnet_v1','inspect_cancel_rehearsal_testnet_v1'):
+        import threading
+        from hl_testnet_runtime.cancel_rehearsal import startup
+        threading.Thread(target=startup,daemon=True,name='explicit-cancel-rehearsal').start()
+    elif mode == 'cancel_monitor_testnet_v1':
         from hl_testnet_runtime.pending_cancel_monitor import start
         start()
     elif mode in ('single_testnet_attempt_v1','inspect_testnet_attempt_v1'):
