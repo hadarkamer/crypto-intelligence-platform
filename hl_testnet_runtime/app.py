@@ -1,4 +1,4 @@
-"""Minimal static WSGI health page. Requests never trigger checks or orders."""
+"""Read-only HTTP health page. Requests never trigger checks or orders."""
 import json
 import os
 import threading
@@ -16,7 +16,6 @@ def startup_check():
 
 
 def review_configured_signal():
-    # Separate read-only task; never replace or implicitly activate a sender.
     from .checks import decode
     from .guarded_execution import review_only
     raw = os.environ.get('HL_TESTNET_REVIEW_SIGNAL', '')
@@ -41,7 +40,6 @@ def review_configured_signal():
 
 
 def start_read_only_check():
-    # One of two read-only tasks per boot; HTTP requests never call either task.
     task = review_configured_signal if os.environ.get('HL_TESTNET_REVIEW_SIGNAL') else startup_check
     threading.Thread(target=task, daemon=True, name='testnet-preflight').start()
 
@@ -50,12 +48,15 @@ def application(environ, start_response):
     method = environ.get('REQUEST_METHOD', '')
     path = environ.get('PATH_INFO', '')
     if method not in ('GET', 'HEAD'):
-        status, body = '405 Method Not Allowed', b'Read-only service. No input accepted.\n'
+        status, body = '405 Method Not Allowed', b'No public controls. No input accepted.\n'
     elif path not in ('/', '/healthz') or environ.get('QUERY_STRING'):
         status, body = '404 Not Found', b'Not found\n'
     else:
         status = '200 OK'
-        body = b'{"service":"hyperliquid-testnet-preflight","running":true,"read_only":true,"order_sending_enabled":false}'
+        controlled = os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'single_testnet_attempt_v1'
+        body = json.dumps({'service':'hyperliquid-testnet-preflight','running':True,
+            'read_only':not controlled,'single_attempt_configured':controlled,
+            'public_order_controls':False,'continuous_trading':False}).encode()
     headers = [('Content-Type', 'application/json' if status == '200 OK' else 'text/plain'),
                ('Content-Length', str(len(body))), ('Cache-Control', 'no-store'),
                ('X-Content-Type-Options', 'nosniff'), ('Referrer-Policy', 'no-referrer'),

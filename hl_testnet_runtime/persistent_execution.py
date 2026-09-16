@@ -1,8 +1,7 @@
-"""Rounded source -> durable staging journal -> explicit one-shot Testnet sender.
+"""Durable rounded Testnet execution. Submission requires an explicit caller.
 
-The web startup may initialize and test STORAGE, and save a prepared source.
-It never calls submit_persisted. No environment value or HTTP request can send.
-A source from yesterday can be saved for audit, but can never be sent as new.
+Storage startup never submits. Controlled attempts retain source timestamps,
+use the original bounded outbox expiry and an additional operator deadline.
 """
 from __future__ import annotations
 from datetime import datetime, timezone
@@ -12,6 +11,7 @@ import os
 import time
 
 from .postgres_journal import PostgresJournal, JournalError, digest, account_address
+from .source_window import source_fresh
 
 
 def prepare_and_store(message, *, account, journal, client=None):
@@ -21,7 +21,6 @@ def prepare_and_store(message, *, account, journal, client=None):
     reader = precision.MetadataReader(checks.InfoReader() if client is None else client)
     prepared = precision.prepare_signal(source, reader.read('meta'))
     key, created = journal.save_prepared(account, prepared)
-    # Confirm a committed record through a new connection before returning.
     stored = journal.load(key)
     if digest(stored['prepared']) != digest(prepared) or stored['account'] != account:
         raise JournalError('PREPARED_RECORD_READBACK_MISMATCH')
@@ -29,10 +28,8 @@ def prepare_and_store(message, *, account, journal, client=None):
 
 
 def startup_storage_check():
-    """Only storage setup/probe/preparation. Does not read the signing key."""
     report = {'mode': 'testnet_storage_only', 'status': 'WAITING_FOR_DATABASE_CONNECTION',
-              'persistent_prepared_record': False, 'order_requests_sent': 0,
-              'signing_tested': False}
+              'persistent_prepared_record': False, 'order_requests_sent': 0, 'signing_tested': False}
     try:
         if os.environ.get('HL_TESTNET_JOURNAL_BACKEND') != 'staging_postgres_v1':
             return
@@ -59,13 +56,13 @@ def startup_storage_check():
     print(json.dumps({'testnet_journal': report}, sort_keys=True), flush=True)
 
 
-def submit_persisted(message, *, account, agent, exit_type=None,
-                     enable_testnet=False, journal=None):
-    """One explicit call only; atomically reserve BEFORE signature/transport.
+def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=False,
+                     journal=None, source_expires_at=None, approval_expires_at=None):
+    """One explicit call, commit-before-signing; one reservation per test account.
 
-    The one-shot lab account remains locked after any attempted send, including
-    unknown results. There is intentionally no reset/recycle/delete method.
-    Successful DB persistence is necessary but not an order-acceptance guarantee.
+    Defaults retain the legacy minute window. Only a supervised caller supplies
+    the ORIGINAL source expiry (<=10 minutes) and a shorter approval deadline.
+    An expired or uncertain attempt is never reset or blindly submitted again.
     """
     result = {'mode': 'testnet', 'status': 'DISABLED', 'order_requests_sent': 0,
               'signing_tested': False, 'verified': False}
@@ -83,10 +80,9 @@ def submit_persisted(message, *, account, agent, exit_type=None,
         journal = PostgresJournal.from_env(os.environ) if journal is None else journal
         key, prepared, reader, _ = prepare_and_store(source, account=account, journal=journal)
         previous = journal.load(key)
-        # A previous send is never retried, even if the signal is now stale.
         if previous['result'] is not None:
             return {**result, **previous['result'], 'replayed': True, 'order_requests_sent': 0}
-        if not 0 <= (datetime.now(timezone.utc) - at).total_seconds() <= guard.MAX_SOURCE_AGE_SECONDS:
+        if not source_fresh(at, source_expires_at, approval_expires_at):
             raise JournalError('SOURCE_NOT_FRESH_FOR_ONE_SHOT_TEST')
         if exit_type not in ('market', 'limit', 'tp_limit_sl_market'):
             raise JournalError('EXPLICIT_EXIT_TYPE_REQUIRED')
@@ -103,7 +99,6 @@ def submit_persisted(message, *, account, agent, exit_type=None,
             raise JournalError('BUDGET_NOT_PASSED_FOR_EXACT_ROUNDED_PLAN')
         if diagnostics.get('mark_within_supplied_exit_range') is not True:
             raise JournalError('TESTNET_PRICE_OUTSIDE_SUPPLIED_EXIT_RANGE')
-        # The original guard is strict at either exit price, not just outside it.
         active = reader.read('activeAssetData', user=account, coin=plan['symbol'])
         mark = checks.number(active.get('markPx'))
         if not min(Decimal(plan['stop']), Decimal(plan['take_profit'])) < mark < max(Decimal(plan['stop']), Decimal(plan['take_profit'])):
@@ -112,8 +107,10 @@ def submit_persisted(message, *, account, agent, exit_type=None,
         if account_address(wallet.address) != agent:
             raise JournalError('KEY_DOES_NOT_MATCH_AGENT')
         http = sender.TestnetHTTP(allow_orders=True)
-        # Reconfirm account-agent mapping at the actual sender boundary.
-        if http.info('userRole', user=agent) != {'role': 'agent', 'data': {'user': account}}:
+        role = http.info('userRole', user=agent)
+        if (not isinstance(role, dict) or role.get('role') != 'agent'
+                or not isinstance(role.get('data'), dict)
+                or account_address(role['data'].get('user')) != account):
             raise JournalError('AGENT_NOT_AUTHORIZED_FOR_TEST_ACCOUNT')
         if http.info('userRole', user=account) != {'role': 'user'}:
             raise JournalError('INDEPENDENT_TEST_ACCOUNT_REQUIRED')
@@ -131,14 +128,12 @@ def submit_persisted(message, *, account, agent, exit_type=None,
             return {**result, **previous, 'replayed': True, 'order_requests_sent': 0}
         reserved = True
         if (time.monotonic() - started > 15
-                or not 0 <= (datetime.now(timezone.utc) - at).total_seconds() <= guard.MAX_SOURCE_AGE_SECONDS
+                or not source_fresh(at, source_expires_at, approval_expires_at)
                 or not 0 <= sender.now_ms() - nonce <= 5000):
             raise JournalError('SOURCE_OR_RESERVATION_EXPIRED_NO_SEND')
-        # Database COMMIT has returned successfully before this point.
         body = sender._signed_body(wallet, action, nonce)
         result['signing_tested'] = True
         response = http._post('/exchange', body)
-        result['signing_tested'] = True
         ack = sender.acknowledgement(response)
         result.update(status=ack, order_requests_sent=http.order_attempts)
         if ack == 'ACKNOWLEDGED_NOT_VERIFIED':
@@ -161,7 +156,7 @@ def submit_persisted(message, *, account, agent, exit_type=None,
 
 
 def inspect_persisted(key, *, journal=None):
-    """Receipt reconciliation uses stored action and public reads; no signing key."""
+    """Stored-action reconciliation, public reads only; never re-submits."""
     import hyperliquid_testnet_executor as sender
     journal = PostgresJournal.from_env(os.environ) if journal is None else journal
     record = journal.load(key)
