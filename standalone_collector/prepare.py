@@ -1,4 +1,4 @@
-"""Build interval-aware app collector; no external source scans during deployment."""
+"""Build app-owned heatmap collection. No source scans during deployment."""
 from pathlib import Path
 import ast
 import hashlib
@@ -46,13 +46,13 @@ def prepare():
         actual=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
         if actual!=expected:raise RuntimeError('Source version changed: '+name)
         (RUNTIME/name).write_bytes(data);manifest[name]=actual
-    (RUNTIME/'market_vision/__init__.py').write_text('"""App-owned Model1 source copy."""\n')
+    (RUNTIME/'market_vision/__init__.py').write_text('"""App-owned heatmap source copy."""\n')
     for name in ('collection_bridge.py','collection_model1_task.py'):
         shutil.copy2(ROOT/name,RUNTIME/name)
     for name in ('model1_readiness.py','model1_diagnostics.py','model1_page_flow.py',
                  'model1_execution.py','image_detail.py','price_detail_input.py',
                  'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
-                 'model1_cache_policy.py'):
+                 'model1_cache_policy.py','heatmap_models.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -65,29 +65,33 @@ def prepare():
     install_detail(RUNTIME)
     if validator_ast(task_path.read_text())!=point_validator:
         raise RuntimeError('Image detail changed the point validator')
-    install_range(RUNTIME)
-    install_legend(RUNTIME)
-    install_cache(RUNTIME)
+    install_range(RUNTIME);install_legend(RUNTIME);install_cache(RUNTIME)
     original=(ROOT/'market_vision/coinglass_heatmap_capture.py').read_text()
     actual=(RUNTIME/'market_vision/coinglass_heatmap_capture.py').read_text()
     expected=expand_legend_capture(expand_detail_capture(expand_capture(original)))
     if actual!=expected:raise RuntimeError('Unexpected capture adaptation')
     if actual.count('page.screenshot(')!=original.count('page.screenshot('):
         raise RuntimeError('Range support must not add a source screenshot')
-    (RUNTIME/'provenance.json').write_text(json.dumps({
-        'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
-        'capture_flow':'one selected horizon; normally close Legend help card; same PNG plus crop',
-        'supported_timeframes':['12H','24H','48H'],
-        'analysis':'one model request, full screenshot and same-image detail, one scan',
-        'price_reference':'explicit visual range or validated legacy point; never fake midpoint',
-        'initial_max_range_fraction':0.01,'range_limit_is_accuracy_claim':False,
-        'legacy_point_validator_unchanged':True,'numeric_axis_order':'smaller price then larger price',
-        'failed_evidence':'private original PNG and numeric metadata; authenticated image access6h',
-        'auto_reuse_minutes':15,'saved_review_max_hours':6,'saved_review_starts_capture':False,
-        'capture_limit_unchanged':True,'bot_started':False,'automatic_source_checks':False},indent=2))
+    # First verify the known Model1 baseline before adding the identity dimension.
     subprocess.run([sys.executable,'-m','unittest','test_original_flow','test_august_replay',
         'test_page_flow','test_48h_execution','test_image_detail','test_price_range','test_legend_popup',
         'test_cache_policy','-q'],cwd=HERE,check=True,timeout=60)
-    print('MODEL1_CACHE_POLICY_INSTALLED auto_reuse_minutes=15 saved_read=GET_ONLY source_scans=0',flush=True)
+    from install_heatmap_models import install as install_models
+    install_models(RUNTIME)
+    # A fresh interpreter ensures each child's actual model configuration is tested.
+    subprocess.run([sys.executable,'-m','unittest','test_heatmap_models','-v'],
+        cwd=HERE,check=True,timeout=90)
+    (RUNTIME/'provenance.json').write_text(json.dumps({
+        'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
+        'capture_flow':'one requested model/horizon; existing session, controls, PNG and same-image crop',
+        'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
+        'analysis':'one bounded model request per new observation',
+        'identity':'strict model-specific source, schema, screenshot label and job',
+        'price_reference':'explicit visual range or validated legacy point; no fake midpoint',
+        'initial_max_range_fraction':0.01,'numeric_thresholds_unchanged':True,
+        'cache_scope':['heatmap_model','timeframe'],'single_worker':True,
+        'auto_reuse_minutes':15,'saved_review_max_hours':6,
+        'bot_started':False,'automatic_source_checks':False},indent=2))
+    print('HEATMAP_MODELS_INSTALLED models=1,2,3 horizons=12H,24H,48H source_scans=0',flush=True)
 
 if __name__=='__main__':prepare()
