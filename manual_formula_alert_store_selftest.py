@@ -18,12 +18,22 @@ import manual_formula_alert_store as store
 from manual_formula_alert_selftest import fixture
 
 BASE = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+OBSERVATION_RULE = 'MAGNET_OBSERVATION_DOGE_SHORT'
 
 
 def pair(identifier=1, minute=1, *, scan=None, symbol='BTC', direction='LONG'):
     event, features = fixture(symbol, direction)
     event.update(event_id=identifier, alert_time_utc=BASE + timedelta(minutes=minute))
     event['engine_snapshot']['watch_scan_id'] = scan or 'scan-' + str(identifier)
+    return event, features
+
+
+def observation_pair(identifier=1, minute=1, *, scan=None):
+    event, _ = pair(identifier, minute, scan=scan, symbol='DOGE', direction='SHORT')
+    event['engine_snapshot']['magnet_confirmation'] = {'status': 'OBSERVATION'}
+    features = {'event.direction_mapping_valid': True,
+                'event.analysis_direction': 'SHORT',
+                'captured.magnet.confirmation_status': 'OBSERVATION'}
     return event, features
 
 
@@ -154,7 +164,7 @@ class ReducerTests(unittest.TestCase):
         state = store._initial(BASE)
         self.assertEqual(store.record_events(state, [pair()], BASE + timedelta(minutes=2)), 3)
         self.assertEqual({i['payload']['rule_id'] for i in state['intents']},
-                         set(store.rules.RULES) - {'C0964', 'C1274'})
+                         {'PRICE_OI_ENTRY2', 'PRICE_OI_SPOT65', 'CONSENSUS_FULL'})
         self.assertTrue(all(i['text'] == i['payload']['text'] for i in state['intents']))
         self.assertEqual(len({i['intent_id'] for i in state['intents']}), 3)
 
@@ -206,7 +216,7 @@ class ReducerTests(unittest.TestCase):
                 self.assertEqual(state['retry'], {})
                 self.assertEqual(len(state['intents']), 3)
                 self.assertEqual({i['payload']['rule_id'] for i in state['intents']},
-                                 set(store.rules.RULES) - {'C0964', 'C1274'})
+                                 {'PRICE_OI_ENTRY2', 'PRICE_OI_SPOT65', 'CONSENSUS_FULL'})
                 self.assertEqual(store.record_events(state, [(event, features)], now + timedelta(seconds=3)), 0)
 
     def test_c1274_dedups_by_futures_candle_and_allows_the_next_candle(self):
@@ -296,18 +306,18 @@ class TransactionTests(unittest.TestCase):
     def test_v2_upgrade_cancels_only_pending_c1274_and_preserves_in_flight(self):
         self.collect()
         previous = self.db.read(1)
-        previous.update(rule_version=store.rules.PREVIOUS_VERSION,
-                        ruleset_sha256=store.rules.PREVIOUS_RULESET_SHA256)
+        previous.update(rule_version=store.rules.LEGACY_VERSION,
+                        ruleset_sha256=store.rules.LEGACY_RULESET_SHA256)
         previous.pop('c1274_candles')
         for item in previous['intents']:
-            item['payload']['predicate_version'] = store.rules.PREVIOUS_VERSION
+            item['payload']['predicate_version'] = store.rules.LEGACY_VERSION
             item['text'] = 'old-v2:' + item['text']
             item['payload']['text'] = item['text']
         old_payload = {
             'rule_id': 'C1274', 'threshold_bps': 100, 'symbol': 'BTC',
             'direction': 'SHORT', 'source_direction': 'LONG',
             'event_id': 1001, 'event_time': store.iso(BASE + timedelta(minutes=1)),
-            'predicate_version': store.rules.PREVIOUS_VERSION,
+            'predicate_version': store.rules.LEGACY_VERSION,
             'price_reference': None, 'text': 'old C1274 v2',
         }
         template = {
@@ -332,6 +342,7 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(state['receipts'], previous['receipts'])
         self.assertEqual(state['dedup'], previous['dedup'])
         self.assertEqual(state['rule_activated_at']['C1274'], store.iso(upgraded_at))
+        self.assertEqual(state['rule_activated_at'][OBSERVATION_RULE], store.iso(upgraded_at))
         self.assertEqual(state['c1274_candles'], {})
 
         by_id = {item['intent_id']: item for item in state['intents']}
@@ -353,9 +364,112 @@ class TransactionTests(unittest.TestCase):
         store.initialize_scope(1, BASE + timedelta(minutes=5))
         restarted = self.db.read(1)
         self.assertEqual(restarted['rule_activated_at']['C1274'], store.iso(upgraded_at))
+        self.assertEqual(restarted['rule_activated_at'][OBSERVATION_RULE], store.iso(upgraded_at))
         self.assertEqual(restarted['counts']['cancelled'], 1)
         self.assertEqual({item['intent_id']: item for item in restarted['intents']}
                          ['old-in-flight-c1274'], frozen_in_flight)
+
+    def test_v3_addition_preserves_all_existing_intents_and_receipt_state(self):
+        self.collect([pair(1, direction='LONG'), pair(2, direction='SHORT')])
+        previous = self.db.read(1)
+        self.assertEqual(store.record_c1274_scan(
+            previous, c1274_bundle(), c1274_references(),
+            BASE + timedelta(minutes=2)), (1, 'MATCH'))
+        previous.update(rule_version=store.rules.PREVIOUS_VERSION,
+                        ruleset_sha256=store.rules.PREVIOUS_RULESET_SHA256)
+        previous['rule_activated_at'] = {'C1274': store.iso(BASE + timedelta(seconds=30)),
+                                         'C0964': store.iso(BASE)}
+        previous['retry']['later-source'] = {'event_time': store.iso(BASE + timedelta(minutes=1)),
+                                             'last_attempt': store.iso(BASE + timedelta(minutes=2))}
+        previous['planned_scans'] = {'already-planned': store.iso(BASE + timedelta(minutes=1))}
+        previous['planned_sequence_recovery_scans'] = deepcopy(previous['planned_scans'])
+        for item in previous['intents']:
+            item['payload']['predicate_version'] = store.rules.PREVIOUS_VERSION
+        in_flight = deepcopy(previous['intents'][0])
+        in_flight.update(intent_id='existing-in-flight', status='IN_FLIGHT',
+                         attempted_at=store.iso(BASE + timedelta(minutes=2)),
+                         attempt_token='frozen-attempt')
+        delivered = deepcopy(previous['intents'][1])
+        delivered.update(intent_id='existing-delivered', status='DELIVERED',
+                         acknowledged_at=store.iso(BASE + timedelta(minutes=2)), message_id=123)
+        previous['intents'].extend((in_flight, delivered))
+        self.db.write(1, previous)
+
+        upgraded_at = BASE + timedelta(minutes=3)
+        # An additive migration must not need to reinterpret any frozen text.
+        with patch.object(store.rules, 'render_message', side_effect=AssertionError('rerendered old intent')):
+            store.initialize_scope(1, upgraded_at)
+        state = self.db.read(1)
+        expected = deepcopy(previous)
+        expected.update(rule_version=store.rules.VERSION, ruleset_sha256=store.rules.RULESET_SHA256)
+        expected['rule_activated_at'][OBSERVATION_RULE] = store.iso(upgraded_at)
+        self.assertEqual(state, expected)
+        self.assertEqual({i['payload']['direction'] for i in state['intents']
+                          if i['status'] == 'PENDING'}, {'LONG', 'SHORT'})
+        self.assertEqual([i['status'] for i in state['intents']
+                          if i['payload']['rule_id'] == 'C1274'], ['PENDING'])
+        store.initialize_scope(1, BASE + timedelta(minutes=5))
+        self.assertEqual(self.db.read(1), expected)
+
+    def test_new_rule_fence_skips_pre_activation_and_survives_restart(self):
+        previous = self.db.read(1)
+        previous.update(rule_version=store.rules.PREVIOUS_VERSION,
+                        ruleset_sha256=store.rules.PREVIOUS_RULESET_SHA256)
+        self.db.write(1, previous)
+        upgraded_at = BASE + timedelta(minutes=3)
+        store.initialize_scope(1, upgraded_at)
+        result = self.collect([observation_pair(1, 2), observation_pair(2, 3),
+                               observation_pair(3, 3.5), observation_pair(4, 4.1),
+                               pair(5, 2)], BASE + timedelta(minutes=4))
+        self.assertEqual(result['created_intents'], 4)
+        state = self.db.read(1)
+        new_intents = [i for i in state['intents'] if i['payload']['rule_id'] == OBSERVATION_RULE]
+        self.assertEqual([i['payload']['event_id'] for i in new_intents], [3])
+        self.assertEqual(new_intents[0]['payload']['direction'], 'SHORT')
+        self.assertEqual(new_intents[0]['payload']['threshold_bps'], 175)
+        self.assertEqual({i['payload']['event_id'] for i in state['intents']
+                          if i['payload']['rule_id'] != OBSERVATION_RULE}, {5})
+        self.assertEqual(state['activated_at'], store.iso(BASE))
+        store.initialize_scope(1, BASE + timedelta(minutes=5))
+        result = self.collect([observation_pair(4, 4.1)], BASE + timedelta(minutes=5))
+        self.assertEqual(result['created_intents'], 1)
+        self.assertEqual(self.db.read(1)['rule_activated_at'][OBSERVATION_RULE], store.iso(upgraded_at))
+
+    def test_new_rule_planned_and_delivered_lanes_dedup_in_either_order(self):
+        for chat_id, planned_first in ((30, True), (31, False)):
+            with self.subTest(planned_first=planned_first):
+                store.initialize_scope(chat_id, BASE)
+                native, features = observation_pair(101, scan='shared-observation-scan')
+                planned = deepcopy(native)
+                planned.update(event_id='watch:' + native['event_fingerprint'],
+                               delivery_status='NOT_ATTEMPTED', capture_stage='WATCH_PLANNED_ALERT')
+                def record_planned():
+                    with patch.object(store.source, 'prepare_watch_pairs', return_value=([(planned, features)], {})):
+                        return store.record_watch_events(chat_id, [planned], BASE + timedelta(minutes=2))
+                def record_native():
+                    with patch.object(store.source, 'load_batch', return_value=([(native, features)], {})):
+                        return store.collect(chat_id, BASE + timedelta(minutes=2))
+                first, second = ((record_planned, record_native) if planned_first
+                                 else (record_native, record_planned))
+                self.assertEqual(first()['created_intents'], 1)
+                self.assertEqual(second()['created_intents'], 0)
+                state = self.db.read(chat_id)
+                self.assertEqual(len(state['intents']), 1)
+                self.assertEqual(state['intents'][0]['payload']['rule_id'], OBSERVATION_RULE)
+                self.assertEqual(state['intents'][0]['payload']['direction'], 'SHORT')
+                self.assertEqual(set(state['receipts']), {'101', planned['event_id']})
+                self.assertEqual(len(state['dedup']), 1)
+
+    def test_predecessor_migrations_require_the_exact_known_hash(self):
+        for version, digest in ((store.rules.PREVIOUS_VERSION, store.rules.LEGACY_RULESET_SHA256),
+                                (store.rules.LEGACY_VERSION, store.rules.PREVIOUS_RULESET_SHA256)):
+            with self.subTest(version=version):
+                state = self.db.read(1)
+                state.update(rule_version=version, ruleset_sha256=digest)
+                self.db.write(1, state)
+                with self.assertRaisesRegex(ValueError, 'version mismatch'):
+                    store.initialize_scope(1, BASE + timedelta(minutes=3))
+                self.assertEqual(self.db.read(1), state)
 
     def test_planned_receipts_do_not_enter_integer_source_query_or_resend_native(self):
         event, features = pair()

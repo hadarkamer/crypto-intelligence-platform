@@ -11,6 +11,7 @@ import json
 import os
 from typing import Any, Dict, Mapping, Optional
 
+import alert_delivery_policy as delivery_policy
 import research_feature_matrix
 import research_evidence_contract
 import research_formula_acceptance
@@ -423,7 +424,12 @@ class FormulaResearchWorker:
     def status(self) -> Dict[str, Any]:
         discovery_enabled = _DISCOVERY_ENABLED and _NATIVE_PIPELINE_COMPATIBLE
         shadow_enabled = _SHADOW_ENABLED and _NATIVE_PIPELINE_COMPATIBLE
-        live_alerts_enabled = _LIVE_ALERTS_ENABLED and _NATIVE_PIPELINE_COMPATIBLE
+        ordinary_alerts_enabled = delivery_policy.ordinary_alerts_enabled()
+        live_alerts_enabled = (
+            _LIVE_ALERTS_ENABLED
+            and _NATIVE_PIPELINE_COMPATIBLE
+            and ordinary_alerts_enabled
+        )
         return {
             "execution_state": (
                 "READY" if _NATIVE_PIPELINE_COMPATIBLE else _QUARANTINE_STATE
@@ -495,6 +501,7 @@ class FormulaResearchWorker:
             "live_delivery_gate": {
                 "environment_enabled": live_alerts_enabled,
                 "environment_configured": _LIVE_ALERTS_ENABLED,
+                "delivery_profile_allowed": ordinary_alerts_enabled,
                 "outcome_contract_compatible": _NATIVE_PIPELINE_COMPATIBLE,
                 "formula_validation_required": True,
                 "telegram_delivery_connected": self._telegram_bot is not None,
@@ -502,6 +509,8 @@ class FormulaResearchWorker:
                 "reason": (
                     _QUARANTINE_REASON
                     if not _NATIVE_PIPELINE_COMPATIBLE
+                    else "delivery disabled by ALERT_DELIVERY_PROFILE"
+                    if not ordinary_alerts_enabled
                     else (
                         "delivery requires a separate explicit owner approval record, "
                         "LIVE stage, runtime enablement and /ai_alerts_on in the "
@@ -1043,7 +1052,7 @@ class FormulaResearchWorker:
             "automatic_promotions": 0,
             "delivery": (
                 "ENABLED_FOR_SUBSCRIBED_CHATS"
-                if _LIVE_ALERTS_ENABLED
+                if _LIVE_ALERTS_ENABLED and delivery_policy.ordinary_alerts_enabled()
                 else "DISABLED_BY_ENVIRONMENT"
             ),
         }
@@ -1125,6 +1134,7 @@ class FormulaResearchWorker:
         if (
             not _NATIVE_PIPELINE_COMPATIBLE
             or not _LIVE_ALERTS_ENABLED
+            or not delivery_policy.ordinary_alerts_enabled()
             or self._telegram_bot is None
         ):
             return {"sent": 0, "failed": 0}
@@ -1134,6 +1144,8 @@ class FormulaResearchWorker:
         sent = 0
         failed = 0
         for delivery in pending:
+            if not delivery_policy.ordinary_alerts_enabled():
+                break
             try:
                 await self._telegram_bot.send_message(
                     chat_id=int(delivery["chat_id"]),

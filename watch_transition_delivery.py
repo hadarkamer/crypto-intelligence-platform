@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import time
 
+import alert_delivery_policy as delivery_policy
 import maxpain_cvd_short_alert
 import research_event_runtime
 import watch_transition_store as store
@@ -28,7 +29,8 @@ _STATUS = {
 
 
 def status():
-    return deepcopy(_STATUS)
+    return {**deepcopy(_STATUS),
+            "delivery_allowed_by_profile": delivery_policy.ordinary_alerts_enabled()}
 
 
 def cycle_result(watch_scan_id):
@@ -175,11 +177,14 @@ async def drain(bot, chat_id, *, limit=32, may_deliver=None, kinds=None, wait_fo
     Only unattempted, unexpired PENDING messages can recover after a restart.
     A crashed IN_FLIGHT attempt is settled UNKNOWN by the store, never resent.
     """
+    if not delivery_policy.ordinary_alerts_enabled():
+        return 0
     if (not wait_for_lock and _DRAIN_LOCK.locked()) or not await initialize():
         return 0
     formula_sent = 0
     async with _DRAIN_LOCK:
-        if may_deliver is not None and not may_deliver():
+        if (not delivery_policy.ordinary_alerts_enabled()
+                or (may_deliver is not None and not may_deliver())):
             return 0
         try:
             _STATUS["orphaned_attempts"] += await asyncio.to_thread(
@@ -189,7 +194,8 @@ async def drain(bot, chat_id, *, limit=32, may_deliver=None, kinds=None, wait_fo
             _gap("orphan_settlement", exc, database=True)
             return 0
         for _ in range(min(max(int(limit), 0), 128)):
-            if may_deliver is not None and not may_deliver():
+            if (not delivery_policy.ordinary_alerts_enabled()
+                    or (may_deliver is not None and not may_deliver())):
                 break
             try:
                 pending = await asyncio.to_thread(
@@ -202,7 +208,8 @@ async def drain(bot, chat_id, *, limit=32, may_deliver=None, kinds=None, wait_fo
             if not pending:
                 break
             intent = pending[0]
-            if may_deliver is not None and not may_deliver():
+            if (not delivery_policy.ordinary_alerts_enabled()
+                    or (may_deliver is not None and not may_deliver())):
                 # Eligibility can change while the database claim is awaited.
                 # No network attempt has begun: release only this reservation.
                 try:
