@@ -273,8 +273,37 @@ def test_watch_only_hook_structure():
     assert len(helper_calls) == 2
     watch, helper = max(helper_calls, key=lambda pair: pair[1].lineno)
     assert watch.name == "run_watch_cycle"
+
+    def assigned(name):
+        values = [node.value for node in ast.walk(watch) if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)]
+        assert len(values) == 1
+        return values[0]
+
+    def named_call(node, name):
+        return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+
+    def policy_call(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "alert_delivery_policy"
+                and node.func.attr == "ordinary_alerts_enabled")
+
+    # Selected-only delivery adds a policy gate without removing the original
+    # General Watch boundary. The transport callback must retain that gate too.
+    delivery_guard = assigned("ordinary_sent")
+    assert isinstance(delivery_guard, ast.BoolOp) and isinstance(delivery_guard.op, ast.And)
+    assert any(isinstance(node, ast.Name) and node.id == "general_enabled" for node in delivery_guard.values)
+    assert any(named_call(node, "may_deliver_ordinary") for node in delivery_guard.values)
+    callback = assigned("may_deliver_ordinary")
+    assert isinstance(callback, ast.Lambda)
+    assert isinstance(callback.body, ast.BoolOp) and isinstance(callback.body.op, ast.And)
+    assert any(policy_call(node) for node in callback.body.values)
+    assert any(named_call(node, "may_deliver_general") for node in callback.body.values)
+    assert any(keyword.arg == "may_deliver" and isinstance(keyword.value, ast.Name)
+               and keyword.value.id == "may_deliver_ordinary" for keyword in helper.keywords)
     guarded = [node for node in ast.walk(watch) if isinstance(node, ast.If)
-               and isinstance(node.test, ast.Name) and node.test.id == "general_enabled"
+               and isinstance(node.test, ast.Name) and node.test.id == "ordinary_sent"
                and helper in list(ast.walk(node))]
     assert len(guarded) == 1  # manual and Magnet-only paths never call helper
     guard = guarded[0]
@@ -283,12 +312,16 @@ def test_watch_only_hook_structure():
                      and node.func.attr == "capture_special_transitions"
                      and node.lineno < helper.lineno]
     assert len(prior_capture) == 2  # delivered and failed status branches
+    lifecycle_guard = assigned("ordinary_lifecycle")
+    assert isinstance(lifecycle_guard, ast.BoolOp) and isinstance(lifecycle_guard.op, ast.And)
+    assert any(isinstance(node, ast.Name) and node.id == "general_enabled" for node in lifecycle_guard.values)
+    assert any(policy_call(node) for node in lifecycle_guard.values)
     collected = [node for node in ast.walk(watch) if isinstance(node, ast.IfExp)
-                 and isinstance(node.test, ast.Name) and node.test.id == "general_enabled"
+                 and isinstance(node.test, ast.Name) and node.test.id == "ordinary_lifecycle"
                  and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
                          and child.func.id == "_collect_special_transition_messages"
                          for child in ast.walk(node.body))]
-    assert len(collected) == 1  # Magnet-only scans do not consume Score65 state
+    assert len(collected) == 1  # Magnet-only and selected-only scans do not consume Score65 state
     assert any(isinstance(node, ast.Try) and any(
         isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
         and child.func.attr == "reset_watch_context"
