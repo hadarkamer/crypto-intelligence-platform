@@ -2894,7 +2894,8 @@ async def _send_formula_watch_alerts(
     existing alert engine. No scoring, collection, or scheduling is changed.
     Delivery failure is recorded separately and cannot stop the Watch cycle.
     """
-    if not watch_scan_id:
+    import alert_delivery_policy
+    if not watch_scan_id or not alert_delivery_policy.ordinary_alerts_enabled():
         return 0
     try:
         matches = maxpain_cvd_short_alert.select_matches(score65_items)
@@ -2903,6 +2904,8 @@ async def _send_formula_watch_alerts(
         return 0
     sent = 0
     for match in matches:
+        if not alert_delivery_policy.ordinary_alerts_enabled():
+            break
         delivery_key = f"{chat_id}|{watch_scan_id}|{match.symbol}"
         if delivery_key in FORMULA_ALERT_SENT_KEYS:
             continue
@@ -3335,6 +3338,9 @@ async def _send_alert_with_confirmation(
     *,
     special_transitions_precomputed: bool = False,
 ) -> None:
+    import alert_delivery_policy
+    if not alert_delivery_policy.ordinary_alerts_enabled():
+        return
     # Freeze the Research Event decision timestamp BEFORE Telegram network latency.
     # The sidecar is still emitted only after successful delivery, but its market/news
     # join anchor remains the exact decision/observation time.
@@ -3366,12 +3372,14 @@ async def _send_alert_with_confirmation(
         )
     except Exception as exc:
         print(f"[research] sent alert hook failed: {exc!r}", flush=True)
-    if special_transitions_precomputed:
+    if special_transitions_precomputed or not alert_delivery_policy.ordinary_alerts_enabled():
         return
     separate_messages = _special_transition_messages(item)
     special_attempted_at = datetime.now(timezone.utc)
     try:
         for separate in separate_messages:
+            if not alert_delivery_policy.ordinary_alerts_enabled():
+                return
             await bot.send_message(chat_id=chat_id, text=separate, parse_mode="HTML")
     except Exception:
         if not special_transitions_precomputed:
@@ -4610,8 +4618,13 @@ async def _send_magnet_watch_reports(
     derivatives_snapshot: Dict[str, Dict[str, Any]],
 ) -> int:
     """Serve every Magnet subscriber from the already-collected Watch snapshot."""
+    import alert_delivery_policy
+    if not alert_delivery_policy.ordinary_alerts_enabled():
+        return 0
     sent = 0
     for symbol, watch in list(MAGNET_V1_WATCHES.items()):
+        if not alert_delivery_policy.ordinary_alerts_enabled():
+            break
         # The command may stop a symbol while a shared cycle is finishing.
         if symbol not in MAGNET_V1_WATCHES:
             continue
@@ -4631,6 +4644,8 @@ async def _send_magnet_watch_reports(
                 rows,
                 derivatives_snapshot=derivatives_snapshot,
             ):
+                if not alert_delivery_policy.ordinary_alerts_enabled():
+                    return sent
                 await bot_app.bot.send_message(
                     chat_id=target_chat,
                     text=message,
@@ -4718,6 +4733,7 @@ async def run_watch_cycle(
     general_enabled: bool = True,
 ) -> Dict[str, Any]:
     """Run one shared DOM + derivatives generation for all Watch consumers."""
+    import alert_delivery_policy
     cycle_started_at = datetime.now(timezone.utc)
     WATCH_RUNTIME["last_scan_utc"] = cycle_started_at.isoformat()
     WATCH_RUNTIME["scan_in_progress"] = True
@@ -4871,16 +4887,18 @@ async def run_watch_cycle(
                 # The ordinary Watch and the other experimental formulas retain
                 # their existing independent recovery paths.
                 print(f"[manual-formulas] C1274 preparation gap: {type(exc).__name__}", flush=True)
-            await dual_cvd65_delivery.record_watch(
-                chat_id, dual_cvd_bundle, watch_scan_id=watch_scan_id,
-                decision_time=datetime.now(timezone.utc),
-                price_references=experimental_references,
-            )
-            await dual_cvd65_delivery.drain(
-                bot_app.bot, chat_id,
-                wait_for_lock=True,
-                may_deliver=lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
-            )
+            if alert_delivery_policy.ordinary_alerts_enabled():
+                await dual_cvd65_delivery.record_watch(
+                    chat_id, dual_cvd_bundle, watch_scan_id=watch_scan_id,
+                    decision_time=datetime.now(timezone.utc),
+                    price_references=experimental_references,
+                )
+                await dual_cvd65_delivery.drain(
+                    bot_app.bot, chat_id,
+                    wait_for_lock=True,
+                    may_deliver=lambda: alert_delivery_policy.ordinary_alerts_enabled()
+                    and bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
+                )
         if top8_only:
             all_items = _filter_top8_items(all_items)
         displayable_items = [
@@ -4897,7 +4915,8 @@ async def run_watch_cycle(
         # A Magnet-only subscriber must not consume regular or combined alert
         # transitions that were never sent to the general Watch chat.
         transition_record = None
-        if general_enabled:
+        ordinary_lifecycle = general_enabled and alert_delivery_policy.ordinary_alerts_enabled()
+        if ordinary_lifecycle:
             transition_record = await watch_transition_delivery.record_watch(
                 chat_id, displayable_items, watch_scan_id=watch_scan_id,
                 decision_time=research_decision_time,
@@ -4909,9 +4928,9 @@ async def run_watch_cycle(
             _collect_special_transition_messages(
                 displayable_items, include_score65=False,
             )
-            if general_enabled else []
+            if ordinary_lifecycle else []
         )
-        if general_enabled and combined_precompute_error is not None:
+        if ordinary_lifecycle and combined_precompute_error is not None:
             raise combined_precompute_error
         combined_deliveries = (
             _collect_combined_confirmation_messages(
@@ -4922,7 +4941,7 @@ async def run_watch_cycle(
                 persist_research=True,
                 precomputed_candidates=combined_candidates,
             )
-            if general_enabled else []
+            if ordinary_lifecycle else []
         )
         candidates = [
             item
@@ -4962,11 +4981,13 @@ async def run_watch_cycle(
         # native delivery captures below still depend on real Telegram results.
         WATCH_RUNTIME["cycle_stage"] = "sending_experimental"
         may_deliver_general = lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id
+        may_deliver_ordinary = lambda: alert_delivery_policy.ordinary_alerts_enabled() and may_deliver_general()
         if general_enabled and may_deliver_general():
             try:
-                await research_ordered_experimental_worker.WORKER.drain_for_watch(
-                    chat_id, may_deliver=may_deliver_general,
-                )
+                if may_deliver_ordinary():
+                    await research_ordered_experimental_worker.WORKER.drain_for_watch(
+                        chat_id, may_deliver=may_deliver_ordinary,
+                    )
             except Exception as exc:
                 print(f"[ordered-experimental] watch preparation gap: {type(exc).__name__}", flush=True)
             try:
@@ -4982,14 +5003,16 @@ async def run_watch_cycle(
                 # Preparation/delivery cannot suppress the ordinary reports.
                 # The existing fresh delivered-event lane remains recoverable.
                 print(f"[manual-formulas] watch preparation gap: {type(exc).__name__}", flush=True)
-            WATCH_RUNTIME["last_formula_sent"] = await watch_transition_delivery.drain(
-                bot_app.bot, chat_id, kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
-                wait_for_lock=True,
-                may_deliver=may_deliver_general,
-            )
+            if may_deliver_ordinary():
+                WATCH_RUNTIME["last_formula_sent"] = await watch_transition_delivery.drain(
+                    bot_app.bot, chat_id, kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
+                    wait_for_lock=True,
+                    may_deliver=may_deliver_ordinary,
+                )
 
         WATCH_RUNTIME["cycle_stage"] = "sending_general"
-        if general_enabled:
+        ordinary_sent = general_enabled and may_deliver_ordinary()
+        if ordinary_sent:
             await bot_app.bot.send_message(chat_id=chat_id, text=header)
             for index, item in enumerate(result_items, start=1):
                 await _send_alert_with_confirmation(
@@ -5038,7 +5061,7 @@ async def run_watch_cycle(
             await watch_transition_delivery.drain(
                 bot_app.bot, chat_id,
                 kinds=("MAX_PAIN_SCORE_65",),
-                may_deliver=lambda: bool(WATCH_GENERAL_ENABLED) and WATCH_RUNTIME.get("chat_id") == chat_id,
+                may_deliver=may_deliver_ordinary,
             )
             for combined_delivery in combined_deliveries:
                 attempted_at = datetime.now(timezone.utc)
@@ -5073,13 +5096,15 @@ async def run_watch_cycle(
                     print(f"[research] Combined hook failed: {exc!r}", flush=True)
 
         WATCH_RUNTIME["cycle_stage"] = "sending_magnet"
-        magnet_sent = await _send_magnet_watch_reports(
-            bot_app,
-            rows,
-            derivatives_status,
-            cycle_number,
-            derivatives_snapshot,
-        )
+        magnet_sent = 0
+        if alert_delivery_policy.ordinary_alerts_enabled():
+            magnet_sent = await _send_magnet_watch_reports(
+                bot_app,
+                rows,
+                derivatives_status,
+                cycle_number,
+                derivatives_snapshot,
+            )
 
         top_item = (
             displayable_items[0]
@@ -5088,7 +5113,7 @@ async def run_watch_cycle(
         )
         WATCH_RUNTIME["last_found"] = len(displayable_items)
         WATCH_RUNTIME["last_candidates"] = len(candidates)
-        WATCH_RUNTIME["last_sent"] = len(result_items)
+        WATCH_RUNTIME["last_sent"] = len(result_items) if ordinary_sent else 0
         WATCH_RUNTIME["top_score"] = (
             top_item.get("score", top_item.get("priority"))
             if top_item else None
@@ -5100,7 +5125,7 @@ async def run_watch_cycle(
         delivery_errors = list(WATCH_RUNTIME.get("last_delivery_errors") or [])
         transition_result = (
             watch_transition_delivery.cycle_result(watch_scan_id)
-            if general_enabled else {"status": "NOT_APPLICABLE"}
+            if ordinary_sent else {"status": "NOT_APPLICABLE"}
         )
         WATCH_RUNTIME["last_transition_result"] = transition_result
         WATCH_RUNTIME["last_cycle_status"] = (
@@ -5110,7 +5135,7 @@ async def run_watch_cycle(
         )
         WATCH_RUNTIME["last_cycle_result"] = WATCH_RUNTIME["last_cycle_status"]
         WATCH_RUNTIME["last_completed_at_utc"] = datetime.now(timezone.utc).isoformat()
-        if delivery_errors:
+        if delivery_errors and alert_delivery_policy.ordinary_alerts_enabled():
             failed_symbols = ", ".join(error["symbol"] for error in delivery_errors)
             WATCH_RUNTIME["last_error"] = f"Magnet delivery incomplete: {failed_symbols}"
             try:
@@ -5128,8 +5153,8 @@ async def run_watch_cycle(
             "ok": True,
             "found": len(all_items),
             "candidates": len(candidates),
-            "sent": len(result_items),
-            "combined_sent": len(combined_deliveries) if general_enabled else 0,
+            "sent": len(result_items) if ordinary_sent else 0,
+            "combined_sent": len(combined_deliveries) if ordinary_sent else 0,
             "magnet_sent": magnet_sent,
             "delivery_errors": delivery_errors,
             "transition_result": transition_result,
@@ -5147,15 +5172,16 @@ async def run_watch_cycle(
         stage = WATCH_RUNTIME.get("cycle_stage", "unknown")
         print(f"[watch-cycle] failed scan={watch_scan_id} stage={stage} error={type(exc).__name__} cause={type(exc.__cause__).__name__}", flush=True)
         try:
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"❌ מחזור Watch משותף #{cycle_number} נכשל\n"
-                    f"{exc!r}\n"
-                    + ("הכשל אירע בשלב שליחת ההודעות.\n" if stage.startswith("sending_") else "הכשל אירע בהכנת נתוני הסריקה.\n")
-                    + "הלולאה נשארת פעילה ותנסה שוב במועד חצי השעה הבא."
-                ),
-            )
+            if alert_delivery_policy.ordinary_alerts_enabled():
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"❌ מחזור Watch משותף #{cycle_number} נכשל\n"
+                        f"{exc!r}\n"
+                        + ("הכשל אירע בשלב שליחת ההודעות.\n" if stage.startswith("sending_") else "הכשל אירע בהכנת נתוני הסריקה.\n")
+                        + "הלולאה נשארת פעילה ותנסה שוב במועד חצי השעה הבא."
+                    ),
+                )
         except Exception:
             pass
         return {"ok": False, "reason": repr(exc)}
@@ -5643,6 +5669,7 @@ async def _ensure_watch_coordinator(
 
 async def _watch_supervisor_loop(bot_app) -> None:
     """Keep every persisted Watch subscription alive until an explicit stop."""
+    import alert_delivery_policy
     while True:
         try:
             if _watch_consumers_active():
@@ -5673,32 +5700,37 @@ async def _watch_supervisor_loop(bot_app) -> None:
                     and not WATCH_RUNTIME.get("scan_in_progress")
                     and WATCH_RUNTIME.get("chat_id") == chat_id
                 ):
-                    await dual_cvd65_delivery.drain(
-                        bot_app.bot, int(chat_id),
-                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
-                        and not WATCH_RUNTIME.get("scan_in_progress")
-                        and WATCH_RUNTIME.get("chat_id") == chat_id,
-                    )
+                    if alert_delivery_policy.ordinary_alerts_enabled():
+                        await dual_cvd65_delivery.drain(
+                            bot_app.bot, int(chat_id),
+                            may_deliver=lambda: alert_delivery_policy.ordinary_alerts_enabled()
+                            and bool(WATCH_GENERAL_ENABLED)
+                            and not WATCH_RUNTIME.get("scan_in_progress")
+                            and WATCH_RUNTIME.get("chat_id") == chat_id,
+                        )
                     await manual_formula_alert_delivery.run_once(
                         bot_app.bot, int(chat_id),
                         may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
                         and not WATCH_RUNTIME.get("scan_in_progress")
                         and WATCH_RUNTIME.get("chat_id") == chat_id,
                     )
-                    await watch_transition_delivery.drain(
-                        bot_app.bot, int(chat_id),
-                        kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
-                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
-                        and not WATCH_RUNTIME.get("scan_in_progress")
-                        and WATCH_RUNTIME.get("chat_id") == chat_id,
-                    )
-                    await watch_transition_delivery.drain(
-                        bot_app.bot, int(chat_id),
-                        kinds=("MAX_PAIN_SCORE_65",),
-                        may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
-                        and not WATCH_RUNTIME.get("scan_in_progress")
-                        and WATCH_RUNTIME.get("chat_id") == chat_id,
-                    )
+                    if alert_delivery_policy.ordinary_alerts_enabled():
+                        await watch_transition_delivery.drain(
+                            bot_app.bot, int(chat_id),
+                            kinds=(maxpain_cvd_short_alert.FORMULA_ID,),
+                            may_deliver=lambda: alert_delivery_policy.ordinary_alerts_enabled()
+                            and bool(WATCH_GENERAL_ENABLED)
+                            and not WATCH_RUNTIME.get("scan_in_progress")
+                            and WATCH_RUNTIME.get("chat_id") == chat_id,
+                        )
+                        await watch_transition_delivery.drain(
+                            bot_app.bot, int(chat_id),
+                            kinds=("MAX_PAIN_SCORE_65",),
+                            may_deliver=lambda: alert_delivery_policy.ordinary_alerts_enabled()
+                            and bool(WATCH_GENERAL_ENABLED)
+                            and not WATCH_RUNTIME.get("scan_in_progress")
+                            and WATCH_RUNTIME.get("chat_id") == chat_id,
+                        )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -5819,6 +5851,7 @@ def _specific_watch_summary(symbol: str, watch: Dict[str, Any], current_price: f
 
 async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
     """Send the normal alert card for every timeframe of each active symbol watch."""
+    import alert_delivery_policy
     if not SPECIFIC_WATCHES:
         return
 
@@ -5845,10 +5878,11 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
 
         current_price = _find_symbol_current_price(rows, symbol)
         if current_price is None:
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ צפייה ב-{symbol}: לא נמצא מחיר חי בסריקה הנוכחית.",
-            )
+            if alert_delivery_policy.ordinary_alerts_enabled():
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ צפייה ב-{symbol}: לא נמצא מחיר חי בסריקה הנוכחית.",
+                )
             continue
 
         # Select one normal alert per timeframe. If both directions exist for the
@@ -5878,17 +5912,20 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
         ]
 
         target = float(watch["target_price"])
-        await bot_app.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"✅ צפייה ממוקדת — {symbol}\n"
-                f"מחיר נוכחי: ${fmt_price(current_price)} | "
-                f"יעד: ${fmt_price(target)}\n"
-                f"התראות זמינות: {len(ordered_items)}/{len(timeframe_order)} טווחים"
-            ),
-        )
+        if alert_delivery_policy.ordinary_alerts_enabled():
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ צפייה ממוקדת — {symbol}\n"
+                    f"מחיר נוכחי: ${fmt_price(current_price)} | "
+                    f"יעד: ${fmt_price(target)}\n"
+                    f"התראות זמינות: {len(ordered_items)}/{len(timeframe_order)} טווחים"
+                ),
+            )
 
         for index, item in enumerate(ordered_items, start=1):
+            if not alert_delivery_policy.ordinary_alerts_enabled():
+                break
             card = _alert_card(index, item, all_items, rows)
             # Add the compact target status only once, after the final normal card.
             if index == len(ordered_items):
@@ -5899,7 +5936,7 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
             timeframe for timeframe in timeframe_order
             if timeframe not in best_by_timeframe
         ]
-        if missing_timeframes:
+        if missing_timeframes and alert_delivery_policy.ordinary_alerts_enabled():
             await bot_app.bot.send_message(
                 chat_id=chat_id,
                 text=(
@@ -5914,10 +5951,11 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
         # The final message is deliberately separate and is sent only after all
         # ordinary timeframe alerts from the target-reaching cycle.
         if _specific_target_reached(watch, current_price):
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=_specific_watch_summary(symbol, watch, current_price),
-            )
+            if alert_delivery_policy.ordinary_alerts_enabled():
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=_specific_watch_summary(symbol, watch, current_price),
+                )
             completed.append(symbol)
 
     for symbol in completed:
@@ -5926,6 +5964,7 @@ async def run_specific_watch_cycle(bot_app, chat_id: int) -> None:
 
 async def specific_watch_loop(bot_app, chat_id: int):
     """One manager loop serves all symbol watches with one shared scan every 5 minutes."""
+    import alert_delivery_policy
     global SPECIFIC_WATCH_TASK
     try:
         while SPECIFIC_WATCHES:
@@ -5936,14 +5975,15 @@ async def specific_watch_loop(bot_app, chat_id: int):
             except Exception as exc:
                 print(f"[specific-watch] cycle error: {exc!r}", flush=True)
                 try:
-                    await bot_app.bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            "❌ סריקת הצפייה הספציפית נכשלה. "
-                            "הצפיות נשארות פעילות וינוסו שוב בעוד 5 דקות.\n"
-                            f"{exc!r}"
-                        ),
-                    )
+                    if alert_delivery_policy.ordinary_alerts_enabled():
+                        await bot_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                "❌ סריקת הצפייה הספציפית נכשלה. "
+                                "הצפיות נשארות פעילות וינוסו שוב בעוד 5 דקות.\n"
+                                f"{exc!r}"
+                            ),
+                        )
                 except Exception:
                     pass
             if SPECIFIC_WATCHES:
@@ -6503,9 +6543,11 @@ async def technical_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("\n".join(lines))
 
 async def health(request):
+    import alert_delivery_policy
     return web.json_response({
         "status": "ok",
         "service": "crypto-intelligence-v1",
+        "alert_delivery_policy": alert_delivery_policy.status(),
         "ai": ai_agent.status(),
         "research_capture": research_event_runtime.status(),
         "watch_transitions": watch_transition_delivery.status(),
@@ -6528,7 +6570,7 @@ async def health(request):
         "dedicated_formula_alert": {
             "formula_id": maxpain_cvd_short_alert.FORMULA_ID,
             "formula_version": maxpain_cvd_short_alert.FORMULA_VERSION,
-            "enabled": bool(WATCH_GENERAL_ENABLED),
+            "enabled": bool(WATCH_GENERAL_ENABLED) and alert_delivery_policy.ordinary_alerts_enabled(),
             "scope": "EXISTING_GENERAL_WATCH_SCORE65_TRANSITIONS",
             "last_cycle_sent": WATCH_RUNTIME.get("last_formula_sent", 0),
         },

@@ -159,6 +159,39 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         bot.send_message.assert_not_awaited()
         self.assertTrue(all(i['status']=='PENDING' for i in self.db.intents))
 
+    async def test_selected_only_profile_blocks_existing_pending_outbox(self):
+        await self.prepare()
+        before = deepcopy(self.db.intents)
+        self.assertTrue(before)
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(delivery.delivery_policy, 'ordinary_alerts_enabled', return_value=False), \
+             patch.object(store, 'claim_pending') as claim:
+            self.assertEqual(await delivery.drain(bot, 1, may_deliver=lambda: True), 0)
+            self.assertFalse(delivery.status()['delivery_allowed_by_profile'])
+        claim.assert_not_called()
+        bot.send_message.assert_not_awaited()
+        self.assertEqual(self.db.intents, before)
+
+    async def test_profile_change_during_claim_releases_without_sending(self):
+        await self.prepare()
+        allowed = [True]
+        def claim(*args, **kwargs):
+            rows = self.db.claim(*args, **kwargs)
+            allowed[0] = False
+            return rows
+        def release(intent_id, token):
+            row = self.db.intents[int(intent_id)]
+            self.assertEqual(row['attempt_token'], token)
+            row.update(status='PENDING', attempt_token=None, attempted_at=None)
+            return True
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(delivery.delivery_policy, 'ordinary_alerts_enabled', side_effect=lambda: allowed[0]), \
+             patch.object(store, 'claim_pending', claim), \
+             patch.object(store, 'release_unattempted', release) as released:
+            self.assertEqual(await delivery.drain(bot, 1, may_deliver=lambda: True), 0)
+        bot.send_message.assert_not_awaited()
+        self.assertTrue(all(row['status'] == 'PENDING' for row in self.db.intents))
+
     async def test_stop_while_claiming_releases_before_any_network_attempt(self):
         await self.prepare()
         active = [True]

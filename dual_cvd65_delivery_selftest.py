@@ -140,6 +140,32 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.claim_calls, 0)
         bot.send_message.assert_not_awaited()
 
+    async def test_selected_only_profile_blocks_existing_pending_outbox(self):
+        self.db.seed(2)
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(delivery.delivery_policy, 'ordinary_alerts_enabled', return_value=False):
+            self.assertEqual(await self.drain(bot), 0)
+            self.assertFalse(delivery.status()['delivery_allowed_by_profile'])
+        self.assertEqual(self.db.claim_calls, 0)
+        self.schema.assert_not_called()
+        self.assertTrue(all(row['status'] == 'PENDING' for row in self.db.rows))
+        bot.send_message.assert_not_awaited()
+
+    async def test_profile_change_during_claim_releases_without_sending(self):
+        self.db.seed()
+        allowed = [True]
+        def claim(*args, **kwargs):
+            rows = self.db.claim_pending(*args, **kwargs)
+            allowed[0] = False
+            return rows
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(delivery.delivery_policy, 'ordinary_alerts_enabled', side_effect=lambda: allowed[0]), \
+             patch.object(delivery.store, 'claim_pending', claim):
+            self.assertEqual(await self.drain(bot), 0)
+        self.assertEqual(self.db.releases, ['1'])
+        self.assertEqual(self.db.rows[0]['status'], 'PENDING')
+        bot.send_message.assert_not_awaited()
+
     async def test_priority_waits_for_existing_send_and_rechecks_authorization(self):
         await delivery.initialize(1)
         self.db.seed()

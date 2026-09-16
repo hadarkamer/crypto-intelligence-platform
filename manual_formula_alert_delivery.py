@@ -8,6 +8,7 @@ import time
 
 import manual_formula_alert as rules
 import manual_formula_alert_store as store
+import alert_delivery_policy
 
 _LOCK = asyncio.Lock()
 _READY = False
@@ -22,7 +23,13 @@ _STATUS = {'version': rules.VERSION, 'rule_ids': list(rules.RULES),
 
 
 def status():
-    return deepcopy(_STATUS)
+    result = deepcopy(_STATUS)
+    result['active_rule_ids'] = [rule for rule in rules.RULE_IDS
+                                 if alert_delivery_policy.manual_rule_enabled(rule)]
+    result['paused_rule_ids'] = [rule for rule in rules.RULE_IDS
+                                 if not alert_delivery_policy.manual_rule_enabled(rule)]
+    result['delivery_policy'] = alert_delivery_policy.status()
+    return result
 
 
 def _now():
@@ -124,6 +131,10 @@ async def _run(bot, chat_id, *, events=None, c1274_bundle=None,
             if intent is None:
                 break
             # This synchronous gate is immediately before entering transport.
+            if not alert_delivery_policy.manual_rule_enabled(intent.get('payload', {}).get('rule_id')):
+                await _finish(chat_id, intent, 'CANCELLED')
+                _STATUS['cancelled'] += 1
+                continue
             if not may_deliver() or store.utc(intent['expires_at']) <= _now():
                 await _finish(chat_id, intent, 'CANCELLED')
                 _STATUS['cancelled'] += 1

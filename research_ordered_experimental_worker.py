@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import os
 from typing import Any
 
+import alert_delivery_policy as delivery_policy
 import research_ordered_experimental as contract
 import research_ordered_experimental_store as store
 
@@ -20,7 +21,7 @@ except ImportError:
 
 
 def enabled() -> bool:
-    return _ENABLED
+    return _ENABLED and delivery_policy.ordinary_alerts_enabled()
 
 
 def _database_url() -> str:
@@ -50,14 +51,15 @@ class OrderedExperimentalWorker:
         self._watch_busy = predicate
 
     def status(self):
-        return {"enabled":_ENABLED,"configured":bool(_database_url()),
+        return {"enabled":enabled(),"configured":bool(_database_url()),
+                "delivery_allowed_by_profile":delivery_policy.ordinary_alerts_enabled(),
                 "running":bool(self._task and not self._task.done()),"telegram_connected":self._bot is not None,
-                "delivery_version":contract.VERSION,"live_effect":"EXPERIMENTAL_NOTIFICATION_ONLY" if _ENABLED else "NONE",
+                "delivery_version":contract.VERSION,"live_effect":"EXPERIMENTAL_NOTIFICATION_ONLY" if enabled() else "NONE",
                 "human_formula_approval_required":False,"trade_execution":False,"poll_seconds":_POLL,
                 "qualification_ttl_minutes":30,"trigger_ttl_minutes":10,"metrics":dict(self.metrics)}
 
     async def start(self):
-        if not _ENABLED:
+        if not enabled():
             return False
         if psycopg is None or not _database_url() or self._bot is None:
             raise RuntimeError("Experimental research database/Telegram binding missing")
@@ -100,38 +102,44 @@ class OrderedExperimentalWorker:
 
     async def run_once(self, *, chat_id=None, max_deliveries=2,
                        allow_watch=False, may_deliver=None):
-        if not _ENABLED or self._bot is None:
+        if not enabled() or self._bot is None:
             return {"sent":0,"disabled":True}
         async with self._delivery_lock:
             if not allow_watch and self._watch_busy():
                 return {"sent":0,"watch_busy":True}
             if may_deliver is not None and not may_deliver():
                 return {"sent":0,"delivery_stopped":True}
-            delivery_allowed = lambda: (allow_watch or not self._watch_busy()) and (
-                may_deliver is None or may_deliver())
+            delivery_allowed = lambda: (delivery_policy.ordinary_alerts_enabled()
+                and (allow_watch or not self._watch_busy())
+                and (may_deliver is None or may_deliver()))
             return await self._deliver(chat_id=chat_id, max_deliveries=max_deliveries,
                                        may_deliver=delivery_allowed, allow_watch=allow_watch)
 
     async def _deliver(self, *, chat_id, max_deliveries, may_deliver, allow_watch):
+        if not delivery_policy.ordinary_alerts_enabled():
+            return {"sent":0,"disabled":True}
         summary = await asyncio.to_thread(_transaction,store.enqueue,
             now=datetime.now(timezone.utc),scope_limit=32 if allow_watch else 8)
         summary.update(sent=0,unknown=0)
         for _ in range(max_deliveries):
-            if may_deliver is not None and not may_deliver():
+            if (not delivery_policy.ordinary_alerts_enabled()
+                    or (may_deliver is not None and not may_deliver())):
                 summary["delivery_stopped"] = True
                 break
             item = await asyncio.to_thread(_transaction,store.claim,
                 now=datetime.now(timezone.utc),chat_id=chat_id)
             if not item:
                 break
-            if may_deliver is not None and not may_deliver():
+            if (not delivery_policy.ordinary_alerts_enabled()
+                    or (may_deliver is not None and not may_deliver())):
                 await asyncio.to_thread(_transaction,store.release_unsent,item)
                 summary["delivery_stopped"] = True
                 break
             text = contract.render(item["payload"])
             if not await asyncio.to_thread(_transaction,store.begin_send,item,now=datetime.now(timezone.utc)):
                 continue
-            if may_deliver is not None and not may_deliver():
+            if (not delivery_policy.ordinary_alerts_enabled()
+                    or (may_deliver is not None and not may_deliver())):
                 # This live owner knows no transport call has started. A
                 # recovered SENDING lease still becomes UNKNOWN, as before.
                 await asyncio.to_thread(_transaction,store.release_unsent,item)

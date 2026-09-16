@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from unittest.mock import AsyncMock, Mock, patch
 
 import research_formula_store
 import research_formula_worker
@@ -94,8 +96,56 @@ async def _check() -> None:
         research_formula_store.load_pending_live_deliveries = originals["load_pending"]
 
 
+async def _check_delivery_policy() -> None:
+    # Exercise the profile independently of the current outcome quarantine.
+    with (
+        patch.object(research_formula_worker, "_NATIVE_PIPELINE_COMPATIBLE", True),
+        patch.object(research_formula_worker, "_DISCOVERY_ENABLED", True),
+        patch.object(research_formula_worker, "_SHADOW_ENABLED", True),
+        patch.object(research_formula_worker, "_LIVE_ALERTS_ENABLED", True),
+        patch.object(research_formula_store, "load_pending_live_deliveries") as load,
+        patch.object(research_formula_store, "mark_live_delivery") as mark,
+        patch.dict(os.environ, {"ALERT_DELIVERY_PROFILE": "SELECTED_EXPERIMENTAL_ONLY"}),
+    ):
+        worker = research_formula_worker.FormulaResearchWorker()
+        bot = Mock(send_message=AsyncMock())
+        worker.bind_telegram(bot)
+        assert await worker._deliver_pending_live_alerts() == {"sent": 0, "failed": 0}
+        load.assert_not_called()
+        mark.assert_not_called()
+        bot.send_message.assert_not_awaited()
+        state = worker.status()
+        assert state["discovery_enabled"] is True
+        assert state["shadow_enabled"] is True
+        assert state["live_alerts_enabled"] is False
+        assert state["live_delivery_gate"]["delivery_profile_allowed"] is False
+        assert "ALERT_DELIVERY_PROFILE" in state["live_delivery_gate"]["reason"]
+
+        # A profile change while awaiting the pending read still blocks sending.
+        def pending_after_profile_change():
+            os.environ["ALERT_DELIVERY_PROFILE"] = "SELECTED_EXPERIMENTAL_ONLY"
+            return [{"delivery_id": 1, "chat_id": 2}]
+
+        os.environ["ALERT_DELIVERY_PROFILE"] = "ALL"
+        load.side_effect = pending_after_profile_change
+        assert await worker._deliver_pending_live_alerts() == {"sent": 0, "failed": 0}
+        load.assert_called_once_with()
+        mark.assert_not_called()
+        bot.send_message.assert_not_awaited()
+
+        os.environ["ALERT_DELIVERY_PROFILE"] = "ALL"
+        load.side_effect = None
+        load.return_value = [{"delivery_id": 1, "chat_id": 2}]
+        with patch.object(worker, "_live_alert_text", return_value="fixture"):
+            assert await worker._deliver_pending_live_alerts() == {"sent": 1, "failed": 0}
+        bot.send_message.assert_awaited_once_with(chat_id=2, text="fixture")
+        mark.assert_called_once_with(1, sent=True)
+        assert worker.status()["live_alerts_enabled"] is True
+
+
 def run() -> None:
     asyncio.run(_check())
+    asyncio.run(_check_delivery_policy())
     print("Formula worker ordered-first-touch quarantine self-test: PASS")
 
 

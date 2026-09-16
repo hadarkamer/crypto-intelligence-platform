@@ -205,10 +205,74 @@ class ManualFormulaTests(unittest.TestCase):
         self.assertEqual(rows["C0964"]["price_reference"]["status"], "UNAVAILABLE")
         self.assertEqual(rows["PRICE_OI_SPOT65"]["price_reference"]["status"], "READY")
 
-    def test_price_display_does_not_change_matching_version_or_ruleset(self):
-        self.assertEqual(rules.VERSION, "manual-formula-experimental-alerts-v3")
+    def test_frozen_rule_version_and_ruleset(self):
+        self.assertEqual(rules.VERSION, "manual-formula-experimental-alerts-v4")
         self.assertEqual(rules.RULESET_SHA256,
-                         "a72815e826f3e15296584288926b0d3b6a322c12d7f2548d8032534130a1803b")
+                         "160901f44287a903208630abeaa20e24eba8615dd20f62fa1c33646294f85df6")
+
+    def test_doge_observation_is_direct_short_only_without_extra_indicator_filters(self):
+        rule_id = 'MAGNET_OBSERVATION_DOGE_SHORT'
+        for symbol in rules.SYMBOLS:
+            for direction in ('LONG', 'SHORT'):
+                event, features = fixture(symbol, direction)
+                event['engine_snapshot']['magnet_confirmation'] = {'status': 'OBSERVATION'}
+                event['engine_snapshot']['magnet'].update(magnet_quality=51.09, liquidity_edge_pct=-20)
+                event['engine_snapshot'].pop('market_evidence')
+                features = {key: value for key, value in features.items() if key.startswith('event.')}
+                features['captured.magnet.confirmation_status'] = 'OBSERVATION'
+                rows = rules.evaluate_event(event, features, NOW)
+                with self.subTest(symbol=symbol, direction=direction):
+                    self.assertEqual([row['rule_id'] for row in rows],
+                                     [rule_id] if symbol == 'DOGE' and direction == 'SHORT' else [])
+                    if rows:
+                        row = rows[0]
+                        self.assertEqual((row['direction'], row['source_direction']), ('SHORT', 'SHORT'))
+                        self.assertEqual(row['prediction_mode'], 'DIRECT')
+                        self.assertEqual(row['threshold_bps'], 175)
+                        self.assertIn('סף 1.75%', row['text'])
+                        self.assertIn('החיזוי בכיוון המגנט, ללא היפוך.', row['text'])
+                        self.assertNotIn('החיזוי הפוך', row['text'])
+
+    def test_doge_observation_rejects_other_states_invalid_direction_and_nonmagnet_source(self):
+        rule_id = 'MAGNET_OBSERVATION_DOGE_SHORT'
+        event, features = fixture('DOGE', 'SHORT')
+        event['engine_snapshot']['magnet_confirmation'] = {'status': 'OBSERVATION'}
+        features['captured.magnet.confirmation_status'] = 'OBSERVATION'
+        for status in (None, '', 'CONFIRMED', 'STRONG', 'UNCONFIRMED', 'observation'):
+            for target in ('snapshot', 'features'):
+                other, data = deepcopy(event), deepcopy(features)
+                if target == 'snapshot':
+                    other['engine_snapshot']['magnet_confirmation']['status'] = status
+                else:
+                    data['captured.magnet.confirmation_status'] = status
+                with self.subTest(status=status, target=target):
+                    self.assertNotIn(rule_id, result_ids(other, data))
+        other = deepcopy(event)
+        other['engine_snapshot']['magnet']['side'] = 'UPPER'
+        self.assertNotIn(rule_id, result_ids(other, features))
+        other = deepcopy(event)
+        other['event_type'] = 'PRICE_OI_ALERT'
+        self.assertNotIn(rule_id, result_ids(other, features))
+        data = {**features, 'event.direction_mapping_valid': False}
+        self.assertNotIn(rule_id, result_ids(event, data))
+
+    def test_doge_observation_reference_levels_are_frozen_symmetric_and_render_cannot_flip(self):
+        rule_id = 'MAGNET_OBSERVATION_DOGE_SHORT'
+        event, features = fixture('DOGE', 'SHORT')
+        event['engine_snapshot']['magnet_confirmation'] = {'status': 'OBSERVATION'}
+        event['engine_snapshot']['experimental_price_references'] = captured_references('DOGE')
+        features['captured.magnet.confirmation_status'] = 'OBSERVATION'
+        row = next(r for r in rules.evaluate_event(event, features, NOW) if r['rule_id'] == rule_id)
+        self.assertEqual(row['price_reference']['required_components'], ['MAX_PAIN'])
+        self.assertEqual(row['price_reference']['price'], '120')
+        self.assertIn('<b>סטופלוס:</b> 122.1', row['text'])
+        self.assertIn('<b>טייק פרופיט:</b> 117.9', row['text'])
+        event['engine_snapshot']['experimental_price_references']['MAX_PAIN']['price'] = '999'
+        self.assertEqual(rules.render_message(row), row['text'])
+        for changes in ({'direction': 'LONG'}, {'source_direction': 'LONG', 'direction': 'LONG'},
+                        {'symbol': 'BTC'}, {'threshold_bps': 150}, {'prediction_mode': 'INVERSE'}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                rules.render_message({**row, **changes})
 
     def test_c0964_exact_predicate_btc_both_directions_and_note(self):
         for symbol in rules.SYMBOLS:

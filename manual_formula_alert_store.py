@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import manual_formula_alert as rules
 import manual_formula_alert_source as source
+import alert_delivery_policy
 from watch_transition_store import _connect
 
 STORE_VERSION = 'manual-four-formulas-outbox-v1'
@@ -61,25 +62,30 @@ def _locked(conn, key, now):
     conn.execute('INSERT INTO bot_settings(key,value) VALUES(%s,%s) ON CONFLICT(key) DO NOTHING',
                  (key, _encode(_initial(now))))
     state = json.loads(conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()['value'])
-    if (state.get('version') == STORE_VERSION
-            and state.get('rule_version') == rules.PREVIOUS_VERSION
-            and state.get('ruleset_sha256') == rules.PREVIOUS_RULESET_SHA256):
-        # Upgrade only the known deployed ruleset. C1274 changed definition,
-        # symbol scope and threshold; old pending alerts must remain frozen and
-        # must never be re-rendered as the new Futures-only formula.
+    from_previous = (state.get('rule_version') == rules.PREVIOUS_VERSION
+                     and state.get('ruleset_sha256') == rules.PREVIOUS_RULESET_SHA256)
+    from_legacy = (state.get('rule_version') == rules.LEGACY_VERSION
+                   and state.get('ruleset_sha256') == rules.LEGACY_RULESET_SHA256)
+    if state.get('version') == STORE_VERSION and (from_previous or from_legacy):
+        # The v4 addition must not replay earlier signals, reset any existing
+        # activation fence, or change previously frozen messages/attempts.
         state.update(rule_version=rules.VERSION, ruleset_sha256=rules.RULESET_SHA256)
-        state.setdefault('rule_activated_at', {})['C1274'] = iso(now)
+        state.setdefault('rule_activated_at', {})['MAGNET_OBSERVATION_DOGE_SHORT'] = iso(now)
         state.setdefault('c1274_candles', {})
-        for item in state['intents']:
-            if item['status'] == 'PENDING':
-                if item.get('payload', {}).get('rule_id') == 'C1274':
-                    item.update(status='CANCELLED', acknowledged_at=iso(now),
-                                cancellation_reason='C1274_RULE_REPLACED')
-                    _count(state, 'cancelled')
-                    continue
-                item['payload']['predicate_version'] = rules.VERSION
-                item['text'] = rules.render_message(item['payload'])
-                item['payload']['text'] = item['text']
+        if from_legacy:
+            # Only v2 still has the replaced C1274 definition. Preserve its
+            # original upgrade policy when a destination skipped v3 entirely.
+            state['rule_activated_at']['C1274'] = iso(now)
+            for item in state['intents']:
+                if item['status'] == 'PENDING':
+                    if item.get('payload', {}).get('rule_id') == 'C1274':
+                        item.update(status='CANCELLED', acknowledged_at=iso(now),
+                                    cancellation_reason='C1274_RULE_REPLACED')
+                        _count(state, 'cancelled')
+                        continue
+                    item['payload']['predicate_version'] = rules.VERSION
+                    item['text'] = rules.render_message(item['payload'])
+                    item['payload']['text'] = item['text']
         _save(conn, key, state)
     if (state.get('version') != STORE_VERSION or state.get('rule_version') != rules.VERSION
             or state.get('ruleset_sha256') != rules.RULESET_SHA256):
@@ -140,6 +146,8 @@ def _c1274_identity(payload):
 
 def record_c1274_scan(state, bundle, references, now):
     """Freeze at most one C1274 decision for each observed Futures candle."""
+    if not alert_delivery_policy.manual_rule_enabled('C1274'):
+        return 0, 'ALERT_POLICY_DISABLED'
     now = utc(now)
     result = rules.evaluate_c1274_scan(bundle, references, now)
     candle_key = hashlib.sha256(
@@ -206,6 +214,8 @@ def record_events(state, pairs, now, *, planned=False):
             # the rules already evaluated in the priority group.
             payloads = [p for p in payloads if p['rule_id'] == 'PRICE_OI_ENTRY2']
         for payload in payloads:
+            if not alert_delivery_policy.manual_rule_enabled(payload['rule_id']):
+                continue
             activation = state.get('rule_activated_at', {}).get(payload['rule_id'], state['activated_at'])
             if when <= utc(activation):
                 continue
@@ -225,6 +235,7 @@ def record_events(state, pairs, now, *, planned=False):
                 _count(state, 'planned_sequence_recovered')
         state['receipts'][identity] = iso(when)
         retry_sequence = (not planned and event.get('symbol') in rules.RULES['PRICE_OI_ENTRY2']['symbols']
+                          and alert_delivery_policy.manual_rule_enabled('PRICE_OI_ENTRY2')
                           and rules.source_is_eligible(event, features, now)
                           and rules._score65(features, 'price_oi')
                           and features.get('sequence.capture_status') in {'SOURCE_UNAVAILABLE', 'SOURCE_OVERFLOW'})
@@ -304,7 +315,8 @@ def record_watch_events(chat_id, events, now, *, c1274_bundle=None,
         for event, features in pairs:
             scan = event['engine_snapshot']['watch_scan_id']
             state.setdefault('planned_scans', {})[scan] = iso(now)
-            if (event['symbol'] in rules.RULES['PRICE_OI_ENTRY2']['symbols']
+            if (alert_delivery_policy.manual_rule_enabled('PRICE_OI_ENTRY2')
+                    and event['symbol'] in rules.RULES['PRICE_OI_ENTRY2']['symbols']
                     and rules._score65(features, 'price_oi')
                     and features.get('sequence.capture_status') in {'SOURCE_UNAVAILABLE', 'SOURCE_OVERFLOW'}):
                 state.setdefault('planned_sequence_recovery_scans', {})[scan] = iso(now)
@@ -324,6 +336,11 @@ def claim(chat_id, now, *, database_url=None):
         result = None
         for item in state['intents']:
             if item['status'] == 'PENDING':
+                if not alert_delivery_policy.manual_rule_enabled(item.get('payload', {}).get('rule_id')):
+                    item.update(status='CANCELLED', acknowledged_at=iso(now),
+                                cancellation_reason='ALERT_POLICY_DISABLED')
+                    _count(state, 'cancelled')
+                    continue
                 item.update(status='IN_FLIGHT', attempt_token=uuid4().hex, attempted_at=iso(now))
                 result = deepcopy(item)
                 break

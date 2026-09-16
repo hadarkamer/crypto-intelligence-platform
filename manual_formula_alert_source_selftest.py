@@ -97,6 +97,39 @@ class SourceTests(unittest.TestCase):
             pairs, _ = self.load(Connection([row]))
             self.assertEqual([r['rule_id'] for r in rules.evaluate_event(*pairs[0], NOW)], ['C0964'])
 
+    def test_magnet_status_survives_native_projection_and_planned_capture(self):
+        class ProjectedConnection(Connection):
+            def execute(self, sql, params):
+                result = super().execute(sql, params)
+                projected = result.fetchall()
+                for row in projected:
+                    row['engine_snapshot'] = {
+                        key: value for key, value in row['engine_snapshot'].items()
+                        if key in params[6]
+                    }
+                return Rows(projected)
+
+        for status in ('OBSERVATION', 'CONFIRMED', None):
+            with self.subTest(status=status):
+                row = event(score=24, direction='SHORT', symbol='DOGE')
+                row.update(event_type='MAGNET_ALERT', event_fingerprint='a'*64)
+                row['engine_snapshot']['magnet'] = {'side': 'LOWER', 'magnet_quality': 55}
+                if status is not None:
+                    row['engine_snapshot']['magnet_confirmation'] = {'status': status}
+                pairs, _ = self.load(ProjectedConnection([row]))
+                native_features = pairs[0][1]
+                self.assertTrue(native_features['event.direction_mapping_valid'])
+                self.assertEqual(native_features['event.analysis_direction'], 'SHORT')
+                self.assertEqual(native_features.get('captured.magnet.confirmation_status'), status)
+                if status is None:
+                    # A low quality alone cannot invent a missing captured label.
+                    self.assertNotIn('captured.magnet.confirmation_status', native_features)
+                planned = deepcopy(row)
+                planned.update(event_id='watch:' + 'a'*64, delivery_status='NOT_ATTEMPTED',
+                               capture_stage='WATCH_PLANNED_ALERT')
+                planned_pairs, _ = source.prepare_watch_pairs(Connection([]), [planned], NOW)
+                self.assertEqual(planned_pairs[0][1], native_features)
+
     def load(self, conn, **kwargs):
         return source.load_batch(conn, activated_at=NOW-timedelta(hours=1), now=NOW,
                                  processed_ids=[], **kwargs)

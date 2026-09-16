@@ -24,7 +24,7 @@ _SNAPSHOT_KEYS = (
     'watch_scan_id', 'sheet_snapshot_id', 'alert_side',
     'experimental_price_references',
     'calculation_validation_errors', 'consensus_hits', 'consensus_total',
-    'magnet', 'market_evidence', 'inverse_analysis', 'record_mode',
+    'magnet', 'magnet_confirmation', 'market_evidence', 'inverse_analysis', 'record_mode',
     'source_scope', 'source_kind', 'data_mode', 'state', 'mode',
     'archive_import', 'archive_reconstruction', 'telegram_archive_import',
     'archive_only', 'telegram_archive', 'archive_run_key',

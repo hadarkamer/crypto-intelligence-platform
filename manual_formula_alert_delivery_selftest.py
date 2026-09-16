@@ -119,6 +119,73 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             runtime.reset_watch_context(token)
 
+    async def test_actual_doge_observation_preview_delivers_normal_short_once(self):
+        import main
+        import research_event_runtime as runtime
+        delivery.store.initialize_scope(1, BASE)
+        stamp = BASE + timedelta(minutes=1)
+        reference = {
+            'status': 'READY', 'component': 'MAX_PAIN', 'symbol': 'DOGE',
+            'price': '0.1', 'price_time_utc': BASE.isoformat(),
+            'anchor_time_utc': (BASE + timedelta(seconds=30)).isoformat(),
+            'source': 'BINANCE_SPOT_TRADE_1M', 'precision': 'CLOSED_1M',
+        }
+        rows = [
+            {'symbol': 'DOGE', 'timeframe': timeframe, 'current_price': .101,
+             'long_max_pain': target, 'long_liquidation_amount': 1_000_000,
+             'short_liquidation_amount': 2_000_000,
+             'price_source': 'binance_spot', 'price_pair': 'DOGEUSDT'}
+            for timeframe, target in (('12h', .099), ('24h', .0999))
+        ]
+        token = runtime.set_watch_context(
+            watch_scan_id='current-doge-observation-watch',
+            experimental_reference_prices_by_symbol={'DOGE': {'MAX_PAIN': reference}},
+        )
+        try:
+            with patch.object(main, 'MAGNET_V1_WATCHES', {'DOGE': {'chat_id': 1}}), \
+                 patch.object(main, 'datetime', SimpleNamespace(now=lambda tz: stamp)), \
+                 patch.object(runtime.research_event_store.WRITER, 'enqueue') as writer:
+                events = main._preview_watch_formula_sources(
+                    1, [], [], [], None, rows, {}, stamp,
+                )
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]['engine_snapshot']['magnet_confirmation']['status'], 'OBSERVATION')
+                self.assertLess(events[0]['engine_snapshot']['magnet']['magnet_quality'], 60)
+                self.assertEqual(events[0]['delivery_status'], 'NOT_ATTEMPTED')
+                bot = self.bot()
+                self.assertEqual(await delivery.run_watch(bot, 1, events, may_deliver=lambda: True), 1)
+                self.assertEqual(await delivery.run_watch(bot, 1, events, may_deliver=lambda: True), 0)
+            writer.assert_not_called()
+            intent = self.rows()[0]
+            self.assertEqual(intent['status'], 'DELIVERED')
+            self.assertEqual(intent['payload']['rule_id'], 'MAGNET_OBSERVATION_DOGE_SHORT')
+            self.assertEqual(intent['payload']['symbol'], 'DOGE')
+            self.assertEqual(intent['payload']['source_direction'], 'SHORT')
+            self.assertEqual(intent['payload']['direction'], 'SHORT')
+            self.assertEqual(intent['payload']['threshold_bps'], 175)
+            self.assertEqual(intent['payload']['price_reference']['price'], '0.1')
+            self.assertEqual(intent['payload']['price_reference']['required_components'], ['MAX_PAIN'])
+            text = bot.send_message.await_args.kwargs['text']
+            self.assertIn('סף 1.75%', text)
+            self.assertIn('DOGE | ירידה — SHORT', text)
+            self.assertIn('<b>סטופלוס:</b> 0.10175', text)
+            self.assertIn('<b>טייק פרופיט:</b> 0.09825', text)
+            self.assertNotIn('החיזוי הפוך', text)
+
+            # A later delivery receipt from the same Watch cannot resend it.
+            native = deepcopy(events[0])
+            native.update(event_id=9001, delivery_status='DELIVERED',
+                          capture_stage='TELEGRAM_MAGNET_ALERT')
+            source = delivery.store.source
+            features = source.totals.extract_event_features(native)
+            features.update(source.questions.extended_features(native))
+            with patch.object(source, 'load_batch', return_value=([(native, features)], {'selected_events': 1})):
+                self.assertEqual(await self.run_delivery(bot), 0)
+            bot.send_message.assert_awaited_once()
+            self.assertEqual(len(self.rows()), 1)
+        finally:
+            runtime.reset_watch_context(token)
+
     async def test_watch_delivers_frozen_sol_c1274_bundle_at_one_point_five_percent(self):
         delivery.store.initialize_scope(1, BASE)
         computed = BASE + timedelta(minutes=1)

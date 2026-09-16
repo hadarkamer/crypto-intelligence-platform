@@ -20,9 +20,11 @@ from zoneinfo import ZoneInfo
 from experimental_reference_price import VERSION as REFERENCE_VERSION
 from experimental_reference_price import render_reference_levels, select_reference
 
-VERSION = "manual-formula-experimental-alerts-v3"
-PREVIOUS_VERSION = "manual-formula-experimental-alerts-v2"
-PREVIOUS_RULESET_SHA256 = "9d28a33d38faae8bafce6f03b3ce400a1f928aca16f36edecb46b9450dd234c8"
+VERSION = "manual-formula-experimental-alerts-v4"
+PREVIOUS_VERSION = "manual-formula-experimental-alerts-v3"
+PREVIOUS_RULESET_SHA256 = "a72815e826f3e15296584288926b0d3b6a322c12d7f2548d8032534130a1803b"
+LEGACY_VERSION = "manual-formula-experimental-alerts-v2"
+LEGACY_RULESET_SHA256 = "9d28a33d38faae8bafce6f03b3ce400a1f928aca16f36edecb46b9450dd234c8"
 SYMBOLS = ("BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP")
 TRIGGER_TTL = timedelta(minutes=10)
 _ISRAEL = ZoneInfo("Asia/Jerusalem")
@@ -74,7 +76,15 @@ RULES = {
         "notes": {"BTC": ("מבוסס בעיקר על אוגוסט ועל עליות",)},
         "conditions_text": "מגנט עם יתרון נזילות LE של 30% ומעלה, ו־Spot CVD בציון כולל 25 ומעלה בכיוון המגנט.",
     },
+    "MAGNET_OBSERVATION_DOGE_SHORT": {
+        "name": "Magnet OBSERVATION — DOGE שורט",
+        "threshold_bps": 175,
+        "symbols": ("DOGE",),
+        "notes": {},
+        "conditions_text": "מגנט מתחת למחיר במצב תצפית OBSERVATION, עם מיפוי כיוון מקור מאומת לשורט.",
+    },
 }
+_DIRECT_RULES = frozenset(("C1274", "MAGNET_OBSERVATION_DOGE_SHORT"))
 RULE_IDS = tuple(RULES)
 RULESET_SHA256 = hashlib.sha256(json.dumps(RULES, ensure_ascii=False, sort_keys=True,
                                          separators=(',', ':')).encode()).hexdigest()
@@ -88,6 +98,7 @@ _REFERENCE_COMPONENTS = {
     "PRICE_OI_SPOT65": ("PRICE_OI", "SPOT_CVD"),
     "CONSENSUS_FULL": ("MAX_PAIN",),
     "C0964": ("MAX_PAIN", "SPOT_CVD"),
+    "MAGNET_OBSERVATION_DOGE_SHORT": ("MAX_PAIN",),
 }
 
 
@@ -275,6 +286,13 @@ def _score65(features: Mapping[str, Any], name: str) -> bool:
 
 
 def _matches(rule_id: str, event: Mapping[str, Any], features: Mapping[str, Any]) -> bool:
+    if rule_id == "MAGNET_OBSERVATION_DOGE_SHORT":
+        snapshot = _mapping(event.get("engine_snapshot"))
+        return (event.get("event_type") in _MAGNET_TYPES
+                and event.get("direction") == "SHORT"
+                and _mapping(snapshot.get("magnet")).get("side") == "LOWER"
+                and _mapping(snapshot.get("magnet_confirmation")).get("status") == "OBSERVATION"
+                and features.get("captured.magnet.confirmation_status") == "OBSERVATION")
     if rule_id == "C0964":
         magnet = _mapping(_mapping(event.get("engine_snapshot")).get("magnet"))
         edge = _number(magnet.get("liquidity_edge_pct"))
@@ -320,7 +338,7 @@ def _valid_c1274_payload(payload: Mapping[str, Any]) -> bool:
 def render_message(payload: Mapping[str, Any]) -> str:
     """Render HTML for an exact rule/symbol/direction, without performance claims."""
     rule = RULES.get(payload.get("rule_id"))
-    direct = payload.get("rule_id") == "C1274"
+    direct = payload.get("rule_id") in _DIRECT_RULES
     expected_direction = (payload.get("source_direction") if direct
                           else _INVERSE.get(payload.get("source_direction")))
     if (not rule or payload.get("predicate_version") != VERSION
@@ -328,8 +346,10 @@ def render_message(payload: Mapping[str, Any]) -> str:
             or payload.get("symbol") not in rule["symbols"]
             or payload.get("source_direction") not in _INVERSE
             or payload.get("direction") != expected_direction
-            or (direct and (payload.get("prediction_mode") != "DIRECT"
-                            or not _valid_c1274_payload(payload)))):
+            or (direct and payload.get("prediction_mode") != "DIRECT")
+            or (payload.get("rule_id") == "C1274" and not _valid_c1274_payload(payload))
+            or (payload.get("rule_id") == "MAGNET_OBSERVATION_DOGE_SHORT"
+                and payload.get("direction") != "SHORT")):
         raise ValueError("Invalid frozen experimental notification")
     stamp = utc(payload["event_time"]).astimezone(_ISRAEL)
     direction = "עלייה — LONG" if payload["direction"] == "LONG" else "ירידה — SHORT"
@@ -340,6 +360,8 @@ def render_message(payload: Mapping[str, Any]) -> str:
                                      rule["threshold_bps"], payload["direction"], html=True),
              escape(rule["conditions_text"]),
              *([] if direct else ["החיזוי הפוך לכיוון המחקר של אירוע המקור."]),
+             *(["החיזוי בכיוון המגנט, ללא היפוך."]
+               if payload.get("rule_id") == "MAGNET_OBSERVATION_DOGE_SHORT" else []),
              *["<b>הערה</b>: " + escape(note) for note in rule["notes"].get(payload["symbol"], ())],
              f"זמן ההתראה בישראל: {stamp:%d.%m.%Y %H:%M:%S}",
              *([] if str(payload["event_id"]).startswith("watch:") else [f'אירוע מקור: {payload["event_id"]}']),
@@ -348,7 +370,7 @@ def render_message(payload: Mapping[str, Any]) -> str:
 
 
 def evaluate_event(event: Mapping[str, Any], features: Mapping[str, Any], now: Any, *, planned=False) -> list[dict[str, Any]]:
-    """Return zero or more exact inverse experimental notifications.
+    """Return exact experimental notifications in each rule's audited direction.
 
     The caller provides canonical event/sequence features and owns activation,
     durable idempotency and delivery. Invalid or absent data never manufacture
@@ -362,10 +384,14 @@ def evaluate_event(event: Mapping[str, Any], features: Mapping[str, Any], now: A
             continue
         if event["symbol"] not in rule["symbols"] or not _matches(rule_id, event, features):
             continue
+        direct = rule_id in _DIRECT_RULES
         payload = {"rule_id": rule_id, "threshold_bps": rule["threshold_bps"],
-                   "symbol": event["symbol"], "direction": _INVERSE[event["direction"]],
+                   "symbol": event["symbol"],
+                   "direction": event["direction"] if direct else _INVERSE[event["direction"]],
                    "event_id": event["event_id"], "event_time": utc(event["alert_time_utc"]).isoformat(),
                    "source_direction": event["direction"], "predicate_version": VERSION}
+        if direct:
+            payload["prediction_mode"] = "DIRECT"
         references = _mapping(event.get("engine_snapshot")).get("experimental_price_references")
         reference = select_reference(references, _REFERENCE_COMPONENTS[rule_id],
                                      symbol=event["symbol"], as_of=event["alert_time_utc"])
