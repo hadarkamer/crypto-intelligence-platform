@@ -1,0 +1,38 @@
+name: Half Threshold Pending Limit Cancellation
+on:
+  push:
+    branches: [paper-trading-v1]
+    paths:
+      - 'hl_testnet_runtime/**'
+      - 'hyperliquid_testnet_executor*.py'
+      - '.github/workflows/half-threshold-cancel.yml'
+permissions:
+  contents: read
+concurrency:
+  group: half-threshold-cancel-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-ci-password
+          POSTGRES_DB: hl_journal_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hl_journal_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HL_JOURNAL_CI_URL: postgresql://postgres:disposable-ci-password@127.0.0.1:5432/hl_journal_ci
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: python3 -m pip install 'psycopg[binary]==3.2.3'
+      - name: Cancellation math, mocked exchange, real isolated PostgreSQL and no-send startup
+        run: python3 -m unittest -v hl_testnet_runtime.test_half_threshold_cancel hl_testnet_runtime.test_cancel_runtime

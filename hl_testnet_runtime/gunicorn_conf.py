@@ -1,4 +1,4 @@
-"""Default storage/read-only task; explicit expiring single-test mode is separate."""
+"""Default read-only tasks; expiring entry test and cancellation execution are separate."""
 workers = 1
 worker_class = 'sync'
 accesslog = None
@@ -15,6 +15,11 @@ def post_worker_init(worker):
         import threading
         from hl_testnet_runtime.controlled_attempt import startup_single_attempt
         threading.Thread(target=startup_single_attempt,daemon=True,name='explicit-single-testnet').start()
+    elif (mode == 'read_only' and os.environ.get('HL_TESTNET_JOURNAL_BACKEND') == 'staging_postgres_v1'
+            and os.environ.get('HL_TESTNET_CANCELLATION_RULE_REVIEW')):
+        import threading
+        from hl_testnet_runtime.half_threshold_cancel import startup_review
+        threading.Thread(target=startup_review,daemon=True,name='cancel-rule-review-only').start()
     elif (os.environ.get('HL_TESTNET_JOURNAL_BACKEND') == 'staging_postgres_v1' and mode == 'read_only'):
         import threading
         from hl_testnet_runtime.persistent_execution import startup_storage_check
