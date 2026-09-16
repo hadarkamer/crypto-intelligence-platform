@@ -17,6 +17,11 @@ def post_worker_init(worker):
         'fees_funding_slippage_included': False,
         'resizes_existing_orders': False, 'mainnet_enabled': False}}), flush=True)
     mode = os.environ.get('HL_TESTNET_RUNTIME_MODE','read_only')
+    if (os.environ.get('HL_TESTNET_CARDS_PHASE1') == 'record_only_v1'
+            and mode in ('read_only', 'cancel_monitor_testnet_v1')):
+        import threading
+        from hl_testnet_runtime.trade_cards_startup import startup as cards_startup
+        threading.Thread(target=cards_startup,daemon=True,name='cards-record-only-probe').start()
     if mode in ('cancel_rehearsal_testnet_v1','inspect_cancel_rehearsal_testnet_v1'):
         import threading
         from hl_testnet_runtime.cancel_rehearsal import startup
