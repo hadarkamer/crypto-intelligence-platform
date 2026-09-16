@@ -128,8 +128,11 @@ def review_only(message, *, account, agent, journal=None, exit_type=None, client
         age = (instant - at).total_seconds()
         if not 0 <= age <= MAX_SOURCE_AGE_SECONDS:
             report['blockers'].append('SOURCE_NOT_FRESH_FOR_ONE_SHOT_TEST')
-        if exit_type not in ('market', 'limit'):
+        if exit_type not in ('market', 'limit', 'tp_limit_sl_market'):
             report['blockers'].append('EXPLICIT_EXIT_TYPE_REQUIRED')
+        else:
+            report['take_profit_type'] = 'limit' if exit_type == 'tp_limit_sl_market' else exit_type
+            report['stop_loss_type'] = 'market' if exit_type == 'tp_limit_sl_market' else exit_type
         storage = journal_status(journal, env=env)
         report['journal_status'] = storage
         if storage != 'JOURNAL_PATH_CHECKED':

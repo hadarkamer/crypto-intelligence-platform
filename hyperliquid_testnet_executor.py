@@ -119,9 +119,10 @@ def build_action(message: dict, metadata: dict, account: str, *, exit_type: str)
     $5000 maximum notional is a laboratory bound, not the trading strategy.
     'market': supplied exit prices remain trigger prices; execution may differ.
     'limit': trigger and limit use the supplied price; exit may remain unfilled.
+    'tp_limit_sl_market': owner-approved TP limit and SL market, both pre-set.
     """
     message, account = _signal(message), _account(account)
-    if exit_type not in ("market", "limit"):
+    if exit_type not in ("market", "limit", "tp_limit_sl_market"):
         raise TestnetError("EXPLICIT_EXIT_TYPE_REQUIRED")
     universe = metadata.get("universe") if isinstance(metadata, dict) else None
     if not isinstance(universe, list) or not universe or len(universe) > 10000:
@@ -151,7 +152,9 @@ def build_action(message: dict, metadata: dict, account: str, *, exit_type: str)
     for role, price in zip(ROLES, (entry, take, stop)):
         cloid = "0x" + hashlib.sha256(_json([VERSION, account, message["event_id"], role]).encode()).hexdigest()[:32]
         typ = ({"limit": {"tif": "Gtc"}} if role == "ENTRY" else
-               {"trigger": {"isMarket": exit_type == "market", "triggerPx": _wire(price),
+               {"trigger": {"isMarket": (exit_type == "market" or
+                                         (exit_type == "tp_limit_sl_market" and role == "STOP")),
+                            "triggerPx": _wire(price),
                             "tpsl": "tp" if role == "TAKE_PROFIT" else "sl"}})
         orders.append({"a": asset, "b": (message["side"] == "LONG") == (role == "ENTRY"),
                        "p": _wire(price), "s": _wire(size), "r": role != "ENTRY", "t": typ, "c": cloid})
@@ -323,9 +326,9 @@ def acknowledgement(response: Any) -> str:
                 return "RESPONSE_REQUIRES_REVIEW"
             oid = status[name].get("oid")
             if type(oid) is not int or oid <= 0:
-                return "RESPONSE_REQUIRES_REVIEW"
+                raise ValueError()
         return "ACKNOWLEDGED_NOT_VERIFIED"
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         return "RESPONSE_REQUIRES_REVIEW"
 
 

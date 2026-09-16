@@ -88,7 +88,7 @@ def submit_persisted(message, *, account, agent, exit_type=None,
             return {**result, **previous['result'], 'replayed': True, 'order_requests_sent': 0}
         if not 0 <= (datetime.now(timezone.utc) - at).total_seconds() <= guard.MAX_SOURCE_AGE_SECONDS:
             raise JournalError('SOURCE_NOT_FRESH_FOR_ONE_SHOT_TEST')
-        if exit_type not in ('market', 'limit'):
+        if exit_type not in ('market', 'limit', 'tp_limit_sl_market'):
             raise JournalError('EXPLICIT_EXIT_TYPE_REQUIRED')
         action = sender.build_action(prepared['execution'], reader.read('meta'), account, exit_type=exit_type)
         plan = {k: prepared['execution'][k] for k in guard.PLAN_FIELDS}

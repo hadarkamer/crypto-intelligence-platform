@@ -106,14 +106,20 @@ def validate_action(action, prepared, account):
         asset = orders[0]['a']
         if type(asset) is not int or not 0 <= asset < 10000:
             raise ValueError()
-        market = orders[1]['t']['trigger']['isMarket']
-        if type(market) is not bool or orders[2]['t']['trigger']['isMarket'] is not market:
+        tp_market = orders[1]['t']['trigger']['isMarket']
+        sl_market = orders[2]['t']['trigger']['isMarket']
+        if type(tp_market) is not bool or type(sl_market) is not bool:
+            raise ValueError()
+        modes = {(False, False): 'limit', (True, True): 'market',
+                 (False, True): 'tp_limit_sl_market'}
+        exit_type = modes.get((tp_market, sl_market))
+        if exit_type is None:
             raise ValueError()
         universe = [{'name': '_unused'} for _ in range(asset)]
         universe.append({'name': prepared['execution']['symbol'],
                          'szDecimals': prepared['audit']['sz_decimals']})
         expected = sender.build_action(prepared['execution'], {'universe': universe}, account,
-                                       exit_type='market' if market else 'limit')
+                                       exit_type=exit_type)
         if canonical(expected) != canonical(action):
             raise ValueError()
         return json.loads(canonical(action))

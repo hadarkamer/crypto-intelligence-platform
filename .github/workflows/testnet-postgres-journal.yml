@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
       - name: Install only PostgreSQL driver for disposable CI database
         run: python3 -m pip install 'psycopg[binary]==3.2.3'
-      - name: Existing checks and actual PostgreSQL restart, race, lost-ack tests
+      - name: Existing checks and actual PostgreSQL restart, race, lost-ack and mixed-exit tests
         run: >-
           python3 -m unittest -v
           hl_testnet_runtime.test_runtime
@@ -44,3 +44,4 @@ jobs:
           hl_testnet_runtime.test_guarded_integration
           hl_testnet_runtime.test_price_precision
           hl_testnet_runtime.test_postgres_journal
+          hl_testnet_runtime.test_mixed_exits
