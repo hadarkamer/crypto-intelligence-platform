@@ -1,5 +1,6 @@
 """Offline integration: real V1 selection, frozen messages and delivery evidence."""
 import asyncio
+import os
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -51,9 +52,18 @@ class MemoryBoundary:
         row.update(kwargs)
         return True
 
+    def release(self, intent_id, token):
+        row = self.intents[int(intent_id)]
+        assert row['attempt_token'] == token and row['status'] == 'IN_FLIGHT'
+        row.update(status='PENDING', attempt_token=None, attempted_at=None)
+        return True
+
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        profile = patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ALL'})
+        profile.start()
+        self.addCleanup(profile.stop)
         self.db = MemoryBoundary()
         self.calls = []
         for target, name, value in (
@@ -62,6 +72,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             (delivery, '_STATUS', deepcopy(delivery._STATUS)),
             (store, 'record_cycle', self.db.record), (store, 'claim_pending', self.db.claim),
             (store, 'complete_attempt', self.db.complete), (store, 'settle_orphans', lambda *a: 0),
+            (store, 'release_unattempted', self.db.release),
             (runtime, 'SINK', research_event_capture.DryRunResearchCapture(max_events=100)),
             (runtime.research_event_store.WRITER, 'enqueue', self.remember),
             (runtime.google_sheets_sync, 'enqueue_delivered_event', lambda *a, **k: True),
@@ -164,7 +175,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         before = deepcopy(self.db.intents)
         self.assertTrue(before)
         bot = SimpleNamespace(send_message=AsyncMock())
-        with patch.object(delivery.delivery_policy, 'ordinary_alerts_enabled', return_value=False), \
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'SELECTED_EXPERIMENTAL_ONLY'}), \
              patch.object(store, 'claim_pending') as claim:
             self.assertEqual(await delivery.drain(bot, 1, may_deliver=lambda: True), 0)
             self.assertFalse(delivery.status()['delivery_allowed_by_profile'])
@@ -186,11 +197,91 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             return True
         bot = SimpleNamespace(send_message=AsyncMock())
         with patch.object(delivery.delivery_policy, 'ordinary_alerts_enabled', side_effect=lambda: allowed[0]), \
+             patch.object(delivery.delivery_policy, 'other_experimental_alerts_enabled', side_effect=lambda: allowed[0]), \
              patch.object(store, 'claim_pending', claim), \
              patch.object(store, 'release_unattempted', release) as released:
             self.assertEqual(await delivery.drain(bot, 1, may_deliver=lambda: True), 0)
         bot.send_message.assert_not_awaited()
         self.assertTrue(all(row['status'] == 'PENDING' for row in self.db.intents))
+
+    async def test_restored_ordinary_profile_records_crossings_without_formula_intents(self):
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}):
+            await self.prepare()
+            await self.record([_item()], name='same-high-score', when=BASE+timedelta(minutes=30))
+            self.assertEqual([row['kind'] for row in self.db.intents], ['MAX_PAIN_SCORE_65'])
+            await self.record([{**_item(), 'score': 59}], name='reset', when=BASE+timedelta(minutes=60))
+            await self.record([_item()], name='second-crossing', when=BASE+timedelta(minutes=90))
+            self.assertEqual([row['kind'] for row in self.db.intents], ['MAX_PAIN_SCORE_65']*2)
+            self.assertTrue(delivery.status()['ordinary_delivery_allowed_by_profile'])
+            self.assertFalse(delivery.status()['formula_delivery_allowed_by_profile'])
+            bot = SimpleNamespace(send_message=AsyncMock())
+            self.assertEqual(await delivery.drain(bot, 1), 0)
+            self.assertEqual(bot.send_message.await_count, 2)
+            self.assertEqual([event.event_type for event, _ in self.calls], ['MAX_PAIN_SCORE_65']*2)
+
+    async def test_old_formula_pending_does_not_starve_new_ordinary_crossing(self):
+        await self.prepare()
+        bot = SimpleNamespace(send_message=AsyncMock())
+        await delivery.drain(bot, 1, kinds=('MAX_PAIN_SCORE_65',))
+        bot.send_message.reset_mock()
+        self.calls.clear()
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}):
+            await self.prepare([_item(symbol='ETH')])
+            with patch.object(store, 'claim_pending', wraps=self.db.claim) as claim:
+                self.assertEqual(await delivery.drain(bot, 1, limit=1), 0)
+            self.assertEqual(claim.call_args.kwargs['kinds'], ('MAX_PAIN_SCORE_65',))
+        self.assertEqual(bot.send_message.await_count, 1)
+        self.assertEqual([row['status'] for row in self.db.intents], ['DELIVERED', 'PENDING', 'DELIVERED'])
+        self.assertEqual([event.event_type for event, _ in self.calls], ['MAX_PAIN_SCORE_65'])
+
+    async def test_requested_kinds_are_intersected_and_empty_never_claims_all(self):
+        await self.prepare()
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}):
+            for kinds in ((), [], ('FORMULA_MP65_CVD_SHORT',), ('UNKNOWN_KIND',)):
+                with self.subTest(kinds=kinds), patch.object(store, 'claim_pending') as claim:
+                    self.assertEqual(await delivery.drain(bot, 1, kinds=kinds), 0)
+                    claim.assert_not_called()
+                    bot.send_message.assert_not_awaited()
+            with patch.object(store, 'claim_pending', wraps=self.db.claim) as claim:
+                self.assertEqual(await delivery.drain(bot, 1,
+                    kinds=('FORMULA_MP65_CVD_SHORT', 'MAX_PAIN_SCORE_65')), 0)
+                self.assertTrue(all(call.kwargs['kinds'] == ('MAX_PAIN_SCORE_65',)
+                                    for call in claim.call_args_list))
+        self.assertEqual([row['status'] for row in self.db.intents], ['DELIVERED', 'PENDING'])
+        self.assertEqual(bot.send_message.await_count, 1)
+
+    async def test_formula_disabled_during_claim_releases_and_continues_ordinary_queue(self):
+        await self.prepare()
+        claims = []
+        def claim(scope, now, limit, *, kinds):
+            claims.append(kinds)
+            if len(claims) == 1:
+                rows = self.db.claim(scope, now, limit, kinds=('FORMULA_MP65_CVD_SHORT',))
+                os.environ['ALERT_DELIVERY_PROFILE'] = 'ORDINARY_AND_SELECTED_EXPERIMENTAL'
+                return rows
+            return self.db.claim(scope, now, limit, kinds=kinds)
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(store, 'claim_pending', claim), \
+             patch.object(store, 'release_unattempted', wraps=self.db.release) as release:
+            self.assertEqual(await delivery.drain(bot, 1), 0)
+        release.assert_called_once_with('1', 'attempt-1')
+        self.assertIn('FORMULA_MP65_CVD_SHORT', claims[0])
+        self.assertTrue(all(kinds == ('MAX_PAIN_SCORE_65',) for kinds in claims[1:]))
+        self.assertEqual(bot.send_message.await_count, 1)
+        self.assertEqual([row['status'] for row in self.db.intents], ['DELIVERED', 'PENDING'])
+        self.assertIsNone(self.db.intents[1]['attempt_token'])
+        self.assertEqual([event.event_type for event, _ in self.calls], ['MAX_PAIN_SCORE_65'])
+
+    async def test_restored_profile_keeps_reset_capture_without_sending(self):
+        item = {**_item(), 'score': 59}
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}), \
+             patch.object(store, 'record_cycle', return_value={
+                 'resets': [item], 'intents': [], 'counts': {'resets': 1}}), \
+             patch.object(runtime, 'capture_score65_reset') as reset:
+            await self.record([item])
+        reset.assert_called_once_with(item, event_time=BASE, persist=True)
+        self.assertEqual(self.db.intents, [])
 
     async def test_stop_while_claiming_releases_before_any_network_attempt(self):
         await self.prepare()

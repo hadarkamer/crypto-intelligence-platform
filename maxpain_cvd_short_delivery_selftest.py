@@ -283,11 +283,11 @@ def test_watch_only_hook_structure():
     def named_call(node, name):
         return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
 
-    def policy_call(node):
+    def policy_call(node, name="ordinary_alerts_enabled"):
         return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "alert_delivery_policy"
-                and node.func.attr == "ordinary_alerts_enabled")
+                and node.func.attr == name)
 
     # Selected-only delivery adds a policy gate without removing the original
     # General Watch boundary. The transport callback must retain that gate too.
@@ -302,6 +302,16 @@ def test_watch_only_hook_structure():
     assert any(named_call(node, "may_deliver_general") for node in callback.body.values)
     assert any(keyword.arg == "may_deliver" and isinstance(keyword.value, ast.Name)
                and keyword.value.id == "may_deliver_ordinary" for keyword in helper.keywords)
+    _, experimental_helper = min(helper_calls, key=lambda pair: pair[1].lineno)
+    experimental_callback = assigned("may_deliver_other_experimental")
+    assert isinstance(experimental_callback, ast.Lambda)
+    assert isinstance(experimental_callback.body, ast.BoolOp) and isinstance(experimental_callback.body.op, ast.And)
+    assert any(policy_call(node, "other_experimental_alerts_enabled") for node in experimental_callback.body.values)
+    assert any(named_call(node, "may_deliver_general") for node in experimental_callback.body.values)
+    assert any(keyword.arg == "may_deliver" and isinstance(keyword.value, ast.Name)
+               and keyword.value.id == "may_deliver_other_experimental" for keyword in experimental_helper.keywords)
+    assert any(isinstance(node, ast.If) and named_call(node.test, "may_deliver_other_experimental")
+               and experimental_helper in list(ast.walk(node)) for node in ast.walk(watch))
     guarded = [node for node in ast.walk(watch) if isinstance(node, ast.If)
                and isinstance(node.test, ast.Name) and node.test.id == "ordinary_sent"
                and helper in list(ast.walk(node))]

@@ -29,7 +29,7 @@ _STATUS = {
 
 def status():
     return {**deepcopy(_STATUS),
-            "delivery_allowed_by_profile": delivery_policy.ordinary_alerts_enabled()}
+            "delivery_allowed_by_profile": delivery_policy.other_experimental_alerts_enabled()}
 
 
 def _now():
@@ -106,7 +106,7 @@ async def _finish(intent, terminal):
 
 async def drain(bot, chat_id, *, limit=2, may_deliver=None, wait_for_lock=False):
     """One transport attempt per intent; uncertain outcomes are never retried."""
-    if not delivery_policy.ordinary_alerts_enabled():
+    if not delivery_policy.other_experimental_alerts_enabled():
         return 0
     if (_DRAIN_LOCK.locked() and not wait_for_lock) or not await initialize(chat_id):
         return 0
@@ -115,7 +115,7 @@ async def drain(bot, chat_id, *, limit=2, may_deliver=None, wait_for_lock=False)
     async with _DRAIN_LOCK:
         # Priority Watch delivery waits for a previous supervisor send. Recheck
         # authorization after that wait before claiming anything for this scan.
-        if not delivery_policy.ordinary_alerts_enabled() or may_deliver is None or not may_deliver():
+        if not delivery_policy.other_experimental_alerts_enabled() or may_deliver is None or not may_deliver():
             return 0
         try:
             _STATUS["orphaned_attempts"] += await asyncio.to_thread(store.settle_orphans, scope, _now())
@@ -123,7 +123,7 @@ async def drain(bot, chat_id, *, limit=2, may_deliver=None, wait_for_lock=False)
             _gap("orphan_settlement", exc)
             return 0
         for _ in range(min(max(int(limit), 0), 2)):
-            if not delivery_policy.ordinary_alerts_enabled() or may_deliver is None or not may_deliver():
+            if not delivery_policy.other_experimental_alerts_enabled() or may_deliver is None or not may_deliver():
                 break
             try:
                 pending = await asyncio.to_thread(store.claim_pending, scope, _now(), limit=1)
@@ -141,7 +141,7 @@ async def drain(bot, chat_id, *, limit=2, may_deliver=None, wait_for_lock=False)
                 continue
             # Subscription may have changed during the DB await. This is the
             # last synchronous check before scheduling the transport call.
-            if not delivery_policy.ordinary_alerts_enabled() or not may_deliver():
+            if not delivery_policy.other_experimental_alerts_enabled() or not may_deliver():
                 try:
                     if not await asyncio.to_thread(store.release_unattempted, intent["intent_id"],
                                                   intent["attempt_token"], _now()):
