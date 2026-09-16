@@ -215,6 +215,7 @@ def extract_current_cores(image_bytes: bytes, *, expected_sha256: str,
     if pre_left < plot[0]: raise EvidenceError('plot_too_narrow')
     profile=[]
     support=[]
+    presence_profile=[]
     valid_palette_rows=0
     for y in range(plot[1],plot[3]):
         values=[colour_level(image.getpixel((x,y))) for x in range(pre_left,right)]
@@ -225,6 +226,14 @@ def extract_current_cores(image_bytes: bytes, *, expected_sha256: str,
         valid_palette_rows += valid >= policy.min_support
         lit=lambda seq: sum(v is not None and v>=policy.min_palette_level for v in seq)/len(seq)
         ratio=lit(current)
+        # Presence is measured separately from the significant-band cutoff.
+        # A weak real strip must never be reported as a historical/absent strip.
+        present=lambda seq: sum(v is not None and v>=0.10 for v in seq)/len(seq)
+        has_presence=(present(current)>=policy.min_support and
+                      present(before)>=policy.min_support and
+                      present(terminal)>=policy.min_support and
+                      current[-1] is not None and current[-1]>=0.10)
+        presence_profile.append(median([v for v in current if v is not None]) if has_presence else 0.0)
         persists=(ratio >= policy.min_support and lit(before) >= policy.min_support and
                   lit(terminal) >= policy.min_support and
                   current[-1] is not None and current[-1]>=policy.min_palette_level)
@@ -279,7 +288,7 @@ def extract_current_cores(image_bytes: bytes, *, expected_sha256: str,
             'bands':bands,'omitted':omitted,'scan_calls':0,'model_calls':0,'sheet_writes':0,
             'intensity_basis':'relative colour-bar position; engineering policy, not liquidity dollars',
             'calibration_requirement':'anchors must be verified for THIS image; no live auto-calibration claimed',
-            '_profile':profile,'_core_mask':core_mask}
+            '_profile':profile,'_core_mask':core_mask,'_presence_profile':presence_profile}
 
 
 def audit_saved_zones(measurement: dict, saved_zones: list[dict]) -> list[dict]:
@@ -298,12 +307,16 @@ def audit_saved_zones(measurement: dict, saved_zones: list[dict]) -> list[dict]:
         if not vals:raise EvidenceError('saved_zone_outside_axis')
         fraction=sum(v>=p['min_palette_level'] for v in vals)/len(vals)
         bright=sum(v>=p['many_level'] for v in vals)/len(vals)
+        presence_vals=measurement['_presence_profile'][ys:ye]
+        presence=sum(v>=0.10 for v in presence_vals)/len(presence_vals)
         match=[b for b in measurement['bands'] if b['side']==z['side'] and
             max(lo,b['unrounded_bounds'][0]) < min(hi,b['unrounded_bounds'][1])]
-        reason=('unsupported_current_edge' if fraction==0 else
+        reason=('unsupported_current_edge' if presence==0 else
+                'present_below_candidate_threshold' if fraction==0 else
                 'no_high_intensity_support' if z.get('intensity')=='many' and bright==0 else
                 'mixed_or_shifted_bounds' if fraction<0.8 or len(match)!=1 else 'supported_region')
-        out.append({**z,'edge_support_fraction':round(fraction,4),
+        out.append({**z,'current_presence_fraction':round(presence,4),
+                    'edge_support_fraction':round(fraction,4),
                     'high_intensity_fraction':round(bright,4),'core_intersections':len(match),
                     'verdict':reason})
     return out
