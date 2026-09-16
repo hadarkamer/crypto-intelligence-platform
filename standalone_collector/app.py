@@ -1,8 +1,7 @@
-"""Independent Model 1 service, no bot process and no scheduled collection.
+"""Independent heatmap service. No bot process or scheduled source collection.
 
---probe checks configuration only. --source-probe captures a diagnostic image;
-PNG creation does NOT prove readability. Real jobs require the strict visual
-source checks and numeric validation in the prepared collection task.
+--probe checks configuration only. Diagnostic PNG creation does not prove
+readability; actual jobs require strict visual and numeric validation.
 """
 import asyncio
 import contextlib
@@ -40,11 +39,7 @@ def _save_report(directory,report):
 
 
 def probe(*,capture_fn=None,directory=None):
-    """Explicit source-only diagnostic, no AI calls or worksheet writes.
-
-    capture_fn/directory are offline-test injection points, never HTTP inputs.
-    This diagnostic only captures; only the validated job can accept prices.
-    """
+    """Explicit source-only diagnostic, no AI calls or worksheet writes."""
     directory=Path(directory) if directory is not None else DIAG
     _private_directory(directory)
     for name in IMAGE_NAMES|{'not-ready.json','report.json'}:
@@ -130,7 +125,7 @@ async def run_worker(store):
             if claimed:
                 held,row=claimed;jid=str(row['id'])
                 try:
-                    result,image=await run_existing_scanner(row['timeframe'],jid)
+                    result,image=await run_existing_scanner(row['timeframe'],jid,row.get('heatmap_model',1))
                     await asyncio.to_thread(store.finish,jid,result,image)
                 except asyncio.CancelledError:
                     await asyncio.to_thread(store.finish,jid,None,None,'interrupted');raise
@@ -153,18 +148,20 @@ def create_app():
     configured=bool(os.getenv('DATABASE_URL') and os.getenv('OPENAI_API_KEY')
         and len(os.getenv('COINGLASS_COLLECTOR_TOKEN',''))>=32 and source_session_configured())
     active=enabled and configured
+    store=JobStore(os.getenv('DATABASE_URL',''),hourly_limit=2) if active else None
     async def health(_):
         result={'ok':True,'service':'decision-hub-model1-collector',
             'mode':'collection' if active else 'not_configured','bot_started':False,
             'scheduled_collection':False,'source_session_configured':source_session_configured(),
-            'capture_flow':'original','acceptance':'screenshot-observed-and-numeric-validation'}
+            'capture_flow':'original','acceptance':'screenshot-observed-and-numeric-validation',
+            'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
+            'new_capture_hourly_limit':store.hourly_limit if store is not None else None,
+            'worker_concurrency':1,'automatic_cache_minutes':15}
         report=read_public_probe_report()
         if report is not None:result['source_probe']=report
         return web.json_response(result,headers={'Cache-Control':'no-store'})
     application.router.add_get('/',health);application.router.add_get('/health',health)
-    # No public screenshots, regardless of any obsolete diagnostic flag.
     application.router.add_get('/api/collection/model1/source-probe/evidence',diagnostic_image)
-    store=JobStore(os.getenv('DATABASE_URL',''),hourly_limit=2) if active else None
     register_collection_routes(application,store=store,enabled=active,start_worker=False)
     if active:
         async def lifecycle(app):
