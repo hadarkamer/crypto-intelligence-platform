@@ -10,6 +10,12 @@ preload_app = False
 
 def post_worker_init(worker):
     import os
+    import json
+    from hl_testnet_runtime.risk_policy import CURRENT_RISK_USD, VERSION
+    print(json.dumps({'testnet_risk_policy': {'version': VERSION,
+        'new_entry_planned_risk_usd': CURRENT_RISK_USD,
+        'fees_funding_slippage_included': False,
+        'resizes_existing_orders': False, 'mainnet_enabled': False}}), flush=True)
     mode = os.environ.get('HL_TESTNET_RUNTIME_MODE','read_only')
     if mode in ('cancel_rehearsal_testnet_v1','inspect_cancel_rehearsal_testnet_v1'):
         import threading

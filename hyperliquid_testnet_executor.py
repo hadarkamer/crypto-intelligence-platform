@@ -19,6 +19,7 @@ import sqlite3
 import stat
 import time
 from typing import Any
+from hl_testnet_runtime.risk_policy import budget, assert_new_entry_budget
 
 VERSION = "hl-testnet-adapter-v1"
 SDK_VERSION = "0.24.0"
@@ -112,16 +113,20 @@ def _signal(message: dict) -> dict:
     return dict(message)
 
 
-def build_action(message: dict, metadata: dict, account: str, *, exit_type: str) -> dict:
-    """Pure conversion, no I/O. Exit type is explicit, never silently chosen.
+def build_action(message: dict, metadata: dict, account: str, *, exit_type: str,
+                 historical_risk_usd: str | None = None) -> dict:
+    """Pure conversion. Default budget is $10, before costs, NOT a loss cap.
 
-    $20 is planned price-distance risk before costs, NOT a guaranteed loss cap.
+    historical_risk_usd reconstructs a frozen old $20 action for verification
+    only. Both signing and transport forbid a new entry above the CURRENT $10.
+    Existing IDs remain stable; changing risk cannot bypass replay protection.
     $5000 maximum notional is a laboratory bound, not the trading strategy.
     'market': supplied exit prices remain trigger prices; execution may differ.
     'limit': trigger and limit use the supplied price; exit may remain unfilled.
     'tp_limit_sl_market': owner-approved TP limit and SL market, both pre-set.
     """
     message, account = _signal(message), _account(account)
+    planned_risk = budget(historical_risk_usd)
     if exit_type not in ("market", "limit", "tp_limit_sl_market"):
         raise TestnetError("EXPLICIT_EXIT_TYPE_REQUIRED")
     universe = metadata.get("universe") if isinstance(metadata, dict) else None
@@ -145,7 +150,7 @@ def build_action(message: dict, metadata: dict, account: str, *, exit_type: str)
     with localcontext() as ctx:
         ctx.prec = 50
         step = Decimal(1).scaleb(-decimals)
-        size = ((Decimal(20) / abs(entry-stop)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        size = ((planned_risk / abs(entry-stop)) / step).to_integral_value(rounding=ROUND_DOWN) * step
         if size <= 0 or not Decimal(10) <= size * entry <= Decimal(5000):
             raise TestnetError("OUTSIDE_LAB_SIZE_BOUNDS")
     orders = []
@@ -176,6 +181,7 @@ class TestnetHTTP:
         if path == "/exchange":
             if not self.allow_orders or body.get("action", {}).get("type") != "order":
                 raise TestnetError("ORDER_TRANSPORT_DISABLED")
+            assert_new_entry_budget(body['action'])
             self.order_attempts += 1
         else:
             self.public_calls += 1
@@ -200,7 +206,7 @@ class TestnetHTTP:
 
     def info(self, kind: str, *, user: str | None = None, oid: str | None = None) -> Any:
         if kind == "meta" and user is None and oid is None:
-            body = {"type": "meta"}
+            body = {"type": kind}
         elif kind in ("userRole", "frontendOpenOrders", "clearinghouseState") and oid is None:
             body = {"type": kind, "user": _account(user)}
         elif kind == "orderStatus" and isinstance(oid, str) and re.fullmatch(r"0x[0-9a-f]{32}", oid):
@@ -225,6 +231,7 @@ def _wallet():
 
 
 def _signed_body(wallet, action: dict, nonce: int) -> dict:
+    assert_new_entry_budget(action)
     from hyperliquid.utils.signing import sign_l1_action
     expires = nonce + 30000
     # False is deliberate and mandatory: signature is valid for Testnet only.

@@ -99,8 +99,13 @@ def safe_result(value):
 
 
 def validate_action(action, prepared, account):
-    """Rebuild the exact native three-order action, refusing foreign fields."""
+    """Exact current OR historical reconstruction, never resize a stored order.
+
+    Retain the old $20 profile only to read/inspect/cancel already stored actions.
+    A new reservation, signature or transport still enforces the current $10.
+    """
     import hyperliquid_testnet_executor as sender
+    from .risk_policy import LEGACY_RISK_USD
     try:
         orders = action['orders']
         asset = orders[0]['a']
@@ -118,11 +123,15 @@ def validate_action(action, prepared, account):
         universe = [{'name': '_unused'} for _ in range(asset)]
         universe.append({'name': prepared['execution']['symbol'],
                          'szDecimals': prepared['audit']['sz_decimals']})
-        expected = sender.build_action(prepared['execution'], {'universe': universe}, account,
-                                       exit_type=exit_type)
-        if canonical(expected) != canonical(action):
-            raise ValueError()
-        return json.loads(canonical(action))
+        for profile in (None, LEGACY_RISK_USD):
+            try:
+                expected = sender.build_action(prepared['execution'], {'universe': universe}, account,
+                    exit_type=exit_type, historical_risk_usd=profile)
+            except sender.TestnetError:
+                continue
+            if canonical(expected) == canonical(action):
+                return json.loads(canonical(action))
+        raise ValueError()
     except Exception:
         raise JournalError('ACTION_NOT_BOUND_TO_ROUNDED_RECORD') from None
 
@@ -262,6 +271,11 @@ class PostgresJournal:
                 if canonical(row[1]) != canonical(action):
                     raise JournalError('RESERVED_ACTION_CHANGED_NO_RESEND')
                 return False, row[2], row[3]
+            from .risk_policy import assert_new_entry_budget, RiskError
+            try:
+                assert_new_entry_budget(action)
+            except RiskError:
+                raise JournalError('NEW_ENTRY_EXCEEDS_CURRENT_RISK_POLICY') from None
             nonce = conn.execute('SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint').fetchone()[0]
             result = {'status': 'RESERVED_OR_UNCERTAIN', 'verified': False}
             conn.execute(f'INSERT INTO {SCHEMA}.attempts(account,plan_key,action,nonce,result) VALUES(%s,%s,%s::jsonb,%s,%s::jsonb)',

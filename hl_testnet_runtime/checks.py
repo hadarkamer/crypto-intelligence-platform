@@ -12,12 +12,13 @@ import importlib.metadata
 import json
 import re
 import time
+from .risk_policy import budget, CURRENT_RISK_USD, VERSION as RISK_VERSION
 
 HOST = 'api.hyperliquid-testnet.xyz'
 ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}\Z')
 SYMBOL = re.compile(r'[A-Z][A-Z0-9]{0,19}\Z')
 MAX_BYTES = 2 * 1024 * 1024
-BUDGET_VERSION = 'current-settings-budget-v2'
+BUDGET_VERSION = 'current-settings-budget-risk10-v3'
 
 
 class Blocked(ValueError):
@@ -138,13 +139,13 @@ def plan_check(plan, symbol, decimals, unheld, available, max_size, *,
                active=None, metadata_max_leverage=None, diagnostics=None):
     """Read-only estimate using the account's EXISTING leverage, never setting it.
 
-    $20 distance risk and original prices/quantity are unchanged. Margin follows
+    New plans use the shared $10 price-distance budget before trading costs.
     Hyperliquid's size * mark / leverage, plus adverse entry-vs-mark loss and a
     separate 1% notional lab reserve (not a claim about actual fees).
     Exchange size and available-margin caps AND unheld USDC remain enforced.
     Both array minima remain conservative; no undocumented side index is assumed.
 
-    With no active context retain the v1 cash-only check for offline callers.
+    With no active context retain the cash-only check for offline callers.
     Production run_check always supplies active context; invalid/missing leverage
     then blocks, never falls back to a convenient multiplier. This is not order
     authorization, liquidation validation, or proof of future available funds.
@@ -165,7 +166,7 @@ def plan_check(plan, symbol, decimals, unheld, available, max_size, *,
     with localcontext() as ctx:
         ctx.prec = 50
         step = Decimal(1).scaleb(-decimals)
-        size = ((Decimal(20) / abs(entry - stop)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        size = ((budget() / abs(entry - stop)) / step).to_integral_value(rounding=ROUND_DOWN) * step
         notional = size * entry
         if size <= 0 or not Decimal(10) <= notional <= Decimal(5000):
             raise Blocked('OUTSIDE_LAB_SIZE_BOUNDS')
@@ -177,6 +178,8 @@ def plan_check(plan, symbol, decimals, unheld, available, max_size, *,
         }
         if diagnostics is not None:
             diagnostics.update(version=BUDGET_VERSION,
+                planned_risk_usd=CURRENT_RISK_USD, risk_policy=RISK_VERSION,
+                fees_funding_slippage_included_in_risk=False,
                 plan_sha256=hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
                 legacy_checks_same_sample=legacy, legacy_passed=all(legacy.values()),
                 capacity_selection='minimum_of_both_sides', current_settings_checks=None,
