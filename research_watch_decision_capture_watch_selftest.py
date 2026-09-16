@@ -168,7 +168,8 @@ class PureCombinedBoundaryTests(unittest.TestCase):
 
 
 class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
-    async def run_cycle(self, *, capture_error=False, precompute_error=False, general=True, empty=False):
+    async def run_cycle(self, *, capture_error=False, precompute_error=False, dual_error=False,
+                        general=True, empty=False):
         scope = helper_scope()
         order, archives, captures = [], [], []
         items = [] if empty else [item(), item(timeframe='24h', score=99, distance=None), item('ADA', score=99)]
@@ -209,6 +210,8 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs['price_references'], references)
             self.assertIs(kwargs['price_references'],
                           context_scope['_WATCH_CONTEXT'].get()['experimental_reference_prices_by_symbol'])
+            if dual_error:
+                raise ValueError('fixture dual failure')
         async def prepare_references(value):
             order.append('prepare_references')
             self.assertIs(value, base_bundle)
@@ -224,8 +227,8 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             return [{'symbol': event.symbol, 'direction': event.direction,
                      'event_type': event.event_type, 'engine_snapshot': event.engine_snapshot}]
         async def manual_delivery(bot, chat_id, planned_sources, **kwargs):
-            order.append('manual')
-            if not empty:
+            order.append('c1274_manual' if kwargs.get('c1274_bundle') is base_bundle else 'manual')
+            if planned_sources and not empty:
                 self.assertEqual(planned_sources[0]['engine_snapshot']['experimental_price_references'],
                                  references['BTC'])
             return 0
@@ -282,17 +285,28 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
     async def test_formula_references_are_frozen_before_dual_and_manual_delivery(self):
         scope, result, order, archives, captures, bot, base = await self.run_cycle()
         self.assertTrue(result['ok'], result)
+        scope['market_confidence_engine'].capture_snapshot.assert_called_once_with(['ADA', 'BTC', 'SOL'])
         scope['experimental_reference_price'].prepare_reference_prices.assert_awaited_once_with(base)
         self.assertLess(order.index('archive'), order.index('prepare_references'))
-        self.assertLess(order.index('prepare_references'), order.index('dual'))
+        self.assertLess(order.index('prepare_references'), order.index('c1274_manual'))
+        self.assertLess(order.index('c1274_manual'), order.index('dual'))
         self.assertLess(order.index('prepare_references'), order.index('preview_manual_sources'))
         self.assertLess(order.index('preview_manual_sources'), order.index('manual'))
         self.assertLess(order.index('manual'), order.index('send'))
         scope['dual_cvd65_delivery'].record_watch.assert_awaited_once()
-        scope['manual_formula_alert_delivery'].run_watch.assert_awaited_once()
+        self.assertEqual(scope['manual_formula_alert_delivery'].run_watch.await_count, 2)
+        c1274_call, manual_call = scope['manual_formula_alert_delivery'].run_watch.await_args_list
+        self.assertEqual(c1274_call.args[2], [])
+        self.assertIs(c1274_call.kwargs['c1274_bundle'], base)
+        self.assertEqual(c1274_call.kwargs['price_references'],
+                         {'BTC': {'PRICE_OI': {
+                             'status': 'READY', 'component': 'PRICE_OI', 'symbol': 'BTC',
+                             'price': '100', 'price_time_utc': '2026-09-15T12:02:16Z',
+                             'anchor_time_utc': '2026-09-15T12:02:16Z',
+                             'source': 'BINANCE_SPOT', 'precision': 'EXACT_CAPTURE'}}})
         context = scope['research_event_runtime'].set_watch_context.call_args.kwargs
         expected = context['experimental_reference_prices_by_symbol']['BTC']
-        planned = scope['manual_formula_alert_delivery'].run_watch.call_args.args[2]
+        planned = manual_call.args[2]
         self.assertEqual(planned[0]['engine_snapshot']['experimental_price_references'], expected)
         self.assertIsNot(planned[0]['engine_snapshot']['experimental_price_references'], expected)
         # Once captured, later context changes cannot reprice a queued manual source.
@@ -315,6 +329,15 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captures[0]['combined_groups'][0]['top_item']['score'], 81)
         self.assertEqual(result['combined_sent'], 1)
         self.assertEqual(set(scope['COMBINED_CONFIRMATION_STATE']), {'BTC|SHORT'})
+
+    async def test_c1274_path_runs_before_and_independently_of_dual_cvd_failure(self):
+        scope, result, order, archives, captures, bot, base = await self.run_cycle(dual_error=True)
+        self.assertFalse(result['ok'])
+        self.assertLess(order.index('c1274_manual'), order.index('dual'))
+        self.assertEqual(scope['manual_formula_alert_delivery'].run_watch.await_count, 1)
+        call = scope['manual_formula_alert_delivery'].run_watch.await_args
+        self.assertEqual(call.args[2], [])
+        self.assertIs(call.kwargs['c1274_bundle'], base)
 
     async def test_capture_failure_keeps_base_dual_and_successful_precompute(self):
         scope, result, order, archives, captures, bot, base = await self.run_cycle(capture_error=True)

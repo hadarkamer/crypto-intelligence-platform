@@ -1,4 +1,4 @@
-"""Four explicitly authorized experimental notifications, never trade execution."""
+"""Owner-authorized experimental notifications, never trade execution."""
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +17,8 @@ _STATUS = {'version': rules.VERSION, 'rule_ids': list(rules.RULES),
            'experimental': True, 'statistically_qualified': False,
            'trade_execution': False, 'ready': False, 'last_error_type': None,
            'runs': 0, 'created_intents': 0, 'delivered': 0, 'unknown': 0,
-           'failed': 0, 'cancelled': 0, 'last_summary': None}
+           'failed': 0, 'cancelled': 0, 'last_summary': None,
+           'last_c1274_scan_status': None, 'last_c1274_summary': None}
 
 
 def status():
@@ -72,13 +73,16 @@ async def run_once(bot, chat_id, *, may_deliver=None):
     return await _run(bot, chat_id, may_deliver=may_deliver, limit=2)
 
 
-async def run_watch(bot, chat_id, events, *, may_deliver=None):
+async def run_watch(bot, chat_id, events, *, c1274_bundle=None,
+                    price_references=None, may_deliver=None):
     """Freeze current Watch matches and send the complete bounded priority group."""
-    return await _run(bot, chat_id, events=events, may_deliver=may_deliver,
+    return await _run(bot, chat_id, events=events, c1274_bundle=c1274_bundle,
+                      price_references=price_references, may_deliver=may_deliver,
                       limit=128, wait_for_lock=True)
 
 
-async def _run(bot, chat_id, *, events=None, may_deliver=None, limit, wait_for_lock=False):
+async def _run(bot, chat_id, *, events=None, c1274_bundle=None,
+               price_references=None, may_deliver=None, limit, wait_for_lock=False):
     # A Watch prelude must wait for an already-started supervisor send. Skipping
     # its preparation would defer the new scan's experiments until after the
     # ordinary group. Polling recovery still avoids overlapping work.
@@ -94,8 +98,16 @@ async def _run(bot, chat_id, *, events=None, may_deliver=None, limit, wait_for_l
             if events is None:
                 result = await asyncio.to_thread(store.collect, chat_id, _now())
             else:
-                result = await asyncio.to_thread(store.record_watch_events, chat_id, events, _now())
+                result = await asyncio.to_thread(
+                    store.record_watch_events, chat_id, events, _now(),
+                    c1274_bundle=c1274_bundle, price_references=price_references,
+                )
             _STATUS['last_summary'] = result
+            if result.get('c1274_scan_status') not in (None, 'NOT_PROVIDED'):
+                # A later event-only pass in the same Watch cycle must not hide
+                # the independent C1274 decision from health/status output.
+                _STATUS['last_c1274_scan_status'] = result['c1274_scan_status']
+                _STATUS['last_c1274_summary'] = deepcopy(result)
             _STATUS['created_intents'] += result.get('created_intents', 0)
             _STATUS['runs'] += 1
         except Exception as exc:

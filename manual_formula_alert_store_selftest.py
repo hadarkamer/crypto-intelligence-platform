@@ -27,6 +27,49 @@ def pair(identifier=1, minute=1, *, scan=None, symbol='BTC', direction='LONG'):
     return event, features
 
 
+def c1274_bundle(*, scan='c1274-scan-1', computed=None, candle_close=None,
+                 direction='BULLISH', score=25, quality=.65):
+    computed = computed or BASE + timedelta(minutes=1)
+    candle_close = candle_close or BASE
+    coins = {symbol: {} for symbol in store.rules.SYMBOLS}
+    coins['SOL'] = {
+        'status': 'PARTIAL',
+        'source_time_errors': [],
+        'models': {'futures_flow': {
+            'available': True,
+            'capture_status': 'AVAILABLE',
+            'quality_status': 'PASS',
+            'freshness_status': 'FRESH',
+            'score': score,
+            'time_families': {'long': {'quality': quality, 'direction': direction}},
+        }},
+        'sources': {'futures': {'quality': {
+            'candle_close': store.iso(candle_close),
+        }}},
+    }
+    body = {
+        'version': store.rules._WATCH_SCORE_VERSION,
+        'population': store.rules._WATCH_SCORE_POPULATION,
+        'hash_version': store.rules._WATCH_SCORE_HASH_VERSION,
+        'status': 'PARTIAL',
+        'symbols_expected': list(store.rules.SYMBOLS),
+        'cycle_id': scan,
+        'computed_at_utc': store.iso(computed),
+        'coins': coins,
+    }
+    return {**body, 'payload_sha256': store.rules._watch_digest(body)}
+
+
+def c1274_references(*, price='100', anchor=None):
+    anchor = anchor or BASE
+    return {'SOL': {'FUTURES_CVD': {
+        'status': 'READY', 'component': 'FUTURES_CVD', 'symbol': 'SOL',
+        'price': price, 'price_time_utc': store.iso(anchor),
+        'anchor_time_utc': store.iso(anchor), 'source': 'BINANCE_SPOT_TRADE_1M',
+        'precision': 'CLOSED_1M',
+    }}}
+
+
 class Rows:
     def __init__(self, row=None): self.row = row
     def fetchone(self): return deepcopy(self.row)
@@ -81,38 +124,39 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(store.record_events(state, excluded, BASE + timedelta(minutes=2)), 0)
         self.assertEqual(state['receipts'], {})
         self.assertEqual(store.record_events(state, [pair(4, 1)], BASE + timedelta(minutes=11)), 0)
-        self.assertEqual(store.record_events(state, [pair(5, 1)], BASE + timedelta(minutes=10, seconds=59)), 4)
-        self.assertEqual(state['counts'], {'checked': 1, 'created': 4})
+        self.assertEqual(store.record_events(state, [pair(5, 1)], BASE + timedelta(minutes=10, seconds=59)), 3)
+        self.assertEqual(state['counts'], {'checked': 1, 'created': 3})
 
     def test_late_lower_ids_are_not_lost_to_a_serial_cursor(self):
         state = store._initial(BASE)
-        self.assertEqual(store.record_events(state, [pair(900, 2)], BASE + timedelta(minutes=3)), 4)
-        self.assertEqual(store.record_events(state, [pair(3, 1)], BASE + timedelta(minutes=3)), 4)
+        self.assertEqual(store.record_events(state, [pair(900, 2)], BASE + timedelta(minutes=3)), 3)
+        self.assertEqual(store.record_events(state, [pair(3, 1)], BASE + timedelta(minutes=3)), 3)
         self.assertEqual(set(state['receipts']), {'900', '3'})
         self.assertEqual(store.record_events(state, [pair(900, 2), pair(3, 1)], BASE + timedelta(minutes=4)), 0)
 
     def test_sibling_dedup_is_per_rule_scan_coin_and_direction(self):
         state = store._initial(BASE)
         now = BASE + timedelta(minutes=3)
-        self.assertEqual(store.record_events(state, [pair(1, scan='shared')], now), 4)
+        self.assertEqual(store.record_events(state, [pair(1, scan='shared')], now), 3)
         self.assertEqual(store.record_events(state, [pair(2, 1.1, scan='shared')], now), 0)
-        self.assertEqual(store.record_events(state, [pair(3, 1.2, scan='shared', direction='SHORT')], now), 4)
-        self.assertEqual(store.record_events(state, [pair(4, 1.3, scan='shared', symbol='BNB')], now), 3)
-        self.assertEqual(store.record_events(state, [pair(5, 1.4, scan='different')], now), 4)
-        self.assertEqual(state['counts'], {'checked': 5, 'created': 15})
+        self.assertEqual(store.record_events(state, [pair(3, 1.2, scan='shared', direction='SHORT')], now), 3)
+        self.assertEqual(store.record_events(state, [pair(4, 1.3, scan='shared', symbol='BNB')], now), 2)
+        self.assertEqual(store.record_events(state, [pair(5, 1.4, scan='different')], now), 3)
+        self.assertEqual(state['counts'], {'checked': 5, 'created': 11})
 
     def test_minute_fallback_dedups_without_a_scan_id(self):
         state = store._initial(BASE)
         first, second = pair(1), pair(2, 1.5)
         for event, _ in (first, second): event['engine_snapshot'].pop('watch_scan_id')
-        self.assertEqual(store.record_events(state, [first, second], BASE + timedelta(minutes=2)), 4)
+        self.assertEqual(store.record_events(state, [first, second], BASE + timedelta(minutes=2)), 3)
 
     def test_multiple_rules_for_same_event_are_preserved_and_text_frozen(self):
         state = store._initial(BASE)
-        self.assertEqual(store.record_events(state, [pair()], BASE + timedelta(minutes=2)), 4)
-        self.assertEqual({i['payload']['rule_id'] for i in state['intents']}, set(store.rules.RULES) - {'C0964'})
+        self.assertEqual(store.record_events(state, [pair()], BASE + timedelta(minutes=2)), 3)
+        self.assertEqual({i['payload']['rule_id'] for i in state['intents']},
+                         set(store.rules.RULES) - {'C0964', 'C1274'})
         self.assertTrue(all(i['text'] == i['payload']['text'] for i in state['intents']))
-        self.assertEqual(len({i['intent_id'] for i in state['intents']}), 4)
+        self.assertEqual(len({i['intent_id'] for i in state['intents']}), 3)
 
     def test_pruned_receipts_cannot_replay_expired_sources(self):
         state = store._initial(BASE)
@@ -122,7 +166,7 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(state['receipts'], {})
         self.assertEqual(state['dedup'], {})
         self.assertEqual({i['status'] for i in state['intents']}, {'EXPIRED'})
-        self.assertEqual(state['counts']['created'], 4)
+        self.assertEqual(state['counts']['created'], 3)
         store.prune(state, later + timedelta(hours=1, seconds=1))
         self.assertEqual(state['intents'], [])
         self.assertEqual(store.record_events(state, [pair()], later + timedelta(hours=2)), 0)
@@ -155,14 +199,60 @@ class ReducerTests(unittest.TestCase):
                 unavailable = {**features, 'sequence.capture_status': status}
                 unavailable.pop('sequence.30m.price_oi.entry_ordinal')
                 now = BASE + timedelta(minutes=2)
-                self.assertEqual(store.record_events(state, [(event, unavailable)], now), 3)
+                self.assertEqual(store.record_events(state, [(event, unavailable)], now), 2)
                 self.assertEqual(set(state['retry']), {'1'})
                 self.assertEqual(store.record_events(state, [(event, unavailable)], now + timedelta(seconds=1)), 0)
                 self.assertEqual(store.record_events(state, [(event, features)], now + timedelta(seconds=2)), 1)
                 self.assertEqual(state['retry'], {})
-                self.assertEqual(len(state['intents']), 4)
-                self.assertEqual({i['payload']['rule_id'] for i in state['intents']}, set(store.rules.RULES) - {'C0964'})
+                self.assertEqual(len(state['intents']), 3)
+                self.assertEqual({i['payload']['rule_id'] for i in state['intents']},
+                                 set(store.rules.RULES) - {'C0964', 'C1274'})
                 self.assertEqual(store.record_events(state, [(event, features)], now + timedelta(seconds=3)), 0)
+
+    def test_c1274_dedups_by_futures_candle_and_allows_the_next_candle(self):
+        state = store._initial(BASE)
+        first = c1274_bundle()
+        self.assertEqual(store.record_c1274_scan(
+            state, first, c1274_references(), BASE + timedelta(minutes=2)), (1, 'MATCH'))
+        self.assertEqual(store.record_c1274_scan(
+            state, first, c1274_references(), BASE + timedelta(minutes=2, seconds=1)),
+                         (0, 'DUPLICATE'))
+
+        # A second Watch scan over the same already-closed Futures candle is
+        # not a second trading opportunity, even if the frozen bundle changed.
+        revised_same_candle = c1274_bundle(
+            scan='c1274-scan-2', computed=BASE + timedelta(minutes=1, seconds=30))
+        self.assertEqual(store.record_c1274_scan(
+            state, revised_same_candle, c1274_references(), BASE + timedelta(minutes=2)),
+                         (0, 'SOURCE_REVISION_IGNORED'))
+
+        next_candle = c1274_bundle(
+            scan='c1274-scan-3', computed=BASE + timedelta(minutes=2),
+            candle_close=BASE + timedelta(minutes=1))
+        self.assertEqual(store.record_c1274_scan(
+            state, next_candle, c1274_references(anchor=BASE + timedelta(minutes=1)),
+            BASE + timedelta(minutes=3)), (1, 'MATCH'))
+        c1274 = [item for item in state['intents'] if item['payload']['rule_id'] == 'C1274']
+        self.assertEqual(len(c1274), 2)
+        self.assertEqual({item['payload']['threshold_bps'] for item in c1274}, {150})
+        self.assertEqual({item['payload']['symbol'] for item in c1274}, {'SOL'})
+        self.assertEqual(len(state['c1274_candles']), 2)
+        self.assertEqual(state['counts']['c1274_scans_checked'], 2)
+        self.assertEqual(state['counts']['c1274_created'], 2)
+        self.assertEqual(state['counts']['c1274_duplicate'], 1)
+        self.assertEqual(state['counts']['c1274_source_revision_ignored'], 1)
+
+    def test_c1274_nonmatch_consumes_candle_without_creating_an_intent(self):
+        state = store._initial(BASE)
+        weak = c1274_bundle(score=24.999)
+        self.assertEqual(store.record_c1274_scan(
+            state, weak, c1274_references(), BASE + timedelta(minutes=2)), (0, 'NO_MATCH'))
+        later_match_same_candle = c1274_bundle(scan='later', score=100)
+        self.assertEqual(store.record_c1274_scan(
+            state, later_match_same_candle, c1274_references(), BASE + timedelta(minutes=2)),
+                         (0, 'SOURCE_REVISION_IGNORED'))
+        self.assertEqual(state['intents'], [])
+        self.assertEqual(len(state['c1274_candles']), 1)
 
     def test_sequence_retry_expires_without_replaying_or_counting_twice(self):
         state = store._initial(BASE)
@@ -203,17 +293,37 @@ class TransactionTests(unittest.TestCase):
         self.assertNotEqual(store.key_for(1), store.key_for(2))
         self.assertTrue(store.schema_ready())
 
-    def test_known_rules_upgrade_preserves_receipts_attempts_and_new_rule_fence(self):
+    def test_v2_upgrade_cancels_only_pending_c1274_and_preserves_in_flight(self):
         self.collect()
         previous = self.db.read(1)
         previous.update(rule_version=store.rules.PREVIOUS_VERSION,
                         ruleset_sha256=store.rules.PREVIOUS_RULESET_SHA256)
+        previous.pop('c1274_candles')
         for item in previous['intents']:
             item['payload']['predicate_version'] = store.rules.PREVIOUS_VERSION
-            item['text'] = item['text'].replace('<b>הערה</b>:', 'הערה:')
+            item['text'] = 'old-v2:' + item['text']
             item['payload']['text'] = item['text']
-        previous['intents'][0].update(status='IN_FLIGHT', attempt_token='existing-attempt',
-                                     attempted_at=store.iso(BASE + timedelta(minutes=2)))
+        old_payload = {
+            'rule_id': 'C1274', 'threshold_bps': 100, 'symbol': 'BTC',
+            'direction': 'SHORT', 'source_direction': 'LONG',
+            'event_id': 1001, 'event_time': store.iso(BASE + timedelta(minutes=1)),
+            'predicate_version': store.rules.PREVIOUS_VERSION,
+            'price_reference': None, 'text': 'old C1274 v2',
+        }
+        template = {
+            'dedup_key': 'old-c1274', 'payload': old_payload, 'text': old_payload['text'],
+            'created_at': store.iso(BASE + timedelta(minutes=2)),
+            'expires_at': store.iso(BASE + timedelta(minutes=11)),
+            'attempt_token': None, 'attempted_at': None, 'acknowledged_at': None,
+        }
+        pending = {**deepcopy(template), 'intent_id': 'old-pending-c1274', 'status': 'PENDING'}
+        in_flight = {**deepcopy(template), 'intent_id': 'old-in-flight-c1274',
+                     'status': 'IN_FLIGHT', 'attempt_token': 'existing-attempt',
+                     'attempted_at': store.iso(BASE + timedelta(minutes=2))}
+        previous['intents'].extend((pending, in_flight))
+        frozen_in_flight = deepcopy(in_flight)
+        old_other_ids = {item['intent_id'] for item in previous['intents']
+                         if item['payload']['rule_id'] != 'C1274'}
         self.db.write(1, previous)
         upgraded_at = BASE + timedelta(minutes=3)
         store.initialize_scope(1, upgraded_at)
@@ -221,20 +331,31 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(state['activated_at'], previous['activated_at'])
         self.assertEqual(state['receipts'], previous['receipts'])
         self.assertEqual(state['dedup'], previous['dedup'])
-        self.assertEqual(state['intents'][0], previous['intents'][0])
-        self.assertEqual(state['rule_activated_at']['C0964'], store.iso(upgraded_at))
-        self.assertTrue(all(i['payload']['predicate_version'] == store.rules.VERSION
-                            for i in state['intents'][1:]))
-        self.assertIn('<b>הערה</b>:', state['intents'][1]['text'])
-        for identifier, minute in ((2, 2.5), (3, 3.1)):
-            event, features = pair(identifier, minute)
-            event['engine_snapshot']['magnet']['liquidity_edge_pct'] = 30
-            store.record_events(state, [(event, features)], BASE + timedelta(minutes=4))
-        self.assertEqual([i['payload']['event_id'] for i in state['intents']
-                          if i['payload']['rule_id'] == 'C0964'], [3])
+        self.assertEqual(state['rule_activated_at']['C1274'], store.iso(upgraded_at))
+        self.assertEqual(state['c1274_candles'], {})
+
+        by_id = {item['intent_id']: item for item in state['intents']}
+        cancelled = by_id['old-pending-c1274']
+        self.assertEqual(cancelled['status'], 'CANCELLED')
+        self.assertEqual(cancelled['acknowledged_at'], store.iso(upgraded_at))
+        self.assertEqual(cancelled['cancellation_reason'], 'C1274_RULE_REPLACED')
+        self.assertEqual(cancelled['payload'], old_payload)
+        self.assertEqual(by_id['old-in-flight-c1274'], frozen_in_flight)
+        self.assertEqual(state['counts']['cancelled'], 1)
+
+        for intent_id in old_other_ids:
+            item = by_id[intent_id]
+            self.assertEqual(item['status'], 'PENDING')
+            self.assertEqual(item['payload']['predicate_version'], store.rules.VERSION)
+            self.assertEqual(item['text'], store.rules.render_message(item['payload']))
+            self.assertFalse(item['text'].startswith('old-v2:'))
         self.db.write(1, state)
         store.initialize_scope(1, BASE + timedelta(minutes=5))
-        self.assertEqual(self.db.read(1)['rule_activated_at']['C0964'], store.iso(upgraded_at))
+        restarted = self.db.read(1)
+        self.assertEqual(restarted['rule_activated_at']['C1274'], store.iso(upgraded_at))
+        self.assertEqual(restarted['counts']['cancelled'], 1)
+        self.assertEqual({item['intent_id']: item for item in restarted['intents']}
+                         ['old-in-flight-c1274'], frozen_in_flight)
 
     def test_planned_receipts_do_not_enter_integer_source_query_or_resend_native(self):
         event, features = pair()
@@ -242,12 +363,12 @@ class TransactionTests(unittest.TestCase):
                      delivery_status='NOT_ATTEMPTED', capture_stage='WATCH_PLANNED_ALERT')
         with patch.object(store.source, 'prepare_watch_pairs', return_value=([(event, features)], {})):
             result = store.record_watch_events(1, [event], BASE + timedelta(minutes=2))
-        self.assertEqual(result['created_intents'], 4)
+        self.assertEqual(result['created_intents'], 3)
         with patch.object(store.source, 'load_batch', return_value=([pair()], {})) as load:
             result = store.collect(1, BASE + timedelta(minutes=3))
         self.assertEqual(load.call_args.kwargs['processed_ids'], [])
         self.assertEqual(result['created_intents'], 0)
-        self.assertEqual(len(self.db.read(1)['intents']), 4)
+        self.assertEqual(len(self.db.read(1)['intents']), 3)
 
     def test_failed_planned_sequence_recovers_only_entry2_from_delivered_sources(self):
         for chat_id, status in ((10, 'SOURCE_UNAVAILABLE'), (11, 'SOURCE_OVERFLOW')):
@@ -259,7 +380,7 @@ class TransactionTests(unittest.TestCase):
                 unavailable = {**features, 'sequence.capture_status': status}
                 with patch.object(store.source, 'prepare_watch_pairs', return_value=([(event, unavailable)], {})):
                     result = store.record_watch_events(chat_id, [event], BASE + timedelta(minutes=2))
-                self.assertEqual(result['created_intents'], 3)
+                self.assertEqual(result['created_intents'], 2)
                 self.assertEqual(result['planned_sequence_recovery_scans'], 1)
                 # A still-unavailable native lookup retains the existing retry
                 # queue, but must not enable a new non-sequence rule.
@@ -277,7 +398,7 @@ class TransactionTests(unittest.TestCase):
                 self.assertEqual(state['retry'], {})
                 self.assertEqual([i['payload']['rule_id'] for i in state['intents']].count('PRICE_OI_ENTRY2'), 1)
                 self.assertNotIn('C0964', [i['payload']['rule_id'] for i in state['intents']])
-                self.assertEqual(len(state['intents']), 4)
+                self.assertEqual(len(state['intents']), 3)
                 sibling, ready = pair(2, 1.1, scan='scan-1')
                 with patch.object(store.source, 'load_batch', return_value=([(sibling, ready)], {})):
                     result = store.collect(chat_id, BASE + timedelta(minutes=5))
@@ -404,15 +525,15 @@ class PostgreSQLTests(unittest.TestCase):
         with patch.object(store.source, 'load_batch', return_value=([pair()], {})):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 results = list(pool.map(collect, range(4)))
-        self.assertEqual(sum(r['created_intents'] for r in results), 4)
+        self.assertEqual(sum(r['created_intents'] for r in results), 3)
         claim_barrier = Barrier(5)
         def claim(_):
             claim_barrier.wait(timeout=5)
             return store.claim(self.chat, BASE + timedelta(minutes=2), database_url=self.dsn)
         with ThreadPoolExecutor(max_workers=5) as pool:
             claims = [i for i in pool.map(claim, range(5)) if i is not None]
-        self.assertEqual(len(claims), 4)
-        self.assertEqual(len({i['intent_id'] for i in claims}), 4)
+        self.assertEqual(len(claims), 3)
+        self.assertEqual(len({i['intent_id'] for i in claims}), 3)
         self.assertIsNone(store.claim(self.chat, BASE + timedelta(minutes=2), database_url=self.dsn))
         for item in claims:
             self.assertTrue(store.finish(self.chat, item['intent_id'], item['attempt_token'], 'UNKNOWN',

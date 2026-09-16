@@ -1,9 +1,10 @@
 """Owner-selected research notifications; no orders or statistical gates.
 
-Predicates are frozen to the audited definitions. Features must be captured at
-the original native alert, aligned to that alert's *research* direction. That
-direction is inverted exactly once for these notifications. Sequence history
-is supplied by the caller; this module never reads later observations.
+Event-based predicates use features captured at the original native alert.
+C1274 instead consumes the one frozen operational-score bundle produced for
+each Watch scan, because its Futures-only definition must not depend on a
+Magnet or any other alert existing in that scan.  This module never reads later
+observations.
 """
 from __future__ import annotations
 
@@ -16,11 +17,12 @@ import math
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+from experimental_reference_price import VERSION as REFERENCE_VERSION
 from experimental_reference_price import render_reference_levels, select_reference
 
-VERSION = "manual-formula-experimental-alerts-v2"
-PREVIOUS_VERSION = "manual-formula-experimental-alerts-v1"
-PREVIOUS_RULESET_SHA256 = "7f7be576af92fdbb283398b14f8f5f81527d1353d46732c358cf66e669eb5560"
+VERSION = "manual-formula-experimental-alerts-v3"
+PREVIOUS_VERSION = "manual-formula-experimental-alerts-v2"
+PREVIOUS_RULESET_SHA256 = "9d28a33d38faae8bafce6f03b3ce400a1f928aca16f36edecb46b9450dd234c8"
 SYMBOLS = ("BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP")
 TRIGGER_TTL = timedelta(minutes=10)
 _ISRAEL = ZoneInfo("Asia/Jerusalem")
@@ -28,14 +30,17 @@ _INVERSE = {"LONG": "SHORT", "SHORT": "LONG"}
 _MAGNET_TYPES = frozenset(("MAGNET_ALERT", "MAGNET_CONFIRMATION", "STRONG_MAGNET_CONFIRMATION"))
 _ARCHIVE_KEYS = frozenset(("archive_reconstruction", "archive_only", "telegram_archive", "archive_run_key",
                            "archive_import", "telegram_archive_import"))
+_WATCH_SCORE_VERSION = "watch-operational-scores-v2"
+_WATCH_SCORE_POPULATION = "all-top8-watch-scans-before-display-v1"
+_WATCH_SCORE_HASH_VERSION = "json-integer-float-zero-normalized-v1"
 
 RULES = {
     "C1274": {
-        "name": "C1274 — Futures ארוך נגד המגנט",
-        "threshold_bps": 100,
-        "symbols": ("BTC", "BNB", "DOGE", "HYPE", "SOL"),
-        "notes": {coin: ("כמות הופעות / אסימטריה טעונות שיפור",) for coin in ("BTC", "SOL")},
-        "conditions_text": "משפחת Futures בטווח הארוך באיכות 65% ומעלה נגד המגנט, וגם הציון הכולל נגדו בעוצמה 25 ומעלה.",
+        "name": "C1274 — Futures ארוך",
+        "threshold_bps": 150,
+        "symbols": ("SOL",),
+        "notes": {"SOL": ("כמות הופעות / אסימטריה טעונות שיפור",)},
+        "conditions_text": "משפחת Futures בטווח הארוך באיכות 65% ומעלה, והציון הכולל באותו כיוון בעוצמה 25 ומעלה.",
     },
     "PRICE_OI_ENTRY2": {
         "name": "כניסת Price/OI השנייה, הפוך",
@@ -78,7 +83,7 @@ RULESET_SHA256 = hashlib.sha256(json.dumps(RULES, ensure_ascii=False, sort_keys=
 # A combination begins at its earliest required component anchor. The shared
 # selector validates captured references; detection never fetches a newer quote.
 _REFERENCE_COMPONENTS = {
-    "C1274": ("MAX_PAIN", "FUTURES_CVD"),
+    "C1274": ("FUTURES_CVD",),
     "PRICE_OI_ENTRY2": ("PRICE_OI",),
     "PRICE_OI_SPOT65": ("PRICE_OI", "SPOT_CVD"),
     "CONSENSUS_FULL": ("MAX_PAIN",),
@@ -105,6 +110,23 @@ def utc(value: Any) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("A timezone-qualified timestamp is required")
     return value.astimezone(timezone.utc)
+
+
+def _watch_numeric_normalized(value: Any) -> Any:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, Mapping):
+        return {key: _watch_numeric_normalized(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_watch_numeric_normalized(item) for item in value]
+    return value
+
+
+def _watch_digest(value: Any) -> str:
+    encoded = json.dumps(_watch_numeric_normalized(value), ensure_ascii=False,
+                         sort_keys=True, separators=(",", ":"), default=str,
+                         allow_nan=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def source_is_eligible(event: Mapping[str, Any], features: Mapping[str, Any], now: Any, *, planned=False) -> bool:
@@ -158,19 +180,93 @@ def source_is_eligible(event: Mapping[str, Any], features: Mapping[str, Any], no
     return timedelta(0) <= age <= TRIGGER_TTL
 
 
-def _c1274(event: Mapping[str, Any]) -> bool:
-    if event.get("event_type") not in _MAGNET_TYPES:
-        return False
-    snapshot = _mapping(event.get("engine_snapshot"))
-    modules = _mapping(_mapping(snapshot.get("market_evidence")).get("modules"))
-    futures = _mapping(modules.get("futures_flow"))
+def _c1274_futures(futures: Mapping[str, Any]) -> str | None:
+    """Return the direct price direction for the audited Futures-only rule."""
     long_family = _mapping(_mapping(futures.get("time_families")).get("long"))
     quality, score = _number(long_family.get("quality")), _number(futures.get("score"))
-    expected_family_direction = "BEARISH" if event["direction"] == "LONG" else "BULLISH"
-    sign = 1 if event["direction"] == "LONG" else -1
-    return (futures.get("available") is True and quality is not None and 0.65 <= quality <= 1
-            and long_family.get("direction") == expected_family_direction
-            and score is not None and -100 <= score <= 100 and sign * score <= -25)
+    family_direction = long_family.get("direction")
+    sign = {"BULLISH": 1, "BEARISH": -1}.get(family_direction)
+    if (futures.get("available") is not True or quality is None or not 0.65 <= quality <= 1
+            or sign is None or score is None or not -100 <= score <= 100
+            or sign * score < 25):
+        return None
+    return "LONG" if family_direction == "BULLISH" else "SHORT"
+
+
+def evaluate_c1274_scan(bundle: Mapping[str, Any], references: Mapping[str, Any], now: Any) -> dict[str, Any]:
+    """Validate one frozen Watch bundle and optionally create one C1274 payload.
+
+    A valid non-match is returned with ``payload=None`` so the outbox can retain
+    a scan receipt.  Invalid, stale or hash-mismatched bundles raise and are
+    isolated by the caller from the event-based notification rules.
+    """
+    if not isinstance(bundle, Mapping):
+        raise ValueError("C1274 scan bundle is missing")
+    body = {key: value for key, value in bundle.items() if key != "payload_sha256"}
+    coins = bundle.get("coins")
+    if (bundle.get("version") != _WATCH_SCORE_VERSION
+            or bundle.get("population") != _WATCH_SCORE_POPULATION
+            or bundle.get("hash_version") != _WATCH_SCORE_HASH_VERSION
+            or bundle.get("status") not in ("COMPLETE", "PARTIAL")
+            or not isinstance(coins, Mapping) or set(coins) != set(SYMBOLS)
+            or not isinstance(bundle.get("symbols_expected"), list)
+            or sorted(bundle.get("symbols_expected") or ()) != sorted(SYMBOLS)
+            or bundle.get("payload_sha256") != _watch_digest(body)):
+        raise ValueError("C1274 scan bundle identity mismatch")
+    scan = bundle.get("cycle_id")
+    if not isinstance(scan, str) or not scan.strip() or len(scan) > 200:
+        raise ValueError("C1274 scan identity is invalid")
+    computed = utc(bundle.get("computed_at_utc"))
+    age = utc(now) - computed
+    if not timedelta(0) <= age <= TRIGGER_TTL:
+        raise ValueError("C1274 scan bundle is stale or future")
+    coin = _mapping(coins.get("SOL"))
+    errors = coin.get("source_time_errors")
+    if (coin.get("status") not in ("CAPTURED", "PARTIAL")
+            or not isinstance(errors, list)
+            or not all(isinstance(error, str) for error in errors)
+            or any(error.startswith(("futures/", "derivatives/")) for error in errors)):
+        raise ValueError("C1274 SOL source contract is invalid")
+    futures = _mapping(_mapping(coin.get("models")).get("futures_flow"))
+    expected_capture = "AVAILABLE" if futures.get("available") is True else "UNAVAILABLE"
+    if futures.get("capture_status") != expected_capture:
+        raise ValueError("C1274 Futures capture status is invalid")
+    if (futures.get("available") is True
+            and (str(futures.get("quality_status") or "").upper() not in ("PASS", "WARNING")
+                 or str(futures.get("freshness_status") or "").upper() != "FRESH")):
+        raise ValueError("C1274 Futures quality is invalid")
+    sources = _mapping(coin.get("sources"))
+    futures_source = _mapping(sources.get("futures"))
+    candle_close = utc(_mapping(futures_source.get("quality")).get("candle_close"))
+    if candle_close > computed or computed - candle_close > timedelta(minutes=30):
+        raise ValueError("C1274 Futures candle clock is invalid")
+    direction = _c1274_futures(futures)
+    result = {"watch_scan_id": scan, "bundle_sha256": bundle["payload_sha256"],
+              "event_time": computed.isoformat(), "source_candle_close_utc": candle_close.isoformat(),
+              "payload": None}
+    if direction is None:
+        return result
+    rule = RULES["C1274"]
+    reference_map = _mapping(references).get("SOL")
+    reference = select_reference(reference_map, _REFERENCE_COMPONENTS["C1274"],
+                                 symbol="SOL", as_of=computed)
+    if (reference.get("status") == "READY"
+            and utc(reference.get("anchor_time_utc")) != candle_close):
+        # A valid quote from another source boundary must never silently become
+        # this Futures candle's entry price.
+        reference = {"status": "UNAVAILABLE", "version": REFERENCE_VERSION,
+                     "reason": "REFERENCE_SOURCE_CLOCK_MISMATCH"}
+    event_id = "watch:" + hashlib.sha256(f"C1274|{scan}|SOL".encode()).hexdigest()
+    payload = {"rule_id": "C1274", "threshold_bps": rule["threshold_bps"],
+               "symbol": "SOL", "direction": direction, "source_direction": direction,
+               "prediction_mode": "DIRECT", "event_id": event_id,
+               "event_time": computed.isoformat(), "watch_scan_id": scan,
+               "source_candle_close_utc": candle_close.isoformat(),
+               "source_bundle_sha256": bundle["payload_sha256"],
+               "predicate_version": VERSION, "price_reference": deepcopy(reference)}
+    payload["text"] = render_message(payload)
+    result["payload"] = payload
+    return result
 
 
 def _score65(features: Mapping[str, Any], name: str) -> bool:
@@ -187,7 +283,9 @@ def _matches(rule_id: str, event: Mapping[str, Any], features: Mapping[str, Any]
                 and edge is not None and edge >= 30
                 and spot is not None and 25 <= spot <= 100)
     if rule_id == "C1274":
-        return _c1274(event)
+        # C1274 is evaluated once per frozen Watch score bundle, never through
+        # a Magnet/native-alert carrier.
+        return False
     if rule_id == "PRICE_OI_ENTRY2":
         ordinal = features.get("sequence.30m.price_oi.entry_ordinal")
         return (type(ordinal) in (int, float) and ordinal == 2
@@ -200,14 +298,38 @@ def _matches(rule_id: str, event: Mapping[str, Any], features: Mapping[str, Any]
     return False
 
 
+def _valid_c1274_payload(payload: Mapping[str, Any]) -> bool:
+    try:
+        scan = payload.get("watch_scan_id")
+        digest = payload.get("source_bundle_sha256")
+        event_time = utc(payload.get("event_time"))
+        candle_close = utc(payload.get("source_candle_close_utc"))
+        expected_event_id = "watch:" + hashlib.sha256(f"C1274|{scan}|SOL".encode()).hexdigest()
+        reference = _mapping(payload.get("price_reference"))
+        return (isinstance(scan, str) and bool(scan.strip()) and len(scan) <= 200
+                and isinstance(digest, str) and len(digest) == 64
+                and all(character in "0123456789abcdef" for character in digest)
+                and payload.get("event_id") == expected_event_id
+                and timedelta(0) <= event_time - candle_close <= timedelta(minutes=30)
+                and (reference.get("status") != "READY"
+                     or utc(reference.get("anchor_time_utc")) == candle_close))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def render_message(payload: Mapping[str, Any]) -> str:
     """Render HTML for an exact rule/symbol/direction, without performance claims."""
     rule = RULES.get(payload.get("rule_id"))
+    direct = payload.get("rule_id") == "C1274"
+    expected_direction = (payload.get("source_direction") if direct
+                          else _INVERSE.get(payload.get("source_direction")))
     if (not rule or payload.get("predicate_version") != VERSION
             or payload.get("threshold_bps") != rule["threshold_bps"]
             or payload.get("symbol") not in rule["symbols"]
             or payload.get("source_direction") not in _INVERSE
-            or payload.get("direction") != _INVERSE[payload["source_direction"]]):
+            or payload.get("direction") != expected_direction
+            or (direct and (payload.get("prediction_mode") != "DIRECT"
+                            or not _valid_c1274_payload(payload)))):
         raise ValueError("Invalid frozen experimental notification")
     stamp = utc(payload["event_time"]).astimezone(_ISRAEL)
     direction = "עלייה — LONG" if payload["direction"] == "LONG" else "ירידה — SHORT"
@@ -217,7 +339,7 @@ def render_message(payload: Mapping[str, Any]) -> str:
              render_reference_levels(payload.get("price_reference"),
                                      rule["threshold_bps"], payload["direction"], html=True),
              escape(rule["conditions_text"]),
-             "החיזוי הפוך לכיוון המחקר של אירוע המקור.",
+             *([] if direct else ["החיזוי הפוך לכיוון המחקר של אירוע המקור."]),
              *["<b>הערה</b>: " + escape(note) for note in rule["notes"].get(payload["symbol"], ())],
              f"זמן ההתראה בישראל: {stamp:%d.%m.%Y %H:%M:%S}",
              *([] if str(payload["event_id"]).startswith("watch:") else [f'אירוע מקור: {payload["event_id"]}']),
@@ -236,6 +358,8 @@ def evaluate_event(event: Mapping[str, Any], features: Mapping[str, Any], now: A
         return []
     result = []
     for rule_id, rule in RULES.items():
+        if rule_id == "C1274":
+            continue
         if event["symbol"] not in rule["symbols"] or not _matches(rule_id, event, features):
             continue
         payload = {"rule_id": rule_id, "threshold_bps": rule["threshold_bps"],

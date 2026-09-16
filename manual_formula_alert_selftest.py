@@ -6,6 +6,7 @@ import unittest
 import manual_formula_alert as rules
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+DEFAULT = object()
 
 
 def fixture(symbol="BTC", direction="LONG"):
@@ -29,10 +30,10 @@ def result_ids(event, features, now=NOW):
     return {row["rule_id"] for row in rules.evaluate_event(event, features, now)}
 
 
-def captured_references():
+def captured_references(symbol="BTC"):
     """Distinct component anchors expose using a shared current quote by mistake."""
     return {
-        component: {"status": "READY", "component": component, "symbol": "BTC",
+        component: {"status": "READY", "component": component, "symbol": symbol,
                     "price": price,
                     "price_time_utc": "2026-09-14T11:59:00Z" if component == "MAX_PAIN" else stamp,
                     "anchor_time_utc": stamp,
@@ -46,15 +47,53 @@ def captured_references():
     }
 
 
+def c1274_bundle(*, direction="BULLISH", score=DEFAULT, quality=.65, available=True,
+                 computed=NOW, candle_close=None, cycle_id="watch-cycle-1"):
+    if score is DEFAULT:
+        score = 25 if direction == "BULLISH" else -25
+    candle_close = candle_close or computed - timedelta(minutes=3)
+    coins = {symbol: {} for symbol in rules.SYMBOLS}
+    coins["SOL"] = {
+        "status": "PARTIAL",
+        "source_time_errors": [],
+        "models": {"futures_flow": {
+            "available": available,
+            "capture_status": "AVAILABLE" if available is True else "UNAVAILABLE",
+            "quality_status": "PASS",
+            "freshness_status": "FRESH",
+            "score": score,
+            "time_families": {"long": {"quality": quality, "direction": direction}},
+        }},
+        "sources": {"futures": {"quality": {"candle_close": candle_close.isoformat()}}},
+    }
+    body = {
+        "version": rules._WATCH_SCORE_VERSION,
+        "population": rules._WATCH_SCORE_POPULATION,
+        "hash_version": rules._WATCH_SCORE_HASH_VERSION,
+        "status": "PARTIAL",
+        "symbols_expected": list(rules.SYMBOLS),
+        "cycle_id": cycle_id,
+        "computed_at_utc": computed.isoformat(),
+        "coins": coins,
+    }
+    return {**body, "payload_sha256": rules._watch_digest(body)}
+
+
+def c1274_result(bundle=None, references=None, now=NOW):
+    return rules.evaluate_c1274_scan(
+        bundle or c1274_bundle(),
+        references if references is not None else {"SOL": captured_references("SOL")},
+        now,
+    )
+
+
 class ManualFormulaTests(unittest.TestCase):
     def test_each_formula_uses_its_earliest_required_anchor_and_final_direction(self):
-        expected = {"C1274": ("FUTURES_CVD", "90"),
-                    "PRICE_OI_ENTRY2": ("PRICE_OI", "110"),
+        expected = {"PRICE_OI_ENTRY2": ("PRICE_OI", "110"),
                     "PRICE_OI_SPOT65": ("SPOT_CVD", "100"),
                     "CONSENSUS_FULL": ("MAX_PAIN", "120"),
                     "C0964": ("SPOT_CVD", "100")}
-        expected_lower_upper = {"C1274": ("89.1", "90.9"),
-                                "PRICE_OI_ENTRY2": ("108.9", "111.1"),
+        expected_lower_upper = {"PRICE_OI_ENTRY2": ("108.9", "111.1"),
                                 "PRICE_OI_SPOT65": ("98", "102"),
                                 "CONSENSUS_FULL": ("117.6", "122.4"),
                                 "C0964": ("98", "102")}
@@ -80,6 +119,21 @@ class ManualFormulaTests(unittest.TestCase):
                     self.assertLess(row["text"].index(levels),
                                     row["text"].index(rules.RULES[row["rule_id"]]["conditions_text"]))
 
+        for family_direction, final_direction in (("BULLISH", "LONG"), ("BEARISH", "SHORT")):
+            row = c1274_result(c1274_bundle(direction=family_direction))["payload"]
+            with self.subTest(rule="C1274", direction=final_direction):
+                self.assertEqual(row["price_reference"]["component"], "FUTURES_CVD")
+                self.assertEqual(float(row["price_reference"]["price"]), 90)
+                self.assertEqual(row["direction"], final_direction)
+                self.assertEqual(row["source_direction"], final_direction)
+                levels = rules.render_reference_levels(row["price_reference"], 150,
+                                                       final_direction, html=True)
+                self.assertIn(levels, row["text"])
+                stop, target = (("88.65", "91.35") if final_direction == "LONG"
+                                else ("91.35", "88.65"))
+                self.assertIn("<b>סטופלוס:</b> " + stop + "\n", row["text"])
+                self.assertIn("<b>טייק פרופיט:</b> " + target + "\n", row["text"])
+
     def test_reference_is_frozen_and_rerender_does_not_reprice(self):
         event, features = fixture()
         event["engine_snapshot"]["experimental_price_references"] = captured_references()
@@ -101,7 +155,7 @@ class ManualFormulaTests(unittest.TestCase):
                 event["engine_snapshot"]["magnet"]["liquidity_edge_pct"] = 30
                 event["engine_snapshot"]["experimental_price_references"] = references
                 rows = rules.evaluate_event(event, features, NOW)
-                self.assertEqual(len(rows), 5)
+                self.assertEqual(len(rows), 4)
                 for row in rows:
                     self.assertNotEqual((row["price_reference"] or {}).get("status"), "READY")
                     self.assertIn(rules.render_reference_levels(None, row["threshold_bps"],
@@ -116,7 +170,7 @@ class ManualFormulaTests(unittest.TestCase):
         rows = {row["rule_id"]: row for row in rules.evaluate_event(event, features, NOW)}
         self.assertNotEqual((rows["PRICE_OI_SPOT65"]["price_reference"] or {}).get("status"), "READY")
         self.assertEqual(rows["PRICE_OI_ENTRY2"]["price_reference"]["status"], "READY")
-        old_payload = {key: value for key, value in rows["C1274"].items()
+        old_payload = {key: value for key, value in rows["PRICE_OI_ENTRY2"].items()
                        if key not in ("price_reference", "text")}
         message = rules.render_message(old_payload)
         self.assertIn(rules.render_reference_levels(None, old_payload["threshold_bps"],
@@ -136,24 +190,25 @@ class ManualFormulaTests(unittest.TestCase):
                         reference["price_time_utc"] = "2026-09-14T12:01:00Z"
                 event["engine_snapshot"]["experimental_price_references"] = references
                 rows = rules.evaluate_event(event, features, NOW)
-                self.assertEqual(len(rows), 5)
+                self.assertEqual(len(rows), 4)
                 self.assertTrue(all(row["price_reference"]["status"] == "UNAVAILABLE" for row in rows))
                 self.assertTrue(all("<b>סטופלוס:</b>" not in row["text"] for row in rows))
 
     def test_later_required_component_cannot_be_from_after_event(self):
         event, features = fixture()
+        event["engine_snapshot"]["magnet"]["liquidity_edge_pct"] = 30
         references = captured_references()
         references["MAX_PAIN"]["anchor_time_utc"] = "2026-09-14T12:01:00Z"
         references["MAX_PAIN"]["price_time_utc"] = "2026-09-14T12:01:00Z"
         event["engine_snapshot"]["experimental_price_references"] = references
         rows = {row["rule_id"]: row for row in rules.evaluate_event(event, features, NOW)}
-        self.assertEqual(rows["C1274"]["price_reference"]["status"], "UNAVAILABLE")
+        self.assertEqual(rows["C0964"]["price_reference"]["status"], "UNAVAILABLE")
         self.assertEqual(rows["PRICE_OI_SPOT65"]["price_reference"]["status"], "READY")
 
     def test_price_display_does_not_change_matching_version_or_ruleset(self):
-        self.assertEqual(rules.VERSION, "manual-formula-experimental-alerts-v2")
+        self.assertEqual(rules.VERSION, "manual-formula-experimental-alerts-v3")
         self.assertEqual(rules.RULESET_SHA256,
-                         "9d28a33d38faae8bafce6f03b3ce400a1f928aca16f36edecb46b9450dd234c8")
+                         "a72815e826f3e15296584288926b0d3b6a322c12d7f2548d8032534130a1803b")
 
     def test_c0964_exact_predicate_btc_both_directions_and_note(self):
         for symbol in rules.SYMBOLS:
@@ -188,7 +243,7 @@ class ManualFormulaTests(unittest.TestCase):
                      capture_stage='WATCH_PLANNED_ALERT', delivery_status='NOT_ATTEMPTED')
         event['engine_snapshot']['watch_scan_id'] = 'current-watch'
         self.assertFalse(rules.evaluate_event(event, features, NOW))
-        self.assertEqual(len(rules.evaluate_event(event, features, NOW, planned=True)), 4)
+        self.assertEqual(len(rules.evaluate_event(event, features, NOW, planned=True)), 3)
         for field, bad in (('capture_stage', 'OBSERVED'), ('event_id', 123), ('delivery_status', 'DELIVERED')):
             changed = deepcopy(event); changed[field] = bad
             self.assertFalse(rules.evaluate_event(changed, features, NOW, planned=True))
@@ -196,34 +251,38 @@ class ManualFormulaTests(unittest.TestCase):
         self.assertFalse(rules.evaluate_event(event, features, NOW, planned=True))
 
     def test_all_eight_coin_filters_are_exact(self):
-        expected = {"C1274": {"BTC", "BNB", "DOGE", "HYPE", "SOL"},
-                    "PRICE_OI_ENTRY2": {"BTC", "BNB", "DOGE", "ETH", "SOL", "XRP"},
+        expected = {"PRICE_OI_ENTRY2": {"BTC", "BNB", "DOGE", "ETH", "SOL", "XRP"},
                     "PRICE_OI_SPOT65": {"BTC", "BNB", "DOGE", "HYPE", "SOL", "XRP", "ZEC"},
                     "CONSENSUS_FULL": {"BTC", "DOGE", "ETH", "HYPE", "SOL", "XRP"}}
         for symbol in rules.SYMBOLS:
             with self.subTest(symbol=symbol):
                 self.assertEqual(result_ids(*fixture(symbol)), {key for key, symbols in expected.items() if symbol in symbols})
         self.assertFalse(result_ids(*fixture("ADA")))
+        self.assertEqual(rules.RULES["C1274"]["symbols"], ("SOL",))
+        self.assertEqual(c1274_result()["payload"]["symbol"], "SOL")
 
     def test_threshold_headers_and_exact_notes(self):
-        expected = {"C1274": {"BTC": ["כמות הופעות / אסימטריה טעונות שיפור"], "SOL": ["כמות הופעות / אסימטריה טעונות שיפור"]},
-                    "PRICE_OI_ENTRY2": {"BTC": ["כמות הופעות קטנה"], "ETH": ["כמות הופעות קטנה"],
+        expected = {"PRICE_OI_ENTRY2": {"BTC": ["כמות הופעות קטנה"], "ETH": ["כמות הופעות קטנה"],
                                         "SOL": ["כמות הופעות קטנה"], "DOGE": ["אסימטריה נמוכה"]},
                     "PRICE_OI_SPOT65": {s: ["כמות הופעות קטנה"] + (["כמות ההופעות הגדולה ביותר"] if s == "ZEC" else []) for s in rules.SYMBOLS if s != "ETH"},
                     "CONSENSUS_FULL": {"SOL": ["אסימטריה טעונת שיפור"], **{s: ["הסתברות / אסימטריה גבוהות אבל מעט הופעות יחסית"] for s in ("XRP", "ETH", "BTC")}}}
         for symbol in rules.SYMBOLS:
             for row in rules.evaluate_event(*fixture(symbol), NOW):
                 with self.subTest(symbol=symbol, rule=row["rule_id"]):
-                    self.assertEqual(row["threshold_bps"], 100 if row["rule_id"] in ("C1274", "PRICE_OI_ENTRY2") else 200)
+                    self.assertEqual(row["threshold_bps"], 100 if row["rule_id"] == "PRICE_OI_ENTRY2" else 200)
                     self.assertTrue(row["text"].startswith(f'🧪 <b>סף {row["threshold_bps"] / 100:g}% — ניסיוני, לא למסחר</b>'))
                     notes = [line.removeprefix("<b>הערה</b>: ") for line in row["text"].splitlines() if line.startswith("<b>הערה</b>: ")]
                     self.assertEqual(notes, expected[row["rule_id"]].get(symbol, []))
                     self.assertNotIn("שיעור הצלחה", row["text"])
+        row = c1274_result()["payload"]
+        self.assertEqual(row["threshold_bps"], 150)
+        self.assertTrue(row["text"].startswith('🧪 <b>סף 1.5% — ניסיוני, לא למסחר</b>'))
+        self.assertIn("<b>הערה</b>: כמות הופעות / אסימטריה טעונות שיפור", row["text"])
 
     def test_single_inversion_both_directions(self):
         for direction, expected in (("LONG", "SHORT"), ("SHORT", "LONG")):
             rows = rules.evaluate_event(*fixture(direction=direction), NOW)
-            self.assertEqual(len(rows), 4)
+            self.assertEqual(len(rows), 3)
             self.assertTrue(all(r["direction"] == expected and r["source_direction"] == direction for r in rows))
         event, features = fixture(); event["source_direction"] = "SHORT"
         self.assertFalse(result_ids(event, features))
@@ -262,34 +321,65 @@ class ManualFormulaTests(unittest.TestCase):
             self.assertNotIn("CONSENSUS_FULL", result_ids(event, features))
 
     def test_c1274_exact_raw_family_predicate_both_directions(self):
-        for direction in ("LONG", "SHORT"):
-            for value in (.649999, None, True, float("nan"), float("inf"), 65):
-                event, features = fixture(direction=direction)
-                event["engine_snapshot"]["market_evidence"]["modules"]["futures_flow"]["time_families"]["long"]["quality"] = value
-                self.assertNotIn("C1274", result_ids(event, features))
+        for direction, expected in (("BULLISH", "LONG"), ("BEARISH", "SHORT")):
+            payload = c1274_result(c1274_bundle(direction=direction))["payload"]
+            self.assertEqual(payload["direction"], expected)
+            self.assertEqual(payload["source_direction"], expected)
+            self.assertEqual(payload["prediction_mode"], "DIRECT")
+            for value in (.649999, None, True, "nan", "inf", 65):
+                bundle = c1274_bundle(direction=direction, quality=value)
+                self.assertIsNone(c1274_result(bundle)["payload"])
             for value in (.65, 1):
-                event, features = fixture(direction=direction)
-                event["engine_snapshot"]["market_evidence"]["modules"]["futures_flow"]["time_families"]["long"]["quality"] = value
-                self.assertIn("C1274", result_ids(event, features))
+                bundle = c1274_bundle(direction=direction, quality=value)
+                self.assertIsNotNone(c1274_result(bundle)["payload"])
         for available in (False, "true", None, 1):
-            event, features = fixture(); event["engine_snapshot"]["market_evidence"]["modules"]["futures_flow"]["available"] = available
-            self.assertNotIn("C1274", result_ids(event, features))
-        for score in (None, True, float("nan"), float("inf"), -24.999999, 25, -101):
-            event, features = fixture(); event["engine_snapshot"]["market_evidence"]["modules"]["futures_flow"]["score"] = score
-            self.assertNotIn("C1274", result_ids(event, features))
-        for value in ("BULLISH", "NEUTRAL", None, "SHORT"):
-            event, features = fixture(); event["engine_snapshot"]["market_evidence"]["modules"]["futures_flow"]["time_families"]["long"]["direction"] = value
-            self.assertNotIn("C1274", result_ids(event, features))
+            self.assertIsNone(c1274_result(c1274_bundle(available=available))["payload"])
+        for score in (None, True, "nan", "inf", 24.999999, -25, 101, -101):
+            self.assertIsNone(c1274_result(c1274_bundle(score=score))["payload"])
+        for score in (25, 100, "25"):
+            self.assertIsNotNone(c1274_result(c1274_bundle(score=score))["payload"])
+        for score in (-25, -100, "-25"):
+            self.assertIsNotNone(c1274_result(c1274_bundle(direction="BEARISH", score=score))["payload"])
+        for value in ("NEUTRAL", None, "SHORT", "LONG"):
+            self.assertIsNone(c1274_result(c1274_bundle(direction=value, score=25))["payload"])
         for kind in ("MAGNET_ALERT", "MAGNET_CONFIRMATION", "STRONG_MAGNET_CONFIRMATION"):
             event, features = fixture(); event["event_type"] = kind
-            self.assertIn("C1274", result_ids(event, features))
-        event, features = fixture(); event["engine_snapshot"]["market_evidence"]["modules"] = {}
-        self.assertNotIn("C1274", result_ids(event, features))
+            self.assertNotIn("C1274", result_ids(event, features))
 
-    def test_c1274_does_not_add_unrequested_magnet_le_or_total_65(self):
-        event, features = fixture()
-        event["engine_snapshot"]["magnet"]["liquidity_edge_pct"] = 0
-        self.assertIn("C1274", result_ids(event, features))
+    def test_c1274_is_futures_only_and_message_has_no_magnet_or_inversion(self):
+        references = {"SOL": {"FUTURES_CVD": captured_references("SOL")["FUTURES_CVD"]}}
+        payload = c1274_result(references=references)["payload"]
+        self.assertEqual(payload["price_reference"]["component"], "FUTURES_CVD")
+        self.assertNotIn("מגנט", payload["text"])
+        self.assertNotIn("החיזוי הפוך", payload["text"])
+
+        missing = c1274_result(references={"SOL": {}})["payload"]
+        self.assertEqual(missing["price_reference"]["status"], "UNAVAILABLE")
+        self.assertNotIn("<b>סטופלוס:</b>", missing["text"])
+
+        wrong_clock = deepcopy(references)
+        wrong_clock["SOL"]["FUTURES_CVD"]["anchor_time_utc"] = "2026-09-14T11:56:00Z"
+        wrong_clock["SOL"]["FUTURES_CVD"]["price_time_utc"] = "2026-09-14T11:56:00Z"
+        mismatched = c1274_result(references=wrong_clock)["payload"]
+        self.assertEqual(mismatched["price_reference"]["reason"],
+                         "REFERENCE_SOURCE_CLOCK_MISMATCH")
+        self.assertNotIn("<b>סטופלוס:</b>", mismatched["text"])
+
+    def test_c1274_rejects_modified_stale_or_bad_clock_bundle(self):
+        modified = c1274_bundle()
+        modified["coins"]["SOL"]["models"]["futures_flow"]["score"] = 50
+        with self.assertRaises(ValueError):
+            c1274_result(modified)
+        with self.assertRaises(ValueError):
+            c1274_result(c1274_bundle(computed=NOW - timedelta(minutes=10, microseconds=1)))
+        with self.assertRaises(ValueError):
+            c1274_result(c1274_bundle(candle_close=NOW + timedelta(seconds=1)))
+        bad_source = c1274_bundle()
+        bad_source["coins"]["SOL"]["source_time_errors"] = ["derivatives/observed:FUTURE_TIME"]
+        bad_source["payload_sha256"] = rules._watch_digest(
+            {key: value for key, value in bad_source.items() if key != "payload_sha256"})
+        with self.assertRaises(ValueError):
+            c1274_result(bad_source)
 
     def test_age_future_timezone_and_exact_ten_minute_boundary(self):
         event, features = fixture()
@@ -327,7 +417,7 @@ class ManualFormulaTests(unittest.TestCase):
     def test_hype_futures_is_not_rejected_by_spot_only_gate(self):
         event, features = fixture("HYPE")
         event["engine_snapshot"].update(price_source="binance_futures", price_market="futures", price_pair="HYPEUSDT")
-        self.assertEqual(result_ids(event, features), {"C1274", "PRICE_OI_SPOT65", "CONSENSUS_FULL"})
+        self.assertEqual(result_ids(event, features), {"PRICE_OI_SPOT65", "CONSENSUS_FULL"})
 
     def test_renderer_rejects_mutated_identity_and_does_not_mutate_input(self):
         event, features = fixture(); original = deepcopy((event, features))
@@ -335,9 +425,18 @@ class ManualFormulaTests(unittest.TestCase):
         self.assertEqual((event, features), original)
         self.assertEqual(payload["text"], rules.render_message(payload))
         for field, bad in (("rule_id", "OTHER"), ("threshold_bps", 200), ("predicate_version", "unknown"),
-                           ("symbol", "ETH"), ("direction", "LONG"), ("source_direction", "SHORT")):
+                           ("symbol", "HYPE"), ("direction", "LONG"), ("source_direction", "SHORT")):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 rules.render_message({**payload, field: bad})
+
+        direct = c1274_result()["payload"]
+        for field, bad in (("threshold_bps", 100), ("symbol", "BTC"),
+                           ("direction", "SHORT"), ("source_direction", "SHORT"),
+                           ("prediction_mode", "INVERSE"), ("watch_scan_id", "other"),
+                           ("source_bundle_sha256", "g" * 64),
+                           ("source_candle_close_utc", "2026-09-14T11:56:00Z")):
+            with self.subTest(direct_field=field), self.assertRaises(ValueError):
+                rules.render_message({**direct, field: bad})
 
 
 if __name__ == "__main__":

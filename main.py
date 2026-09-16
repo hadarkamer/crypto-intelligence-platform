@@ -4762,7 +4762,13 @@ async def run_watch_cycle(
                 async def _prepare(rows, live_result):
                     try:
                         await derivatives_task
-                        snapshot_symbols = sorted({str(row.get("symbol") or "").upper() for row in rows if row.get("symbol")})
+                        # C1274 is a standalone SOL Futures rule. Its source
+                        # must exist even when this scan has no Max-Pain row for
+                        # SOL, so it cannot inherit a hidden Magnet dependency.
+                        snapshot_symbols = sorted(
+                            {str(row.get("symbol") or "").upper() for row in rows if row.get("symbol")}
+                            | {"SOL"}
+                        )
                         snapshot = await asyncio.to_thread(market_confidence_engine.capture_snapshot, snapshot_symbols)
                         formula_timing["cvd_observations_by_symbol"] = {
                             symbol: value.get("timing_observation", {}) for symbol, value in snapshot.items()
@@ -4850,6 +4856,21 @@ async def run_watch_cycle(
         except Exception as exc:
             print(f"[experimental-reference] unavailable: {type(exc).__name__}", flush=True)
         if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
+            # C1274 is intentionally independent of Magnet, Max Pain and the
+            # dual-CVD/legacy planned-event paths. Freeze and drain it directly
+            # from the score bundle before any of those later paths can fail.
+            try:
+                await manual_formula_alert_delivery.run_watch(
+                    bot_app.bot, chat_id, [],
+                    c1274_bundle=dual_cvd_bundle,
+                    price_references=experimental_references,
+                    may_deliver=lambda: bool(WATCH_GENERAL_ENABLED)
+                    and WATCH_RUNTIME.get("chat_id") == chat_id,
+                )
+            except Exception as exc:
+                # The ordinary Watch and the other experimental formulas retain
+                # their existing independent recovery paths.
+                print(f"[manual-formulas] C1274 preparation gap: {type(exc).__name__}", flush=True)
             await dual_cvd65_delivery.record_watch(
                 chat_id, dual_cvd_bundle, watch_scan_id=watch_scan_id,
                 decision_time=datetime.now(timezone.utc),
