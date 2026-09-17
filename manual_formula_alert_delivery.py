@@ -61,6 +61,12 @@ async def initialize(chat_id=None):
         _gap('initialize', exc)
         return False
     _STATUS.update(ready=True, last_error_type=None)
+    # Optional independent DATA copies. Never await receiver or change Telegram.
+    try:
+        from alert_cards_forwarder import maybe_start
+        maybe_start(chat_id)
+    except Exception:
+        print('[alert-cards] FORWARD_HOOK_UNAVAILABLE', flush=True)
     return True
 
 
