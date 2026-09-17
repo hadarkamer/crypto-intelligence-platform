@@ -13,7 +13,8 @@ def fixture(symbol="BTC", direction="LONG"):
     event = {"event_id": 123, "event_fingerprint": "a" * 64, "event_kind": "ALERT",
              "event_type": "MAGNET_ALERT", "delivery_status": "DELIVERED", "symbol": symbol,
              "direction": direction, "alert_time_utc": NOW, "current_price": 100,
-             "engine_snapshot": {"magnet": {"side": "UPPER" if direction == "LONG" else "LOWER"},
+             "engine_snapshot": {"magnet": {"side": "UPPER" if direction == "LONG" else "LOWER",
+                 "count": 3, "members": ["12h", "24h", "48h"]},
                  "price_source": "binance_futures" if symbol == "HYPE" else "binance_spot",
                  "market_evidence": {"modules": {"futures_flow": {
                      "available": True, "score": -25 if direction == "LONG" else 25,
@@ -206,8 +207,11 @@ class ManualFormulaTests(unittest.TestCase):
         self.assertEqual(rows["PRICE_OI_SPOT65"]["price_reference"]["status"], "READY")
 
     def test_frozen_rule_version_and_ruleset(self):
-        self.assertEqual(rules.VERSION, "manual-formula-experimental-alerts-v4")
+        self.assertEqual(rules.VERSION, "manual-formula-experimental-alerts-v5")
         self.assertEqual(rules.RULESET_SHA256,
+                         "6e2fdc705023e3b9ec5c81ed71df2bcc50dc4195f29a89cd89a0071346937110")
+        self.assertEqual(rules.PRE_TIMEFRAME_FILTER_VERSION, "manual-formula-experimental-alerts-v4")
+        self.assertEqual(rules.PRE_TIMEFRAME_FILTER_RULESET_SHA256,
                          "160901f44287a903208630abeaa20e24eba8615dd20f62fa1c33646294f85df6")
 
     def test_doge_observation_is_direct_short_only_without_extra_indicator_filters(self):
@@ -273,6 +277,76 @@ class ManualFormulaTests(unittest.TestCase):
                         {'symbol': 'BTC'}, {'threshold_bps': 150}, {'prediction_mode': 'INVERSE'}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 rules.render_message({**row, **changes})
+
+    def test_doge_observation_requires_three_to_seven_distinct_supported_timeframes(self):
+        rule_id = 'MAGNET_OBSERVATION_DOGE_SHORT'
+        supported = ['12h', '24h', '48h', '3d', '1w', '2w', '1m']
+        for count in (2, 3, 7):
+            for container in (list, tuple):
+                event, features = fixture('DOGE', 'SHORT')
+                event['engine_snapshot']['magnet_confirmation'] = {'status': 'OBSERVATION'}
+                features['captured.magnet.confirmation_status'] = 'OBSERVATION'
+                event['engine_snapshot']['magnet'].update(count=count, members=container(supported[:count]))
+                rows = [r for r in rules.evaluate_event(event, features, NOW) if r['rule_id'] == rule_id]
+                with self.subTest(count=count, container=container.__name__):
+                    self.assertEqual(len(rows), int(count >= 3))
+                    if rows:
+                        self.assertEqual(rows[0]['magnet_timeframes'], supported[:count])
+                        self.assertEqual(rows[0]['magnet_timeframe_count'], count)
+                        self.assertTrue(rules.delivery_payload_allowed(rows[0]))
+
+    def test_doge_observation_rejects_missing_malformed_or_inconsistent_timeframes(self):
+        rule_id = 'MAGNET_OBSERVATION_DOGE_SHORT'
+        valid = {'count': 3, 'members': ['12h', '24h', '48h']}
+        invalid = [
+            {}, {'members': valid['members']}, {'count': 3},
+            *[{**valid, 'count': value} for value in (None, True, '3', 3.0, -1, 2, 4, 8)],
+            *[{**valid, 'members': value} for value in (
+                None, '12h,24h,48h', {'12h': 1, '24h': 1, '48h': 1}, [],
+                ['12h', '24h'], ['12h', '24h', '24h'], ['12h', '24h', '4h'],
+                ['12h', '24h', '48H'], ['12h', '24h', None], ['12h', '24h', ['48h']],
+                ['12h', '24h', '48h', '48h'])],
+            {'count': 4, 'members': ['12h', '24h', '48h', '48h']},
+        ]
+        for metadata in invalid:
+            event, features = fixture('DOGE', 'SHORT')
+            event['engine_snapshot']['magnet'] = {'side': 'LOWER', **deepcopy(metadata)}
+            event['engine_snapshot']['magnet_confirmation'] = {'status': 'OBSERVATION'}
+            features['captured.magnet.confirmation_status'] = 'OBSERVATION'
+            with self.subTest(metadata=metadata):
+                self.assertNotIn(rule_id, result_ids(event, features))
+
+    def test_doge_timeframes_are_frozen_and_old_or_invalid_payload_cannot_deliver(self):
+        event, features = fixture('DOGE', 'SHORT')
+        event['engine_snapshot']['magnet_confirmation'] = {'status': 'OBSERVATION'}
+        features['captured.magnet.confirmation_status'] = 'OBSERVATION'
+        payload = next(r for r in rules.evaluate_event(event, features, NOW)
+                       if r['rule_id'] == 'MAGNET_OBSERVATION_DOGE_SHORT')
+        frozen = deepcopy(payload)
+        event['engine_snapshot']['magnet']['members'].append('3d')
+        event['engine_snapshot']['magnet']['count'] = 4
+        self.assertEqual(payload, frozen)
+        self.assertEqual(rules.render_message(payload), frozen['text'])
+        for changes in ({'predicate_version': rules.PRE_TIMEFRAME_FILTER_VERSION},
+                        {'predicate_version': None}, {'magnet_timeframe_count': 2},
+                        {'magnet_timeframe_count': 3.0}, {'magnet_timeframes': None},
+                        {'magnet_timeframes': ['12h', '24h', '24h']},
+                        {'magnet_timeframes': ['12h', '24h', '4h']}):
+            bad = {**payload, **changes}
+            with self.subTest(changes=changes):
+                self.assertFalse(rules.delivery_payload_allowed(bad))
+                with self.assertRaises(ValueError):
+                    rules.render_message(bad)
+        for missing in ('predicate_version', 'magnet_timeframe_count', 'magnet_timeframes'):
+            bad = deepcopy(payload)
+            del bad[missing]
+            with self.subTest(missing=missing):
+                self.assertFalse(rules.delivery_payload_allowed(bad))
+        for rule_id in rules.RULES:
+            if rule_id != 'MAGNET_OBSERVATION_DOGE_SHORT':
+                with self.subTest(legacy_rule=rule_id):
+                    self.assertTrue(rules.delivery_payload_allowed(
+                        {'rule_id': rule_id, 'predicate_version': rules.LEGACY_VERSION}))
 
     def test_c0964_exact_predicate_btc_both_directions_and_note(self):
         for symbol in rules.SYMBOLS:

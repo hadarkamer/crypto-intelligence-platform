@@ -10,10 +10,13 @@ existing experimental Telegram notifications after reviewing its symmetric
 - Symbol: DOGE only.
 - Native source: a Magnet-family event with a verified research direction of
   SHORT, a LOWER magnet and captured confirmation status `OBSERVATION`.
+- From v5 (17 September): at least three distinct captured timeframe members
+  in that same cluster, with a consistent member count. Two-member clusters
+  cannot trigger this experimental rule.
 - Prediction: SHORT in the source direction, without inversion.
 - Threshold: 175 basis points. Stop = reference price × 1.0175;
   take profit = reference price × 0.9825.
-- No additional MQ55, CVD, liquidity, horizon or market-wave condition.
+- No additional MQ55, CVD, liquidity, outcome horizon or market-wave condition.
 
 The existing fresh-source, provenance, recipient and Watch controls apply.
 Missing confirmation status does not become OBSERVATION from a low MQ score.
@@ -131,3 +134,26 @@ other experimental delivery disabled, and exactly the same two active manual
 rules. Regression checks cover a full Watch cycle, supervisor recovery, mixed
 queue filtering, independent experimental workers and profile changes during
 awaited claims.
+
+## DOGE cluster membership filter — 17 September
+
+The owner requested removing two-timeframe Magnet OBSERVATION cases from the
+DOGE SHORT experimental notifications. Ruleset v5 requires 3–7 distinct members
+from `12h`, `24h`, `48h`, `3d`, `1w`, `2w`, `1m`. The captured numeric count must
+match the member list. Missing, duplicate, unsupported or inconsistent evidence
+does not qualify. Members from separate clusters are never combined. A scan
+containing a two-member cluster and a qualifying cluster can still emit one
+notification for the qualifying cluster under the existing deduplication rule.
+
+New DOGE payloads freeze `magnet_timeframes` and `magnet_timeframe_count`.
+Rendering, queue claiming and the final transport gate enforce the filter.
+The exact known v4 state is migrated without resetting activation fences,
+receipts, deduplication, C1274 candle state or non-DOGE frozen messages. Because
+v4 DOGE payloads did not retain member evidence, only their unattempted pending
+messages are cancelled with `DOGE_TIMEFRAME_FILTER_UPDATED`; historical and
+in-flight records are preserved. The earlier v3/v2 migration paths remain.
+
+The production profile remains `ORDINARY_AND_SELECTED_EXPERIMENTAL`: ordinary
+notifications and C1274 remain active, the other experimental rules remain
+paused, and DOGE retains SHORT with the symmetric 1.75% threshold. Ordinary
+Magnet reporting and research capture continue to include two-member clusters.
