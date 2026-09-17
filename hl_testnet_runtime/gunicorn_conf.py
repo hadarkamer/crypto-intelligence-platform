@@ -17,6 +17,11 @@ def post_worker_init(worker):
         'fees_funding_slippage_included': False,
         'resizes_existing_orders': False, 'mainnet_enabled': False}}), flush=True)
     mode = os.environ.get('HL_TESTNET_RUNTIME_MODE','read_only')
+    if (os.environ.get('HL_TESTNET_CONNECTION_REVIEW') == 'two_account_no_orders_v1'
+            and mode in ('read_only','cancel_monitor_testnet_v1')):
+        import threading
+        from hl_testnet_runtime.connection_review_startup import startup as connection_review
+        threading.Thread(target=connection_review,daemon=True,name='connection-no-orders-review').start()
     if (os.environ.get('HL_TESTNET_CARDS_PHASE1') == 'record_only_v1'
             and mode in ('read_only', 'cancel_monitor_testnet_v1')):
         import threading

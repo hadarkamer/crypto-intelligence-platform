@@ -57,9 +57,12 @@ def startup_storage_check():
 
 
 def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=False,
-                     journal=None, source_expires_at=None, approval_expires_at=None):
+                     journal=None, source_expires_at=None, approval_expires_at=None,
+                     account_role=None):
     """One explicit call, commit-before-signing; one reservation per test account.
 
+    Role-bound calls additionally require the new default-locked role switch.
+    Startup review NEVER calls this. Legacy callers keep their existing path.
     Defaults retain the legacy minute window. Only a supervised caller supplies
     the ORIGINAL source expiry (<=10 minutes) and a shorter approval deadline.
     An expired or uncertain attempt is never reset or blindly submitted again.
@@ -70,6 +73,10 @@ def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=
         return result
     from . import checks, guarded_execution as guard, price_precision as precision
     import hyperliquid_testnet_executor as sender
+    if account_role is not None:
+        from . import two_account_execution as roles
+        if not roles.execution_unlocked(os.environ):
+            return {**result, 'status': 'ROLE_EXECUTION_LOCKED'}
     http, reserved, key = None, False, None
     started = time.monotonic()
     try:
@@ -77,6 +84,8 @@ def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=
         account, agent = account_address(account), account_address(agent)
         if account == agent:
             raise JournalError('USE_DEDICATED_AGENT_NOT_MASTER_KEY')
+        if account_role is not None:
+            roles.route_for(os.environ, account_role, account, agent, source['side'])
         journal = PostgresJournal.from_env(os.environ) if journal is None else journal
         key, prepared, reader, _ = prepare_and_store(source, account=account, journal=journal)
         previous = journal.load(key)
@@ -88,9 +97,12 @@ def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=
             raise JournalError('EXPLICIT_EXIT_TYPE_REQUIRED')
         action = sender.build_action(prepared['execution'], reader.read('meta'), account, exit_type=exit_type)
         plan = {k: prepared['execution'][k] for k in guard.PLAN_FIELDS}
-        report = checks.run_check({'HL_TESTNET_ACCOUNT_ADDRESS': account,
-            'HL_TESTNET_AGENT_ADDRESS': agent, 'HL_TESTNET_RUNTIME_MODE': 'read_only',
-            'HL_TESTNET_CHECK_SYMBOL': plan['symbol'], 'HL_TESTNET_CHECK_PLAN': json.dumps(plan)}, client=reader)
+        if account_role is not None:
+            report = roles.budget_for_role(os.environ, account_role, account, agent, plan, reader)
+        else:
+            report = checks.run_check({'HL_TESTNET_ACCOUNT_ADDRESS': account,
+                'HL_TESTNET_AGENT_ADDRESS': agent, 'HL_TESTNET_RUNTIME_MODE': 'read_only',
+                'HL_TESTNET_CHECK_SYMBOL': plan['symbol'], 'HL_TESTNET_CHECK_PLAN': json.dumps(plan)}, client=reader)
         diagnostics = report.get('budget_diagnostics') or {}
         if (report.get('status') != 'PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION'
                 or report.get('test_plan_checked') is not True
@@ -103,7 +115,8 @@ def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=
         mark = checks.number(active.get('markPx'))
         if not min(Decimal(plan['stop']), Decimal(plan['take_profit'])) < mark < max(Decimal(plan['stop']), Decimal(plan['take_profit'])):
             raise JournalError('TESTNET_PRICE_OUTSIDE_SUPPLIED_EXIT_RANGE')
-        wallet = sender._wallet()
+        wallet = (roles.wallet_for_role(os.environ, account_role, account, agent)
+                  if account_role is not None else sender._wallet())
         if account_address(wallet.address) != agent:
             raise JournalError('KEY_DOES_NOT_MATCH_AGENT')
         http = sender.TestnetHTTP(allow_orders=True)
@@ -131,6 +144,8 @@ def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=
                 or not source_fresh(at, source_expires_at, approval_expires_at)
                 or not 0 <= sender.now_ms() - nonce <= 5000):
             raise JournalError('SOURCE_OR_RESERVATION_EXPIRED_NO_SEND')
+        if account_role is not None and not roles.execution_unlocked(os.environ):
+            raise JournalError('ROLE_EXECUTION_LOCKED')
         body = sender._signed_body(wallet, action, nonce)
         result['signing_tested'] = True
         response = http._post('/exchange', body)
