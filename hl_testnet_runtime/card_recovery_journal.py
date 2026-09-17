@@ -167,10 +167,12 @@ class RecoveryJournal:
                 raise RecoveryStorageError('CONCURRENT_RECOVERY_RELOAD_REQUIRED')
             try:
                 data = change(conn, active, revision, last)
+            except life.LifecycleError as exc:
+                # LifecycleStorageError also inherits JournalError: normalize it
+                # first so callers receive one stable recovery-domain exception.
+                raise RecoveryStorageError(str(exc)) from None
             except JournalError:
                 raise
-            except life.LifecycleError as exc:
-                raise RecoveryStorageError(str(exc)) from None
             if now_ms < data['last_event_at_ms']:
                 raise RecoveryStorageError('RECOVERY_TIME_MOVED_BACKWARDS')
             data.update(last_event_at_ms=now_ms, request_revision=revision+1)
