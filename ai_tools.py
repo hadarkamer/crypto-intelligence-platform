@@ -19,6 +19,7 @@ import market_confidence_engine
 import research_feature_matrix
 import research_formula_store
 import research_historical_replay
+import research_watch_scan_formula_leaderboard
 
 
 TOOL_SPECS = [
@@ -431,6 +432,61 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
+        "name": "research_watch_formula_leaderboard",
+        "description": (
+            "Read one exact partition of the active Ordered-V7 all-Watch formula corpus and return "
+            "separate probability and full-window asymmetry leaders, including n=1-4 and explicit "
+            "zero-evidence counts. The source combines Watch capture phases and is descriptive only: "
+            "it is not Stage-8 prospective evidence, qualification, promotion, LIVE, Telegram, or trading authority."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "dimension": {
+                    "type": "string",
+                    "enum": ["COIN", "SELECTED_TIMEFRAME"],
+                    "description": "Use COIN for ordinary formula definitions or SELECTED_TIMEFRAME for the separate timeframe catalog.",
+                },
+                "symbol_scope": {
+                    "type": "string",
+                    "enum": ["ALL", "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ZEC", "HYPE"],
+                    "description": "One exact Watch scope. ALL is the Watch Top8 pool and is not Stage-8 ALL_BINANCE7.",
+                },
+                "window_minutes": {
+                    "type": "integer",
+                    "enum": [60, 240, 720, 1440],
+                    "description": "One exact completed outcome window.",
+                },
+                "timeframe": {
+                    "type": "string",
+                    "enum": ["NOT_APPLICABLE", "12h", "24h", "48h", "3d", "1w", "2w", "1m"],
+                    "description": "Use NOT_APPLICABLE for COIN; otherwise one exact selected MaxPain timeframe.",
+                },
+                "analysis_direction": {
+                    "type": "string",
+                    "enum": ["LONG", "SHORT"],
+                    "description": "Exact measured result direction; inverse definitions are mapped without mixing directions.",
+                },
+                "threshold_bps": {
+                    "type": "integer",
+                    "enum": [25, 50, 75, 100, 125, 150, 175, 200],
+                    "description": "One exact symmetric Ordered-V7 barrier in basis points.",
+                },
+                "top_per_route": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4,
+                    "description": "Maximum leaders returned separately in each evidence band and route.",
+                },
+            },
+            "required": ["dimension", "symbol_scope", "window_minutes", "timeframe",
+                         "analysis_direction", "threshold_bps", "top_per_route"],
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "research_formula_shadow",
         "description": (
             "Read formula lifecycle counts and recent matches observed after a formula entered Shadow. "
@@ -668,6 +724,31 @@ async def _research_formula_registry(args: Dict[str, Any]) -> Any:
     return _bounded(result, max_chars=55000)
 
 
+async def _research_watch_formula_leaderboard(args: Dict[str, Any]) -> Any:
+    def read() -> Any:
+        # This descriptive AI read reuses the already configured research
+        # connection, but the transaction itself is forced read-only before
+        # any source view is touched. The standalone CLI remains purpose-URL only.
+        with research_formula_store._connect(read_only=True) as conn:
+            with conn.transaction():
+                conn.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                )
+                return research_watch_scan_formula_leaderboard.read_leaderboard(
+                    conn,
+                    dimension=str(args.get("dimension")),
+                    symbol_scope=str(args.get("symbol_scope")),
+                    window_minutes=int(args.get("window_minutes")),
+                    timeframe=str(args.get("timeframe")),
+                    analysis_direction=str(args.get("analysis_direction")),
+                    threshold_bps=int(args.get("threshold_bps")),
+                    top_per_route=int(args.get("top_per_route")),
+                )
+
+    result = await asyncio.to_thread(read)
+    return _bounded(result, max_chars=55000)
+
+
 async def _research_historical_replay_status(_: Dict[str, Any]) -> Any:
     result = await asyncio.to_thread(research_historical_replay.status)
     return _bounded(result, max_chars=45000)
@@ -716,6 +797,7 @@ async def _get_ai_capabilities(_: Dict[str, Any]) -> Any:
             "research_feature_matrix",
             "research_historical_replay_status",
             "research_formula_registry",
+            "research_watch_formula_leaderboard",
             "research_formula_shadow",
             "research_formula_lab_comparison",
             "get_ai_capabilities",
@@ -806,6 +888,7 @@ _EXECUTORS: Dict[str, Callable[[Dict[str, Any]], Awaitable[Any]]] = {
     "research_feature_matrix": _research_feature_matrix,
     "research_historical_replay_status": _research_historical_replay_status,
     "research_formula_registry": _research_formula_registry,
+    "research_watch_formula_leaderboard": _research_watch_formula_leaderboard,
     "research_formula_shadow": _research_formula_shadow,
     "research_formula_lab_comparison": _research_formula_lab_comparison,
     "get_ai_capabilities": _get_ai_capabilities,
