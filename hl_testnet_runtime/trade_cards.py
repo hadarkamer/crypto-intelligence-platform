@@ -87,6 +87,11 @@ def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
 
 
 def validate_card(card):
+    # An unavailable-asset DATA card is a separate strict schema with no order
+    # prices or quantity. Existing prepared-card validation remains unchanged.
+    from . import unavailable_asset_cards
+    if isinstance(card, dict) and card.get('version') == unavailable_asset_cards.VERSION:
+        return unavailable_asset_cards.validate(card)
     try:
         prepared = card['prepared']
         meta = {'universe': [{'name': prepared['source']['symbol'],
@@ -150,5 +155,5 @@ def journal_projection(card):
         machine_fields=dict(source_event_id=card['event_id'], rule=card['rule'],
             account_role=card['account_role'], source=card['prepared']['source'],
             rounded=card['prepared']['execution'], risk=card['risk'],
-            planned_quantity=card['planning']['quantity'], status='RECORDED_ONLY',
+            planned_quantity=card['planning']['quantity'], status=card['state'],
             actual_execution=None, pnl=None))

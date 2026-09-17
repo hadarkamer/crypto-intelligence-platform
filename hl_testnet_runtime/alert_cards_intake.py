@@ -17,6 +17,7 @@ from .trade_card_store import CardStore
 from .postgres_journal import PostgresJournal, JournalError
 
 TABLE='hl_testnet_cards_v1.delivery_receipts'
+RESOLUTIONS='hl_testnet_cards_v1.asset_receipt_resolutions'
 _LOCK=threading.Lock()
 _META=None
 _META_AT=0.0
@@ -41,6 +42,17 @@ def initialize(journal):
             card_id text REFERENCES hl_testnet_cards_v1.cards(card_id),
             source jsonb, reason text, received_at timestamptz NOT NULL DEFAULT clock_timestamp())''')
         conn.execute(f'REVOKE ALL ON {TABLE} FROM PUBLIC')
+        # A reprocessed valid source may become a DATA card, never executable.
+        # Preserve the original rejection and receipt time instead of erasing it.
+        conn.execute(f'''CREATE TABLE IF NOT EXISTS {RESOLUTIONS} (
+            receipt_id text PRIMARY KEY REFERENCES {TABLE}(receipt_id),
+            previous_status text NOT NULL CHECK(previous_status='REJECTED'),
+            previous_reason text NOT NULL CHECK(previous_reason='ASSET_UNAVAILABLE'),
+            previous_received_at timestamptz NOT NULL,
+            source jsonb NOT NULL,
+            card_id text NOT NULL REFERENCES hl_testnet_cards_v1.cards(card_id),
+            resolved_at timestamptz NOT NULL DEFAULT clock_timestamp())''')
+        conn.execute(f'REVOKE ALL ON {RESOLUTIONS} FROM PUBLIC')
 
 
 def metadata():
@@ -48,7 +60,7 @@ def metadata():
     with _LOCK:
         if _META is None or time.monotonic()-_META_AT>=300:
             from .checks import InfoReader
-            value=InfoReader().read('meta')  # Public Testnet precision data only.
+            value=InfoReader().read('meta')
             if not isinstance(value,dict) or not isinstance(value.get('universe'),list):
                 raise wire.WireError('METADATA_UNAVAILABLE')
             _META=value;_META_AT=time.monotonic()
@@ -59,8 +71,8 @@ class ReceiptStore:
     def __init__(self,journal): self.journal=journal;self.cards=CardStore(journal)
     def get(self,identity):
         with self.journal._transaction() as conn:
-            row=conn.execute(f'SELECT status,card_id FROM {TABLE} WHERE receipt_id=%s',(identity,)).fetchone()
-        return None if row is None else dict(status=row[0],card_id=row[1])
+            row=conn.execute(f'SELECT status,card_id,reason FROM {TABLE} WHERE receipt_id=%s',(identity,)).fetchone()
+        return None if row is None else dict(status=row[0],card_id=row[1],reason=row[2])
     def save(self,identity,status,card_id,source,reason=None):
         with self.journal._transaction() as conn:
             conn.execute(f'''INSERT INTO {TABLE}(receipt_id,status,card_id,source,reason)
@@ -69,25 +81,55 @@ class ReceiptStore:
             row=conn.execute(f'SELECT status,card_id FROM {TABLE} WHERE receipt_id=%s',(identity,)).fetchone()
             if row!=(status,card_id): raise JournalError('DELIVERY_RECEIPT_CONFLICT')
 
+    def resolve_asset_rejection(self,identity,card_id,source):
+        """One specific DATA-only transition, retaining original evidence atomically.
+
+        No generic error reset, no price rewrite, no reset of order reservations.
+        A retry must match the source already received through authenticated intake.
+        """
+        with self.journal._transaction() as conn:
+            row=conn.execute(f'''SELECT status,card_id,source,reason,received_at
+                FROM {TABLE} WHERE receipt_id=%s FOR UPDATE''',(identity,)).fetchone()
+            if row is None or row[2]!=source:
+                raise JournalError('RECEIPT_SOURCE_CHANGED_NO_RECOVERY')
+            if row[0]=='RECORDED' and row[1]==card_id:
+                return False
+            if row[0]!='REJECTED' or row[1] is not None or row[3]!='ASSET_UNAVAILABLE':
+                raise JournalError('RECEIPT_NOT_ELIGIBLE_FOR_ASSET_RECOVERY')
+            conn.execute(f'''INSERT INTO {RESOLUTIONS}
+                (receipt_id,previous_status,previous_reason,previous_received_at,source,card_id)
+                VALUES(%s,%s,%s,%s,%s::jsonb,%s)''',
+                (identity,row[0],row[3],row[4],json.dumps(source,allow_nan=False),card_id))
+            conn.execute(f'''UPDATE {TABLE} SET status='RECORDED',card_id=%s,reason=NULL
+                WHERE receipt_id=%s''',(card_id,identity))
+        return True
+
 
 def accept(raw,store,*,read_metadata=metadata):
     identity=hashlib.sha256(raw).hexdigest()
     previous=store.get(identity)
-    if previous:
+    recover_asset=(previous is not None and previous['status']=='REJECTED'
+                   and previous.get('reason')=='ASSET_UNAVAILABLE')
+    if previous and not recover_asset:
         return dict(receipt_id=identity,status='DUPLICATE' if previous['status']=='RECORDED' else 'REJECTED',record_only=True)
     value=wire.decoded(raw)
     try:
         spec=wire.normalize(value)
     except wire.WireError as exc:
-        # Unknown fields may contain sensitive input: store hash/code, NOT raw input.
         store.save(identity,'REJECTED',None,None,str(exc))
         return dict(receipt_id=identity,status='REJECTED',record_only=True)
     try:
-        card=cards.prepare_card(spec['signal'],read_metadata(),rule_id=spec['rule_id'],
-            threshold_pct=spec['threshold_pct'],record_kind='received_alert',source_stream=spec['source_stream'])
-        if not card['planning']['positive_quantity']:
-            raise cards.CardError('ZERO_PLANNED_QUANTITY')
-        saved=store.cards.record(card)  # Commit before acknowledgement.
+        try:
+            card=cards.prepare_card(spec['signal'],read_metadata(),rule_id=spec['rule_id'],
+                threshold_pct=spec['threshold_pct'],record_kind='received_alert',source_stream=spec['source_stream'])
+            if not card['planning']['positive_quantity']:
+                raise cards.CardError('ZERO_PLANNED_QUANTITY')
+        except cards.CardError as exc:
+            if str(exc)!='ASSET_UNAVAILABLE': raise
+            # Persist valid source with NULL execution/quantity, NOT a fake market.
+            from .unavailable_asset_cards import prepare
+            card=prepare(value)
+        saved=store.cards.record(card)
     except cards.CardError as exc:
         store.save(identity,'REJECTED',None,value,str(exc))
         return dict(receipt_id=identity,status='REJECTED',record_only=True)
@@ -95,11 +137,15 @@ def accept(raw,store,*,read_metadata=metadata):
         if str(exc)!='SOURCE_OR_PLAN_CHANGED_NO_OVERWRITE': raise
         store.save(identity,'REJECTED',None,value,'SOURCE_OR_PLAN_CHANGED_NO_OVERWRITE')
         return dict(receipt_id=identity,status='REJECTED',record_only=True)
-    # A lost reply or a failure here is safe to retry: card identity is immutable.
-    store.save(identity,'RECORDED',saved['card_id'],value)
-    result=dict(receipt_id=identity,status='RECORDED' if saved['created'] else 'DUPLICATE',record_only=True)
+    # The card has committed before the receipt. A lost reply is safe to retry.
+    if recover_asset:
+        store.resolve_asset_rejection(identity,saved['card_id'],value)
+    else:
+        store.save(identity,'RECORDED',saved['card_id'],value)
+    result=dict(receipt_id=identity,status='RECORDED' if saved['created'] else 'DUPLICATE',
+                record_only=True,card_state=card['state'])
     print(json.dumps({'testnet_cards_intake':dict(status=result['status'],family=value['family'],
-        account_role=card['account_role'],order_requests_sent=0,
+        account_role=card['account_role'],card_state=card['state'],order_requests_sent=0,
         source_time_utc=spec['signal']['at'],observed_at_utc=datetime.now(timezone.utc).isoformat())}),flush=True)
     return result
 
