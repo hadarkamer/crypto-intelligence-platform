@@ -48,6 +48,9 @@ def run(env, *, journal=None):
             report['short_account_balance'] = review_balance(
                 routes['short_account'].get('account'),
                 expected_amount=env.get('HL_TESTNET_BALANCE_EXPECTED_USD', ''))
+            if env.get('HL_TESTNET_BALANCE_LEDGER_REVIEW') == 'seven_day_public_history_v1':
+                from .account_ledger_review import review_history
+                report['short_account_ledger'] = review_history(routes['short_account'].get('account'))
     except Exception:
         report['status'] = 'CARD_PHASE1_REQUIRES_REVIEW'
     return report
