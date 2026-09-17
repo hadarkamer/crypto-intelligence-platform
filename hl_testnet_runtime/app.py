@@ -70,6 +70,9 @@ def application(environ, start_response):
         if monitoring:
             from .pending_cancel_monitor import health
             report['monitor'] = health()
+        if os.environ.get('HL_TESTNET_CARD_SYNC') == 'registered_readonly_v1':
+            from .card_sync import health as card_health
+            report['card_sync'] = card_health()
         body = json.dumps(report).encode()
     headers = [('Content-Type', 'application/json' if status == '200 OK' else 'text/plain'),
                ('Content-Length', str(len(body))), ('Cache-Control', 'no-store'),

@@ -17,6 +17,9 @@ def post_worker_init(worker):
         'fees_funding_slippage_included': False,
         'resizes_existing_orders': False, 'mainnet_enabled': False}}), flush=True)
     mode = os.environ.get('HL_TESTNET_RUNTIME_MODE','read_only')
+    if os.environ.get('HL_TESTNET_CARD_SYNC') == 'registered_readonly_v1':
+        from hl_testnet_runtime.card_sync import start as start_card_sync
+        start_card_sync()
     if (os.environ.get('HL_TESTNET_CONNECTION_REVIEW') == 'two_account_no_orders_v1'
             and mode in ('read_only','cancel_monitor_testnet_v1')):
         import threading
@@ -55,3 +58,5 @@ def post_worker_init(worker):
 def worker_exit(server, worker):
     from hl_testnet_runtime.pending_cancel_monitor import stop
     stop()
+    from hl_testnet_runtime.card_sync import stop as stop_card_sync
+    stop_card_sync()
