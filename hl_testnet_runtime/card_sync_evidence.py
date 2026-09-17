@@ -74,7 +74,6 @@ def history(reader, account, start, end, *, depth=0):
         raise SyncError('INVALID_FILL_HISTORY')
     times = {life.moment(r.get('time')) for r in rows}
     if any(not start <= t <= end for t in times): raise SyncError('FILL_TIME_OUTSIDE_WINDOW')
-    # Handle both documented bounds without dropping equal-timestamp boundary fills.
     if len(rows) >= 2000 or len(times) >= 500:
         if start == end or depth >= 32: raise SyncError('FILL_HISTORY_TRUNCATED')
         middle = (start+end)//2
@@ -87,7 +86,8 @@ def merge_fills(previous, raw, account, symbol, start, end):
     by_id = {f['fill_id']:deepcopy(f) for f in previous}
     recent = {}
     for row in raw:
-        if row.get('coin') != symbol: continue
+        if not isinstance(row.get('coin'),str): raise SyncError('INVALID_FILL_SYMBOL')
+        if row['coin'] != symbol: continue
         tid, oid = row.get('tid'),row.get('oid')
         if type(tid) is not int or tid < 0 or type(oid) is not int or not 0 < oid < 2**64:
             raise SyncError('EXACT_FILL_IDENTIFIERS_REQUIRED')
@@ -125,17 +125,21 @@ def observe(bindings, previous, reader, start, end):
     old_terminal = {r['oid']:r for r in previous['terminal_orders']}
     responses = {oid:reader.read('orderStatus',account,oid=oid) for oid in links}
     fills = merge_fills(previous['fills'],history(reader,account,start,end),account,symbol,start,end)
-    totals = {}
-    for row in fills: totals[row['oid']] = totals.get(row['oid'],Decimal(0))+life.number(row['quantity'])
+    totals = {}; last_fill = {}
+    for row in fills:
+        totals[row['oid']] = totals.get(row['oid'],Decimal(0))+life.number(row['quantity'])
+        last_fill[row['oid']] = max(last_fill.get(row['oid'],0),row['at_ms'])
     raw_inventory = reader.read('frontendOpenOrders',account)
     position = reader.read('clearinghouseState',account)
     if not isinstance(raw_inventory,list) or len(raw_inventory)>10000 or any(not isinstance(x,dict) for x in raw_inventory):
         raise SyncError('INVALID_ORDER_INVENTORY')
     inventory = {}
     for row in raw_inventory:
-        if row.get('coin') != symbol: continue
+        if not isinstance(row.get('coin'),str): raise SyncError('INVALID_ORDER_SYMBOL')
+        if row['coin'] != symbol: continue
         oid = row.get('oid')
-        if type(oid) is not int or str(oid) in inventory: raise SyncError('INVALID_INVENTORY_ORDER_ID')
+        if type(oid) is not int or not 0<oid<2**64 or str(oid) in inventory:
+            raise SyncError('INVALID_INVENTORY_ORDER_ID')
         inventory[str(oid)] = row
     if set(inventory)-set(links): raise SyncError('UNASSIGNED_EXCHANGE_ORDER')
     terminals,opens = [],[]
@@ -157,6 +161,7 @@ def observe(bindings, previous, reader, start, end):
         state = 'FILLED' if status=='filled' else 'CANCELED' if status in CANCELED else 'REJECTED' if status in REJECTED else None
         if state:
             if oid in inventory: raise SyncError('OBSERVATION_CHANGED_RETRY')
+            if last_fill.get(oid,0)>stamp: raise SyncError('FILL_AFTER_TERMINAL_STATUS')
             if state=='FILLED' and filled!=original: raise SyncError('FILLED_ORDER_HISTORY_INCOMPLETE')
             value = dict(account=account,symbol=symbol,oid=oid,state=state,
                          filled_quantity=life.text(filled),at_ms=stamp)
@@ -165,7 +170,7 @@ def observe(bindings, previous, reader, start, end):
                 if (old['state']!=state or old['at_ms']!=stamp
                         or life.number(old['filled_quantity'])!=filled):
                     raise SyncError('TERMINAL_FACT_CHANGED')
-                value = deepcopy(old)  # Preserve immutable decimal representation.
+                value = deepcopy(old)
             terminals.append(value)
             continue
         if oid in old_terminal: raise SyncError('TERMINAL_ORDER_BECAME_ACTIVE')
@@ -183,11 +188,16 @@ def observe(bindings, previous, reader, start, end):
             order_type='LIMIT' if leg=='ENTRY' else 'TP_LIMIT' if leg=='TAKE_PROFIT' else 'SL_MARKET'))
     if not isinstance(position,dict) or not isinstance(position.get('assetPositions'),list):
         raise SyncError('INVALID_POSITION_STATE')
-    matches = [r['position'] for r in position['assetPositions'] if isinstance(r,dict)
-               and isinstance(r.get('position'),dict) and r['position'].get('coin')==symbol]
-    if len(matches)>1: raise SyncError('DUPLICATE_POSITION')
+    matches=[]; seen_coins=set()
+    for row in position['assetPositions']:
+        if (not isinstance(row,dict) or not isinstance(row.get('position'),dict)
+                or not isinstance(row['position'].get('coin'),str)):
+            raise SyncError('INVALID_POSITION_STATE')
+        item=row['position']; coin=item['coin']
+        if coin in seen_coins: raise SyncError('DUPLICATE_POSITION')
+        seen_coins.add(coin); life.number(item.get('szi'),signed=True)
+        if coin==symbol: matches.append(item)
     quantity = matches[0]['szi'] if matches else '0'
-    life.number(quantity,signed=True)
     return dict(environment='testnet',account=account,symbol=symbol,at_ms=end,history_complete=True,
         orders_complete=True,position_quantity=quantity,fills=fills,
         open_orders=sorted(opens,key=lambda r:r['oid']),terminal_orders=sorted(terminals,key=lambda r:r['oid']))
