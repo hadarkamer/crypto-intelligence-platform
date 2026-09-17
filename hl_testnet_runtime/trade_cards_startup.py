@@ -4,6 +4,7 @@ Storage setup only. An optional separate authenticated intake records delivered
 notifications, never orders or app writes. No source polling in this service.
 """
 import json
+from .approved_account_assignment import review_routes
 
 
 def run(env, *, journal=None):
@@ -37,6 +38,9 @@ def run(env, *, journal=None):
             new_review_cards=sum(r['created'] for r in reviewed),
             duplicate_card_checks=sum(r['replay_verified'] for r in reviewed),
             historical_sources_are_not_new_orders=True)
+        if env.get('HL_TESTNET_ACCOUNT_ROUTE_REVIEW') == 'public_read_only_v1':
+            # Separate observation; never a signing or order-enablement gate.
+            report['account_assignment'] = review_routes(routes)
     except Exception:
         report['status'] = 'CARD_PHASE1_REQUIRES_REVIEW'
     return report

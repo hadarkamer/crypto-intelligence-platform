@@ -104,9 +104,15 @@ def validate_card(card):
 def account_routes(env):
     """Public addresses only. Configuration is NOT authenticated authorization.
 
-    No fallback to the original single-account settings; no automatic assignment
-    of an existing position to a direction. Missing slots remain explicitly empty.
+    Existing single-account PUBLIC settings are reused only via the explicitly
+    approved long-account alias. Missing slots are never substituted silently.
+    This assigns future card destinations, not any existing exchange position.
     """
+    from .approved_account_assignment import public_route_env, AssignmentError
+    try:
+        env = public_route_env(env)
+    except AssignmentError as exc:
+        raise CardError(str(exc)) from None
     routes, used = {}, set()
     for side, role in ROLES.items():
         keys = [f'HL_TESTNET_{side}_ACCOUNT_ADDRESS', f'HL_TESTNET_{side}_AGENT_ADDRESS']
