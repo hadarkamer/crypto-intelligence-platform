@@ -4,8 +4,17 @@ No initialization on import/startup, no exchange or app connection. This is not 
 execution queue. Source cards and the legacy order journal are never overwritten.
 """
 from . import card_lifecycle as life
+from .postgres_journal import JournalError
 
 SCHEMA = 'hl_testnet_card_lifecycle_v1'
+
+
+class LifecycleStorageError(JournalError, life.LifecycleError):
+    """Preserve fixed conflict codes through the shared transaction boundary.
+
+    JournalError is explicitly propagated by PostgresJournal after rollback;
+    unrelated database failures keep its existing redacted error behavior.
+    """
 
 
 def _continues(previous, current):
@@ -13,23 +22,23 @@ def _continues(previous, current):
     old_b = {b['card_id']: b for b in previous['bindings']}
     new_b = {b['card_id']: b for b in current['bindings']}
     if not set(old_b) <= set(new_b):
-        raise life.LifecycleError('PREVIOUS_CARD_REMOVED')
+        raise LifecycleStorageError('PREVIOUS_CARD_REMOVED')
     for cid, old in old_b.items():
         new = new_b[cid]
         if {k:v for k,v in old.items() if k != 'orders'} != {k:v for k,v in new.items() if k != 'orders'}:
-            raise life.LifecycleError('IMMUTABLE_CARD_BINDING_CHANGED')
+            raise LifecycleStorageError('IMMUTABLE_CARD_BINDING_CHANGED')
         if any(not set(old['orders'][leg]) <= set(new['orders'][leg]) for leg in life.LEGS):
-            raise life.LifecycleError('PREVIOUS_ORDER_BINDING_REMOVED')
+            raise LifecycleStorageError('PREVIOUS_ORDER_BINDING_REMOVED')
     before, after = previous['snapshot'], current['snapshot']
     if before['account'].lower() != after['account'].lower() or before['symbol'] != after['symbol']:
-        raise life.LifecycleError('BUCKET_CHANGED')
+        raise LifecycleStorageError('BUCKET_CHANGED')
     if after['at_ms'] <= before['at_ms']:
-        raise life.LifecycleError('STALE_OR_CONFLICTING_SNAPSHOT')
+        raise LifecycleStorageError('STALE_OR_CONFLICTING_SNAPSHOT')
     for collection, key in (('fills', 'fill_id'), ('terminal_orders', 'oid')):
         new = {row[key]: row for row in after[collection]}
         for row in before[collection]:
             if new.get(row[key]) != row:
-                raise life.LifecycleError('PREVIOUS_EXCHANGE_FACT_CHANGED_OR_MISSING')
+                raise LifecycleStorageError('PREVIOUS_EXCHANGE_FACT_CHANGED_OR_MISSING')
 
 
 class LifecycleStore:
@@ -61,7 +70,7 @@ class LifecycleStore:
 
     def ready(self, conn):
         if conn.execute(f'SELECT version FROM {SCHEMA}.versions WHERE singleton=true').fetchone() != (life.VERSION,):
-            raise life.LifecycleError('LIFECYCLE_SCHEMA_REQUIRES_REVIEW')
+            raise LifecycleStorageError('LIFECYCLE_SCHEMA_REQUIRES_REVIEW')
 
     @staticmethod
     def bucket(account, symbol):
@@ -70,12 +79,12 @@ class LifecycleStore:
     @staticmethod
     def verify(evidence, checksum):
         if life.digest(evidence) != checksum:
-            raise life.LifecycleError('OBSERVATION_CHECKSUM_MISMATCH')
+            raise LifecycleStorageError('OBSERVATION_CHECKSUM_MISMATCH')
 
     def save(self, bindings, snapshot, *, expected_revision, now_ms):
         report = life.review(bindings, snapshot, now_ms=now_ms)
         if type(expected_revision) is not int or expected_revision < 0:
-            raise life.LifecycleError('REVISION_REQUIRED')
+            raise LifecycleStorageError('REVISION_REQUIRED')
         evidence = dict(bindings=bindings, snapshot=snapshot)
         checksum, payload = life.digest(evidence), life.encoded(evidence)
         bucket = self.bucket(snapshot['account'], snapshot['symbol'])
@@ -91,7 +100,7 @@ class LifecycleStore:
                 if old[2] == checksum:
                     return dict(revision=revision, duplicate=True, report=report)
             if expected_revision != revision:
-                raise life.LifecycleError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
+                raise LifecycleStorageError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
             if old:
                 _continues(old[1], evidence)
             revision += 1
@@ -107,7 +116,7 @@ class LifecycleStore:
             self.ready(conn)
             row = conn.execute(f'SELECT revision,evidence,evidence_hash FROM {SCHEMA}.heads WHERE bucket=%s', (self.bucket(account,symbol),)).fetchone()
         if not row:
-            raise life.LifecycleError('NO_LIFECYCLE_OBSERVATION')
+            raise LifecycleStorageError('NO_LIFECYCLE_OBSERVATION')
         self.verify(row[1], row[2])
         # Recheck freshness; a saved green report is not current authority.
         return dict(revision=row[0], report=life.review(row[1]['bindings'],row[1]['snapshot'],now_ms=now_ms))
