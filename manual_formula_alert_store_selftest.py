@@ -154,6 +154,29 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(store.record_events(state, [pair(5, 1.4, scan='different')], now), 3)
         self.assertEqual(state['counts'], {'checked': 5, 'created': 11})
 
+    def test_doge_same_scan_uses_one_qualifying_cluster_without_unioning_timeframes(self):
+        for memberships, expected_event in (
+                ((['12h', '24h'], ['12h', '24h', '48h']), 2),
+                ((['12h', '24h', '48h'], ['12h', '24h']), 1),
+                ((['12h', '24h'], ['48h', '3d']), None)):
+            with self.subTest(memberships=memberships):
+                state = store._initial(BASE)
+                pairs = []
+                for identifier, members in enumerate(memberships, 1):
+                    event, features = observation_pair(identifier, scan='shared-doge-clusters')
+                    event['engine_snapshot']['magnet'].update(count=len(members), members=members)
+                    pairs.append((event, features))
+                expected = int(expected_event is not None)
+                self.assertEqual(store.record_events(state, pairs, BASE + timedelta(minutes=2)), expected)
+                self.assertEqual(len(state['intents']), expected)
+                if expected:
+                    payload = state['intents'][0]['payload']
+                    self.assertEqual(payload['event_id'], expected_event)
+                    self.assertEqual(payload['magnet_timeframes'], ['12h', '24h', '48h'])
+                    self.assertEqual(payload['magnet_timeframe_count'], 3)
+                self.assertEqual(store.record_events(state, pairs, BASE + timedelta(minutes=3)), 0)
+                self.assertEqual(len(state['intents']), expected)
+
     def test_minute_fallback_dedups_without_a_scan_id(self):
         state = store._initial(BASE)
         first, second = pair(1), pair(2, 1.5)
@@ -411,6 +434,73 @@ class TransactionTests(unittest.TestCase):
         store.initialize_scope(1, BASE + timedelta(minutes=5))
         self.assertEqual(self.db.read(1), expected)
 
+    def test_v4_timeframe_upgrade_cancels_only_pending_doge_without_reset_or_replay(self):
+        self.collect([observation_pair(101, scan='old-doge-101'),
+                      observation_pair(102, scan='old-doge-102'), pair(1)])
+        previous = self.db.read(1)
+        self.assertEqual(store.record_c1274_scan(
+            previous, c1274_bundle(), c1274_references(),
+            BASE + timedelta(minutes=2)), (1, 'MATCH'))
+        previous.update(rule_version=store.rules.PRE_TIMEFRAME_FILTER_VERSION,
+                        ruleset_sha256=store.rules.PRE_TIMEFRAME_FILTER_RULESET_SHA256)
+        previous['rule_activated_at'] = {
+            OBSERVATION_RULE: store.iso(BASE + timedelta(seconds=10)),
+            'C1274': store.iso(BASE + timedelta(seconds=30)),
+            'C0964': store.iso(BASE),
+        }
+        previous['retry']['999'] = {'event_time': store.iso(BASE + timedelta(minutes=1)),
+                                   'last_attempt': store.iso(BASE + timedelta(minutes=2))}
+        previous['planned_scans'] = {'already-planned': store.iso(BASE + timedelta(minutes=1))}
+        previous['planned_sequence_recovery_scans'] = deepcopy(previous['planned_scans'])
+        for item in previous['intents']:
+            item['payload']['predicate_version'] = store.rules.PRE_TIMEFRAME_FILTER_VERSION
+            item['payload'].pop('magnet_timeframe_count', None)
+            item['payload'].pop('magnet_timeframes', None)
+            item['text'] = 'frozen-v4:' + item['text']
+            item['payload']['text'] = item['text']
+        for template in (previous['intents'][0], previous['intents'][-1]):
+            # Both DOGE and C1274 attempts/receipts must remain byte-for-byte.
+            rule_id = template['payload']['rule_id']
+            in_flight = deepcopy(template)
+            in_flight.update(intent_id='in-flight-' + rule_id, status='IN_FLIGHT',
+                             attempted_at=store.iso(BASE + timedelta(minutes=2)),
+                             attempt_token='frozen-token-' + rule_id)
+            delivered = deepcopy(template)
+            delivered.update(intent_id='delivered-' + rule_id, status='DELIVERED',
+                             acknowledged_at=store.iso(BASE + timedelta(minutes=2)), message_id=123)
+            previous['intents'].extend((in_flight, delivered))
+        self.db.write(1, previous)
+        upgraded_at = BASE + timedelta(minutes=3)
+        expected = deepcopy(previous)
+        expected.update(rule_version=store.rules.VERSION, ruleset_sha256=store.rules.RULESET_SHA256)
+        expected['counts']['cancelled'] = 2
+        for item in expected['intents']:
+            if item['status'] == 'PENDING' and item['payload']['rule_id'] == OBSERVATION_RULE:
+                item.update(status='CANCELLED', acknowledged_at=store.iso(upgraded_at),
+                            cancellation_reason='DOGE_TIMEFRAME_FILTER_UPDATED')
+        with patch.object(store.rules, 'render_message', side_effect=AssertionError('rerendered frozen intent')):
+            store.initialize_scope(1, upgraded_at)
+            self.assertEqual(store._encode(self.db.read(1)), store._encode(expected))
+            store.initialize_scope(1, BASE + timedelta(minutes=4))
+            self.assertEqual(store._encode(self.db.read(1)), store._encode(expected))
+
+        # Existing receipts and rule/scan dedup survive: neither a redelivery
+        # nor a newly valid sibling can revive the cancelled old opportunity.
+        replay = self.collect([observation_pair(101, scan='old-doge-101'),
+                               observation_pair(103, scan='old-doge-101')],
+                              BASE + timedelta(minutes=4))
+        self.assertEqual(replay['created_intents'], 0)
+        self.assertEqual(self.collect([observation_pair(104, 3.5, scan='new-doge-scan')],
+                                      BASE + timedelta(minutes=4))['created_intents'], 1)
+        after = self.db.read(1)
+        self.assertEqual(after['activated_at'], previous['activated_at'])
+        self.assertEqual(after['rule_activated_at'], previous['rule_activated_at'])
+        self.assertEqual(after['c1274_candles'], previous['c1274_candles'])
+        doge_pending = [i for i in after['intents']
+                        if i['status'] == 'PENDING' and i['payload']['rule_id'] == OBSERVATION_RULE]
+        self.assertEqual([i['payload']['event_id'] for i in doge_pending], [104])
+        self.assertEqual(doge_pending[0]['payload']['predicate_version'], store.rules.VERSION)
+
     def test_new_rule_fence_skips_pre_activation_and_survives_restart(self):
         previous = self.db.read(1)
         previous.update(rule_version=store.rules.PREVIOUS_VERSION,
@@ -461,7 +551,8 @@ class TransactionTests(unittest.TestCase):
                 self.assertEqual(len(state['dedup']), 1)
 
     def test_predecessor_migrations_require_the_exact_known_hash(self):
-        for version, digest in ((store.rules.PREVIOUS_VERSION, store.rules.LEGACY_RULESET_SHA256),
+        for version, digest in ((store.rules.PRE_TIMEFRAME_FILTER_VERSION, store.rules.PREVIOUS_RULESET_SHA256),
+                                (store.rules.PREVIOUS_VERSION, store.rules.LEGACY_RULESET_SHA256),
                                 (store.rules.LEGACY_VERSION, store.rules.PREVIOUS_RULESET_SHA256)):
             with self.subTest(version=version):
                 state = self.db.read(1)
@@ -580,6 +671,36 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.db.read(1)['intents'][0]['status'], 'DELIVERED')
         with self.assertRaisesRegex(ValueError, 'Invalid terminal'):
             store.finish(1, intent['intent_id'], intent['attempt_token'], 'PENDING', when)
+
+    def test_claim_cancels_old_or_invalid_doge_and_continues_to_valid_pending(self):
+        invalid_changes = (
+            {'predicate_version': store.rules.PRE_TIMEFRAME_FILTER_VERSION},
+            {'magnet_timeframes': None},
+            {'magnet_timeframes': ['12h', '24h'], 'magnet_timeframe_count': 2},
+            {'magnet_timeframes': ['12h', '24h']},
+            {'magnet_timeframes': ['12h', '24h', '24h']},
+            {'magnet_timeframe_count': 3.0},
+        )
+        for chat_id, changes in enumerate(invalid_changes, 100):
+            with self.subTest(changes=changes):
+                state = store._initial(BASE)
+                store.record_events(state, [observation_pair(1), observation_pair(2)],
+                                    BASE + timedelta(minutes=2))
+                state['intents'][0]['payload'].update(changes)
+                frozen_payload = deepcopy(state['intents'][0]['payload'])
+                self.db.write(chat_id, state)
+                claimed = store.claim(chat_id, BASE + timedelta(minutes=2))
+                self.assertEqual(claimed['payload']['event_id'], 2)
+                self.assertEqual(claimed['status'], 'IN_FLIGHT')
+                after = self.db.read(chat_id)
+                rejected = after['intents'][0]
+                self.assertEqual(rejected['status'], 'CANCELLED')
+                self.assertEqual(rejected['cancellation_reason'], 'DOGE_TIMEFRAME_FILTER_UPDATED')
+                self.assertEqual(rejected['payload'], frozen_payload)
+                self.assertIsNone(rejected['attempt_token'])
+                self.assertEqual(after['counts']['cancelled'], 1)
+                self.assertIsNone(store.claim(chat_id, BASE + timedelta(minutes=2, seconds=1)))
+                self.assertEqual(self.db.read(chat_id)['counts']['cancelled'], 1)
 
     def test_claims_reserve_only_one_and_expired_are_not_claimed(self):
         self.collect()

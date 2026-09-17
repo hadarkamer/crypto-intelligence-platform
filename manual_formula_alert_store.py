@@ -62,11 +62,24 @@ def _locked(conn, key, now):
     conn.execute('INSERT INTO bot_settings(key,value) VALUES(%s,%s) ON CONFLICT(key) DO NOTHING',
                  (key, _encode(_initial(now))))
     state = json.loads(conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()['value'])
+    from_unfiltered = (state.get('rule_version') == rules.PRE_TIMEFRAME_FILTER_VERSION
+                       and state.get('ruleset_sha256') == rules.PRE_TIMEFRAME_FILTER_RULESET_SHA256)
     from_previous = (state.get('rule_version') == rules.PREVIOUS_VERSION
                      and state.get('ruleset_sha256') == rules.PREVIOUS_RULESET_SHA256)
     from_legacy = (state.get('rule_version') == rules.LEGACY_VERSION
                    and state.get('ruleset_sha256') == rules.LEGACY_RULESET_SHA256)
-    if state.get('version') == STORE_VERSION and (from_previous or from_legacy):
+    if state.get('version') == STORE_VERSION and from_unfiltered:
+        # v4 DOGE payloads did not freeze cluster membership. Cancel only their
+        # unattempted messages; preserve all fences, receipts and other rules.
+        state.update(rule_version=rules.VERSION, ruleset_sha256=rules.RULESET_SHA256)
+        for item in state['intents']:
+            if (item['status'] == 'PENDING'
+                    and item.get('payload', {}).get('rule_id') == 'MAGNET_OBSERVATION_DOGE_SHORT'):
+                item.update(status='CANCELLED', acknowledged_at=iso(now),
+                            cancellation_reason='DOGE_TIMEFRAME_FILTER_UPDATED')
+                _count(state, 'cancelled')
+        _save(conn, key, state)
+    elif state.get('version') == STORE_VERSION and (from_previous or from_legacy):
         # The v4 addition must not replay earlier signals, reset any existing
         # activation fence, or change previously frozen messages/attempts.
         state.update(rule_version=rules.VERSION, ruleset_sha256=rules.RULESET_SHA256)
@@ -339,6 +352,11 @@ def claim(chat_id, now, *, database_url=None):
                 if not alert_delivery_policy.manual_rule_enabled(item.get('payload', {}).get('rule_id')):
                     item.update(status='CANCELLED', acknowledged_at=iso(now),
                                 cancellation_reason='ALERT_POLICY_DISABLED')
+                    _count(state, 'cancelled')
+                    continue
+                if not rules.delivery_payload_allowed(item.get('payload', {})):
+                    item.update(status='CANCELLED', acknowledged_at=iso(now),
+                                cancellation_reason='DOGE_TIMEFRAME_FILTER_UPDATED')
                     _count(state, 'cancelled')
                     continue
                 item.update(status='IN_FLIGHT', attempt_token=uuid4().hex, attempted_at=iso(now))

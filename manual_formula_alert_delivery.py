@@ -131,7 +131,8 @@ async def _run(bot, chat_id, *, events=None, c1274_bundle=None,
             if intent is None:
                 break
             # This synchronous gate is immediately before entering transport.
-            if not alert_delivery_policy.manual_rule_enabled(intent.get('payload', {}).get('rule_id')):
+            if (not alert_delivery_policy.manual_rule_enabled(intent.get('payload', {}).get('rule_id'))
+                    or not store.rules.delivery_payload_allowed(intent.get('payload', {}))):
                 await _finish(chat_id, intent, 'CANCELLED')
                 _STATUS['cancelled'] += 1
                 continue

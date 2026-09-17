@@ -45,6 +45,24 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         kwargs.setdefault('may_deliver', lambda: True)
         return await delivery.run_once(bot, 1, **kwargs)
 
+    def doge_observation_fixture(self, *, timeframes=('12h', '24h', '48h')):
+        stamp = BASE + timedelta(minutes=1)
+        reference = {
+            'status': 'READY', 'component': 'MAX_PAIN', 'symbol': 'DOGE',
+            'price': '0.1', 'price_time_utc': BASE.isoformat(),
+            'anchor_time_utc': (BASE + timedelta(seconds=30)).isoformat(),
+            'source': 'BINANCE_SPOT_TRADE_1M', 'precision': 'CLOSED_1M',
+        }
+        targets = {'12h': .099, '24h': .0999, '48h': .09945}
+        rows = [
+            {'symbol': 'DOGE', 'timeframe': timeframe, 'current_price': .101,
+             'long_max_pain': targets[timeframe], 'long_liquidation_amount': 1_000_000,
+             'short_liquidation_amount': 2_000_000,
+             'price_source': 'binance_spot', 'price_pair': 'DOGEUSDT'}
+            for timeframe in timeframes
+        ]
+        return stamp, reference, rows
+
     async def test_initialize_scope_once_per_destination_without_resetting_fence(self):
         original = delivery.store.initialize_scope
         with patch.object(delivery.store, 'initialize_scope', wraps=original) as initialize:
@@ -123,20 +141,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         import main
         import research_event_runtime as runtime
         delivery.store.initialize_scope(1, BASE)
-        stamp = BASE + timedelta(minutes=1)
-        reference = {
-            'status': 'READY', 'component': 'MAX_PAIN', 'symbol': 'DOGE',
-            'price': '0.1', 'price_time_utc': BASE.isoformat(),
-            'anchor_time_utc': (BASE + timedelta(seconds=30)).isoformat(),
-            'source': 'BINANCE_SPOT_TRADE_1M', 'precision': 'CLOSED_1M',
-        }
-        rows = [
-            {'symbol': 'DOGE', 'timeframe': timeframe, 'current_price': .101,
-             'long_max_pain': target, 'long_liquidation_amount': 1_000_000,
-             'short_liquidation_amount': 2_000_000,
-             'price_source': 'binance_spot', 'price_pair': 'DOGEUSDT'}
-            for timeframe, target in (('12h', .099), ('24h', .0999))
-        ]
+        stamp, reference, rows = self.doge_observation_fixture()
         token = runtime.set_watch_context(
             watch_scan_id='current-doge-observation-watch',
             experimental_reference_prices_by_symbol={'DOGE': {'MAX_PAIN': reference}},
@@ -163,6 +168,8 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(intent['payload']['source_direction'], 'SHORT')
             self.assertEqual(intent['payload']['direction'], 'SHORT')
             self.assertEqual(intent['payload']['threshold_bps'], 175)
+            self.assertCountEqual(intent['payload']['magnet_timeframes'], ['12h', '24h', '48h'])
+            self.assertEqual(intent['payload']['magnet_timeframe_count'], 3)
             self.assertEqual(intent['payload']['price_reference']['price'], '0.1')
             self.assertEqual(intent['payload']['price_reference']['required_components'], ['MAX_PAIN'])
             text = bot.send_message.await_args.kwargs['text']
@@ -183,6 +190,37 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.run_delivery(bot), 0)
             bot.send_message.assert_awaited_once()
             self.assertEqual(len(self.rows()), 1)
+        finally:
+            runtime.reset_watch_context(token)
+
+    async def test_actual_two_timeframe_doge_observation_preview_does_not_deliver(self):
+        import main
+        import research_event_runtime as runtime
+        delivery.store.initialize_scope(1, BASE)
+        stamp, reference, rows = self.doge_observation_fixture(timeframes=('12h', '24h'))
+        token = runtime.set_watch_context(
+            watch_scan_id='current-two-timeframe-doge-observation-watch',
+            experimental_reference_prices_by_symbol={'DOGE': {'MAX_PAIN': reference}},
+        )
+        try:
+            with patch.object(main, 'MAGNET_V1_WATCHES', {'DOGE': {'chat_id': 1}}), \
+                 patch.object(main, 'datetime', SimpleNamespace(now=lambda tz: stamp)), \
+                 patch.object(runtime.research_event_store.WRITER, 'enqueue') as writer:
+                events = main._preview_watch_formula_sources(
+                    1, [], [], [], None, rows, {}, stamp,
+                )
+                self.assertEqual(len(events), 1)
+                snapshot = events[0]['engine_snapshot']
+                self.assertEqual(snapshot['magnet_confirmation']['status'], 'OBSERVATION')
+                self.assertEqual(snapshot['magnet']['count'], 2)
+                self.assertCountEqual(snapshot['magnet']['members'], ['12h', '24h'])
+                self.assertLess(snapshot['magnet']['magnet_quality'], 60)
+                self.assertEqual(events[0]['direction'], 'SHORT')
+                bot = self.bot()
+                self.assertEqual(await delivery.run_watch(bot, 1, events, may_deliver=lambda: True), 0)
+            writer.assert_not_called()
+            bot.send_message.assert_not_awaited()
+            self.assertEqual(self.rows(), [])
         finally:
             runtime.reset_watch_context(token)
 
@@ -298,6 +336,31 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         active[0] = True
         self.assertEqual(await self.run_delivery(bot, may_deliver=lambda: active[0]), 0)
         bot.send_message.assert_not_awaited()
+
+    async def test_forged_claimed_doge_member_count_is_cancelled_before_transport(self):
+        self.seed()
+        original = delivery.store.claim
+        def forged_claim(*args, **kwargs):
+            intent = original(*args, **kwargs)
+            if intent is not None:
+                # Forge the returned claim after the real store has validated
+                # and claimed it, so only the final transport gate can stop it.
+                intent['payload'].update(
+                    rule_id='MAGNET_OBSERVATION_DOGE_SHORT', symbol='DOGE',
+                    source_direction='SHORT', direction='SHORT', threshold_bps=175,
+                    magnet_timeframes=['12h', '24h'], magnet_timeframe_count=3,
+                )
+            return intent
+        bot = self.bot()
+        with patch.object(delivery.store, 'claim', side_effect=forged_claim) as claim, \
+             patch.object(delivery.store, 'finish', wraps=delivery.store.finish) as finish:
+            self.assertEqual(await self.run_delivery(bot, may_deliver=lambda: True), 0)
+        self.assertGreaterEqual(claim.call_count, 1)
+        bot.send_message.assert_not_awaited()
+        finish.assert_called_once()
+        self.assertEqual(finish.call_args.args[3], 'CANCELLED')
+        self.assertEqual(self.rows()[0]['status'], 'CANCELLED')
+        self.assertEqual(delivery.status()['cancelled'], 1)
 
     async def test_revocation_after_first_send_prevents_second_claim(self):
         self.seed(2); active = [True]

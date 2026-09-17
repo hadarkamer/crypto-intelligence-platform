@@ -20,7 +20,9 @@ from zoneinfo import ZoneInfo
 from experimental_reference_price import VERSION as REFERENCE_VERSION
 from experimental_reference_price import render_reference_levels, select_reference
 
-VERSION = "manual-formula-experimental-alerts-v4"
+VERSION = "manual-formula-experimental-alerts-v5"
+PRE_TIMEFRAME_FILTER_VERSION = "manual-formula-experimental-alerts-v4"
+PRE_TIMEFRAME_FILTER_RULESET_SHA256 = "160901f44287a903208630abeaa20e24eba8615dd20f62fa1c33646294f85df6"
 PREVIOUS_VERSION = "manual-formula-experimental-alerts-v3"
 PREVIOUS_RULESET_SHA256 = "a72815e826f3e15296584288926b0d3b6a322c12d7f2548d8032534130a1803b"
 LEGACY_VERSION = "manual-formula-experimental-alerts-v2"
@@ -30,6 +32,7 @@ TRIGGER_TTL = timedelta(minutes=10)
 _ISRAEL = ZoneInfo("Asia/Jerusalem")
 _INVERSE = {"LONG": "SHORT", "SHORT": "LONG"}
 _MAGNET_TYPES = frozenset(("MAGNET_ALERT", "MAGNET_CONFIRMATION", "STRONG_MAGNET_CONFIRMATION"))
+_MAGNET_TIMEFRAMES = frozenset(("12h", "24h", "48h", "3d", "1w", "2w", "1m"))
 _ARCHIVE_KEYS = frozenset(("archive_reconstruction", "archive_only", "telegram_archive", "archive_run_key",
                            "archive_import", "telegram_archive_import"))
 _WATCH_SCORE_VERSION = "watch-operational-scores-v2"
@@ -80,8 +83,9 @@ RULES = {
         "name": "Magnet OBSERVATION — DOGE שורט",
         "threshold_bps": 175,
         "symbols": ("DOGE",),
+        "minimum_timeframes": 3,
         "notes": {},
-        "conditions_text": "מגנט מתחת למחיר במצב תצפית OBSERVATION, עם מיפוי כיוון מקור מאומת לשורט.",
+        "conditions_text": "מגנט מתחת למחיר במצב תצפית OBSERVATION, הכולל לפחות 3 טווחי זמן שונים, עם מיפוי כיוון מקור מאומת לשורט.",
     },
 }
 _DIRECT_RULES = frozenset(("C1274", "MAGNET_OBSERVATION_DOGE_SHORT"))
@@ -285,12 +289,31 @@ def _score65(features: Mapping[str, Any], name: str) -> bool:
     return score is not None and 65 <= score <= 100
 
 
+def _valid_doge_timeframes(count: Any, members: Any) -> bool:
+    """Validate the captured members of one cluster; never union clusters."""
+    return (type(count) is int and isinstance(members, (list, tuple))
+            and RULES['MAGNET_OBSERVATION_DOGE_SHORT']['minimum_timeframes'] <= count <= len(_MAGNET_TIMEFRAMES)
+            and len(members) == count
+            and all(isinstance(member, str) and member in _MAGNET_TIMEFRAMES for member in members)
+            and len(set(members)) == count)
+
+
+def delivery_payload_allowed(payload: Mapping[str, Any]) -> bool:
+    """Tighten DOGE only; other rules retain their previously frozen payloads."""
+    return (payload.get('rule_id') != 'MAGNET_OBSERVATION_DOGE_SHORT'
+            or (payload.get('predicate_version') == VERSION
+                and _valid_doge_timeframes(payload.get('magnet_timeframe_count'),
+                                          payload.get('magnet_timeframes'))))
+
+
 def _matches(rule_id: str, event: Mapping[str, Any], features: Mapping[str, Any]) -> bool:
     if rule_id == "MAGNET_OBSERVATION_DOGE_SHORT":
         snapshot = _mapping(event.get("engine_snapshot"))
+        magnet = _mapping(snapshot.get("magnet"))
         return (event.get("event_type") in _MAGNET_TYPES
                 and event.get("direction") == "SHORT"
-                and _mapping(snapshot.get("magnet")).get("side") == "LOWER"
+                and magnet.get("side") == "LOWER"
+                and _valid_doge_timeframes(magnet.get('count'), magnet.get('members'))
                 and _mapping(snapshot.get("magnet_confirmation")).get("status") == "OBSERVATION"
                 and features.get("captured.magnet.confirmation_status") == "OBSERVATION")
     if rule_id == "C0964":
@@ -349,7 +372,7 @@ def render_message(payload: Mapping[str, Any]) -> str:
             or (direct and payload.get("prediction_mode") != "DIRECT")
             or (payload.get("rule_id") == "C1274" and not _valid_c1274_payload(payload))
             or (payload.get("rule_id") == "MAGNET_OBSERVATION_DOGE_SHORT"
-                and payload.get("direction") != "SHORT")):
+                and (payload.get("direction") != "SHORT" or not delivery_payload_allowed(payload)))):
         raise ValueError("Invalid frozen experimental notification")
     stamp = utc(payload["event_time"]).astimezone(_ISRAEL)
     direction = "עלייה — LONG" if payload["direction"] == "LONG" else "ירידה — SHORT"
@@ -392,6 +415,10 @@ def evaluate_event(event: Mapping[str, Any], features: Mapping[str, Any], now: A
                    "source_direction": event["direction"], "predicate_version": VERSION}
         if direct:
             payload["prediction_mode"] = "DIRECT"
+        if rule_id == 'MAGNET_OBSERVATION_DOGE_SHORT':
+            magnet = event['engine_snapshot']['magnet']
+            payload['magnet_timeframes'] = list(magnet['members'])
+            payload['magnet_timeframe_count'] = magnet['count']
         references = _mapping(event.get("engine_snapshot")).get("experimental_price_references")
         reference = select_reference(references, _REFERENCE_COMPONENTS[rule_id],
                                      symbol=event["symbol"], as_of=event["alert_time_utc"])
