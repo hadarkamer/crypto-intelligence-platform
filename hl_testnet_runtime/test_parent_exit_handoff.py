@@ -187,6 +187,36 @@ class ParentHandoffTests(unittest.TestCase):
         for p in ('automatic',True,None):
             with self.assertRaises(h.HandoffError):check(fixture(),policy=p)
 
+    def test_parent_identifier_requires_positive_bounded_integer(self):
+        for oid in ('0',str(2**64),'01'):
+            bs,s,c,l=fixture();old=l['parent_oid'];l['parent_oid']=oid
+            bs[0]['orders']['ENTRY']=[oid]
+            for collection in ('fills','open_orders'):
+                for row in s[collection]:
+                    if row['oid']==old:row['oid']=oid
+            with self.assertRaises(h.life.LifecycleError):check((bs,s,c,l),policy=h.REHEARSE)
+
+    def test_mixed_native_and_new_stop_not_verified_even_if_total_matches(self):
+        bs,s,c,l=ended(fixture(),full=True)
+        bs[0]['orders']['STOP'].append('901')
+        for row in s['open_orders']:
+            if row['oid']==l['children']['STOP']:row['quantity']='50'
+        s['open_orders'].append({**order(bs[0],'STOP','50'),'oid':'901'})
+        p=check((bs,s,c,l),policy=h.REHEARSE)
+        self.assertIn('MIXED_NATIVE_AND_REPLACEMENT_EXITS_REVIEW',p['reasons'])
+        self.assertFalse(p['stop_verified']);self.assertIsNone(p['next_step'])
+        self.assertEqual(p['unprotected_quantity'],'100')
+
+    def test_replacements_allowed_after_all_original_children_are_terminal(self):
+        bs,s,c,l=ended(fixture())
+        for leg,oid in (('STOP','901'),('TAKE_PROFIT','902')):
+            bs[0]['orders'][leg].append(oid)
+            s['open_orders'].append({**order(bs[0],leg,'40'),'oid':oid})
+        p=check((bs,s,c,l))
+        self.assertEqual(p['state'],'ORIGINAL_GROUP_RETIRED')
+        self.assertEqual(p['recovery_proposal']['state'],'NO_CORRECTION_NEEDED')
+        self.assertTrue(p['stop_verified'])
+
     def test_module_has_no_transport_keys_startup_or_timer(self):
         source=inspect.getsource(h)
         for text in ('import os','import http','import requests','import threading','sign_l1_action','def startup','def start(', '/exchange'):
@@ -218,7 +248,8 @@ class DurableHandoffTests(unittest.TestCase):
             event_id='terminal',expected_revision=p['revision'],now_ms=ev[1]['at_ms'])
 
     def test_preserve_policy_never_creates_cancellation_request(self):
-        with self.assertRaises(h.HandoffError):
+        # The shared journal intentionally normalizes its domain exceptions.
+        with self.assertRaisesRegex(d.RecoveryStorageError,'^EXPLICIT_FRESH_HANDOFF_REHEARSAL_REQUIRED$'):
             self.store.prepare_handoff(*self.ev,event_id='not-approved',expected_revision=0,now_ms=T)
         self.assertIsNone(self.store.pending(self.ev[1]['account'],'DOGE')['request'])
 
@@ -268,6 +299,19 @@ class DurableHandoffTests(unittest.TestCase):
     def test_changed_old_fill_cannot_confirm(self):
         p=self.begin(self.prepare());ev=ended(self.ev);ev[1]['fills'][0]['price']='99'
         with self.assertRaises(d.RecoveryStorageError):self.finish(p,ev)
+
+    def test_terminal_before_working_observation_does_not_unlock(self):
+        p=self.begin(self.prepare());ev=ended(self.ev);ev[1]['terminal_orders'][0]['at_ms']=T-1
+        with self.assertRaisesRegex(d.RecoveryStorageError,'^TERMINAL_PREDATES_WORKING_OBSERVATION$'):
+            self.finish(p,ev)
+        self.assertEqual(self.store.load(p['request']['request_id'])['request']['phase'],'OUTCOME_UNKNOWN')
+
+    def test_future_time_does_not_release_unknown_request(self):
+        p=self.begin(self.prepare());rid=p['request']['request_id']
+        with self.assertRaises(d.RecoveryStorageError):
+            self.store.begin_handoff(rid,*self.ev,policy=h.REHEARSE,event_id='after-long-delay',
+                expected_revision=p['revision'],now_ms=T+86400000)
+        self.assertEqual(self.store.load(rid)['request']['simulated_attempt_count'],1)
 
     def test_concurrent_deliveries_keep_one_request(self):
         with ThreadPoolExecutor(max_workers=4) as pool:

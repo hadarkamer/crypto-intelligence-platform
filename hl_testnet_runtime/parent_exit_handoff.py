@@ -26,6 +26,9 @@ def _link(bindings, snapshot, link):
     if link['grouping'] != 'normalTpsl':
         raise HandoffError('EXPLICIT_ORIGINAL_PARENT_LINK_REQUIRED')
     life.shape(link['children'], 'STOP TAKE_PROFIT')
+    life.ident(link['parent_oid'], r'[1-9][0-9]{0,19}')
+    if int(link['parent_oid']) >= 2**64:
+        raise HandoffError('INVALID_ORIGINAL_PARENT_ID')
     selected = [b for b in bindings if b['card_id'] == link['card_id']]
     if len(selected) != 1:
         raise HandoffError('EXACT_LINKED_CARD_REQUIRED')
@@ -78,6 +81,11 @@ def assess(bindings, snapshot, context, link, *, now_ms, policy=PRESERVE):
     parent = opens.get(link['parent_oid'])
     children = [opens.get(link['children'][leg]) for leg in recovery.EXITS]
     retired = all(oid in terminals for oid in link['children'].values())
+    extra = set(b['orders']['STOP'] + b['orders']['TAKE_PROFIT']) - set(link['children'].values())
+    # Matching aggregate size does not prove that a mixture of native and
+    # independent exits is one safely isolated pair. Check before success too.
+    if not retired and any(oid in opens for oid in extra):
+        reasons.add('MIXED_NATIVE_AND_REPLACEMENT_EXITS_REVIEW')
     remaining = life.number(card['remaining_quantity'], signed=True)
     entered = life.number(card['entry_quantity'])
     protected = remaining > 0 and life.number(card['stop_quantity_observed']) == remaining and not reasons and not card['issues']
@@ -96,7 +104,8 @@ def assess(bindings, snapshot, context, link, *, now_ms, policy=PRESERVE):
     if context['cards'][cid]['grouping'] == 'independent_fixed' and (parent or not retired):
         reasons.add('CANNOT_RELABEL_WORKING_LINKED_ORDERS')
     if reasons:
-        return {**out, 'reasons': sorted(reasons), 'stop_verified': False}
+        return {**out, 'reasons': sorted(reasons), 'stop_verified': False,
+                'unprotected_quantity': card['remaining_quantity'] if remaining > 0 else '0'}
     if parent:
         if parent['state'] != 'ACTIVE' or entered >= life.number(b['planned_quantity']):
             return {**out, 'reasons': ['PARENT_STATUS_REQUIRES_RECHECK']}
@@ -135,9 +144,6 @@ def assess(bindings, snapshot, context, link, *, now_ms, policy=PRESERVE):
     if policy == PRESERVE:
         return {**out, 'state': 'POLICY_APPROVAL_REQUIRED',
                 'reasons': ['LINKED_CHILD_RETIREMENT_NOT_APPROVED']}
-    extra = set(b['orders']['STOP'] + b['orders']['TAKE_PROFIT']) - set(link['children'].values())
-    if any(oid in opens for oid in extra):
-        return {**out, 'reasons': ['MIXED_NATIVE_AND_REPLACEMENT_EXITS_REVIEW']}
     for leg in ('TAKE_PROFIT', 'STOP'):
         oid = link['children'][leg]
         if oid in opens:
@@ -244,6 +250,8 @@ class ParentHandoffJournal(durable.RecoveryJournal):
             ending = [t for t in snapshot['terminal_orders'] if t['oid'] == target]
             if len(ending) != 1 or any(o['oid'] == target for o in snapshot['open_orders']):
                 raise HandoffError('EXACT_TARGET_NOT_TERMINAL')
+            if ending[0]['at_ms'] <= data['original_evidence']['snapshot']['at_ms']:
+                raise HandoffError('TERMINAL_PREDATES_WORKING_OBSERVATION')
             reply = data['reply']
             if reply and reply['state'] == 'ACCEPTED_UNVERIFIED' and reply['oid'] != target:
                 raise HandoffError('HANDOFF_RECEIPT_TARGET_MISMATCH')
