@@ -31,6 +31,9 @@ def run(env, *, journal=None):
                 raise JournalError('CARD_INTAKE_CONFIGURATION_REQUIRED')
             initialize(store.journal)
             report['authenticated_record_intake_ready'] = True
+            if env.get('HL_TESTNET_CARDS_RECEIPT_REVIEW_ID'):
+                from .card_receipt_review import review
+                report['selected_receipt_review'] = review(env['HL_TESTNET_CARDS_RECEIPT_REVIEW_ID'],store.journal)
         report.update(store.probe())
         reviewed = store.import_legacy_reviews()
         report.update(status='CARD_STORAGE_AND_ROUTING_REVIEW_PASSED',
