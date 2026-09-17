@@ -5,7 +5,7 @@ Only the already executed experiment is eligible. Original records stay intact.
 This is NOT a live/partial-position adapter or authority for future trading.
 """
 from datetime import datetime, timezone
-from decimal import Decimal, localcontext
+from decimal import Decimal
 import http.client
 import json
 import time
@@ -108,12 +108,25 @@ def order_evidence(raw, sent, leg, start, end):
         raise ReviewError('ORDER_ORIGINAL_SIZE_MISMATCH')
     if life.number(order.get('limitPx'), positive=True) != life.number(sent['p'], positive=True):
         raise ReviewError('ORDER_LIMIT_PRICE_MISMATCH')
-    if leg != 'ENTRY' and life.number(order.get('triggerPx'), positive=True) != life.number(sent['t']['trigger']['triggerPx'], positive=True):
-        raise ReviewError('ORDER_TRIGGER_MISMATCH')
+    cleared = False
+    if leg != 'ENTRY':
+        trigger = life.number(order.get('triggerPx'))
+        expected = life.number(sent['t']['trigger']['triggerPx'], positive=True)
+        if trigger != expected:
+            # Observed on the real, fully filled DOGE TP: isTrigger=false,
+            # triggerPx=0, but original cloid, quantity and limit price survive.
+            # Never interpret zero as a new intended trigger price. The original
+            # validated action remains the source of the historical trigger.
+            expected_type = 'Take Profit Limit' if leg == 'TAKE_PROFIT' else 'Stop Market'
+            cleared = (trigger == 0 and order.get('isTrigger') is False
+                and order.get('orderType') == expected_type
+                and status == ('filled' if leg == 'TAKE_PROFIT' else 'siblingFilledCanceled'))
+            if not cleared:
+                raise ReviewError('ORDER_TRIGGER_MISMATCH')
     at = life.moment(envelope.get('statusTimestamp'))
     if not start <= at <= end:
         raise ReviewError('ORDER_TIME_OUTSIDE_HISTORY')
-    return dict(oid=str(oid), raw_status=status,
+    return dict(oid=str(oid), raw_status=status, trigger_metadata_cleared=cleared,
                 state='CANCELED' if leg == 'STOP' else 'FILLED', at_ms=at)
 
 
@@ -187,8 +200,9 @@ def collect(record, account, reader, *, clock=now_ms, elapsed=time.monotonic):
         end = clock()
         if not 0 < end-start <= WEEK_MS:
             raise ReviewError('SAVED_HISTORY_WINDOW_EXCEEDED')
-        ids = {leg: order_evidence(reader.read('orderStatus',account,oid=sent['c']),sent,leg,start,end)
-               for leg,sent in zip(life.LEGS,action['orders'])}
+        raw_orders = [reader.read('orderStatus',account,oid=sent['c']) for sent in action['orders']]
+        ids = {leg: order_evidence(raw,sent,leg,start,end)
+               for leg,sent,raw in zip(life.LEGS,action['orders'],raw_orders)}
         raw = reader.read('userFillsByTime',account,start=start,end=end)
         fills, reported = normalize_fills(raw,account,ids,start,end,quantity)
         flat_inventory(reader.read('clearinghouseState',account),reader.read('frontendOpenOrders',account))
