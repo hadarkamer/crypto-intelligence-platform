@@ -41,6 +41,13 @@ def run(env, *, journal=None):
         if env.get('HL_TESTNET_ACCOUNT_ROUTE_REVIEW') == 'public_read_only_v1':
             # Separate observation; never a signing or order-enablement gate.
             report['account_assignment'] = review_routes(routes)
+        if env.get('HL_TESTNET_BALANCE_REVIEW') == 'short_public_balance_v1':
+            # Explicit amount observation of the approved second account only.
+            # No changes to routing, default mode or any execution guard.
+            from .account_balance_review import review_balance
+            report['short_account_balance'] = review_balance(
+                routes['short_account'].get('account'),
+                expected_amount=env.get('HL_TESTNET_BALANCE_EXPECTED_USD', ''))
     except Exception:
         report['status'] = 'CARD_PHASE1_REQUIRES_REVIEW'
     return report
