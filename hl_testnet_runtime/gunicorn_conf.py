@@ -11,6 +11,10 @@ preload_app = False
 def post_worker_init(worker):
     import os
     import json
+    # Fail before starting ANY legacy task if integrated review is misconfigured.
+    if os.environ.get('HL_TESTNET_SAFETY_PIPELINE'):
+        from hl_testnet_runtime.integrated_safety import config as safety_config
+        safety_config(os.environ)
     from hl_testnet_runtime.risk_policy import CURRENT_RISK_USD, VERSION
     print(json.dumps({'testnet_risk_policy': {'version': VERSION,
         'new_entry_planned_risk_usd': CURRENT_RISK_USD,

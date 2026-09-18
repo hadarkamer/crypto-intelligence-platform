@@ -1,8 +1,7 @@
-"""Opt-in continuous Testnet card observations. No execution or app delivery.
+"""Opt-in continuous Testnet observations and integrated read-only safety.
 
-Only previously registered, durably bound exchange orders are monitored. New
-record-only alerts cannot be mistaken for positions. One completed pass then
-30 seconds of rest; per-bucket database claims prevent deployment overlap.
+Only registered exchange orders are monitored. Alert records are never executed.
+Reuse one existing loop and its database claims; no extra recurring process.
 """
 from collections import Counter
 from datetime import datetime, timezone
@@ -28,13 +27,16 @@ def config(env):
             or env.get('HL_TESTNET_JOURNAL_BACKEND')!='staging_postgres_v1'
             or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')=='approved_single_attempt_v1'):
         raise SyncError('READ_ONLY_SYNC_NOT_ENABLED')
+    if env.get('HL_TESTNET_SAFETY_PIPELINE'):
+        from .integrated_safety import config as safety_config
+        safety_config(env)
     return account_routes(public_route_env(env))
 
 
 class BudgetReader(PublicReader):
-    """Reserve worst-case weight for fill pages before making the request.
+    """At most 400 info-weight units per pass, then at least 30 seconds rest.
 
-    At most 400 info-weight units per pass, followed by at least 30 seconds rest.
+    Integrated safety adds one separately bounded activeAssetData public read.
     This is a worker safety budget, not a maximum number of trades or cards.
     """
     def __init__(self):
@@ -52,14 +54,17 @@ def error_code(exc):
     return text if isinstance(exc,(life.LifecycleError,JournalError,checks.Blocked)) and re.fullmatch(r'[A-Z_]{1,100}',text) else 'SYNC_READ_FAILED'
 
 
-def tick(store,routes,*,reader_factory=BudgetReader,clock=now_ms,stop_event=None):
+def tick(store,routes,*,reader_factory=BudgetReader,clock=now_ms,stop_event=None,
+         market_reader_factory=checks.InfoReader):
     report=dict(status='WAITING_FOR_REGISTERED_EXECUTIONS',environment='testnet',
         continuous_sync_enabled=True,dispatch_enabled=False,order_requests_sent=0,
         app_delivery_sent=False,public_reads=0,changed=False,card_states={},closure_verified_count=0)
+    integrated=getattr(store,'safety_enabled',False)
+    report['integrated_safety_enabled']=integrated
     if stop_event is not None and stop_event.is_set(): return {**report,'status':'STOPPED'}
     claim=store.claim()
     if claim:
-        reader=reader_factory()
+        reader=reader_factory(); extra_reads=0
         try:
             for binding in claim['evidence']['bindings']:
                 route=routes.get(binding['role'],{})
@@ -67,6 +72,11 @@ def tick(store,routes,*,reader_factory=BudgetReader,clock=now_ms,stop_event=None
                     raise SyncError('BOUND_ACCOUNT_NOT_IN_APPROVED_ROUTES')
             observation=collect(claim['evidence'],reader,cursor_ms=claim['cursor_ms'],clock=clock)
             if stop_event is not None and stop_event.is_set(): raise SyncError('WORKER_STOPPED_RECHECK_REQUIRED')
+            if integrated:
+                from . import integrated_safety as safety
+                snap=observation['snapshot']; extra_reads=1
+                observation['safety_sample']=safety.market_sample(market_reader_factory(),snap['account'],snap['symbol'],clock)
+                if stop_event is not None and stop_event.is_set(): raise SyncError('WORKER_STOPPED_RECHECK_REQUIRED')
             saved=store.save(claim,observation,now_ms=clock())
             cards=saved['report']['cards']
             report.update(status='SYNC_PASS_COMPLETED' if saved['status']=='VERIFIED' else 'SYNC_REQUIRES_REVIEW',
@@ -74,12 +84,14 @@ def tick(store,routes,*,reader_factory=BudgetReader,clock=now_ms,stop_event=None
                 closure_verified_count=sum(c['closure_verified'] for c in cards),
                 bucket_issues=saved['report']['bucket_issues'],
                 card_issue_codes=sorted({issue for c in cards for issue in c['issues']}))
+            if integrated:
+                report['safety']=safety.summary(saved['report']['safety'])
         except Exception as exc:
             code=error_code(exc)
             store.fail(claim,code)
             report.update(status='SYNC_REQUIRES_REVIEW',reason=code)
         finally:
-            report['public_reads']=reader.calls
+            report['public_reads']=reader.calls+extra_reads
     report.update(store.summary())
     if not claim and report['registered_buckets']:
         report['status']='NO_BUCKET_DUE'
@@ -110,6 +122,8 @@ def health():
         return dict(running=alive,recent_report=recent,read_only=True,dispatch_enabled=False,
             status=_report.get('status','NOT_STARTED'),registered_buckets=registered,
             fresh_verified_buckets=verified,problem_buckets=_report.get('problem_buckets',0),
+            integrated_safety_enabled=_report.get('integrated_safety_enabled',False),
+            execution_authorized=False,
             fully_current=alive and recent and registered>0 and registered==verified)
 
 
@@ -133,8 +147,9 @@ def run_loop(store,routes,stop_event,emit=_emit,*,runner=tick):
 def _worker(env):
     try:
         routes=config(env)
-        store=SyncStore(PostgresJournal.from_env(env))
-        store.initialize()  # No DDL inside the repeating pass.
+        integrated=bool(env.get('HL_TESTNET_SAFETY_PIPELINE'))
+        store=SyncStore(PostgresJournal.from_env(env),safety_enabled=integrated)
+        store.initialize()  # All schema setup precedes the repeating pass.
         run_loop(store,routes,_stop)
     except Exception as exc:
         _emit(dict(status='SYNC_INITIALIZATION_FAILED',reason=error_code(exc),

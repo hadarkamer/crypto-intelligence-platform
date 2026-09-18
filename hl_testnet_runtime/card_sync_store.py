@@ -1,8 +1,6 @@
-"""Persistent read-only observation worker state beside existing lifecycle tables.
+"""Persistent read-only observation state; optional safety checks commit together.
 
-All writes are to shadow observation tables, never trading journals or alert cards.
-Per-bucket expiring claims fence deployments; evidence and heartbeat commit together.
-Unchanged facts update a small heartbeat, not an ever-growing full history copy.
+Only local observation tables are updated. No orders are submitted here.
 """
 from copy import deepcopy
 import uuid
@@ -14,10 +12,16 @@ TABLE = SCHEMA+'.sync_state'
 
 
 class SyncStore:
-    def __init__(self,journal): self.journal=journal
+    def __init__(self,journal,*,safety_enabled=False):
+        if type(safety_enabled) is not bool: raise ValueError('BOOLEAN_SAFETY_MODE_REQUIRED')
+        self.journal=journal
+        self.safety_enabled=safety_enabled
 
     def initialize(self):
         LifecycleStore(self.journal).initialize()
+        if self.safety_enabled:
+            from .card_recovery_journal import RecoveryJournal
+            RecoveryJournal(self.journal).initialize()
         with self.journal._transaction() as conn:
             conn.execute('SELECT pg_advisory_xact_lock(%s)',(1729048230,))
             conn.execute(f'''CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -70,15 +74,26 @@ class SyncStore:
             LifecycleStore.verify(old[1],old[2])
             _continues(old[1],evidence)
             changed=good and facts(old[1]['snapshot'])!=facts(evidence['snapshot'])
-            revision=old[0]
+            revision=old[0]+int(changed)
+            if self.safety_enabled:
+                from . import integrated_safety as safety
+                assessment=safety.from_database(conn,evidence['bindings'],evidence['snapshot'],
+                    observation.get('safety_sample'),revision=revision,now_ms=now_ms,journal=self.journal)
+                good=good and not assessment['requires_review']
+                if not good:
+                    changed=False;revision=old[0]
+                    assessment['checked_revision']=revision
+                    assessment['display_copy']=safety.display.project(evidence['bindings'],evidence['snapshot'],
+                        revision=revision,now_ms=now_ms)
+                assessment['observation_committed']=good
+                report['safety']=assessment
+                report['needs_review']=not good
             if changed:
-                revision+=1
                 payload,checksum=life.encoded(evidence),life.digest(evidence)
                 conn.execute(f'''UPDATE {SCHEMA}.heads SET revision=%s,evidence=%s::jsonb,evidence_hash=%s
                     WHERE bucket=%s''',(revision,payload,checksum,bucket))
                 conn.execute(f'''INSERT INTO {SCHEMA}.history(bucket,revision,evidence,evidence_hash)
                     VALUES(%s,%s,%s::jsonb,%s)''',(bucket,revision,payload,checksum))
-            # A problem never advances the checkpoint or replaces last verified evidence.
             conn.execute(f'''UPDATE {TABLE} SET owner=NULL,lease_until=NULL,
                 next_check=clock_timestamp()+interval '30 seconds',last_attempt=clock_timestamp(),
                 last_success=CASE WHEN %s THEN clock_timestamp() ELSE last_success END,
@@ -98,12 +113,15 @@ class SyncStore:
                 WHERE bucket=%s AND owner=%s''',(code,claim['bucket'],claim['token']))
 
     def summary(self):
+        safety_ok="true"
+        if self.safety_enabled:
+            safety_ok="COALESCE(s.report->'safety'->>'version','')='integrated-testnet-safety-review-v1'"
         with self.journal._transaction() as conn:
             row=conn.execute(f'''SELECT count(*),
                 count(*) FILTER(WHERE s.status='VERIFIED' AND s.last_success>clock_timestamp()-interval '120 seconds'
-                    AND s.checked_revision=h.revision),
+                    AND s.checked_revision=h.revision AND ({safety_ok})),
                 count(*) FILTER(WHERE s.status NOT IN ('VERIFIED','CHECKING','NOT_CHECKED')),
                 count(*) FILTER(WHERE s.last_success IS NULL OR s.last_success<=clock_timestamp()-interval '120 seconds'
-                    OR s.checked_revision IS DISTINCT FROM h.revision)
+                    OR s.checked_revision IS DISTINCT FROM h.revision OR NOT ({safety_ok}))
                 FROM {SCHEMA}.heads h LEFT JOIN {TABLE} s ON s.bucket=h.bucket''').fetchone()
         return dict(registered_buckets=row[0],fresh_verified_buckets=row[1],problem_buckets=row[2],stale_buckets=row[3])

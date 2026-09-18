@@ -61,14 +61,15 @@ def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=
                      account_role=None):
     """One explicit call, commit-before-signing; one reservation per test account.
 
-    Role-bound calls additionally require the new default-locked role switch.
-    Startup review NEVER calls this. Legacy callers keep their existing path.
-    Defaults retain the legacy minute window. Only a supervised caller supplies
-    the ORIGINAL source expiry (<=10 minutes) and a shorter approval deadline.
-    An expired or uncertain attempt is never reset or blindly submitted again.
+    Integrated safety review is an unconditional no-send gate, even if a caller
+    accidentally supplies enable_testnet=True. It requires a later separately
+    approved rollout to remove that gate; no health/app reply can remove it.
+    Role-bound calls additionally require the default-locked role switch.
     """
     result = {'mode': 'testnet', 'status': 'DISABLED', 'order_requests_sent': 0,
               'signing_tested': False, 'verified': False}
+    if os.environ.get('HL_TESTNET_SAFETY_PIPELINE'):
+        return {**result, 'status': 'INTEGRATED_SAFETY_NO_SEND'}
     if enable_testnet is not True:
         return result
     from . import checks, guarded_execution as guard, price_precision as precision
@@ -144,6 +145,8 @@ def submit_persisted(message, *, account, agent, exit_type=None, enable_testnet=
                 or not source_fresh(at, source_expires_at, approval_expires_at)
                 or not 0 <= sender.now_ms() - nonce <= 5000):
             raise JournalError('SOURCE_OR_RESERVATION_EXPIRED_NO_SEND')
+        if os.environ.get('HL_TESTNET_SAFETY_PIPELINE'):
+            raise JournalError('INTEGRATED_SAFETY_NO_SEND')
         if account_role is not None and not roles.execution_unlocked(os.environ):
             raise JournalError('ROLE_EXECUTION_LOCKED')
         body = sender._signed_body(wallet, action, nonce)
