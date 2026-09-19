@@ -34,6 +34,9 @@ def startup():
     from .saved_trade_review import review_saved_trade
     reviews = [('testnet_second_connection', inspect_second),
                ('testnet_saved_trade_review', review_saved_trade)]
+    if os.environ.get('HL_TESTNET_FILLED_PREPARATION') == 'prepare_second_account_no_orders_v1':
+        from .filled_trial_runtime import inspect_preparation
+        reviews.append(('testnet_filled_preparation', inspect_preparation))
     if os.environ.get('HL_TESTNET_CLOSED_CARD_REVIEW') == 'saved_doge_shadow_v1':
         reviews.append(('testnet_doge_lifecycle', _doge_card_review))
     for label, function in reviews:

@@ -61,12 +61,16 @@ def application(environ, start_response):
         status = '200 OK'
         mode = os.environ.get('HL_TESTNET_RUNTIME_MODE')
         controlled = mode == 'single_testnet_attempt_v1'
+        filled = mode == 'filled_card_controlled_v1'
         monitoring = mode == 'cancel_monitor_testnet_v1'
         rehearsal = mode == 'cancel_rehearsal_testnet_v1'
         report = {'service':'hyperliquid-testnet-preflight','running':True,
-            'read_only':not (controlled or monitoring or rehearsal),'single_attempt_configured':controlled,
+            'read_only':not (controlled or filled or monitoring or rehearsal),'single_attempt_configured':controlled,
             'public_order_controls':False,'continuous_trading':False,
             'cancellation_monitor_configured':monitoring,'technical_rehearsal_configured':rehearsal}
+        if filled:
+            from .filled_trial_runtime import health as filled_health
+            report['controlled_card'] = filled_health()
         if monitoring:
             from .pending_cancel_monitor import health
             report['monitor'] = health()
