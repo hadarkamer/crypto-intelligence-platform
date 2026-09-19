@@ -14,6 +14,7 @@ import time
 
 from . import card_lifecycle as life, filled_quantity_exits as selected
 from . import card_exit_recovery as recovery, card_sync_evidence as evidence
+from . import filled_pending_cancel as half_cancel
 from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
 from .trade_card_store import CardStore
 from . import checks, two_account_execution as roles
@@ -146,6 +147,17 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
             order=dict(a=index,b=b['side']=='SHORT',p=price,s=q,r=True,
                 t=dict(trigger=dict(isMarket=leg=='STOP',triggerPx=price,tpsl='sl' if leg=='STOP' else 'tp')),c=cloid)
             return make(cid,leg,'CREATE_EXIT',dict(type='order',orders=[order],grouping='na'),q)
+        # This is the pre-existing half-formula rule, now connected to the SAME
+        # durable cancel/receipt/reconciliation path. Never cancel partial fills.
+        candidates=half_cancel.scan(state,routes,sample,now_ms=now_ms)['candidates']
+        if candidates:
+            candidate=candidates[0];cid=candidate['card_id'];oid=candidate['oid']
+            proposal=make(cid,'ENTRY',half_cancel.OPERATION,
+                dict(type='cancel',cancels=[dict(a=index,o=int(oid))]),'0',oid)
+            proposal.update(cancel_rule_digest=candidate['rule_digest'],
+                cancel_first_crossing_at_ms=candidate['first_crossing_at_ms'],
+                cancel_sample_at_ms=candidate['sample_at_ms'])
+            return proposal
     unbound=[cid for cid in state['originals'] if cid not in bound]
     if unbound:
         cid=sorted(unbound)[0];original=state['originals'][cid]
@@ -251,6 +263,10 @@ class Controller:
                 return dict(status=pending['phase'],order_requests_sent=0)
         else: pending=None
         sample=self.venue.sample(state['account'],state['symbol']);meta=self.venue.metadata()
+        # Observation only, including during preview. The existing durable state
+        # remembers crossings; an obsolete NEVER-SENT cancel can yield to a fill.
+        state=half_cancel.checkpoint(self.store,state,self.routes,sample,now_ms=self.venue.now())
+        pending=self.store.request(state['pending']) if state['pending'] else None
         sequence=pending['proposal']['sequence'] if pending else None
         proposal=choose(state,self.routes,meta,sample,now_ms=self.venue.now(),sequence=sequence,
                         after_exit_policy=self.after_exit_policy)
@@ -263,6 +279,7 @@ class Controller:
             prior=deepcopy(pending['proposal']);fresh=deepcopy(proposal)
             for item in (prior,fresh):
                 item.pop('basis');item.pop('observed_at_ms')
+                item.pop('cancel_sample_at_ms',None)
             if prior!=fresh:
                 raise DispatchError('UNSENT_PLAN_CHANGED_EXPLICIT_REPLAN_REQUIRED')
             # Preserve the frozen action identity but refresh the evidence used at begin.
@@ -382,6 +399,7 @@ class TestnetVenue:
             raise DispatchError('FINAL_EVIDENCE_EXPIRED')
         if not at<=nonce<=at+1000:
             raise DispatchError('PERSISTED_NONCE_TIME_INVALID')
+        half_cancel.final_freshness(request,now_ms=now)
     def send(self,request):
         p=request['proposal'];route=self._gate(p,self.env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY'))
         self._fresh_attempt(request)
