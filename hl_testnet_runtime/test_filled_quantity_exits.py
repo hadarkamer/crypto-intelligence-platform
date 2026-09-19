@@ -109,7 +109,8 @@ class FilledQuantityTests(NoOrders):
 
     def test_oversized_source_still_hits_existing_lab_cap(self):
         import hyperliquid_testnet_executor as old
-        b,r=original();src={**r['card']['prepared']['source'],entry='100',stop='99.9',take_profit='100.2'}
+        b,r=original()
+        src=dict(r['card']['prepared']['source'],entry='100',stop='99.9',take_profit='100.2')
         card=trade_cards.prepare_card(src,META,rule_id='SOFTWARE_TEST',threshold_pct='1.5',record_kind='synthetic_test')
         with self.assertRaisesRegex(old.TestnetError,'OUTSIDE_LAB_SIZE_BOUNDS'):
             m.prepare_entry(card,META,A,ROUTES)
