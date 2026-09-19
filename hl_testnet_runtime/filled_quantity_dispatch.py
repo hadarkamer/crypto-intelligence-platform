@@ -358,12 +358,33 @@ class TestnetVenue:
             report=roles.budget_for_role(self.env,proposal['role'],route['account'],route['agent'],plan,checks.InfoReader())
             if report.get('status')!='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION' or report.get('test_plan_checked') is not True:
                 raise DispatchError('EXACT_ENTRY_BUDGET_NOT_VERIFIED')
+    def _fresh_attempt(self,request):
+        """Check both the attempt AND its evidence, including after local signing.
+
+        Approval lifetime and signature expiry are different clocks from evidence
+        freshness. A slow local preparation cannot extend either freshness bound.
+        This is a guard, not permission or proof that quantities cannot change.
+        """
+        if (not isinstance(request,dict) or request.get('domain')!='testnet'
+                or request.get('phase')!='OUTCOME_UNKNOWN'
+                or type(request.get('attempts')) is not int or request['attempts']!=1):
+            raise DispatchError('DURABLE_TESTNET_REQUEST_REQUIRED')
+        try:
+            at=life.moment(request['attempt_at_ms'])
+            prepared=life.moment(request['prepared_at_ms'])
+            observed=life.moment(request['proposal']['observed_at_ms'])
+            nonce=life.moment(request['nonce']);now=life.moment(self.now())
+        except (KeyError,TypeError,life.LifecycleError):
+            raise DispatchError('DURABLE_ATTEMPT_TIMELINE_REQUIRED') from None
+        if prepared>at or observed>at or not 0<=now-at<=5000:
+            raise DispatchError('DURABLE_ATTEMPT_EXPIRED')
+        if not 0<=now-observed<=15000:
+            raise DispatchError('FINAL_EVIDENCE_EXPIRED')
+        if not at<=nonce<=at+1000:
+            raise DispatchError('PERSISTED_NONCE_TIME_INVALID')
     def send(self,request):
         p=request['proposal'];route=self._gate(p,self.env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY'))
-        if request['domain']!='testnet' or request['phase']!='OUTCOME_UNKNOWN' or request['attempts']!=1:
-            raise DispatchError('DURABLE_TESTNET_REQUEST_REQUIRED')
-        if not 0<=self.now()-request['attempt_at_ms']<=5000:
-            raise DispatchError('DURABLE_ATTEMPT_EXPIRED')
+        self._fresh_attempt(request)
         wallet=roles.wallet_for_role(self.env,p['role'],route['account'],route['agent'])
         from hyperliquid.utils.signing import sign_l1_action
         expires=request['nonce']+15000
@@ -374,6 +395,7 @@ class TestnetVenue:
         body=json.dumps(dict(action=action,nonce=request['nonce'],signature=signature,expiresAfter=expires)).encode()
         if len(body)>16384: raise DispatchError('REQUEST_TOO_LARGE')
         self._gate(p,self.env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY'))
+        self._fresh_attempt(request)
         connection=http.client.HTTPSConnection(HOST,timeout=4)
         try:
             self.sent+=1
