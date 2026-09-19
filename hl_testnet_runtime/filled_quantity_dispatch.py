@@ -105,6 +105,7 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
         return dict(version=VERSION,card_id=cid,account=state['account'],symbol=state['symbol'],
             role=state['originals'][cid]['draft']['role'],leg=leg,operation=operation,
             action=action,quantity=quantity,old_oid=old_oid,sequence=sequence,
+            source_at=state['originals'][cid]['card']['prepared']['execution']['at'],
             basis=life.digest(ev),observed_at_ms=snap['at_ms'])
     bound={b['card_id'] for b in bs}
     # Existing exposure is serviced first, never delayed by a new entry.
@@ -277,13 +278,14 @@ class Controller:
         state=self.store.begin(state,proposal,route['agent'],self.venue.now())
         request=self.store.request(state['pending'])
         # A lost commit reply never reaches here. Once here, any error remains uncertain.
+        sent_before=getattr(self.venue,'sent',0)
         try:
             raw=self.venue.send(request)
             reply=normalized_reply(raw,proposal['action']['type'])
         except Exception:
-            return dict(status='OUTCOME_UNKNOWN',order_requests_sent=getattr(self.venue,'sent',0))
+            return dict(status='OUTCOME_UNKNOWN',order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
         self.store.reply(state,reply,self.venue.now())
-        return dict(status=reply['state'],request_id=request['request_id'],order_requests_sent=getattr(self.venue,'sent',0))
+        return dict(status=reply['state'],request_id=request['request_id'],order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
 
 
 class TestnetVenue:
@@ -329,6 +331,17 @@ class TestnetVenue:
         except (ValueError,TypeError): raise DispatchError('EXACT_APPROVAL_DEADLINE_REQUIRED') from None
         if expires<=0 or (proposal['operation']=='ENTRY' and not 0<expires-self.now()<=86400000):
             raise DispatchError('TRIAL_ENTRY_APPROVAL_EXPIRED')
+        # Check original source age again at the final boundary, including after
+        # a slow budget read. Never refresh an alert timestamp on retry.
+        if proposal['operation']=='ENTRY':
+            from .source_window import source_fresh, timestamp
+            try:
+                at=timestamp(proposal['source_at'])
+            except (KeyError,TypeError,ValueError):
+                raise DispatchError('ORIGINAL_SOURCE_TIME_REQUIRED') from None
+            if not source_fresh(at,env.get('HL_TESTNET_FILLED_SOURCE_EXPIRES_AT'),
+                    now=datetime.fromtimestamp(self.now()/1000,timezone.utc)):
+                raise DispatchError('NEW_TRIAL_SOURCE_NOT_FRESH')
         # Entry approval expiry must NOT silently terminate management of an open card.
         return roles.route_for(env,proposal['role'],proposal['account'])
     def authorize(self,state,proposal,after_exit_policy):
