@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from . import filled_quantity_dispatch as dispatch, card_lifecycle as life
 from . import two_account_execution as roles
-from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA, DONE
+from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
 from .postgres_journal import PostgresJournal
 from .trade_card_store import CardStore
 
@@ -122,14 +122,17 @@ def tick(controller, bucket, *, send=False):
 def _loop(controller, bucket):
     errors = 0
     while not _stop.is_set():
+        before = getattr(controller.venue, 'sent', 0)
         try:
             result = tick(controller, bucket, send=True)
             errors = 0
         except Exception:
-            # No raw exception text, actions, keys or connection strings in logs.
-            # The durable controller prevents retries of possibly sent requests.
+            # A database/reconciliation failure may occur AFTER an HTTP attempt.
+            # Report the observed attempt counter, never falsely report zero.
+            # Never expose raw exceptions, actions, keys or connection strings.
             result = dict(status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY', finished=False,
-                          order_requests_sent=0, app_controls=False)
+                order_requests_sent=max(0, getattr(controller.venue, 'sent', 0)-before),
+                app_controls=False)
             errors += 1
         with _lock:
             _health['cycles'] += 1
