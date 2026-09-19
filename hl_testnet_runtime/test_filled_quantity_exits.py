@@ -18,8 +18,8 @@ ROUTES = {'long_account':{'account':A},'short_account':{'account':B}}
 
 def original(n=1, side='LONG'):
     source=dict(kind='SIGNAL',event_id='filled-policy-'+str(n),symbol='DOGE',side=side,
-        entry='100',stop='99.9' if side=='LONG' else '100.1',
-        take_profit='100.2' if side=='LONG' else '99.8',
+        entry='10',stop='9.9' if side=='LONG' else '10.1',
+        take_profit='10.2' if side=='LONG' else '9.8',
         at=datetime.fromtimestamp((T-20000)/1000,timezone.utc).isoformat())
     card=trade_cards.prepare_card(source,META,rule_id='SOFTWARE_TEST',threshold_pct='1.5',record_kind='synthetic_test')
     account=ROUTES[card['account_role']]['account']
@@ -39,7 +39,7 @@ def case(q='40',*,side='LONG',n=1,stop=None,take=None):
             b['orders'][leg]=[str(n*10+offset)]
             opens.append(order(b,leg,size))
     s=snapshot(b,fills=fs,opens=opens,terms=terms,position=('-' if side=='SHORT' and q!='0' else '')+q)
-    c=controls([b],s,mark='100')
+    c=controls([b],s,mark='10')
     return [b],s,c,{b['card_id']:record}
 
 
@@ -91,7 +91,7 @@ class FilledQuantityTests(NoOrders):
     def test_altered_plan_and_extra_app_fields_rejected(self):
         b,r=original()
         for key,value in (('policy','close-all'),('dispatch_enabled',True),('source_at','now'),
-                          ('prices',dict(entry='100',stop='99',take_profit='102')),('command','buy')):
+                          ('prices',dict(entry='10',stop='9',take_profit='12')),('command','buy')):
             d={**r['draft'],key:value}
             with self.assertRaises(life.LifecycleError):m.validate_draft(r['card'],d,ROUTES)
         d=deepcopy(r['draft']);d['entry_action']['orders'][0]['s']='500'
@@ -106,6 +106,13 @@ class FilledQuantityTests(NoOrders):
     def test_wrong_account_cannot_receive_draft(self):
         b,r=original()
         with self.assertRaises(life.LifecycleError):m.prepare_entry(r['card'],META,B,ROUTES)
+
+    def test_oversized_source_still_hits_existing_lab_cap(self):
+        import hyperliquid_testnet_executor as old
+        b,r=original();src={**r['card']['prepared']['source'],entry='100',stop='99.9',take_profit='100.2'}
+        card=trade_cards.prepare_card(src,META,rule_id='SOFTWARE_TEST',threshold_pct='1.5',record_kind='synthetic_test')
+        with self.assertRaisesRegex(old.TestnetError,'OUTSIDE_LAB_SIZE_BOUNDS'):
+            m.prepare_entry(card,META,A,ROUTES)
 
     def test_zero_fill_places_no_exit(self):
         out=assess(case('0'))
@@ -136,7 +143,7 @@ class FilledQuantityTests(NoOrders):
         self.assertEqual(out['next_step']['operation'],'RESIZE_EXIT')
         self.assertEqual(out['next_step']['target_quantity'],'60')
         self.assertEqual(out['next_step']['order_id'],'11')
-        self.assertEqual(out['next_step']['original_price'],'99.9')
+        self.assertEqual(out['next_step']['original_price'],'9.9')
 
     def test_short_uses_its_own_account_and_buy_to_reduce(self):
         ev=case(side='SHORT');out=assess(ev)
@@ -150,7 +157,7 @@ class FilledQuantityTests(NoOrders):
         bs=one[0]+two[0];s=deepcopy(one[1])
         for key in ('fills','open_orders','terminal_orders'):s[key]+=two[1][key]
         s['position_quantity']='140'
-        ev=bs,s,controls(bs,s,mark='100'),{**one[3],**two[3]}
+        ev=bs,s,controls(bs,s,mark='10'),{**one[3],**two[3]}
         before=deepcopy(ev);out=assess(ev)
         self.assertEqual(out['next_step']['card_id'],one[0][0]['card_id'])
         self.assertEqual(out['next_step']['target_quantity'],'40');self.assertEqual(ev,before)
@@ -180,7 +187,7 @@ class FilledQuantityTests(NoOrders):
             self.assertIsNone(assess(ev)['next_step'])
 
     def test_crossed_price_does_not_silently_reprice(self):
-        ev=case();ev[2]['mark_price']='99.8'
+        ev=case();ev[2]['mark_price']='9.8'
         out=assess(ev);self.assertIsNone(out['next_step'])
         self.assertIn('EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE',out['reasons'])
 
