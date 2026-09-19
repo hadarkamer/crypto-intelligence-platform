@@ -249,7 +249,8 @@ class HalfThresholdDatabaseTests(fx.NoExternal):
         self.assertEqual(self.v.orders['1000']['status'],'canceled')
 
     def test_concurrent_crossing_checkpoints_keep_one_durable_record(self):
-        self.entry();self.mark='10.08';s=self.c.refresh(self.bucket);price=sample(self.mark,self.v.now())
+        self.entry();self.mark='10.08';self.v.t+=1
+        s=self.c.refresh(self.bucket);price=sample(self.mark,self.v.now())
         def record(_):
             try:half.checkpoint(self.store,s,fx.ROUTES2,price,now_ms=self.v.now());return True
             except JournalError:return False
