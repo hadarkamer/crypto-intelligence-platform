@@ -98,6 +98,9 @@ def cleanup(state, *, now_ms, after_exit_policy='NOT_SELECTED'):
     Cleanup must not be suppressed merely because another card's TP/SL level
     has been crossed. Missing/contradictory ownership/history still blocks it.
     Entry remainder cancellation keeps the already-approved policy and priority.
+    A partial exit can ALSO leave an oversized sibling, not just a flat card.
+    Retire that exact order through the existing cancel/observe/replan path;
+    do not create a replacement here or cancel a correctly-sized other leg.
     Never infer closure from the account's net position, an app row or a receipt.
     """
     bs, snap, view = _read(state, now_ms)
@@ -123,6 +126,15 @@ def cleanup(state, *, now_ms, after_exit_policy='NOT_SELECTED'):
             for leg,o in _open_for(b, snap):
                 if o['state'] == 'ACTIVE':
                     candidates.append((1, b['card_id'], leg, o['oid'], 'CANCEL_ORPHAN_EXIT'))
+        else:
+            # Preserve stop-first recovery ordering; only an individual order
+            # that can exceed its owner's remainder is a cleanup candidate.
+            # Two correctly-sized independent siblings still require the
+            # separate capacity fence, never an invented native-OCO guarantee.
+            for leg,o in _open_for(b, snap):
+                if o['state'] == 'ACTIVE' and life.number(o['quantity']) > remaining:
+                    candidates.append((2 if leg == 'STOP' else 3, b['card_id'], leg,
+                                       o['oid'], 'CANCEL_FOR_RESIZE'))
     if not candidates:
         return None
     _, cid, leg, oid, operation = sorted(candidates)[0]
@@ -253,8 +265,16 @@ def retire_obsolete_unsent(store, state, *, now_ms):
         obsolete = life.number(card['remaining_quantity'], signed=True) != life.number(p['quantity']) or bool(_open_for(b,snap,(p['leg'],)))
     elif p['operation'] in ('CANCEL_ORPHAN_EXIT', 'CANCEL_FOR_RESIZE'):
         obsolete = any(o['oid'] == p['old_oid'] for o in snap['terminal_orders'])
-        if p['operation'] == 'CANCEL_ORPHAN_EXIT' and life.number(card['remaining_quantity'], signed=True) > 0:
+        remaining = life.number(card['remaining_quantity'], signed=True)
+        if p['operation'] == 'CANCEL_ORPHAN_EXIT' and remaining > 0:
             obsolete = True
+        elif p['operation'] == 'CANCEL_FOR_RESIZE':
+            own = [o for _,o in _open_for(b,snap,(p['leg'],)) if o['oid'] == p['old_oid']]
+            # A fresh fill can make the size correct, or finish the card while
+            # this cancellation was only PREPARED. Replan rather than remove a
+            # now-correct exit or leave stale resize intent blocking cleanup.
+            if remaining <= 0 or any(life.number(o['quantity']) == remaining for o in own):
+                obsolete = True
     if not obsolete:
         return state
     def update(conn, value):
