@@ -62,7 +62,10 @@ class ResidualWireTests(NoExternal):
     def test_cancellation_uses_validated_original_not_display_or_changed_draft(self):
         s=orphan();p=select(s);s['originals'][p['card_id']]['draft']['prices']['stop']='1'
         with self.assertRaises(contract.ContractError):validate(s,p)
-        with self.assertRaises(contract.ContractError):validate(dict(display_copy=True),p)
+        # Pass malformed input to the production boundary, not the fixture's
+        # timestamp helper, which intentionally expects a complete snapshot.
+        with self.assertRaisesRegex(contract.ContractError,'^RESIDUAL_WIRE_CONTRACT_INVALID$'):
+            contract.validate_wire_proposal(dict(display_copy=True),p,now_ms=T)
 
     def test_correct_exit_payloads_keep_exact_card_prices_and_ids(self):
         for side in ('LONG','SHORT'):
