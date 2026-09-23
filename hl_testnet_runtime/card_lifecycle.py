@@ -182,7 +182,24 @@ def validate_snapshot(snapshot):
     return account, symbol
 
 
-def review(bindings, snapshot, *, now_ms, max_age_ms=15000):
+def plain_tp_ids(bindings, account, symbol, values):
+    """Explicit internal read model, never infer a plain TP from an order label.
+
+    Default callers remain trigger-only. The exclusive protocol obtains these
+    IDs from its immutable request/ownership records, never from the app.
+    This read-only option grants no order or policy authority.
+    """
+    if not isinstance(values, (tuple, list, set, frozenset)):
+        raise LifecycleError('EXPLICIT_PLAIN_TP_IDS_REQUIRED')
+    ids = frozenset(ident(v, r'[0-9]{1,30}') for v in values)
+    allowed = {oid for b in bindings if address(b['account']) == address(account)
+               and b['symbol'] == symbol for oid in b['orders']['TAKE_PROFIT']}
+    if not ids <= allowed:
+        raise LifecycleError('PLAIN_TP_ID_NOT_OWNED')
+    return ids
+
+
+def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oids=()):
     """Derive card states from comparable, complete evidence; never place/cancel.
 
     Gross card PnL is cash-flow based only once the card is verifiably flat and
@@ -191,6 +208,7 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000):
     """
     links = validate_bindings(bindings)
     account, symbol = validate_snapshot(snapshot)
+    plain = plain_tp_ids(bindings, account, symbol, plain_take_profit_oids)
     moment(now_ms)
     if type(max_age_ms) is not int or not 0 < max_age_ms <= 60000:
         raise LifecycleError('INVALID_MAX_AGE')
@@ -246,7 +264,10 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000):
                     valid = valid and o['order_type'] == 'LIMIT' and o['trigger_price'] is None and number(o['price']) == number(b['prices']['entry'])
                 else:
                     price = b['prices']['stop' if leg == 'STOP' else 'take_profit']
-                    valid = valid and o['order_type'] == ('SL_MARKET' if leg == 'STOP' else 'TP_LIMIT') and o['trigger_price'] is not None and number(o['trigger_price']) == number(price)
+                    if leg == 'TAKE_PROFIT' and oid in plain:
+                        valid = valid and o['order_type'] == 'LIMIT' and o['trigger_price'] is None
+                    else:
+                        valid = valid and o['order_type'] == ('SL_MARKET' if leg == 'STOP' else 'TP_LIMIT') and o['trigger_price'] is not None and number(o['trigger_price']) == number(price)
                     if leg == 'TAKE_PROFIT': valid = valid and number(o['price']) == number(price)
                     if valid and o['state'] == 'ACTIVE': coverage[leg] += number(o['quantity'])
                 if not valid: local.add('ORDER_TERMS_MISMATCH')

@@ -72,7 +72,12 @@ def placement(s, req, *, at, fill_quantity='0'):
     if done==q:
         snap['terminal_orders'].append({**terminal(b,p['leg'],str(done)),'at_ms':at-1})
     else:
-        snap['open_orders'].append(order(b,p['leg'],str(q-done)))
+        observed=order(b,p['leg'],str(q-done))
+        # The submitted TP is a PLAIN limit. Never fabricate a trigger field to
+        # make it pass the old lifecycle model; the raw-evidence suite checks this.
+        if p['leg']=='TAKE_PROFIT':
+            observed.update(order_type='LIMIT',trigger_price=None)
+        snap['open_orders'].append(observed)
     snap['at_ms']=at
     raw=dict(status='order',order=dict(status='filled' if done==q else 'open',statusTimestamp=at-1,
         order=dict(oid=int(oid),cloid=wire['c'],coin=p['symbol'],side='B' if wire['b'] else 'A',
@@ -149,7 +154,6 @@ class ExclusivePureTests(NoExternal):
         self.assertEqual(m.plan(s,targets(s),now_ms=T+4)['step']['quantity'],'70')
 
     def test_all_racing_fills_bound_total_exit_to_owner_allocation(self):
-        # 101 separate cancellation outcomes, not 101 independently counted tests.
         for spent in range(101):
             s=after_cancel(state(),late=str(spent));p=m.plan(s,targets(s),now_ms=T+4)['step']
             reserved=Decimal(p['quantity']) if p else Decimal(0)
@@ -160,9 +164,8 @@ class ExclusivePureTests(NoExternal):
 
     def test_counterexample_to_two_native_independent_full_size_exits(self):
         owner=100;another=100;tp_fill=100;remaining_account=owner+another-tp_fill
-        stop_fill=min(100,remaining_account)  # Account reduce-only still allows it.
+        stop_fill=min(100,remaining_account)
         self.assertGreater(tp_fill+stop_fill,owner)
-        # This is a rejected architecture, not a claim the protocol repaired it.
 
     def test_source_contains_no_transport_keys_worker_or_app_entrypoint(self):
         src=inspect.getsource(m)

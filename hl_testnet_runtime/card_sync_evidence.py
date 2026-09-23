@@ -5,7 +5,7 @@ No signer, order sender, wallet keys, transfers or account changes. Retain old
 fills and query a bounded overlapping interval; unknown activity is not hidden.
 """
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import http.client
 import json
 import time
@@ -119,16 +119,19 @@ REJECTED = frozenset(('rejected','tickRejected','minTradeNtlRejected','perpMargi
     'openInterestIncreaseRejected','insufficientSpotBalanceRejected','oracleRejected','perpMaxPositionRejected'))
 
 
-def observe(bindings, previous, reader, start, end):
+def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()):
     account,symbol = life.validate_snapshot(previous)
+    plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
     links = {oid:(b,leg) for b in bindings for leg in life.LEGS for oid in b['orders'][leg]}
     old_terminal = {r['oid']:r for r in previous['terminal_orders']}
     responses = {oid:reader.read('orderStatus',account,oid=oid) for oid in links}
     fills = merge_fills(previous['fills'],history(reader,account,start,end),account,symbol,start,end)
     totals = {}; last_fill = {}
-    for row in fills:
-        totals[row['oid']] = totals.get(row['oid'],Decimal(0))+life.number(row['quantity'])
-        last_fill[row['oid']] = max(last_fill.get(row['oid'],0),row['at_ms'])
+    with localcontext() as ctx:
+        ctx.prec = 80
+        for row in fills:
+            totals[row['oid']] = totals.get(row['oid'],Decimal(0))+life.number(row['quantity'])
+            last_fill[row['oid']] = max(last_fill.get(row['oid'],0),row['at_ms'])
     raw_inventory = reader.read('frontendOpenOrders',account)
     position = reader.read('clearinghouseState',account)
     if not isinstance(raw_inventory,list) or len(raw_inventory)>10000 or any(not isinstance(x,dict) for x in raw_inventory):
@@ -155,6 +158,10 @@ def observe(bindings, previous, reader, start, end):
                 or order.get('side')!=side or type(order.get('reduceOnly')) is not bool
                 or order['reduceOnly']!=(leg!='ENTRY')):
             raise SyncError('ORDER_BINDING_MISMATCH')
+        if oid in plain and (order.get('orderType')!='Limit' or order.get('isTrigger') is not False
+                or order.get('isPositionTpsl',False) is not False
+                or life.number(order.get('limitPx'),positive=True)!=life.number(binding['prices']['take_profit'])):
+            raise SyncError('REGISTERED_PLAIN_TP_TERMS_MISMATCH')
         original = life.number(order.get('origSz'),positive=True)
         filled = totals.get(oid,Decimal(0))
         if filled > original: raise SyncError('FILLS_EXCEED_ORIGINAL_SIZE')
@@ -163,6 +170,7 @@ def observe(bindings, previous, reader, start, end):
             if oid in inventory: raise SyncError('OBSERVATION_CHANGED_RETRY')
             if last_fill.get(oid,0)>stamp: raise SyncError('FILL_AFTER_TERMINAL_STATUS')
             if state=='FILLED' and filled!=original: raise SyncError('FILLED_ORDER_HISTORY_INCOMPLETE')
+            if state=='REJECTED' and filled!=0: raise SyncError('REJECTED_ORDER_HAS_FILLS')
             value = dict(account=account,symbol=symbol,oid=oid,state=state,
                          filled_quantity=life.text(filled),at_ms=stamp)
             if oid in old_terminal:
@@ -179,13 +187,15 @@ def observe(bindings, previous, reader, start, end):
         fields = ('oid','coin','side','sz','limitPx','triggerPx','reduceOnly','orderType','isTrigger')
         if any(actual.get(k)!=order.get(k) for k in fields): raise SyncError('OBSERVATION_CHANGED_RETRY')
         remaining = life.number(order.get('sz'),positive=True)
-        if remaining+filled!=original: raise SyncError('OPEN_ORDER_HISTORY_INCOMPLETE')
-        expected_type = 'Limit' if leg=='ENTRY' else 'Take Profit Limit' if leg=='TAKE_PROFIT' else 'Stop Market'
+        with localcontext() as ctx:
+            ctx.prec = 80
+            if remaining+filled!=original: raise SyncError('OPEN_ORDER_HISTORY_INCOMPLETE')
+        expected_type = 'Limit' if leg=='ENTRY' or oid in plain else 'Take Profit Limit' if leg=='TAKE_PROFIT' else 'Stop Market'
         if order.get('orderType')!=expected_type: raise SyncError('ORDER_TYPE_REQUIRES_REVIEW')
         opens.append(dict(account=account,symbol=symbol,oid=oid,quantity=order['sz'],price=order['limitPx'],
-            trigger_price=None if leg=='ENTRY' else order.get('triggerPx'),side=side,
+            trigger_price=None if leg=='ENTRY' or oid in plain else order.get('triggerPx'),side=side,
             reduce_only=order['reduceOnly'],state='ACTIVE',
-            order_type='LIMIT' if leg=='ENTRY' else 'TP_LIMIT' if leg=='TAKE_PROFIT' else 'SL_MARKET'))
+            order_type='LIMIT' if leg=='ENTRY' or oid in plain else 'TP_LIMIT' if leg=='TAKE_PROFIT' else 'SL_MARKET'))
     if not isinstance(position,dict) or not isinstance(position.get('assetPositions'),list):
         raise SyncError('INVALID_POSITION_STATE')
     matches=[]; seen_coins=set()
@@ -203,10 +213,12 @@ def observe(bindings, previous, reader, start, end):
         open_orders=sorted(opens,key=lambda r:r['oid']),terminal_orders=sorted(terminals,key=lambda r:r['oid']))
 
 
-def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.monotonic):
+def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.monotonic,
+            plain_take_profit_oids=()):
     bindings,previous = deepcopy(evidence['bindings']),deepcopy(evidence['snapshot'])
     life.validate_bindings(bindings)
     account,symbol = life.validate_snapshot(previous)
+    plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
     if any(life.address(b['account'])!=account or b['symbol']!=symbol for b in bindings):
         raise SyncError('MIXED_BUCKET_BINDINGS')
     if not previous['history_complete'] or not previous['orders_complete']:
@@ -216,9 +228,9 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
     end,started = clock(),elapsed()
     if not 0 <= end-cursor < DAY_MS-OVERLAP_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
     start = max(1,cursor-OVERLAP_MS)
-    first = observe(bindings,previous,reader,start,end)
-    second = observe(bindings,previous,reader,start,end)
+    first = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain)
+    second = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain)
     if first != second: raise SyncError('OBSERVATION_CHANGED_RETRY')
     if elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')
-    result = life.review(bindings,second,now_ms=clock())
+    result = life.review(bindings,second,now_ms=clock(),plain_take_profit_oids=plain)
     return dict(bindings=bindings,snapshot=second,report=result,cursor_ms=end)
