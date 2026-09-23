@@ -294,7 +294,14 @@ class DispatchDatabaseTests(NoExternal):
         with self.assertRaises(DispatchError):v.authorize(s,self.v.requests[0]['proposal'],'NOT_SELECTED')
     def test_raw_double_exit_race_is_detected_not_charged_to_second_card(self):
         self.protect('100');b,o=original(2);self.cards.record(o['card']);self.c.register(b['card_id'])
-        self.cycle();self.v.fill('1003','100');self.cycle();self.cycle();self.cycle(False)
+        # The new storage fence blocks constructing this unsafe overlap normally.
+        with self.assertRaisesRegex(DispatchError,'SHARED_MARKET_INDEPENDENT_PAIR_NOT_ISOLATED'):
+            self.cycle()
+        # Arrange PRE-EXISTING legacy exposure in the SOFTWARE venue only.
+        # Restore the guard before the cancellation race and retain all original
+        # incident/attribution assertions; do not call this race "prevented".
+        with patch('hl_testnet_runtime.residual_exit_fence.validate_proposal',return_value=True):
+            self.cycle();self.v.fill('1003','100');self.cycle();self.cycle();self.cycle(False)
         self.v.fill('1002','100')
         self.v.cancel_race=lambda oid:self.v.fill(oid,'100')
         self.cycle() # venue fills first card stop before cancellation can take effect

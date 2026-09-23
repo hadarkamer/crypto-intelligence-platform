@@ -146,6 +146,8 @@ class DispatchStore:
                 raise DispatchError('UNRESOLVED_REQUEST_NO_NEW_INTENT')
             if proposal is None or proposal.get('basis') != life.digest(value['evidence']):
                 raise DispatchError('PROPOSAL_EVIDENCE_CHANGED')
+            from .residual_exit_fence import validate_proposal
+            validate_proposal(value, proposal, now_ms=now_ms)
             rid=life.digest([VERSION,value['bucket'],value['revision']+1,proposal])
             request=dict(request_id=rid,domain=self.domain,bucket=value['bucket'],phase='PREPARED',
                 proposal=deepcopy(proposal),prepared_at_ms=now_ms,attempt_at_ms=None,nonce=None,
@@ -164,6 +166,8 @@ class DispatchStore:
             at=value['evidence']['snapshot']['at_ms']
             if not 0 <= now_ms-at <= 15000:
                 raise DispatchError('PRE_SEND_EVIDENCE_EXPIRED')
+            from .residual_exit_fence import validate_proposal
+            validate_proposal(value, proposal, now_ms=now_ms)
             agent=life.address(agent_address)
             nonce=conn.execute(f'''INSERT INTO {SCHEMA}.nonces VALUES(%s,%s)
                 ON CONFLICT(agent) DO UPDATE SET nonce=GREATEST({SCHEMA}.nonces.nonce+1,EXCLUDED.nonce)

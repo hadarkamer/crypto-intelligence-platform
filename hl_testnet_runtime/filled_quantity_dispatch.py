@@ -15,6 +15,7 @@ import time
 from . import card_lifecycle as life, filled_quantity_exits as selected
 from . import card_exit_recovery as recovery, card_sync_evidence as evidence
 from . import filled_pending_cancel as half_cancel
+from . import residual_exit_fence as residual
 from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
 from .trade_card_store import CardStore
 from . import checks, two_account_execution as roles
@@ -111,6 +112,12 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
     bound={b['card_id'] for b in bs}
     # Existing exposure is serviced first, never delayed by a new entry.
     if bs:
+        # An unrelated crossed exit level must not suppress exact-owner cleanup.
+        # No sibling is considered retired until public finality is reconciled.
+        orphan=residual.cleanup(state,now_ms=now_ms,after_exit_policy=after_exit_policy)
+        if orphan:
+            return make(orphan['card_id'],orphan['leg'],orphan['operation'],
+                dict(type='cancel',cancels=[dict(a=index,o=int(orphan['oid']))]),'0',orphan['oid'])
         originals={cid:state['originals'][cid] for cid in bound}
         context=dict(symbol=state['symbol'],mark_price=sample['mark_price'],at_ms=sample['at_ms'],cards={
             b['card_id']:dict(grouping='independent_fixed',requests={leg:dict(state='NONE',code=None) for leg in recovery.EXITS}) for b in bs})
@@ -248,6 +255,7 @@ class Controller:
                 if not ending: return current  # A receipt alone cannot unlock replacement.
                 if ending[0]['at_ms']<=p['observed_at_ms']:
                     raise DispatchError('TERMINAL_BEFORE_WORKING_OBSERVATION')
+                current['residual_verification']=residual.confirm_cancel(s,current,snap,bs,now_ms=now)
                 current['terminal_state']=ending[0]['state']
                 current['cancellation_caused_terminal_state']=False
             current['phase']='OBSERVED';current['observed_at_ms']=snap['at_ms'];s['pending']=None
@@ -263,6 +271,9 @@ class Controller:
                 return dict(status=pending['phase'],order_requests_sent=0)
         else: pending=None
         sample=self.venue.sample(state['account'],state['symbol']);meta=self.venue.metadata()
+        # Retire only provably NEVER-ATTEMPTED obsolete exit work. Unknown
+        # requests retain the same durable barrier across closure and restart.
+        state=residual.retire_obsolete_unsent(self.store,state,now_ms=self.venue.now())
         # Observation only, including during preview. The existing durable state
         # remembers crossings; an obsolete NEVER-SENT cancel can yield to a fill.
         state=half_cancel.checkpoint(self.store,state,self.routes,sample,now_ms=self.venue.now())
