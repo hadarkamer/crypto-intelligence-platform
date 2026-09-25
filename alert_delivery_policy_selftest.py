@@ -16,34 +16,38 @@ class PolicyTests(unittest.TestCase):
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ALL'}):
             self.assertTrue(policy.ordinary_alerts_enabled())
             self.assertTrue(policy.other_experimental_alerts_enabled())
+            self.assertTrue(policy.u21_experimental_enabled())
             self.assertTrue(all(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
             self.assertTrue(policy.status()['configuration_valid'])
 
-    def test_selected_profile_allows_exactly_two_manual_rules(self):
+    def test_selected_profile_allows_only_u21_and_no_manual_rules(self):
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'SELECTED_EXPERIMENTAL_ONLY'}):
             self.assertFalse(policy.ordinary_alerts_enabled())
             self.assertFalse(policy.other_experimental_alerts_enabled())
+            self.assertTrue(policy.u21_experimental_enabled())
             self.assertEqual([rule for rule in store.rules.RULE_IDS if policy.manual_rule_enabled(rule)],
-                             ['C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'])
+                             [])
             self.assertFalse(policy.manual_rule_enabled('unknown'))
-            self.assertEqual(delivery.status()['active_rule_ids'],
-                             ['C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'])
+            self.assertEqual(delivery.status()['active_rule_ids'], [])
             self.assertEqual(set(delivery.status()['paused_rule_ids']),
-                             {'PRICE_OI_ENTRY2', 'PRICE_OI_SPOT65', 'CONSENSUS_FULL', 'C0964'})
+                             set(store.rules.RULE_IDS))
+            self.assertEqual(policy.status()['selected_experimental_rule_ids'], ['U21_XRP_SHORT'])
+            self.assertEqual(policy.status()['manual_rule_allowlist'], [])
 
     def test_ordinary_and_selected_preserves_exact_experimental_selection(self):
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}):
             self.assertTrue(policy.ordinary_alerts_enabled())
             self.assertFalse(policy.other_experimental_alerts_enabled())
+            self.assertTrue(policy.u21_experimental_enabled())
             self.assertFalse(policy.manual_rule_enabled('unknown'))
-            self.assertEqual(delivery.status()['active_rule_ids'],
-                             ['C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'])
+            self.assertEqual(delivery.status()['active_rule_ids'], [])
             self.assertEqual(set(delivery.status()['paused_rule_ids']),
-                             {'PRICE_OI_ENTRY2', 'PRICE_OI_SPOT65', 'CONSENSUS_FULL', 'C0964'})
+                             set(store.rules.RULE_IDS))
             self.assertEqual(policy.status(), {
                 'profile': 'ORDINARY_AND_SELECTED_EXPERIMENTAL', 'configuration_valid': True,
                 'ordinary_alerts_enabled': True, 'other_experimental_alerts_enabled': False,
-                'manual_rule_allowlist': ['C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'],
+                'manual_rule_allowlist': [], 'u21_experimental_enabled': True,
+                'selected_experimental_rule_ids': ['U21_XRP_SHORT'],
             })
 
     def test_unknown_profile_fails_closed(self):
@@ -51,8 +55,10 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(profile=profile), patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': profile}):
                 self.assertFalse(policy.ordinary_alerts_enabled())
                 self.assertFalse(policy.other_experimental_alerts_enabled())
+                self.assertFalse(policy.u21_experimental_enabled())
                 self.assertFalse(any(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
                 self.assertFalse(policy.status()['configuration_valid'])
+                self.assertEqual(policy.status()['selected_experimental_rule_ids'], [])
 
     def test_muted_matching_events_get_receipts_without_creating_pending_alerts(self):
         state = store._initial(BASE)
@@ -61,7 +67,9 @@ class PolicyTests(unittest.TestCase):
             self.assertIn('1', state['receipts'])
             self.assertEqual(state['intents'], [])
             self.assertEqual(store.record_events(state, [observation_pair(2)],
-                                                 BASE + timedelta(minutes=2)), 1)
+                                                 BASE + timedelta(minutes=2)), 0)
+            self.assertIn('2', state['receipts'])
+            self.assertEqual(state['intents'], [])
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ALL'}):
             self.assertEqual(store.record_events(state, [pair()], BASE + timedelta(minutes=3)), 0)
 
@@ -73,7 +81,7 @@ class SelectedDeliveryTests(unittest.IsolatedAsyncioTestCase):
     bot = delivery_tests.DeliveryTests.bot
     run_delivery = delivery_tests.DeliveryTests.run_delivery
 
-    async def test_only_selected_alerts_send_and_existing_other_pending_alerts_cancel(self):
+    async def test_existing_manual_pending_alerts_all_cancel_under_u21_selection(self):
         await self._assert_selected_delivery('SELECTED_EXPERIMENTAL_ONLY')
 
     async def test_restored_ordinary_profile_keeps_other_manual_alerts_cancelled(self):
@@ -82,22 +90,25 @@ class SelectedDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def _assert_selected_delivery(self, profile):
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ALL'}):
             self.seed(3)
-        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': profile}):
             state = self.db.read(1)
             self.assertEqual(store.record_events(state, [observation_pair(20)], self.clock[0]), 1)
             self.assertEqual(store.record_c1274_scan(state, c1274_bundle(), c1274_references(), self.clock[0]),
                              (1, 'MATCH'))
             self.db.write(1, state)
+        with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': profile}):
             bot = self.bot()
-            self.assertEqual(await self.run_delivery(bot), 2)
+            self.assertEqual(await self.run_delivery(bot), 0)
             self.assertEqual(await self.run_delivery(bot), 0)
             rows = self.rows()
             self.assertEqual({row['payload']['rule_id'] for row in rows if row['status'] == 'DELIVERED'},
-                             {'C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'})
+                             set())
             muted = [row for row in rows if row['status'] == 'CANCELLED']
-            self.assertEqual(len(muted), 3)
+            self.assertEqual(len(muted), 5)
+            self.assertEqual({row['payload']['rule_id'] for row in muted},
+                             {'CONSENSUS_FULL', 'PRICE_OI_ENTRY2', 'PRICE_OI_SPOT65',
+                              'C1274', 'MAGNET_OBSERVATION_DOGE_SHORT'})
             self.assertTrue(all(row['cancellation_reason'] == 'ALERT_POLICY_DISABLED' for row in muted))
-            self.assertEqual(bot.send_message.await_count, 2)
+            bot.send_message.assert_not_awaited()
 
 
     async def test_policy_is_rechecked_after_awaited_claim(self):

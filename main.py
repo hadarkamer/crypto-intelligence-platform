@@ -41,6 +41,7 @@ import watch_transition_delivery
 import dual_cvd65_delivery
 import experimental_reference_price
 import manual_formula_alert_delivery
+import u21_experimental_worker
 import ai_agent
 import ai_telegram
 import research_event_runtime
@@ -6556,6 +6557,7 @@ async def health(request):
         "dual_cvd65_experimental": dual_cvd65_delivery.status(),
         "experimental_reference_prices": experimental_reference_price.status(),
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
+        "u21_experimental": u21_experimental_worker.WORKER.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
@@ -7873,12 +7875,16 @@ async def main():
     WATCH_SUPERVISOR_TASK = asyncio.create_task(
         _watch_supervisor_loop(bot_app), name="persistent-watch-supervisor"
     )
+    u21_experimental_worker.WORKER.start(
+        bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
+    )
     await asyncio.sleep(0)
 
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
+        await u21_experimental_worker.WORKER.stop()
         if WATCH_SUPERVISOR_TASK is not None and not WATCH_SUPERVISOR_TASK.done():
             WATCH_SUPERVISOR_TASK.cancel()
             try:
