@@ -158,6 +158,15 @@ class DispatchPureTests(NoExternal):
     def test_rejection_cannot_look_like_acceptance(self):
         r=dict(status='ok',response=dict(type='order',data=dict(statuses=[dict(error='Reduce only order would increase position.')])) )
         self.assertEqual(m.normalized_reply(r,'order')['state'],'REJECTED')
+    def test_confirmed_entry_rejection_is_not_mislabeled_as_unknown(self):
+        request=dict(reply=dict(state='REJECTED',code='ORACLE_PRICE',oid=None),
+                     proposal=dict(leg='ENTRY'))
+        with self.assertRaisesRegex(DispatchError,'ENTRY_REJECTED_NO_ORDER_NO_RETRY'):
+            m.identity(dict(status='unknownOid'),request,T)
+        request['reply']=dict(state='OUTCOME_UNKNOWN',code=None,oid=None)
+        with self.assertRaisesRegex(DispatchError,'OUTCOME_UNRESOLVED_NO_NEW_REQUEST'):
+            m.identity(dict(status='unknownOid'),request,T)
+
     def test_malformed_cancel_responses_remain_unknown(self):
         for raw in (None,{},dict(status='ok',response=None),dict(status='ok',response='no')):
             self.assertEqual(m.normalized_reply(raw,'cancel')['state'],'OUTCOME_UNKNOWN')
