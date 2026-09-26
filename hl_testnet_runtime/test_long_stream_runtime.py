@@ -1,0 +1,242 @@
+"""Long stream release boundaries; no network, wallet or real order."""
+from datetime import datetime, timezone
+from unittest.mock import patch
+import os
+import io
+import json
+import unittest
+
+from . import long_stream_runtime as stream, filled_quantity_dispatch as dispatch
+from . import alert_cards_intake as intake, app, gunicorn_conf
+from . import approved_alert_selection as selection
+from .filled_dispatch_store import DispatchError
+from .test_card_lifecycle import A
+from .test_filled_quantity_dispatch import NoExternal
+from .test_filled_quantity_dispatch import Venue, ROUTES2
+from .test_filled_quantity_exits import original, META
+from . import trade_cards
+from .filled_dispatch_store import DispatchStore, SCHEMA
+from .trade_card_store import CardStore
+from .postgres_journal import PostgresJournal
+from .test_card_lifecycle import T
+
+AGENT='0x'+'3'*40
+SECRET='a'*64
+
+
+def env():
+    return dict(RENDER_SERVICE_ID=stream.roles.SERVICE,
+        HL_TESTNET_RUNTIME_MODE=stream.MODE,
+        HL_TESTNET_FILLED_DISPATCH=stream.RELEASE,
+        HL_TESTNET_LONG_STREAM=stream.SOURCE,
+        HL_TESTNET_LONG_ENTRY_ENABLED='false',
+        HL_TESTNET_LONG_NOT_BEFORE='2026-09-26T14:00:00+00:00',
+        HL_TESTNET_LONG_ACCOUNT_ADDRESS=A,
+        HL_TESTNET_LONG_AGENT_ADDRESS=AGENT,
+        HL_TESTNET_JOURNAL_BACKEND='staging_postgres_v1',
+        HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',
+        HL_TESTNET_FILLED_AFTER_EXIT_POLICY=dispatch.AFTER_EXIT,
+        HL_TESTNET_CARDS_INTAKE='record_only_v1',
+        HL_TESTNET_CARDS_PHASE1='record_only_v1',
+        HL_TESTNET_CARDS_INTAKE_SECRET=SECRET)
+
+
+class ConfigurationTests(NoExternal):
+    def test_exact_long_route_and_record_only_intake(self):
+        route, start=stream.configuration(env())
+        self.assertEqual(route['account'],A)
+        self.assertEqual(start,datetime(2026,9,26,14,tzinfo=timezone.utc))
+        self.assertTrue(intake.enabled(env()))
+
+    def test_all_other_release_modes_fail_closed(self):
+        for key,value in (
+                ('HL_TESTNET_RUNTIME_MODE','filled_card_controlled_v1'),
+                ('HL_TESTNET_FILLED_DISPATCH','approved_single_card_v1'),
+                ('HL_TESTNET_LONG_STREAM',''),
+                ('HL_TESTNET_LONG_ENTRY_ENABLED','maybe'),
+                ('HL_TESTNET_FILLED_AUTOWAIT','approved_next_u21_once_v1'),
+                ('HL_TESTNET_FILLED_CARD_ID','b'*64),
+                ('HL_TESTNET_TWO_ACCOUNT_EXECUTION','approved_single_attempt_v1'),
+                ('HL_TESTNET_CARD_SYNC','registered_readonly_v1'),
+                ('HL_TESTNET_CARDS_INTAKE_SECRET',''),
+                ('HL_TESTNET_SAFETY_PIPELINE','integrated_readonly_v1')):
+            with self.subTest(key=key),self.assertRaises(DispatchError):
+                stream.configuration({**env(),key:value})
+        self.assertFalse(intake.enabled({**env(),'HL_TESTNET_RUNTIME_MODE':'read_only',
+                                         'HL_TESTNET_CARDS_INTAKE_SECRET':''}))
+
+    def test_disabled_entry_keeps_exit_gate_available(self):
+        venue=dispatch.TestnetVenue(env())
+        proposal=dict(card_id='b'*64,role='long_account',account=A,
+            operation='CREATE_EXIT',source_at='2026-09-26T14:00:00+00:00')
+        self.assertEqual(venue._gate(proposal,dispatch.AFTER_EXIT)['account'],A)
+        with self.assertRaisesRegex(DispatchError,'LONG_ENTRIES_DISABLED'):
+            venue._gate({**proposal,'operation':'ENTRY'},dispatch.AFTER_EXIT)
+        with self.assertRaises(DispatchError):
+            venue._gate({**proposal,'role':'short_account'},dispatch.AFTER_EXIT)
+        with self.assertRaises(stream.roles.checks.Blocked):
+            venue._gate({**proposal,'account':AGENT},dispatch.AFTER_EXIT)
+
+    def test_startup_is_single_worker_and_health_has_no_controls(self):
+        with patch.dict(stream.os.environ,env(),clear=True),\
+             patch.object(stream,'start') as starter,\
+             patch('hl_testnet_runtime.filled_trial_runtime.start',
+                   side_effect=AssertionError('SHORT_WORKER_STARTED')):
+            gunicorn_conf.post_worker_init(None)
+            starter.assert_called_once()
+            output=[]
+            body=b''.join(app.application(dict(REQUEST_METHOD='GET',PATH_INFO='/healthz',
+                QUERY_STRING=''),lambda status,headers:output.append(status)))
+            report=json.loads(body)
+            self.assertEqual(output,['200 OK'])
+            self.assertFalse(report['read_only'])
+            self.assertFalse(report['continuous_trading'])
+            self.assertFalse(report['public_order_controls'])
+            self.assertIn('long_stream',report)
+
+    def test_account_inventory_rejects_unowned_order_and_position(self):
+        class Reader:
+            orders=[]
+            positions=[]
+            def read(self,kind,account):
+                return (self.orders if kind=='frontendOpenOrders' else
+                    dict(assetPositions=[dict(position=p) for p in self.positions]))
+        fake=Reader()
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=fake):
+            self.assertTrue(stream._account_owned(None,A,[]))
+            fake.orders=[dict(coin='BTC',oid=100)]
+            with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_ORDER'):
+                stream._account_owned(None,A,[])
+            fake.orders=[];fake.positions=[dict(coin='BTC',szi='2')]
+            with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_POSITION'):
+                stream._account_owned(None,A,[])
+
+    def test_disabled_entries_still_service_existing_buckets(self):
+        class Store:
+            journal=object()
+            def for_account(self,account):
+                return [dict(bucket='a'*64,pending='request',
+                             bindings=[],originals={})]
+        class Venue:
+            @staticmethod
+            def now(): return 1790433900000
+        class Controller:
+            store=Store()
+            venue=Venue()
+            def cycle(self,bucket,*,send,allow_new_entries):
+                self.args=(bucket,send,allow_new_entries)
+                return dict(order_requests_sent=1,status='ACCEPTED_UNVERIFIED')
+        c=Controller()
+        result=stream.tick(c,dict(account=A),
+            datetime(2026,9,26,14,tzinfo=timezone.utc),new_entries=False)
+        self.assertEqual(c.args,('a'*64,True,False))
+        self.assertEqual(result['order_requests_sent'],1)
+        self.assertEqual(result['status'],'ENTRIES_DISABLED')
+
+    def test_unowned_account_blocks_new_entry_before_registration(self):
+        class Store:
+            journal=object()
+            def for_account(self,account): return []
+        class Venue:
+            @staticmethod
+            def now(): return 1790433900000
+        class Controller:
+            store=Store()
+            venue=Venue()
+            def cycle(self,*args,**kwargs):
+                raise AssertionError('NO_CARD_WAS_REGISTERED')
+        with patch.object(stream,'_account_owned',
+                          side_effect=DispatchError('UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY')),\
+             patch.object(stream.selection,'page',
+                          side_effect=AssertionError('SELECTION_MUST_WAIT')):
+            with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_ORDER'):
+                stream.tick(Controller(),dict(account=A),
+                    datetime(2026,9,26,14,tzinfo=timezone.utc),new_entries=True)
+
+    def test_account_snapshot_is_market_scoped_only_for_long_stream(self):
+        class Reader:
+            def read(self,kind,account):
+                return ([dict(coin='BTC',oid=100)] if kind=='frontendOpenOrders'
+                    else dict(assetPositions=[dict(position=dict(coin='BTC',szi='2'))]))
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=Reader()):
+            venue=dispatch.TestnetVenue(env())
+            snap=venue.empty_snapshot(A,'DOGE')
+            self.assertEqual(snap['position_quantity'],'0')
+            venue.env={**env(),'HL_TESTNET_RUNTIME_MODE':'filled_card_controlled_v1'}
+            with self.assertRaises(DispatchError):
+                venue.empty_snapshot(A,'DOGE')
+
+
+@unittest.skipUnless(os.environ.get('HL_JOURNAL_CI_URL'),
+    'Disposable loopback PostgreSQL required')
+class DurableLongStreamTests(NoExternal):
+    def setUp(self):
+        super().setUp()
+        self.j=PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL'])
+        with self.j._transaction() as conn:
+            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1',
+                         'hl_testnet_cards_v1','hl_testnet_execution_v1'):
+                conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
+        self.j.bootstrap()
+        self.cards=CardStore(self.j);self.cards.initialize()
+        self.store=DispatchStore(self.j);self.store.initialize()
+        self.v=Venue()
+        self.c=dispatch.Controller(self.store,self.v,ROUTES2,
+            after_exit_policy=dispatch.AFTER_EXIT)
+        self.route=ROUTES2['long_account']
+        self.start=datetime.fromtimestamp((T-30000)/1000,timezone.utc)
+
+    def card(self,n):
+        _,record=original(n,'LONG')
+        source=record['card']['prepared']['source']
+        expiry=datetime.fromtimestamp((T+30000)/1000,timezone.utc).isoformat()
+        card=trade_cards.prepare_card(source,META,rule_id='FORMULA_'+str(n),
+            threshold_pct='1.5',record_kind='received_alert',
+            source_expires_at=expiry)
+        self.cards.record(card)
+        return card
+
+    def sweep(self,ids,*,enabled=True):
+        with patch.object(stream.selection,'page',return_value=(
+                    [(cid,'long_account') for cid in ids],None)),\
+             patch.object(stream,'_account_owned',return_value=True):
+            return stream.tick(self.c,self.route,self.start,new_entries=enabled)
+
+    def test_two_identical_market_alerts_keep_distinct_ids_and_one_entry(self):
+        a,b=self.card(91),self.card(92)
+        first=self.sweep([a['card_id'],b['card_id']])
+        self.assertEqual(first['new_cards_registered'],2)
+        state=self.store.for_account(self.route['account'])[0]
+        self.assertEqual(set(state['originals']),{a['card_id'],b['card_id']})
+        self.assertEqual(self.v.sent,1)
+        # Restart the controller and repeat the same source page: no new
+        # registration or second entry while the first market is unresolved.
+        self.c=dispatch.Controller(self.store,self.v,ROUTES2,
+            after_exit_policy=dispatch.AFTER_EXIT)
+        second=self.sweep([a['card_id'],b['card_id']])
+        self.assertEqual(second['new_cards_registered'],0)
+        self.assertEqual(self.v.sent,1)
+
+    def test_entry_off_does_not_discard_a_recorded_alert(self):
+        card=self.card(93)
+        first=self.sweep([card['card_id']],enabled=False)
+        self.assertEqual(first['new_cards_registered'],0)
+        self.assertEqual(self.v.sent,0)
+        self.assertEqual(self.sweep([card['card_id']])['new_cards_registered'],1)
+        self.assertEqual(self.v.sent,1)
+
+    def test_paged_selector_reads_only_receipted_fresh_rows(self):
+        old=self.card(94)
+        fresh=self.card(95)
+        intake.initialize(self.j)
+        intake.ReceiptStore(self.j).save('a'*64,'RECORDED',fresh['card_id'],
+                                          {'source':'fixture'})
+        now=datetime.fromtimestamp(T/1000,timezone.utc)
+        rows,cursor=selection.page(self.j,not_before=self.start.isoformat(),now=now)
+        self.assertEqual(rows,[(fresh['card_id'],'long_account')])
+        self.assertIsNone(cursor)
+        self.assertNotEqual(old['card_id'],fresh['card_id'])
+
+
+if __name__=='__main__':
+    unittest.main()

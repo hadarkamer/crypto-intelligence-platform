@@ -77,6 +77,24 @@ class DispatchStore:
             row=conn.execute(f'SELECT value,digest FROM {SCHEMA}.buckets WHERE bucket=%s',(bucket,)).fetchone()
             return checked(row)
 
+    def for_account(self, account):
+        """Reopen durable market buckets after a worker restart."""
+        account = life.address(account)
+        with self.journal._transaction() as conn:
+            self.ready(conn)
+            rows = conn.execute(f'''SELECT bucket,value,digest FROM {SCHEMA}.buckets
+                WHERE value->>'account'=%s ORDER BY bucket LIMIT 257''',
+                (account,)).fetchall()
+        if len(rows) > 256:
+            raise DispatchError('ACCOUNT_BUCKET_SCAN_REQUIRES_REVIEW')
+        result = []
+        for bucket, value, digest in rows:
+            state = checked((value,digest))
+            if state['bucket'] != bucket or state['account'] != account:
+                raise DispatchError('ACCOUNT_BUCKET_IDENTITY_MISMATCH')
+            result.append(state)
+        return result
+
     def request(self, request_id):
         with self.journal._transaction() as conn:
             self.ready(conn)

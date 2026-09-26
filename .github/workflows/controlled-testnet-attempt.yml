@@ -3,12 +3,15 @@ on:
   push:
     branches: [paper-trading-v1]
     paths: ['hl_testnet_runtime/**', '.github/workflows/controlled-testnet-attempt.yml']
+  pull_request:
+    branches: [paper-trading-v1]
+    paths: ['hl_testnet_runtime/**', '.github/workflows/controlled-testnet-attempt.yml']
 permissions:
   contents: read
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 7
+    timeout-minutes: 12
     services:
       postgres:
         image: postgres:18
@@ -33,3 +36,7 @@ jobs:
           hl_testnet_runtime.test_guarded_execution hl_testnet_runtime.test_guarded_integration
           hl_testnet_runtime.test_price_precision hl_testnet_runtime.test_postgres_journal
           hl_testnet_runtime.test_mixed_exits hl_testnet_runtime.test_controlled_attempt
+          hl_testnet_runtime.test_filled_quantity_dispatch
+          hl_testnet_runtime.test_filled_trial_runtime
+          hl_testnet_runtime.test_approved_alert_selection
+          hl_testnet_runtime.test_long_stream_runtime

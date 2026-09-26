@@ -21,6 +21,10 @@ def post_worker_init(worker):
         'fees_funding_slippage_included': False,
         'resizes_existing_orders': False, 'mainnet_enabled': False}}), flush=True)
     mode = os.environ.get('HL_TESTNET_RUNTIME_MODE','read_only')
+    if mode == 'long_stream_testnet_v1':
+        from hl_testnet_runtime.long_stream_runtime import start
+        start()
+        return
     if mode == 'filled_card_controlled_v1':
         # Mutually exclusive future release: never start old monitors alongside it.
         from hl_testnet_runtime.filled_trial_runtime import start as start_filled_trial
@@ -71,3 +75,5 @@ def worker_exit(server, worker):
     stop_card_sync()
     from hl_testnet_runtime.filled_trial_runtime import stop as stop_filled_trial
     stop_filled_trial()
+    from hl_testnet_runtime.long_stream_runtime import stop as stop_long_stream
+    stop_long_stream()

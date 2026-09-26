@@ -31,11 +31,20 @@ def enabled(env):
         and not env.get('HL_TESTNET_SAFETY_PIPELINE')
         and not env.get('HL_TESTNET_CARD_SYNC')
         and env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')=='disabled')
+    long_intake=(mode=='long_stream_testnet_v1'
+        and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
+        and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'
+        and env.get('HL_TESTNET_LONG_ENTRY_ENABLED') in ('true','false')
+        and not env.get('HL_TESTNET_FILLED_AUTOWAIT')
+        and not env.get('HL_TESTNET_FILLED_CARD_ID')
+        and not env.get('HL_TESTNET_SAFETY_PIPELINE')
+        and not env.get('HL_TESTNET_CARD_SYNC')
+        and env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')=='disabled')
     return (env.get('HL_TESTNET_CARDS_INTAKE')=='record_only_v1'
         and env.get('RENDER_SERVICE_ID')=='srv-dakptbh594qs7395460g'
         and env.get('HL_TESTNET_CARDS_PHASE1')=='record_only_v1'
         and env.get('HL_TESTNET_JOURNAL_BACKEND')=='staging_postgres_v1'
-        and (mode in ('read_only','cancel_monitor_testnet_v1') or controlled_intake)
+        and (mode in ('read_only','cancel_monitor_testnet_v1') or controlled_intake or long_intake)
         and bool(wire.HEX.fullmatch(env.get('HL_TESTNET_CARDS_INTAKE_SECRET',''))))
 
 

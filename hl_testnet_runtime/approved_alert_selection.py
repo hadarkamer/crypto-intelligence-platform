@@ -49,3 +49,42 @@ def next_cards(journal, *, not_before, now=None):
         if eligible(card, not_before=not_before, now=now):
             result.append(card_id)
     return result
+
+
+def page(journal, *, not_before, now, after=None):
+    """Scan a bounded, stable source-time window without losing a busy page.
+
+    The cursor advances over *all* rows, including ineligible and opposite-role
+    cards. Callers must recheck freshness at registration and at the send gate.
+    """
+    not_before = timestamp(not_before)
+    if not_before > now:
+        raise DispatchError('ALERT_SELECTION_START_IN_FUTURE')
+    if after is not None:
+        if (not isinstance(after, tuple) or len(after) != 2
+                or not isinstance(after[0], datetime) or
+                not isinstance(after[1], str)):
+            raise DispatchError('INVALID_ALERT_PAGE_CURSOR')
+    with journal._transaction() as conn:
+        CardStore(journal).ready(conn)
+        rows = conn.execute('''SELECT created_at,card_id,manifest,digest
+            FROM hl_testnet_cards_v1.cards
+            WHERE created_at >= %s
+              AND (manifest->>'source_expires_at')::timestamptz > %s
+              AND EXISTS (SELECT 1 FROM hl_testnet_cards_v1.delivery_receipts r
+                  WHERE r.card_id=cards.card_id AND r.status='RECORDED')
+              AND (%s::timestamptz IS NULL OR (created_at,card_id) > (%s::timestamptz,%s))
+            ORDER BY created_at,card_id LIMIT 65''',
+            (not_before, now, after[0] if after else None,
+             after[0] if after else None, after[1] if after else '')).fetchall()
+    selected = []
+    for created, card_id, raw, digest in rows[:64]:
+        if trade_cards.checksum(raw) != digest:
+            raise DispatchError('STORED_CARD_CHECKSUM_MISMATCH')
+        card = trade_cards.validate_card(raw)
+        if card['card_id'] != card_id:
+            raise DispatchError('STORED_CARD_ID_MISMATCH')
+        if eligible(card, not_before=not_before, now=now):
+            selected.append((card_id, card['account_role']))
+    cursor = (rows[63][0], rows[63][1]) if len(rows) > 64 else None
+    return selected, cursor
