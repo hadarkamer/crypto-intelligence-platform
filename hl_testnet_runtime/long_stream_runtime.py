@@ -83,6 +83,16 @@ def short_configuration(env):
     return route, start
 
 
+def _safe_failure(exc):
+    """Expose only fixed internal codes and a source line; never private input."""
+    code = str(exc)
+    known = isinstance(exc, (DispatchError, roles.checks.Blocked, life.LifecycleError))
+    safe_code = code if known and re.fullmatch(r'[A-Z][A-Z0-9_]{2,99}', code) else type(exc).__name__
+    origin = traceback.extract_tb(exc.__traceback__)[-1]
+    return dict(failure_code=safe_code,
+                failure_origin=f'{os.path.basename(origin.filename)}:{origin.lineno}')
+
+
 def _unfinished(state, now):
     if state['pending'] is not None:
         return True
@@ -152,6 +162,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     states = controller.store.for_account(route['account'])
     sent = 0
     errors = 0
+    first_failure = None
     for state in states:
         try:
             if not _unfinished(state,now):
@@ -159,12 +170,17 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
             result = controller.cycle(state['bucket'],send=True,
                                       allow_new_entries=False)
             sent += result['order_requests_sent']
-        except Exception:
+        except Exception as exc:
             errors += 1
+            if first_failure is None:
+                first_failure = _safe_failure(exc)
     if errors or not new_entries:
-        return dict(status='EXISTING_RECONCILIATION_REQUIRED' if errors else 'ENTRIES_DISABLED',
-                    active_buckets=len(states),
-                    order_requests_sent=sent,new_cards_registered=0)
+        result = dict(status='EXISTING_RECONCILIATION_REQUIRED' if errors else 'ENTRIES_DISABLED',
+                      active_buckets=len(states),
+                      order_requests_sent=sent,new_cards_registered=0)
+        if first_failure is not None:
+            result.update(first_failure)
+        return result
     states = controller.store.for_account(route['account'])
     _account_owned(controller.venue,route['account'],states)
     known_cards = {cid for state in states for cid in state['originals']}
@@ -254,14 +270,10 @@ def _loop(controller, streams):
                 result=tick(controller,route,start,
                             new_entries=controller.venue.env[enabled_key]=='true',role=role)
             except Exception as exc:
-                code = str(exc)
-                known = isinstance(exc, (DispatchError, roles.checks.Blocked))
-                safe_code = code if known and re.fullmatch(r'[A-Z][A-Z0-9_]{2,99}', code) else type(exc).__name__
-                origin = traceback.extract_tb(exc.__traceback__)[-1]
+                failure = _safe_failure(exc)
                 result=dict(status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY',
                     order_requests_sent=max(0,getattr(controller.venue,'sent',0)-before),
-                    new_cards_registered=0, failure_code=safe_code,
-                    failure_origin=f'{os.path.basename(origin.filename)}:{origin.lineno}')
+                    new_cards_registered=0, **failure)
             results.append(result)
             with _lock:
                 _health['cycles'] += 1

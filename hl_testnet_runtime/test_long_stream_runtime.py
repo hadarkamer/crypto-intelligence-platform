@@ -249,6 +249,27 @@ class ConfigurationTests(NoExternal):
         self.assertEqual(result['order_requests_sent'],1)
         self.assertEqual(result['status'],'ENTRIES_DISABLED')
 
+    def test_existing_reconciliation_reports_fixed_failure_code(self):
+        class Store:
+            journal=object()
+            def for_account(self,account):
+                return [dict(bucket='a'*64,pending='request',
+                             bindings=[],originals={})]
+        class Venue:
+            @staticmethod
+            def now(): return 1790433900000
+        class Controller:
+            store=Store()
+            venue=Venue()
+            def cycle(self,*args,**kwargs):
+                raise life.LifecycleError('BINDINGS_REQUIRED')
+        result=stream.tick(Controller(),dict(account=A),
+            datetime(2026,9,26,14,tzinfo=timezone.utc),new_entries=True)
+        self.assertEqual(result['status'],'EXISTING_RECONCILIATION_REQUIRED')
+        self.assertEqual(result['failure_code'],'BINDINGS_REQUIRED')
+        self.assertRegex(result['failure_origin'],r'test_long_stream_runtime.py:[0-9]+')
+        self.assertEqual(result['order_requests_sent'],0)
+
     def test_unowned_account_blocks_new_entry_before_registration(self):
         class Store:
             journal=object()
