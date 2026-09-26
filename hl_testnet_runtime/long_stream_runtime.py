@@ -376,6 +376,60 @@ def _short_card_readiness(controller, route):
     print(json.dumps({'testnet_short_card_readiness': report}, sort_keys=True), flush=True)
 
 
+def _short_pending_readiness(controller, route):
+    """Report bounded public evidence for uncertain SHORT requests; never reconcile or send."""
+    report = dict(status='READ_ONLY_REVIEW_UNAVAILABLE', pending=[],
+                  order_requests_sent=0, account_settings_changes=0, transfers_sent=0)
+    try:
+        states = controller.store.for_account(route['account'])
+        pending = [state for state in states if state['pending'] is not None]
+        if len(pending) > 8:
+            report['status'] = 'TOO_MANY_PENDING_REQUESTS'
+        else:
+            from .card_sync_evidence import PublicReader
+            reader = PublicReader()
+            for state in pending:
+                request = controller.store.request(state['pending'])
+                item = dict(symbol=state['symbol'], phase=request['phase'],
+                            reply_state=(request.get('reply') or {}).get('state'))
+                if (request.get('attempt_at_ms') is not None
+                        and request['proposal']['action']['type'] == 'order'):
+                    cloid = request['proposal']['action']['orders'][0]['c']
+                    raw = controller.venue.lookup(route['account'], cloid)
+                    status = raw.get('status') if isinstance(raw, dict) else None
+                    item['lookup_status'] = (status if isinstance(status, str)
+                        and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}', status)
+                        else 'UNRECOGNIZED')
+                    if status == 'order':
+                        order_status = (raw.get('order') or {}).get('status')
+                        item['order_status'] = (order_status if isinstance(order_status, str)
+                            and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}', order_status)
+                            else 'UNRECOGNIZED')
+                    orders = reader.read('frontendOpenOrders', route['account'])
+                    positions = reader.read('clearinghouseState', route['account'])
+                    if (not isinstance(orders, list) or not isinstance(positions, dict)
+                            or not isinstance(positions.get('assetPositions'), list)
+                            or any(not isinstance(o, dict) or not isinstance(o.get('coin'), str)
+                                   for o in orders)
+                            or any(not isinstance(p, dict) or not isinstance(p.get('position'), dict)
+                                   or not isinstance(p['position'].get('coin'), str)
+                                   for p in positions['assetPositions'])):
+                        raise DispatchError('PUBLIC_ACCOUNT_STATE_INVALID')
+                    item['symbol_open_orders_present'] = any(
+                        o['coin'] == state['symbol'] for o in orders)
+                    quantities = [(p['position']['coin'],life.number(
+                        p['position'].get('szi'),signed=True))
+                        for p in positions['assetPositions']]
+                    item['symbol_position_present'] = any(
+                        symbol == state['symbol'] and quantity != 0
+                        for symbol,quantity in quantities)
+                report['pending'].append(item)
+            report['status'] = 'PENDING_PUBLIC_EVIDENCE_OBSERVED'
+    except Exception:
+        pass
+    print(json.dumps({'testnet_short_pending_readiness': report}, sort_keys=True), flush=True)
+
+
 def start():
     global _thread,_app_thread
     env=dict(os.environ)
@@ -417,6 +471,8 @@ def start():
                              daemon=True,name='testnet-short-account-readiness').start()
             threading.Thread(target=_short_card_readiness,args=(controller,short[0]),
                              daemon=True,name='testnet-short-card-readiness').start()
+            threading.Thread(target=_short_pending_readiness,args=(controller,short[0]),
+                             daemon=True,name='testnet-short-pending-readiness').start()
         if app_mode:
             _app_thread=threading.Thread(target=_app_loop,args=(controller,route,private_key),
                 daemon=True,name='testnet-app-card-delivery')
