@@ -45,6 +45,28 @@ def env():
 
 
 class ConfigurationTests(NoExternal):
+    def test_second_account_readiness_is_read_only_and_redacted(self):
+        for failure, status in (
+                (stream.roles.checks.Blocked('AGENT_ACCOUNT_MISMATCH'), 'AGENT_ACCOUNT_MISMATCH'),
+                (ValueError('private credential'), 'READ_ONLY_REVIEW_UNAVAILABLE')):
+            output=io.StringIO()
+            with patch.object(stream.roles,'default_native_snapshot',side_effect=failure),redirect_stdout(output):
+                stream._short_account_readiness({'account':B,'agent':AGENT})
+            report=json.loads(output.getvalue())['testnet_short_account_readiness']
+            self.assertEqual(report['status'],status)
+            self.assertEqual(report['order_requests_sent'],0)
+            self.assertNotIn('credential',output.getvalue())
+        output=io.StringIO()
+        observation=dict(status='NATIVE_CAPACITY_OBSERVED_NO_ORDER_CHECKED',
+                         account_mode='default',balance_usd='100',
+                         exchange_reported_available_usd='100',account_mapping_verified=True,
+                         unrelated_private_field='must not log')
+        with patch.object(stream.roles,'default_native_snapshot',return_value=observation),redirect_stdout(output):
+            stream._short_account_readiness({'account':B,'agent':AGENT})
+        report=json.loads(output.getvalue())['testnet_short_account_readiness']
+        self.assertEqual(report['balance_usd'],'100')
+        self.assertNotIn('unrelated_private_field',output.getvalue())
+
     def test_stream_failure_reports_safe_code_without_exception_details(self):
         controller=Mock()
         controller.venue.env={'HL_TESTNET_SHORT_ENTRY_ENABLED':'true'}
