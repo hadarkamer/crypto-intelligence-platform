@@ -452,6 +452,10 @@ class TestnetVenue:
         return roles.route_for(env,proposal['role'],proposal['account'])
     def authorize(self,state,proposal,after_exit_policy):
         route=self._gate(proposal,after_exit_policy)
+        if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
+            # A missing or mismatched signer must fail before a durable attempt
+            # is begun, where its outcome would otherwise remain uncertain.
+            roles.wallet_for_role(self.env,proposal['role'],route['account'],route['agent'])
         if (self.env.get('HL_TESTNET_RUNTIME_MODE')=='filled_card_controlled_v1'
                 and any(b['card_id']!=proposal['card_id'] for b in state['bindings'])):
             raise DispatchError('SHARED_MARKET_TRIAL_ISOLATION_NOT_VERIFIED')
