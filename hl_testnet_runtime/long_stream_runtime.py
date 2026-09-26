@@ -392,6 +392,10 @@ def _short_pending_readiness(controller, route):
                 request = controller.store.request(state['pending'])
                 item = dict(symbol=state['symbol'], phase=request['phase'],
                             reply_state=(request.get('reply') or {}).get('state'))
+                reply_code = (request.get('reply') or {}).get('code')
+                item['reply_code'] = (reply_code if reply_code in
+                    set(dispatch.recovery.ERRORS.values()) | {'OTHER_REJECTION', None}
+                    else 'UNRECOGNIZED')
                 if (request.get('attempt_at_ms') is not None
                         and request['proposal']['action']['type'] == 'order'):
                     cloid = request['proposal']['action']['orders'][0]['c']
@@ -423,6 +427,17 @@ def _short_pending_readiness(controller, route):
                     item['symbol_position_present'] = any(
                         symbol == state['symbol'] and quantity != 0
                         for symbol,quantity in quantities)
+                    end = controller.venue.now()
+                    start = request['attempt_at_ms']
+                    item['fill_window_complete'] = (0 <= end-start <= 86400000)
+                    if item['fill_window_complete']:
+                        from .card_sync_evidence import history
+                        fills = history(reader,route['account'],start,end)
+                        if any(not isinstance(fill,dict) or not isinstance(fill.get('coin'),str)
+                               for fill in fills):
+                            raise DispatchError('PUBLIC_FILL_HISTORY_INVALID')
+                        item['symbol_fills_since_attempt'] = any(
+                            fill['coin'] == state['symbol'] for fill in fills)
                 report['pending'].append(item)
             report['status'] = 'PENDING_PUBLIC_EVIDENCE_OBSERVED'
     except Exception:
