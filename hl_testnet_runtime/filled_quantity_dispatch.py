@@ -465,12 +465,17 @@ class TestnetVenue:
                     or original['account_role']!=proposal['role']
                     or 'source_expires_at' not in original):
                 raise DispatchError('DELIVERED_STREAM_SOURCE_REQUIRED')
-            snap=state['evidence']['snapshot']
-            view=life.review(state['bindings'],snap,now_ms=self.now())
-            if view['bucket_issues'] or any(v['card_id']!=proposal['card_id']
-                    and (v['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL') or v['issues'])
-                    for v in view['cards']):
-                raise DispatchError('SHARED_MARKET_PREDECESSOR_NOT_FINAL')
+            # The first card in a market bucket has no predecessor bindings.
+            # Its empty pre-entry checkpoint and account-ownership sweep are the
+            # applicable safeguards; lifecycle.review intentionally requires at
+            # least one binding and is only meaningful for existing cards.
+            if state['bindings']:
+                snap=state['evidence']['snapshot']
+                view=life.review(state['bindings'],snap,now_ms=self.now())
+                if view['bucket_issues'] or any(v['card_id']!=proposal['card_id']
+                        and (v['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL') or v['issues'])
+                        for v in view['cards']):
+                    raise DispatchError('SHARED_MARKET_PREDECESSOR_NOT_FINAL')
         if proposal['operation']=='ENTRY':
             if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
                 # An unrelated position or order appearing since the worker's
