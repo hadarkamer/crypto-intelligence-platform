@@ -41,6 +41,7 @@ _POLL_SECONDS = 60
 _REFRESH_MINUTES = 15
 _PATHS_PER_PASS = 8
 _PASS_SECONDS = 30
+_MAX_SOURCE_JSON_BYTES = 16 * 1024 * 1024
 _LOCK_ID = 70108260909452001
 # Explicit complete population from the approved September 4 research period.
 SOURCE_START = datetime(2026, 9, 3, 21, 0, tzinfo=timezone.utc)
@@ -52,6 +53,38 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def compact_source(source):
+    """Keep exact Spot provenance and a digest of each full archived snapshot.
+
+    HYPE retains its full snapshot because the native derived price contract
+    binds the exact original event, including that snapshot.
+    """
+    from research_outcome_worker import _snapshot_price_provenance
+    events = []
+    for event in source["events"]:
+        row = dict(event)
+        if row.get("engine_snapshot_compacted"):
+            events.append(row)
+            continue
+        frozen = report.snapshot_digest(event.get("engine_snapshot"))
+        if "engine_snapshot_digest" in row and row["engine_snapshot_digest"] != frozen:
+            raise ValueError("Frozen engine snapshot changed")
+        row["engine_snapshot_digest"] = frozen
+        if row.get("symbol") != "HYPE":
+            provenance = _snapshot_price_provenance(event.get("engine_snapshot"))
+            row["engine_snapshot"] = {"price_" + key: value for key, value in provenance.items()}
+            row["engine_snapshot_compacted"] = True
+        events.append(row)
+    return {"waves": source["waves"], "events": events}
+
+
+def compact_job(job):
+    if job and any("engine_snapshot_digest" not in event for event in job["source"]["events"]):
+        job["source"] = compact_source(job["source"])
+        job["source_digest"] = digest(job["source"])
+    return job
 
 
 def _iso_or_none(value):
@@ -93,7 +126,7 @@ def load_job_source(conn, observed_at):
     # Versioned policy excludes its initial boundary-unverified warmup parent;
     # no source or price availability condition selects the eligible universe.
     eligible = {wave["btc_parent_movement_id"] for wave in waves if wave["evidence_eligible"] is True}
-    return {"waves": waves, "events": [event for event in events if event["btc_parent_movement_id"] in eligible]}
+    return compact_source({"waves": waves, "events": [event for event in events if event["btc_parent_movement_id"] in eligible]})
 
 
 def prepare_job(source, observed_at, *, previous_report=None, previous_source=None):
@@ -296,6 +329,9 @@ class ResearchBTCWaveReportWorker:
                     if not source["waves"]:
                         return {"waiting_for": "BTC_PARENT_POPULATION"}
                     job = prepare_job(source, now, previous_report=state["report"], previous_source=state["source"])
+                # Migrate old checkpoints before publishing the large JSONB
+                # source again under the current database memory limit.
+                job = compact_job(job)
                 def fetch(symbol, start, end):
                     route = archive.HYPERLIQUID_PERP if symbol == "HYPE" else archive.BINANCE_SPOT
                     return archive.read_path(route, symbol, start, end, connection=conn)
@@ -321,11 +357,14 @@ class ResearchBTCWaveReportWorker:
                             remaining_paths=len(revised["pending_event_ids"]))
                         self.metrics.update(runs=self.metrics["runs"]+1, last_result=progress, last_error=None)
                         return progress
+                    source_json = canonical(job["source"])
+                    if len(source_json.encode()) > _MAX_SOURCE_JSON_BYTES:
+                        raise ValueError("FULL_WAVE_SOURCE_TOO_LARGE_FOR_DATABASE_PUBLICATION")
                     staged = research_sheet_outbox.stage_upserts(conn, sheet_upserts(completed, evaluated_at=now, previous_report=state["report"]))
                     conn.execute("""UPDATE research_btc_wave_report_state SET pending_job=NULL,
                         report=%s::jsonb,source=%s::jsonb,report_observed_at_utc=%s,last_completed_at_utc=%s,
                         next_report_at_utc=%s,last_error=NULL,updated_at_utc=NOW() WHERE worker_key=%s""",
-                        (canonical(completed), canonical(job["source"]), job["observed_at"], now,
+                        (canonical(completed), source_json, job["observed_at"], now,
                          now+timedelta(minutes=_REFRESH_MINUTES), VERSION))
                     progress.update(published=True, staged_rows=staged, report_observed_at_utc=str(job["observed_at"]),
                         missing_representatives=sum(row["status"] == "DATA_MISSING" for row in completed["records"] if row["source_scope"] == report.PERP_MIXED_SCOPE))
