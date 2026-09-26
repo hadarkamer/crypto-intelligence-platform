@@ -12,12 +12,17 @@ import json
 import re
 
 VERSION = 'delivered-alert-card-v1'
+U21_VERSION = 'delivered-u21-card-v1'
+U21_CONFIG = 'u21-xrp-short-sl005-tp08-corrected-closed1m-v1'
 MAX_BYTES = 16384
 PATH = '/internal/testnet-cards/v1'
 HOST = 'hl-testnet-check-yoyo.onrender.com'
 FIELDS = {'version','family','scope_hash','intent_id','rule_id','symbol','side',
           'source_at','delivered_at','expires_at','message_id','threshold_bps',
           'text','reference'}
+U21_FIELDS = {'version','family','scope_hash','intent_id','position_id','config_version',
+              'rule_id','symbol','side','decision_at','source_at','created_at',
+              'delivered_at','expires_at','message_id','text','entry','stop','take_profit'}
 REFERENCE = {'status','symbol','price','price_time_utc','anchor_time_utc','source'}
 IDENT = re.compile(r'[A-Za-z0-9_.:-]{1,100}\Z')
 HEX = re.compile(r'[0-9a-f]{64}\Z')
@@ -105,7 +110,83 @@ def dual_delivery(row, scope_hash):
         message_id=None,threshold_bps=None,text=row.get('text'),reference=ref_only(obs.get('price_reference')))
 
 
+def u21_delivery(intent, scope_hash, config_version):
+    """Copy only frozen, delivered U21 fields; the feature snapshot stays at source."""
+    p = intent.get('payload') or {}
+    if p.get('rule_id') != 'U21' or config_version != U21_CONFIG:
+        raise WireError('UNSUPPORTED_U21_SOURCE')
+    prices = {name:p.get(field+'_price_decimal') for name,field in
+              (('entry','entry'),('stop','stop'),('take_profit','take'))}
+    for name,field in (('entry','entry'),('stop','stop'),('take_profit','take')):
+        try:
+            same = positive(prices[name]) == Decimal(str(p.get(field+'_price')))
+        except (InvalidOperation, WireError):
+            same = False
+        if not same:
+            raise WireError('FROZEN_U21_PRICE_MISMATCH')
+    return dict(version=U21_VERSION,family='u21_xrp_short',scope_hash=scope_hash,
+        intent_id=intent.get('intent_id'),position_id=p.get('position_id'),
+        config_version=config_version,rule_id='U21_XRP_SHORT',symbol=p.get('symbol'),
+        side=p.get('direction'),decision_at=p.get('decision_at'),source_at=p.get('entry_at'),
+        created_at=intent.get('created_at'),delivered_at=intent.get('acknowledged_at'),
+        expires_at=intent.get('expires_at'),message_id=intent.get('message_id'),
+        text=intent.get('text'),**prices)
+
+
+def normalize_u21(value):
+    if (not isinstance(value,dict) or set(value)!=U21_FIELDS or value['version']!=U21_VERSION
+            or value['family']!='u21_xrp_short' or value['config_version']!=U21_CONFIG
+            or value['rule_id']!='U21_XRP_SHORT' or value['symbol']!='XRP'
+            or value['side']!='SHORT' or not isinstance(value['scope_hash'],str)
+            or not HEX.fullmatch(value['scope_hash'])):
+        raise WireError('UNSUPPORTED_U21_CONTRACT')
+    for name in ('intent_id','position_id'):
+        if not isinstance(value[name],str) or not re.fullmatch(r'[0-9a-f]{32}',value[name]):
+            raise WireError('STABLE_U21_ID_REQUIRED')
+    if type(value['message_id']) is not int or value['message_id']<=0:
+        raise WireError('U21_DELIVERY_RECEIPT_REQUIRED')
+    decision,source,created,delivered,expiry=(moment(value[k]) for k in
+        ('decision_at','source_at','created_at','delivered_at','expires_at'))
+    if (decision.second or decision.microsecond or decision.minute%15
+            or (source-decision).total_seconds()!=60 or (expiry-source).total_seconds()!=90
+            or not source<=created<=delivered or delivered>=expiry):
+        raise WireError('INCONSISTENT_U21_SOURCE_TIMES')
+    e,s,t=(positive(value[k]) for k in ('entry','stop','take_profit'))
+    if not t<e<s: raise WireError('INCONSISTENT_SOURCE_PRICES')
+    # Verify the frozen producer version's float outputs, without replacing
+    # those source strings with freshly calculated prices in the returned card.
+    if s!=Decimal(str(float(e)*1.005)) or t!=Decimal(str(float(e)*.92)):
+        raise WireError('FROZEN_U21_PRICE_MISMATCH')
+    raw=value['text']
+    if not isinstance(raw,str) or not 0<len(raw)<=12000:
+        raise WireError('DELIVERED_TEXT_REQUIRED')
+    plain=re.sub(r'</?(?:b|i|strong|em|code)>','',raw)
+    if '<' in plain or '>' in plain: raise WireError('UNSUPPORTED_MESSAGE_FORMAT')
+    plain=html.unescape(plain)
+    def one(pattern):
+        found=re.findall(pattern,plain,re.MULTILINE)
+        if len(found)!=1: raise WireError('MISSING_OR_AMBIGUOUS_U21_FIELD')
+        return found[0]
+    if one(r'^(🧪 U21 · XRP · SHORT — ניסיונית, ללא חפיפה)$') != '🧪 U21 · XRP · SHORT — ניסיונית, ללא חפיפה':
+        raise WireError('U21_HEADING_MISMATCH')
+    shown=(one(r'^מחיר ייחוס לכניסה:\s*([^\s]+)\s*$'),
+           one(r'^סטופ:\s*([^\s]+) \(\+0\.5%\)$'),
+           one(r'^טייק:\s*([^\s]+) \(−8%\) · יחס 1:16$'))
+    if shown!=tuple(format(float(value[k]),'.8g') for k in ('entry','stop','take_profit')):
+        raise WireError('U21_DISPLAY_PRICE_MISMATCH')
+    if one(r'^זמן הייחוס: ([^\n]+) UTC$') != source.strftime('%Y-%m-%d %H:%M'):
+        raise WireError('U21_DISPLAY_TIME_MISMATCH')
+    signal=dict(kind='SIGNAL',event_id=value['intent_id'],symbol='XRP',side='SHORT',
+                entry=value['entry'],stop=value['stop'],take_profit=value['take_profit'],
+                at=value['source_at'])
+    return dict(signal=signal,rule_id=value['rule_id'],threshold_pct=None,
+                source_expires_at=value['expires_at'],
+                source_stream=value['family']+':'+value['scope_hash'])
+
+
 def normalize(value):
+    if isinstance(value,dict) and value.get('version')==U21_VERSION:
+        return normalize_u21(value)
     if not isinstance(value,dict) or set(value)!=FIELDS or value['version']!=VERSION:
         raise WireError('UNSUPPORTED_DELIVERY_CONTRACT')
     if value['family'] not in ('manual','dual_cvd65') or not isinstance(value['scope_hash'],str) or not HEX.fullmatch(value['scope_hash']):
