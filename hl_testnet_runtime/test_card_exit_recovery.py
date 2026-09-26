@@ -260,6 +260,11 @@ class ReplyTests(NoNetworkCase):
         out=r.classify_reply({'status':'err','response':'Insufficient margin to place order.'},list(r.life.LEGS))
         self.assertTrue(all(x['state']=='REJECTED' for x in out.values()))
 
+    def test_documented_oracle_rejection_is_normalized(self):
+        raw={'status':'ok','response':{'type':'order','data':{'statuses':[
+            {'error':'Order price too far from oracle'}]}}}
+        self.assertEqual(r.classify_reply(raw,['ENTRY'])['ENTRY']['code'],'ORACLE_PRICE')
+
     def test_single_error_vector_applies_to_whole_batch(self):
         raw={'status':'ok','response':{'type':'order','data':{'statuses':[{'error':'Invalid TP/SL price.'}]}}}
         out=r.classify_reply(raw,list(r.life.LEGS))
