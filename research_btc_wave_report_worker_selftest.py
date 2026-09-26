@@ -123,6 +123,38 @@ def run():
     changed["events"][0]["current_price"] = 100.1
     invalid = worker.prepare_job(changed, now, previous_report=previous, previous_source=source)
     assert invalid["reused_closed_paths"] == 0
+    # Old checkpoints include large snapshots on every event. A digest preserves
+    # cache invalidation while keeping both the checkpoint and published source small.
+    bulky = fixtures()
+    for item in bulky["events"]:
+        item["engine_snapshot"]["history"] = "x" * 20000
+    old_job = worker.prepare_job(bulky, now)
+    migrated = worker.compact_job(old_job)
+    assert migrated["source_digest"] == worker.digest(migrated["source"])
+    assert worker.compact_job(migrated) is migrated
+    assert len(worker.canonical(migrated["source"])) < len(worker.canonical(bulky)) // 10
+    assert all(item["engine_snapshot_compacted"] and "history" not in item["engine_snapshot"]
+               and len(item["engine_snapshot_digest"]) == 64
+               for item in migrated["source"]["events"])
+    worker.advance_job(migrated, fetcher=fetch)
+    bulky_report = worker.finish_job(migrated)
+    reused = worker.prepare_job(worker.compact_source(bulky), now+timedelta(hours=1),
+        previous_report=bulky_report, previous_source=bulky)
+    assert reused["reused_closed_paths"] == 1
+    corrected = fixtures()
+    for item in corrected["events"]:
+        item["engine_snapshot"]["history"] = "x" * 20000
+    corrected["events"][0]["engine_snapshot"]["history"] += "changed"
+    rejected = worker.prepare_job(worker.compact_source(corrected), now+timedelta(hours=1),
+        previous_report=bulky_report, previous_source=bulky)
+    assert rejected["reused_closed_paths"] == 0
+    hype = fixtures()
+    hype["events"][0]["symbol"] = "HYPE"
+    hype["events"][0]["engine_snapshot"]["history"] = "h" * 20000
+    preserved = worker.compact_source(hype)["events"][0]
+    assert preserved["engine_snapshot"] == hype["events"][0]["engine_snapshot"]
+    assert preserved["engine_snapshot_digest"] == report.snapshot_digest(preserved["engine_snapshot"])
+    assert not preserved.get("engine_snapshot_compacted")
     # Missing first selected source never falls through to a later winner.
     missing_source = fixtures()
     missing_source["events"].append(event(3, seconds=10, wave_id="first"))
