@@ -213,6 +213,7 @@ class DurableLongStreamTests(NoExternal):
         # registration or second entry while the first market is unresolved.
         self.c=dispatch.Controller(self.store,self.v,ROUTES2,
             after_exit_policy=dispatch.AFTER_EXIT)
+        self.v.t += 1000  # a fresh public observation after worker restart
         second=self.sweep([a['card_id'],b['card_id']])
         self.assertEqual(second['new_cards_registered'],0)
         self.assertEqual(self.v.sent,1)
