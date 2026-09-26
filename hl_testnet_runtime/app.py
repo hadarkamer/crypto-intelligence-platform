@@ -67,7 +67,10 @@ def application(environ, start_response):
         rehearsal = mode == 'cancel_rehearsal_testnet_v1'
         report = {'service':'hyperliquid-testnet-preflight','running':True,
             'read_only':not (controlled or filled or long_stream or monitoring or rehearsal),'single_attempt_configured':controlled,
-            'public_order_controls':False,'continuous_trading':long_stream and os.environ.get('HL_TESTNET_LONG_ENTRY_ENABLED')=='true',
+            'public_order_controls':False,'continuous_trading':long_stream and (
+                os.environ.get('HL_TESTNET_LONG_ENTRY_ENABLED')=='true' or
+                (os.environ.get('HL_TESTNET_SHORT_STREAM')=='approved_alerts_v1' and
+                 os.environ.get('HL_TESTNET_SHORT_ENTRY_ENABLED')=='true')),
             'cancellation_monitor_configured':monitoring,'technical_rehearsal_configured':rehearsal}
         if filled:
             from .filled_trial_runtime import health as filled_health

@@ -82,6 +82,19 @@ class ConnectionTests(unittest.TestCase):
         self.assertTrue(out['test_plan_checked'])
         self.assertEqual(out['budget_diagnostics']['planned_risk_usd'],'10')
         self.assertEqual(out['budget_diagnostics']['plan_sha256'],p.digest(PLAN))
+    def test_stream_budget_accepts_existing_owned_market_capacity_only(self):
+        self.reader.perp['assetPositions']=[dict(position=dict(coin='DOGE',szi='-10'))]
+        self.reader.perp['marginSummary'].update(totalRawUsd='990',
+            totalMarginUsed='30',totalNtlPos='100')
+        with self.assertRaisesRegex(checks.Blocked,'INITIAL_ACCOUNT_NOT_EMPTY'):
+            r.budget_for_role(ENV,'short_account',C,D,PLAN,self.reader)
+        report=r.budget_for_role({**ENV,'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1'},
+            'short_account',C,D,PLAN,self.reader)
+        self.assertTrue(report['test_plan_checked'])
+        self.reader.active['availableToTrade']=['1','1']
+        with self.assertRaises(checks.Blocked):
+            r.budget_for_role({**ENV,'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1'},
+                'short_account',C,D,PLAN,self.reader)
     def test_insufficient_money_blocks_exact_plan(self):
         self.reader.active['availableToTrade']=['1','1']
         with self.assertRaises(checks.Blocked):r.budget_for_role(ENV,'short_account',C,D,PLAN,self.reader)

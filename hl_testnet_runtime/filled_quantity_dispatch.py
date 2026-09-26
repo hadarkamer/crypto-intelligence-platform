@@ -357,10 +357,9 @@ class Controller:
 
 
 class TestnetVenue:
-    """Actual adapter, no endpoint/host injection; both old and new gates stay off.
+    """Actual Testnet adapter with explicit per-role gates and no host injection.
 
-    This release is a separately approved SINGLE-CARD trial, not certification
-    of simultaneous same-market independent OCO. The general strategy is unchanged.
+    Independent same-market OCO is not assumed; later cards wait for finality.
     """
     domain='testnet'
     def __init__(self,env): self.env=env;self.sent=0
@@ -401,15 +400,18 @@ class TestnetVenue:
             orders_complete=True,position_quantity='0',fills=[],open_orders=[],terminal_orders=[])
     def _gate(self,proposal,after_exit_policy):
         env=self.env
-        long_stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
+        stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
             and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
             and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'
-            and proposal['role']=='long_account'
+            and (proposal['role']=='long_account' or
+                 (proposal['role']=='short_account' and
+                  env.get('HL_TESTNET_SHORT_STREAM')=='approved_alerts_v1' and
+                  env.get('HL_TESTNET_SHORT_ENTRY_ENABLED') in ('true','false')))
             and env.get('HL_TESTNET_FILLED_CARD_ID','')=='')
         single=(env.get('HL_TESTNET_RUNTIME_MODE')=='filled_card_controlled_v1'
             and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_single_card_v1'
             and env.get('HL_TESTNET_FILLED_CARD_ID')==proposal['card_id'])
-        if (env.get('RENDER_SERVICE_ID')!=roles.SERVICE or not (single or long_stream)
+        if (env.get('RENDER_SERVICE_ID')!=roles.SERVICE or not (single or stream)
                 or env.get('HL_TESTNET_SAFETY_PIPELINE') or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')!='disabled'
                 or env.get('HL_TESTNET_CARD_SYNC')):
             raise DispatchError('FILLED_DISPATCH_NOT_AUTHORIZED')
@@ -420,8 +422,12 @@ class TestnetVenue:
             except (ValueError,TypeError): raise DispatchError('EXACT_APPROVAL_DEADLINE_REQUIRED') from None
             if expires<=0 or (proposal['operation']=='ENTRY' and not 0<expires-self.now()<=86400000):
                 raise DispatchError('TRIAL_ENTRY_APPROVAL_EXPIRED')
-        elif proposal['operation']=='ENTRY' and env.get('HL_TESTNET_LONG_ENTRY_ENABLED')!='true':
-            raise DispatchError('LONG_ENTRIES_DISABLED_MANAGEMENT_CONTINUES')
+        elif proposal['operation']=='ENTRY':
+            flag=('HL_TESTNET_LONG_ENTRY_ENABLED' if proposal['role']=='long_account'
+                  else 'HL_TESTNET_SHORT_ENTRY_ENABLED')
+            if env.get(flag)!='true':
+                raise DispatchError('STREAM_ENTRIES_DISABLED_MANAGEMENT_CONTINUES'
+                    if proposal['role']=='short_account' else 'LONG_ENTRIES_DISABLED_MANAGEMENT_CONTINUES')
         # Check original source age again at the final boundary, including after
         # a slow budget read. Never refresh an alert timestamp on retry.
         if proposal['operation']=='ENTRY':
@@ -430,12 +436,14 @@ class TestnetVenue:
                 at=timestamp(proposal['source_at'])
             except (KeyError,TypeError,ValueError):
                 raise DispatchError('ORIGINAL_SOURCE_TIME_REQUIRED') from None
-            if long_stream:
-                try: start=timestamp(env['HL_TESTNET_LONG_NOT_BEFORE'])
+            if stream:
+                key=('HL_TESTNET_LONG_NOT_BEFORE' if proposal['role']=='long_account'
+                     else 'HL_TESTNET_SHORT_NOT_BEFORE')
+                try: start=timestamp(env[key])
                 except (KeyError,TypeError,ValueError):
-                    raise DispatchError('LONG_STREAM_START_TIME_REQUIRED') from None
+                    raise DispatchError('STREAM_START_TIME_REQUIRED') from None
                 if at < start:
-                    raise DispatchError('LONG_SOURCE_BEFORE_RELEASE_WINDOW')
+                    raise DispatchError('STREAM_SOURCE_BEFORE_RELEASE_WINDOW')
             if not source_fresh(at,proposal.get('source_expires_at',
                     env.get('HL_TESTNET_FILLED_SOURCE_EXPIRES_AT')),
                     now=datetime.fromtimestamp(self.now()/1000,timezone.utc)):
@@ -450,9 +458,9 @@ class TestnetVenue:
         if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
             original=state['originals'][proposal['card_id']]['card']
             if (original['record_kind']!='received_alert'
-                    or original['account_role']!='long_account'
+                    or original['account_role']!=proposal['role']
                     or 'source_expires_at' not in original):
-                raise DispatchError('DELIVERED_LONG_SOURCE_REQUIRED')
+                raise DispatchError('DELIVERED_STREAM_SOURCE_REQUIRED')
             snap=state['evidence']['snapshot']
             view=life.review(state['bindings'],snap,now_ms=self.now())
             if view['bucket_issues'] or any(v['card_id']!=proposal['card_id']
@@ -460,6 +468,11 @@ class TestnetVenue:
                     for v in view['cards']):
                 raise DispatchError('SHARED_MARKET_PREDECESSOR_NOT_FINAL')
         if proposal['operation']=='ENTRY':
+            if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
+                # An unrelated position or order appearing since the worker's
+                # sweep must block new entries at the final authorization gate.
+                from .long_stream_runtime import _account_owned
+                _account_owned(self,route['account'],self.store.for_account(route['account']))
             source=state['originals'][proposal['card_id']]['card']['prepared']['execution']
             from .source_window import source_fresh, timestamp
             expiry=state['originals'][proposal['card_id']]['card'].get('source_expires_at',
