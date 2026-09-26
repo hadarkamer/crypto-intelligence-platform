@@ -323,6 +323,47 @@ def _short_account_readiness(route):
     print(json.dumps({'testnet_short_account_readiness': report}, sort_keys=True), flush=True)
 
 
+def _short_card_readiness(controller, route):
+    """Inspect recent recorded SHORT plans with current public data, without reserving work."""
+    report = dict(status='READ_ONLY_REVIEW_UNAVAILABLE', cards=[], buckets=[],
+                  order_requests_sent=0, account_settings_changes=0, transfers_sent=0)
+    try:
+        states = controller.store.for_account(route['account'])
+        report['buckets'] = [dict(symbol=s['symbol'], registered_cards=len(s['originals']),
+                                  bound_cards=len(s['bindings']), pending_request=bool(s['pending']))
+                             for s in states[:8]]
+        with controller.store.journal._transaction() as conn:
+            CardStore(controller.store.journal).ready(conn)
+            rows = conn.execute('''SELECT card_id FROM hl_testnet_cards_v1.cards
+                WHERE created_at >= now() - interval '12 hours'
+                  AND manifest->>'account_role'='short_account'
+                  AND manifest->>'record_kind'='received_alert'
+                ORDER BY created_at DESC LIMIT 3''').fetchall()
+        for (card_id,) in rows:
+            card = CardStore(controller.store.journal).load(card_id)
+            source = card['prepared']['execution']
+            plan = {key:source[key] for key in ('symbol','side','entry','stop','take_profit')}
+            item = dict(symbol=plan['symbol'], source_at=card['prepared']['source']['at'],
+                        current_budget_status='READ_ONLY_REVIEW_UNAVAILABLE')
+            try:
+                outcome = roles.budget_for_role(controller.venue.env,'short_account',
+                    route['account'],route['agent'],plan,roles.checks.InfoReader())
+                item['current_budget_status'] = outcome['status']
+                diagnostic = outcome.get('budget_diagnostics') or {}
+                item['current_budget_failed_checks'] = diagnostic.get('failed_checks',[])
+            except roles.checks.Blocked as exc:
+                code = str(exc)
+                if re.fullmatch(r'[A-Z][A-Z0-9_]{2,99}', code):
+                    item['current_budget_status'] = code
+            except Exception:
+                pass
+            report['cards'].append(item)
+        report['status'] = 'CURRENT_ACCOUNT_AND_STORED_CARDS_OBSERVED'
+    except Exception:
+        pass
+    print(json.dumps({'testnet_short_card_readiness': report}, sort_keys=True), flush=True)
+
+
 def start():
     global _thread,_app_thread
     env=dict(os.environ)
@@ -362,6 +403,8 @@ def start():
         if short:
             threading.Thread(target=_short_account_readiness,args=(short[0],),
                              daemon=True,name='testnet-short-account-readiness').start()
+            threading.Thread(target=_short_card_readiness,args=(controller,short[0]),
+                             daemon=True,name='testnet-short-card-readiness').start()
         if app_mode:
             _app_thread=threading.Thread(target=_app_loop,args=(controller,route,private_key),
                 daemon=True,name='testnet-app-card-delivery')
