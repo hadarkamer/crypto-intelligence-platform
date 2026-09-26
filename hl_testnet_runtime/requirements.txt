@@ -1,3 +1,4 @@
 gunicorn==26.2.0
 hyperliquid-python-sdk==0.24.0
 psycopg[binary]==3.2.3
+pycryptodome==3.21.0

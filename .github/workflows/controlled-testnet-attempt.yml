@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - run: python3 -m pip install 'psycopg[binary]==3.2.3'
+      - run: python3 -m pip install 'psycopg[binary]==3.2.3' 'pycryptodome==3.21.0'
       - run: >-
           python3 -m unittest -q
           hl_testnet_runtime.test_runtime hyperliquid_testnet_executor_selftest
@@ -40,3 +40,4 @@ jobs:
           hl_testnet_runtime.test_filled_trial_runtime
           hl_testnet_runtime.test_approved_alert_selection
           hl_testnet_runtime.test_long_stream_runtime
+          hl_testnet_runtime.test_app_card_delivery

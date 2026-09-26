@@ -23,8 +23,10 @@ SOURCE = 'approved_alerts_v1'
 _stop = threading.Event()
 _lock = threading.Lock()
 _thread = None
+_app_thread = None
 _health = dict(configured=False, running=False, last_status='DISABLED',
-               cycles=0, order_requests_sent=0, new_entries_enabled=False)
+               cycles=0, order_requests_sent=0, new_entries_enabled=False,
+               app_delivery_status='DISABLED')
 
 
 def configuration(env):
@@ -198,14 +200,39 @@ def _loop(controller, route, start):
         _health['running']=False
 
 
+def _app_loop(controller, route, private_key):
+    from .app_card_delivery import Publisher
+    publisher = Publisher()
+    while not _stop.is_set():
+        try:
+            count = publisher.pass_once(controller, route, private_key)
+            status = publisher.last_status
+        except Exception:
+            count = 0
+            status = 'DELIVERY_UNAVAILABLE_RETRY'
+        with _lock:
+            _health['app_delivery_status'] = status
+        print(json.dumps({'testnet_app_delivery': {'status':status,
+            'cards_sent':count,'order_requests_sent':0}},sort_keys=True),flush=True)
+        _stop.wait(10 if status != 'DELIVERY_UNAVAILABLE_RETRY' else 30)
+
+
 def start():
-    global _thread
+    global _thread,_app_thread
     env=dict(os.environ)
     route,not_before=configuration(env)
+    app_mode=env.get('HL_TESTNET_APP_DELIVERY','')
+    if app_mode not in ('','ed25519_signed_v1'):
+        raise DispatchError('APP_DELIVERY_MODE_INVALID')
+    private_key=env.get('HL_TESTNET_APP_SIGNING_KEY','') if app_mode else ''
+    if app_mode and not private_key:
+        raise DispatchError('APP_DELIVERY_SIGNING_KEY_REQUIRED')
     controller=dispatch.controller_from_env(env)
     with controller.store.journal._transaction() as conn:
         controller.store.ready(conn)
         CardStore(controller.store.journal).ready(conn)
+    from .alert_cards_intake import initialize as initialize_intake
+    initialize_intake(controller.store.journal)
     controller.store.for_account(route['account'])
     with _lock:
         if _thread is not None and _thread.is_alive():
@@ -213,10 +240,15 @@ def start():
         _stop.clear()
         _health.update(configured=True,running=True,last_status='STARTING',cycles=0,
                        order_requests_sent=0,
-                       new_entries_enabled=env['HL_TESTNET_LONG_ENTRY_ENABLED']=='true')
+                       new_entries_enabled=env['HL_TESTNET_LONG_ENTRY_ENABLED']=='true',
+                       app_delivery_status='STARTING' if app_mode else 'DISABLED')
         _thread=threading.Thread(target=_loop,args=(controller,route,not_before),
                                  daemon=True,name='long-testnet-card-stream')
         _thread.start()
+        if app_mode:
+            _app_thread=threading.Thread(target=_app_loop,args=(controller,route,private_key),
+                daemon=True,name='testnet-app-card-delivery')
+            _app_thread.start()
     return True
 
 
