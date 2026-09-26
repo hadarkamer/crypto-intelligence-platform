@@ -46,6 +46,29 @@ def env():
 
 
 class ConfigurationTests(NoExternal):
+    def test_short_pending_diagnostic_reads_public_state_without_order_or_identifiers(self):
+        controller=Mock()
+        controller.store.for_account.return_value=[dict(symbol='DOGE',pending='private-request-id')]
+        controller.store.request.return_value=dict(phase='OUTCOME_UNKNOWN',
+            reply=dict(state='OUTCOME_UNKNOWN'),attempt_at_ms=T,
+            proposal=dict(action=dict(type='order',orders=[dict(c='private-cloid')])))
+        controller.venue.lookup.return_value=dict(status='unknownOid',
+                                                  secret='private-venue-field')
+        reader=Mock()
+        reader.read.side_effect=[[],dict(assetPositions=[])]
+        output=io.StringIO()
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader), \
+             redirect_stdout(output):
+            stream._short_pending_readiness(controller,{'account':B})
+        report=json.loads(output.getvalue())['testnet_short_pending_readiness']
+        self.assertEqual(report['status'],'PENDING_PUBLIC_EVIDENCE_OBSERVED')
+        self.assertEqual(report['pending'],[dict(symbol='DOGE',phase='OUTCOME_UNKNOWN',
+            reply_state='OUTCOME_UNKNOWN',lookup_status='unknownOid',
+            symbol_open_orders_present=False,symbol_position_present=False)])
+        self.assertEqual(report['order_requests_sent'],0)
+        self.assertNotIn('private-',output.getvalue())
+        controller.venue.send.assert_not_called()
+
     def test_recent_short_cards_check_current_budget_without_dispatch(self):
         controller=Mock()
         controller.venue.env={}
