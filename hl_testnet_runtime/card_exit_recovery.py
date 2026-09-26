@@ -22,6 +22,12 @@ ERRORS = {
     'Reduce only order would increase position.': 'REDUCE_ONLY',
     'Invalid TP/SL price.': 'INVALID_TRIGGER',
     'No liquidity available for market order.': 'NO_LIQUIDITY',
+    'Order would increase open interest while open interest is capped': 'OPEN_INTEREST_CAP',
+    'Order rejected due to price more aggressive than oracle while at open interest cap': 'OPEN_INTEREST_CAP_PRICE',
+    'Order would increase open interest too quickly': 'OPEN_INTEREST_INCREASE',
+    'Order has insufficient spot balance to trade': 'INSUFFICIENT_SPOT_BALANCE',
+    'Order price too far from oracle': 'ORACLE_PRICE',
+    'Order would cause position to exceed margin tier limit at current leverage': 'MAX_POSITION',
 }
 
 

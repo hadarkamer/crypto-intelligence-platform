@@ -68,6 +68,14 @@ def normalized_reply(raw, kind):
 def identity(raw, request, now_ms):
     """Verify a venue lookup of the PERSISTED cloid, not a caller's three IDs."""
     if not isinstance(raw,dict) or raw.get('status')!='order':
+        # A normalized exchange rejection plus an exact public unknownOid result
+        # is not an ambiguous transport outcome. It is still terminal for this
+        # request: never retry it, and never invent an order or binding.
+        reply = request.get('reply') or {}
+        if (isinstance(raw,dict) and raw.get('status')=='unknownOid'
+                and reply.get('state')=='REJECTED'
+                and request.get('proposal',{}).get('leg')=='ENTRY'):
+            raise DispatchError('ENTRY_REJECTED_NO_ORDER_NO_RETRY')
         raise DispatchError('OUTCOME_UNRESOLVED_NO_NEW_REQUEST')
     env=raw.get('order');o=env.get('order') if isinstance(env,dict) else None
     p=request['proposal'];expected=p['action']['orders'][0]
