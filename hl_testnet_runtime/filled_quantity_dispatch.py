@@ -300,7 +300,7 @@ class Controller:
             return current
         return self.store.change(bucket,state['revision'],'PUBLIC_RECONCILIATION',now,update)
 
-    def cycle(self,bucket,*,send=False):
+    def cycle(self,bucket,*,send=False,allow_new_entries=True):
         """A false send flag never reserves, signs, cancels or places an order."""
         state=self.refresh(bucket)
         if state['pending']:
@@ -322,6 +322,8 @@ class Controller:
         if send is not True:
             return dict(status='PREVIEW_ONLY',proposal=proposal,order_requests_sent=0)
         if proposal is None: return dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
+        if proposal['operation']=='ENTRY' and allow_new_entries is not True:
+            return dict(status='NEW_ENTRIES_DISABLED',order_requests_sent=0)
         # All release checks occur BEFORE reservation or any key access.
         self.venue.authorize(state,proposal,self.after_exit_policy)
         if pending:
@@ -377,26 +379,49 @@ class TestnetVenue:
         reader=evidence.PublicReader();start=self.now()
         for _ in range(2):
             orders=reader.read('frontendOpenOrders',account);state=reader.read('clearinghouseState',account)
-            if (not isinstance(orders,list) or orders or not isinstance(state,dict)
+            if (not isinstance(orders,list) or not isinstance(state,dict)
                     or not isinstance(state.get('assetPositions'),list)
-                    or any(life.number(p['position']['szi'],signed=True)!=0 for p in state['assetPositions'])):
+                    or any(not isinstance(o,dict) or not isinstance(o.get('coin'),str)
+                           for o in orders)
+                    or any(not isinstance(p,dict) or not isinstance(p.get('position'),dict)
+                           or not isinstance(p['position'].get('coin'),str)
+                           for p in state['assetPositions'])):
+                raise DispatchError('FIRST_TRIAL_REQUIRES_EMPTY_DEDICATED_ACCOUNT')
+            if (any(o['coin']==symbol for o in orders)
+                    or any(p['position']['coin']==symbol and
+                           life.number(p['position']['szi'],signed=True)!=0
+                           for p in state['assetPositions'])):
+                raise DispatchError('UNOWNED_SYMBOL_EXPOSURE_REQUIRES_REVIEW')
+            if self.env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_testnet_v1' and (
+                    orders or any(life.number(p['position']['szi'],signed=True)!=0
+                                  for p in state['assetPositions'])):
                 raise DispatchError('FIRST_TRIAL_REQUIRES_EMPTY_DEDICATED_ACCOUNT')
         if self.now()-start>15000: raise DispatchError('PRE_ENTRY_CHECKPOINT_EXPIRED')
         return dict(environment='testnet',account=account,symbol=symbol,at_ms=start,history_complete=True,
             orders_complete=True,position_quantity='0',fills=[],open_orders=[],terminal_orders=[])
     def _gate(self,proposal,after_exit_policy):
         env=self.env
-        if (env.get('RENDER_SERVICE_ID')!=roles.SERVICE or env.get('HL_TESTNET_RUNTIME_MODE')!='filled_card_controlled_v1'
-                or env.get('HL_TESTNET_FILLED_DISPATCH')!='approved_single_card_v1'
+        long_stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
+            and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
+            and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'
+            and proposal['role']=='long_account'
+            and env.get('HL_TESTNET_FILLED_CARD_ID','')=='')
+        single=(env.get('HL_TESTNET_RUNTIME_MODE')=='filled_card_controlled_v1'
+            and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_single_card_v1'
+            and env.get('HL_TESTNET_FILLED_CARD_ID')==proposal['card_id'])
+        if (env.get('RENDER_SERVICE_ID')!=roles.SERVICE or not (single or long_stream)
                 or env.get('HL_TESTNET_SAFETY_PIPELINE') or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')!='disabled'
-                or env.get('HL_TESTNET_FILLED_CARD_ID')!=proposal['card_id']):
+                or env.get('HL_TESTNET_CARD_SYNC')):
             raise DispatchError('FILLED_DISPATCH_NOT_AUTHORIZED')
         if after_exit_policy!=AFTER_EXIT or env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY')!=AFTER_EXIT:
             raise DispatchError('AFTER_EXIT_REMAINDER_DECISION_REQUIRED_BEFORE_TRIAL')
-        try: expires=int(env.get('HL_TESTNET_FILLED_APPROVAL_EXPIRES_MS',''))
-        except (ValueError,TypeError): raise DispatchError('EXACT_APPROVAL_DEADLINE_REQUIRED') from None
-        if expires<=0 or (proposal['operation']=='ENTRY' and not 0<expires-self.now()<=86400000):
-            raise DispatchError('TRIAL_ENTRY_APPROVAL_EXPIRED')
+        if single:
+            try: expires=int(env.get('HL_TESTNET_FILLED_APPROVAL_EXPIRES_MS',''))
+            except (ValueError,TypeError): raise DispatchError('EXACT_APPROVAL_DEADLINE_REQUIRED') from None
+            if expires<=0 or (proposal['operation']=='ENTRY' and not 0<expires-self.now()<=86400000):
+                raise DispatchError('TRIAL_ENTRY_APPROVAL_EXPIRED')
+        elif proposal['operation']=='ENTRY' and env.get('HL_TESTNET_LONG_ENTRY_ENABLED')!='true':
+            raise DispatchError('LONG_ENTRIES_DISABLED_MANAGEMENT_CONTINUES')
         # Check original source age again at the final boundary, including after
         # a slow budget read. Never refresh an alert timestamp on retry.
         if proposal['operation']=='ENTRY':
@@ -405,6 +430,12 @@ class TestnetVenue:
                 at=timestamp(proposal['source_at'])
             except (KeyError,TypeError,ValueError):
                 raise DispatchError('ORIGINAL_SOURCE_TIME_REQUIRED') from None
+            if long_stream:
+                try: start=timestamp(env['HL_TESTNET_LONG_NOT_BEFORE'])
+                except (KeyError,TypeError,ValueError):
+                    raise DispatchError('LONG_STREAM_START_TIME_REQUIRED') from None
+                if at < start:
+                    raise DispatchError('LONG_SOURCE_BEFORE_RELEASE_WINDOW')
             if not source_fresh(at,proposal.get('source_expires_at',
                     env.get('HL_TESTNET_FILLED_SOURCE_EXPIRES_AT')),
                     now=datetime.fromtimestamp(self.now()/1000,timezone.utc)):
@@ -413,8 +444,21 @@ class TestnetVenue:
         return roles.route_for(env,proposal['role'],proposal['account'])
     def authorize(self,state,proposal,after_exit_policy):
         route=self._gate(proposal,after_exit_policy)
-        if any(b['card_id']!=proposal['card_id'] for b in state['bindings']):
+        if (self.env.get('HL_TESTNET_RUNTIME_MODE')=='filled_card_controlled_v1'
+                and any(b['card_id']!=proposal['card_id'] for b in state['bindings'])):
             raise DispatchError('SHARED_MARKET_TRIAL_ISOLATION_NOT_VERIFIED')
+        if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
+            original=state['originals'][proposal['card_id']]['card']
+            if (original['record_kind']!='received_alert'
+                    or original['account_role']!='long_account'
+                    or 'source_expires_at' not in original):
+                raise DispatchError('DELIVERED_LONG_SOURCE_REQUIRED')
+            snap=state['evidence']['snapshot']
+            view=life.review(state['bindings'],snap,now_ms=self.now())
+            if view['bucket_issues'] or any(v['card_id']!=proposal['card_id']
+                    and (v['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL') or v['issues'])
+                    for v in view['cards']):
+                raise DispatchError('SHARED_MARKET_PREDECESSOR_NOT_FINAL')
         if proposal['operation']=='ENTRY':
             source=state['originals'][proposal['card_id']]['card']['prepared']['execution']
             from .source_window import source_fresh, timestamp

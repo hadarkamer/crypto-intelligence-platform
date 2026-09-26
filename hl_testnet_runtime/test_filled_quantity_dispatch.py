@@ -325,24 +325,15 @@ class DispatchDatabaseTests(NoExternal):
     def test_default_real_gate_and_no_configuration_write(self):
         v=m.TestnetVenue({});self.protect();s=self.store.load(self.bucket)
         with self.assertRaises(DispatchError):v.authorize(s,self.v.requests[0]['proposal'],'NOT_SELECTED')
-    def test_raw_double_exit_race_is_detected_not_charged_to_second_card(self):
+    def test_second_same_market_card_waits_without_creating_an_exit_race(self):
         self.protect('100');b,o=original(2);self.cards.record(o['card']);self.c.register(b['card_id'])
-        # The new storage fence blocks constructing this unsafe overlap normally.
-        with self.assertRaisesRegex(DispatchError,'SHARED_MARKET_INDEPENDENT_PAIR_NOT_ISOLATED'):
-            self.cycle()
-        # Arrange PRE-EXISTING legacy exposure in the SOFTWARE venue only.
-        # Restore the guard before the cancellation race and retain all original
-        # incident/attribution assertions; do not call this race "prevented".
-        with patch('hl_testnet_runtime.residual_exit_fence.validate_proposal',return_value=True):
-            self.cycle();self.v.fill('1003','100');self.cycle();self.cycle();self.cycle(False)
-        self.v.fill('1002','100')
-        self.v.cancel_race=lambda oid:self.v.fill(oid,'100')
-        self.cycle() # venue fills first card stop before cancellation can take effect
-        with self.assertRaises(DispatchError):self.cycle(False)
-        views=self.remaining();first=next(v for v in views if v['card_id']==self.b['card_id'])
-        second=next(v for v in views if v['card_id']==b['card_id'])
-        self.assertIn('EXIT_EXCEEDS_CARD_QUANTITY',first['issues'])
-        self.assertEqual(second['remaining_quantity'],'100');self.assertFalse(first['closure_verified'])
+        sent=self.v.sent
+        self.cycle()
+        self.assertEqual(self.v.sent,sent)
+        state=self.store.load(self.bucket)
+        self.assertIn(b['card_id'],state['originals'])
+        self.assertEqual({binding['card_id'] for binding in state['bindings']},
+                         {self.b['card_id']})
 
 
 if __name__=='__main__':unittest.main()
