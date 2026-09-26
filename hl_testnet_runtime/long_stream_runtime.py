@@ -302,6 +302,27 @@ def _app_loop(controller, route, private_key):
         _stop.wait(10 if status != 'DELIVERY_UNAVAILABLE_RETRY' else 30)
 
 
+def _short_account_readiness(route):
+    """One public, read-only snapshot of the approved second account."""
+    report = dict(status='READ_ONLY_REVIEW_UNAVAILABLE', order_requests_sent=0,
+                  account_settings_changes=0, transfers_sent=0)
+    try:
+        from .checks import InfoReader, Blocked
+        result = roles.default_native_snapshot(
+            route, InfoReader(), 'BTC', allow_owned_exposure=True)
+        report.update(status=result['status'], account_mode=result['account_mode'],
+                      balance_usd=result['balance_usd'],
+                      exchange_reported_available_usd=result['exchange_reported_available_usd'],
+                      account_mapping_verified=result['account_mapping_verified'])
+    except Blocked as exc:
+        code = str(exc)
+        if re.fullmatch(r'[A-Z][A-Z0-9_]{2,99}', code):
+            report['status'] = code
+    except Exception:
+        pass
+    print(json.dumps({'testnet_short_account_readiness': report}, sort_keys=True), flush=True)
+
+
 def start():
     global _thread,_app_thread
     env=dict(os.environ)
@@ -338,6 +359,9 @@ def start():
         _thread=threading.Thread(target=_loop,args=(controller,streams),
                                  daemon=True,name='testnet-card-stream')
         _thread.start()
+        if short:
+            threading.Thread(target=_short_account_readiness,args=(short[0],),
+                             daemon=True,name='testnet-short-account-readiness').start()
         if app_mode:
             _app_thread=threading.Thread(target=_app_loop,args=(controller,route,private_key),
                 daemon=True,name='testnet-app-card-delivery')
