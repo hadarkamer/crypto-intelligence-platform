@@ -126,7 +126,7 @@ def load_job_source(conn, observed_at):
     # Versioned policy excludes its initial boundary-unverified warmup parent;
     # no source or price availability condition selects the eligible universe.
     eligible = {wave["btc_parent_movement_id"] for wave in waves if wave["evidence_eligible"] is True}
-    return compact_source({"waves": waves, "events": [event for event in events if event["btc_parent_movement_id"] in eligible]})
+    return {"waves": waves, "events": [event for event in events if event["btc_parent_movement_id"] in eligible]}
 
 
 def prepare_job(source, observed_at, *, previous_report=None, previous_source=None):
@@ -325,7 +325,7 @@ class ResearchBTCWaveReportWorker:
                         return waiting
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                        source = load_job_source(conn, now)
+                        source = compact_source(load_job_source(conn, now))
                     if not source["waves"]:
                         return {"waiting_for": "BTC_PARENT_POPULATION"}
                     job = prepare_job(source, now, previous_report=state["report"], previous_source=state["source"])
@@ -346,7 +346,7 @@ class ResearchBTCWaveReportWorker:
                     conn.commit()
                     with conn.transaction():
                         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                        current_source = load_job_source(conn, report.utc(job["observed_at"]))
+                        current_source = compact_source(load_job_source(conn, report.utc(job["observed_at"])))
                     if digest(current_source) != job["source_digest"]:
                         revised = prepare_job(current_source, job["observed_at"],
                             previous_report=completed, previous_source=job["source"])
