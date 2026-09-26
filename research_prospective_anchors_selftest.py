@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import math
 from pathlib import Path
@@ -17,13 +17,13 @@ UTC = timezone.utc
 
 
 def _source_rows(slot: datetime, *, symbol: str = "BTC", refresh_minute: int = 33):
-    refreshed = slot.replace(minute=refresh_minute)
+    refreshed = slot + timedelta(minutes=refresh_minute)
     is_hype = symbol == "HYPE"
     return {
         "official_price": {
             "symbol": symbol,
-            "observed_at_utc": slot.replace(minute=34),
-            "refresh_completed_at_utc": slot.replace(minute=34),
+            "observed_at_utc": slot + timedelta(minutes=34),
+            "refresh_completed_at_utc": slot + timedelta(minutes=34),
             "source": "hyperliquid_spot_@107" if is_hype else "binance_spot",
             "quality_status": "PASS",
             "price_exchange": "Hyperliquid" if is_hype else "Binance",
@@ -44,8 +44,8 @@ def _source_rows(slot: datetime, *, symbol: str = "BTC", refresh_minute: int = 3
             "source_record_id": 123,
             "price_source": "binance_spot",
             "oi_source": "coinglass_open_interest_exchange_list",
-            "price_fetched_at_utc": slot.replace(minute=32, second=30),
-            "oi_fetched_at_utc": slot.replace(minute=32, second=31),
+            "price_fetched_at_utc": slot + timedelta(minutes=32, seconds=30),
+            "oi_fetched_at_utc": slot + timedelta(minutes=32, seconds=31),
             "quality_status": "PASS",
             "price_close": 100.0,
             "oi_close_usd": 1_000_000.0,
@@ -55,7 +55,7 @@ def _source_rows(slot: datetime, *, symbol: str = "BTC", refresh_minute: int = 3
         "futures_cvd": {
             "symbol": symbol,
             "source_candle_time_utc": slot,
-            "refresh_completed_at_utc": slot.replace(minute=32),
+            "refresh_completed_at_utc": slot + timedelta(minutes=32),
             "source": "coinglass_futures_aggregated_cvd",
             "quality_status": "PASS",
             "quality_status_basis": "ADAPTER_STRUCTURAL_VALIDATION",
@@ -69,7 +69,7 @@ def _source_rows(slot: datetime, *, symbol: str = "BTC", refresh_minute: int = 3
         "spot_cvd": {
             "symbol": symbol,
             "source_candle_time_utc": slot,
-            "refresh_completed_at_utc": slot.replace(minute=32),
+            "refresh_completed_at_utc": slot + timedelta(minutes=32),
             "source": "coinglass_spot_aggregated_cvd",
             "quality_status": "PASS",
             "quality_status_basis": "ADAPTER_STRUCTURAL_VALIDATION",
@@ -244,6 +244,23 @@ def run() -> None:
 
     slot = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
     now = datetime(2026, 8, 29, 12, 34, tzinfo=UTC)
+    # Shared integration fixtures must preserve offsets across both valid
+    # 30-minute slot boundaries; ``datetime.replace(minute=...)`` silently
+    # moved :30-slot refreshes backwards into the same hour.
+    half_hour_slot = slot + timedelta(minutes=30)
+    half_hour_sources = _source_rows(half_hour_slot)
+    assert half_hour_sources["official_price"]["observed_at_utc"] == (
+        half_hour_slot + timedelta(minutes=34)
+    )
+    assert half_hour_sources["price_oi"]["price_fetched_at_utc"] == (
+        half_hour_slot + timedelta(minutes=32, seconds=30)
+    )
+    assert half_hour_sources["futures_cvd"]["refresh_completed_at_utc"] == (
+        half_hour_slot + timedelta(minutes=32)
+    )
+    assert half_hour_sources["spot_cvd"]["refresh_completed_at_utc"] == (
+        half_hour_slot + timedelta(minutes=32)
+    )
     frozen_model_wrapper = {
         "symbol": "BTC",
         "captured_at_utc": now,

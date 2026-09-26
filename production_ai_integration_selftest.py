@@ -42,6 +42,7 @@ EXPECTED_TOOLS = [
     "research_feature_matrix",
     "research_historical_replay_status",
     "research_formula_registry",
+    "research_watch_formula_leaderboard",
     "research_formula_shadow",
     "research_formula_lab_comparison",
     "get_ai_capabilities",
@@ -54,6 +55,39 @@ def run() -> None:
     payload = ai_agent.AGENT._base_payload([{"role": "user", "content": "test"}])
     assert payload["tools"] == ai_tools.TOOL_SPECS
     assert not any(tool.get("type") in {"web_search", "code_interpreter"} for tool in payload["tools"])
+
+    watch_leaderboard_spec = next(
+        spec
+        for spec in ai_tools.TOOL_SPECS
+        if spec.get("name") == "research_watch_formula_leaderboard"
+    )
+    assert watch_leaderboard_spec["strict"] is True
+    assert "descriptive only" in watch_leaderboard_spec["description"]
+    assert "not Stage-8 prospective evidence" in watch_leaderboard_spec["description"]
+    watch_parameters = watch_leaderboard_spec["parameters"]
+    assert watch_parameters["additionalProperties"] is False
+    assert watch_parameters["required"] == [
+        "dimension",
+        "symbol_scope",
+        "window_minutes",
+        "timeframe",
+        "analysis_direction",
+        "threshold_bps",
+        "top_per_route",
+    ]
+    assert watch_parameters["properties"]["symbol_scope"]["enum"] == [
+        "ALL", "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ZEC", "HYPE"
+    ]
+    assert "not Stage-8 ALL_BINANCE7" in (
+        watch_parameters["properties"]["symbol_scope"]["description"]
+    )
+    assert watch_parameters["properties"]["analysis_direction"]["enum"] == [
+        "LONG", "SHORT"
+    ]
+    assert watch_parameters["properties"]["threshold_bps"]["enum"] == [
+        25, 50, 75, 100, 125, 150, 175, 200
+    ]
+    assert watch_parameters["properties"]["top_per_route"]["maximum"] == 4
 
     archive = ai_alert_research.archive_status()
     assert archive["configured"] is False
@@ -494,6 +528,16 @@ def run() -> None:
     assert "Formula-discovery researcher" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_groups" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "research_formula_registry" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "research_watch_formula_leaderboard" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "one exact dimension, symbol scope, outcome window" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "Compare probability and asymmetry as separate routes" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "n<5 is provisional descriptive evidence only" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "Watch ALL includes HYPE and is not Stage-8 ALL_BINANCE7" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "Watch HYPE route is not the Stage-8 HYPE_SPOT_107 route" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "Never treat this comparator as Stage-8 evidence" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "N_LT_5_PROVISIONAL separate from N_GTE_5_DESCRIPTIVE" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "N_0_NO_EVIDENCE has no rank" in ai_agent.SYSTEM_INSTRUCTIONS
+    assert "Do not compare the ranked bands as if they shared one evidence universe" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "Market session is a first-class analytical variable" in ai_agent.SYSTEM_INSTRUCTIONS
     assert "MAE p75, p90 and p95 on three separate" in ai_agent.SYSTEM_INSTRUCTIONS
     formula_store_text = (root / "research_formula_store.py").read_text(encoding="utf-8")
