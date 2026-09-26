@@ -281,6 +281,13 @@ class DurableLongStreamTests(NoExternal):
                 stream.tick(self.c,self.route,self.start,new_entries=False)
         self.assertEqual([r['proposal']['leg'] for r in self.v.requests],
                          ['ENTRY','STOP','TAKE_PROFIT'])
+        opened=stream.observed_trades(self.c,self.route)
+        self.assertEqual(len(opened),1)
+        self.assertEqual(opened[0]['card_id'],card['card_id'])
+        self.assertEqual(opened[0]['source_event_id'],card['prepared']['source']['event_id'])
+        self.assertEqual(opened[0]['entry_quantity'],'100')
+        self.assertTrue(opened[0]['protection_verified'])
+        self.assertFalse(opened[0]['closure_verified'])
         self.v.fill('1002','100')
         with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
             for _ in range(3):
@@ -296,6 +303,10 @@ class DurableLongStreamTests(NoExternal):
         self.assertIsNone(state['pending'])
         self.assertEqual(self.v.orders['1001']['status'],'canceled')
         self.assertEqual(self.v.sent,4)  # entry, stop, take profit, orphan stop cancel
+        closed=stream.observed_trades(self.c,self.route)
+        self.assertEqual(len(closed),1)
+        self.assertEqual(closed[0]['card_id'],card['card_id'])
+        self.assertTrue(closed[0]['closure_verified'])
         # The immutable source card and its per-card evidence survive a new controller.
         restarted=dispatch.Controller(self.store,self.v,ROUTES2,
             after_exit_policy=dispatch.AFTER_EXIT)
