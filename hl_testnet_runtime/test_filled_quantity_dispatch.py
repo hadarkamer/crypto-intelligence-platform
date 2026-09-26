@@ -115,7 +115,9 @@ class DispatchPureTests(NoExternal):
                    evidence=dict(snapshot=dict()))
         proposal=dict(card_id=cid,operation='ENTRY',role='short_account',account=B)
         venue=m.TestnetVenue({'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1'})
-        venue.store=type('Store',(),{'for_account':lambda self,account:[]})()
+        store=type('Store',(),{'domain':'testnet',
+            'for_account':lambda self,account:[]})()
+        m.Controller(store,venue,ROUTES2)
         budget=dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',
                     test_plan_checked=True)
         with patch.object(venue,'now',return_value=T), \
