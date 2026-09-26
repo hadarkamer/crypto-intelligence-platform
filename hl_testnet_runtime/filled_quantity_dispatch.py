@@ -104,11 +104,15 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
     index,decimals=asset(meta,state['symbol'])
     sequence=state['revision']+1 if sequence is None else sequence
     def make(cid,leg,operation,action,quantity,old_oid=None):
-        return dict(version=VERSION,card_id=cid,account=state['account'],symbol=state['symbol'],
+        card=state['originals'][cid]['card']
+        result=dict(version=VERSION,card_id=cid,account=state['account'],symbol=state['symbol'],
             role=state['originals'][cid]['draft']['role'],leg=leg,operation=operation,
             action=action,quantity=quantity,old_oid=old_oid,sequence=sequence,
-            source_at=state['originals'][cid]['card']['prepared']['execution']['at'],
+            source_at=card['prepared']['execution']['at'],
             basis=life.digest(ev),observed_at_ms=snap['at_ms'])
+        if 'source_expires_at' in card:
+            result['source_expires_at']=card['source_expires_at']
+        return result
     bound={b['card_id'] for b in bs}
     # Existing exposure is serviced first, never delayed by a new entry.
     if bs:
@@ -189,17 +193,26 @@ class Controller:
 
     def register(self, card_id):
         card=CardStore(self.store.journal).load(card_id)
-        # The U21 source has no half-threshold cancellation rule. Recording it
-        # does not authorize substituting an invented threshold for execution.
+        owner_policy=None
         if card['rule']['threshold_pct'] is None:
-            raise DispatchError('SOURCE_CANCEL_POLICY_REQUIRES_OWNER_DECISION')
+            if card['rule']['id']!='U21_XRP_SHORT' or 'source_expires_at' not in card:
+                raise DispatchError('SOURCE_CANCEL_POLICY_REQUIRES_OWNER_DECISION')
+            owner_policy=deepcopy(half_cancel.U21_OWNER_POLICY)
         account=life.address(self.routes[card['account_role']]['account'])
         draft=selected.prepare_entry(card,self.venue.metadata(),account,self.routes)
         state=self.store.create_bucket(account,draft['symbol'])
         original=dict(card=card,draft=draft)
+        if owner_policy is not None:
+            original['cancel_policy']=owner_policy
         if card_id in state['originals']:
             if original!=state['originals'][card_id]: raise DispatchError('IMMUTABLE_ORIGINAL_CHANGED')
             return state
+        if owner_policy is not None:
+            from .source_window import source_fresh, timestamp
+            if not source_fresh(timestamp(card['prepared']['source']['at']),
+                    card['source_expires_at'],
+                    now=datetime.fromtimestamp(self.venue.now()/1000,timezone.utc)):
+                raise DispatchError('U21_ORIGINAL_SOURCE_EXPIRED')
         def update(conn,s):
             if s['pending']: raise DispatchError('REGISTER_WHILE_REQUEST_UNRESOLVED')
             s['originals'][card_id]=original
@@ -371,7 +384,8 @@ class TestnetVenue:
                 at=timestamp(proposal['source_at'])
             except (KeyError,TypeError,ValueError):
                 raise DispatchError('ORIGINAL_SOURCE_TIME_REQUIRED') from None
-            if not source_fresh(at,env.get('HL_TESTNET_FILLED_SOURCE_EXPIRES_AT'),
+            if not source_fresh(at,proposal.get('source_expires_at',
+                    env.get('HL_TESTNET_FILLED_SOURCE_EXPIRES_AT')),
                     now=datetime.fromtimestamp(self.now()/1000,timezone.utc)):
                 raise DispatchError('NEW_TRIAL_SOURCE_NOT_FRESH')
         # Entry approval expiry must NOT silently terminate management of an open card.
@@ -383,7 +397,9 @@ class TestnetVenue:
         if proposal['operation']=='ENTRY':
             source=state['originals'][proposal['card_id']]['card']['prepared']['execution']
             from .source_window import source_fresh, timestamp
-            if not source_fresh(timestamp(source['at']),self.env.get('HL_TESTNET_FILLED_SOURCE_EXPIRES_AT'),
+            expiry=state['originals'][proposal['card_id']]['card'].get('source_expires_at',
+                self.env.get('HL_TESTNET_FILLED_SOURCE_EXPIRES_AT'))
+            if not source_fresh(timestamp(source['at']),expiry,
                     now=datetime.fromtimestamp(self.now()/1000,timezone.utc)):
                 raise DispatchError('NEW_TRIAL_SOURCE_NOT_FRESH')
             plan={k:source[k] for k in ('symbol','side','entry','stop','take_profit')}

@@ -13,6 +13,22 @@ from .filled_dispatch_store import DispatchError
 POLICY = rule_engine.POLICY
 OPERATION = 'CANCEL_UNFILLED_HALF_THRESHOLD'
 FIELD = 'half_threshold_observations'
+U21_OWNER_POLICY = dict(version='u21-owner-cancel-threshold-v1',
+                        threshold_pct='0.5', cancel_move_pct='0.25')
+
+
+def threshold_for(original):
+    """Keep a source formula threshold distinct from the U21 owner's policy."""
+    card = original['card']
+    source_threshold = card['rule']['threshold_pct']
+    if source_threshold is not None:
+        if 'cancel_policy' in original:
+            raise DispatchError('UNEXPECTED_CANCEL_POLICY_OVERRIDE')
+        return source_threshold
+    if (card['rule']['id'] != 'U21_XRP_SHORT'
+            or original.get('cancel_policy') != U21_OWNER_POLICY):
+        raise DispatchError('SOURCE_CANCEL_POLICY_REQUIRES_OWNER_DECISION')
+    return U21_OWNER_POLICY['threshold_pct']
 
 
 def _rule(original, draft):
@@ -24,7 +40,7 @@ def _rule(original, draft):
     return rule_engine.make_rule(rule_id='CARD_'+card['card_id'][:32].upper(),
         event_id=card['event_id'], symbol=draft['symbol'], side=draft['side'],
         entry=entry['p'], size=entry['s'], entry_cloid=entry['c'],
-        threshold_pct=card['rule']['threshold_pct'],
+        threshold_pct=threshold_for(original),
         source_digest=life.digest(source), execution_digest=life.digest(card))
 
 
