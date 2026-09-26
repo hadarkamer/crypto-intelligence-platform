@@ -157,6 +157,27 @@ class DispatchPureTests(NoExternal):
         snap['position_quantity']='140';one['evidence']['bindings']=one['bindings']
         p=self.select(one);self.assertEqual(p['quantity'],'40')
 
+    def test_same_symbol_alert_waits_for_verified_finality(self):
+        from .test_card_lifecycle import fill, terminal
+        one=state_from_case(q='100',stop='100',take='100')
+        second,record=original(2)
+        one['originals'][second['card_id']]=record
+        self.assertIsNone(self.select(one))
+        snap=one['evidence']['snapshot'];old=one['bindings'][0]
+        snap['fills'].append(fill(old,'TAKE_PROFIT',qty='100'))
+        snap['terminal_orders'] += [terminal(old,'STOP','0'),terminal(old,'TAKE_PROFIT','100')]
+        snap['open_orders']=[];snap['position_quantity']='0'
+        self.assertTrue(life.review(one['bindings'],snap,now_ms=T)['cards'][0]['closure_verified'])
+        proposal=self.select(one)
+        self.assertEqual((proposal['card_id'],proposal['leg']),(second['card_id'],'ENTRY'))
+        self.assertTrue(m.residual.validate_proposal(one,proposal,now_ms=T))
+
+    def test_pending_first_entry_also_blocks_new_card(self):
+        one=state_from_case(q='0')
+        second,record=original(2)
+        one['originals'][second['card_id']]=record
+        self.assertIsNone(self.select(one))
+
 
 @unittest.skipUnless(CI,'Disposable loopback PostgreSQL required')
 class DispatchDatabaseTests(NoExternal):
