@@ -16,6 +16,7 @@ from .test_filled_quantity_dispatch import NoExternal
 from .test_filled_quantity_dispatch import Venue, ROUTES2
 from .test_filled_quantity_exits import original, META
 from . import trade_cards
+from . import card_lifecycle as life
 from .filled_dispatch_store import DispatchStore, SCHEMA
 from .trade_card_store import CardStore
 from .postgres_journal import PostgresJournal
@@ -263,6 +264,46 @@ class DurableLongStreamTests(NoExternal):
         self.assertEqual(result['payload']['status'],'WAITING_ENTRY')
         self.assertIsNone(result['payload']['quantity_entered'])
         self.assertFalse(result['payload']['pnl_verified'])
+
+    def test_receipt_to_entry_protection_take_close_and_restart(self):
+        card=self.card(97)
+        intake.initialize(self.j)
+        intake.ReceiptStore(self.j).save('c'*64,'RECORDED',card['card_id'],
+                                          {'source':'fixture'})
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
+            first=stream.tick(self.c,self.route,self.start,new_entries=True)
+            self.assertEqual(first['new_cards_registered'],1)
+            self.assertEqual(first['order_requests_sent'],1)
+            self.assertEqual(self.v.requests[0]['proposal']['operation'],'ENTRY')
+            self.v.fill('1000','100')
+            for _ in range(4):
+                self.v.t+=1
+                stream.tick(self.c,self.route,self.start,new_entries=False)
+        self.assertEqual([r['proposal']['leg'] for r in self.v.requests],
+                         ['ENTRY','STOP','TAKE_PROFIT'])
+        self.v.fill('1002','100')
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
+            for _ in range(3):
+                self.v.t+=1
+                stream.tick(self.c,self.route,self.start,new_entries=False)
+        state=self.store.for_account(self.route['account'])[0]
+        view=life.review(state['bindings'],state['evidence']['snapshot'],now_ms=self.v.now())
+        self.assertTrue(view['cards'][0]['closure_verified'])
+        self.assertEqual(view['cards'][0]['state'],'CLOSED')
+        self.assertIsNotNone(view['cards'][0]['gross_pnl_usdc'])
+        self.assertIsNotNone(view['cards'][0]['net_before_funding_usdc'])
+        self.assertIsNone(view['cards'][0]['final_net_usdc'])
+        self.assertIsNone(state['pending'])
+        self.assertEqual(self.v.orders['1001']['status'],'canceled')
+        self.assertEqual(self.v.sent,4)  # entry, stop, take profit, orphan stop cancel
+        # The immutable source card and its per-card evidence survive a new controller.
+        restarted=dispatch.Controller(self.store,self.v,ROUTES2,
+            after_exit_policy=dispatch.AFTER_EXIT)
+        self.assertEqual(CardStore(restarted.store.journal).load(card['card_id']),card)
+        saved=restarted.store.for_account(self.route['account'])[0]
+        self.assertEqual(saved['bindings'][0]['card_id'],card['card_id'])
+        self.assertEqual(life.review(saved['bindings'],saved['evidence']['snapshot'],
+            now_ms=self.v.now())['cards'][0]['state'],'CLOSED')
 
 
 if __name__=='__main__':
