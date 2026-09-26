@@ -1,6 +1,7 @@
 """Long stream release boundaries; no network, wallet or real order."""
 from datetime import datetime, timezone
-from unittest.mock import patch
+from contextlib import redirect_stdout
+from unittest.mock import Mock, patch
 import os
 import io
 import json
@@ -44,6 +45,26 @@ def env():
 
 
 class ConfigurationTests(NoExternal):
+    def test_stream_failure_reports_safe_code_without_exception_details(self):
+        controller=Mock()
+        controller.venue.env={'HL_TESTNET_SHORT_ENTRY_ENABLED':'true'}
+        controller.venue.sent=0
+        stop=Mock()
+        stop.is_set.side_effect=[False,True]
+        for failure, expected in (
+                (DispatchError('PRICE_OUTSIDE_ORIGINAL_EXITS'), 'PRICE_OUTSIDE_ORIGINAL_EXITS'),
+                (ValueError('private account credential must not appear'), 'ValueError')):
+            stop.is_set.side_effect=[False,True]
+            output=io.StringIO()
+            with patch.object(stream,'tick',side_effect=failure),patch.object(stream,'_stop',stop),redirect_stdout(output):
+                stream._loop(controller,[('short_account',{},None,'HL_TESTNET_SHORT_ENTRY_ENABLED')])
+            report=json.loads(output.getvalue().strip())['testnet_short_stream']
+            self.assertEqual(report['status'],'RECONCILIATION_REQUIRED_NO_BLIND_RETRY')
+            self.assertEqual(report['order_requests_sent'],0)
+            self.assertEqual(report['failure_code'],expected)
+            self.assertRegex(report['failure_origin'],r'^[\w.]+:\d+$')
+            self.assertNotIn('credential',output.getvalue())
+
     def test_exact_long_route_and_record_only_intake(self):
         route, start=stream.configuration(env())
         self.assertEqual(route['account'],A)
