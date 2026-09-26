@@ -205,6 +205,9 @@ class Controller:
         if store.domain!=venue.domain:
             raise DispatchError('SOFTWARE_AND_ACCOUNT_STORAGE_MUST_NOT_MIX')
         self.store,self.venue,self.routes=store,venue,deepcopy(routes)
+        # Final account-ownership authorization needs every durable bucket for
+        # this account, not only the bucket passed to authorize().
+        self.venue.store=self.store
         self.after_exit_policy=after_exit_policy
 
     def register(self, card_id, *, single_card=False):
