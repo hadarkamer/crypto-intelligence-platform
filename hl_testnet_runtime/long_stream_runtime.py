@@ -408,15 +408,21 @@ def _short_pending_readiness(controller, route):
                     orders = reader.read('frontendOpenOrders', route['account'])
                     positions = reader.read('clearinghouseState', route['account'])
                     if (not isinstance(orders, list) or not isinstance(positions, dict)
-                            or not isinstance(positions.get('assetPositions'), list)):
+                            or not isinstance(positions.get('assetPositions'), list)
+                            or any(not isinstance(o, dict) or not isinstance(o.get('coin'), str)
+                                   for o in orders)
+                            or any(not isinstance(p, dict) or not isinstance(p.get('position'), dict)
+                                   or not isinstance(p['position'].get('coin'), str)
+                                   for p in positions['assetPositions'])):
                         raise DispatchError('PUBLIC_ACCOUNT_STATE_INVALID')
                     item['symbol_open_orders_present'] = any(
-                        isinstance(o, dict) and o.get('coin') == state['symbol'] for o in orders)
+                        o['coin'] == state['symbol'] for o in orders)
+                    quantities = [(p['position']['coin'],life.number(
+                        p['position'].get('szi'),signed=True))
+                        for p in positions['assetPositions']]
                     item['symbol_position_present'] = any(
-                        isinstance(p, dict) and isinstance(p.get('position'), dict)
-                        and p['position'].get('coin') == state['symbol']
-                        and life.number(p['position'].get('szi'), signed=True) != 0
-                        for p in positions['assetPositions'])
+                        symbol == state['symbol'] and quantity != 0
+                        for symbol,quantity in quantities)
                 report['pending'].append(item)
             report['status'] = 'PENDING_PUBLIC_EVIDENCE_OBSERVED'
     except Exception:
