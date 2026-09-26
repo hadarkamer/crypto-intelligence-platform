@@ -71,11 +71,11 @@ def execution_unlocked(env):
         and env.get('HL_TESTNET_RUNTIME_MODE') == 'single_testnet_attempt_v1')
 
 
-def default_native_snapshot(route, reader, symbol, *, plan=None):
+def default_native_snapshot(route, reader, symbol, *, plan=None, allow_owned_exposure=False):
     """Conservative evidence for this one account/native USDC only, not all default users.
 
-    No summed balances, guessed mode or changed leverage. This initial adapter
-    deliberately remains empty-account-only; multi-card execution is a later gate.
+    No summed balances, guessed mode or changed leverage. Existing exposure is
+    permitted only when the continuous worker has reconciled its owned markets.
     """
     account, agent = route['account'], route['agent']
     if account != PHANTOM:
@@ -93,7 +93,7 @@ def default_native_snapshot(route, reader, symbol, *, plan=None):
     perp = reader.read('clearinghouseState', user=account)
     if not isinstance(perp, dict) or not isinstance(perp.get('assetPositions'), list):
         raise checks.Blocked('INVALID_ACCOUNT_STATE')
-    if any(checks.number(p['position']['szi'], signed=True) != 0 for p in perp['assetPositions']):
+    if not allow_owned_exposure and any(checks.number(p['position']['szi'], signed=True) != 0 for p in perp['assetPositions']):
         raise checks.Blocked('INITIAL_ACCOUNT_NOT_EMPTY')
     summary = perp.get('marginSummary', {})
     equity = checks.number(summary.get('accountValue'))
@@ -101,7 +101,9 @@ def default_native_snapshot(route, reader, symbol, *, plan=None):
     used = checks.number(summary.get('totalMarginUsed'))
     notional = checks.number(summary.get('totalNtlPos'))
     unheld = checks.number(perp.get('withdrawable'))
-    if not (equity == raw and equity > 0 and 0 < unheld <= equity and used == 0 and notional == 0):
+    if not (equity > 0 and 0 < unheld <= equity and raw >= 0 and used >= 0 and notional >= 0):
+        raise checks.Blocked('DEFAULT_NATIVE_BALANCE_NOT_RECONCILED')
+    if not allow_owned_exposure and not (equity == raw and used == 0 and notional == 0):
         raise checks.Blocked('DEFAULT_NATIVE_BALANCE_NOT_RECONCILED')
     spot = reader.read('spotClearinghouseState', user=account)
     total, _ = checks.unified_usdc(spot)
@@ -138,7 +140,9 @@ def budget_for_role(env, role, account, agent, plan, reader):
     route = route_for(env, role, account, agent, plan['side'])
     mode = reader.read('userAbstraction', user=route['account'])
     if mode == 'default':
-        return default_native_snapshot(route, reader, plan['symbol'], plan=plan)
+        return default_native_snapshot(route, reader, plan['symbol'], plan=plan,
+            allow_owned_exposure=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
+                                  and role=='short_account'))
     if mode not in ('disabled', 'unifiedAccount'):
         raise checks.Blocked('ACCOUNT_MODE_REQUIRES_REVIEW')
     return checks.run_check({'HL_TESTNET_ACCOUNT_ADDRESS': account,

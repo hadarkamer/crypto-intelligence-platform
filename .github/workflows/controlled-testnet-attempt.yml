@@ -40,4 +40,5 @@ jobs:
           hl_testnet_runtime.test_filled_trial_runtime
           hl_testnet_runtime.test_approved_alert_selection
           hl_testnet_runtime.test_long_stream_runtime
+          hl_testnet_runtime.test_two_account_execution
           hl_testnet_runtime.test_app_card_delivery

@@ -1,4 +1,4 @@
-"""One durable Testnet worker for delivered LONG cards.
+"""One durable Testnet worker for delivered cards in two separate accounts.
 
 The producer selects formulas. This worker resumes every owned market bucket
 before considering fresh cards. It never takes execution instructions from the
@@ -26,6 +26,7 @@ _thread = None
 _app_thread = None
 _health = dict(configured=False, running=False, last_status='DISABLED',
                cycles=0, order_requests_sent=0, new_entries_enabled=False,
+               short_entries_enabled=False, short_stream_configured=False,
                app_delivery_status='DISABLED')
 
 
@@ -56,6 +57,24 @@ def configuration(env):
         raise DispatchError('LONG_STREAM_START_IN_FUTURE')
     route = roles.route_for(env, 'long_account', side='LONG')
     return route, start
+
+
+def short_configuration(env):
+    """Absence preserves the deployed long-only release; a partial opt-in fails."""
+    keys = ('HL_TESTNET_SHORT_STREAM', 'HL_TESTNET_SHORT_ENTRY_ENABLED',
+            'HL_TESTNET_SHORT_NOT_BEFORE')
+    if not any(env.get(key) for key in keys):
+        return None
+    if (env.get('HL_TESTNET_SHORT_STREAM') != SOURCE
+            or env.get('HL_TESTNET_SHORT_ENTRY_ENABLED') not in ('true', 'false')):
+        raise DispatchError('SHORT_STREAM_CONFIGURATION_REQUIRED')
+    try:
+        start = timestamp(env['HL_TESTNET_SHORT_NOT_BEFORE'])
+    except (KeyError, TypeError, ValueError):
+        raise DispatchError('SHORT_STREAM_START_TIME_REQUIRED') from None
+    if start > datetime.now(timezone.utc):
+        raise DispatchError('SHORT_STREAM_START_IN_FUTURE')
+    return roles.route_for(env, 'short_account', side='SHORT'), start
 
 
 def _unfinished(state, now):
@@ -94,6 +113,8 @@ def _account_owned(venue, account, states):
         raise DispatchError('DUPLICATE_MARKET_BUCKET')
     known = {(s['symbol'],oid) for s in states for b in s['bindings']
              for leg in life.LEGS for oid in b['orders'][leg]}
+    expected = {s['symbol']:(life.number(s['evidence']['snapshot']['position_quantity'],signed=True)
+               if s['evidence'] is not None else 0) for s in states}
     if any(s['pending'] is not None for s in states):
         raise DispatchError('UNRESOLVED_ACCOUNT_REQUEST_NO_NEW_ENTRY')
     for row in orders:
@@ -111,13 +132,15 @@ def _account_owned(venue, account, states):
         if p['coin'] in seen:
             raise DispatchError('DUPLICATE_ACCOUNT_POSITION')
         seen.add(p['coin'])
-        if (life.number(p.get('szi'),signed=True)!=0
-                and (p['coin'] not in by_symbol or not by_symbol[p['coin']]['bindings'])):
+        actual=life.number(p.get('szi'),signed=True)
+        if actual!=expected.get(p['coin'],0):
             raise DispatchError('UNOWNED_ACCOUNT_POSITION_NO_NEW_ENTRY')
+    if any(quantity!=0 and symbol not in seen for symbol,quantity in expected.items()):
+        raise DispatchError('ACCOUNT_POSITION_DISAPPEARED_RECONCILE_FIRST')
     return True
 
 
-def tick(controller, route, not_before, *, new_entries):
+def tick(controller, route, not_before, *, new_entries, role='long_account'):
     """One bounded sweep. Every old exposure is serviced before new cards."""
     now = datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)
     states = controller.store.for_account(route['account'])
@@ -150,12 +173,12 @@ def tick(controller, route, not_before, *, new_entries):
     for _ in range(100):
         candidates,cursor = selection.page(controller.store.journal,
             not_before=not_before.isoformat(),now=now,after=cursor)
-        for cid,role in candidates:
-            if role!='long_account' or cid in known_cards:
+        for cid,card_role in candidates:
+            if role != card_role or cid in known_cards:
                 continue
             card=CardStore(controller.store.journal).load(cid)
-            if card['account_role']!='long_account':
-                raise DispatchError('LONG_SOURCE_ROLE_CHANGED')
+            if card['account_role'] != card_role:
+                raise DispatchError('STREAM_SOURCE_ROLE_CHANGED')
             try:
                 state=controller.register(cid)
             except DispatchError as exc:
@@ -164,7 +187,7 @@ def tick(controller, route, not_before, *, new_entries):
                     continue
                 raise
             if state['account']!=route['account']:
-                raise DispatchError('LONG_CARD_ACCOUNT_MISMATCH')
+                raise DispatchError('STREAM_CARD_ACCOUNT_MISMATCH')
             known_cards.add(cid)
             registered += 1
             if state['bucket'] not in touched:
@@ -180,7 +203,7 @@ def tick(controller, route, not_before, *, new_entries):
                 order_requests_sent=sent,new_cards_registered=registered)
 
 
-def observed_trades(controller, route):
+def observed_trades(controller, route, *, role='long_account'):
     """Read durable fill evidence for monitoring; never authorize an order."""
     result = []
     for state in controller.store.for_account(route['account']):
@@ -199,7 +222,7 @@ def observed_trades(controller, route):
             card = trade_cards.validate_card(original['card'])
             if (card['card_id'] != row['card_id'] or
                     card['record_kind'] != 'received_alert' or
-                    card['account_role'] != 'long_account'):
+                    card['account_role'] != role):
                 raise DispatchError('OBSERVED_TRADE_SOURCE_MISMATCH')
             remaining = life.number(row['remaining_quantity'])
             protected = (remaining > 0 and not row['issues'] and
@@ -215,33 +238,38 @@ def observed_trades(controller, route):
     return result
 
 
-def _loop(controller, route, start):
+def _loop(controller, streams):
     reported = set()
     while not _stop.is_set():
-        before=getattr(controller.venue,'sent',0)
-        try:
-            result=tick(controller,route,start,
-                        new_entries=controller.venue.env['HL_TESTNET_LONG_ENTRY_ENABLED']=='true')
-        except Exception:
-            result=dict(status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY',
-                order_requests_sent=max(0,getattr(controller.venue,'sent',0)-before),
-                new_cards_registered=0)
-        with _lock:
-            _health['cycles'] += 1
-            _health['last_status']=result['status']
-            _health['order_requests_sent']=getattr(controller.venue,'sent',0)
-        print(json.dumps({'testnet_long_stream':result},sort_keys=True),flush=True)
-        if result.get('active_buckets',0) or result.get('new_cards_registered',0):
+        results = []
+        for role,route,start,enabled_key in streams:
+            before=getattr(controller.venue,'sent',0)
             try:
-                for trade in observed_trades(controller,route):
-                    marker = (trade['card_id'],trade['state'],
-                              trade['protection_verified'],trade['closure_verified'])
-                    if marker not in reported:
-                        print(json.dumps({'testnet_long_trade_observed':trade},sort_keys=True),flush=True)
-                        reported.add(marker)
+                result=tick(controller,route,start,
+                            new_entries=controller.venue.env[enabled_key]=='true',role=role)
             except Exception:
-                print(json.dumps({'testnet_long_trade_observation':'UNAVAILABLE_RETRY'}),flush=True)
-        _stop.wait(2 if result['status']=='SWEEP_COMPLETE' else 10)
+                result=dict(status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY',
+                    order_requests_sent=max(0,getattr(controller.venue,'sent',0)-before),
+                    new_cards_registered=0)
+            results.append(result)
+            with _lock:
+                _health['cycles'] += 1
+                _health['last_status']=result['status']
+                _health['order_requests_sent']=getattr(controller.venue,'sent',0)
+            print(json.dumps({('testnet_long_stream' if role=='long_account' else 'testnet_short_stream'):result},sort_keys=True),flush=True)
+            if result.get('active_buckets',0) or result.get('new_cards_registered',0):
+                try:
+                    for trade in observed_trades(controller,route,role=role):
+                        marker = (trade['card_id'],trade['state'],
+                                  trade['protection_verified'],trade['closure_verified'])
+                        if marker not in reported:
+                            label='testnet_long_trade_observed' if role=='long_account' else 'testnet_short_trade_observed'
+                            print(json.dumps({label:trade},sort_keys=True),flush=True)
+                            reported.add(marker)
+                except Exception:
+                    label='testnet_long_trade_observation' if role=='long_account' else 'testnet_short_trade_observation'
+                    print(json.dumps({label:'UNAVAILABLE_RETRY'}),flush=True)
+        _stop.wait(2 if all(r['status']=='SWEEP_COMPLETE' for r in results) else 10)
     with _lock:
         _health['running']=False
 
@@ -267,6 +295,7 @@ def start():
     global _thread,_app_thread
     env=dict(os.environ)
     route,not_before=configuration(env)
+    short=short_configuration(env)
     app_mode=env.get('HL_TESTNET_APP_DELIVERY','')
     if app_mode not in ('','ed25519_signed_v1'):
         raise DispatchError('APP_DELIVERY_MODE_INVALID')
@@ -280,6 +309,8 @@ def start():
     from .alert_cards_intake import initialize as initialize_intake
     initialize_intake(controller.store.journal)
     controller.store.for_account(route['account'])
+    if short:
+        controller.store.for_account(short[0]['account'])
     with _lock:
         if _thread is not None and _thread.is_alive():
             return False
@@ -287,9 +318,14 @@ def start():
         _health.update(configured=True,running=True,last_status='STARTING',cycles=0,
                        order_requests_sent=0,
                        new_entries_enabled=env['HL_TESTNET_LONG_ENTRY_ENABLED']=='true',
+                       short_entries_enabled=bool(short and env['HL_TESTNET_SHORT_ENTRY_ENABLED']=='true'),
+                       short_stream_configured=bool(short),
                        app_delivery_status='STARTING' if app_mode else 'DISABLED')
-        _thread=threading.Thread(target=_loop,args=(controller,route,not_before),
-                                 daemon=True,name='long-testnet-card-stream')
+        streams=[('long_account',route,not_before,'HL_TESTNET_LONG_ENTRY_ENABLED')]
+        if short:
+            streams.append(('short_account',short[0],short[1],'HL_TESTNET_SHORT_ENTRY_ENABLED'))
+        _thread=threading.Thread(target=_loop,args=(controller,streams),
+                                 daemon=True,name='testnet-card-stream')
         _thread.start()
         if app_mode:
             _app_thread=threading.Thread(target=_app_loop,args=(controller,route,private_key),

@@ -11,7 +11,7 @@ from . import alert_cards_intake as intake, app, gunicorn_conf
 from . import approved_alert_selection as selection
 from . import app_card_delivery as app_delivery
 from .filled_dispatch_store import DispatchError
-from .test_card_lifecycle import A
+from .test_card_lifecycle import A, B
 from .test_filled_quantity_dispatch import NoExternal
 from .test_filled_quantity_dispatch import Venue, ROUTES2
 from .test_filled_quantity_exits import original, META
@@ -49,6 +49,30 @@ class ConfigurationTests(NoExternal):
         self.assertEqual(route['account'],A)
         self.assertEqual(start,datetime(2026,9,26,14,tzinfo=timezone.utc))
         self.assertTrue(intake.enabled(env()))
+        self.assertIsNone(stream.short_configuration(env()))
+
+    def test_short_release_requires_all_fields_and_own_route(self):
+        configured={**env(),
+            'HL_TESTNET_SHORT_ACCOUNT_ADDRESS':B,
+            'HL_TESTNET_SHORT_AGENT_ADDRESS':'0x'+'4'*40,
+            'HL_TESTNET_SHORT_STREAM':stream.SOURCE,
+            'HL_TESTNET_SHORT_ENTRY_ENABLED':'false',
+            'HL_TESTNET_SHORT_NOT_BEFORE':'2026-09-26T14:00:00+00:00'}
+        route,start=stream.short_configuration(configured)
+        self.assertEqual(route['account'],B)
+        self.assertEqual(start,datetime(2026,9,26,14,tzinfo=timezone.utc))
+        for key in ('HL_TESTNET_SHORT_ACCOUNT_ADDRESS','HL_TESTNET_SHORT_STREAM',
+                    'HL_TESTNET_SHORT_ENTRY_ENABLED','HL_TESTNET_SHORT_NOT_BEFORE'):
+            with self.subTest(key=key),self.assertRaises(Exception):
+                stream.short_configuration({**configured,key:''})
+        venue=dispatch.TestnetVenue(configured)
+        proposal=dict(card_id='b'*64,role='short_account',account=B,
+            operation='CREATE_EXIT',source_at='2026-09-26T14:00:00+00:00')
+        self.assertEqual(venue._gate(proposal,dispatch.AFTER_EXIT)['account'],B)
+        with self.assertRaisesRegex(DispatchError,'STREAM_ENTRIES_DISABLED'):
+            venue._gate({**proposal,'operation':'ENTRY'},dispatch.AFTER_EXIT)
+        with self.assertRaises(stream.roles.checks.Blocked):
+            venue._gate({**proposal,'account':A},dispatch.AFTER_EXIT)
 
     def test_all_other_release_modes_fail_closed(self):
         for key,value in (
@@ -112,6 +136,19 @@ class ConfigurationTests(NoExternal):
             fake.orders=[];fake.positions=[dict(coin='BTC',szi='2')]
             with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_POSITION'):
                 stream._account_owned(None,A,[])
+            fake.positions=[]
+            state=dict(symbol='BTC',pending=None,bindings=[dict(orders={
+                'ENTRY':[], 'STOP':[], 'TAKE_PROFIT':[]})],
+                evidence=dict(snapshot=dict(position_quantity='0')))
+            fake.positions=[dict(coin='BTC',szi='2')]
+            with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_POSITION'):
+                stream._account_owned(None,A,[state])
+            fake.positions=[dict(coin='BTC',szi='2'),dict(coin='ETH',szi='-3')]
+            owned=[{**state,'symbol':'BTC',
+                    'evidence':dict(snapshot=dict(position_quantity='2'))},
+                   {**state,'symbol':'ETH',
+                    'evidence':dict(snapshot=dict(position_quantity='-3'))}]
+            self.assertTrue(stream._account_owned(None,A,owned))
 
     def test_disabled_entries_still_service_existing_buckets(self):
         class Store:
@@ -196,8 +233,8 @@ class DurableLongStreamTests(NoExternal):
         self.route=ROUTES2['long_account']
         self.start=datetime.fromtimestamp((T-30000)/1000,timezone.utc)
 
-    def card(self,n):
-        _,record=original(n,'LONG')
+    def card(self,n,side='LONG'):
+        _,record=original(n,side)
         source=record['card']['prepared']['source']
         expiry=datetime.fromtimestamp((T+30000)/1000,timezone.utc).isoformat()
         card=trade_cards.prepare_card(source,META,rule_id='FORMULA_'+str(n),
@@ -315,6 +352,46 @@ class DurableLongStreamTests(NoExternal):
         self.assertEqual(saved['bindings'][0]['card_id'],card['card_id'])
         self.assertEqual(life.review(saved['bindings'],saved['evidence']['snapshot'],
             now_ms=self.v.now())['cards'][0]['state'],'CLOSED')
+
+    def test_short_receipt_to_fill_exits_closure_and_restart(self):
+        card=self.card(98,side='SHORT')
+        route=ROUTES2['short_account']
+        intake.initialize(self.j)
+        intake.ReceiptStore(self.j).save('d'*64,'RECORDED',card['card_id'],
+                                          {'source':'fixture'})
+        def short_tick(enabled):
+            return stream.tick(self.c,route,self.start,new_entries=enabled,
+                               role='short_account')
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
+            first=short_tick(True)
+            self.assertEqual(first['new_cards_registered'],1)
+            self.assertEqual(self.v.requests[0]['proposal']['role'],'short_account')
+            self.assertFalse(self.v.requests[0]['proposal']['action']['orders'][0]['b'])
+            self.v.fill('1000','100')
+            for _ in range(4):
+                self.v.t+=1
+                short_tick(False)
+        self.assertEqual([r['proposal']['leg'] for r in self.v.requests],
+                         ['ENTRY','STOP','TAKE_PROFIT'])
+        opened=stream.observed_trades(self.c,route,role='short_account')
+        self.assertEqual(opened[0]['card_id'],card['card_id'])
+        self.assertTrue(opened[0]['protection_verified'])
+        self.assertFalse(opened[0]['closure_verified'])
+        self.assertTrue(all(self.v.orders[oid]['order']['side']=='B'
+            for oid in ('1001','1002')))
+        self.v.fill('1002','100')
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
+            for _ in range(3):
+                self.v.t+=1
+                short_tick(False)
+        restarted=dispatch.Controller(self.store,self.v,ROUTES2,
+            after_exit_policy=dispatch.AFTER_EXIT)
+        saved=restarted.store.for_account(route['account'])[0]
+        view=life.review(saved['bindings'],saved['evidence']['snapshot'],now_ms=self.v.now())
+        self.assertEqual(view['cards'][0]['state'],'CLOSED')
+        self.assertTrue(view['cards'][0]['closure_verified'])
+        self.assertEqual(CardStore(self.j).load(card['card_id']),card)
+        self.assertTrue(stream.observed_trades(restarted,route,role='short_account')[0]['closure_verified'])
 
 
 if __name__=='__main__':
