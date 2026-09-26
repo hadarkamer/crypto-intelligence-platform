@@ -24,11 +24,18 @@ _META_AT=0.0
 
 
 def enabled(env):
+    mode=env.get('HL_TESTNET_RUNTIME_MODE')
+    controlled_intake=(mode=='filled_card_controlled_v1'
+        and env.get('HL_TESTNET_FILLED_AUTOWAIT')=='approved_next_u21_once_v1'
+        and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_single_card_v1'
+        and not env.get('HL_TESTNET_SAFETY_PIPELINE')
+        and not env.get('HL_TESTNET_CARD_SYNC')
+        and env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')=='disabled')
     return (env.get('HL_TESTNET_CARDS_INTAKE')=='record_only_v1'
         and env.get('RENDER_SERVICE_ID')=='srv-dakptbh594qs7395460g'
         and env.get('HL_TESTNET_CARDS_PHASE1')=='record_only_v1'
         and env.get('HL_TESTNET_JOURNAL_BACKEND')=='staging_postgres_v1'
-        and env.get('HL_TESTNET_RUNTIME_MODE') in ('read_only','cancel_monitor_testnet_v1')
+        and (mode in ('read_only','cancel_monitor_testnet_v1') or controlled_intake)
         and bool(wire.HEX.fullmatch(env.get('HL_TESTNET_CARDS_INTAKE_SECRET',''))))
 
 

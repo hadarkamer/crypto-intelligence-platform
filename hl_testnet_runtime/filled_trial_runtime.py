@@ -16,10 +16,12 @@ from . import two_account_execution as roles
 from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
 from .postgres_journal import PostgresJournal
 from .trade_card_store import CardStore
+from .source_window import source_fresh, timestamp
 
 VERSION = 'second-account-controlled-runtime-v1'
 PREPARE = 'prepare_second_account_no_orders_v1'
 EXECUTE = 'filled_card_controlled_v1'
+AUTOWAIT = 'approved_next_u21_once_v1'
 POLICY = dispatch.AFTER_EXIT
 DELAY_SECONDS = 2
 _lock = threading.Lock()
@@ -41,7 +43,16 @@ def configuration(env, *, sending=False):
                 or env.get('HL_TESTNET_SAFETY_PIPELINE')
                 or env.get('HL_TESTNET_CARD_SYNC')):
             raise DispatchError('CONTROLLED_WORKER_REQUIRES_EXCLUSIVE_EXPLICIT_RELEASE')
-        life.ident(env.get('HL_TESTNET_FILLED_CARD_ID'), r'[0-9a-f]{64}')
+        if env.get('HL_TESTNET_FILLED_AUTOWAIT') == AUTOWAIT:
+            from .alert_cards_intake import enabled as intake_enabled
+            if (env.get('HL_TESTNET_FILLED_CARD_ID') or not intake_enabled(env)):
+                raise DispatchError('ONE_FRESH_U21_INTAKE_CONFIGURATION_REQUIRED')
+            try:
+                timestamp(env['HL_TESTNET_FILLED_NOT_BEFORE'])
+            except (KeyError, TypeError, ValueError):
+                raise DispatchError('EXPLICIT_U21_START_TIME_REQUIRED') from None
+        else:
+            life.ident(env.get('HL_TESTNET_FILLED_CARD_ID'), r'[0-9a-f]{64}')
     else:
         if (env.get('HL_TESTNET_RUNTIME_MODE') != 'read_only'
                 or env.get('HL_TESTNET_FILLED_DISPATCH', 'disabled') != 'disabled'
@@ -149,28 +160,113 @@ def _loop(controller, bucket):
         _health['running'] = False
 
 
+def _next_u21_card(controller, not_before):
+    """Read authenticated, stored cards; never interpret the display text anew."""
+    from . import trade_cards as cards
+    journal=controller.store.journal
+    now=datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)
+    with journal._transaction() as conn:
+        CardStore(journal).ready(conn)
+        rows=conn.execute('''SELECT card_id,manifest,digest FROM hl_testnet_cards_v1.cards
+            WHERE source_stream LIKE %s AND created_at >= %s
+              AND (manifest->>'source_expires_at')::timestamptz > %s
+              AND EXISTS (SELECT 1 FROM hl_testnet_cards_v1.delivery_receipts r
+                  WHERE r.card_id=cards.card_id AND r.status='RECORDED')
+            ORDER BY created_at,card_id LIMIT 32''',('u21_xrp_short:%',not_before,now)).fetchall()
+    for cid,raw,checksum in rows:
+        if cards.checksum(raw)!=checksum:
+            raise DispatchError('STORED_CARD_CHECKSUM_MISMATCH')
+        card=cards.validate_card(raw)
+        if (card['card_id']==cid and card['rule']['id']=='U21_XRP_SHORT'
+                and card['record_kind']=='received_alert'
+                and card['state']=='RECORDED_ONLY'
+                and card['account_role']=='short_account'
+                and timestamp(card['prepared']['source']['at']) >= not_before
+                and source_fresh(timestamp(card['prepared']['source']['at']),
+                    card['source_expires_at'],now=now)):
+            return cid
+    return None
+
+
+def _wait_for_one(controller, bucket, env, not_before):
+    """One persistent account/market slot; restart resumes the same card."""
+    errors=0
+    while not _stop.is_set():
+        try:
+            state=controller.store.load(bucket)
+            originals=state['originals']
+            if len(originals)>1 or state['bindings'] and not originals:
+                raise DispatchError('ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED')
+            if originals:
+                cid=next(iter(originals))
+                card=CardStore(controller.store.journal).load(cid)
+                if (card!=originals[cid]['card'] or card['rule']['id']!='U21_XRP_SHORT'
+                        or card['account_role']!='short_account'):
+                    raise DispatchError('IMMUTABLE_ORIGINAL_CHANGED')
+            else:
+                try:
+                    deadline=int(env.get('HL_TESTNET_FILLED_APPROVAL_EXPIRES_MS',''))
+                except (ValueError,TypeError):
+                    raise DispatchError('EXACT_APPROVAL_DEADLINE_REQUIRED') from None
+                now_ms=controller.venue.now()
+                if deadline<=now_ms:
+                    with _lock:
+                        _health.update(last_status='APPROVAL_EXPIRED_WITHOUT_ENTRY',running=False)
+                    return
+                if deadline-now_ms>86400000:
+                    raise DispatchError('TRIAL_ENTRY_APPROVAL_WINDOW_INVALID')
+                cid=_next_u21_card(controller,not_before)
+                if cid is None:
+                    with _lock: _health['last_status']='WAITING_FOR_NEW_U21'
+                    _stop.wait(DELAY_SECONDS)
+                    continue
+                state=controller.register(cid,single_card=True)
+                if set(state['originals'])!={cid}:
+                    raise DispatchError('ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED')
+            # The exact card identity is local to this controller, not an env
+            # mutation or a way to reuse the release for a second alert.
+            controller.venue.env={**env,'HL_TESTNET_FILLED_CARD_ID':cid}
+            _loop(controller,bucket)
+            return
+        except Exception:
+            with _lock: _health['last_status']='WAITING_RECONCILIATION_REQUIRED'
+            errors+=1
+            _stop.wait(min(30,DELAY_SECONDS*(2**min(errors,4))))
+    with _lock: _health['running']=False
+
+
 def start():
     """Future explicit release only. NOT called in the deployed read-only mode."""
     global _thread
     env = os.environ
     route = configuration(env, sending=True)
     controller = dispatch.controller_from_env(env)
-    cid = env['HL_TESTNET_FILLED_CARD_ID']
-    card = CardStore(controller.store.journal).load(cid)
-    if card['record_kind'] != 'received_alert' or card['account_role'] != 'short_account':
-        raise DispatchError('RECEIVED_SECOND_ACCOUNT_CARD_REQUIRED')
     with controller.store.journal._transaction() as conn:
         controller.store.ready(conn)  # No recurring/startup migration during execution.
-    state = controller.register(cid)
-    if state['account'] != route['account'] or set(state['originals']) != {cid}:
-        raise DispatchError('ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED')
+        if env.get('HL_TESTNET_FILLED_AUTOWAIT')==AUTOWAIT:
+            CardStore(controller.store.journal).ready(conn)
+    if env.get('HL_TESTNET_FILLED_AUTOWAIT')==AUTOWAIT:
+        not_before=timestamp(env['HL_TESTNET_FILLED_NOT_BEFORE'])
+        state=controller.store.create_bucket(route['account'],'XRP')
+        if state['account']!=route['account'] or state['symbol']!='XRP':
+            raise DispatchError('ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED')
+        target=_wait_for_one;args=(controller,state['bucket'],dict(env),not_before)
+    else:
+        cid = env['HL_TESTNET_FILLED_CARD_ID']
+        card = CardStore(controller.store.journal).load(cid)
+        if card['record_kind'] != 'received_alert' or card['account_role'] != 'short_account':
+            raise DispatchError('RECEIVED_SECOND_ACCOUNT_CARD_REQUIRED')
+        state = controller.register(cid)
+        if state['account'] != route['account'] or set(state['originals']) != {cid}:
+            raise DispatchError('ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED')
+        target=_loop;args=(controller,state['bucket'])
     with _lock:
         if _thread is not None and _thread.is_alive():
             return False
         _stop.clear()
         _health.update(configured=True, running=True, last_status='STARTING',
                        cycles=0, order_requests_sent=0, app_controls=False)
-        _thread = threading.Thread(target=_loop, args=(controller, state['bucket']),
+        _thread = threading.Thread(target=target, args=args,
                                    name='explicit-filled-card-trial', daemon=True)
         _thread.start()
     return True
