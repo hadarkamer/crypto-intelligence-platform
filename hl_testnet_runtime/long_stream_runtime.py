@@ -8,7 +8,9 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import os
+import re
 import threading
+import traceback
 
 from . import approved_alert_selection as selection, card_lifecycle as life
 from . import filled_quantity_dispatch as dispatch, two_account_execution as roles
@@ -251,10 +253,15 @@ def _loop(controller, streams):
             try:
                 result=tick(controller,route,start,
                             new_entries=controller.venue.env[enabled_key]=='true',role=role)
-            except Exception:
+            except Exception as exc:
+                code = str(exc)
+                known = isinstance(exc, (DispatchError, roles.checks.Blocked))
+                safe_code = code if known and re.fullmatch(r'[A-Z][A-Z0-9_]{2,99}', code) else type(exc).__name__
+                origin = traceback.extract_tb(exc.__traceback__)[-1]
                 result=dict(status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY',
                     order_requests_sent=max(0,getattr(controller.venue,'sent',0)-before),
-                    new_cards_registered=0)
+                    new_cards_registered=0, failure_code=safe_code,
+                    failure_origin=f'{os.path.basename(origin.filename)}:{origin.lineno}')
             results.append(result)
             with _lock:
                 _health['cycles'] += 1
