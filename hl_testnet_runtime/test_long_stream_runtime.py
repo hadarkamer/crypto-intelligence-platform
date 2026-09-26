@@ -278,18 +278,21 @@ class DurableLongStreamTests(NoExternal):
             self.v.fill('1000','100')
             for _ in range(4):
                 self.v.t+=1
-                stream.tick(self.c,self.route,self.start,new_entries=True)
+                stream.tick(self.c,self.route,self.start,new_entries=False)
         self.assertEqual([r['proposal']['leg'] for r in self.v.requests],
                          ['ENTRY','STOP','TAKE_PROFIT'])
         self.v.fill('1002','100')
         with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
             for _ in range(3):
                 self.v.t+=1
-                stream.tick(self.c,self.route,self.start,new_entries=True)
+                stream.tick(self.c,self.route,self.start,new_entries=False)
         state=self.store.for_account(self.route['account'])[0]
         view=life.review(state['bindings'],state['evidence']['snapshot'],now_ms=self.v.now())
         self.assertTrue(view['cards'][0]['closure_verified'])
         self.assertEqual(view['cards'][0]['state'],'CLOSED')
+        self.assertIsNotNone(view['cards'][0]['gross_pnl_usdc'])
+        self.assertIsNotNone(view['cards'][0]['net_before_funding_usdc'])
+        self.assertIsNone(view['cards'][0]['final_net_usdc'])
         self.assertIsNone(state['pending'])
         self.assertEqual(self.v.orders['1001']['status'],'canceled')
         self.assertEqual(self.v.sent,4)  # entry, stop, take profit, orphan stop cancel
