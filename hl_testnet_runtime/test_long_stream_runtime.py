@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
+from contextlib import nullcontext
 import os
 import io
 import json
@@ -45,6 +46,31 @@ def env():
 
 
 class ConfigurationTests(NoExternal):
+    def test_recent_short_cards_check_current_budget_without_dispatch(self):
+        controller=Mock()
+        controller.venue.env={}
+        controller.store.for_account.return_value=[dict(symbol='BTC',originals={'c':{}},
+                                                         bindings=[],pending=None)]
+        conn=Mock()
+        conn.execute.return_value.fetchall.return_value=[('c',)]
+        controller.store.journal._transaction.return_value=nullcontext(conn)
+        card=dict(prepared=dict(source=dict(at='2026-09-26T17:05:00+00:00'),
+                                execution=dict(symbol='BTC',side='SHORT',entry='100',
+                                               stop='102',take_profit='98')))
+        output=io.StringIO()
+        with patch.object(stream,'CardStore') as store, \
+             patch.object(stream.roles,'budget_for_role',
+                side_effect=stream.roles.checks.Blocked('ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE')), \
+             redirect_stdout(output):
+            store.return_value.load.return_value=card
+            stream._short_card_readiness(controller,{'account':B,'agent':AGENT})
+        report=json.loads(output.getvalue())['testnet_short_card_readiness']
+        self.assertEqual(report['buckets'][0]['registered_cards'],1)
+        self.assertEqual(report['cards'][0]['current_budget_status'],
+                         'ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE')
+        self.assertEqual(report['order_requests_sent'],0)
+        controller.venue.send.assert_not_called()
+
     def test_second_account_readiness_is_read_only_and_redacted(self):
         for failure, status in (
                 (stream.roles.checks.Blocked('AGENT_ACCOUNT_MISMATCH'), 'AGENT_ACCOUNT_MISMATCH'),
