@@ -68,6 +68,14 @@ class ConfigurationTests(NoExternal):
         self.assertEqual(report['order_requests_sent'],0)
         self.assertNotIn('private-',output.getvalue())
         controller.venue.send.assert_not_called()
+        reader.read.side_effect=[[dict(other='malformed')],dict(assetPositions=[])]
+        output=io.StringIO()
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader), \
+             redirect_stdout(output):
+            stream._short_pending_readiness(controller,{'account':B})
+        invalid=json.loads(output.getvalue())['testnet_short_pending_readiness']
+        self.assertEqual(invalid['status'],'READ_ONLY_REVIEW_UNAVAILABLE')
+        self.assertEqual(invalid['pending'],[])
 
     def test_recent_short_cards_check_current_budget_without_dispatch(self):
         controller=Mock()
