@@ -169,9 +169,25 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
                 cancel_first_crossing_at_ms=candidate['first_crossing_at_ms'],
                 cancel_sample_at_ms=candidate['sample_at_ms'])
             return proposal
-    unbound=[cid for cid in state['originals'] if cid not in bound]
-    if unbound:
-        cid=sorted(unbound)[0];original=state['originals'][cid]
+        # Hyperliquid nets positions by account and symbol. Independent TP and
+        # stop orders are not per-card OCO, so another card cannot enter this
+        # market until every older card and every one of its orders is final.
+        # Keep the newer alert recorded; source expiry is checked again below.
+        if any(v['state'] not in ('CLOSED', 'CANCELED_WITHOUT_FILL')
+               or v['issues'] for v in views['cards']):
+            return None
+    # Distinct alerts stay distinct. When a symbol is free again, consider
+    # their original source time, never the outcome or the card hash order.
+    unbound=sorted((cid for cid in state['originals'] if cid not in bound),
+        key=lambda cid:(state['originals'][cid]['card']['prepared']['source']['at'],cid))
+    for cid in unbound:
+        original=state['originals'][cid]
+        if 'source_expires_at' in original['card']:
+            from .source_window import source_fresh, timestamp
+            if not source_fresh(timestamp(original['card']['prepared']['source']['at']),
+                    original['card']['source_expires_at'],
+                    now=datetime.fromtimestamp(now_ms/1000,timezone.utc)):
+                continue
         draft=selected.validate_draft(original['card'],original['draft'],routes)
         if draft['entry_action']['orders'][0]['a']!=index or draft['size_decimals']!=decimals:
             raise DispatchError('ENTRY_METADATA_CHANGED_REVIEW_REQUIRED')
