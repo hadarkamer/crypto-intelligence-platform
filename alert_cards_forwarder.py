@@ -68,6 +68,24 @@ def read_delivered(scopes, fence):
                 for item in intents:
                     if item.get('status') == 'DELIVERED' and wire.moment(item['acknowledged_at']) >= cutoff:
                         result.append(wire.manual_delivery(item, scope))
+            # U21 receives subscription_scope(chat_id) = general-watch:<hash>;
+            # its key_for() hashes that whole scope a second time.
+            u21_scope = hashlib.sha256(('general-watch:'+scope).encode()).hexdigest()
+            row = conn.execute('SELECT value FROM bot_settings WHERE key=%s',
+                               ('u21-xrp-experimental-cap1-v1:'+u21_scope,)).fetchone()
+            if row:
+                raw = row['value']
+                if not isinstance(raw, str) or len(raw.encode()) > 1024*1024:
+                    raise wire.WireError('SOURCE_STATE_TOO_LARGE')
+                state = json.loads(raw)
+                if state.get('version') != 'u21-xrp-experimental-cap1-v1':
+                    raise wire.WireError('UNSUPPORTED_U21_SOURCE_VERSION')
+                intents = state.get('intents')
+                if not isinstance(intents, list) or len(intents)>128:
+                    raise wire.WireError('SOURCE_STATE_INVALID')
+                for item in intents:
+                    if item.get('status') == 'DELIVERED' and wire.moment(item['acknowledged_at']) >= cutoff:
+                        result.append(wire.u21_delivery(item, scope, state.get('config_version')))
             rows = conn.execute('''SELECT intent_id,rule_id,symbol,direction,source_at_utc,
                     expires_at,finished_at_utc,text,payload FROM dual_cvd65_intents
                 WHERE subscription_scope=%s AND status='DELIVERED' AND finished_at_utc>=%s

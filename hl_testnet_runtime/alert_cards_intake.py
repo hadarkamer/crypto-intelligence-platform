@@ -121,7 +121,8 @@ def accept(raw,store,*,read_metadata=metadata):
     try:
         try:
             card=cards.prepare_card(spec['signal'],read_metadata(),rule_id=spec['rule_id'],
-                threshold_pct=spec['threshold_pct'],record_kind='received_alert',source_stream=spec['source_stream'])
+                threshold_pct=spec['threshold_pct'],record_kind='received_alert',
+                source_stream=spec['source_stream'],source_expires_at=spec.get('source_expires_at'))
             if not card['planning']['positive_quantity']:
                 raise cards.CardError('ZERO_PLANNED_QUANTITY')
         except cards.CardError as exc:

@@ -18,7 +18,7 @@ def prepare(value):
     from .trade_cards import checksum, ROLES
     spec = wire.normalize(value)
     source = spec['signal']
-    return dict(version=VERSION, environment='testnet',
+    card = dict(version=VERSION, environment='testnet',
         card_id=checksum(['testnet', spec['source_stream'], source['event_id']]),
         source_stream=spec['source_stream'], event_id=source['event_id'],
         record_kind='received_alert',
@@ -32,6 +32,9 @@ def prepare(value):
         risk=dict(planned_usd=CURRENT_RISK_USD, policy=RISK_VERSION, costs_included=False),
         state=STATE, actual_execution=None, dispatch_enabled=False, revision=1,
         delivery=deepcopy(value))
+    if spec.get('source_expires_at') is not None:
+        card['source_expires_at'] = spec['source_expires_at']
+    return card
 
 
 def validate(card):

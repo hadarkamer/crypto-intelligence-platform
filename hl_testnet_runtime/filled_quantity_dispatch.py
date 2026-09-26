@@ -189,6 +189,10 @@ class Controller:
 
     def register(self, card_id):
         card=CardStore(self.store.journal).load(card_id)
+        # The U21 source has no half-threshold cancellation rule. Recording it
+        # does not authorize substituting an invented threshold for execution.
+        if card['rule']['threshold_pct'] is None:
+            raise DispatchError('SOURCE_CANCEL_POLICY_REQUIRES_OWNER_DECISION')
         account=life.address(self.routes[card['account_role']]['account'])
         draft=selected.prepare_entry(card,self.venue.metadata(),account,self.routes)
         state=self.store.create_bucket(account,draft['symbol'])

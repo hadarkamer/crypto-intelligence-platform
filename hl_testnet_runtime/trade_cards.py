@@ -48,7 +48,7 @@ def text(value):
 
 
 def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
-                 source_stream='bot_experimental'):
+                 source_stream='bot_experimental', source_expires_at=None):
     """Record a valid alert even when accounts are unconfigured; do not dispatch.
 
     Source IDs identify individual alerts, not a market wave or message text.
@@ -60,9 +60,24 @@ def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
         raise CardError('EXPLICIT_RECORD_KIND_REQUIRED')
     identifier(source_stream)
     identifier(rule_id)
+    u21 = (rule_id == 'U21_XRP_SHORT' and
+           re.fullmatch(r'u21_xrp_short:[0-9a-f]{64}', source_stream) is not None)
+    if (threshold_pct is None) != u21 or (source_expires_at is None) != (not u21):
+        raise CardError('SOURCE_CANCEL_POLICY_MISSING_OR_UNEXPECTED')
+    if u21:
+        if source.get('symbol') != 'XRP' or source.get('side') != 'SHORT':
+            raise CardError('U21_SOURCE_DIRECTION_INVALID')
+        from .source_window import timestamp
+        try:
+            source_time = timestamp(source['at'])
+            expiry = timestamp(source_expires_at)
+            if (expiry-source_time).total_seconds() != 90:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise CardError('U21_SOURCE_EXPIRY_INVALID') from None
     try:
-        threshold = precision.decimal_price(threshold_pct)
-        if threshold > 100:
+        threshold = None if u21 else precision.decimal_price(threshold_pct)
+        if threshold is not None and threshold > 100:
             raise CardError('FORMULA_THRESHOLD_MUST_BE_PERCENT')
         prepared = precision.prepare_signal(source, metadata)
     except precision.PrecisionError as exc:
@@ -74,16 +89,19 @@ def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
         step = Decimal(1).scaleb(-prepared['audit']['sz_decimals'])
         size = ((budget() / abs(entry-stop)) / step).to_integral_value(rounding=ROUND_DOWN) * step
         direction = Decimal(1) if execution['side'] == 'LONG' else Decimal(-1)
-        cancel_price = entry * (1 + direction * threshold / 200)
+        cancel_price = None if threshold is None else text(entry * (1 + direction * threshold / 200))
         planning = dict(quantity=text(size), distance_risk_usd=text(size * abs(entry-stop)),
-                        cancel_price=text(cancel_price), positive_quantity=size > 0)
-    return dict(version=VERSION, environment='testnet',
+                        cancel_price=cancel_price, positive_quantity=size > 0)
+    card = dict(version=VERSION, environment='testnet',
         card_id=checksum(['testnet', source_stream, execution['event_id']]),
         source_stream=source_stream, event_id=execution['event_id'], record_kind=record_kind,
         rule=dict(id=rule_id, threshold_pct=threshold_pct), prepared=prepared,
         account_role=ROLES[execution['side']], planning=planning,
         risk=dict(planned_usd=CURRENT_RISK_USD, policy=RISK_VERSION, costs_included=False),
         state='RECORDED_ONLY', actual_execution=None, dispatch_enabled=False, revision=1)
+    if u21:
+        card['source_expires_at'] = source_expires_at
+    return card
 
 
 def validate_card(card):
@@ -98,7 +116,7 @@ def validate_card(card):
                              'szDecimals': prepared['audit']['sz_decimals']}]}
         expected = prepare_card(prepared['source'], meta, rule_id=card['rule']['id'],
             threshold_pct=card['rule']['threshold_pct'], record_kind=card['record_kind'],
-            source_stream=card['source_stream'])
+            source_stream=card['source_stream'],source_expires_at=card.get('source_expires_at'))
         if canonical(expected) != canonical(card):
             raise ValueError()
         return deepcopy(card)
