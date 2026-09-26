@@ -47,6 +47,13 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Cannot encode {type(value).__name__}")
 
 
+def snapshot_digest(value: Any) -> str:
+    """Bind a cached source to the original snapshot without retaining its body."""
+    raw = json.dumps(value, sort_keys=True, default=_json_default,
+                     separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def _first_open(start: datetime) -> datetime:
     floor = start.replace(second=0, microsecond=0)
     return floor if start == floor else floor + MINUTE
@@ -483,10 +490,18 @@ def verified_closed_cache(*, previous_report: Mapping, previous_source: Mapping,
     old_waves = {w["btc_parent_movement_id"]: w for w in previous_source["waves"]}
     new_waves = {w["btc_parent_movement_id"]: w for w in parents}
     fields = ("event_id", "event_kind", "event_type", "symbol", "direction", "score", "current_price",
-        "delivery_status", "engine_snapshot", "event_fingerprint", "strategy_version", "code_version",
+        "delivery_status", "event_fingerprint", "strategy_version", "code_version",
         "membership_status", "membership_policy_version", "membership_parent_id")
     def signature(event):
         value = {field: event.get(field) for field in fields}
+        stored = event.get("engine_snapshot_digest")
+        if stored is not None:
+            if (not isinstance(stored, str) or len(stored) != 64
+                    or any(c not in "0123456789abcdef" for c in stored)
+                    or ("engine_snapshot" in event and not event.get("engine_snapshot_compacted")
+                        and snapshot_digest(event["engine_snapshot"]) != stored)):
+                raise ValueError("Invalid frozen engine snapshot digest")
+        value["engine_snapshot_digest"] = stored if stored is not None else snapshot_digest(event.get("engine_snapshot"))
         value.update({field: utc(event[field]).isoformat() if event.get(field) else None
             for field in ("alert_time_utc", "decision_time_utc", "btc_observed_close_utc")})
         return json.dumps(value, default=_json_default, sort_keys=True, allow_nan=False)
