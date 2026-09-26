@@ -9,6 +9,7 @@ import unittest
 from . import long_stream_runtime as stream, filled_quantity_dispatch as dispatch
 from . import alert_cards_intake as intake, app, gunicorn_conf
 from . import approved_alert_selection as selection
+from . import app_card_delivery as app_delivery
 from .filled_dispatch_store import DispatchError
 from .test_card_lifecycle import A
 from .test_filled_quantity_dispatch import NoExternal
@@ -245,6 +246,23 @@ class DurableLongStreamTests(NoExternal):
         self.assertEqual(rows,[(fresh['card_id'],'long_account')])
         self.assertIsNone(cursor)
         self.assertNotEqual(old['card_id'],fresh['card_id'])
+
+    def test_app_projection_uses_only_receipted_card_and_durable_entry_state(self):
+        card=self.card(96)
+        intake.initialize(self.j)
+        intake.ReceiptStore(self.j).save('b'*64,'RECORDED',card['card_id'],
+                                          {'source':'fixture'})
+        found=list(app_delivery.records(self.j))
+        self.assertEqual([row['card_id'] for row,_ in found],[card['card_id']])
+        self.sweep([card['card_id']])
+        state=self.store.for_account(self.route['account'])[0]
+        request=self.store.request(state['pending'])
+        result=app_delivery.project(found[0][0],state,created_at=found[0][1],
+                                    pending_request=request)
+        self.assertGreater(result['revision'],1)
+        self.assertEqual(result['payload']['status'],'WAITING_ENTRY')
+        self.assertIsNone(result['payload']['quantity_entered'])
+        self.assertFalse(result['payload']['pnl_verified'])
 
 
 if __name__=='__main__':
