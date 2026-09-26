@@ -236,4 +236,5 @@ def normalize(value):
     signal=dict(kind='SIGNAL',event_id=value['intent_id'],symbol=symbol,side=side,
                 entry=entry,stop=stop,take_profit=take,at=value['source_at'])
     return dict(signal=signal,rule_id=value['rule_id'],threshold_pct=threshold,
+                source_expires_at=value['expires_at'],
                 source_stream=value['family']+':'+value['scope_hash'])

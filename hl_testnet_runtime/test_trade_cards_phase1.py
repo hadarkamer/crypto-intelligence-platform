@@ -82,6 +82,18 @@ class CardTests(unittest.TestCase):
         self.assertFalse(item['dispatch_enabled'])
         self.assertNotIn('action',item)
 
+    def test_legacy_card_preserves_original_expiry_for_future_execution(self):
+        expiry='2026-09-16T12:10:00+00:00'
+        item=card(source_expires_at=expiry)
+        self.assertEqual(item['source_expires_at'],expiry)
+        self.assertEqual(c.validate_card(item),item)
+        self.assertNotIn('source_expires_at',card())  # older stored cards remain valid
+
+    def test_legacy_card_rejects_fabricated_or_extended_expiry(self):
+        for expiry in ('2026-09-16T12:00:00+00:00',
+                       '2026-09-16T12:10:01+00:00','2026-09-16T12:05:00'):
+            with self.assertRaises(c.CardError):card(source_expires_at=expiry)
+
     def test_no_new_identity_on_key_reordering(self):
         self.assertEqual(card(),card(dict(reversed(list(source().items())))))
 

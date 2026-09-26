@@ -59,7 +59,9 @@ class WireTests(unittest.TestCase):
         for key,value in [('source_at','bad'),('delivered_at','2026-09-16T11:00:00Z'),('expires_at','2026-09-16T20:00:00Z')]:
             with self.assertRaises(w.WireError):w.normalize({**delivery(),key:value})
     def test_expired_delivery_can_be_recorded_never_retimestamped(self):
-        self.assertEqual(w.normalize(delivery())['signal']['at'],'2026-09-16T12:05:00+00:00')
+        normalized=w.normalize(delivery())
+        self.assertEqual(normalized['signal']['at'],'2026-09-16T12:05:00+00:00')
+        self.assertEqual(normalized['source_expires_at'],delivery()['expires_at'])
     def test_bad_markup_or_price_order_rejected(self):
         for txt in (delivery()['text']+'<script>x</script>',delivery()['text'].replace('סטופלוס:</b> 98','סטופלוס:</b> 103')):
             with self.assertRaises(w.WireError):w.normalize({**delivery(),'text':txt})

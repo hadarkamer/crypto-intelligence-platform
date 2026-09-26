@@ -6,6 +6,7 @@ loopback CI DSN. Software rows cannot be loaded into the Testnet adapter.
 from copy import deepcopy
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from decimal import Decimal
 import inspect
 import json
@@ -15,7 +16,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from . import filled_quantity_dispatch as m, card_lifecycle as life
+from . import filled_quantity_dispatch as m, card_lifecycle as life, trade_cards
 from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
 from .postgres_journal import PostgresJournal, JournalError
 from .trade_card_store import CardStore
@@ -249,6 +250,17 @@ class DispatchDatabaseTests(NoExternal):
     def test_second_card_registration_does_not_bypass_pending(self):
         self.entry();b,o=original(2);self.cards.record(o['card'])
         with self.assertRaises(JournalError):self.c.register(b['card_id'])
+    def test_expired_general_alert_cannot_register(self):
+        _,o=original(3)
+        card=o['card']
+        source=card['prepared']['source']
+        expired=datetime.fromtimestamp((T-1000)/1000,timezone.utc).isoformat()
+        card=trade_cards.prepare_card(source,META,rule_id='SOFTWARE_TEST',
+            threshold_pct='1.5',record_kind='synthetic_test',source_expires_at=expired)
+        self.cards.record(card)
+        with self.assertRaisesRegex(DispatchError,'ORIGINAL_SOURCE_EXPIRED'):
+            self.c.register(card['card_id'])
+        self.assertEqual(self.v.sent,0)
     def test_receipt_without_correct_order_terms_cannot_bind(self):
         self.entry();self.v.orders['1000']['order']['reduceOnly']=True
         with self.assertRaises((JournalError,ValueError)):self.cycle(False)

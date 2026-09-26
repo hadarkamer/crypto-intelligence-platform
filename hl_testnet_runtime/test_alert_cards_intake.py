@@ -89,6 +89,7 @@ class IntakePostgresTests(unittest.TestCase):
         self.assertEqual(card['state'],'RECORDED_ONLY');self.assertEqual(card['account_role'],'long_account')
         self.assertIsNone(card['actual_execution']);self.assertEqual(card['risk']['planned_usd'],'10')
         self.assertEqual(card['prepared']['source']['at'],delivery()['source_at'])
+        self.assertEqual(card['source_expires_at'],delivery()['expires_at'])
     def test_both_sources_both_directions_are_supported_without_accounts(self):
         for side in ('LONG','SHORT'):
             for family in ('manual','dual_cvd65'):

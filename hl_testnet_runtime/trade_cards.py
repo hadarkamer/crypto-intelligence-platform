@@ -62,8 +62,17 @@ def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
     identifier(rule_id)
     u21 = (rule_id == 'U21_XRP_SHORT' and
            re.fullmatch(r'u21_xrp_short:[0-9a-f]{64}', source_stream) is not None)
-    if (threshold_pct is None) != u21 or (source_expires_at is None) != (not u21):
+    if (threshold_pct is None) != u21 or (u21 and source_expires_at is None):
         raise CardError('SOURCE_CANCEL_POLICY_MISSING_OR_UNEXPECTED')
+    if source_expires_at is not None and not u21:
+        from .source_window import timestamp
+        try:
+            source_time = timestamp(source['at'])
+            expiry = timestamp(source_expires_at)
+            if not 0 < (expiry-source_time).total_seconds() <= 600:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise CardError('SOURCE_EXPIRY_INVALID') from None
     if u21:
         if source.get('symbol') != 'XRP' or source.get('side') != 'SHORT':
             raise CardError('U21_SOURCE_DIRECTION_INVALID')
@@ -99,7 +108,7 @@ def prepare_card(source, metadata, *, rule_id, threshold_pct, record_kind,
         account_role=ROLES[execution['side']], planning=planning,
         risk=dict(planned_usd=CURRENT_RISK_USD, policy=RISK_VERSION, costs_included=False),
         state='RECORDED_ONLY', actual_execution=None, dispatch_enabled=False, revision=1)
-    if u21:
+    if source_expires_at is not None:
         card['source_expires_at'] = source_expires_at
     return card
 
