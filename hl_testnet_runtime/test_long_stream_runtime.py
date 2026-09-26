@@ -50,12 +50,13 @@ class ConfigurationTests(NoExternal):
         controller=Mock()
         controller.store.for_account.return_value=[dict(symbol='DOGE',pending='private-request-id')]
         controller.store.request.return_value=dict(phase='OUTCOME_UNKNOWN',
-            reply=dict(state='OUTCOME_UNKNOWN'),attempt_at_ms=T,
+            reply=dict(state='OUTCOME_UNKNOWN',code=None),attempt_at_ms=T,
             proposal=dict(action=dict(type='order',orders=[dict(c='private-cloid')])))
+        controller.venue.now.return_value=T+1000
         controller.venue.lookup.return_value=dict(status='unknownOid',
                                                   secret='private-venue-field')
         reader=Mock()
-        reader.read.side_effect=[[],dict(assetPositions=[])]
+        reader.read.side_effect=[[],dict(assetPositions=[]),[]]
         output=io.StringIO()
         with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader), \
              redirect_stdout(output):
@@ -63,8 +64,9 @@ class ConfigurationTests(NoExternal):
         report=json.loads(output.getvalue())['testnet_short_pending_readiness']
         self.assertEqual(report['status'],'PENDING_PUBLIC_EVIDENCE_OBSERVED')
         self.assertEqual(report['pending'],[dict(symbol='DOGE',phase='OUTCOME_UNKNOWN',
-            reply_state='OUTCOME_UNKNOWN',lookup_status='unknownOid',
-            symbol_open_orders_present=False,symbol_position_present=False)])
+            reply_state='OUTCOME_UNKNOWN',reply_code=None,lookup_status='unknownOid',
+            symbol_open_orders_present=False,symbol_position_present=False,
+            fill_window_complete=True,symbol_fills_since_attempt=False)])
         self.assertEqual(report['order_requests_sent'],0)
         self.assertNotIn('private-',output.getvalue())
         controller.venue.send.assert_not_called()
