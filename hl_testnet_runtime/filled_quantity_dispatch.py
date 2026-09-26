@@ -209,12 +209,13 @@ class Controller:
             if single_card and set(state['originals'])!={card_id}:
                 raise DispatchError('ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED')
             return state
-        if owner_policy is not None:
+        if 'source_expires_at' in card:
             from .source_window import source_fresh, timestamp
             if not source_fresh(timestamp(card['prepared']['source']['at']),
                     card['source_expires_at'],
                     now=datetime.fromtimestamp(self.venue.now()/1000,timezone.utc)):
-                raise DispatchError('U21_ORIGINAL_SOURCE_EXPIRED')
+                raise DispatchError('U21_ORIGINAL_SOURCE_EXPIRED' if owner_policy is not None
+                                    else 'ORIGINAL_SOURCE_EXPIRED')
         def update(conn,s):
             if s['pending']: raise DispatchError('REGISTER_WHILE_REQUEST_UNRESOLVED')
             if single_card and s['originals']:
