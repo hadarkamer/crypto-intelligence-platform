@@ -104,7 +104,13 @@ class ResidualPureTests(NoExternal):
         self.assertEqual(row['excess_independent_capacity'],'100')
         self.assertFalse(report['native_per_card_oco_verified'])
         p=new_entry(s)
-        with self.assertRaisesRegex(life.LifecycleError,'SHARED_MARKET_INDEPENDENT_PAIR_NOT_ISOLATED'):
+        with self.assertRaisesRegex(life.LifecycleError,'SHARED_SYMBOL_PREDECESSOR_NOT_FINAL'):
+            fence.validate_proposal(s,p,now_ms=T)
+
+    def test_even_a_single_resting_exit_blocks_next_card_entry(self):
+        s=state_from_case(q='100',stop='100');p=new_entry(s)
+        self.assertEqual(select(s)['leg'],'TAKE_PROFIT')
+        with self.assertRaisesRegex(life.LifecycleError,'SHARED_SYMBOL_PREDECESSOR_NOT_FINAL'):
             fence.validate_proposal(s,p,now_ms=T)
 
     def test_guard_does_not_change_single_card_tp_sl_policy(self):
