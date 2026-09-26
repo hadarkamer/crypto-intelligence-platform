@@ -181,6 +181,14 @@ class DurableLongStreamTests(NoExternal):
         self.cards=CardStore(self.j);self.cards.initialize()
         self.store=DispatchStore(self.j);self.store.initialize()
         self.v=Venue()
+        # Public reads consume time even when the in-memory venue is otherwise
+        # deterministic; consecutive reconciliations require newer evidence.
+        collect=self.v.collect
+        def moving_collect(value):
+            result=collect(value)
+            self.v.t += 1
+            return result
+        self.v.collect=moving_collect
         self.c=dispatch.Controller(self.store,self.v,ROUTES2,
             after_exit_policy=dispatch.AFTER_EXIT)
         self.route=ROUTES2['long_account']
