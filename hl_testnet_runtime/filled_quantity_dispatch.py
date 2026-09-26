@@ -191,7 +191,7 @@ class Controller:
         self.store,self.venue,self.routes=store,venue,deepcopy(routes)
         self.after_exit_policy=after_exit_policy
 
-    def register(self, card_id):
+    def register(self, card_id, *, single_card=False):
         card=CardStore(self.store.journal).load(card_id)
         owner_policy=None
         if card['rule']['threshold_pct'] is None:
@@ -206,6 +206,8 @@ class Controller:
             original['cancel_policy']=owner_policy
         if card_id in state['originals']:
             if original!=state['originals'][card_id]: raise DispatchError('IMMUTABLE_ORIGINAL_CHANGED')
+            if single_card and set(state['originals'])!={card_id}:
+                raise DispatchError('ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED')
             return state
         if owner_policy is not None:
             from .source_window import source_fresh, timestamp
@@ -215,6 +217,8 @@ class Controller:
                 raise DispatchError('U21_ORIGINAL_SOURCE_EXPIRED')
         def update(conn,s):
             if s['pending']: raise DispatchError('REGISTER_WHILE_REQUEST_UNRESOLVED')
+            if single_card and s['originals']:
+                raise DispatchError('ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED')
             s['originals'][card_id]=original
         return self.store.change(state['bucket'],state['revision'],'REGISTER_LOCAL_CARD',self.venue.now(),update)
 

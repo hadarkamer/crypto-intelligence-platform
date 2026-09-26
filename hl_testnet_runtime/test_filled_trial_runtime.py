@@ -4,6 +4,7 @@ Use the existing real controller/collector and disposable PostgreSQL. Only the
 external venue is replaced. Runtime flags are tested separately from policy.
 """
 from copy import deepcopy
+from datetime import timedelta
 import io
 import json
 import os
@@ -17,6 +18,10 @@ from .postgres_journal import PostgresJournal, JournalError
 from .trade_card_store import CardStore
 from .test_filled_quantity_exits import original
 from . import app, gunicorn_conf
+from . import alert_cards_intake as intake
+from .test_u21_intake import value as u21_value
+from .source_window import timestamp
+import alert_cards_wire as wire
 
 CI = os.environ.get('HL_JOURNAL_CI_URL')
 T = fixture.T
@@ -31,6 +36,18 @@ def read_only_env():
         HL_TESTNET_SAFETY_PIPELINE='integrated_readonly_v1',
         HL_TESTNET_FILLED_AFTER_EXIT_POLICY=m.POLICY,
         HL_TESTNET_FILLED_PREPARATION=m.PREPARE)
+
+
+def autowait_env():
+    env=read_only_env()
+    env.update(HL_TESTNET_RUNTIME_MODE=m.EXECUTE,
+        HL_TESTNET_FILLED_DISPATCH='approved_single_card_v1',
+        HL_TESTNET_SAFETY_PIPELINE='',HL_TESTNET_FILLED_AUTOWAIT=m.AUTOWAIT,
+        HL_TESTNET_FILLED_NOT_BEFORE='2026-01-01T12:00:00+00:00',
+        HL_TESTNET_CARDS_PHASE1='record_only_v1',
+        HL_TESTNET_CARDS_INTAKE='record_only_v1',
+        HL_TESTNET_CARDS_INTAKE_SECRET='ab'*32)
+    return env
 
 
 class PreparationBoundaryTests(fixture.NoExternal):
@@ -71,6 +88,22 @@ class PreparationBoundaryTests(fixture.NoExternal):
             HL_TESTNET_FILLED_DISPATCH='approved_single_card_v1',HL_TESTNET_SAFETY_PIPELINE='',
             HL_TESTNET_FILLED_CARD_ID='a'*64,HL_TESTNET_CARD_SYNC='registered_readonly_v1')
         with self.assertRaises(DispatchError):m.configuration(env,sending=True)
+
+    def test_autowait_needs_exact_record_intake_and_no_fixed_second_card(self):
+        env=autowait_env()
+        with patch.object(m.roles,'route_for',return_value={'account':m.roles.PHANTOM}):
+            self.assertEqual(m.configuration(env,sending=True)['account'],m.roles.PHANTOM)
+            for field,value in (('HL_TESTNET_CARDS_INTAKE',''),
+                                ('HL_TESTNET_CARD_SYNC','registered_readonly_v1'),
+                                ('HL_TESTNET_FILLED_CARD_ID','a'*64),
+                                ('HL_TESTNET_FILLED_NOT_BEFORE','invalid'),
+                                ('HL_TESTNET_CARDS_INTAKE_SECRET','')):
+                changed={**env,field:value}
+                with self.subTest(field=field),self.assertRaises(DispatchError):
+                    m.configuration(changed,sending=True)
+        self.assertTrue(intake.enabled(env))
+        self.assertFalse(intake.enabled({**env,'HL_TESTNET_FILLED_AUTOWAIT':''}))
+        self.assertFalse(intake.enabled({**env,'HL_TESTNET_RUNTIME_MODE':'single_testnet_attempt_v1'}))
 
     def test_future_worker_branch_does_not_start_legacy_tasks(self):
         with patch.dict(os.environ, {'HL_TESTNET_RUNTIME_MODE':m.EXECUTE}, clear=True),\
@@ -229,6 +262,40 @@ class ApprovedRemainderDriverTests(fixture.NoExternal):
         self.assertEqual(original_record,before)
         self.assertEqual(self.o['draft']['planned_quantity'],'100')
         self.assertEqual(self.b['account'],fixture.B)
+
+    def test_autowait_selects_only_delivered_fresh_u21_and_freezes_one_card(self):
+        intake.initialize(self.j)
+        raw=u21_value()
+        receipt=intake.ReceiptStore(self.j)
+        reply=intake.accept(wire.encoded(raw),receipt,
+            read_metadata=lambda:{'universe':[{'name':'XRP','szDecimals':1}]})
+        cid=receipt.get(reply['receipt_id'])['card_id']
+        source=timestamp(raw['source_at'])
+        self.v.t=int((source+timedelta(seconds=30)).timestamp()*1000)
+        self.v.metadata=lambda:{'universe':[{'name':'XRP','szDecimals':1}]}
+        self.assertIsNone(m._next_u21_card(self.c,source+timedelta(seconds=1)))
+        self.assertEqual(m._next_u21_card(self.c,source-timedelta(seconds=1)),cid)
+        state=self.c.register(cid,single_card=True)
+        self.assertEqual(set(state['originals']),{cid})
+        self.assertEqual(state['originals'][cid]['cancel_policy']['threshold_pct'],'0.5')
+        self.v.t=int((source+timedelta(seconds=90)).timestamp()*1000)
+        self.assertIsNone(m._next_u21_card(self.c,source-timedelta(seconds=1)))
+        self.assertEqual(self.c.register(cid,single_card=True)['bucket'],state['bucket'])
+        with patch.object(m,'_loop') as loop,\
+             patch.object(m,'_next_u21_card',side_effect=AssertionError('NO_SECOND_CHOICE')):
+            m._stop.clear()
+            m._wait_for_one(self.c,state['bucket'],{},source)
+            loop.assert_called_once_with(self.c,state['bucket'])
+            self.assertEqual(self.v.env['HL_TESTNET_FILLED_CARD_ID'],cid)
+        second=u21_value()
+        second['intent_id']='f'*32;second['position_id']='e'*32
+        self.v.t=int((source+timedelta(seconds=30)).timestamp()*1000)
+        r=intake.accept(wire.encoded(second),receipt,
+            read_metadata=lambda:{'universe':[{'name':'XRP','szDecimals':1}]})
+        second_id=receipt.get(r['receipt_id'])['card_id']
+        with self.assertRaisesRegex(DispatchError,'ONE_EXPLICIT_SECOND_ACCOUNT_TRIAL_REQUIRED'):
+            self.c.register(second_id,single_card=True)
+        self.assertEqual(set(self.store.load(state['bucket'])['originals']),{cid})
 
 
 if __name__=='__main__':unittest.main()
