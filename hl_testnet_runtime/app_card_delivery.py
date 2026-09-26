@@ -65,9 +65,9 @@ def project(card, state, *, created_at, pending_request=None):
                 payload=payload, observed_at=observed)
 
 
-def records(journal):
+def records(journal, *, start_after=None):
     """A bounded historical scan; failed sends retry from durable source on restart."""
-    after = None
+    after = start_after
     for _ in range(100):
         with journal._transaction() as conn:
             rows = conn.execute('''SELECT c.card_id,c.manifest,c.digest,c.created_at
@@ -115,25 +115,35 @@ def signed_post(payload, private_der):
 class Publisher:
     def __init__(self):
         self.sent = {}
+        self.cursor = None
         self.last_status = 'DISABLED'
 
     def pass_once(self, controller, route, key, *, post=signed_post):
         states = {s['symbol']:s for s in controller.store.for_account(route['account'])}
         attempted = 0
-        for card, created in records(controller.store.journal):
-            symbol = card['prepared']['source']['symbol']
-            state = states.get(symbol)
-            pending = (controller.store.request(state['pending'])
-                if state is not None and state['pending'] else None)
-            value = project(card,state,created_at=created,pending_request=pending)
-            fingerprint = hashlib.sha256(json.dumps(value,sort_keys=True,default=str).encode()).hexdigest()
-            marker = (value['revision'],fingerprint)
-            if self.sent.get(card['card_id']) == marker:
-                continue
-            if attempted >= 4:
+        start = self.cursor
+        for wrapping in (False,True):
+            if wrapping and start is None:
                 break
-            post(value,key)
-            self.sent[card['card_id']] = marker
-            attempted += 1
+            for card, created in records(controller.store.journal,
+                    start_after=None if wrapping else start):
+                if wrapping and card['card_id'] > start:
+                    break
+                symbol = card['prepared']['source']['symbol']
+                state = states.get(symbol)
+                pending = (controller.store.request(state['pending'])
+                    if state is not None and state['pending'] else None)
+                value = project(card,state,created_at=created,pending_request=pending)
+                fingerprint = hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
+                marker = (value['revision'],fingerprint)
+                if self.sent.get(card['card_id']) == marker:
+                    continue
+                post(value,key)
+                self.sent[card['card_id']] = marker
+                self.cursor = card['card_id']
+                attempted += 1
+                if attempted == 4:
+                    self.last_status = 'DELIVERED'
+                    return attempted
         self.last_status = 'DELIVERED' if attempted else 'UNCHANGED'
         return attempted

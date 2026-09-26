@@ -59,6 +59,30 @@ class ProjectionTests(unittest.TestCase):
             headers['X-Card-Timestamp'].encode()+b'.'+raw,
             base64.b64decode(headers['X-Card-Signature']))
 
+    def test_many_changing_cards_rotate_without_starving_later_ids(self):
+        cards=[dict(card_id=f'{i:064x}',prepared=dict(source=dict(symbol='DOGE')))
+               for i in range(1,7)]
+        class Store:
+            journal=object()
+            def for_account(self,account): return []
+        class Controller:
+            store=Store()
+        delivered=[]
+        def rows(journal,*,start_after=None):
+            for card in cards:
+                if start_after is None or card['card_id']>start_after:
+                    yield card,datetime.fromtimestamp(T/1000,timezone.utc)
+        def projection(card,state,*,created_at,pending_request=None):
+            return dict(card_id=card['card_id'],revision=1,payload={},observed_at=created_at.isoformat())
+        publisher=delivery.Publisher()
+        with patch.object(delivery,'records',side_effect=rows),\
+             patch.object(delivery,'project',side_effect=projection):
+            self.assertEqual(publisher.pass_once(Controller(),dict(account='ignored'),'',
+                post=lambda value,key:delivered.append(value['card_id'])),4)
+            self.assertEqual(publisher.pass_once(Controller(),dict(account='ignored'),'',
+                post=lambda value,key:delivered.append(value['card_id'])),2)
+        self.assertEqual(delivered,[card['card_id'] for card in cards])
+
 
 if __name__ == '__main__':
     unittest.main()
