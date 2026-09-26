@@ -186,6 +186,14 @@ def validate_proposal(state, proposal, *, now_ms):
     if leg == 'ENTRY':
         if b is not None:
             raise FenceError('REGISTERED_CARD_ENTRY_CANNOT_BE_REOPENED')
+        # Recheck at the durable reserve and nonce boundaries. A proposal made
+        # when a predecessor was flat cannot enter after a later fill or order
+        # has changed the shared account/symbol position.
+        if (any(c['state'] not in ('CLOSED', 'CANCELED_WITHOUT_FILL')
+                or c['issues'] for c in view['cards'])
+                or snap['open_orders']
+                or life.number(snap['position_quantity'], signed=True) != 0):
+            raise FenceError('SHARED_SYMBOL_PREDECESSOR_NOT_FINAL')
         if any(x['active_or_pending'] and life.number(x['excess_independent_capacity']) > 0 for x in rows):
             raise FenceError('SHARED_MARKET_INDEPENDENT_PAIR_NOT_ISOLATED')
         return True
