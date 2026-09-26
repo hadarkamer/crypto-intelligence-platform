@@ -74,7 +74,11 @@ def short_configuration(env):
         raise DispatchError('SHORT_STREAM_START_TIME_REQUIRED') from None
     if start > datetime.now(timezone.utc):
         raise DispatchError('SHORT_STREAM_START_IN_FUTURE')
-    return roles.route_for(env, 'short_account', side='SHORT'), start
+    route = roles.route_for(env, 'short_account', side='SHORT')
+    if env['HL_TESTNET_SHORT_ENTRY_ENABLED'] == 'true':
+        # Check the signer before the worker can reserve a durable request.
+        roles.wallet_for_role(env, 'short_account', route['account'], route['agent'])
+    return route, start
 
 
 def _unfinished(state, now):
