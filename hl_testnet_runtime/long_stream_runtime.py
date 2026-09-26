@@ -180,7 +180,43 @@ def tick(controller, route, not_before, *, new_entries):
                 order_requests_sent=sent,new_cards_registered=registered)
 
 
+def observed_trades(controller, route):
+    """Read durable fill evidence for monitoring; never authorize an order."""
+    result = []
+    for state in controller.store.for_account(route['account']):
+        if not state['bindings'] or state['evidence'] is None:
+            continue
+        snap = state['evidence']['snapshot']
+        view = life.review(state['bindings'], snap, now_ms=controller.venue.now())
+        if view['bucket_issues']:
+            continue
+        for row in view['cards']:
+            if life.number(row['entry_quantity']) <= 0:
+                continue
+            original = state['originals'].get(row['card_id'])
+            if original is None:
+                raise DispatchError('OBSERVED_TRADE_SOURCE_MISSING')
+            card = trade_cards.validate_card(original['card'])
+            if (card['card_id'] != row['card_id'] or
+                    card['record_kind'] != 'received_alert' or
+                    card['account_role'] != 'long_account'):
+                raise DispatchError('OBSERVED_TRADE_SOURCE_MISMATCH')
+            remaining = life.number(row['remaining_quantity'])
+            protected = (remaining > 0 and not row['issues'] and
+                life.number(row['stop_quantity_observed']) >= remaining and
+                life.number(row['take_profit_quantity_observed']) >= remaining)
+            result.append(dict(card_id=row['card_id'],
+                source_event_id=card['prepared']['source']['event_id'],
+                symbol=state['symbol'], state=row['state'],
+                entry_quantity=row['entry_quantity'],
+                protection_verified=protected,
+                closure_verified=row['closure_verified'],
+                evidence_at_ms=snap['at_ms'],order_requests_sent=0))
+    return result
+
+
 def _loop(controller, route, start):
+    reported = set()
     while not _stop.is_set():
         before=getattr(controller.venue,'sent',0)
         try:
@@ -195,6 +231,16 @@ def _loop(controller, route, start):
             _health['last_status']=result['status']
             _health['order_requests_sent']=getattr(controller.venue,'sent',0)
         print(json.dumps({'testnet_long_stream':result},sort_keys=True),flush=True)
+        if result.get('active_buckets',0) or result.get('new_cards_registered',0):
+            try:
+                for trade in observed_trades(controller,route):
+                    marker = (trade['card_id'],trade['state'],
+                              trade['protection_verified'],trade['closure_verified'])
+                    if marker not in reported:
+                        print(json.dumps({'testnet_long_trade_observed':trade},sort_keys=True),flush=True)
+                        reported.add(marker)
+            except Exception:
+                print(json.dumps({'testnet_long_trade_observation':'UNAVAILABLE_RETRY'}),flush=True)
         _stop.wait(2 if result['status']=='SWEEP_COMPLETE' else 10)
     with _lock:
         _health['running']=False
