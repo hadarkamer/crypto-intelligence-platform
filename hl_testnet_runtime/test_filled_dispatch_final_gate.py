@@ -32,6 +32,30 @@ class FinalBoundaryTests(fixture.NoExternal):
                 v._gate(p,m.AFTER_EXIT)
         self.assertEqual(v.sent,0)
 
+    def test_first_stream_entry_has_no_predecessor_lifecycle_to_review(self):
+        from datetime import datetime, timezone
+        cid='b'*64
+        at=datetime.fromtimestamp((T-1000)/1000,timezone.utc).isoformat()
+        expires=datetime.fromtimestamp((T+60000)/1000,timezone.utc).isoformat()
+        card=dict(record_kind='received_alert',account_role='short_account',
+            source_expires_at=expires,prepared=dict(execution=dict(
+                symbol='DOGE',side='SHORT',entry='10',stop='11',
+                take_profit='9',at=at)))
+        state=dict(bindings=[],originals={cid:dict(card=card)},
+                   evidence=dict(snapshot=dict()))
+        proposal=dict(card_id=cid,operation='ENTRY',role='short_account',account=fixture.B)
+        venue=m.TestnetVenue({'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1'})
+        venue.store=type('Store',(),{'for_account':lambda self,account:[]})()
+        budget=dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',
+                    test_plan_checked=True)
+        with patch.object(venue,'now',return_value=T), \
+                patch.object(venue,'_gate',return_value=ROUTES2['short_account']), \
+                patch.object(m.roles,'wallet_for_role',return_value=object()), \
+                patch.object(m.roles,'budget_for_role',return_value=budget), \
+                patch.object(m.life,'review',side_effect=AssertionError('NO_PREDECESSOR')), \
+                patch('hl_testnet_runtime.long_stream_runtime._account_owned',return_value=True):
+            venue.authorize(state,proposal,m.AFTER_EXIT)
+
     def test_expired_entry_window_does_not_disable_exit_management(self):
         env=dict(RENDER_SERVICE_ID=m.roles.SERVICE,HL_TESTNET_RUNTIME_MODE='filled_card_controlled_v1',
             HL_TESTNET_FILLED_DISPATCH='approved_single_card_v1',HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',
