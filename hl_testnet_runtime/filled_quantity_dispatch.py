@@ -49,6 +49,23 @@ def rejection_reason(raw):
     return message
 
 
+def rejection_subject(raw, account, agent):
+    """Classify a recovered signer without persisting either wallet address."""
+    if not isinstance(raw, dict):
+        return None
+    message = raw.get('response') if raw.get('status') == 'err' else None
+    match = (re.search(r'User or API Wallet (0x[0-9a-fA-F]{40}) does not exist', message)
+             if isinstance(message, str) and len(message) <= 1024 else None)
+    if match is None:
+        return None
+    recovered = match.group(1).lower()
+    if recovered == str(agent).lower():
+        return 'AGENT'
+    if recovered == str(account).lower():
+        return 'ACCOUNT'
+    return 'UNEXPECTED_SIGNER'
+
+
 def asset(meta, symbol):
     universe=meta.get('universe') if isinstance(meta,dict) else None
     if not isinstance(universe,list) or not 0 < len(universe) <= 10000:
@@ -70,13 +87,17 @@ def precise(price, quantity, decimals):
         raise DispatchError('CURRENT_PRICE_OR_SIZE_PRECISION_REJECTED')
 
 
-def normalized_reply(raw, kind):
+def normalized_reply(raw, kind, *, account=None, agent=None):
     if kind != 'cancel':
         result = recovery.classify_reply(raw,['ENTRY'])['ENTRY']
         if result['state'] == 'REJECTED':
             reason = rejection_reason(raw)
             if reason is not None:
                 result['venue_reason'] = reason
+            if account is not None and agent is not None:
+                subject = rejection_subject(raw, account, agent)
+                if subject is not None:
+                    result['rejection_subject'] = subject
         return result
     unknown=dict(state='OUTCOME_UNKNOWN',code=None,oid=None)
     if not isinstance(raw,dict): return unknown
@@ -419,7 +440,8 @@ class Controller:
         sent_before=getattr(self.venue,'sent',0)
         try:
             raw=self.venue.send(request)
-            reply=normalized_reply(raw,proposal['action']['type'])
+            reply=normalized_reply(raw,proposal['action']['type'],
+                                   account=proposal['account'],agent=route['agent'])
         except Exception:
             return dict(status='OUTCOME_UNKNOWN',order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
         self.store.reply(state,reply,self.venue.now())
@@ -428,6 +450,7 @@ class Controller:
         if reply['state']=='REJECTED':
             result['rejection_code']=reply['code']
             result['rejection_reason']=reply.get('venue_reason')
+            result['rejection_subject']=reply.get('rejection_subject')
             result['symbol']=proposal['symbol']
         return result
 

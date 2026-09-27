@@ -173,7 +173,8 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
             sent += result['order_requests_sent']
             if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
                 rejection=dict(rejection_code=result.get('rejection_code'),
-                               rejection_reason=result.get('rejection_reason'),symbol=state['symbol'])
+                               rejection_reason=result.get('rejection_reason'),
+                               rejection_subject=result.get('rejection_subject'),symbol=state['symbol'])
         except Exception as exc:
             errors += 1
             if first_failure is None:
@@ -228,7 +229,8 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
         sent += result['order_requests_sent']
         if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
             rejection=dict(rejection_code=result.get('rejection_code'),
-                           rejection_reason=result.get('rejection_reason'),symbol=result['symbol'])
+                           rejection_reason=result.get('rejection_reason'),
+                           rejection_subject=result.get('rejection_subject'),symbol=result['symbol'])
     summary=dict(status='SWEEP_COMPLETE',active_buckets=len(states),
                  order_requests_sent=sent,new_cards_registered=registered)
     if rejection is not None:
