@@ -66,6 +66,47 @@ def rejection_subject(raw, account, agent):
     return 'UNEXPECTED_SIGNER'
 
 
+def canonical_wire_action(action):
+    """Rebuild the exact SDK wire order after JSONB has discarded key order."""
+    if not isinstance(action, dict):
+        raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+    kind = action.get('type')
+    if kind == 'order':
+        if (set(action) != {'type','orders','grouping'} or action.get('grouping') != 'na'
+                or not isinstance(action.get('orders'), list) or len(action['orders']) != 1):
+            raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+        source = action['orders'][0]
+        if not isinstance(source, dict) or set(source) != {'a','b','p','s','r','t','c'}:
+            raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+        source_type = source['t']
+        if (isinstance(source_type, dict) and set(source_type) == {'limit'}
+                and isinstance(source_type['limit'], dict)
+                and set(source_type['limit']) == {'tif'}):
+            order_type = {'limit': {'tif': source_type['limit']['tif']}}
+        elif (isinstance(source_type, dict) and set(source_type) == {'trigger'}
+                and isinstance(source_type['trigger'], dict)
+                and set(source_type['trigger']) == {'isMarket','triggerPx','tpsl'}):
+            trigger = source_type['trigger']
+            order_type = {'trigger': {'isMarket': trigger['isMarket'],
+                                      'triggerPx': trigger['triggerPx'],
+                                      'tpsl': trigger['tpsl']}}
+        else:
+            raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+        order = {'a': source['a'], 'b': source['b'], 'p': source['p'],
+                 's': source['s'], 'r': source['r'], 't': order_type,
+                 'c': source['c']}
+        return {'type': 'order', 'orders': [order], 'grouping': 'na'}
+    if kind == 'cancel':
+        if (set(action) != {'type','cancels'} or not isinstance(action.get('cancels'), list)
+                or len(action['cancels']) != 1):
+            raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+        source = action['cancels'][0]
+        if not isinstance(source, dict) or set(source) != {'a','o'}:
+            raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+        return {'type': 'cancel', 'cancels': [{'a': source['a'], 'o': source['o']}]}
+    raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+
+
 def asset(meta, symbol):
     universe=meta.get('universe') if isinstance(meta,dict) else None
     if not isinstance(universe,list) or not 0 < len(universe) <= 10000:
@@ -641,8 +682,8 @@ class TestnetVenue:
         wallet=roles.wallet_for_role(self.env,p['role'],route['account'],route['agent'])
         from hyperliquid.utils.signing import sign_l1_action
         expires=request['nonce']+15000
-        action=deepcopy(p['action'])
-        if action['type'] not in ('order','cancel') or HOST!='api.hyperliquid-testnet.xyz':
+        action=canonical_wire_action(p['action'])
+        if HOST!='api.hyperliquid-testnet.xyz':
             raise DispatchError('ACTION_OR_HOST_FORBIDDEN')
         signature=sign_l1_action(wallet,action,None,request['nonce'],expires,False)
         body=json.dumps(dict(action=action,nonce=request['nonce'],signature=signature,expiresAfter=expires)).encode()
