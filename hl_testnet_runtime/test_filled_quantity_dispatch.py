@@ -175,6 +175,22 @@ class DispatchPureTests(NoExternal):
             self.assertNotIn(address.lower(),json.dumps(result).lower())
         self.assertIsNone(m.rejection_subject(
             dict(status='err',response='Order price too far from oracle'),A,AGENT))
+    def test_jsonb_reordered_action_is_rebuilt_in_exact_sdk_wire_order(self):
+        state=state_from_case();record=next(iter(state['originals'].values()))
+        original=record['draft']['entry_action']
+        reordered=json.loads(json.dumps(original,sort_keys=True))
+        self.assertNotEqual(list(reordered),['type','orders','grouping'])
+        wire=m.canonical_wire_action(reordered)
+        self.assertEqual(list(wire),['type','orders','grouping'])
+        self.assertEqual(list(wire['orders'][0]),['a','b','p','s','r','t','c'])
+        self.assertEqual(list(wire['orders'][0]['t']),['limit'])
+        self.assertEqual(wire,original)
+        cancel=m.canonical_wire_action({'cancels':[{'o':123,'a':0}],'type':'cancel'})
+        self.assertEqual(list(cancel),['type','cancels'])
+        self.assertEqual(list(cancel['cancels'][0]),['a','o'])
+        with self.assertRaisesRegex(DispatchError,'ACTION_WIRE_SHAPE_INVALID'):
+            m.canonical_wire_action({'type':'order','orders':original['orders'],
+                                     'grouping':'normalTpsl'})
     def test_rejected_entry_requires_two_public_empty_history_checks(self):
         venue=m.TestnetVenue({})
         state=dict(account=A,symbol='DOGE',bindings=[])

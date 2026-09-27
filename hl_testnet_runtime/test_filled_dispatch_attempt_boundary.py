@@ -129,6 +129,9 @@ class FinalAttemptBoundaryTests(fixtures.NoExternal):
 
     def test_actual_adapter_serialization_uses_only_fixed_testnet_in_local_double(self):
         clock=[T+3];venue=self.venue(clock);fake=dummy_signer(clock,0);value=request()
+        # PostgreSQL JSONB does not preserve the SDK's MessagePack map order.
+        value['proposal']['action']=json.loads(json.dumps(
+            value['proposal']['action'],sort_keys=True))
         before=deepcopy(value);calls=[]
         class Connection:
             status=200
@@ -146,7 +149,11 @@ class FinalAttemptBoundaryTests(fixtures.NoExternal):
             http.assert_called_once_with('api.hyperliquid-testnet.xyz',timeout=4)
         self.assertEqual(value,before);self.assertEqual(len(calls),1)
         self.assertEqual(calls[0][0:2],('POST','/exchange'))
-        self.assertEqual(calls[0][2]['action'],value['proposal']['action'])
+        wire=m.canonical_wire_action(value['proposal']['action'])
+        self.assertEqual(calls[0][2]['action'],wire)
+        self.assertEqual(fake.calls[0][1],wire)
+        self.assertEqual(list(fake.calls[0][1]),['type','orders','grouping'])
+        self.assertEqual(list(fake.calls[0][1]['orders'][0]),['a','b','p','s','r','t','c'])
         self.assertEqual(calls[0][2]['expiresAfter'],value['nonce']+15000)
         self.assertIs(fake.calls[0][-1],False)
         self.assertEqual(m.normalized_reply(result,'order')['state'],'ACCEPTED_UNVERIFIED')
