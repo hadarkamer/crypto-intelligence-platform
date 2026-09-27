@@ -185,6 +185,13 @@ class DispatchPureTests(NoExternal):
         self.assertEqual(list(wire['orders'][0]),['a','b','p','s','r','t','c'])
         self.assertEqual(list(wire['orders'][0]['t']),['limit'])
         self.assertEqual(wire,original)
+        trailing={**original,'orders':[{**original['orders'][0],
+            'p':'0.098700','s':'5927.0','t':{'trigger':{
+                'tpsl':'sl','triggerPx':'0.098700','isMarket':True}}}]}
+        normalized=m.canonical_wire_action(trailing)['orders'][0]
+        self.assertEqual((normalized['p'],normalized['s'],
+                          normalized['t']['trigger']['triggerPx']),
+                         ('0.0987','5927','0.0987'))
         cancel=m.canonical_wire_action({'cancels':[{'o':123,'a':0}],'type':'cancel'})
         self.assertEqual(list(cancel),['type','cancels'])
         self.assertEqual(list(cancel['cancels'][0]),['a','o'])
@@ -206,6 +213,24 @@ class DispatchPureTests(NoExternal):
             history.return_value=[dict(coin='DOGE')]
             with self.assertRaisesRegex(DispatchError,'REJECTION_FILL_FOUND_NO_RELEASE'):
                 venue.rejected_entry_evidence(state,request,'cloid')
+    def test_rejected_exit_signature_recovery_is_bounded_and_one_time(self):
+        venue=m.TestnetVenue({});state=state_from_case()
+        cid=next(iter(state['originals']))
+        request=dict(attempt_at_ms=T-121000,attempts=1,
+            reply=dict(oid=None,rejection_subject='UNEXPECTED_SIGNER'),
+            proposal=dict(card_id=cid,leg='STOP'))
+        observed=dict(bindings=state['bindings'],snapshot=state['evidence']['snapshot'])
+        with patch.object(venue,'now',return_value=T), \
+             patch.object(venue,'lookup',return_value={'status':'unknownOid'}) as lookup, \
+             patch.object(venue,'collect',return_value=observed) as collect, \
+             patch('hl_testnet_runtime.card_sync_evidence.PublicReader'), \
+             patch('hl_testnet_runtime.card_sync_evidence.history',return_value=[]) as history:
+            self.assertEqual(venue.rejected_exit_evidence(state,request,'cloid'),
+                             state['evidence']['snapshot'])
+            self.assertEqual((lookup.call_count,history.call_count,collect.call_count),(2,2,1))
+            state['originals'][cid]['exit_signature_recovery_used']=True
+            with self.assertRaisesRegex(DispatchError,'REJECTION_HISTORY_WINDOW_REQUIRES_REVIEW'):
+                venue.rejected_exit_evidence(state,request,'cloid')
     def test_confirmed_entry_rejection_is_not_mislabeled_as_unknown(self):
         request=dict(reply=dict(state='REJECTED',code='ORACLE_PRICE',oid=None),
                      proposal=dict(leg='ENTRY'))

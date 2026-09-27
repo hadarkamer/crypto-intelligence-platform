@@ -92,8 +92,19 @@ def canonical_wire_action(action):
                                       'tpsl': trigger['tpsl']}}
         else:
             raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
-        order = {'a': source['a'], 'b': source['b'], 'p': source['p'],
-                 's': source['s'], 'r': source['r'], 't': order_type,
+        def wire_number(value):
+            number = life.number(value,positive=True)
+            rendered = format(number,'f')
+            if '.' in rendered:
+                rendered = rendered.rstrip('0').rstrip('.')
+            if not rendered or rendered == '0':
+                raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+            return rendered
+        if 'trigger' in order_type:
+            order_type['trigger']['triggerPx'] = wire_number(
+                order_type['trigger']['triggerPx'])
+        order = {'a': source['a'], 'b': source['b'], 'p': wire_number(source['p']),
+                 's': wire_number(source['s']), 'r': source['r'], 't': order_type,
                  'c': source['c']}
         return {'type': 'order', 'orders': [order], 'grouping': 'na'}
     if kind == 'cancel':
@@ -381,6 +392,36 @@ class Controller:
                         return current
                     return self.store.change(bucket,state['revision'],
                         'REJECTED_ENTRY_NO_ORDER_RECONCILED',self.venue.now(),retire)
+                if (raw == {'status':'unknownOid'} and request['phase']=='REJECTED'
+                        and request['proposal']['leg'] in recovery.EXITS and bs
+                        and (request.get('reply') or {}).get('state')=='REJECTED'
+                        and (request.get('reply') or {}).get('rejection_subject')=='UNEXPECTED_SIGNER'
+                        and not state['originals'][request['proposal']['card_id']].get(
+                            'exit_signature_recovery_used')):
+                    snap=self.venue.rejected_exit_evidence(state,request,cloid)
+                    life.validate_snapshot(snap)
+                    if (snap['at_ms']<=request['attempt_at_ms'] or
+                            snap['account']!=state['account'] or snap['symbol']!=state['symbol'] or
+                            snap['history_complete'] is not True or
+                            snap['orders_complete'] is not True):
+                        raise DispatchError('POST_REJECTION_EVIDENCE_REQUIRED')
+                    def retire_exit(conn,s):
+                        current=self.store.pending_record(conn,s)
+                        original=s['originals'][request['proposal']['card_id']]
+                        if (current!=request or s['bindings']!=bs
+                                or s['pending']!=request['request_id']
+                                or original.get('exit_signature_recovery_used')):
+                            raise DispatchError('REJECTION_RECONCILIATION_CHANGED')
+                        original['exit_signature_recovery_used']=True
+                        s['evidence']=dict(bindings=deepcopy(bs),snapshot=snap)
+                        s['pending']=None
+                        current['phase']='OBSERVED'
+                        current['terminal_state']='REJECTED_NO_ORDER'
+                        current['observed_at_ms']=snap['at_ms']
+                        return current
+                    return self.store.change(bucket,state['revision'],
+                        'REJECTED_EXIT_SIGNATURE_NO_ORDER_RECONCILED',
+                        self.venue.now(),retire_exit)
                 oid=identity(raw,request,self.venue.now())
                 cid=request['proposal']['card_id'];leg=request['proposal']['leg']
                 b=next((b for b in bs if b['card_id']==cid),None)
@@ -556,6 +597,28 @@ class TestnetVenue:
         if self.now()-start>=DAY_MS:
             raise DispatchError('REJECTION_HISTORY_WINDOW_REQUIRES_REVIEW')
         return snap
+    def rejected_exit_evidence(self,state,request,cloid):
+        """One-time recovery for the diagnosed pre-canonical exit signature."""
+        from .card_sync_evidence import PublicReader, history, DAY_MS
+        start=request['attempt_at_ms'];now=self.now()
+        original=state['originals'][request['proposal']['card_id']]
+        if (not state['bindings'] or state['evidence'] is None or request['attempts']!=1
+                or request['reply']['oid'] is not None
+                or request['reply'].get('rejection_subject')!='UNEXPECTED_SIGNER'
+                or original.get('exit_signature_recovery_used')
+                or not 120000<=now-start<DAY_MS):
+            raise DispatchError('REJECTION_HISTORY_WINDOW_REQUIRES_REVIEW')
+        reader=PublicReader()
+        for _ in range(2):
+            if self.lookup(state['account'],cloid)!={'status':'unknownOid'}:
+                raise DispatchError('REJECTION_ORDER_LOOKUP_CHANGED')
+            if any(row.get('coin')==state['symbol'] for row in
+                   history(reader,state['account'],start,self.now())):
+                raise DispatchError('REJECTION_FILL_FOUND_NO_RELEASE')
+        observed=self.collect(state['evidence'])
+        if observed['bindings']!=state['bindings'] or self.now()-start>=DAY_MS:
+            raise DispatchError('POST_REJECTION_EVIDENCE_REQUIRED')
+        return observed['snapshot']
     def _gate(self,proposal,after_exit_policy):
         env=self.env
         stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
