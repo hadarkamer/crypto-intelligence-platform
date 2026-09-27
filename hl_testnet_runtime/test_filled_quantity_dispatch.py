@@ -166,6 +166,15 @@ class DispatchPureTests(NoExternal):
         self.assertNotIn('0x'+'a'*40,json.dumps(result))
         self.assertNotIn('Z'*64,json.dumps(result))
         self.assertNotIn('venue_reason',m.normalized_reply(dict(status='err',response='\nsecret'),'order'))
+    def test_recovered_signer_is_classified_without_persisting_wallets(self):
+        unexpected='0x'+'c'*40
+        for address,expected in ((AGENT,'AGENT'),(A,'ACCOUNT'),(unexpected,'UNEXPECTED_SIGNER')):
+            raw=dict(status='err',response='L1 error: User or API Wallet '+address+' does not exist.')
+            result=m.normalized_reply(raw,'order',account=A,agent=AGENT)
+            self.assertEqual(result['rejection_subject'],expected)
+            self.assertNotIn(address.lower(),json.dumps(result).lower())
+        self.assertIsNone(m.rejection_subject(
+            dict(status='err',response='Order price too far from oracle'),A,AGENT))
     def test_rejected_entry_requires_two_public_empty_history_checks(self):
         venue=m.TestnetVenue({})
         state=dict(account=A,symbol='DOGE',bindings=[])
