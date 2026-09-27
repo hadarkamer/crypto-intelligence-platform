@@ -57,6 +57,18 @@ class NoOrders(unittest.TestCase):
 
 
 class FilledQuantityTests(NoOrders):
+    def test_audited_exit_signature_recovery_marker_is_schema_safe(self):
+        ev=case();cid=ev[0][0]['card_id']
+        ev[3][cid]['exit_signature_recovery_used']=True
+        self.assertEqual(assess(ev)['state'],'PROPOSED_OFFLINE')
+        ev[3][cid]['unexpected_marker']=True
+        with self.assertRaisesRegex(life.LifecycleError,'UNEXPECTED_FIELDS'):
+            assess(ev)
+        del ev[3][cid]['unexpected_marker']
+        ev[3][cid]['exit_signature_recovery_used']=False
+        with self.assertRaisesRegex(life.LifecycleError,'UNEXPECTED_FIELDS'):
+            assess(ev)
+
     def test_selected_policy_does_not_authorize_trading_or_partial_cancel(self):
         selected=m.selection()
         self.assertTrue(selected['design_selected'])

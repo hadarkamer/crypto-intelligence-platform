@@ -91,7 +91,16 @@ def assess(bindings, snapshot, context, *, originals, routes, now_ms):
         raise life.LifecycleError('ALL_ORIGINAL_FILLED_ENTRY_RECORDS_REQUIRED')
     for b in bindings:
         original = originals[b['card_id']]
-        life.shape(original,'card draft')
+        # The connected dispatcher may attach one durable, boolean recovery
+        # fence after proving that a pre-canonical exit was rejected without
+        # creating an order. Keep the immutable execution inputs strict while
+        # allowing only that audited marker; arbitrary metadata still fails.
+        if (not isinstance(original,dict)
+                or set(original)-{'card','draft','exit_signature_recovery_used'}
+                or not {'card','draft'} <= set(original)
+                or ('exit_signature_recovery_used' in original
+                    and original['exit_signature_recovery_used'] is not True)):
+            raise life.LifecycleError('UNEXPECTED_FIELDS')
         draft = validate_draft(original['card'],original['draft'],routes)
         expected = life.binding_from_card(original['card'],account,routes,b['orders'])
         if b != expected or len(b['orders']['ENTRY']) != 1:
