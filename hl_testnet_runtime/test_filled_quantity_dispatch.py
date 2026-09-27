@@ -158,6 +158,29 @@ class DispatchPureTests(NoExternal):
     def test_rejection_cannot_look_like_acceptance(self):
         r=dict(status='ok',response=dict(type='order',data=dict(statuses=[dict(error='Reduce only order would increase position.')])) )
         self.assertEqual(m.normalized_reply(r,'order')['state'],'REJECTED')
+    def test_rejection_reason_is_persistable_and_redacts_wallets_and_long_tokens(self):
+        raw=dict(status='err',response='L1 error: User or API Wallet 0x'+'a'*40+' does not exist; token '+'Z'*64)
+        result=m.normalized_reply(raw,'order')
+        self.assertEqual(result['state'],'REJECTED')
+        self.assertIn('User or API Wallet [address] does not exist',result['venue_reason'])
+        self.assertNotIn('0x'+'a'*40,json.dumps(result))
+        self.assertNotIn('Z'*64,json.dumps(result))
+        self.assertNotIn('venue_reason',m.normalized_reply(dict(status='err',response='\nsecret'),'order'))
+    def test_rejected_entry_requires_two_public_empty_history_checks(self):
+        venue=m.TestnetVenue({})
+        state=dict(account=A,symbol='DOGE',bindings=[])
+        request=dict(attempt_at_ms=T-121000,attempts=1,reply=dict(oid=None))
+        snap=dict(at_ms=T,position_quantity='0',open_orders=[],fills=[])
+        with patch.object(venue,'now',return_value=T), \
+             patch.object(venue,'lookup',return_value={'status':'unknownOid'}) as lookup, \
+             patch.object(venue,'empty_snapshot',return_value=snap) as empty, \
+             patch('hl_testnet_runtime.card_sync_evidence.PublicReader'), \
+             patch('hl_testnet_runtime.card_sync_evidence.history',return_value=[]) as history:
+            self.assertEqual(venue.rejected_entry_evidence(state,request,'cloid'),snap)
+            self.assertEqual((lookup.call_count,empty.call_count,history.call_count),(2,2,2))
+            history.return_value=[dict(coin='DOGE')]
+            with self.assertRaisesRegex(DispatchError,'REJECTION_FILL_FOUND_NO_RELEASE'):
+                venue.rejected_entry_evidence(state,request,'cloid')
     def test_confirmed_entry_rejection_is_not_mislabeled_as_unknown(self):
         request=dict(reply=dict(state='REJECTED',code='ORACLE_PRICE',oid=None),
                      proposal=dict(leg='ENTRY'))
@@ -239,6 +262,27 @@ class DispatchDatabaseTests(NoExternal):
     def test_preview_records_no_requests_and_no_attempts(self):
         r=self.cycle(False);self.assertEqual(r['status'],'PREVIEW_ONLY');self.assertEqual(self.v.sent,0)
         with self.j._transaction() as conn:self.assertEqual(conn.execute(f'SELECT count(*) FROM {SCHEMA}.requests').fetchone()[0],0)
+    def test_confirmed_rejection_retires_once_and_never_replays_original_card(self):
+        def reject(_):
+            self.v.sent+=1;self.v.t+=10
+            return dict(status='err',response='Order price too far from oracle')
+        with patch.object(self.v,'send',side_effect=reject):
+            result=self.cycle()
+        self.assertEqual(result['status'],'REJECTED')
+        rid=self.store.load(self.bucket)['pending']
+        self.assertEqual(self.store.request(rid)['reply']['venue_reason'],'Order price too far from oracle')
+        self.v.t+=121000
+        with patch.object(self.v,'rejected_entry_evidence',create=True,
+                          side_effect=lambda state,request,cloid:self.v.empty_snapshot(A,'DOGE')):
+            self.cycle(False)
+        state=self.store.load(self.bucket)
+        self.assertIsNone(state['pending'])
+        self.assertTrue(state['originals'][self.b['card_id']]['entry_rejected_no_retry'])
+        self.assertEqual(self.store.request(rid)['terminal_state'],'REJECTED_NO_ORDER')
+        self.assertEqual(self.v.sent,1)
+        self.cycle(False)
+        self.assertIsNone(m.choose(self.store.load(self.bucket),ROUTES2,META,
+                                   self.v.sample(A,'DOGE'),now_ms=self.v.now()))
     def test_entry_stop_take_whole_chain_40_with_pending_60(self):
         self.protect();s=self.store.load(self.bucket);v=self.remaining()[0]
         self.assertEqual((v['entry_quantity'],v['stop_quantity_observed'],v['take_profit_quantity_observed']),('40','40','40'))
