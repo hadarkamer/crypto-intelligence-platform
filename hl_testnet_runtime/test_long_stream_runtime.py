@@ -51,7 +51,7 @@ class ConfigurationTests(NoExternal):
         controller.store.for_account.return_value=[dict(symbol='DOGE',pending='private-request-id')]
         controller.store.request.return_value=dict(phase='OUTCOME_UNKNOWN',
             reply=dict(state='OUTCOME_UNKNOWN',code=None),attempt_at_ms=T,
-            proposal=dict(action=dict(type='order',orders=[dict(c='private-cloid')])))
+            proposal=dict(leg='STOP',action=dict(type='order',orders=[dict(c='private-cloid')])))
         controller.venue.now.return_value=T+1000
         controller.venue.lookup.return_value=dict(status='unknownOid',
                                                   secret='private-venue-field')
@@ -64,12 +64,24 @@ class ConfigurationTests(NoExternal):
         report=json.loads(output.getvalue())['testnet_short_pending_readiness']
         self.assertEqual(report['status'],'PENDING_PUBLIC_EVIDENCE_OBSERVED')
         self.assertEqual(report['pending'],[dict(symbol='DOGE',phase='OUTCOME_UNKNOWN',
-            reply_state='OUTCOME_UNKNOWN',reply_code=None,lookup_status='unknownOid',
+            reply_state='OUTCOME_UNKNOWN',leg='STOP',reply_code=None,lookup_status='unknownOid',
             symbol_open_orders_present=False,symbol_position_present=False,
             fill_window_complete=True,symbol_fills_since_attempt=False)])
         self.assertEqual(report['order_requests_sent'],0)
         self.assertNotIn('private-',output.getvalue())
         controller.venue.send.assert_not_called()
+        controller.store.request.return_value['phase']='REJECTED'
+        controller.store.request.return_value['reply']=dict(state='REJECTED',
+            code='OTHER_REJECTION',venue_reason='Order price too far from oracle',
+            rejection_subject='AGENT')
+        reader.read.side_effect=[[],dict(assetPositions=[]),[]]
+        output=io.StringIO()
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader), \
+             redirect_stdout(output):
+            stream._short_pending_readiness(controller,{'account':B})
+        rejected=json.loads(output.getvalue())['testnet_short_pending_readiness']['pending'][0]
+        self.assertEqual(rejected['rejection_reason'],'Order price too far from oracle')
+        self.assertEqual(rejected['rejection_subject'],'AGENT')
         reader.read.side_effect=[[dict(other='malformed')],dict(assetPositions=[])]
         output=io.StringIO()
         with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader), \

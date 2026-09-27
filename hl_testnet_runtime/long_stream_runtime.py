@@ -405,13 +405,26 @@ def _short_pending_readiness(controller, route):
                 request = controller.store.request(state['pending'])
                 item = dict(symbol=state['symbol'], phase=request['phase'],
                             reply_state=(request.get('reply') or {}).get('state'))
+                proposal = request.get('proposal') or {}
+                leg = proposal.get('leg')
+                item['leg'] = leg if leg in life.LEGS else 'UNRECOGNIZED'
                 reply_code = (request.get('reply') or {}).get('code')
                 item['reply_code'] = (reply_code if reply_code in
                     set(dispatch.recovery.ERRORS.values()) | {'OTHER_REJECTION', None}
                     else 'UNRECOGNIZED')
+                reply = request.get('reply') or {}
+                reason = reply.get('venue_reason')
+                if (reply.get('state') == 'REJECTED' and isinstance(reason,str)
+                        and 0 < len(reason) <= 240
+                        and re.fullmatch(r'[\x20-\x7e]+',reason)
+                        and re.search(r'0x[0-9a-fA-F]{8,}',reason) is None):
+                    item['rejection_reason'] = reason
+                subject = reply.get('rejection_subject')
+                if subject in {'AGENT','ACCOUNT','UNEXPECTED_SIGNER'}:
+                    item['rejection_subject'] = subject
                 if (request.get('attempt_at_ms') is not None
                         and request['proposal']['action']['type'] == 'order'):
-                    cloid = request['proposal']['action']['orders'][0]['c']
+                    cloid = proposal['action']['orders'][0]['c']
                     raw = controller.venue.lookup(route['account'], cloid)
                     status = raw.get('status') if isinstance(raw, dict) else None
                     item['lookup_status'] = (status if isinstance(status, str)
