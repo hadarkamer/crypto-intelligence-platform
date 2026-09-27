@@ -185,7 +185,20 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
         if status!='open' or oid not in inventory: raise SyncError('ORDER_ACTIVATION_UNRESOLVED')
         actual = inventory[oid]
         fields = ('oid','coin','side','sz','limitPx','triggerPx','reduceOnly','orderType','isTrigger')
-        if any(actual.get(k)!=order.get(k) for k in fields): raise SyncError('OBSERVATION_CHANGED_RETRY')
+        for key in fields:
+            if actual.get(key) == order.get(key):
+                continue
+            # Expose only a fixed field/classification code. The order id,
+            # account and raw exchange values remain out of logs. Do not
+            # accept either observation until the discrepancy is understood.
+            suffix = 'DIFF'
+            if key in ('sz','limitPx','triggerPx'):
+                try:
+                    if Decimal(actual[key]) == Decimal(order[key]):
+                        suffix = 'FORMAT_ONLY'
+                except (KeyError,TypeError,ValueError,ArithmeticError):
+                    pass
+            raise SyncError(f'ORDER_VIEW_{key.upper()}_{suffix}')
         remaining = life.number(order.get('sz'),positive=True)
         with localcontext() as ctx:
             ctx.prec = 80
