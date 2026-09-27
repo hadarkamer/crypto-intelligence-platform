@@ -107,7 +107,7 @@ def _unfinished(state, now):
                        or c['issues'] for c in view['cards'])):
             return True
     bound = {b['card_id'] for b in state['bindings']}
-    return any(cid not in bound and
+    return any(cid not in bound and original.get('entry_rejected_no_retry') is not True and
         'source_expires_at' in original['card'] and
         source_fresh(timestamp(original['card']['prepared']['source']['at']),
                      original['card']['source_expires_at'], now=now)
@@ -163,6 +163,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     sent = 0
     errors = 0
     first_failure = None
+    rejection = None
     for state in states:
         try:
             if not _unfinished(state,now):
@@ -170,6 +171,9 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
             result = controller.cycle(state['bucket'],send=True,
                                       allow_new_entries=False)
             sent += result['order_requests_sent']
+            if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
+                rejection=dict(rejection_code=result.get('rejection_code'),
+                               rejection_reason=result.get('rejection_reason'),symbol=state['symbol'])
         except Exception as exc:
             errors += 1
             if first_failure is None:
@@ -186,6 +190,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     known_cards = {cid for state in states for cid in state['originals']}
     touched = [state['bucket'] for state in states if state['pending'] is None
                and any(cid not in {b['card_id'] for b in state['bindings']}
+                       and original.get('entry_rejected_no_retry') is not True
                        and 'source_expires_at' in original['card']
                        and source_fresh(timestamp(original['card']['prepared']['source']['at']),
                            original['card']['source_expires_at'],now=now)
@@ -221,8 +226,14 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     for bucket in touched:
         result=controller.cycle(bucket,send=True)
         sent += result['order_requests_sent']
-    return dict(status='SWEEP_COMPLETE',active_buckets=len(states),
-                order_requests_sent=sent,new_cards_registered=registered)
+        if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
+            rejection=dict(rejection_code=result.get('rejection_code'),
+                           rejection_reason=result.get('rejection_reason'),symbol=result['symbol'])
+    summary=dict(status='SWEEP_COMPLETE',active_buckets=len(states),
+                 order_requests_sent=sent,new_cards_registered=registered)
+    if rejection is not None:
+        summary.update(rejection)
+    return summary
 
 
 def observed_trades(controller, route, *, role='long_account'):

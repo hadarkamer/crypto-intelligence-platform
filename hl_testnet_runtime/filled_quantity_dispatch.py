@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import http.client
 import json
+import re
 import time
 
 from . import card_lifecycle as life, filled_quantity_exits as selected
@@ -23,6 +24,29 @@ from . import checks, two_account_execution as roles
 VERSION = 'connected-filled-quantity-dispatch-v1'
 AFTER_EXIT = 'cancel_remainder_after_exit_v1'
 HOST = 'api.hyperliquid-testnet.xyz'
+
+
+def rejection_reason(raw):
+    """Bound and redact a venue error before it reaches durable state or logs."""
+    if not isinstance(raw, dict):
+        return None
+    message = raw.get('response') if raw.get('status') == 'err' else None
+    if message is None and raw.get('status') == 'ok':
+        response = raw.get('response')
+        data = response.get('data') if isinstance(response, dict) else None
+        statuses = data.get('statuses') if isinstance(data, dict) else None
+        if (isinstance(statuses, list) and len(statuses) == 1
+                and isinstance(statuses[0], dict) and set(statuses[0]) == {'error'}):
+            message = statuses[0]['error']
+    if not isinstance(message, str) or not 0 < len(message) <= 1024:
+        return None
+    message = re.sub(r'0x[0-9a-fA-F]{8,}', '[address]', message)
+    message = re.sub(r'\b[0-9a-fA-F]{32,}\b', '[hex]', message)
+    message = re.sub(r'\b[A-Za-z0-9_+/=-]{48,}\b', '[token]', message)
+    message = re.sub(r'\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b', '[email]', message)
+    if len(message) > 240 or re.search(r'[^\x20-\x7e]', message):
+        return None
+    return message
 
 
 def asset(meta, symbol):
@@ -48,7 +72,12 @@ def precise(price, quantity, decimals):
 
 def normalized_reply(raw, kind):
     if kind != 'cancel':
-        return recovery.classify_reply(raw,['ENTRY'])['ENTRY']
+        result = recovery.classify_reply(raw,['ENTRY'])['ENTRY']
+        if result['state'] == 'REJECTED':
+            reason = rejection_reason(raw)
+            if reason is not None:
+                result['venue_reason'] = reason
+        return result
     unknown=dict(state='OUTCOME_UNKNOWN',code=None,oid=None)
     if not isinstance(raw,dict): return unknown
     if raw.get('status')=='err' and isinstance(raw.get('response'),str):
@@ -190,6 +219,8 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
         key=lambda cid:(state['originals'][cid]['card']['prepared']['source']['at'],cid))
     for cid in unbound:
         original=state['originals'][cid]
+        if original.get('entry_rejected_no_retry') is True:
+            continue
         if 'source_expires_at' in original['card']:
             from .source_window import source_fresh, timestamp
             if not source_fresh(timestamp(original['card']['prepared']['source']['at']),
@@ -260,6 +291,34 @@ class Controller:
             if request['attempt_at_ms'] is not None and request['proposal']['action']['type']=='order':
                 cloid=request['proposal']['action']['orders'][0]['c']
                 raw=self.venue.lookup(state['account'],cloid)
+                if (raw == {'status':'unknownOid'} and request['phase']=='REJECTED'
+                        and request['proposal']['leg']=='ENTRY' and not bs
+                        and (request.get('reply') or {}).get('state')=='REJECTED'):
+                    # Only a confirmed venue rejection can use this path. The
+                    # original intent remains terminal and can never be resent.
+                    snap=self.venue.rejected_entry_evidence(state,request,cloid)
+                    life.validate_snapshot(snap)
+                    if (snap['at_ms']<=request['attempt_at_ms'] or
+                            snap['account']!=state['account'] or snap['symbol']!=state['symbol'] or
+                            snap['position_quantity']!='0' or snap['fills'] or
+                            snap['open_orders'] or snap['terminal_orders'] or
+                            snap['history_complete'] is not True or
+                            snap['orders_complete'] is not True):
+                        raise DispatchError('POST_REJECTION_EVIDENCE_REQUIRED')
+                    def retire(conn,s):
+                        current=self.store.pending_record(conn,s)
+                        if (current!=request or s['bindings'] or s['pending']!=request['request_id']
+                                or s['originals'][request['proposal']['card_id']].get('entry_rejected_no_retry')):
+                            raise DispatchError('REJECTION_RECONCILIATION_CHANGED')
+                        s['originals'][request['proposal']['card_id']]['entry_rejected_no_retry']=True
+                        s['evidence']=dict(bindings=[],snapshot=snap)
+                        s['pending']=None
+                        current['phase']='OBSERVED'
+                        current['terminal_state']='REJECTED_NO_ORDER'
+                        current['observed_at_ms']=snap['at_ms']
+                        return current
+                    return self.store.change(bucket,state['revision'],
+                        'REJECTED_ENTRY_NO_ORDER_RECONCILED',self.venue.now(),retire)
                 oid=identity(raw,request,self.venue.now())
                 cid=request['proposal']['card_id'];leg=request['proposal']['leg']
                 b=next((b for b in bs if b['card_id']==cid),None)
@@ -364,7 +423,13 @@ class Controller:
         except Exception:
             return dict(status='OUTCOME_UNKNOWN',order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
         self.store.reply(state,reply,self.venue.now())
-        return dict(status=reply['state'],request_id=request['request_id'],order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
+        result=dict(status=reply['state'],request_id=request['request_id'],
+                    order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
+        if reply['state']=='REJECTED':
+            result['rejection_code']=reply['code']
+            result['rejection_reason']=reply.get('venue_reason')
+            result['symbol']=proposal['symbol']
+        return result
 
 
 class TestnetVenue:
@@ -409,6 +474,24 @@ class TestnetVenue:
         if self.now()-start>15000: raise DispatchError('PRE_ENTRY_CHECKPOINT_EXPIRED')
         return dict(environment='testnet',account=account,symbol=symbol,at_ms=start,history_complete=True,
             orders_complete=True,position_quantity='0',fills=[],open_orders=[],terminal_orders=[])
+    def rejected_entry_evidence(self,state,request,cloid):
+        """Independent public observations; no signer and no order endpoint."""
+        from .card_sync_evidence import PublicReader, history, DAY_MS
+        start=request['attempt_at_ms'];now=self.now()
+        if (state['bindings'] or request['attempts']!=1 or request['reply']['oid'] is not None
+                or not 120000<=now-start<DAY_MS):
+            raise DispatchError('REJECTION_HISTORY_WINDOW_REQUIRES_REVIEW')
+        reader=PublicReader()
+        for _ in range(2):
+            if self.lookup(state['account'],cloid)!={'status':'unknownOid'}:
+                raise DispatchError('REJECTION_ORDER_LOOKUP_CHANGED')
+            if any(row.get('coin')==state['symbol'] for row in
+                   history(reader,state['account'],start,self.now())):
+                raise DispatchError('REJECTION_FILL_FOUND_NO_RELEASE')
+            snap=self.empty_snapshot(state['account'],state['symbol'])
+        if self.now()-start>=DAY_MS:
+            raise DispatchError('REJECTION_HISTORY_WINDOW_REQUIRES_REVIEW')
+        return snap
     def _gate(self,proposal,after_exit_policy):
         env=self.env
         stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
