@@ -152,6 +152,17 @@ class EvidenceTests(unittest.TestCase):
         ev=evidence();reader=Reader(ev);reader.data['statuses']['10']['order']['statusTimestamp']=T+20000
         with self.assertRaisesRegex(e.SyncError,'CHANGED_RETRY'):e.collect(ev,reader,clock=lambda:T+10000)
 
+    def test_disagreeing_live_order_still_blocks_with_safe_field_code(self):
+        ev=evidence(is_open=True)
+        for change, code in ((lambda row: row.update(sz='99'), 'ORDER_VIEW_SZ_DIFF'),
+                             (lambda row: row.update(limitPx=f"{float(row['limitPx']):.2f}"), 'ORDER_VIEW_LIMITPX_FORMAT_ONLY')):
+            reader=Reader(ev)
+            change(reader.data['inventory'][0])
+            with self.assertRaisesRegex(e.SyncError,code) as error:
+                e.collect(ev,reader,clock=lambda:T+10000)
+            self.assertNotIn(str(reader.data['inventory'][0]['limitPx']),str(error.exception))
+            self.assertEqual(ev['snapshot']['position_quantity'],'100')
+
     def test_unknown_status_not_treated_as_closed(self):
         ev=evidence();reader=Reader(ev);reader.data['statuses']['10']['order']['status']='triggered'
         with self.assertRaises(e.SyncError):e.collect(ev,reader,clock=lambda:T+10000)
