@@ -588,6 +588,7 @@ class ExpiredEntryDatabaseTests(NoExternal):
         self.v.fill('1000','40');self.v.t=T+1
         self.c.cycle(self.bucket,send=True)  # Cancel the expired 60 first.
         self.c.refresh(self.bucket)
+        self.v.t+=1  # The next public observation must be newer than the cancellation.
         self.v.sample=lambda account,symbol:dict(mark_price='9',at_ms=self.v.now())
         result=self.c.cycle(self.bucket,send=True)
         self.assertEqual(result['status'],'ACCEPTED_UNVERIFIED')
@@ -600,6 +601,7 @@ class ExpiredEntryDatabaseTests(NoExternal):
         self.assertTrue(view['cards'][0]['closure_verified'])
         self.assertEqual(self.v.orders['1001']['status'],'filled')
         sent=self.v.sent
+        self.v.t+=1
         self.c.cycle(self.bucket,send=True)
         self.assertEqual(self.v.sent,sent)
 
@@ -608,6 +610,7 @@ class ExpiredEntryDatabaseTests(NoExternal):
         self.v.fill('1000','40');self.v.t=T+1
         self.c.cycle(self.bucket,send=True)
         self.c.refresh(self.bucket)
+        self.v.t+=1
         self.v.ioc_fill='15'
         self.v.sample=lambda account,symbol:dict(mark_price='9',at_ms=self.v.now())
         self.c.cycle(self.bucket,send=True)
@@ -617,6 +620,7 @@ class ExpiredEntryDatabaseTests(NoExternal):
                           self.v.requests[-1]['proposal']['quantity']),('STOP','25'))
         self.c.cycle(self.bucket,send=False)
         sent=self.v.sent
+        self.v.t+=1
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
             self.c.cycle(self.bucket,send=True)
         self.assertEqual(self.v.sent,sent)
