@@ -184,6 +184,14 @@ async def _reply(update, text, markup=None):
         await update.message.reply_text(text, parse_mode='HTML', reply_markup=markup)
 
 
+async def trade_id(update, context):
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != 'private' or chat.id != user.id:
+        return
+    await update.message.reply_text(f'מזהה המשתמש שלך בטלגרם: {user.id}. העתיקי אותו לשיחה שבה ביקשת להפעיל את דוחות העסקאות.')
+
+
 async def command(update, context):
     if not authorized(update):
         await update.message.reply_text('תצוגת העסקאות זמינה רק בצ׳אט הפרטי המורשה.')
@@ -229,6 +237,7 @@ async def callback(update, context):
 
 
 def register(app):
+    app.add_handler(CommandHandler('trade_id', trade_id))
     for name in ('long_trades', 'short_trades', 'open_trades', 'closed_trades', 'daily_trades'):
         app.add_handler(CommandHandler(name, command))
     app.add_handler(CallbackQueryHandler(callback, pattern=r'^(tr|td|dy):'))
