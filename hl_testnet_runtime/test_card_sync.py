@@ -365,7 +365,9 @@ print('RESTART_OK')'''
     def test_new_record_only_alert_is_not_treated_as_an_executed_trade(self):
         # The scheduler only scans registered lifecycle heads, not alert payloads.
         with self.j._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
+            table=conn.execute("SELECT to_regclass('hl_testnet_execution_v1.attempts')").fetchone()[0]
+            if table is not None:
+                self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
         self.assertEqual(self.s.summary()['registered_buckets'],1)
 
 
