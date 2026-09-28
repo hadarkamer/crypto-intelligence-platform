@@ -210,7 +210,8 @@ def identity(raw, request, now_ms):
     return str(oid)
 
 
-def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_policy='NOT_SELECTED'):
+def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_policy='NOT_SELECTED',
+           allowed_entry_card_id=None):
     """Build the next exact action from verified card quantities; never sends."""
     ev=state['evidence'];snap=ev['snapshot'];bs=state['bindings']
     if not 0<=now_ms-snap['at_ms']<=15000 or not 0<=now_ms-sample['at_ms']<=15000:
@@ -362,6 +363,8 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
     unbound=sorted((cid for cid in state['originals'] if cid not in bound),
         key=lambda cid:(state['originals'][cid]['card']['prepared']['source']['at'],cid))
     for cid in unbound:
+        if allowed_entry_card_id is not None and cid != allowed_entry_card_id:
+            continue
         original=state['originals'][cid]
         if original.get('entry_rejected_no_retry') is True:
             continue
@@ -544,7 +547,7 @@ class Controller:
             return current
         return self.store.change(bucket,state['revision'],'PUBLIC_RECONCILIATION',now,update)
 
-    def cycle(self,bucket,*,send=False,allow_new_entries=True):
+    def cycle(self,bucket,*,send=False,allow_new_entries=True,allowed_entry_card_id=None):
         """A false send flag never reserves, signs, cancels or places an order."""
         state=self.refresh(bucket)
         if state['pending']:
@@ -562,7 +565,8 @@ class Controller:
         pending=self.store.request(state['pending']) if state['pending'] else None
         sequence=pending['proposal']['sequence'] if pending else None
         proposal=choose(state,self.routes,meta,sample,now_ms=self.venue.now(),sequence=sequence,
-                        after_exit_policy=self.after_exit_policy)
+                        after_exit_policy=self.after_exit_policy,
+                        allowed_entry_card_id=allowed_entry_card_id)
         if send is not True:
             return dict(status='PREVIEW_ONLY',proposal=proposal,order_requests_sent=0)
         if proposal is None: return dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
@@ -720,6 +724,10 @@ class TestnetVenue:
             if env.get(flag)!='true':
                 raise DispatchError('STREAM_ENTRIES_DISABLED_MANAGEMENT_CONTINUES'
                     if proposal['role']=='short_account' else 'LONG_ENTRIES_DISABLED_MANAGEMENT_CONTINUES')
+            if (proposal['role']=='short_account' and
+                    (not re.fullmatch(r'[0-9a-f]{64}', env.get('HL_TESTNET_SHORT_TRIAL_CARD_ID',''))
+                     or proposal['card_id']!=env['HL_TESTNET_SHORT_TRIAL_CARD_ID'])):
+                raise DispatchError('SHORT_ENTRY_OUTSIDE_EXACT_TRIAL_CARD')
         # Check original source age again at the final boundary, including after
         # a slow budget read. Never refresh an alert timestamp on retry.
         if proposal['operation']=='ENTRY':
