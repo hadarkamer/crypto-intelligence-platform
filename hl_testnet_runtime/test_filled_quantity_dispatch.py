@@ -618,9 +618,7 @@ class ExpiredEntryDatabaseTests(NoExternal):
         self.c.cycle(self.bucket,send=True)
         self.assertEqual((self.v.requests[-1]['proposal']['leg'],
                           self.v.requests[-1]['proposal']['quantity']),('STOP','25'))
-        self.c.cycle(self.bucket,send=False)
         sent=self.v.sent
-        self.v.t+=1
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
             self.c.cycle(self.bucket,send=True)
         self.assertEqual(self.v.sent,sent)
