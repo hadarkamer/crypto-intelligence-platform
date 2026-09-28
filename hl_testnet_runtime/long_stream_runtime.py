@@ -249,14 +249,17 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     return summary
 
 
-def observed_trades(controller, route, *, role='long_account'):
+def observed_trades(controller, route, *, role='long_account', historical=False):
     """Read owned fills and working exits for monitoring; never authorize an order."""
     result = []
     for state in controller.store.for_account(route['account']):
         if not state['bindings'] or state['evidence'] is None:
             continue
         snap = state['evidence']['snapshot']
-        view = life.review(state['bindings'], snap, now_ms=controller.venue.now())
+        # Reports of stored evidence must be evaluated at the observation time.
+        # The caller must still show its age; this does not refresh live state.
+        view = life.review(state['bindings'], snap,
+                           now_ms=snap['at_ms'] if historical else controller.venue.now())
         bindings = {b['card_id']:b for b in state['bindings']}
         for row in view['cards']:
             if life.number(row['entry_quantity']) <= 0:
