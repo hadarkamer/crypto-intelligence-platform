@@ -21,7 +21,7 @@ from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
 from .postgres_journal import PostgresJournal, JournalError
 from .trade_card_store import CardStore
 from .test_filled_quantity_exits import original, case, META, ROUTES
-from .test_card_lifecycle import T, A, B
+from .test_card_lifecycle import T, A, B, terminal, order
 
 CI=os.environ.get('HL_JOURNAL_CI_URL')
 AGENT='0x'+'3'*40
@@ -154,6 +154,40 @@ class DispatchPureTests(NoExternal):
         # An accepted but entirely unfilled entry also expires on this clock.
         unfilled=state_from_case(q='0',side='SHORT',expiry_seconds=10)
         self.assertEqual(self.select(unfilled)['operation'],'CANCEL_EXPIRED_ENTRY_REMAINDER')
+    def test_crossed_old_target_protects_only_confirmed_partial_short(self):
+        s=state_from_case(q='40',side='SHORT',expiry_seconds=10)
+        b=s['bindings'][0];snap=s['evidence']['snapshot']
+        snap['open_orders']=[]
+        ending=terminal(b,'ENTRY','40');ending['state']='CANCELED'
+        snap['terminal_orders']=[ending]
+        before=deepcopy(s)
+        p=m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
+        self.assertEqual((p['leg'],p['operation'],p['quantity']),('STOP','CREATE_EXIT','40'))
+        self.assertEqual(p['action']['orders'][0]['t'],
+                         dict(trigger=dict(isMarket=True,triggerPx='10.1',tpsl='sl')))
+        self.assertTrue(p['action']['orders'][0]['r'])
+        from . import residual_exit_contract as contract, residual_exit_fence as fence
+        self.assertTrue(contract.validate_wire_proposal(s,p,now_ms=T))
+        self.assertTrue(fence.validate_proposal(s,p,now_ms=T))
+        self.assertEqual(s,before)
+        # A crossed STOP cannot be sent as if it were still protective.
+        with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
+            m.choose(s,ROUTES2,META,dict(mark_price='11',at_ms=T),now_ms=T)
+        # Once STOP is working, the old target remains flagged for review.
+        b['orders']['STOP']=['11'];snap['open_orders']=[order(b,'STOP','40')]
+        with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
+            m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
+    def test_crossed_target_stop_requires_final_entry_and_no_other_orders(self):
+        s=state_from_case(q='40',side='SHORT')
+        snap=s['evidence']['snapshot'];b=s['bindings'][0]
+        with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
+            m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
+        snap['terminal_orders']=[terminal(b,'ENTRY','40')]
+        snap['terminal_orders'][0]['state']='CANCELED'
+        b['orders']['STOP']=['11']
+        snap['open_orders']=[order(b,'STOP','1')]
+        with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
+            m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
     def test_quantity_change_is_cancel_exact_old_order_not_create_duplicate(self):
         s=state_from_case(q='60',stop='40',take='40');p=self.select(s)
         self.assertEqual(p['operation'],'CANCEL_FOR_RESIZE')

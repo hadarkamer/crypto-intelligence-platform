@@ -197,11 +197,18 @@ def plan(bindings, snapshot, context, *, now_ms):
                 _step(binding, leg, operation, life.text(remaining), orders[0]['oid'] if orders else None)))
     proposals.sort(key=lambda item: (item[0], item[1]['card_id'], item[1]['leg'], item[1]['order_id'] or ''))
     next_step = proposals[0][1] if proposals and not reasons else None
+    # A crossed old target still requires human review. Expose only an
+    # independently valid, missing STOP so the connected dispatcher can
+    # protect existing exposure without moving either original price.
+    protective_stop_step = next((step for _, step in proposals
+        if step['leg'] == 'STOP' and step['operation'] == 'CREATE_EXIT'), None) \
+        if reasons == {'EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE'} else None
     return dict(version=VERSION, environment='testnet', simulation_only=True,
         bucket=life.digest(['testnet', life.address(snapshot['account']), snapshot['symbol']]),
         basis=evidence_key(bindings,snapshot,context), observed_at_ms=snapshot['at_ms'],
         valid_until_ms=min(snapshot['at_ms'],at)+15000,
-        next_step=next_step, desired_exits=desired, urgent_card_ids=sorted(urgent),
+        next_step=next_step, protective_stop_step=protective_stop_step,
+        desired_exits=desired, urgent_card_ids=sorted(urgent),
         reasons=sorted(reasons), state='REVIEW_REQUIRED' if reasons else 'PROPOSED_OFFLINE' if next_step else 'NO_CORRECTION_NEEDED',
         dispatch_enabled=False, order_requests_sent=0, app_delivery_enabled=False,
         preserve_entry_orders=True, live_recovery_ready=False)

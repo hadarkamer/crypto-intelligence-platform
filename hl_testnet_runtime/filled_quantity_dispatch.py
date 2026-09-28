@@ -276,8 +276,24 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
                         return make(b['card_id'],'ENTRY','CANCEL_ENTRY_AFTER_EXIT',
                             dict(type='cancel',cancels=[dict(a=index,o=int(working[0]['oid']))]),'0',working[0]['oid'])
         if report['reasons']:
-            raise DispatchError('LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW')
-        step=report['next_step']
+            # Once the original take level has passed, do not place that stale
+            # take order. A sole card with a final entry, confirmed position,
+            # no exits and a still-valid original stop can be protected first.
+            # Every other review reason continues to block the dispatcher.
+            stop=report.get('protective_stop_step')
+            if (report['reasons'] != ['EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE']
+                    or stop is None or len(bs)!=1 or views['bucket_issues']
+                    or set(views['cards'][0]['issues']) !=
+                        {'STOP_COVERAGE_MISSING','TAKE_PROFIT_COVERAGE_MISSING'}
+                    or life.number(views['cards'][0]['entry_quantity'])<=0
+                    or life.number(views['cards'][0]['exit_quantity'])!=0
+                    or snap['open_orders']
+                    or not any(o['oid'] in bs[0]['orders']['ENTRY']
+                        for o in snap['terminal_orders'])):
+                raise DispatchError('LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW')
+            step=stop
+        else:
+            step=report['next_step']
         if step:
             cid,leg,op=step['card_id'],step['leg'],step['operation']
             b=next(b for b in bs if b['card_id']==cid)
