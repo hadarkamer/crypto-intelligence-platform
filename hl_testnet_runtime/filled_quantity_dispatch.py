@@ -185,16 +185,20 @@ def identity(raw, request, now_ms):
     oid=o.get('oid');stamp=life.moment(env.get('statusTimestamp'))
     if type(oid) is not int or not 0<oid<2**64 or not request['attempt_at_ms']<=stamp<=now_ms:
         raise DispatchError('ORDER_LOOKUP_ID_OR_TIME_MISMATCH')
-    leg=p['leg'];typ='Limit' if leg=='ENTRY' else 'Stop Market' if leg=='STOP' else 'Take Profit Limit'
+    leg=p['leg'];immediate=p['operation']=='CLOSE_PASSED_TAKE'
+    typ='Limit' if leg=='ENTRY' or immediate else 'Stop Market' if leg=='STOP' else 'Take Profit Limit'
     if (o.get('cloid')!=expected['c'] or o.get('coin')!=p['symbol']
             or o.get('side')!=('B' if expected['b'] else 'A')
             or type(o.get('reduceOnly')) is not bool or o['reduceOnly']!=expected['r']
             or life.number(o.get('origSz'),positive=True)!=life.number(expected['s'])
             or life.number(o.get('limitPx'),positive=True)!=life.number(expected['p'])
             or o.get('orderType')!=typ or o.get('isPositionTpsl',False) is not False
-            or type(o.get('isTrigger')) is not bool or o['isTrigger']!=(leg!='ENTRY')):
+            or type(o.get('isTrigger')) is not bool or o['isTrigger']!=(leg!='ENTRY' and not immediate)):
         raise DispatchError('ORDER_TERMS_NOT_BOUND_TO_INTENT')
-    if leg!='ENTRY' and life.number(o.get('triggerPx'),positive=True)!=life.number(expected['t']['trigger']['triggerPx']):
+    if immediate and (expected['t'] != {'limit':{'tif':'Ioc'}}
+                      or env.get('status')=='open'):
+        raise DispatchError('IMMEDIATE_TAKE_NOT_TERMINAL')
+    if leg!='ENTRY' and not immediate and life.number(o.get('triggerPx'),positive=True)!=life.number(expected['t']['trigger']['triggerPx']):
         raise DispatchError('TRIGGER_NOT_BOUND_TO_INTENT')
     if (request.get('reply') or {}).get('state')=='REJECTED':
         raise DispatchError('REJECTION_CONFLICTS_WITH_PUBLIC_ORDER')
@@ -261,6 +265,32 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
         context=dict(symbol=state['symbol'],mark_price=sample['mark_price'],at_ms=sample['at_ms'],cards={
             b['card_id']:dict(grouping='independent_fixed',requests={leg:dict(state='NONE',code=None) for leg in recovery.EXITS}) for b in bs})
         report=selected.assess(bs,snap,context,originals=originals,routes=routes,now_ms=now_ms)
+        # The old trigger cannot be installed after its level has passed. A
+        # single final-entry card may instead try one reduce-only IOC limit at
+        # the immutable target: it fills at that price or better, or vanishes.
+        # Never infer closure from the mark, and never retry this attempt after
+        # a terminal IOC. Public fills and terminal status decide what happened.
+        if report['reasons']==['EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE'] and len(bs)==1:
+            b=bs[0];v=views['cards'][0]
+            target=life.number(b['prices']['take_profit'])
+            mark=life.number(sample['mark_price'],positive=True)
+            favorable=mark>=target if b['side']=='LONG' else mark<=target
+            remaining=life.number(v['remaining_quantity'],signed=True)
+            terminal_ids={o['oid'] for o in snap['terminal_orders']}
+            if (favorable and not views['bucket_issues'] and remaining>0
+                    and set(v['issues']) <= {'STOP_COVERAGE_MISSING','TAKE_PROFIT_COVERAGE_MISSING'}
+                    and not b['orders']['TAKE_PROFIT']
+                    and all(oid in terminal_ids for oid in b['orders']['ENTRY'])
+                    and all(o['oid'] in b['orders']['STOP'] for o in snap['open_orders'])
+                    and life.number(v['stop_quantity_observed']) in (0,remaining)):
+                q=life.text(remaining);price=b['prices']['take_profit']
+                precise(price,q,decimals)
+                cloid='0x'+life.digest([VERSION,state['bucket'],b['card_id'],
+                                       'CLOSE_PASSED_TAKE',sequence])[:32]
+                order=dict(a=index,b=b['side']=='SHORT',p=price,s=q,r=True,
+                           t=dict(limit=dict(tif='Ioc')),c=cloid)
+                return make(b['card_id'],'TAKE_PROFIT','CLOSE_PASSED_TAKE',
+                            dict(type='order',orders=[order],grouping='na'),q)
         # Cancelling a still-pending entry after any exit is a separate, explicit policy.
         if 'ENTRY_REMAINDER_AFTER_EXIT_POLICY_REQUIRED' in report['reasons']:
             if after_exit_policy!=AFTER_EXIT:
@@ -283,10 +313,11 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
             stop=report.get('protective_stop_step')
             if (report['reasons'] != ['EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE']
                     or stop is None or len(bs)!=1 or views['bucket_issues']
-                    or set(views['cards'][0]['issues']) !=
+                    or 'STOP_COVERAGE_MISSING' not in views['cards'][0]['issues']
+                    or set(views['cards'][0]['issues']) -
                         {'STOP_COVERAGE_MISSING','TAKE_PROFIT_COVERAGE_MISSING'}
                     or life.number(views['cards'][0]['entry_quantity'])<=0
-                    or life.number(views['cards'][0]['exit_quantity'])!=0
+                    or life.number(views['cards'][0]['remaining_quantity'],signed=True)<=0
                     or snap['open_orders']
                     or not any(o['oid'] in bs[0]['orders']['ENTRY']
                         for o in snap['terminal_orders'])):
