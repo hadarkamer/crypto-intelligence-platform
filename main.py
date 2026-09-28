@@ -44,6 +44,7 @@ import manual_formula_alert_delivery
 import u21_experimental_worker
 import ai_agent
 import ai_telegram
+import trade_telegram
 import research_event_runtime
 import research_event_store
 import research_outcome_worker
@@ -1624,6 +1625,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/maxpain BTC long|short — Max Pain בלבד בכיוון שנבחר ידנית\n"
         "/magnet BTC — Magnet V1 + אישור נגזרים\n"
         "/coin BTC — הצגת המטבע מה-Snapshot השמור האחרון\n"
+        "/long_trades /short_trades — עסקאות הבוט לפי חשבון Testnet\n"
+        "/open_trades /closed_trades — פתוחות או סגורות לפי חשבון\n"
+        "/daily_trades [YYYY-MM-DD] — סיכום יומי לפי שעון ישראל\n"
         "/watch_on — Watch כללי מסונכרן ל-OI+CVD כל חצי שעה\n"
         "  ↳ כולל התראת קונפירמיישן משולב אוטומטית לכל המטבעות שנסרקו\n"
         "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
@@ -7740,6 +7744,7 @@ async def main():
     bot_app.add_handler(CommandHandler("oi_state", oi_state_cmd))
     bot_app.add_handler(CommandHandler("oi_regime", oi_state_cmd))
     ai_telegram.register_ai_handlers(bot_app)
+    trade_telegram.register(bot_app)
     bot_app.add_error_handler(telegram_error_handler)
 
     await bot_app.initialize()
