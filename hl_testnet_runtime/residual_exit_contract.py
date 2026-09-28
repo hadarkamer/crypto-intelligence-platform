@@ -14,6 +14,7 @@ CANCEL_LEGS = {
     'CANCEL_FOR_RESIZE': ('STOP', 'TAKE_PROFIT'),
     'CANCEL_ENTRY_AFTER_EXIT': ('ENTRY',),
     'CANCEL_UNFILLED_HALF_THRESHOLD': ('ENTRY',),
+    'CANCEL_EXPIRED_ENTRY_REMAINDER': ('ENTRY',),
 }
 HARD_QUANTITY_ISSUES = {
     'FILL_SIDE_MISMATCH', 'TERMINAL_FILL_TOTAL_MISMATCH',
@@ -78,6 +79,16 @@ def _validate(state, p, now_ms):
             raise ContractError('CLEANUP_REQUIRES_CONFIRMED_OWN_EXIT')
         if op == 'CANCEL_UNFILLED_HALF_THRESHOLD' and (entered != 0 or exited != 0):
             raise ContractError('HALF_THRESHOLD_CANNOT_CANCEL_FILLED_ENTRY')
+        if op == 'CANCEL_EXPIRED_ENTRY_REMAINDER':
+            from .source_window import timestamp
+            expiry=original['card'].get('source_expires_at')
+            if (view['bucket_issues'] or original['card']['record_kind']!='received_alert'
+                    or expiry is None or now_ms<int(timestamp(expiry).timestamp()*1000)
+                    or exited!=0 or len(binding['orders']['ENTRY'])!=1
+                    or set(owner['issues'])-{'STOP_COVERAGE_MISSING','TAKE_PROFIT_COVERAGE_MISSING'}
+                    or life.number(own_open[0]['quantity'],positive=True)+entered
+                        !=life.number(binding['planned_quantity'])):
+                raise ContractError('EXPIRED_REMAINDER_PROOF_REQUIRED')
         if op == 'CANCEL_ORPHAN_EXIT' and remaining > 0:
             raise ContractError('LIVE_CARD_EXIT_IS_NOT_AN_ORPHAN')
         if op == 'CANCEL_FOR_RESIZE' and (remaining <= 0
