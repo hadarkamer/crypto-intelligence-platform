@@ -162,7 +162,8 @@ def accept(raw,store,*,read_metadata=metadata):
     result=dict(receipt_id=identity,status='RECORDED' if saved['created'] else 'DUPLICATE',
                 record_only=True,card_state=card['state'])
     print(json.dumps({'testnet_cards_intake':dict(status=result['status'],family=value['family'],
-        account_role=card['account_role'],card_state=card['state'],order_requests_sent=0,
+        account_role=card['account_role'],card_id=card['card_id'],
+        card_state=card['state'],order_requests_sent=0,
         source_time_utc=spec['signal']['at'],observed_at_utc=datetime.now(timezone.utc).isoformat())}),flush=True)
     return result
 

@@ -205,10 +205,13 @@ class ConfigurationTests(NoExternal):
         with patch.object(stream.roles,'wallet_for_role',
                           side_effect=stream.roles.checks.Blocked('ROLE_AGENT_KEY_NOT_CONFIGURED')):
             with self.assertRaisesRegex(stream.roles.checks.Blocked,'NOT_CONFIGURED'):
-                stream.short_configuration({**configured,'HL_TESTNET_SHORT_ENTRY_ENABLED':'true'})
+                stream.short_configuration({**configured,'HL_TESTNET_SHORT_ENTRY_ENABLED':'true',
+                                            'HL_TESTNET_SHORT_TRIAL_CARD_ID':'b'*64})
         with patch.object(stream.roles,'wallet_for_role',return_value=object()) as signer:
-            stream.short_configuration({**configured,'HL_TESTNET_SHORT_ENTRY_ENABLED':'true'})
-            signer.assert_called_once_with({**configured,'HL_TESTNET_SHORT_ENTRY_ENABLED':'true'},
+            stream.short_configuration({**configured,'HL_TESTNET_SHORT_ENTRY_ENABLED':'true',
+                                        'HL_TESTNET_SHORT_TRIAL_CARD_ID':'b'*64})
+            signer.assert_called_once_with({**configured,'HL_TESTNET_SHORT_ENTRY_ENABLED':'true',
+                                            'HL_TESTNET_SHORT_TRIAL_CARD_ID':'b'*64},
                 'short_account',B,'0x'+'4'*40)
         venue=dispatch.TestnetVenue(configured)
         proposal=dict(card_id='b'*64,role='short_account',account=B,

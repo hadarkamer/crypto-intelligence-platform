@@ -79,6 +79,8 @@ def short_configuration(env):
         raise DispatchError('SHORT_STREAM_START_IN_FUTURE')
     route = roles.route_for(env, 'short_account', side='SHORT')
     if env['HL_TESTNET_SHORT_ENTRY_ENABLED'] == 'true':
+        if not re.fullmatch(r'[0-9a-f]{64}', env.get('HL_TESTNET_SHORT_TRIAL_CARD_ID', '')):
+            raise DispatchError('EXACT_SHORT_TRIAL_CARD_REQUIRED')
         # Check the signer before the worker can reserve a durable request.
         roles.wallet_for_role(env, 'short_account', route['account'], route['agent'])
     return route, start
@@ -199,9 +201,12 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
         return result
     states = controller.store.for_account(route['account'])
     _account_owned(controller.venue,route['account'],states,role=role)
+    trial_id = (getattr(controller.venue, 'env', {}).get('HL_TESTNET_SHORT_TRIAL_CARD_ID')
+                if role == 'short_account' else None)
     known_cards = {cid for state in states for cid in state['originals']}
     touched = [state['bucket'] for state in states if state['pending'] is None
-               and any(cid not in {b['card_id'] for b in state['bindings']}
+               and any((trial_id is None or cid == trial_id)
+                       and cid not in {b['card_id'] for b in state['bindings']}
                        and original.get('entry_rejected_no_retry') is not True
                        and 'source_expires_at' in original['card']
                        and source_fresh(timestamp(original['card']['prepared']['source']['at']),
@@ -213,7 +218,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
         candidates,cursor = selection.page(controller.store.journal,
             not_before=not_before.isoformat(),now=now,after=cursor)
         for cid,card_role in candidates:
-            if role != card_role or cid in known_cards:
+            if role != card_role or cid in known_cards or (trial_id is not None and cid != trial_id):
                 continue
             card=CardStore(controller.store.journal).load(cid)
             if card['account_role'] != card_role:
@@ -236,7 +241,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     else:
         raise DispatchError('LONG_ALERT_SCAN_BUDGET_REQUIRES_REVIEW')
     for bucket in touched:
-        result=controller.cycle(bucket,send=True)
+        result=controller.cycle(bucket,send=True,allowed_entry_card_id=trial_id)
         sent += result['order_requests_sent']
         if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
             rejection=dict(rejection_code=result.get('rejection_code'),
@@ -418,7 +423,9 @@ def _short_card_readiness(controller, route):
             card = CardStore(controller.store.journal).load(card_id)
             source = card['prepared']['execution']
             plan = {key:source[key] for key in ('symbol','side','entry','stop','take_profit')}
-            item = dict(symbol=plan['symbol'], source_at=card['prepared']['source']['at'],
+            item = dict(card_id=card_id, symbol=plan['symbol'],
+                        source_at=card['prepared']['source']['at'],
+                        source_expires_at=card.get('source_expires_at'),
                         current_budget_status='READ_ONLY_REVIEW_UNAVAILABLE')
             try:
                 outcome = roles.budget_for_role(controller.venue.env,'short_account',
