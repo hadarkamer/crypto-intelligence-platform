@@ -121,7 +121,9 @@ class ConfigurationTests(NoExternal):
                 (stream.roles.checks.Blocked('AGENT_ACCOUNT_MISMATCH'), 'AGENT_ACCOUNT_MISMATCH'),
                 (ValueError('private credential'), 'READ_ONLY_REVIEW_UNAVAILABLE')):
             output=io.StringIO()
-            with patch.object(stream.roles,'default_native_snapshot',side_effect=failure),redirect_stdout(output):
+            with patch.object(stream.roles.checks,'InfoReader') as reader, \
+                 patch.object(stream.roles,'default_native_snapshot',side_effect=failure),redirect_stdout(output):
+                reader.return_value.read.return_value='default'
                 stream._short_account_readiness({'account':B,'agent':AGENT})
             report=json.loads(output.getvalue())['testnet_short_account_readiness']
             self.assertEqual(report['status'],status)
@@ -132,11 +134,32 @@ class ConfigurationTests(NoExternal):
                          account_mode='default',balance_usd='100',
                          exchange_reported_available_usd='100',account_mapping_verified=True,
                          unrelated_private_field='must not log')
-        with patch.object(stream.roles,'default_native_snapshot',return_value=observation),redirect_stdout(output):
+        with patch.object(stream.roles.checks,'InfoReader') as reader, \
+             patch.object(stream.roles,'default_native_snapshot',return_value=observation),redirect_stdout(output):
+            reader.return_value.read.return_value='default'
             stream._short_account_readiness({'account':B,'agent':AGENT})
         report=json.loads(output.getvalue())['testnet_short_account_readiness']
         self.assertEqual(report['balance_usd'],'100')
         self.assertNotIn('unrelated_private_field',output.getvalue())
+
+    def test_unified_short_readiness_uses_mode_aware_public_check(self):
+        output=io.StringIO()
+        observation=dict(status='ACCOUNT_CHECKED_WAITING_FOR_TEST_PLAN',
+                         account_mapping_verified=True, positive_usdc_observed=True,
+                         unheld_balance_observed=True, exchange_capacity_observed=True,
+                         private_field='must not log')
+        with patch.object(stream.roles.checks,'InfoReader') as reader, \
+             patch.object(stream.roles.checks,'run_check',return_value=observation) as check, \
+             patch.object(stream.roles,'default_native_snapshot',side_effect=AssertionError('default only')), \
+             redirect_stdout(output):
+            reader.return_value.read.return_value='unifiedAccount'
+            stream._short_account_readiness({'account':B,'agent':AGENT})
+        report=json.loads(output.getvalue())['testnet_short_account_readiness']
+        self.assertEqual(report['account_mode'],'unifiedAccount')
+        self.assertEqual(report['status'],'ACCOUNT_CHECKED_WAITING_FOR_TEST_PLAN')
+        self.assertEqual(report['order_requests_sent'],0)
+        self.assertNotIn('private_field',output.getvalue())
+        check.assert_called_once()
 
     def test_stream_failure_reports_safe_code_without_exception_details(self):
         controller=Mock()

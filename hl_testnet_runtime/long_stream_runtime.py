@@ -366,12 +366,29 @@ def _short_account_readiness(route):
                   account_settings_changes=0, transfers_sent=0)
     try:
         from .checks import InfoReader, Blocked
-        result = roles.default_native_snapshot(
-            route, InfoReader(), 'BTC', allow_owned_exposure=True)
-        report.update(status=result['status'], account_mode=result['account_mode'],
-                      balance_usd=result['balance_usd'],
-                      exchange_reported_available_usd=result['exchange_reported_available_usd'],
-                      account_mapping_verified=result['account_mapping_verified'])
+        reader = InfoReader()
+        mode = reader.read('userAbstraction', user=route['account'])
+        if mode == 'default':
+            result = roles.default_native_snapshot(
+                route, reader, 'BTC', allow_owned_exposure=True)
+            report.update(status=result['status'], account_mode=result['account_mode'],
+                          balance_usd=result['balance_usd'],
+                          exchange_reported_available_usd=result['exchange_reported_available_usd'],
+                          account_mapping_verified=result['account_mapping_verified'])
+        elif mode in ('disabled', 'unifiedAccount'):
+            result = roles.checks.run_check({
+                'HL_TESTNET_RUNTIME_MODE': 'read_only',
+                'HL_TESTNET_ACCOUNT_ADDRESS': route['account'],
+                'HL_TESTNET_AGENT_ADDRESS': route['agent'],
+                'HL_TESTNET_CHECK_SYMBOL': 'BTC',
+            }, client=reader)
+            report.update(status=result['status'], account_mode=mode,
+                          account_mapping_verified=result['account_mapping_verified'],
+                          positive_usdc_observed=result['positive_usdc_observed'],
+                          unheld_balance_observed=result['unheld_balance_observed'],
+                          exchange_capacity_observed=result['exchange_capacity_observed'])
+        else:
+            raise Blocked('ACCOUNT_MODE_REQUIRES_REVIEW')
     except Blocked as exc:
         code = str(exc)
         if re.fullmatch(r'[A-Z][A-Z0-9_]{2,99}', code):
