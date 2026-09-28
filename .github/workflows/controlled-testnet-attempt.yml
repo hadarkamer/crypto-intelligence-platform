@@ -38,6 +38,7 @@ jobs:
           hl_testnet_runtime.test_mixed_exits hl_testnet_runtime.test_controlled_attempt
           hl_testnet_runtime.test_card_sync
           hl_testnet_runtime.test_filled_quantity_dispatch
+          hl_testnet_runtime.test_residual_exit_contract.ResidualWireTests
           hl_testnet_runtime.test_filled_trial_runtime
           hl_testnet_runtime.test_approved_alert_selection
           hl_testnet_runtime.test_long_stream_runtime
