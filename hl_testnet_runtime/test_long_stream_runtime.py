@@ -272,6 +272,29 @@ class ConfigurationTests(NoExternal):
                     'evidence':dict(snapshot=dict(position_quantity='-3'))}]
             self.assertTrue(stream._account_owned(None,A,owned))
 
+    def test_account_inventory_rejects_opposite_direction_even_when_journal_agrees(self):
+        class Reader:
+            position='0'
+            def read(self,kind,account):
+                if kind=='frontendOpenOrders': return []
+                return dict(assetPositions=[dict(position=dict(coin='BTC',szi=self.position))])
+        reader=Reader()
+        state=dict(symbol='BTC',pending=None,bindings=[],
+                   evidence=dict(snapshot=dict(position_quantity='-2')))
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader):
+            reader.position='-2'
+            with self.assertRaisesRegex(DispatchError,'OPPOSITE_DIRECTION_ACCOUNT_EXPOSURE'):
+                stream._account_owned(None,A,[state],role='long_account')
+            self.assertTrue(stream._account_owned(None,B,[state],role='short_account'))
+            state['evidence']['snapshot']['position_quantity']='2'
+            reader.position='2'
+            with self.assertRaisesRegex(DispatchError,'OPPOSITE_DIRECTION_ACCOUNT_EXPOSURE'):
+                stream._account_owned(None,B,[state],role='short_account')
+            state['bindings']=[dict(role='short_account',orders={
+                'ENTRY':[],'STOP':[],'TAKE_PROFIT':[]})]
+            with self.assertRaisesRegex(DispatchError,'ACCOUNT_BINDING_ROLE_MISMATCH'):
+                stream._account_owned(None,A,[state],role='long_account')
+
     def test_disabled_entries_still_service_existing_buckets(self):
         class Store:
             journal=object()
@@ -466,6 +489,13 @@ class DurableLongStreamTests(NoExternal):
         self.assertEqual(opened[0]['card_id'],card['card_id'])
         self.assertEqual(opened[0]['source_event_id'],card['prepared']['source']['event_id'])
         self.assertEqual(opened[0]['entry_quantity'],'100')
+        self.assertEqual(opened[0]['account_role'],'long_account')
+        self.assertEqual(opened[0]['actual_entry_price'],self.v.orders['1000']['order']['limitPx'])
+        self.assertIsInstance(opened[0]['first_entry_at_ms'],int)
+        self.assertIsNone(opened[0]['last_exit_at_ms'])
+        self.assertEqual(opened[0]['remaining_quantity'],'100')
+        self.assertEqual(set(opened[0]['active_order_ids']),{'1001','1002'})
+        self.assertFalse(opened[0]['issues'])
         self.assertTrue(opened[0]['protection_verified'])
         self.assertFalse(opened[0]['closure_verified'])
         self.v.fill('1002','100')
@@ -487,6 +517,9 @@ class DurableLongStreamTests(NoExternal):
         self.assertEqual(len(closed),1)
         self.assertEqual(closed[0]['card_id'],card['card_id'])
         self.assertTrue(closed[0]['closure_verified'])
+        self.assertIsNotNone(closed[0]['actual_exit_price'])
+        self.assertIsInstance(closed[0]['last_exit_at_ms'],int)
+        self.assertEqual(closed[0]['remaining_quantity'],'0')
         # The immutable source card and its per-card evidence survive a new controller.
         restarted=dispatch.Controller(self.store,self.v,ROUTES2,
             after_exit_policy=dispatch.AFTER_EXIT)
@@ -518,6 +551,7 @@ class DurableLongStreamTests(NoExternal):
                          ['ENTRY','STOP','TAKE_PROFIT'])
         opened=stream.observed_trades(self.c,route,role='short_account')
         self.assertEqual(opened[0]['card_id'],card['card_id'])
+        self.assertEqual(opened[0]['account_role'],'short_account')
         self.assertTrue(opened[0]['protection_verified'])
         self.assertFalse(opened[0]['closure_verified'])
         self.assertTrue(all(self.v.orders[oid]['order']['side']=='B'

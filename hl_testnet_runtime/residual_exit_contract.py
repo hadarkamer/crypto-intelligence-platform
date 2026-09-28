@@ -124,20 +124,35 @@ def _validate(state, p, now_ms):
         if op != 'ENTRY' or binding is not None or action != draft['entry_action']:
             raise ContractError('ENTRY_WIRE_DIFFERS_FROM_IMMUTABLE_DRAFT')
         return True
-    if leg not in fence.EXITS or op != 'CREATE_EXIT' or binding is None:
+    if leg not in fence.EXITS or op not in ('CREATE_EXIT','CLOSE_PASSED_TAKE') or binding is None:
         raise ContractError('EXACT_OWNED_EXIT_CREATION_REQUIRED')
     sequence = p['sequence']
     if type(sequence) is not int or sequence <= 0 or p['version'] != DISPATCH_VERSION:
         raise ContractError('EXIT_REQUEST_IDENTITY_REQUIRED')
     price = binding['prices']['stop' if leg == 'STOP' else 'take_profit']
-    cloid = '0x' + life.digest([DISPATCH_VERSION, state['bucket'], cid, leg, sequence])[:32]
-    trigger = order['t']['trigger']
-    if type(trigger['isMarket']) is not bool:
-        raise ContractError('EXIT_TRIGGER_BOOLEAN_REQUIRED')
+    immediate=op=='CLOSE_PASSED_TAKE'
+    if immediate:
+        if (leg!='TAKE_PROFIT' or binding['orders']['TAKE_PROFIT']
+                or any(o['oid'] in binding['orders']['ENTRY'] for o in snap['open_orders'])
+                or any(oid not in {t['oid'] for t in snap['terminal_orders']}
+                       for oid in binding['orders']['ENTRY'])
+                or len(bs)!=1 or life.number(owner['remaining_quantity'],signed=True)!=q
+                or set(owner['issues'])-{'STOP_COVERAGE_MISSING','TAKE_PROFIT_COVERAGE_MISSING'}
+                or life.number(owner['stop_quantity_observed']) not in (0,q)
+                or any(o['oid'] not in binding['orders']['STOP'] for o in snap['open_orders'])):
+            raise ContractError('MISSED_TARGET_CLOSE_PROOF_REQUIRED')
+        cloid = '0x' + life.digest([DISPATCH_VERSION, state['bucket'], cid, op, sequence])[:32]
+        kind=dict(limit=dict(tif='Ioc'))
+    else:
+        cloid = '0x' + life.digest([DISPATCH_VERSION, state['bucket'], cid, leg, sequence])[:32]
+        trigger = order['t']['trigger']
+        if type(trigger['isMarket']) is not bool:
+            raise ContractError('EXIT_TRIGGER_BOOLEAN_REQUIRED')
+        kind=dict(trigger=dict(isMarket=leg=='STOP', triggerPx=price,
+                               tpsl='sl' if leg=='STOP' else 'tp'))
     expected = dict(type='order', grouping='na', orders=[dict(
         a=asset, b=binding['side']=='SHORT', p=price, s=p['quantity'], r=True,
-        t=dict(trigger=dict(isMarket=leg=='STOP', triggerPx=price,
-                            tpsl='sl' if leg=='STOP' else 'tp')), c=cloid)])
+        t=kind, c=cloid)])
     if action != expected:
         raise ContractError('EXIT_WIRE_DIFFERS_FROM_OWN_CARD_CONTRACT')
     return True
