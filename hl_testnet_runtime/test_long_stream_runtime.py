@@ -95,7 +95,8 @@ class ConfigurationTests(NoExternal):
         controller=Mock()
         controller.venue.env={}
         controller.store.for_account.return_value=[dict(symbol='BTC',originals={'c':{}},
-                                                         bindings=[],pending=None)]
+                                                         bindings=[],pending=None,
+                                                         evidence=dict(snapshot=dict(at_ms=1234,fills=[])))]
         conn=Mock()
         conn.execute.return_value.fetchall.return_value=[('c',)]
         controller.store.journal._transaction.return_value=nullcontext(conn)
@@ -111,6 +112,8 @@ class ConfigurationTests(NoExternal):
             stream._short_card_readiness(controller,{'account':B,'agent':AGENT})
         report=json.loads(output.getvalue())['testnet_short_card_readiness']
         self.assertEqual(report['buckets'][0]['registered_cards'],1)
+        self.assertEqual(report['buckets'][0]['evidence_at_ms'],1234)
+        self.assertEqual(report['buckets'][0]['evidence_fill_count'],0)
         self.assertEqual(report['cards'][0]['current_budget_status'],
                          'ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE')
         self.assertEqual(report['order_requests_sent'],0)
