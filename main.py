@@ -1628,6 +1628,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/long_trades /short_trades — עסקאות הבוט לפי חשבון Testnet\n"
         "/open_trades /closed_trades — פתוחות או סגורות לפי חשבון\n"
         "/daily_trades [YYYY-MM-DD] — סיכום יומי לפי שעון ישראל\n"
+        "/trade_id — הצגת מזהה המשתמש שלך לצורך הרשאה פרטית לדוחות\n"
         "/watch_on — Watch כללי מסונכרן ל-OI+CVD כל חצי שעה\n"
         "  ↳ כולל התראת קונפירמיישן משולב אוטומטית לכל המטבעות שנסרקו\n"
         "/watch_on_top8 — הפעלת Watch רק עבור 8 מטבעות הליבה\n"
