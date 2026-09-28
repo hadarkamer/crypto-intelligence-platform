@@ -2,12 +2,11 @@
 
 Dedicated tables in the existing STAGING database, never the production DB.
 No exchange imports, credentials in records, deletion or automatic replay.
-A failed/uncertain commit is NOT permission to sign. The Free staging database
-expires: surviving application restarts is not a backup or indefinite retention.
+A failed/uncertain commit is NOT permission to sign. The selected staging
+database is paid; connection and schema checks still fail closed on errors.
 """
 from __future__ import annotations
 from contextlib import contextmanager
-from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -17,7 +16,6 @@ SCHEMA = 'hl_testnet_execution_v1'
 VERSION = 'testnet-postgres-journal-v1'
 STAGING_HOST = 'dpg-dab7rc2d0e5s73dkb9l0-a'
 STAGING_DB = 'crypto_intelligence_staging_db'
-EXPIRES = datetime(2026, 10, 1, 7, 24, 32, tzinfo=timezone.utc)
 ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}\Z')
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 LOCK = 1729048159
@@ -158,8 +156,6 @@ class PostgresJournal:
 
     @contextmanager
     def _transaction(self):
-        if not self._ci and datetime.now(timezone.utc) >= EXPIRES:
-            raise JournalError('STAGING_STORAGE_EXPIRED_DO_NOT_SEND')
         try:
             import psycopg
             with psycopg.connect(**self._parameters, connect_timeout=4,
