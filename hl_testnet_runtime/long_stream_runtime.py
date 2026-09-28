@@ -512,6 +512,24 @@ def _short_pending_readiness(controller, route):
                                    or not isinstance(p['position'].get('coin'), str)
                                    for p in positions['assetPositions'])):
                         raise DispatchError('PUBLIC_ACCOUNT_STATE_INVALID')
+                    # Compare the two public size views for owned orders when a
+                    # request is unresolved. This is diagnostic only: it does
+                    # not choose a size or change reconciliation policy.
+                    owned = [(leg,oid) for binding in state.get('bindings',[])
+                             for leg in life.LEGS for oid in binding['orders'][leg]]
+                    if len(owned)>16:
+                        raise DispatchError('ORDER_DIAGNOSTIC_BUDGET_EXCEEDED')
+                    item['owned_order_views'] = []
+                    for order_leg,order_id in owned:
+                        raw_status=reader.read('orderStatus',route['account'],oid=order_id)
+                        detail=(raw_status.get('order') or {}) if isinstance(raw_status,dict) else {}
+                        status_order=detail.get('order') or {}
+                        inventory_order=next((o for o in orders
+                            if o.get('coin')==state['symbol'] and str(o.get('oid'))==order_id),None)
+                        item['owned_order_views'].append(dict(leg=order_leg,oid=order_id,
+                            status=detail.get('status'),status_size=status_order.get('sz'),
+                            original_size=status_order.get('origSz'),
+                            inventory_size=(inventory_order.get('sz') if inventory_order else None)))
                     item['symbol_open_orders_present'] = any(
                         o['coin'] == state['symbol'] for o in orders)
                     quantities = [(p['position']['coin'],life.number(
