@@ -16,20 +16,23 @@ META = {'universe':[{'name':'DOGE','szDecimals':2}]}
 ROUTES = {'long_account':{'account':A},'short_account':{'account':B}}
 
 
-def original(n=1, side='LONG'):
+def original(n=1, side='LONG', expiry_seconds=None):
     source=dict(kind='SIGNAL',event_id='filled-policy-'+str(n),symbol='DOGE',side=side,
         entry='10',stop='9.9' if side=='LONG' else '10.1',
         take_profit='10.2' if side=='LONG' else '9.8',
         at=datetime.fromtimestamp((T-20000)/1000,timezone.utc).isoformat())
-    card=trade_cards.prepare_card(source,META,rule_id='SOFTWARE_TEST',threshold_pct='1.5',record_kind='synthetic_test')
+    expiry=(datetime.fromtimestamp((T-20000+expiry_seconds*1000)/1000,timezone.utc).isoformat()
+            if expiry_seconds is not None else None)
+    card=trade_cards.prepare_card(source,META,rule_id='SOFTWARE_TEST',threshold_pct='1.5',
+        record_kind='received_alert' if expiry is not None else 'synthetic_test',source_expires_at=expiry)
     account=ROUTES[card['account_role']]['account']
     draft=m.prepare_entry(card,META,account,ROUTES)
     b=life.binding_from_card(card,account,ROUTES,dict(ENTRY=[str(n*10)],STOP=[],TAKE_PROFIT=[]))
     return b,dict(card=card,draft=draft)
 
 
-def case(q='40',*,side='LONG',n=1,stop=None,take=None):
-    b,record=original(n,side)
+def case(q='40',*,side='LONG',n=1,stop=None,take=None,expiry_seconds=None):
+    b,record=original(n,side,expiry_seconds)
     fs=[] if q=='0' else [fill(b,qty=q)]
     terms=[]; opens=[]
     if q=='100':terms.append(terminal(b,'ENTRY','100'))

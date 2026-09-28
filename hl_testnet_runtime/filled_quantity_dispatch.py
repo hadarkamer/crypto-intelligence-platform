@@ -232,11 +232,35 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
         if orphan:
             return make(orphan['card_id'],orphan['leg'],orphan['operation'],
                 dict(type='cancel',cancels=[dict(a=index,o=int(orphan['oid']))]),'0',orphan['oid'])
+        # Source expiry used to stop NEW submissions. A GTC order already on
+        # the book needs its own exact cancellation, including after a partial
+        # fill. Do this before exit recovery can stop on a crossed old target.
+        views=life.review(bs,snap,now_ms=now_ms)
+        if not views['bucket_issues']:
+            from .source_window import timestamp
+            opens={o['oid']:o for o in snap['open_orders']}
+            for b in sorted(bs,key=lambda item:item['card_id']):
+                card=state['originals'][b['card_id']]['card']
+                expiry=card.get('source_expires_at')
+                v=next(row for row in views['cards'] if row['card_id']==b['card_id'])
+                if (card['record_kind']!='received_alert' or expiry is None
+                        or now_ms<int(timestamp(expiry).timestamp()*1000)
+                        or life.number(v['exit_quantity'])!=0
+                        or set(v['issues'])-{'STOP_COVERAGE_MISSING','TAKE_PROFIT_COVERAGE_MISSING'}
+                        or len(b['orders']['ENTRY'])!=1):
+                    continue
+                oid=b['orders']['ENTRY'][0]
+                own=opens.get(oid)
+                if (own is None or own['state']!='ACTIVE'
+                        or life.number(own['quantity'],positive=True)
+                            +life.number(v['entry_quantity'])!=life.number(b['planned_quantity'])):
+                    continue
+                return make(b['card_id'],'ENTRY','CANCEL_EXPIRED_ENTRY_REMAINDER',
+                    dict(type='cancel',cancels=[dict(a=index,o=int(oid))]),'0',oid)
         originals={cid:state['originals'][cid] for cid in bound}
         context=dict(symbol=state['symbol'],mark_price=sample['mark_price'],at_ms=sample['at_ms'],cards={
             b['card_id']:dict(grouping='independent_fixed',requests={leg:dict(state='NONE',code=None) for leg in recovery.EXITS}) for b in bs})
         report=selected.assess(bs,snap,context,originals=originals,routes=routes,now_ms=now_ms)
-        views=life.review(bs,snap,now_ms=now_ms)
         # Cancelling a still-pending entry after any exit is a separate, explicit policy.
         if 'ENTRY_REMAINDER_AFTER_EXIT_POLICY_REQUIRED' in report['reasons']:
             if after_exit_policy!=AFTER_EXIT:
