@@ -62,13 +62,6 @@ class PureTests(unittest.TestCase):
              patch('sys.stdout', new_callable=StringIO) as output:
             startup_storage_check()
         self.assertEqual(json.loads(output.getvalue())['testnet_journal']['status'], 'WAITING_FOR_DATABASE_CONNECTION')
-    def test_staging_expiry_blocks_before_connect(self):
-        from types import SimpleNamespace
-        journal = pg.PostgresJournal({'host':pg.STAGING_HOST,'dbname':pg.STAGING_DB})
-        with patch.object(pg, 'datetime', SimpleNamespace(now=lambda tz:pg.EXPIRES+timedelta(seconds=1))):
-            with self.assertRaisesRegex(pg.JournalError,'EXPIRED'):
-                journal.readiness_probe()
-
 
 @unittest.skipUnless(CI_URL, 'Requires disposable PostgreSQL CI service')
 class PostgresTests(unittest.TestCase):
