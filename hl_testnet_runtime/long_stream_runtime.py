@@ -6,6 +6,7 @@ application or an HTTP request. Disabling new entries keeps exits running.
 """
 from copy import deepcopy
 from datetime import datetime, timezone
+from decimal import Decimal
 import json
 import os
 import re
@@ -114,7 +115,7 @@ def _unfinished(state, now):
         for cid,original in state['originals'].items())
 
 
-def _account_owned(venue, account, states):
+def _account_owned(venue, account, states, *, role=None):
     """Unknown positions/orders block *new* entries, never exit maintenance."""
     from .card_sync_evidence import PublicReader
     reader = PublicReader()
@@ -127,10 +128,18 @@ def _account_owned(venue, account, states):
     by_symbol = {s['symbol']:s for s in states}
     if len(by_symbol) != len(states):
         raise DispatchError('DUPLICATE_MARKET_BUCKET')
+    if role is not None:
+        if role not in roles.ROLES:
+            raise DispatchError('EXPLICIT_ACCOUNT_ROLE_REQUIRED')
+        if any(b['role'] != role for s in states for b in s['bindings']):
+            raise DispatchError('ACCOUNT_BINDING_ROLE_MISMATCH')
     known = {(s['symbol'],oid) for s in states for b in s['bindings']
              for leg in life.LEGS for oid in b['orders'][leg]}
     expected = {s['symbol']:(life.number(s['evidence']['snapshot']['position_quantity'],signed=True)
                if s['evidence'] is not None else 0) for s in states}
+    if role is not None and any(q and (q > 0) != (role == 'long_account')
+                                for q in expected.values()):
+        raise DispatchError('OPPOSITE_DIRECTION_ACCOUNT_EXPOSURE_NO_NEW_ENTRY')
     if any(s['pending'] is not None for s in states):
         raise DispatchError('UNRESOLVED_ACCOUNT_REQUEST_NO_NEW_ENTRY')
     for row in orders:
@@ -149,6 +158,8 @@ def _account_owned(venue, account, states):
             raise DispatchError('DUPLICATE_ACCOUNT_POSITION')
         seen.add(p['coin'])
         actual=life.number(p.get('szi'),signed=True)
+        if role is not None and actual and (actual > 0) != (role == 'long_account'):
+            raise DispatchError('OPPOSITE_DIRECTION_ACCOUNT_EXPOSURE_NO_NEW_ENTRY')
         if actual!=expected.get(p['coin'],0):
             raise DispatchError('UNOWNED_ACCOUNT_POSITION_NO_NEW_ENTRY')
     if any(quantity!=0 and symbol not in seen for symbol,quantity in expected.items()):
@@ -187,7 +198,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
             result.update(first_failure)
         return result
     states = controller.store.for_account(route['account'])
-    _account_owned(controller.venue,route['account'],states)
+    _account_owned(controller.venue,route['account'],states,role=role)
     known_cards = {cid for state in states for cid in state['originals']}
     touched = [state['bucket'] for state in states if state['pending'] is None
                and any(cid not in {b['card_id'] for b in state['bindings']}
@@ -239,15 +250,14 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
 
 
 def observed_trades(controller, route, *, role='long_account'):
-    """Read durable fill evidence for monitoring; never authorize an order."""
+    """Read owned fills and working exits for monitoring; never authorize an order."""
     result = []
     for state in controller.store.for_account(route['account']):
         if not state['bindings'] or state['evidence'] is None:
             continue
         snap = state['evidence']['snapshot']
         view = life.review(state['bindings'], snap, now_ms=controller.venue.now())
-        if view['bucket_issues']:
-            continue
+        bindings = {b['card_id']:b for b in state['bindings']}
         for row in view['cards']:
             if life.number(row['entry_quantity']) <= 0:
                 continue
@@ -260,13 +270,32 @@ def observed_trades(controller, route, *, role='long_account'):
                     card['account_role'] != role):
                 raise DispatchError('OBSERVED_TRADE_SOURCE_MISMATCH')
             remaining = life.number(row['remaining_quantity'])
-            protected = (remaining > 0 and not row['issues'] and
+            binding = bindings[row['card_id']]
+            entry_ids = set(binding['orders']['ENTRY'])
+            exit_ids = set(binding['orders']['STOP']+binding['orders']['TAKE_PROFIT'])
+            entries = [f for f in snap['fills'] if f['oid'] in entry_ids]
+            exits = [f for f in snap['fills'] if f['oid'] in exit_ids]
+            def weighted_price(fills):
+                quantity = sum((Decimal(f['quantity']) for f in fills),Decimal(0))
+                return (life.text(sum((Decimal(f['quantity'])*Decimal(f['price'])
+                         for f in fills),Decimal(0))/quantity) if quantity else None)
+            active = [o['oid'] for o in snap['open_orders']
+                      if o['oid'] in entry_ids | exit_ids]
+            protected = (remaining > 0 and not view['bucket_issues'] and not row['issues'] and
                 life.number(row['stop_quantity_observed']) >= remaining and
                 life.number(row['take_profit_quantity_observed']) >= remaining)
             result.append(dict(card_id=row['card_id'],
                 source_event_id=card['prepared']['source']['event_id'],
-                symbol=state['symbol'], state=row['state'],
-                entry_quantity=row['entry_quantity'],
+                account_role=role,symbol=state['symbol'],state=row['state'],
+                planned_prices=deepcopy(binding['prices']),
+                entry_quantity=row['entry_quantity'],exit_quantity=row['exit_quantity'],
+                remaining_quantity=row['remaining_quantity'],
+                actual_entry_price=weighted_price(entries),
+                actual_exit_price=weighted_price(exits),
+                first_entry_at_ms=min(f['at_ms'] for f in entries),
+                last_exit_at_ms=max((f['at_ms'] for f in exits),default=None),
+                active_order_ids=active,
+                issues=sorted(set(view['bucket_issues']) | set(row['issues'])),
                 protection_verified=protected,
                 closure_verified=row['closure_verified'],
                 evidence_at_ms=snap['at_ms'],order_requests_sent=0))
@@ -297,7 +326,8 @@ def _loop(controller, streams):
                 try:
                     for trade in observed_trades(controller,route,role=role):
                         marker = (trade['card_id'],trade['state'],
-                                  trade['protection_verified'],trade['closure_verified'])
+                                  trade['protection_verified'],trade['closure_verified'],
+                                  tuple(trade['issues']))
                         if marker not in reported:
                             label='testnet_long_trade_observed' if role=='long_account' else 'testnet_short_trade_observed'
                             print(json.dumps({label:trade},sort_keys=True),flush=True)
