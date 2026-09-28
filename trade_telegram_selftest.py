@@ -54,8 +54,18 @@ class Reports(unittest.TestCase):
         self.assertFalse(t.authorized(u, {}))
         self.assertFalse(t.authorized(u, {'HL_TESTNET_REPORT_TELEGRAM_USER_ID':'43'}))
         self.assertTrue(t.authorized(u, {'HL_TESTNET_REPORT_TELEGRAM_USER_ID':'42'}))
+        both = {'HL_TESTNET_REPORT_TELEGRAM_USER_IDS':'42, 43'}
+        self.assertTrue(t.authorized(u, both))
+        u.effective_user.id = u.effective_chat.id = 43
+        self.assertTrue(t.authorized(u, both))
+        u.effective_user.id = u.effective_chat.id = 44
+        self.assertFalse(t.authorized(u, both))
+        u.effective_user.id = 42
+        self.assertFalse(t.authorized(u, both))
+        u.effective_chat.id = 42
         u.effective_chat.type='group'
-        self.assertFalse(t.authorized(u, {'HL_TESTNET_REPORT_TELEGRAM_USER_ID':'42'}))
+        self.assertFalse(t.authorized(u, both))
+
 
     def test_filters_keep_unverified_closure_out_of_closed(self):
         self.assertEqual([r['card_id'] for _,r in t.selection(self.rows,'A','closed')],
@@ -92,6 +102,23 @@ class Reports(unittest.TestCase):
             req=fetch.call_args.args[0]
             self.assertEqual(req.full_url,t.REPORT_URL)
             self.assertEqual(req.get_header('X-trade-report-token'),'y'*40)
+
+
+class ReportCommand(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_goes_to_requesting_private_chat(self):
+        both = {'HL_TESTNET_REPORT_TELEGRAM_USER_IDS':'42,43'}
+        check = t.authorized
+        for uid in (42, 43):
+            message = SimpleNamespace(text='/open_trades', reply_text=AsyncMock())
+            update = SimpleNamespace(effective_user=SimpleNamespace(id=uid),
+                effective_chat=SimpleNamespace(id=uid,type='private'), message=message,
+                callback_query=None)
+            context = SimpleNamespace(args=[])
+            with patch.object(t, 'authorized', side_effect=lambda u: check(u, both)), \
+                 patch.object(t, 'load_trades', return_value={'L':[], 'S':[]}):
+                await t.command(update, context)
+            message.reply_text.assert_awaited_once()
+            self.assertIn('עסקאות Testnet', message.reply_text.await_args.args[0])
 
 
 class IdentityCommand(unittest.IsolatedAsyncioTestCase):
