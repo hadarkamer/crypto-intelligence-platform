@@ -116,6 +116,38 @@ class NoExternal(unittest.TestCase):
 class DispatchPureTests(NoExternal):
     def select(self,s,**kw):
         return m.choose(s,ROUTES2,META,dict(mark_price='10',at_ms=T),now_ms=T,**kw)
+    def test_exact_short_trial_skips_older_unbound_card_in_same_market(self):
+        older, chosen = 'a'*64, 'b'*64
+        source_at=datetime.fromtimestamp((T-1000)/1000,timezone.utc).isoformat()
+        original=lambda cid: dict(card=dict(prepared=dict(source=dict(at=source_at),
+                                                       execution=dict(at=source_at))),
+                                  draft=dict(role='short_account'))
+        state=dict(account=A,symbol='DOGE',bucket='c'*64,revision=1,bindings=[],
+                   originals={older:original(older),chosen:original(chosen)},
+                   evidence=dict(snapshot=dict(at_ms=T)))
+        draft=dict(entry_action=dict(type='order',orders=[dict(a=0)]),
+                   size_decimals=2,prices=dict(stop='9',take_profit='11'),planned_quantity='1')
+        with patch.object(m.selected,'validate_draft',return_value=draft):
+            proposal=self.select(state,allowed_entry_card_id=chosen)
+        self.assertEqual(proposal['card_id'],chosen)
+        self.assertEqual(proposal['operation'],'ENTRY')
+
+    def test_exact_short_trial_rejects_any_other_entry_at_final_gate(self):
+        env=dict(HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+                 HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
+                 HL_TESTNET_LONG_STREAM='approved_alerts_v1',
+                 HL_TESTNET_SHORT_STREAM='approved_alerts_v1',
+                 HL_TESTNET_SHORT_ENTRY_ENABLED='true',
+                 HL_TESTNET_SHORT_NOT_BEFORE='2026-09-26T00:00:00+00:00',
+                 HL_TESTNET_SHORT_TRIAL_CARD_ID='a'*64,
+                 HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',
+                 HL_TESTNET_FILLED_AFTER_EXIT_POLICY=m.AFTER_EXIT,
+                 RENDER_SERVICE_ID=m.roles.SERVICE)
+        venue=m.TestnetVenue(env)
+        proposal=dict(card_id='b'*64,role='short_account',account=B,
+                      operation='ENTRY',source_at='2026-09-26T14:00:00+00:00')
+        with self.assertRaisesRegex(DispatchError,'OUTSIDE_EXACT_TRIAL_CARD'):
+            venue._gate(proposal,m.AFTER_EXIT)
     def test_first_stream_entry_has_no_predecessor_lifecycle_to_review(self):
         cid='b'*64
         at=datetime.fromtimestamp((T-1000)/1000,timezone.utc).isoformat()
