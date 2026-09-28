@@ -114,6 +114,20 @@ class ResidualWireTests(NoExternal):
         with self.assertRaisesRegex(contract.ContractError,'^HALF_THRESHOLD_CANNOT_CANCEL_FILLED_ENTRY$'):
             validate(s,p)
 
+    def test_expired_remainder_requires_original_time_fill_and_exact_order(self):
+        s=state_from_case(q='40',side='SHORT',expiry_seconds=10)
+        p=select(s,mark='9')
+        self.assertEqual(p['operation'],'CANCEL_EXPIRED_ENTRY_REMAINDER')
+        self.assertTrue(validate(s,p))
+        early=state_from_case(q='40',side='SHORT',expiry_seconds=60)
+        with self.assertRaisesRegex(contract.ContractError,'EXPIRED_REMAINDER_PROOF_REQUIRED'):
+            validate(early,own_cancel(early,'ENTRY','CANCEL_EXPIRED_ENTRY_REMAINDER'))
+        no_fill=state_from_case(q='0',side='SHORT',expiry_seconds=10)
+        self.assertTrue(validate(no_fill,own_cancel(no_fill,'ENTRY','CANCEL_EXPIRED_ENTRY_REMAINDER')))
+        changed=deepcopy(s);changed['evidence']['snapshot']['open_orders'][0]['quantity']='59'
+        with self.assertRaises(contract.ContractError):
+            validate(changed,own_cancel(changed,'ENTRY','CANCEL_EXPIRED_ENTRY_REMAINDER'))
+
     def test_correct_sized_stop_cannot_be_removed_as_fake_resize_or_orphan(self):
         s=state_from_case(q='40',stop='40',take='40')
         for operation in ('CANCEL_FOR_RESIZE','CANCEL_ORPHAN_EXIT'):
