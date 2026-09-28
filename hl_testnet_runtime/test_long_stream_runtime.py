@@ -46,6 +46,19 @@ def env():
 
 
 class ConfigurationTests(NoExternal):
+    def test_aged_closed_short_reconciles_with_entries_disabled(self):
+        controller=Mock()
+        controller.venue.now.return_value=T+2*60*60*1000
+        controller.store.for_account.return_value=[dict(bucket='saved-short',bindings=[{}],
+            evidence=dict(snapshot=dict(at_ms=T)),pending=None)]
+        controller.cycle.return_value=dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
+        with patch.object(stream,'_unfinished',return_value=False):
+            result=stream.tick(controller,{'account':B},datetime.now(timezone.utc),
+                               new_entries=False,role='short_account')
+        self.assertEqual(result['status'],'ENTRIES_DISABLED')
+        controller.cycle.assert_called_once_with('saved-short',send=True,allow_new_entries=False)
+        controller.venue.send.assert_not_called()
+
     def test_short_pending_diagnostic_reads_public_state_without_order_or_identifiers(self):
         controller=Mock()
         controller.store.for_account.return_value=[dict(symbol='DOGE',pending='private-request-id')]

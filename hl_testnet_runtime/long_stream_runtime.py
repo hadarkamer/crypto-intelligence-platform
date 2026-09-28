@@ -179,7 +179,13 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     rejection = None
     for state in states:
         try:
-            if not _unfinished(state,now):
+            # A closed SHORT bucket can still be the predecessor of a new card.
+            # Refresh its aged evidence periodically even while entries are off,
+            # so a later entry cannot inherit an unreviewed history gap.
+            aged_closed_short = (role == 'short_account' and state['bindings']
+                and state['evidence'] is not None
+                and 3600000 < int(now.timestamp()*1000)-state['evidence']['snapshot']['at_ms'])
+            if not _unfinished(state,now) and not aged_closed_short:
                 continue
             result = controller.cycle(state['bucket'],send=True,
                                       allow_new_entries=False)
