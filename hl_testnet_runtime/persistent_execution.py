@@ -48,7 +48,6 @@ def startup_storage_check():
                 account=os.environ.get('HL_TESTNET_ACCOUNT_ADDRESS', ''), journal=journal)
             report.update(persistent_prepared_record=True, new_prepared_record=created,
                           original_time_preserved=True, rounding_audit_preserved=True)
-        report['storage_expiry_utc'] = '2026-10-01T07:24:32Z'
     except JournalError as exc:
         report['status'] = str(exc)
     except Exception:
