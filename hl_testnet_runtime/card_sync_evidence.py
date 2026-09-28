@@ -188,6 +188,19 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
         for key in fields:
             if actual.get(key) == order.get(key):
                 continue
+            if key == 'sz':
+                # On a partially filled order, orderStatus may still report
+                # the original size while frontendOpenOrders reports what is
+                # left. Accept only when independently observed fills account
+                # for the entire difference; never choose one view by itself.
+                try:
+                    inventory_remaining = life.number(actual.get('sz'),positive=True)
+                    status_size = life.number(order.get('sz'),positive=True)
+                    if (filled > 0 and status_size == original
+                            and inventory_remaining + filled == original):
+                        continue
+                except life.LifecycleError:
+                    pass
             # Expose only a fixed field/classification code. The order id,
             # account and raw exchange values remain out of logs. Do not
             # accept either observation until the discrepancy is understood.
@@ -199,13 +212,13 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
                 except (KeyError,TypeError,ValueError,ArithmeticError):
                     pass
             raise SyncError(f'ORDER_VIEW_{key.upper()}_{suffix}')
-        remaining = life.number(order.get('sz'),positive=True)
+        remaining = life.number(actual.get('sz'),positive=True)
         with localcontext() as ctx:
             ctx.prec = 80
             if remaining+filled!=original: raise SyncError('OPEN_ORDER_HISTORY_INCOMPLETE')
         expected_type = 'Limit' if leg=='ENTRY' or oid in plain else 'Take Profit Limit' if leg=='TAKE_PROFIT' else 'Stop Market'
         if order.get('orderType')!=expected_type: raise SyncError('ORDER_TYPE_REQUIRES_REVIEW')
-        opens.append(dict(account=account,symbol=symbol,oid=oid,quantity=order['sz'],price=order['limitPx'],
+        opens.append(dict(account=account,symbol=symbol,oid=oid,quantity=actual['sz'],price=order['limitPx'],
             trigger_price=None if leg=='ENTRY' or oid in plain else order.get('triggerPx'),side=side,
             reduce_only=order['reduceOnly'],state='ACTIVE',
             order_type='LIMIT' if leg=='ENTRY' or oid in plain else 'TP_LIMIT' if leg=='TAKE_PROFIT' else 'SL_MARKET'))
