@@ -410,7 +410,11 @@ def _short_card_readiness(controller, route):
     try:
         states = controller.store.for_account(route['account'])
         report['buckets'] = [dict(symbol=s['symbol'], registered_cards=len(s['originals']),
-                                  bound_cards=len(s['bindings']), pending_request=bool(s['pending']))
+                                  bound_cards=len(s['bindings']), pending_request=bool(s['pending']),
+                                  evidence_at_ms=(s['evidence']['snapshot']['at_ms']
+                                                  if s.get('evidence') is not None else None),
+                                  evidence_fill_count=(len(s['evidence']['snapshot']['fills'])
+                                                       if s.get('evidence') is not None else None))
                              for s in states[:8]]
         with controller.store.journal._transaction() as conn:
             CardStore(controller.store.journal).ready(conn)
