@@ -366,9 +366,14 @@ print('RESTART_OK')'''
         # The scheduler only scans registered lifecycle heads, not alert payloads.
         with self.j._transaction() as conn:
             table=conn.execute("SELECT to_regclass('hl_testnet_execution_v1.attempts')").fetchone()[0]
-            if table is not None:
-                self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
+            before=(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0]
+                    if table is not None else None)
         self.assertEqual(self.s.summary()['registered_buckets'],1)
+        with self.j._transaction() as conn:
+            current=conn.execute("SELECT to_regclass('hl_testnet_execution_v1.attempts')").fetchone()[0]
+            after=(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0]
+                   if current is not None else None)
+        self.assertEqual((current is not None,after),(table is not None,before))
 
 
 if __name__=='__main__':unittest.main()
