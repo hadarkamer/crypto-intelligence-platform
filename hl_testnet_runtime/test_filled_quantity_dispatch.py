@@ -40,7 +40,7 @@ class Venue:
     domain='software'
     def __init__(self):
         self.t=T;self.sent=0;self.orders={};self.fills=[];self.requests=[]
-        self.lose_reply=False;self.cancel_race=None;self.calls=0
+        self.lose_reply=False;self.cancel_race=None;self.calls=0;self.ioc_fill=None
     def now(self): return self.t
     def metadata(self): return META
     def sample(self,account,symbol): return dict(mark_price='10',at_ms=self.t)
@@ -59,12 +59,19 @@ class Venue:
             reply=dict(status='ok',response=dict(type='cancel',data=dict(statuses=['success'])))
         else:
             o=action['orders'][0];oid=str(1000+len(self.orders));leg=p['leg']
+            immediate=p['operation']=='CLOSE_PASSED_TAKE'
             raw=dict(oid=int(oid),cloid=o['c'],coin=p['symbol'],side='B' if o['b'] else 'A',
-                limitPx=o['p'],sz=o['s'],origSz=o['s'],reduceOnly=o['r'],isTrigger=leg!='ENTRY',
+                limitPx=o['p'],sz=o['s'],origSz=o['s'],reduceOnly=o['r'],isTrigger=leg!='ENTRY' and not immediate,
                 triggerPx=o.get('t',{}).get('trigger',{}).get('triggerPx','0'),isPositionTpsl=False,
-                orderType='Limit' if leg=='ENTRY' else 'Stop Market' if leg=='STOP' else 'Take Profit Limit')
+                orderType='Limit' if leg=='ENTRY' or immediate else 'Stop Market' if leg=='STOP' else 'Take Profit Limit')
             self.orders[oid]=dict(order=raw,status='open',statusTimestamp=self.t,account=p['account'])
             reply=dict(status='ok',response=dict(type='order',data=dict(statuses=[dict(resting=dict(oid=int(oid)))])))
+            if immediate:
+                quantity=o['s'] if self.ioc_fill is None else self.ioc_fill
+                if Decimal(quantity)>0:self.fill(oid,quantity)
+                if self.orders[oid]['status']=='open':
+                    self.orders[oid].update(status='canceled',statusTimestamp=self.t)
+                reply['response']['data']['statuses']=[dict(filled=dict(oid=int(oid)))]
         if self.lose_reply: self.lose_reply=False;raise TimeoutError()
         return reply
     def fill(self,oid,q):
@@ -154,7 +161,7 @@ class DispatchPureTests(NoExternal):
         # An accepted but entirely unfilled entry also expires on this clock.
         unfilled=state_from_case(q='0',side='SHORT',expiry_seconds=10)
         self.assertEqual(self.select(unfilled)['operation'],'CANCEL_EXPIRED_ENTRY_REMAINDER')
-    def test_crossed_old_target_protects_only_confirmed_partial_short(self):
+    def test_crossed_old_target_closes_only_confirmed_partial_short_at_original_price(self):
         s=state_from_case(q='40',side='SHORT',expiry_seconds=10)
         b=s['bindings'][0];snap=s['evidence']['snapshot']
         snap['open_orders']=[]
@@ -162,9 +169,10 @@ class DispatchPureTests(NoExternal):
         snap['terminal_orders']=[ending]
         before=deepcopy(s)
         p=m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
-        self.assertEqual((p['leg'],p['operation'],p['quantity']),('STOP','CREATE_EXIT','40'))
-        self.assertEqual(p['action']['orders'][0]['t'],
-                         dict(trigger=dict(isMarket=True,triggerPx='10.1',tpsl='sl')))
+        self.assertEqual((p['leg'],p['operation'],p['quantity']),
+                         ('TAKE_PROFIT','CLOSE_PASSED_TAKE','40'))
+        self.assertEqual(p['action']['orders'][0]['t'],dict(limit=dict(tif='Ioc')))
+        self.assertEqual(p['action']['orders'][0]['p'],'9.8')
         self.assertTrue(p['action']['orders'][0]['r'])
         from . import residual_exit_contract as contract, residual_exit_fence as fence
         self.assertTrue(contract.validate_wire_proposal(s,p,now_ms=T))
@@ -173,8 +181,14 @@ class DispatchPureTests(NoExternal):
         # A crossed STOP cannot be sent as if it were still protective.
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
             m.choose(s,ROUTES2,META,dict(mark_price='11',at_ms=T),now_ms=T)
-        # Once STOP is working, the old target remains flagged for review.
+        # A correctly sized stop can remain working during the immediate try.
         b['orders']['STOP']=['11'];snap['open_orders']=[order(b,'STOP','40')]
+        self.assertEqual(m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
+                         ['operation'],'CLOSE_PASSED_TAKE')
+        # If the exchange canceled the one immediate try, do not retry blindly;
+        # retain or restore the stop based on a new complete observation.
+        b['orders']['TAKE_PROFIT']=['12']
+        snap['terminal_orders'].append(terminal(b,'TAKE_PROFIT','0'))
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
             m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
     def test_crossed_target_stop_requires_final_entry_and_no_other_orders(self):
@@ -186,6 +200,24 @@ class DispatchPureTests(NoExternal):
         snap['terminal_orders'][0]['state']='CANCELED'
         b['orders']['STOP']=['11']
         snap['open_orders']=[order(b,'STOP','1')]
+        with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
+            m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
+    def test_canceled_immediate_take_does_not_retry_and_restores_missing_stop(self):
+        s=state_from_case(q='40',side='SHORT')
+        b=s['bindings'][0];snap=s['evidence']['snapshot']
+        b['orders']['TAKE_PROFIT']=['12']
+        snap['open_orders']=[]
+        entry=terminal(b,'ENTRY','40');entry['state']='CANCELED'
+        snap['terminal_orders']=[entry,terminal(b,'TAKE_PROFIT','0')]
+        p=m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
+        self.assertEqual((p['leg'],p['operation']),('STOP','CREATE_EXIT'))
+    def test_external_manual_close_cannot_send_another_exit(self):
+        s=state_from_case(q='40',side='SHORT')
+        b=s['bindings'][0];snap=s['evidence']['snapshot']
+        snap['open_orders']=[]
+        entry=terminal(b,'ENTRY','40');entry['state']='CANCELED'
+        snap['terminal_orders']=[entry]
+        snap['position_quantity']='0'
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
             m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
     def test_quantity_change_is_cancel_exact_old_order_not_create_duplicate(self):
@@ -550,6 +582,44 @@ class ExpiredEntryDatabaseTests(NoExternal):
         self.assertEqual(state['evidence']['snapshot']['position_quantity'],'-50')
         self.assertFalse(state['evidence']['snapshot']['open_orders'])
         self.assertEqual(len(self.v.requests),2)
+
+    def test_missed_target_ioc_closes_confirmed_amount_once(self):
+        self.c.cycle(self.bucket,send=True)
+        self.v.fill('1000','40');self.v.t=T+1
+        self.c.cycle(self.bucket,send=True)  # Cancel the expired 60 first.
+        self.c.refresh(self.bucket)
+        self.v.sample=lambda account,symbol:dict(mark_price='9',at_ms=self.v.now())
+        result=self.c.cycle(self.bucket,send=True)
+        self.assertEqual(result['status'],'ACCEPTED_UNVERIFIED')
+        self.assertEqual(self.v.requests[-1]['proposal']['operation'],'CLOSE_PASSED_TAKE')
+        self.assertEqual(self.v.requests[-1]['proposal']['action']['orders'][0]['t'],
+                         {'limit':{'tif':'Ioc'}})
+        self.c.cycle(self.bucket,send=False)
+        state=self.store.load(self.bucket)
+        view=life.review(state['bindings'],state['evidence']['snapshot'],now_ms=self.v.now())
+        self.assertTrue(view['cards'][0]['closure_verified'])
+        self.assertEqual(self.v.orders['1001']['status'],'filled')
+        sent=self.v.sent
+        self.c.cycle(self.bucket,send=True)
+        self.assertEqual(self.v.sent,sent)
+
+    def test_partial_ioc_is_not_repeated_and_remaining_amount_is_protected(self):
+        self.c.cycle(self.bucket,send=True)
+        self.v.fill('1000','40');self.v.t=T+1
+        self.c.cycle(self.bucket,send=True)
+        self.c.refresh(self.bucket)
+        self.v.ioc_fill='15'
+        self.v.sample=lambda account,symbol:dict(mark_price='9',at_ms=self.v.now())
+        self.c.cycle(self.bucket,send=True)
+        self.assertEqual(self.v.orders['1001']['status'],'canceled')
+        self.c.cycle(self.bucket,send=True)
+        self.assertEqual((self.v.requests[-1]['proposal']['leg'],
+                          self.v.requests[-1]['proposal']['quantity']),('STOP','25'))
+        self.c.cycle(self.bucket,send=False)
+        sent=self.v.sent
+        with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
+            self.c.cycle(self.bucket,send=True)
+        self.assertEqual(self.v.sent,sent)
 
 
 if __name__=='__main__':unittest.main()
