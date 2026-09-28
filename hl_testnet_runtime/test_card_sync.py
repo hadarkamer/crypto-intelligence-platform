@@ -16,6 +16,7 @@ from .postgres_journal import PostgresJournal, JournalError
 from .test_card_lifecycle import binding, opened, closed, snapshot, order, fill, terminal, A, B, T
 
 CI=os.environ.get('HL_JOURNAL_CI_URL')
+DAY_AND_THREE_HOURS=e.DAY_MS+3*60*60*1000
 
 
 def evidence(b=None,*,is_open=False):
@@ -82,6 +83,27 @@ class EvidenceTests(unittest.TestCase):
         r=e.collect(ev,reader,cursor_ms=T+120000,clock=lambda:T+130000)
         self.assertEqual(len(r['snapshot']['fills']),2)
         self.assertEqual(reader.windows[0][0],T+60000)
+
+    def test_day_old_checkpoint_replays_bounded_overlapping_history(self):
+        ev=evidence();reader=Reader(ev)
+        end=T+DAY_AND_THREE_HOURS
+        result=e.collect(ev,reader,clock=lambda:end,elapsed=lambda:0)
+        self.assertEqual(result['snapshot']['fills'],ev['snapshot']['fills'])
+        self.assertEqual(result['cursor_ms'],end)
+        self.assertGreaterEqual(len(reader.windows),4)
+        self.assertTrue(all(0<=b-a<=e.DAY_MS for a,b in reader.windows))
+        self.assertEqual(reader.windows[0],reader.windows[1])
+        self.assertLessEqual(reader.windows[2][0],reader.windows[0][1])
+
+    def test_catchup_keeps_missing_old_fill_blocked(self):
+        ev=evidence();reader=Reader(ev);reader.data['fills']=[]
+        with self.assertRaisesRegex(e.SyncError,'PREVIOUS_FILL_MISSING'):
+            e.collect(ev,reader,clock=lambda:T+DAY_AND_THREE_HOURS,elapsed=lambda:0)
+
+    def test_older_than_two_days_requires_review(self):
+        ev=evidence()
+        with self.assertRaisesRegex(e.SyncError,'HISTORY_GAP_REQUIRES_REVIEW'):
+            e.collect(ev,Reader(ev),clock=lambda:T+2*e.DAY_MS+1)
 
     def test_open_to_closed_only_on_complete_evidence(self):
         ev=evidence(is_open=True);target=evidence()
@@ -205,7 +227,7 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(e.SyncError):collected(evidence(),cursor_ms=value)
 
     def test_long_gap_explicitly_blocked(self):
-        with self.assertRaisesRegex(e.SyncError,'GAP'):e.collect(evidence(),Reader(evidence()),clock=lambda:T+e.DAY_MS)
+        with self.assertRaisesRegex(e.SyncError,'GAP'):e.collect(evidence(),Reader(evidence()),clock=lambda:T+2*e.DAY_MS+1)
 
     def test_incomplete_bootstrap_rejected(self):
         ev=evidence();ev['snapshot']['history_complete']=False
