@@ -14,6 +14,7 @@ from . import card_lifecycle as life, checks
 HOST = 'api.hyperliquid-testnet.xyz'
 DAY_MS = 86400000
 OVERLAP_MS = 60000
+MAX_CATCHUP_MS = 2*DAY_MS
 
 
 class SyncError(life.LifecycleError):
@@ -252,7 +253,20 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
     cursor = previous['at_ms'] if cursor_ms is None else life.moment(cursor_ms)
     if cursor < previous['at_ms']: raise SyncError('CHECKPOINT_BEHIND_EVIDENCE')
     end,started = clock(),elapsed()
-    if not 0 <= end-cursor < DAY_MS-OVERLAP_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
+    if not 0 <= end-cursor <= MAX_CATCHUP_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
+    # Reconstruct a short missed interval before taking the current order and
+    # position snapshot. Each bounded window is observed twice; nothing is
+    # persisted until the final full lifecycle review succeeds.
+    while end-cursor >= DAY_MS-OVERLAP_MS:
+        stop = cursor+DAY_MS-2*OVERLAP_MS
+        start = max(1,cursor-OVERLAP_MS)
+        first_fills = merge_fills(previous['fills'],history(reader,account,start,stop),
+                                  account,symbol,start,stop)
+        second_fills = merge_fills(previous['fills'],history(reader,account,start,stop),
+                                   account,symbol,start,stop)
+        if first_fills != second_fills: raise SyncError('OBSERVATION_CHANGED_RETRY')
+        previous['fills'] = first_fills
+        cursor = stop
     start = max(1,cursor-OVERLAP_MS)
     first = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain)
     second = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain)
