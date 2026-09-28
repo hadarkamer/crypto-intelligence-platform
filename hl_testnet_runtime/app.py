@@ -3,6 +3,7 @@
 No HTTP path can sign or submit exchange orders.
 """
 import json
+import hmac
 import os
 import threading
 from .checks import run_check
@@ -53,6 +54,28 @@ def application(environ, start_response):
     if path == '/internal/testnet-cards/v1':
         from .alert_cards_intake import application as intake
         return intake(environ, start_response)
+    if path == '/internal/testnet-trades/v1':
+        # Private read-only projection from this service's durable journal.
+        # The Telegram bot receives no database credential or trading key.
+        token = os.environ.get('HL_TESTNET_REPORT_API_TOKEN', '')
+        supplied = environ.get('HTTP_X_TRADE_REPORT_TOKEN', '')
+        if (method != 'GET' or environ.get('QUERY_STRING') or len(token) < 32
+                or len(token) > 256 or not isinstance(supplied, str)
+                or not hmac.compare_digest(token, supplied)):
+            status, body = '404 Not Found', b'Not found\n'
+        else:
+            try:
+                from .trade_report_store import load_trades
+                body = json.dumps(load_trades(), separators=(',', ':'), allow_nan=False).encode()
+                if len(body) > 262144:
+                    raise ValueError('REPORT_TOO_LARGE')
+                status = '200 OK'
+            except Exception:
+                status, body = '503 Service Unavailable', b'Report unavailable\n'
+        start_response(status,[('Content-Type','application/json' if status == '200 OK' else 'text/plain'),
+            ('Content-Length',str(len(body))),('Cache-Control','no-store'),
+            ('X-Content-Type-Options','nosniff')])
+        return [body]
     if method not in ('GET', 'HEAD'):
         status, body = '405 Method Not Allowed', b'No public controls. No input accepted.\n'
     elif path not in ('/', '/healthz') or environ.get('QUERY_STRING'):
