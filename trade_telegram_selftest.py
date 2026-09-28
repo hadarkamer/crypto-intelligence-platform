@@ -66,6 +66,9 @@ class Reports(unittest.TestCase):
         self.assertIn('LONG',text)
         self.assertEqual(len(buttons.inline_keyboard),4)
         self.assertIn('סגירה בבדיקה',t.detail(self.rows,'L','c'*16))
+        self.unverified['remaining_quantity']='0.0000'
+        self.assertEqual(t.status(self.unverified),'סגירה בבדיקה')
+        self.assertIn('בדיקה',t.list_view(self.rows,'L','all')[0])
 
     def test_daily_uses_israel_day_and_both_account_sections(self):
         text,_=t.daily_view(self.rows,datetime(2026,9,28).date())
