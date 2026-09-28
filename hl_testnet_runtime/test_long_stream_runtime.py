@@ -78,6 +78,7 @@ class ConfigurationTests(NoExternal):
         self.assertEqual(report['status'],'PENDING_PUBLIC_EVIDENCE_OBSERVED')
         self.assertEqual(report['pending'],[dict(symbol='DOGE',phase='OUTCOME_UNKNOWN',
             reply_state='OUTCOME_UNKNOWN',leg='STOP',reply_code=None,lookup_status='unknownOid',
+            owned_order_views=[],
             symbol_open_orders_present=False,symbol_position_present=False,
             fill_window_complete=True,symbol_fills_since_attempt=False)])
         self.assertEqual(report['order_requests_sent'],0)
