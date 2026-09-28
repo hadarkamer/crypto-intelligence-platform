@@ -80,7 +80,13 @@ class Venue:
         return dict(status='order',order=deepcopy(rows[0])) if rows else dict(status='unknownOid')
     def read(self,kind,account,*,oid=None,start=None,end=None):
         self.calls+=1
-        if kind=='orderStatus': return dict(status='order',order=deepcopy(self.orders[oid]))
+        if kind=='orderStatus':
+            result=deepcopy(self.orders[oid])
+            # Match the observed Testnet response: an open order's status can
+            # retain its original size after frontendOpenOrders has shrunk.
+            if result['status']=='open':
+                result['order']['sz']=result['order']['origSz']
+            return dict(status='order',order=result)
         if kind=='frontendOpenOrders': return [deepcopy(r['order']) for r in self.orders.values() if r['account']==account and r['status']=='open']
         if kind=='userFillsByTime': return [deepcopy(f) for f in self.fills if f['account']==account and start<=f['time']<=end]
         if kind=='clearinghouseState':

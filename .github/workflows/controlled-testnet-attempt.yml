@@ -36,6 +36,7 @@ jobs:
           hl_testnet_runtime.test_guarded_execution hl_testnet_runtime.test_guarded_integration
           hl_testnet_runtime.test_price_precision hl_testnet_runtime.test_postgres_journal
           hl_testnet_runtime.test_mixed_exits hl_testnet_runtime.test_controlled_attempt
+          hl_testnet_runtime.test_card_sync
           hl_testnet_runtime.test_filled_quantity_dispatch
           hl_testnet_runtime.test_filled_trial_runtime
           hl_testnet_runtime.test_approved_alert_selection

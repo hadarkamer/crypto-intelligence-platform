@@ -30,15 +30,16 @@ def raw_state(ev):
     opened_by={x['oid']:x for x in s['open_orders']}; terminal_by={x['oid']:x for x in s['terminal_orders']}
     for b in bs:
         for leg in life.LEGS:
-            oid=b['orders'][leg][0]; terminal_row=terminal_by.get(oid); op=opened_by.get(oid)
-            is_entry=leg=='ENTRY'; side=('B' if b['side']=='LONG' else 'A') if is_entry else ('A' if b['side']=='LONG' else 'B')
-            status=('filled' if terminal_row['state']=='FILLED' else 'siblingFilledCanceled') if terminal_row else 'open'
-            row=dict(oid=int(oid),coin=b['symbol'],side=side,origSz=b['planned_quantity'],
-                sz=op['quantity'] if op else '0',limitPx=b['prices']['entry' if is_entry else 'stop' if leg=='STOP' else 'take_profit'],
-                reduceOnly=not is_entry,orderType='Limit' if is_entry else 'Stop Market' if leg=='STOP' else 'Take Profit Limit',
-                isTrigger=not is_entry,triggerPx='0' if is_entry else b['prices']['stop' if leg=='STOP' else 'take_profit'])
-            statuses[oid]=dict(status='order',order=dict(order=row,status=status,statusTimestamp=terminal_row['at_ms'] if terminal_row else T-100))
-            if op: inventory.append(deepcopy(row))
+            for oid in b['orders'][leg]:
+                terminal_row=terminal_by.get(oid); op=opened_by.get(oid)
+                is_entry=leg=='ENTRY'; side=('B' if b['side']=='LONG' else 'A') if is_entry else ('A' if b['side']=='LONG' else 'B')
+                status=('filled' if terminal_row['state']=='FILLED' else 'siblingFilledCanceled') if terminal_row else 'open'
+                row=dict(oid=int(oid),coin=b['symbol'],side=side,origSz=b['planned_quantity'],
+                    sz=op['quantity'] if op else '0',limitPx=b['prices']['entry' if is_entry else 'stop' if leg=='STOP' else 'take_profit'],
+                    reduceOnly=not is_entry,orderType='Limit' if is_entry else 'Stop Market' if leg=='STOP' else 'Take Profit Limit',
+                    isTrigger=not is_entry,triggerPx='0' if is_entry else b['prices']['stop' if leg=='STOP' else 'take_profit'])
+                statuses[oid]=dict(status='order',order=dict(order=row,status=status,statusTimestamp=terminal_row['at_ms'] if terminal_row else T-100))
+                if op: inventory.append(deepcopy(row))
     rawfills=[dict(coin=f['symbol'],tid=int(f['fill_id'].split(':')[-1]),oid=int(f['oid']),
         sz=f['quantity'],px=f['price'],fee=f['fee'],feeToken=f['fee_token'],side=f['side'],time=f['at_ms']) for f in s['fills']]
     position=dict(assetPositions=[dict(position=dict(coin=s['symbol'],szi=s['position_quantity']))])
@@ -162,6 +163,29 @@ class EvidenceTests(unittest.TestCase):
                 e.collect(ev,reader,clock=lambda:T+10000)
             self.assertNotIn(str(reader.data['inventory'][0]['limitPx']),str(error.exception))
             self.assertEqual(ev['snapshot']['position_quantity'],'100')
+
+    def test_partly_filled_short_uses_verified_remaining_size_without_hiding_missing_exits(self):
+        b=binding(side='SHORT')
+        b['orders']['STOP']=[];b['orders']['TAKE_PROFIT']=[]
+        s=snapshot(b,fills=[{**fill(b,qty='40'),'fill_id':'hl:1000'}],
+                   opens=[order(b,'ENTRY',qty='60')],position='-40')
+        ev=dict(bindings=[b],snapshot=s)
+        reader=Reader(ev)
+        reader.data['statuses']['10']['order']['order']['sz']='100'
+        result=e.collect(ev,reader,clock=lambda:T+10000)
+        self.assertEqual(result['snapshot']['open_orders'][0]['quantity'],'60')
+        self.assertEqual(result['report']['cards'][0]['entry_quantity'],'40')
+        self.assertIn('STOP_COVERAGE_MISSING',result['report']['cards'][0]['issues'])
+        self.assertIn('TAKE_PROFIT_COVERAGE_MISSING',result['report']['cards'][0]['issues'])
+        self.assertTrue(result['report']['needs_review'])
+        self.assertEqual(ev['snapshot'],s)
+
+        for bad_remaining in ('59','61'):
+            bad=Reader(ev)
+            bad.data['statuses']['10']['order']['order']['sz']='100'
+            bad.data['inventory'][0]['sz']=bad_remaining
+            with self.assertRaisesRegex(e.SyncError,'ORDER_VIEW_SZ_DIFF'):
+                e.collect(ev,bad,clock=lambda:T+10000)
 
     def test_unknown_status_not_treated_as_closed(self):
         ev=evidence();reader=Reader(ev);reader.data['statuses']['10']['order']['status']='triggered'
@@ -341,8 +365,15 @@ print('RESTART_OK')'''
     def test_new_record_only_alert_is_not_treated_as_an_executed_trade(self):
         # The scheduler only scans registered lifecycle heads, not alert payloads.
         with self.j._transaction() as conn:
-            self.assertEqual(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0],0)
+            table=conn.execute("SELECT to_regclass('hl_testnet_execution_v1.attempts')").fetchone()[0]
+            before=(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0]
+                    if table is not None else None)
         self.assertEqual(self.s.summary()['registered_buckets'],1)
+        with self.j._transaction() as conn:
+            current=conn.execute("SELECT to_regclass('hl_testnet_execution_v1.attempts')").fetchone()[0]
+            after=(conn.execute('SELECT count(*) FROM hl_testnet_execution_v1.attempts').fetchone()[0]
+                   if current is not None else None)
+        self.assertEqual((current is not None,after),(table is not None,before))
 
 
 if __name__=='__main__':unittest.main()
