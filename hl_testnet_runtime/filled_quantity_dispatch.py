@@ -773,7 +773,8 @@ class TestnetVenue:
                 # An unrelated position or order appearing since the worker's
                 # sweep must block new entries at the final authorization gate.
                 from .long_stream_runtime import _account_owned
-                _account_owned(self,route['account'],self.store.for_account(route['account']))
+                _account_owned(self,route['account'],self.store.for_account(route['account']),
+                               role=proposal['role'])
             source=state['originals'][proposal['card_id']]['card']['prepared']['execution']
             from .source_window import source_fresh, timestamp
             expiry=state['originals'][proposal['card_id']]['card'].get('source_expires_at',
