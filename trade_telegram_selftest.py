@@ -1,7 +1,7 @@
 """Read-only Testnet Telegram report contracts; no exchange calls."""
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import sys
 import types
 import unittest
@@ -92,6 +92,20 @@ class Reports(unittest.TestCase):
             req=fetch.call_args.args[0]
             self.assertEqual(req.full_url,t.REPORT_URL)
             self.assertEqual(req.get_header('X-trade-report-token'),'y'*40)
+
+
+class IdentityCommand(unittest.IsolatedAsyncioTestCase):
+    async def test_identity_is_returned_only_in_own_private_chat(self):
+        message=SimpleNamespace(reply_text=AsyncMock())
+        update=SimpleNamespace(effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=42,type='private'),message=message)
+        await t.trade_id(update,None)
+        message.reply_text.assert_awaited_once()
+        self.assertIn('42',message.reply_text.await_args.args[0])
+        message.reply_text.reset_mock()
+        update.effective_chat.type='group'
+        await t.trade_id(update,None)
+        message.reply_text.assert_not_awaited()
 
 
 if __name__=='__main__':
