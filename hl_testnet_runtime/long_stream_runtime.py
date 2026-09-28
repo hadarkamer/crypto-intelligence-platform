@@ -201,7 +201,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
         return result
     states = controller.store.for_account(route['account'])
     _account_owned(controller.venue,route['account'],states,role=role)
-    trial_id = (controller.venue.env.get('HL_TESTNET_SHORT_TRIAL_CARD_ID')
+    trial_id = (getattr(controller.venue, 'env', {}).get('HL_TESTNET_SHORT_TRIAL_CARD_ID')
                 if role == 'short_account' else None)
     known_cards = {cid for state in states for cid in state['originals']}
     touched = [state['bucket'] for state in states if state['pending'] is None
