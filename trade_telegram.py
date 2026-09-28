@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from html import escape
 import json
 import os
@@ -71,7 +72,7 @@ def price(value):
 def status(row):
     if row['closure_verified']:
         return 'סגורה ✓'
-    if row['remaining_quantity'] != '0':
+    if Decimal(row['remaining_quantity']) != 0:
         return 'פתוחה' if not row['issues'] else 'פתוחה · בדיקה'
     return 'סגירה בבדיקה'
 
@@ -96,7 +97,7 @@ def list_view(trades, role='A', kind='open', page=0):
              '<pre>חשבון מטבע  כניסה       כמות       מצב</pre>']
     for key, row in rows[start:start+PAGE_SIZE]:
         code = row['symbol'][:6].ljust(6)
-        label = 'סגור' if row['closure_verified'] else 'פתוח' if row['remaining_quantity'] != '0' else 'בדיקה'
+        label = 'סגור' if row['closure_verified'] else 'פתוח' if Decimal(row['remaining_quantity']) != 0 else 'בדיקה'
         lines.append('<pre>' + escape(f'{LABELS[key]:5} {code} {when(row["first_entry_at_ms"], day=True):11} '
                         f'{row["remaining_quantity"][:10]:10} {label}') + '</pre>')
     if not rows:
