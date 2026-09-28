@@ -139,6 +139,21 @@ class DispatchPureTests(NoExternal):
         self.assertEqual((p['leg'],p['quantity']),('STOP','40'))
         self.assertEqual(p['action']['grouping'],'na');self.assertTrue(p['action']['orders'][0]['r'])
         self.assertEqual(s,before)
+    def test_expired_partial_short_cancels_only_its_working_remainder(self):
+        s=state_from_case(q='40',side='SHORT',expiry_seconds=10)
+        before=deepcopy(s)
+        p=m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T,
+                   after_exit_policy=m.AFTER_EXIT)
+        self.assertEqual((p['operation'],p['leg'],p['quantity']),
+                         ('CANCEL_EXPIRED_ENTRY_REMAINDER','ENTRY','0'))
+        self.assertEqual(p['action'],dict(type='cancel',cancels=[dict(a=0,o=10)]))
+        self.assertEqual(s,before)
+        # The same alert before expiry still follows normal stop-first recovery.
+        future=state_from_case(q='40',side='SHORT',expiry_seconds=60)
+        self.assertEqual(self.select(future)['leg'],'STOP')
+        # An accepted but entirely unfilled entry also expires on this clock.
+        unfilled=state_from_case(q='0',side='SHORT',expiry_seconds=10)
+        self.assertEqual(self.select(unfilled)['operation'],'CANCEL_EXPIRED_ENTRY_REMAINDER')
     def test_quantity_change_is_cancel_exact_old_order_not_create_duplicate(self):
         s=state_from_case(q='60',stop='40',take='40');p=self.select(s)
         self.assertEqual(p['operation'],'CANCEL_FOR_RESIZE')
@@ -468,6 +483,39 @@ class DispatchDatabaseTests(NoExternal):
         self.assertIn(b['card_id'],state['originals'])
         self.assertEqual({binding['card_id'] for binding in state['bindings']},
                          {self.b['card_id']})
+
+
+@unittest.skipUnless(CI,'Disposable loopback PostgreSQL required')
+class ExpiredEntryDatabaseTests(NoExternal):
+    def setUp(self):
+        super().setUp();self.j=PostgresJournal.for_ci(CI)
+        with self.j._transaction() as conn:
+            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+                conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
+        self.j.bootstrap();cards=CardStore(self.j);cards.initialize()
+        self.store=DispatchStore(self.j);self.store.initialize()
+        self.v=Venue();self.v.t=T-15000
+        self.c=m.Controller(self.store,self.v,ROUTES2)
+        self.b,record=original(side='SHORT',expiry_seconds=10)
+        cards.record(record['card'])
+        self.bucket=self.c.register(self.b['card_id'])['bucket']
+
+    def test_partial_fill_racing_with_expiry_cancel_is_reconciled(self):
+        first=self.c.cycle(self.bucket,send=True)
+        self.assertEqual(first['status'],'ACCEPTED_UNVERIFIED')
+        self.v.fill('1000','40')
+        self.v.t=T+1
+        self.v.cancel_race=lambda oid:self.v.fill(oid,'10')
+        result=self.c.cycle(self.bucket,send=True)
+        self.assertEqual(result['status'],'ACCEPTED_UNVERIFIED')
+        self.assertEqual(self.v.requests[-1]['proposal']['operation'],'CANCEL_EXPIRED_ENTRY_REMAINDER')
+        self.assertEqual(self.v.orders['1000']['status'],'canceled')
+        self.assertEqual(self.v.orders['1000']['order']['sz'],'50')
+        state=self.c.refresh(self.bucket)
+        self.assertIsNone(state['pending'])
+        self.assertEqual(state['evidence']['snapshot']['position_quantity'],'-50')
+        self.assertFalse(state['evidence']['snapshot']['open_orders'])
+        self.assertEqual(len(self.v.requests),2)
 
 
 if __name__=='__main__':unittest.main()
