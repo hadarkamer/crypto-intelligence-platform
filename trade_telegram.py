@@ -28,9 +28,12 @@ def authorized(update, env=None):
     env = os.environ if env is None else env
     user = update.effective_user
     chat = update.effective_chat
-    uid = env.get('HL_TESTNET_REPORT_TELEGRAM_USER_ID', '')
-    return bool(uid.isdecimal() and user and chat and chat.type == 'private'
-                and str(user.id) == uid and chat.id == user.id)
+    configured = env.get('HL_TESTNET_REPORT_TELEGRAM_USER_IDS')
+    if configured is None:
+        configured = env.get('HL_TESTNET_REPORT_TELEGRAM_USER_ID', '')
+    allowed = {value.strip() for value in configured.split(',') if value.strip().isdecimal()}
+    return bool(user and chat and chat.type == 'private'
+                and str(user.id) in allowed and chat.id == user.id)
 
 
 def load_trades(env=None):
