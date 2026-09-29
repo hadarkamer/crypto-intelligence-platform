@@ -510,6 +510,21 @@ class DispatchDatabaseTests(NoExternal):
             except JournalError:return False
         with ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(reserve,range(4)))
         self.assertEqual(sum(results),1)
+    def test_overlapping_workers_cannot_send_same_entry_twice(self):
+        workers=[m.Controller(DispatchStore(PostgresJournal.for_ci(CI)),self.v,ROUTES2)
+                 for _ in range(2)]
+        def cycle(worker):
+            try:return worker.cycle(self.bucket,send=True)
+            except JournalError:return {'status':'RELOAD_REQUIRED','order_requests_sent':0}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(cycle,workers))
+        self.assertEqual(self.v.sent,1)
+        self.assertEqual(len(self.v.requests),1)
+        self.assertEqual(sum(r['order_requests_sent'] for r in results),1)
+        state=self.store.load(self.bucket)
+        request=self.store.request(state['pending'])
+        self.assertEqual(request['attempts'],1)
+        self.assertEqual(request['phase'],'ACK_UNVERIFIED')
     def test_stale_before_begin_blocks_even_after_reservation(self):
         s=self.c.refresh(self.bucket);p=m.choose(s,ROUTES2,META,self.v.sample(A,'DOGE'),now_ms=self.v.now())
         s=self.store.reserve(s,p,self.v.now())
