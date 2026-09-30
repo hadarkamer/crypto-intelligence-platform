@@ -225,8 +225,9 @@ class Controller:
             r=self.store.pending_record(conn,current)
             if r!=request:
                 raise DispatchError('EMERGENCY_NORMAL_REQUEST_CHANGED')
-            _continues(current['evidence'],evidence)
-            current['evidence']=dict(bindings=current['bindings'],snapshot=evidence['snapshot'])
+            if current['evidence']['snapshot']!=evidence['snapshot']:
+                _continues(current['evidence'],evidence)
+                current['evidence']=dict(bindings=current['bindings'],snapshot=evidence['snapshot'])
             r.update(phase='OBSERVED',terminal_state='NO_PUBLIC_ORDER_AFTER_SIGNATURE_EXPIRY',
                      observed_at_ms=evidence['snapshot']['at_ms'])
             current['pending']=None
@@ -551,7 +552,10 @@ def start(normal, streams, stop_event):
                                 and not any(o['oid'] in b['orders']['ENTRY']
                                     for o in state['evidence']['snapshot']['open_orders'] for b in state['bindings'])):
                             continue
-                        if not state['bindings'] and not state['pending']:
+                        if not state.get('emergency') and not state['pending'] and (
+                                not state['bindings'] or (state['evidence']
+                                    and not state['evidence']['snapshot']['open_orders']
+                                    and life.number(state['evidence']['snapshot']['position_quantity'],signed=True)==0)):
                             continue
                         if state.get('emergency',{}).get('phase')=='CLOSED_VERIFIED':
                             continue

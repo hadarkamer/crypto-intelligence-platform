@@ -143,6 +143,61 @@ class EmergencyPureTests(NoExternal):
                         dict(status='ok',response='ack'),T)
         self.assertIsNone(state['protection_timing'][cid]['fill_to_stop_public_ms'])
 
+    def test_timing_trial_rejects_synthetic_expired_or_enabled_continuous_entries(self):
+        from . import protection_timing_trial as trial
+        from .test_long_stream_runtime import env
+        environment={**env(),'HL_TESTNET_EMERGENCY_CLOSE':m.APPROVAL,'HL_TESTNET_SHORT_ENTRY_ENABLED':'false'}
+        _,record=original(expiry_seconds=300)
+        card=record['card'];before=deepcopy(environment)
+        self.assertEqual(trial.validate(environment,card,T),T+90000)
+        self.assertEqual(environment,before)
+        for mutation in [{'HL_TESTNET_LONG_ENTRY_ENABLED':'true'},
+                         {'HL_TESTNET_SHORT_ENTRY_ENABLED':'true'},
+                         {'HL_TESTNET_EMERGENCY_CLOSE':''},
+                         {'RENDER_SERVICE_ID':'production'}]:
+            with self.assertRaises(DispatchError):trial.validate({**environment,**mutation},card,T)
+        with self.assertRaises(DispatchError):trial.validate(environment,original()[1]['card'],T)
+        with self.assertRaises(DispatchError):trial.validate(environment,card,T+600000)
+
+    def test_emergency_enabled_entry_requires_exact_expiring_trial_card(self):
+        from .test_long_stream_runtime import env
+        card=original(expiry_seconds=300)[1]['card'];cid=card['card_id']
+        environment={**env(),'HL_TESTNET_EMERGENCY_CLOSE':m.APPROVAL,
+            'HL_TESTNET_LONG_ENTRY_ENABLED':'true','HL_TESTNET_LONG_NOT_BEFORE':datetime.fromtimestamp((T-60000)/1000,timezone.utc).isoformat(),
+            'HL_TESTNET_PROTECTION_TIMING_CARD_ID':cid,'HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS':str(T+90000)}
+        venue=dispatch.TestnetVenue(environment);venue.now=lambda:T
+        proposal=dict(operation='ENTRY',card_id=cid,role='long_account',account=A,symbol='DOGE',
+            source_at=card['prepared']['execution']['at'],source_expires_at=card['source_expires_at'])
+        with patch.object(m,'healthy',return_value=True):
+            self.assertEqual(venue._gate(proposal,dispatch.AFTER_EXIT)['account'],A)
+            for mutation in [dict(card_id='f'*64),{}]:
+                if mutation:
+                    with self.assertRaisesRegex(DispatchError,'EXACT_TIMING'):venue._gate({**proposal,**mutation},dispatch.AFTER_EXIT)
+            for deadline in [T-1,T,T+120001]:
+                venue.env['HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS']=str(deadline)
+                with self.assertRaisesRegex(DispatchError,'EXACT_TIMING'):venue._gate(proposal,dispatch.AFTER_EXIT)
+
+    def test_disabled_entry_tick_skips_idle_flat_unbound_candidate(self):
+        from . import long_stream_runtime as stream
+        from unittest.mock import Mock
+        controller=Mock();controller.venue.now.return_value=T
+        state=dict(bucket='a'*64,bindings=[],pending=None,
+                   evidence=dict(snapshot=dict(at_ms=T,position_quantity='0',open_orders=[])))
+        controller.store.for_account.return_value=[state]
+        with patch.object(stream,'_unfinished',return_value=True):
+            result=stream.tick(controller,{'account':A},datetime.fromtimestamp(T/1000,timezone.utc),new_entries=False)
+        self.assertEqual(result['status'],'ENTRIES_DISABLED')
+        controller.cycle.assert_not_called()
+
+    def test_normal_tick_does_not_compete_with_latched_emergency_lane(self):
+        from . import long_stream_runtime as stream
+        from unittest.mock import Mock
+        controller=Mock();controller.venue.now.return_value=T
+        controller.store.for_account.return_value=[dict(emergency=dict(phase='ACTIVE'))]
+        result=stream.tick(controller,{'account':A},datetime.fromtimestamp(T/1000,timezone.utc),new_entries=False)
+        self.assertEqual(result['maintenance_active'],1)
+        controller.cycle.assert_not_called()
+
     def test_emergency_whitelist_cannot_assign_unowned_or_active_order(self):
         state=state_from_case(q='40',stop='40')
         with self.assertRaisesRegex(life.LifecycleError,'NOT_OWNED'):

@@ -205,6 +205,13 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
                 and state['evidence'] is not None
                 and 3600000 < int(now.timestamp()*1000)-state['evidence']['snapshot']['at_ms'])
             unfinished = _unfinished(state,now)
+            # A locally registered, never-attempted candidate requires no
+            # maintenance while entries are disabled. Preserve aged SHORT
+            # history catch-up and all pending/working/exposed buckets.
+            if (not new_entries and not aged_closed_short and state['pending'] is None and state['evidence'] is not None
+                    and not state['evidence']['snapshot']['open_orders']
+                    and life.number(state['evidence']['snapshot']['position_quantity'],signed=True)==0):
+                unfinished=False
             if not unfinished and not aged_closed_short:
                 continue
             maintenance_active += int(unfinished)

@@ -768,6 +768,13 @@ class TestnetVenue:
             from .emergency_close import APPROVAL, healthy
             if env['HL_TESTNET_EMERGENCY_CLOSE']!=APPROVAL or not healthy(self.now()):
                 raise DispatchError('EMERGENCY_SUPERVISOR_NOT_FRESH_NO_NEW_ENTRY')
+            trial=env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID','')
+            try: trial_expires=int(env.get('HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS',''))
+            except (ValueError,TypeError):
+                raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED') from None
+            if (not re.fullmatch(r'[0-9a-f]{64}',trial) or trial!=proposal.get('card_id')
+                    or not 0<trial_expires-self.now()<=120000):
+                raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED')
         stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
             and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
             and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'
