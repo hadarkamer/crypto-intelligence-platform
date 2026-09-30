@@ -4,7 +4,7 @@ Never invoke real signing or HTTP. Database tests require the existing strictly
 loopback CI DSN. Software rows cannot be loaded into the Testnet adapter.
 """
 from copy import deepcopy
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -14,7 +14,7 @@ import os
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from . import filled_quantity_dispatch as m, card_lifecycle as life, trade_cards
 from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
@@ -163,7 +163,7 @@ class DispatchPureTests(NoExternal):
                 take_profit='9',at=at)))
         state=dict(bindings=[],originals={cid:dict(card=card)},
                    evidence=dict(snapshot=dict()))
-        proposal=dict(card_id=cid,operation='ENTRY',role='short_account',account=B)
+        proposal=dict(card_id=cid,operation='ENTRY',role='short_account',account=B,observed_at_ms=T)
         venue=m.TestnetVenue({'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1'})
         store=type('Store',(),{'domain':'testnet',
             'for_account':lambda self,account:[]})()
@@ -174,6 +174,7 @@ class DispatchPureTests(NoExternal):
                 patch.object(venue,'_gate',return_value=ROUTES2['short_account']), \
                 patch.object(m.roles,'wallet_for_role',return_value=object()), \
                 patch.object(m.roles,'budget_for_role',return_value=budget), \
+                patch.object(m.roles,'entry_action_headroom',return_value=100), \
                 patch.object(m.life,'review',side_effect=AssertionError('NO_PREDECESSOR')), \
                 patch('hl_testnet_runtime.long_stream_runtime._account_owned',return_value=True):
             venue.authorize(state,proposal,m.AFTER_EXIT)
@@ -679,6 +680,102 @@ class ExpiredEntryDatabaseTests(NoExternal):
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
             self.c.cycle(self.bucket,send=True)
         self.assertEqual(self.v.sent,sent)
+
+
+class EntryPreflightBoundaryTests(NoExternal):
+    def setup_case(self,side='LONG',expiry_seconds=600):
+        b,record=original(side=side,expiry_seconds=expiry_seconds)
+        snapshot=Venue().empty_snapshot(b['account'],'DOGE')
+        state=dict(bucket=life.digest(['testnet',b['account'],'DOGE']),revision=1,
+            bindings=[],originals={b['card_id']:record},pending=None,
+            account=b['account'],symbol='DOGE',evidence=dict(bindings=[],snapshot=snapshot))
+        self.clock=T
+        env=dict(HL_TESTNET_RUNTIME_MODE='filled_card_controlled_v1',
+            HL_TESTNET_FILLED_DISPATCH='approved_single_card_v1',
+            HL_TESTNET_FILLED_CARD_ID=b['card_id'],
+            HL_TESTNET_FILLED_APPROVAL_EXPIRES_MS=str(T+60000),
+            HL_TESTNET_FILLED_AFTER_EXIT_POLICY=m.AFTER_EXIT,
+            HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',RENDER_SERVICE_ID=m.roles.SERVICE,
+            HL_TESTNET_LONG_ACCOUNT_ADDRESS=A,HL_TESTNET_LONG_AGENT_ADDRESS=AGENT,
+            HL_TESTNET_SHORT_ACCOUNT_ADDRESS=B,HL_TESTNET_SHORT_AGENT_ADDRESS='0x'+'4'*40)
+        venue=m.TestnetVenue(env);venue.now=lambda:self.clock
+        proposal=m.choose(state,ROUTES2,META,dict(mark_price='10',at_ms=T),now_ms=T)
+        return state,venue,proposal
+    @contextmanager
+    def public_checks(self,budget=None,headroom=None):
+        report=dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True)
+        with ExitStack() as stack:
+            reader=stack.enter_context(patch.object(m.checks,'InfoReader',return_value=object()))
+            budget_mock=stack.enter_context(patch.object(m.roles,'budget_for_role',
+                side_effect=budget,return_value=report))
+            headroom_mock=stack.enter_context(patch.object(m.roles,'entry_action_headroom',
+                side_effect=headroom,return_value=100))
+            yield reader,budget_mock,headroom_mock
+    def test_both_roles_pass_fresh_preflight_without_state_mutation(self):
+        for side in ('LONG','SHORT'):
+            state,venue,proposal=self.setup_case(side)
+            before=deepcopy((state,proposal,venue.env))
+            with self.public_checks() as (_,budget,headroom):
+                venue.authorize(state,proposal,m.AFTER_EXIT)
+                self.assertEqual(budget.call_args.args[1],proposal['role'])
+                self.assertEqual(headroom.call_args.args[0],proposal['account'])
+            self.assertEqual(before,(state,proposal,venue.env));self.assertEqual(venue.sent,0)
+    def test_old_future_and_missing_evidence_block_before_account_reads(self):
+        for observed in (T-15001,T+1,None,True):
+            state,venue,proposal=self.setup_case();proposal['observed_at_ms']=observed
+            with self.public_checks() as (reader,budget,headroom),self.assertRaises(DispatchError):
+                venue.authorize(state,proposal,m.AFTER_EXIT)
+            reader.assert_not_called();budget.assert_not_called();headroom.assert_not_called()
+    def test_slow_budget_blocks_before_controller_reservation_or_send(self):
+        state,venue,proposal=self.setup_case()
+        store=Mock(domain='testnet')
+        controller=m.Controller(store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
+        def slow(*args):
+            self.clock=T+15001
+            return dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True)
+        with self.public_checks(budget=slow), \
+                patch.object(controller,'refresh',return_value=state), \
+                patch.object(m.residual,'retire_obsolete_unsent',return_value=state), \
+                patch.object(m.half_cancel,'checkpoint',return_value=state), \
+                patch.object(venue,'sample',return_value=dict(mark_price='10',at_ms=T)), \
+                patch.object(venue,'metadata',return_value=META):
+            with self.assertRaisesRegex(DispatchError,'^ENTRY_EVIDENCE_EXPIRED_BEFORE_RESERVATION$'):
+                controller.cycle(state['bucket'],send=True)
+        store.reserve.assert_not_called();store.begin.assert_not_called()
+        self.assertEqual(venue.sent,0)
+    def test_original_alert_expiry_rechecked_after_budget(self):
+        state,venue,proposal=self.setup_case(expiry_seconds=21)
+        def slow(*args):
+            self.clock=T+1000
+            return dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True)
+        with self.public_checks(budget=slow),self.assertRaisesRegex(DispatchError,'^NEW_TRIAL_SOURCE_NOT_FRESH$'):
+            venue.authorize(state,proposal,m.AFTER_EXIT)
+        self.assertEqual(venue.sent,0)
+    def test_slow_allowance_read_and_expired_operator_approval_block(self):
+        for delay,code in ((15001,'ENTRY_EVIDENCE_EXPIRED_BEFORE_RESERVATION'),
+                           (60000,'TRIAL_ENTRY_APPROVAL_EXPIRED')):
+            state,venue,proposal=self.setup_case()
+            def slow(*args):
+                self.clock=T+delay
+                return 100
+            with self.public_checks(headroom=slow),self.assertRaisesRegex(DispatchError,'^'+code+'$'):
+                venue.authorize(state,proposal,m.AFTER_EXIT)
+            self.assertEqual(venue.sent,0)
+    def test_capacity_failure_blocks_and_does_not_touch_exit_authorization(self):
+        state,venue,proposal=self.setup_case()
+        with self.public_checks(headroom=m.checks.Blocked('ENTRY_ACTION_HEADROOM_INSUFFICIENT')):
+            with self.assertRaisesRegex(m.checks.Blocked,'^ENTRY_ACTION_HEADROOM_INSUFFICIENT$'):
+                venue.authorize(state,proposal,m.AFTER_EXIT)
+        proposal['operation']='CREATE_EXIT'
+        with self.public_checks() as (reader,budget,headroom):
+            venue.authorize(state,proposal,m.AFTER_EXIT)
+        reader.assert_not_called();budget.assert_not_called();headroom.assert_not_called()
+    def test_low_budget_never_reads_extra_capacity(self):
+        state,venue,proposal=self.setup_case()
+        with self.public_checks(budget=lambda *args:dict(status='NO_USABLE_CAPACITY_OBSERVED')) as (_,_,headroom):
+            with self.assertRaisesRegex(DispatchError,'^EXACT_ENTRY_BUDGET_NOT_VERIFIED$'):
+                venue.authorize(state,proposal,m.AFTER_EXIT)
+        headroom.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

@@ -71,7 +71,7 @@ class InfoReader:
             raise Blocked('TESTNET_ONLY')
         if kind == 'meta' and user is None and coin is None:
             body = {'type': kind}
-        elif kind in ('userRole', 'userAbstraction', 'spotClearinghouseState', 'clearinghouseState') and coin is None:
+        elif kind in ('userRole', 'userAbstraction', 'spotClearinghouseState', 'clearinghouseState', 'userRateLimit') and coin is None:
             body = {'type': kind, 'user': address(user)}
         elif kind == 'activeAssetData' and isinstance(coin, str) and SYMBOL.fullmatch(coin):
             body = {'type': kind, 'user': address(user), 'coin': coin}

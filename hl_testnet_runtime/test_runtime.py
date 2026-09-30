@@ -188,6 +188,16 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(args[:2],('POST','/info'))
         self.assertEqual(json.loads(args[2]),{'type':'meta'})
         self.assertNotIn('Authorization',args[3])
+    def test_rate_allowance_read_is_fixed_testnet_info_only(self):
+        response=Mock(status=200)
+        response.read.return_value=b'{"nRequestsCap":10,"nRequestsUsed":0,"nRequestsSurplus":0}'
+        connection=Mock();connection.getresponse.return_value=response
+        with patch.object(checks.http.client,'HTTPSConnection',return_value=connection) as ctor:
+            checks.InfoReader().read('userRateLimit',user=A)
+        ctor.assert_called_once_with('api.hyperliquid-testnet.xyz',timeout=4)
+        args=connection.request.call_args.args
+        self.assertEqual(args[:2],('POST','/info'))
+        self.assertEqual(json.loads(args[2]),dict(type='userRateLimit',user=A))
     def test_redirect_is_never_followed(self):
         response = Mock(status=302)
         connection=Mock();connection.getresponse.return_value=response

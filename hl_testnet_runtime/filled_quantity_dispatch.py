@@ -816,6 +816,8 @@ class TestnetVenue:
         return roles.route_for(env,proposal['role'],proposal['account'])
     def authorize(self,state,proposal,after_exit_policy):
         route=self._gate(proposal,after_exit_policy)
+        if proposal['operation']=='ENTRY':
+            self._fresh_entry_evidence(proposal)
         if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
             # A missing or mismatched signer must fail before a durable attempt
             # is begun, where its outcome would otherwise remain uncertain.
@@ -858,6 +860,19 @@ class TestnetVenue:
             report=roles.budget_for_role(self.env,proposal['role'],route['account'],route['agent'],plan,checks.InfoReader())
             if report.get('status')!='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION' or report.get('test_plan_checked') is not True:
                 raise DispatchError('EXACT_ENTRY_BUDGET_NOT_VERIFIED')
+            roles.entry_action_headroom(route['account'],checks.InfoReader())
+            # Slow account/budget reads must fail BEFORE a durable reservation
+            # and attempt, not leave an unsent entry marked outcome-unknown.
+            self._gate(proposal,after_exit_policy)
+            self._fresh_entry_evidence(proposal)
+    def _fresh_entry_evidence(self,proposal):
+        try:
+            observed=life.moment(proposal['observed_at_ms'])
+            now=life.moment(self.now())
+        except (KeyError,TypeError,life.LifecycleError):
+            raise DispatchError('ENTRY_EVIDENCE_TIME_REQUIRED') from None
+        if not 0<=now-observed<=15000:
+            raise DispatchError('ENTRY_EVIDENCE_EXPIRED_BEFORE_RESERVATION')
     def _fresh_attempt(self,request):
         """Check both the attempt AND its evidence, including after local signing.
 

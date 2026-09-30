@@ -44,6 +44,33 @@ class ConnectionTests(unittest.TestCase):
         self.net=patch('http.client.HTTPSConnection',side_effect=AssertionError('Real network prohibited'))
         self.net.start();self.addCleanup(self.net.stop)
         self.reader=Reader();self.route=r.route_for(ENV,'short_account')
+    def test_entry_headroom_uses_the_exact_account_and_five_action_floor(self):
+        reader=Mock()
+        reader.read.return_value=dict(nRequestsCap=100,nRequestsUsed=95,nRequestsSurplus=0)
+        self.assertEqual(r.entry_action_headroom(C,reader),5)
+        reader.read.assert_called_once_with('userRateLimit',user=C)
+        reader.read.return_value['nRequestsUsed']=96
+        with self.assertRaisesRegex(checks.Blocked,'^ENTRY_ACTION_HEADROOM_INSUFFICIENT$'):
+            r.entry_action_headroom(C,reader)
+    def test_reserved_surplus_and_exhausted_allowance_are_not_confused(self):
+        reader=Mock()
+        reader.read.return_value=dict(nRequestsCap=2,nRequestsUsed=0,nRequestsSurplus=3)
+        self.assertEqual(r.entry_action_headroom(C,reader),5)
+        for used in (2,3):
+            reader.read.return_value=dict(nRequestsCap=2,nRequestsUsed=used,nRequestsSurplus=0)
+            with self.assertRaisesRegex(checks.Blocked,'^ENTRY_ACTION_HEADROOM_INSUFFICIENT$'):
+                r.entry_action_headroom(C,reader)
+    def test_malformed_or_ambiguous_rate_counters_block_new_entry(self):
+        baseline=dict(nRequestsCap=100,nRequestsUsed=0,nRequestsSurplus=0)
+        candidates=[None,[],{},dict(nRequestsCap=100,nRequestsUsed=1,nRequestsSurplus=1)]
+        for name in baseline:
+            for value in (None,True,-1,1.0,'100',2**63):
+                candidates.append({**baseline,name:value})
+        reader=Mock()
+        for value in candidates:
+            reader.read.return_value=value
+            with self.subTest(value=value),self.assertRaisesRegex(checks.Blocked,'^ENTRY_ACTION_CAPACITY_NOT_VERIFIED$'):
+                r.entry_action_headroom(C,reader)
     def test_direction_and_account_must_both_match(self):
         for account,agent,side in [(A,D,'SHORT'),(C,B,'SHORT'),(C,D,'LONG')]:
             with self.assertRaises(checks.Blocked):r.route_for(ENV,'short_account',account,agent,side)

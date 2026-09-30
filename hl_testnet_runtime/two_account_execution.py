@@ -18,6 +18,10 @@ from .approved_account_assignment import MODE as LEGACY_ALIAS
 PHANTOM = '0x6059e209cc4b1173eb30a7ac3740b24d33ce8075'
 SERVICE = 'srv-dakptbh594qs7395460g'
 ROLES = {'long_account': 'LONG', 'short_account': 'SHORT'}
+# Minimum observed address allowance: entry, stop, take, remainder cancellation
+# and one reduce-only close. This is neither a reservation nor a guarantee of
+# future capacity, retry coverage, IP headroom or an implemented emergency path.
+ENTRY_ACTION_HEADROOM = 5
 
 
 def route_for(env, role, account=None, agent=None, side=None):
@@ -148,6 +152,27 @@ def budget_for_role(env, role, account, agent, plan, reader):
     return checks.run_check({'HL_TESTNET_ACCOUNT_ADDRESS': account,
         'HL_TESTNET_AGENT_ADDRESS': agent, 'HL_TESTNET_RUNTIME_MODE': 'read_only',
         'HL_TESTNET_CHECK_SYMBOL': plan['symbol'], 'HL_TESTNET_CHECK_PLAN': json.dumps(plan)}, client=reader)
+
+
+def entry_action_headroom(account, reader):
+    """Read-only entry gate. Never apply it to protection or closing requests.
+
+    The venue nets reserved capacity into used/surplus. Reject ambiguous or
+    malformed counters rather than interpreting missing capacity as unlimited.
+    No allowance is purchased or reserved and no order is sent here.
+    """
+    raw = reader.read('userRateLimit', user=checks.address(account))
+    names = ('nRequestsCap', 'nRequestsUsed', 'nRequestsSurplus')
+    if (not isinstance(raw, dict) or any(type(raw.get(k)) is not int
+            or not 0 <= raw[k] < 2**63 for k in names)):
+        raise checks.Blocked('ENTRY_ACTION_CAPACITY_NOT_VERIFIED')
+    cap, used, surplus = (raw[k] for k in names)
+    if used and surplus:
+        raise checks.Blocked('ENTRY_ACTION_CAPACITY_NOT_VERIFIED')
+    remaining = cap - used + surplus
+    if remaining < ENTRY_ACTION_HEADROOM:
+        raise checks.Blocked('ENTRY_ACTION_HEADROOM_INSUFFICIENT')
+    return remaining
 
 
 def inspect_second(env, *, reader=None):
