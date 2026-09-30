@@ -172,11 +172,25 @@ def validate_proposal(state, proposal, *, now_ms):
         if proposal['operation'] == 'CANCEL_ORPHAN_EXIT' and life.number(cv['remaining_quantity'], signed=True) > 0:
             raise FenceError('ORPHAN_GAINED_QUANTITY_REPLAN_REQUIRED')
         return True
-    if action.get('type') != 'order' or not isinstance(action.get('orders'), list) or len(action['orders']) != 1:
+    modifying=action.get('type')=='batchModify'
+    if modifying:
+        items=action.get('modifies')
+        if (not isinstance(items,list) or len(items)!=1 or b is None or leg not in EXITS
+                or proposal['operation']!='MODIFY_EXIT'
+                or type(items[0].get('oid')) is not int
+                or str(items[0]['oid'])!=proposal.get('old_oid')
+                or proposal['old_oid'] not in b['orders'][leg]):
+            raise FenceError('EXACT_OWNED_MODIFICATION_REQUIRED')
+        prior=[o for o in snap['open_orders'] if o['oid']==proposal['old_oid']]
+        if len(prior)!=1 or prior[0]['state']!='ACTIVE':
+            raise FenceError('MODIFICATION_TARGET_NOT_ACTIVE')
+        o=items[0]['order']
+    elif action.get('type') != 'order' or not isinstance(action.get('orders'), list) or len(action['orders']) != 1:
         raise FenceError('ONE_EXACT_ORDER_REQUIRED')
+    else:
+        o=action['orders'][0]
     if view['bucket_issues']:
         raise FenceError('ACCOUNT_RECONCILIATION_REQUIRED_BEFORE_ORDER')
-    o = action['orders'][0]
     q = life.number(o.get('s'), positive=True)
     if q != life.number(proposal['quantity'], positive=True):
         raise FenceError('WIRE_AND_RESERVED_QUANTITY_DIFFER')
@@ -204,12 +218,15 @@ def validate_proposal(state, proposal, *, now_ms):
         raise FenceError('EXIT_EXCEEDS_OWN_CONFIRMED_REMAINDER')
     if o.get('r') is not True or o.get('b') is not (b['side'] == 'SHORT'):
         raise FenceError('EXACT_REDUCING_EXIT_REQUIRED')
-    if _open_for(b, snap, (leg,)):
+    if any(row['oid']!=proposal.get('old_oid') or not modifying for _,row in _open_for(b,snap,(leg,))):
         raise FenceError('PREVIOUS_SAME_LEG_NOT_TERMINAL')
+    if modifying and q!=remaining:
+        raise FenceError('MODIFICATION_REQUIRES_EXACT_CONFIRMED_REMAINDER')
     others = [x for x in rows if x['card_id'] != cid and x['active_or_pending']]
     if others:
         own = next(x for x in rows if x['card_id'] == cid)
-        if life.number(own['outstanding_exit_quantity']) + q > remaining:
+        prior_quantity=life.number(prior[0]['quantity']) if modifying else 0
+        if life.number(own['outstanding_exit_quantity']) - prior_quantity + q > remaining:
             raise FenceError('SHARED_CARD_INDEPENDENT_EXIT_CAPACITY_EXCEEDED')
     return True
 
@@ -271,17 +288,20 @@ def retire_obsolete_unsent(store, state, *, now_ms):
     obsolete = False
     if p['action']['type'] == 'order' and p['leg'] in EXITS:
         obsolete = life.number(card['remaining_quantity'], signed=True) != life.number(p['quantity']) or bool(_open_for(b,snap,(p['leg'],)))
-    elif p['operation'] in ('CANCEL_ORPHAN_EXIT', 'CANCEL_FOR_RESIZE'):
+    elif p['operation'] in ('CANCEL_ORPHAN_EXIT', 'CANCEL_FOR_RESIZE', 'MODIFY_EXIT'):
         obsolete = any(o['oid'] == p['old_oid'] for o in snap['terminal_orders'])
         remaining = life.number(card['remaining_quantity'], signed=True)
         if p['operation'] == 'CANCEL_ORPHAN_EXIT' and remaining > 0:
             obsolete = True
-        elif p['operation'] == 'CANCEL_FOR_RESIZE':
+        elif p['operation'] in ('CANCEL_FOR_RESIZE','MODIFY_EXIT'):
             own = [o for _,o in _open_for(b,snap,(p['leg'],)) if o['oid'] == p['old_oid']]
             # A fresh fill can make the size correct, or finish the card while
             # this cancellation was only PREPARED. Replan rather than remove a
             # now-correct exit or leave stale resize intent blocking cleanup.
-            if remaining <= 0 or any(life.number(o['quantity']) == remaining for o in own):
+            if remaining <= 0 or (p['operation']=='CANCEL_FOR_RESIZE' and
+                    any(life.number(o['quantity']) == remaining for o in own)):
+                obsolete = True
+            if p['operation']=='MODIFY_EXIT' and remaining!=life.number(p['quantity']):
                 obsolete = True
     if not obsolete:
         return state

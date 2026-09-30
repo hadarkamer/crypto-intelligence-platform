@@ -58,7 +58,12 @@ class Venue:
             if self.orders[oid]['status']=='open': self.orders[oid].update(status='canceled',statusTimestamp=self.t)
             reply=dict(status='ok',response=dict(type='cancel',data=dict(statuses=['success'])))
         else:
-            o=action['orders'][0];oid=str(1000+len(self.orders));leg=p['leg']
+            o=m.requested_order(action);oid=str(1000+len(self.orders));leg=p['leg']
+            if action['type']=='batchModify':
+                prior=self.orders[str(action['modifies'][0]['oid'])]
+                if prior['status']!='open':
+                    return dict(status='ok',response=dict(type='order',data=dict(statuses=[dict(error='Cannot modify terminal order')])) )
+                prior.update(status='canceled',statusTimestamp=self.t)
             immediate=p['operation']=='CLOSE_PASSED_TAKE'
             raw=dict(oid=int(oid),cloid=o['c'],coin=p['symbol'],side='B' if o['b'] else 'A',
                 limitPx=o['p'],sz=o['s'],origSz=o['s'],reduceOnly=o['r'],isTrigger=leg!='ENTRY' and not immediate,
@@ -252,11 +257,13 @@ class DispatchPureTests(NoExternal):
         snap['position_quantity']='0'
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
             m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
-    def test_quantity_change_is_cancel_exact_old_order_not_create_duplicate(self):
+    def test_quantity_change_modifies_exact_old_exit_without_cancel_request(self):
         s=state_from_case(q='60',stop='40',take='40');p=self.select(s)
-        self.assertEqual(p['operation'],'CANCEL_FOR_RESIZE')
-        self.assertEqual(p['action']['type'],'cancel');self.assertEqual(p['old_oid'],s['bindings'][0]['orders']['STOP'][0])
-        self.assertNotIn('always_place',json.dumps(p));self.assertNotIn('modify',json.dumps(p))
+        self.assertEqual(p['operation'],'MODIFY_EXIT')
+        self.assertEqual(p['action']['type'],'batchModify');self.assertEqual(p['old_oid'],s['bindings'][0]['orders']['STOP'][0])
+        self.assertEqual(p['action']['modifies'][0]['oid'],int(p['old_oid']))
+        self.assertEqual(m.requested_order(p['action'])['s'],'60')
+        self.assertEqual(m.requested_order(p['action'])['r'],True)
     def test_quantity_and_price_precision_both_enforced(self):
         for px,q in (('9.987654','1'),('9.9','1.001')):
             with self.assertRaises(DispatchError):m.precise(px,q,2)
@@ -463,15 +470,18 @@ class DispatchDatabaseTests(NoExternal):
         self.bucket=s['bucket'];self.b=b;self.protect()
         self.assertEqual(self.store.load(self.bucket)['account'],B)
         self.assertTrue(self.v.requests[1]['proposal']['action']['orders'][0]['b'])
-    def test_resize_waits_for_cancel_evidence_and_recomputes(self):
+    def test_resize_is_one_venue_action_and_recomputes_later_partial_fill(self):
         self.protect();self.v.fill('1000','20');self.cycle()
-        self.assertEqual(self.v.requests[-1]['proposal']['operation'],'CANCEL_FOR_RESIZE')
-        # Another 10 fills while the old stop's cancellation is being reconciled.
+        self.assertEqual(self.v.requests[-1]['proposal']['operation'],'MODIFY_EXIT')
+        self.assertEqual(self.v.orders['1001']['status'],'canceled')
+        self.assertEqual(self.v.orders['1003']['status'],'open')
+        # Another fill while the single modification's result is reconciled.
         self.v.fill('1000','10');self.cycle()
         self.assertEqual(self.v.requests[-1]['proposal']['quantity'],'70')
         self.cycle();self.cycle();self.cycle(False)
         v=self.remaining()[0];self.assertEqual((v['stop_quantity_observed'],v['take_profit_quantity_observed']),('70','70'))
         self.assertEqual(self.v.orders['1000']['order']['sz'],'30')
+        self.assertTrue(all(r['proposal']['action']['type']!='cancel' for r in self.v.requests))
     def test_lost_create_reply_reconciles_cloid_without_resending(self):
         self.entry();self.v.lose_reply=True;self.cycle();count=self.v.sent
         self.cycle(False);s=self.store.load(self.bucket)
@@ -510,6 +520,21 @@ class DispatchDatabaseTests(NoExternal):
             except JournalError:return False
         with ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(reserve,range(4)))
         self.assertEqual(sum(results),1)
+    def test_overlapping_workers_cannot_send_same_entry_twice(self):
+        workers=[m.Controller(DispatchStore(PostgresJournal.for_ci(CI)),self.v,ROUTES2)
+                 for _ in range(2)]
+        def cycle(worker):
+            try:return worker.cycle(self.bucket,send=True)
+            except JournalError:return {'status':'RELOAD_REQUIRED','order_requests_sent':0}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(cycle,workers))
+        self.assertEqual(self.v.sent,1)
+        self.assertEqual(len(self.v.requests),1)
+        self.assertEqual(sum(r['order_requests_sent'] for r in results),1)
+        state=self.store.load(self.bucket)
+        request=self.store.request(state['pending'])
+        self.assertEqual(request['attempts'],1)
+        self.assertEqual(request['phase'],'ACK_UNVERIFIED')
     def test_stale_before_begin_blocks_even_after_reservation(self):
         s=self.c.refresh(self.bucket);p=m.choose(s,ROUTES2,META,self.v.sample(A,'DOGE'),now_ms=self.v.now())
         s=self.store.reserve(s,p,self.v.now())

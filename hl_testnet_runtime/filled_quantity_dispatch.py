@@ -71,6 +71,18 @@ def canonical_wire_action(action):
     if not isinstance(action, dict):
         raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
     kind = action.get('type')
+    if kind == 'batchModify':
+        if (set(action) != {'type','modifies'} or not isinstance(action['modifies'],list)
+                or len(action['modifies']) != 1):
+            raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+        item=action['modifies'][0]
+        if (not isinstance(item,dict) or set(item) != {'oid','order'}
+                or type(item['oid']) is not int or not 0 < item['oid'] < 2**64):
+            raise DispatchError('ACTION_WIRE_SHAPE_INVALID')
+        order=canonical_wire_action(dict(type='order',orders=[item['order']],grouping='na'))['orders'][0]
+        if order['r'] is not True or 'trigger' not in order['t']:
+            raise DispatchError('ONLY_PROTECTIVE_EXIT_MODIFICATION_ALLOWED')
+        return dict(type='batchModify',modifies=[dict(oid=item['oid'],order=order)])
     if kind == 'order':
         if (set(action) != {'type','orders','grouping'} or action.get('grouping') != 'na'
                 or not isinstance(action.get('orders'), list) or len(action['orders']) != 1):
@@ -167,6 +179,10 @@ def normalized_reply(raw, kind, *, account=None, agent=None):
     return unknown
 
 
+def requested_order(action):
+    return action['modifies'][0]['order'] if action['type']=='batchModify' else action['orders'][0]
+
+
 def identity(raw, request, now_ms):
     """Verify a venue lookup of the PERSISTED cloid, not a caller's three IDs."""
     if not isinstance(raw,dict) or raw.get('status')!='order':
@@ -180,7 +196,7 @@ def identity(raw, request, now_ms):
             raise DispatchError('ENTRY_REJECTED_NO_ORDER_NO_RETRY')
         raise DispatchError('OUTCOME_UNRESOLVED_NO_NEW_REQUEST')
     env=raw.get('order');o=env.get('order') if isinstance(env,dict) else None
-    p=request['proposal'];expected=p['action']['orders'][0]
+    p=request['proposal'];expected=requested_order(p['action'])
     if not isinstance(o,dict): raise DispatchError('INVALID_ORDER_LOOKUP')
     oid=o.get('oid');stamp=life.moment(env.get('statusTimestamp'))
     if type(oid) is not int or not 0<oid<2**64 or not request['attempt_at_ms']<=stamp<=now_ms:
@@ -210,6 +226,44 @@ def identity(raw, request, now_ms):
     return str(oid)
 
 
+def exit_modify_proposal(state, meta, sample, *, card_id, leg, old_oid, now_ms, sequence=None):
+    """Preview one owned exit amendment; no sender, key or alternate authority.
+
+    Also permits a same-quantity amendment for a supervised Testnet probe.
+    The caller must still use authorize/reserve/begin/send and public reconciliation.
+    """
+    from .residual_exit_contract import validate_wire_proposal
+    snap=state['evidence']['snapshot']
+    if not 0<=now_ms-snap['at_ms']<=15000 or not 0<=now_ms-sample['at_ms']<=15000:
+        raise DispatchError('FRESH_EVIDENCE_REQUIRED')
+    index,decimals=asset(meta,state['symbol'])
+    sequence=state['revision']+1 if sequence is None else sequence
+    b=next(b for b in state['bindings'] if b['card_id']==card_id)
+    if leg not in recovery.EXITS:
+        raise DispatchError('ONLY_PROTECTIVE_EXIT_MODIFICATION_ALLOWED')
+    view=life.review(state['bindings'],snap,now_ms=now_ms)
+    v=next(v for v in view['cards'] if v['card_id']==card_id)
+    q=life.text(life.number(v['remaining_quantity'],positive=True))
+    price=b['prices']['stop' if leg=='STOP' else 'take_profit']
+    mark=life.number(sample['mark_price'],positive=True);target=life.number(price)
+    crossed=(mark<=target if leg=='STOP' else mark>=target) if b['side']=='LONG' else (mark>=target if leg=='STOP' else mark<=target)
+    if crossed:
+        raise DispatchError('EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE')
+    precise(price,q,decimals)
+    cloid='0x'+life.digest([VERSION,state['bucket'],card_id,leg,sequence])[:32]
+    order=dict(a=index,b=b['side']=='SHORT',p=price,s=q,r=True,
+        t=dict(trigger=dict(isMarket=leg=='STOP',triggerPx=price,tpsl='sl' if leg=='STOP' else 'tp')),c=cloid)
+    card=state['originals'][card_id]['card']
+    p=dict(version=VERSION,card_id=card_id,account=state['account'],symbol=state['symbol'],
+        role=b['role'],leg=leg,operation='MODIFY_EXIT',quantity=q,old_oid=old_oid,sequence=sequence,
+        action=dict(type='batchModify',modifies=[dict(oid=int(old_oid),order=order)]),
+        source_at=card['prepared']['execution']['at'],basis=life.digest(state['evidence']),observed_at_ms=snap['at_ms'])
+    if 'source_expires_at' in card:p['source_expires_at']=card['source_expires_at']
+    residual.validate_proposal(state,p,now_ms=now_ms)
+    validate_wire_proposal(state,p,now_ms=now_ms)
+    return p
+
+
 def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_policy='NOT_SELECTED',
            allowed_entry_card_id=None):
     """Build the next exact action from verified card quantities; never sends."""
@@ -228,6 +282,9 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
         if 'source_expires_at' in card:
             result['source_expires_at']=card['source_expires_at']
         return result
+    def modify_exit(cid,leg,oid):
+        return exit_modify_proposal(state,meta,sample,card_id=cid,leg=leg,old_oid=oid,
+                                    now_ms=now_ms,sequence=sequence)
     bound={b['card_id'] for b in bs}
     # Existing exposure is serviced first, never delayed by a new entry.
     if bs:
@@ -235,6 +292,8 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
         # No sibling is considered retired until public finality is reconciled.
         orphan=residual.cleanup(state,now_ms=now_ms,after_exit_policy=after_exit_policy)
         if orphan:
+            if orphan['operation']=='CANCEL_FOR_RESIZE':
+                return modify_exit(orphan['card_id'],orphan['leg'],orphan['oid'])
             return make(orphan['card_id'],orphan['leg'],orphan['operation'],
                 dict(type='cancel',cancels=[dict(a=index,o=int(orphan['oid']))]),'0',orphan['oid'])
         # Source expiry used to stop NEW submissions. A GTC order already on
@@ -331,9 +390,9 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
             b=next(b for b in bs if b['card_id']==cid)
             if op in ('RESIZE_EXIT','CANCEL_ORPHAN_EXIT'):
                 oid=step['order_id']
-                # Current API does not offer a safe conditional trigger replacement.
-                # Cancel exact old order, OBSERVE its finality, then recalculate/create.
-                return make(cid,leg,'CANCEL_FOR_RESIZE' if op=='RESIZE_EXIT' else 'CANCEL_ORPHAN_EXIT',
+                if op=='RESIZE_EXIT':
+                    return modify_exit(cid,leg,oid)
+                return make(cid,leg,'CANCEL_ORPHAN_EXIT',
                     dict(type='cancel',cancels=[dict(a=index,o=int(oid))]),'0',oid)
             q=step['target_quantity'];price=step['original_price'];precise(price,q,decimals)
             cloid='0x'+life.digest([VERSION,state['bucket'],cid,leg,sequence])[:32]
@@ -435,8 +494,8 @@ class Controller:
         if state['pending']:
             request=self.store.request(state['pending'])
             if request['phase']=='CONFLICT': raise DispatchError('CONFLICT_REQUIRES_REVIEW')
-            if request['attempt_at_ms'] is not None and request['proposal']['action']['type']=='order':
-                cloid=request['proposal']['action']['orders'][0]['c']
+            if request['attempt_at_ms'] is not None and request['proposal']['action']['type'] in ('order','batchModify'):
+                cloid=requested_order(request['proposal']['action'])['c']
                 raw=self.venue.lookup(state['account'],cloid)
                 if (raw == {'status':'unknownOid'} and request['phase']=='REJECTED'
                         and request['proposal']['leg']=='ENTRY' and not bs
@@ -523,9 +582,14 @@ class Controller:
             if snap['at_ms']<=current['attempt_at_ms']:
                 raise DispatchError('POST_ATTEMPT_OBSERVATION_REQUIRED')
             p=current['proposal']
-            if p['action']['type']=='order':
+            if p['action']['type'] in ('order','batchModify'):
                 if oid is None: raise DispatchError('EXACT_ORDER_OWNERSHIP_REQUIRED')
-                cloid=p['action']['orders'][0]['c']
+                cloid=requested_order(p['action'])['c']
+                if p['action']['type']=='batchModify':
+                    ending=[o for o in snap['terminal_orders'] if o['oid']==p['old_oid']]
+                    if (len(ending)!=1 or ending[0]['state'] not in ('CANCELED','FILLED')
+                            or ending[0]['at_ms']<current['attempt_at_ms']):
+                        raise DispatchError('MODIFIED_EXIT_PREDECESSOR_NOT_FINAL')
                 conn.execute(f'''INSERT INTO {SCHEMA}.ownership VALUES(%s,%s,%s,%s,%s,%s)
                     ON CONFLICT DO NOTHING''',(s['account'],oid,cloid,p['card_id'],p['leg'],current['request_id']))
                 saved=conn.execute(f'SELECT card_id,leg,request_id,cloid FROM {SCHEMA}.ownership WHERE account=%s AND oid=%s',

@@ -57,6 +57,21 @@ def _validate(state, p, now_ms):
     binding = next((b for b in bs if b['card_id'] == cid), None)
     owner = next((v for v in view['cards'] if v['card_id'] == cid), None)
     action = p['action']; asset = draft['entry_action']['orders'][0]['a']
+    modifying=action['type']=='batchModify'
+    if modifying:
+        life.shape(action,'type modifies')
+        if (not isinstance(action['modifies'],list) or len(action['modifies'])!=1
+                or binding is None or leg not in fence.EXITS or op!='MODIFY_EXIT'):
+            raise ContractError('EXACT_OWNED_MODIFICATION_REQUIRED')
+        item=action['modifies'][0];life.shape(item,'oid order')
+        if (type(item['oid']) is not int or str(item['oid'])!=p['old_oid']
+                or p['old_oid'] not in binding['orders'][leg]
+                or life.number(p['quantity'],positive=True)!=life.number(owner['remaining_quantity'],positive=True)):
+            raise ContractError('MODIFICATION_DIFFERS_FROM_OWN_REMAINDER')
+        active=[o for o in snap['open_orders'] if o['oid']==p['old_oid']]
+        if len(active)!=1 or active[0]['state']!='ACTIVE':
+            raise ContractError('MODIFICATION_TARGET_NOT_ACTIVE')
+        action=dict(type='order',orders=[item['order']],grouping='na')
     if action['type'] == 'cancel':
         life.shape(action, 'type cancels')
         if (not isinstance(action['cancels'], list) or len(action['cancels']) != 1
@@ -124,7 +139,7 @@ def _validate(state, p, now_ms):
         if op != 'ENTRY' or binding is not None or action != draft['entry_action']:
             raise ContractError('ENTRY_WIRE_DIFFERS_FROM_IMMUTABLE_DRAFT')
         return True
-    if leg not in fence.EXITS or op not in ('CREATE_EXIT','CLOSE_PASSED_TAKE') or binding is None:
+    if leg not in fence.EXITS or op not in ('CREATE_EXIT','CLOSE_PASSED_TAKE','MODIFY_EXIT') or binding is None:
         raise ContractError('EXACT_OWNED_EXIT_CREATION_REQUIRED')
     sequence = p['sequence']
     if type(sequence) is not int or sequence <= 0 or p['version'] != DISPATCH_VERSION:
