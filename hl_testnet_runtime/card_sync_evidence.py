@@ -5,10 +5,12 @@ No signer, order sender, wallet keys, transfers or account changes. Retain old
 fills and query a bounded overlapping interval; unknown activity is not hidden.
 """
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, localcontext
 import http.client
 import json
 import time
+import threading
 from . import card_lifecycle as life, checks
 
 HOST = 'api.hyperliquid-testnet.xyz'
@@ -35,8 +37,32 @@ def facts(snapshot):
 
 class PublicReader:
     """Only fixed public /info requests. Bounded calls, bytes and request time."""
-    def __init__(self):
+    def __init__(self, *, parallel=False):
         self.calls = 0
+        self.parallel = parallel is True
+        self._calls_lock = threading.Lock()
+
+    def observation_inputs(self, account, oids, start, end):
+        """Overlap independent info reads, never the two verification passes.
+
+        The dispatcher opts in; the separately weighted read-only worker keeps
+        its serial reader. No order transport or persistent state is concurrent.
+        """
+        if not self.parallel:
+            return observation_inputs(self, account, oids, start, end)
+        pool = ThreadPoolExecutor(max_workers=4)
+        try:
+            fills = pool.submit(history, self, account, start, end)
+            inventory = pool.submit(self.read, 'frontendOpenOrders', account)
+            position = pool.submit(self.read, 'clearinghouseState', account)
+            statuses = {oid: pool.submit(self.read, 'orderStatus', account, oid=oid)
+                        for oid in oids}
+            return ({oid: future.result() for oid, future in statuses.items()},
+                    fills.result(), inventory.result(), position.result())
+        finally:
+            # Join started reads and discard queued work on failure. No reads
+            # from a failed observation may survive into another dispatch cycle.
+            pool.shutdown(wait=True, cancel_futures=True)
 
     def read(self, kind, account, *, oid=None, start=None, end=None):
         body = {'type':kind, 'user':life.address(account)}
@@ -52,9 +78,10 @@ class PublicReader:
             pass
         else:
             raise SyncError('READ_TYPE_NOT_ALLOWED')
-        if HOST != 'api.hyperliquid-testnet.xyz' or self.calls >= 200:
-            raise SyncError('READ_BUDGET_EXCEEDED')
-        self.calls += 1
+        with self._calls_lock:
+            if HOST != 'api.hyperliquid-testnet.xyz' or self.calls >= 200:
+                raise SyncError('READ_BUDGET_EXCEEDED')
+            self.calls += 1
         connection = http.client.HTTPSConnection(HOST, timeout=4)
         try:
             connection.request('POST','/info',json.dumps(body).encode(),{'Content-Type':'application/json'})
@@ -120,21 +147,31 @@ REJECTED = frozenset(('rejected','tickRejected','minTradeNtlRejected','perpMargi
     'openInterestIncreaseRejected','insufficientSpotBalanceRejected','oracleRejected','perpMaxPositionRejected'))
 
 
+def observation_inputs(reader, account, oids, start, end):
+    """Serial compatibility for offline venues and independently budgeted readers."""
+    responses = {oid: reader.read('orderStatus', account, oid=oid) for oid in oids}
+    raw_fills = history(reader, account, start, end)
+    inventory = reader.read('frontendOpenOrders', account)
+    position = reader.read('clearinghouseState', account)
+    return responses, raw_fills, inventory, position
+
+
 def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()):
     account,symbol = life.validate_snapshot(previous)
     plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
     links = {oid:(b,leg) for b in bindings for leg in life.LEGS for oid in b['orders'][leg]}
     old_terminal = {r['oid']:r for r in previous['terminal_orders']}
-    responses = {oid:reader.read('orderStatus',account,oid=oid) for oid in links}
-    fills = merge_fills(previous['fills'],history(reader,account,start,end),account,symbol,start,end)
+    read_inputs = getattr(reader, 'observation_inputs', None)
+    responses, raw_fills, raw_inventory, position = (
+        read_inputs(account, links, start, end) if callable(read_inputs)
+        else observation_inputs(reader, account, links, start, end))
+    fills = merge_fills(previous['fills'],raw_fills,account,symbol,start,end)
     totals = {}; last_fill = {}
     with localcontext() as ctx:
         ctx.prec = 80
         for row in fills:
             totals[row['oid']] = totals.get(row['oid'],Decimal(0))+life.number(row['quantity'])
             last_fill[row['oid']] = max(last_fill.get(row['oid'],0),row['at_ms'])
-    raw_inventory = reader.read('frontendOpenOrders',account)
-    position = reader.read('clearinghouseState',account)
     if not isinstance(raw_inventory,list) or len(raw_inventory)>10000 or any(not isinstance(x,dict) for x in raw_inventory):
         raise SyncError('INVALID_ORDER_INVENTORY')
     inventory = {}

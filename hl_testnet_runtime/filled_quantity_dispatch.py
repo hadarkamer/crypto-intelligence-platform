@@ -693,7 +693,7 @@ class TestnetVenue:
     def lookup(self,account,cloid):
         import hyperliquid_testnet_executor as legacy
         return legacy.TestnetHTTP().info('orderStatus',user=account,oid=cloid)
-    def collect(self,value): return evidence.collect(value,evidence.PublicReader())
+    def collect(self,value): return evidence.collect(value,evidence.PublicReader(parallel=True))
     def empty_snapshot(self,account,symbol):
         reader=evidence.PublicReader();start=self.now()
         for _ in range(2):
