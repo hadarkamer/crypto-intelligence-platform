@@ -695,6 +695,55 @@ class DurableLongStreamTests(NoExternal):
                          ['ENTRY','STOP','TAKE_PROFIT'])
         self.assertTrue(stream.observed_trades(self.c,self.route)[0]['protection_verified'])
 
+    def test_short_partial_growth_after_restart_preserves_unknown_modify_barrier(self):
+        """Resume open partial exposure from Postgres, including a lost amend reply."""
+        card=self.card(101,side='SHORT')
+        route=ROUTES2['short_account']
+        self.c.register(card['card_id'])
+        bucket=self.store.for_account(route['account'])[0]['bucket']
+        def sweep():
+            return stream.tick(self.c,route,self.start,new_entries=False,
+                               role='short_account')
+        def restart():
+            self.store=DispatchStore(PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL']))
+            self.c=dispatch.Controller(self.store,self.v,ROUTES2,
+                                      after_exit_policy=dispatch.AFTER_EXIT)
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
+            self.c.cycle(bucket,send=True)
+            self.v.fill('1000','40')
+            self.assertEqual(sweep()['order_requests_sent'],2)
+            restart()
+            self.assertEqual(sweep()['order_requests_sent'],0)
+            opened=stream.observed_trades(self.c,route,role='short_account')[0]
+            self.assertEqual(opened['entry_quantity'],'40')
+            self.assertTrue(opened['protection_verified'])
+            self.v.fill('1000','30')
+            self.v.lose_reply=True
+            self.assertEqual(sweep()['order_requests_sent'],1)
+            pending=self.store.request(self.store.load(bucket)['pending'])
+            self.assertEqual(pending['phase'],'OUTCOME_UNKNOWN')
+            self.assertEqual(pending['proposal']['action']['type'],'batchModify')
+            self.assertEqual(pending['proposal']['leg'],'STOP')
+            self.assertEqual(pending['attempts'],1)
+            unknown_id=pending['request_id']
+            restart()
+            self.assertEqual(sweep()['order_requests_sent'],1)
+        amended=[r for r in self.v.requests if r['proposal']['operation']=='MODIFY_EXIT']
+        self.assertEqual([r['proposal']['leg'] for r in amended],['STOP','TAKE_PROFIT'])
+        self.assertTrue(all(r['attempts']==1 for r in self.v.requests))
+        self.assertTrue(all(r['proposal']['quantity']=='70' for r in amended))
+        self.assertTrue(all(r['proposal']['action']['type']=='batchModify' for r in amended))
+        self.assertEqual(self.store.request(unknown_id)['phase'],'OBSERVED')
+        saved=self.store.load(bucket)
+        self.assertIsNone(saved['pending'])
+        opened=stream.observed_trades(self.c,route,role='short_account')[0]
+        self.assertEqual(opened['entry_quantity'],'70')
+        self.assertEqual(opened['remaining_quantity'],'70')
+        self.assertTrue(opened['protection_verified'])
+        self.assertEqual(self.v.orders['1000']['order']['sz'],'30')
+        self.assertTrue(all(self.v.orders[oid]['order']['reduceOnly']
+            for oid in opened['active_order_ids'] if oid!='1000'))
+
 
 if __name__=='__main__':
     unittest.main()
