@@ -10,7 +10,8 @@ from . import emergency_close as m, card_lifecycle as life
 from . import filled_quantity_dispatch as dispatch
 from .filled_dispatch_store import DispatchStore,DispatchError,SCHEMA
 from .test_filled_quantity_dispatch import (NoExternal,Venue as NormalVenue,
-    DispatchDatabaseTests,state_from_case,ROUTES2,AGENT)
+    state_from_case,ROUTES2,AGENT)
+from . import test_filled_quantity_dispatch as fixtures
 from .test_filled_quantity_exits import original,META
 from .test_card_lifecycle import T,A,B,fill
 
@@ -128,10 +129,20 @@ class EmergencyPureTests(NoExternal):
 
 @unittest.skipUnless(CI,'Disposable loopback PostgreSQL required')
 class EmergencyDatabaseTests(NoExternal):
-    setUp=DispatchDatabaseTests.setUp
-    cycle=DispatchDatabaseTests.cycle
-    entry=DispatchDatabaseTests.entry
-    protect=DispatchDatabaseTests.protect
+    def setUp(self):
+        super().setUp()
+        self.j=fixtures.PostgresJournal.for_ci(CI)
+        with self.j._transaction() as conn:
+            for name in (SCHEMA,'hl_testnet_recovery_rehearsal_v1','hl_testnet_cards_v1','hl_testnet_execution_v1'):
+                conn.execute(f'DROP SCHEMA IF EXISTS {name} CASCADE')
+        self.j.bootstrap();self.cards=fixtures.CardStore(self.j);self.cards.initialize()
+        self.store=DispatchStore(self.j);self.store.initialize();self.v=NormalVenue()
+        self.c=dispatch.Controller(self.store,self.v,ROUTES2)
+        self.b,self.o=original();self.cards.record(self.o['card'])
+        self.s=self.c.register(self.b['card_id']);self.bucket=self.s['bucket']
+    cycle=fixtures.DispatchDatabaseTests.cycle
+    entry=fixtures.DispatchDatabaseTests.entry
+    protect=fixtures.DispatchDatabaseTests.protect
 
     def setup_emergency(self,q='40'):
         self.entry(q)
