@@ -248,6 +248,103 @@ class EvidenceTests(unittest.TestCase):
         rows=e.history(Pages(),A,T,T+999)
         self.assertEqual(len(rows),1000);self.assertEqual(len({r['time'] for r in rows}),1000)
 
+    def test_parallel_reads_overlap_with_four_workers_and_sequential_verification(self):
+        ev=evidence(is_open=True)
+        source=Reader(ev)
+        barrier=threading.Barrier(4,timeout=3)
+        lock=threading.Lock()
+        calls_per_pass=6  # Three statuses, fills, inventory and position.
+        class Parallel(e.PublicReader):
+            def __init__(self):
+                super().__init__(parallel=True)
+                self.started=0;self.active=0;self.peak=0
+            def read(self,*args,**kwargs):
+                with lock:
+                    ordinal=self.started;self.started+=1
+                    if ordinal % calls_per_pass == 0:
+                        # A new pass must not overlap an old observation.
+                        if self.active: raise AssertionError('OVERLAPPING_VERIFICATION_PASSES')
+                    self.active+=1;self.peak=max(self.peak,self.active)
+                try:
+                    if ordinal % calls_per_pass < 4: barrier.wait()
+                    with lock: return source.read(*args,**kwargs)
+                finally:
+                    with lock: self.active-=1
+        reader=Parallel()
+        result=e.collect(ev,reader,clock=lambda:T+10000)
+        self.assertEqual(result,collected(ev))
+        self.assertEqual((reader.started,reader.peak,reader.active),(12,4,0))
+        self.assertEqual(source.windows,[source.windows[0]]*2)
+
+    def test_parallel_inconsistent_second_pass_is_rejected(self):
+        ev=evidence(is_open=True);source=Reader(ev);lock=threading.Lock()
+        class Parallel(e.PublicReader):
+            def __init__(self): super().__init__(parallel=True);self.positions=0
+            def read(self,kind,*args,**kwargs):
+                with lock:
+                    result=source.read(kind,*args,**kwargs)
+                    if kind=='clearinghouseState':
+                        self.positions+=1
+                        if self.positions==2: result['assetPositions'][0]['position']['szi']='99'
+                    return result
+        original=deepcopy(ev)
+        with self.assertRaisesRegex(e.SyncError,'OBSERVATION_CHANGED_RETRY'):
+            e.collect(ev,Parallel(),clock=lambda:T+10000)
+        self.assertEqual(ev,original)
+
+    def test_parallel_read_failure_returns_no_partial_evidence_and_joins_workers(self):
+        ev=evidence();source=Reader(ev);lock=threading.Lock()
+        class Parallel(e.PublicReader):
+            def __init__(self): super().__init__(parallel=True);self.active=0
+            def read(self,kind,*args,**kwargs):
+                with lock: self.active+=1
+                try:
+                    if kind=='userFillsByTime': raise e.SyncError('PUBLIC_READ_UNAVAILABLE')
+                    with lock: return source.read(kind,*args,**kwargs)
+                finally:
+                    with lock: self.active-=1
+        reader=Parallel();original=deepcopy(ev)
+        with self.assertRaisesRegex(e.SyncError,'PUBLIC_READ_UNAVAILABLE'):
+            e.collect(ev,reader,clock=lambda:T+10000)
+        self.assertEqual((reader.active,ev),(0,original))
+
+    def test_parallel_missing_fill_cannot_be_reported_as_closed(self):
+        ev=evidence(is_open=True);source=Reader(evidence());source.data['fills']=source.data['fills'][:1]
+        lock=threading.Lock()
+        reader=e.PublicReader(parallel=True)
+        def read(*args,**kwargs):
+            with lock: return source.read(*args,**kwargs)
+        reader.read=read
+        with self.assertRaisesRegex(e.SyncError,'HISTORY_INCOMPLETE'):
+            e.collect(ev,reader,clock=lambda:T+10000)
+
+    def test_public_read_call_budget_is_shared_by_parallel_workers(self):
+        reader=e.PublicReader(parallel=True);reader.calls=198
+        class Response:
+            status=200
+            def read(self,*args): return b'[]'
+        class Connection:
+            def __init__(self,*args,**kwargs): pass
+            def request(self,*args,**kwargs): pass
+            def getresponse(self): return Response()
+            def close(self): pass
+        def read(_):
+            try: reader.read('frontendOpenOrders',A);return 'OK'
+            except e.SyncError as exc: return str(exc)
+        with patch.object(e.http.client,'HTTPSConnection',Connection):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results=list(pool.map(read,range(8)))
+        self.assertEqual(results.count('OK'),2)
+        self.assertEqual(results.count('READ_BUDGET_EXCEEDED'),6)
+        self.assertEqual(reader.calls,200)
+
+    def test_weighted_monitor_reader_remains_serial(self):
+        reader=worker.BudgetReader();source=Reader(evidence())
+        with patch.object(reader,'read',side_effect=source.read), \
+                patch.object(e,'ThreadPoolExecutor',side_effect=AssertionError('MONITOR_MUST_REMAIN_SERIAL')):
+            result=e.collect(evidence(),reader,clock=lambda:T+10000)
+        self.assertTrue(result['report']['cards'][0]['closure_verified'])
+
     def test_public_transport_rejects_exchange_or_mainnet(self):
         with self.assertRaises(e.SyncError):e.PublicReader().read('order',A)
         with patch.object(e,'HOST','api.hyperliquid.xyz'):
