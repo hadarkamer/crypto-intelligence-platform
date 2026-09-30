@@ -169,12 +169,28 @@ def _account_owned(venue, account, states, *, role=None):
     return True
 
 
+def _maintain_bucket(controller, bucket):
+    """Reconcile between bounded exit actions without waiting another sweep.
+
+    cycle() refreshes public evidence and resolves the durable pending request
+    before selecting each action. An uncertain or rejected reply ends this pass;
+    it never authorizes a resend. New entries stay disabled throughout.
+    """
+    for _ in range(3):
+        result = controller.cycle(bucket, send=True, allow_new_entries=False)
+        yield result
+        if (result.get('status') != 'ACCEPTED_UNVERIFIED'
+                or result['order_requests_sent'] != 1):
+            break
+
+
 def tick(controller, route, not_before, *, new_entries, role='long_account'):
     """One bounded sweep. Every old exposure is serviced before new cards."""
     now = datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)
     states = controller.store.for_account(route['account'])
     sent = 0
     errors = 0
+    maintenance_active = 0
     first_failure = None
     rejection = None
     for state in states:
@@ -185,15 +201,16 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
             aged_closed_short = (role == 'short_account' and state['bindings']
                 and state['evidence'] is not None
                 and 3600000 < int(now.timestamp()*1000)-state['evidence']['snapshot']['at_ms'])
-            if not _unfinished(state,now) and not aged_closed_short:
+            unfinished = _unfinished(state,now)
+            if not unfinished and not aged_closed_short:
                 continue
-            result = controller.cycle(state['bucket'],send=True,
-                                      allow_new_entries=False)
-            sent += result['order_requests_sent']
-            if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
-                rejection=dict(rejection_code=result.get('rejection_code'),
-                               rejection_reason=result.get('rejection_reason'),
-                               rejection_subject=result.get('rejection_subject'),symbol=state['symbol'])
+            maintenance_active += int(unfinished)
+            for result in _maintain_bucket(controller, state['bucket']):
+                sent += result['order_requests_sent']
+                if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
+                    rejection=dict(rejection_code=result.get('rejection_code'),
+                                   rejection_reason=result.get('rejection_reason'),
+                                   rejection_subject=result.get('rejection_subject'),symbol=state['symbol'])
         except Exception as exc:
             errors += 1
             if first_failure is None:
@@ -201,6 +218,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     if errors or not new_entries:
         result = dict(status='EXISTING_RECONCILIATION_REQUIRED' if errors else 'ENTRIES_DISABLED',
                       active_buckets=len(states),
+                      maintenance_active=maintenance_active,
                       order_requests_sent=sent,new_cards_registered=0)
         if first_failure is not None:
             result.update(first_failure)
@@ -253,7 +271,15 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
             rejection=dict(rejection_code=result.get('rejection_code'),
                            rejection_reason=result.get('rejection_reason'),
                            rejection_subject=result.get('rejection_subject'),symbol=result['symbol'])
+        if result.get('status') == 'ACCEPTED_UNVERIFIED' and result['order_requests_sent'] == 1:
+            for maintenance in _maintain_bucket(controller, bucket):
+                sent += maintenance['order_requests_sent']
+                if maintenance.get('status') == 'REJECTED' and maintenance['order_requests_sent'] == 1:
+                    rejection=dict(rejection_code=maintenance.get('rejection_code'),
+                                   rejection_reason=maintenance.get('rejection_reason'),
+                                   rejection_subject=maintenance.get('rejection_subject'),symbol=maintenance['symbol'])
     summary=dict(status='SWEEP_COMPLETE',active_buckets=len(states),
+                 maintenance_active=maintenance_active,
                  order_requests_sent=sent,new_cards_registered=registered)
     if rejection is not None:
         summary.update(rejection)
@@ -349,7 +375,8 @@ def _loop(controller, streams):
                 except Exception:
                     label='testnet_long_trade_observation' if role=='long_account' else 'testnet_short_trade_observation'
                     print(json.dumps({label:'UNAVAILABLE_RETRY'}),flush=True)
-        _stop.wait(2 if all(r['status']=='SWEEP_COMPLETE' for r in results) else 10)
+        _stop.wait(2 if (all(r['status']=='SWEEP_COMPLETE' for r in results)
+                        or any(r.get('maintenance_active',0) for r in results)) else 10)
     with _lock:
         _health['running']=False
 

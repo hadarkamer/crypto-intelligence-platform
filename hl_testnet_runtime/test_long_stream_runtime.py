@@ -46,6 +46,46 @@ def env():
 
 
 class ConfigurationTests(NoExternal):
+    def test_maintenance_reconciles_between_actions_and_cannot_open_entries(self):
+        controller=Mock()
+        controller.cycle.side_effect=[
+            dict(status='ACCEPTED_UNVERIFIED',order_requests_sent=1),
+            dict(status='ACCEPTED_UNVERIFIED',order_requests_sent=1),
+            dict(status='NO_ACTION_NEEDED',order_requests_sent=0)]
+        results=list(stream._maintain_bucket(controller,'owned'))
+        self.assertEqual(sum(r['order_requests_sent'] for r in results),2)
+        self.assertEqual(controller.cycle.call_count,3)
+        for call in controller.cycle.call_args_list:
+            self.assertEqual(call.args,('owned',))
+            self.assertEqual(call.kwargs,dict(send=True,allow_new_entries=False))
+
+    def test_maintenance_stops_on_unknown_rejected_or_unobserved_request(self):
+        for status in ('OUTCOME_UNKNOWN','REJECTED','ATTEMPTED','ACCEPTED_UNVERIFIED'):
+            controller=Mock()
+            controller.cycle.return_value=dict(status=status,order_requests_sent=0)
+            self.assertEqual(len(list(stream._maintain_bucket(controller,'owned'))),1)
+            controller.cycle.assert_called_once()
+
+    def test_maintenance_pass_is_bounded_even_as_fills_keep_growing(self):
+        controller=Mock()
+        controller.cycle.return_value=dict(status='ACCEPTED_UNVERIFIED',order_requests_sent=1)
+        self.assertEqual(len(list(stream._maintain_bucket(controller,'owned'))),3)
+        self.assertEqual(controller.cycle.call_count,3)
+
+    def test_entry_disabled_maintenance_keeps_fast_poll_and_flat_accounts_wait(self):
+        for active, delay in ((1,2),(0,10)):
+            controller=Mock()
+            controller.venue.env={'enabled':'false'}
+            controller.venue.sent=0
+            stop=Mock()
+            stop.is_set.side_effect=[False,True]
+            result=dict(status='ENTRIES_DISABLED',maintenance_active=active,
+                        active_buckets=0,order_requests_sent=0,new_cards_registered=0)
+            with patch.object(stream,'tick',return_value=result), \
+                 patch.object(stream,'_stop',stop),redirect_stdout(io.StringIO()):
+                stream._loop(controller,[('long_account',{},None,'enabled')])
+            stop.wait.assert_called_once_with(delay)
+
     def test_aged_closed_short_reconciles_with_entries_disabled(self):
         controller=Mock()
         controller.venue.now.return_value=T+2*60*60*1000
@@ -349,15 +389,20 @@ class ConfigurationTests(NoExternal):
         class Controller:
             store=Store()
             venue=Venue()
+            calls=0
             def cycle(self,bucket,*,send,allow_new_entries):
                 self.args=(bucket,send,allow_new_entries)
-                return dict(order_requests_sent=1,status='ACCEPTED_UNVERIFIED')
+                self.calls+=1
+                return (dict(order_requests_sent=1,status='ACCEPTED_UNVERIFIED')
+                        if self.calls==1 else dict(order_requests_sent=0,status='OUTCOME_UNKNOWN'))
         c=Controller()
         result=stream.tick(c,dict(account=A),
             datetime(2026,9,26,14,tzinfo=timezone.utc),new_entries=False)
         self.assertEqual(c.args,('a'*64,True,False))
         self.assertEqual(result['order_requests_sent'],1)
         self.assertEqual(result['status'],'ENTRIES_DISABLED')
+        self.assertEqual(result['maintenance_active'],1)
+        self.assertEqual(c.calls,2)
 
     def test_existing_reconciliation_reports_fixed_failure_code(self):
         class Store:
@@ -521,9 +566,9 @@ class DurableLongStreamTests(NoExternal):
             self.assertEqual(first['order_requests_sent'],1)
             self.assertEqual(self.v.requests[0]['proposal']['operation'],'ENTRY')
             self.v.fill('1000','100')
-            for _ in range(4):
-                self.v.t+=1
-                stream.tick(self.c,self.route,self.start,new_entries=False)
+            self.v.t+=1
+            protected=stream.tick(self.c,self.route,self.start,new_entries=False)
+            self.assertEqual(protected['order_requests_sent'],2)
         self.assertEqual([r['proposal']['leg'] for r in self.v.requests],
                          ['ENTRY','STOP','TAKE_PROFIT'])
         opened=stream.observed_trades(self.c,self.route)
@@ -586,9 +631,9 @@ class DurableLongStreamTests(NoExternal):
             self.assertEqual(self.v.requests[0]['proposal']['role'],'short_account')
             self.assertFalse(self.v.requests[0]['proposal']['action']['orders'][0]['b'])
             self.v.fill('1000','100')
-            for _ in range(4):
-                self.v.t+=1
-                short_tick(False)
+            self.v.t+=1
+            protected=short_tick(False)
+            self.assertEqual(protected['order_requests_sent'],2)
         self.assertEqual([r['proposal']['leg'] for r in self.v.requests],
                          ['ENTRY','STOP','TAKE_PROFIT'])
         opened=stream.observed_trades(self.c,route,role='short_account')
@@ -611,6 +656,43 @@ class DurableLongStreamTests(NoExternal):
         self.assertTrue(view['cards'][0]['closure_verified'])
         self.assertEqual(CardStore(self.j).load(card['card_id']),card)
         self.assertTrue(stream.observed_trades(restarted,route,role='short_account')[0]['closure_verified'])
+
+    def test_one_maintenance_sweep_protects_partial_growth_using_native_modify(self):
+        card=self.card(99)
+        self.c.register(card['card_id'])
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
+            self.sweep([],enabled=True)
+            self.v.fill('1000','40')
+            first=self.sweep([],enabled=False)
+            self.assertEqual(first['order_requests_sent'],2)
+            self.assertTrue(stream.observed_trades(self.c,self.route)[0]['protection_verified'])
+            self.v.fill('1000','30')
+            second=self.sweep([],enabled=False)
+            self.assertEqual(second['order_requests_sent'],2)
+        changed=self.v.requests[-2:]
+        self.assertEqual([r['proposal']['operation'] for r in changed],['MODIFY_EXIT']*2)
+        self.assertTrue(all(r['proposal']['action']['type']=='batchModify' for r in changed))
+        self.assertTrue(all(r['proposal']['quantity']=='70' for r in changed))
+        trade=stream.observed_trades(self.c,self.route)[0]
+        self.assertEqual(trade['entry_quantity'],'70')
+        self.assertTrue(trade['protection_verified'])
+        self.assertEqual(self.v.orders['1000']['order']['sz'],'30')
+
+    def test_lost_stop_reply_ends_pass_and_next_pass_reconciles_without_duplicate(self):
+        card=self.card(100)
+        self.c.register(card['card_id'])
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
+            self.sweep([],enabled=True)
+            self.v.fill('1000','100')
+            self.v.lose_reply=True
+            uncertain=self.sweep([],enabled=False)
+            self.assertEqual(uncertain['order_requests_sent'],1)
+            self.assertEqual([r['proposal']['leg'] for r in self.v.requests],['ENTRY','STOP'])
+            recovered=self.sweep([],enabled=False)
+            self.assertEqual(recovered['order_requests_sent'],1)
+        self.assertEqual([r['proposal']['leg'] for r in self.v.requests],
+                         ['ENTRY','STOP','TAKE_PROFIT'])
+        self.assertTrue(stream.observed_trades(self.c,self.route)[0]['protection_verified'])
 
 
 if __name__=='__main__':
