@@ -198,6 +198,9 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
             # A closed SHORT bucket can still be the predecessor of a new card.
             # Refresh its aged evidence periodically even while entries are off,
             # so a later entry cannot inherit an unreviewed history gap.
+            if state.get('emergency') is not None:
+                maintenance_active += int(state['emergency']['phase'] != 'CLOSED_VERIFIED')
+                continue
             aged_closed_short = (role == 'short_account' and state['bindings']
                 and state['evidence'] is not None
                 and 3600000 < int(now.timestamp()*1000)-state['evidence']['snapshot']['at_ms'])
@@ -295,8 +298,8 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
         snap = state['evidence']['snapshot']
         # Reports of stored evidence must be evaluated at the observation time.
         # The caller must still show its age; this does not refresh live state.
-        view = life.review(state['bindings'], snap,
-                           now_ms=snap['at_ms'] if historical else controller.venue.now())
+        from .emergency_close import view as emergency_view
+        view = emergency_view(state, snap['at_ms'] if historical else controller.venue.now())
         bindings = {b['card_id']:b for b in state['bindings']}
         for row in view['cards']:
             if life.number(row['entry_quantity']) <= 0:
@@ -598,6 +601,8 @@ def start():
         streams=[('long_account',route,not_before,'HL_TESTNET_LONG_ENTRY_ENABLED')]
         if short:
             streams.append(('short_account',short[0],short[1],'HL_TESTNET_SHORT_ENTRY_ENABLED'))
+        from .emergency_close import start as start_emergency
+        start_emergency(controller,streams,_stop)
         _thread=threading.Thread(target=_loop,args=(controller,streams),
                                  daemon=True,name='testnet-card-stream')
         _thread.start()
@@ -621,4 +626,7 @@ def stop():
 
 def health():
     with _lock:
-        return deepcopy(_health)
+        result=deepcopy(_health)
+    from .emergency_close import health as emergency_health
+    result['emergency_close']=emergency_health()
+    return result

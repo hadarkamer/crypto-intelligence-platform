@@ -95,6 +95,14 @@ class DispatchStore:
             result.append(state)
         return result
 
+    def action_allowed(self, proposal):
+        from .emergency_close import fence
+        bucket=RecoveryJournal.bucket(proposal['account'],proposal['symbol'])
+        with self.journal._transaction() as conn:
+            self.ready(conn)
+            row=conn.execute(f'SELECT value,digest FROM {SCHEMA}.buckets WHERE bucket=%s',(bucket,)).fetchone()
+            fence(conn,checked(row),proposal['operation'])
+
     def request(self, request_id):
         with self.journal._transaction() as conn:
             self.ready(conn)
@@ -121,7 +129,11 @@ class DispatchStore:
         if type(revision) is not int or revision < 0:
             raise DispatchError('EXACT_REVISION_REQUIRED')
         with self.journal._transaction() as conn:
-            self.ready(conn);RecoveryJournal._lock(conn,bucket)
+            self.ready(conn)
+            # All lanes take the global entry latch lock before the bucket lock.
+            from .emergency_close import LOCK
+            conn.execute('SELECT pg_advisory_xact_lock(%s)', (LOCK,))
+            RecoveryJournal._lock(conn,bucket)
             row=conn.execute(f'SELECT value,digest,revision FROM {SCHEMA}.buckets WHERE bucket=%s FOR UPDATE',(bucket,)).fetchone()
             state=checked(row)
             if row[2] != revision or state['revision'] != revision or state['domain'] != self.domain:
@@ -160,6 +172,8 @@ class DispatchStore:
 
     def reserve(self, state, proposal, now_ms):
         def update(conn, value):
+            from .emergency_close import fence
+            fence(conn, value, proposal['operation'])
             if value['pending'] is not None:
                 raise DispatchError('UNRESOLVED_REQUEST_NO_NEW_INTENT')
             if proposal is None or proposal.get('basis') != life.digest(value['evidence']):
@@ -178,6 +192,8 @@ class DispatchStore:
 
     def begin(self, state, proposal, agent, now_ms):
         def update(conn, value):
+            from .emergency_close import fence
+            fence(conn, value, proposal['operation'])
             request=self.pending_record(conn,value)
             if request is None or request['phase'] != 'PREPARED':
                 raise DispatchError('ATTEMPT_MAY_HAVE_BEEN_SENT_NO_REPEAT')

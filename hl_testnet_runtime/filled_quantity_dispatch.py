@@ -201,7 +201,7 @@ def identity(raw, request, now_ms):
     oid=o.get('oid');stamp=life.moment(env.get('statusTimestamp'))
     if type(oid) is not int or not 0<oid<2**64 or not request['attempt_at_ms']<=stamp<=now_ms:
         raise DispatchError('ORDER_LOOKUP_ID_OR_TIME_MISMATCH')
-    leg=p['leg'];immediate=p['operation']=='CLOSE_PASSED_TAKE'
+    leg=p['leg'];immediate=p['operation'] in ('CLOSE_PASSED_TAKE','EMERGENCY_CLOSE')
     typ='Limit' if leg=='ENTRY' or immediate else 'Stop Market' if leg=='STOP' else 'Take Profit Limit'
     if (o.get('cloid')!=expected['c'] or o.get('coin')!=p['symbol']
             or o.get('side')!=('B' if expected['b'] else 'A')
@@ -760,6 +760,12 @@ class TestnetVenue:
         return observed['snapshot']
     def _gate(self,proposal,after_exit_policy):
         env=self.env
+        if hasattr(self,'store'):
+            self.store.action_allowed(proposal)
+        if proposal.get('operation')=='ENTRY' and env.get('HL_TESTNET_EMERGENCY_CLOSE'):
+            from .emergency_close import APPROVAL, healthy
+            if env['HL_TESTNET_EMERGENCY_CLOSE']!=APPROVAL or not healthy(self.now()):
+                raise DispatchError('EMERGENCY_SUPERVISOR_NOT_FRESH_NO_NEW_ENTRY')
         stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
             and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
             and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'

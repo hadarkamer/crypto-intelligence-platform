@@ -199,7 +199,7 @@ def plain_tp_ids(bindings, account, symbol, values):
     return ids
 
 
-def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oids=()):
+def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oids=(), emergency_stop_oids=()):
     """Derive card states from comparable, complete evidence; never place/cancel.
 
     Gross card PnL is cash-flow based only once the card is verifiably flat and
@@ -209,6 +209,12 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
     links = validate_bindings(bindings)
     account, symbol = validate_snapshot(snapshot)
     plain = plain_tp_ids(bindings, account, symbol, plain_take_profit_oids)
+    emergency = frozenset(ident(oid,r'[0-9]{1,30}') for oid in emergency_stop_oids)
+    allowed_emergency = {oid for b in bindings for oid in b['orders']['STOP']}
+    if not emergency <= allowed_emergency:
+        raise LifecycleError('EMERGENCY_EXIT_ID_NOT_OWNED')
+    if any(oid in {o['oid'] for o in snapshot['open_orders']} for oid in emergency):
+        raise LifecycleError('EMERGENCY_IOC_NOT_TERMINAL')
     moment(now_ms)
     if type(max_age_ms) is not int or not 0 < max_age_ms <= 60000:
         raise LifecycleError('INVALID_MAX_AGE')
@@ -248,7 +254,7 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
             if entered > number(b['planned_quantity']): local.add('ENTRY_EXCEEDS_PLAN')
             if remaining < 0: local.add('EXIT_EXCEEDS_CARD_QUANTITY')
             total_remaining += remaining * (1 if b['side'] == 'LONG' else -1)
-            if quantities['TAKE_PROFIT'] > 0 and quantities['STOP'] > 0: local.add('BOTH_EXIT_LEGS_FILLED_REVIEW')
+            if quantities['TAKE_PROFIT'] > 0 and quantities['STOP'] > 0 and not emergency.intersection(b['orders']['STOP']): local.add('BOTH_EXIT_LEGS_FILLED_REVIEW')
             for oid, t in terminal.items():
                 if oid in own and number(t['filled_quantity']) != filled_by_oid.get(oid, Decimal(0)):
                     local.add('TERMINAL_FILL_TOTAL_MISMATCH')
