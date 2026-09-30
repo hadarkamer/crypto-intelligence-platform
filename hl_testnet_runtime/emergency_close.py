@@ -542,7 +542,7 @@ def start(normal, streams, stop_event):
             for _,route,*_ in streams:
                 try:
                     for state in controller.store.for_account(route['account']):
-                        from .long_stream_runtime import _unfinished
+                        from .long_stream_runtime import _unfinished,idle_flat
                         from datetime import datetime,timezone
                         if not _unfinished(state,datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)):
                             continue
@@ -552,10 +552,7 @@ def start(normal, streams, stop_event):
                                 and not any(o['oid'] in b['orders']['ENTRY']
                                     for o in state['evidence']['snapshot']['open_orders'] for b in state['bindings'])):
                             continue
-                        if not state.get('emergency') and not state['pending'] and (
-                                not state['bindings'] or (state['evidence']
-                                    and not state['evidence']['snapshot']['open_orders']
-                                    and life.number(state['evidence']['snapshot']['position_quantity'],signed=True)==0)):
+                        if not state.get('emergency') and idle_flat(state):
                             continue
                         if state.get('emergency',{}).get('phase')=='CLOSED_VERIFIED':
                             continue

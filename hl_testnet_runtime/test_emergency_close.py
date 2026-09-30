@@ -189,6 +189,12 @@ class EmergencyPureTests(NoExternal):
         self.assertEqual(result['status'],'ENTRIES_DISABLED')
         controller.cycle.assert_not_called()
 
+    def test_idle_flat_never_skips_unresolved_owned_order(self):
+        from .long_stream_runtime import idle_flat
+        state=state_from_case(q='0')
+        state['evidence']['snapshot']['open_orders']=[]
+        self.assertFalse(idle_flat(state))
+
     def test_normal_tick_does_not_compete_with_latched_emergency_lane(self):
         from . import long_stream_runtime as stream
         from unittest.mock import Mock

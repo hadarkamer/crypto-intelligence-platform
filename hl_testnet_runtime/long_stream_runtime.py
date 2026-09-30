@@ -117,6 +117,20 @@ def _unfinished(state, now):
         for cid,original in state['originals'].items())
 
 
+def idle_flat(state):
+    """No in-flight work and every previously bound card/order is final."""
+    if state['pending'] is not None or state['evidence'] is None:
+        return False
+    snap=state['evidence']['snapshot']
+    if snap['open_orders'] or life.number(snap['position_quantity'],signed=True)!=0:
+        return False
+    if not state['bindings']:
+        return True
+    report=life.review(state['bindings'],snap,now_ms=snap['at_ms'])
+    return not report['bucket_issues'] and all(not row['issues']
+        and row['state'] in ('CLOSED','CANCELED_WITHOUT_FILL') for row in report['cards'])
+
+
 def _account_owned(venue, account, states, *, role=None):
     """Unknown positions/orders block *new* entries, never exit maintenance."""
     from .card_sync_evidence import PublicReader
@@ -208,9 +222,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
             # A locally registered, never-attempted candidate requires no
             # maintenance while entries are disabled. Preserve aged SHORT
             # history catch-up and all pending/working/exposed buckets.
-            if (not new_entries and not aged_closed_short and state['pending'] is None and state['evidence'] is not None
-                    and not state['evidence']['snapshot']['open_orders']
-                    and life.number(state['evidence']['snapshot']['position_quantity'],signed=True)==0):
+            if not new_entries and not aged_closed_short and idle_flat(state):
                 unfinished=False
             if not unfinished and not aged_closed_short:
                 continue
