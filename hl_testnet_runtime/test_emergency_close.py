@@ -1,5 +1,6 @@
 """Fault-injected actual controller/store tests; no keys or real exchange calls."""
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime,timezone
 from decimal import Decimal
 import os
@@ -117,6 +118,30 @@ class EmergencyPureTests(NoExternal):
             self.assertFalse(m.healthy(T+15001))
             m._health['last_status']='RECONCILIATION_REQUIRED_NO_BLIND_RETRY'
             self.assertFalse(m.healthy(T))
+
+    def test_timing_separates_public_activation_from_saved_verification(self):
+        state=state_from_case(q='40',stop='40')
+        cid=state['bindings'][0]['card_id'];first=state['evidence']['snapshot']['fills'][0]['at_ms']
+        state['entry_timing_armed']={cid:first-1}
+        request=dict(proposal=dict(card_id=cid,leg='STOP',operation='CREATE_EXIT'))
+        lookup=dict(status='order',order=dict(status='open',statusTimestamp=T-2000,
+            order=dict(oid=int(state['bindings'][0]['orders']['STOP'][0]))))
+        m.record_timing(state,request,lookup,T)
+        item=state['protection_timing'][cid]
+        self.assertEqual(item['fill_to_stop_public_ms'],8000)
+        self.assertEqual(item['fill_to_saved_verification_ms'],10000)
+        m.record_timing(state,request,lookup,T+1)
+        self.assertEqual(state['protection_timing'][cid],item)
+
+    def test_old_evidence_and_ack_never_become_new_live_measurement(self):
+        state=state_from_case(q='40',stop='40')
+        cid=state['bindings'][0]['card_id']
+        m.record_timing(state,None,None,T)
+        self.assertNotIn(cid,state.get('protection_timing',{}))
+        state['entry_timing_armed']={cid:T-20001}
+        m.record_timing(state,dict(proposal=dict(card_id=cid,leg='STOP',operation='CREATE_EXIT')),
+                        dict(status='ok',response='ack'),T)
+        self.assertIsNone(state['protection_timing'][cid]['fill_to_stop_public_ms'])
 
     def test_emergency_whitelist_cannot_assign_unowned_or_active_order(self):
         state=state_from_case(q='40',stop='40')
@@ -284,6 +309,102 @@ class EmergencyDatabaseTests(NoExternal):
             broken=deepcopy(proposal);broken['action']['orders'][0][field]=value
             with self.assertRaises(DispatchError):self.em._begin(state,broken)
         self.assertEqual(len(self.incident()['requests']),0)
+
+    def test_expired_unknown_normal_stop_finalizes_only_after_public_no_order_proof(self):
+        self.entry('100')
+        with patch.object(self.v,'send',side_effect=TimeoutError()):self.cycle()
+        self.v=VenueFromExisting(self.v);self.c.venue=self.v;self.v.store=self.store
+        self.em=m.Controller(self.c,self.v);self.v.t+=5001
+        self.emergency();self.emergency()
+        self.assertIsNotNone(self.store.load(self.bucket)['pending'])
+        self.v.t+=121000;self.emergency()
+        self.assertIsNone(self.store.load(self.bucket)['pending'])
+        self.assertEqual(self.incident()['phase'],'CLOSED_VERIFIED')
+
+    def test_expired_unknown_close_creates_new_intent_after_verified_no_order(self):
+        self.setup_emergency('100')
+        with patch.object(self.v,'send',side_effect=TimeoutError()):self.emergency()
+        first=self.incident()['requests'][0]
+        self.v.t+=121000;self.emergency()
+        second=self.incident()['requests'][1]
+        self.assertEqual(first['phase'],'OUTCOME_UNKNOWN')
+        self.assertEqual(self.incident()['requests'][0]['phase'],'EXPIRED_NO_PUBLIC_ORDER')
+        self.assertNotEqual(first['request_id'],second['request_id'])
+        self.emergency();self.assertEqual(self.incident()['phase'],'CLOSED_VERIFIED')
+
+    def test_rejected_cancel_reconciles_expiry_before_new_exact_cancel(self):
+        self.setup_emergency('40');self.v.reject_cancel=True
+        self.emergency();self.emergency();self.emergency()
+        self.assertIsNotNone(self.incident()['pending_cancel'])
+        self.v.reject_cancel=False;self.v.t+=121000
+        self.assertEqual(self.emergency()['operation'],'EMERGENCY_CANCEL')
+        self.emergency();self.assertEqual(self.incident()['phase'],'CLOSED_VERIFIED')
+
+    def test_late_stop_already_active_prevents_unnecessary_emergency(self):
+        self.entry('100');self.cycle()
+        self.v=VenueFromExisting(self.v);self.c.venue=self.v;self.v.store=self.store
+        self.em=m.Controller(self.c,self.v);self.v.t+=5001
+        self.assertEqual(self.emergency()['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+        self.assertNotIn('emergency',self.store.load(self.bucket))
+        self.assertEqual(self.v.sent,2)
+
+    def test_concurrent_begin_commits_only_one_emergency_intent(self):
+        self.setup_emergency('100');self.v.t+=1
+        state=self.em._refresh_normal(self.store.load(self.bucket))
+        state=self.em.latch(state,m.trigger(state,now_ms=self.v.now()))
+        proposal=self.em.proposal(state)
+        def begin():
+            try:return self.em._begin(state,proposal)[1]['request_id']
+            except DispatchError:return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(lambda _:begin(),range(2)))
+        self.assertEqual(sum(r is not None for r in results),1)
+        self.assertEqual(len(self.incident()['requests']),1)
+        self.assertEqual(self.v.sent,1)
+
+    def test_lost_commit_ack_never_reaches_emergency_sender(self):
+        self.setup_emergency('100');change=self.store.change
+        def uncertain(*args,**kwargs):
+            result=change(*args,**kwargs)
+            if args[2]=='EMERGENCY_ATTEMPT_BEGUN':
+                raise fixtures.JournalError('COMMIT_ACKNOWLEDGEMENT_LOST')
+            return result
+        with patch.object(self.store,'change',side_effect=uncertain):
+            with self.assertRaises(fixtures.JournalError):self.emergency()
+        self.assertEqual(self.v.sent,1)
+        self.assertIsNotNone(self.incident()['pending_close'])
+        with self.assertRaisesRegex(DispatchError,'NO_RESEND'):self.emergency()
+
+    def test_stop_fill_race_does_not_double_allocate_closed_quantity(self):
+        self.entry('100');self.cycle();self.cycle(False)
+        self.v=VenueFromExisting(self.v);self.c.venue=self.v;self.v.store=self.store
+        self.em=m.Controller(self.c,self.v);self.v.t+=5001
+        # Deliberately latch a verified incident before a late stop fill.
+        self.v.t+=1;state=self.em._refresh_normal(self.store.load(self.bucket))
+        self.em.latch(state,dict(card_id=self.b['card_id'],reason='FAULT_INJECTION_TEST',
+            uncovered_since_ms=self.v.now()-5000,uncovered_quantity='100'))
+        send=self.v.send
+        def race(request):
+            if request['proposal']['operation']=='EMERGENCY_CLOSE':
+                self.v.fill('1001','40');self.v.ioc_fill='60'
+            return send(request)
+        with patch.object(self.v,'send',side_effect=race):self.emergency()
+        self.v.ioc_fill=None
+        self.emergency()  # cancels the remaining reduce-only stop
+        self.emergency()
+        state=self.store.load(self.bucket)
+        self.assertEqual(state['evidence']['snapshot']['position_quantity'],'0')
+        self.assertEqual(self.incident()['phase'],'CLOSED_VERIFIED')
+        self.assertEqual(m.view(state,self.v.now())['cards'][0]['exit_quantity'],'100')
+
+    def test_real_store_records_new_fill_to_stop_timing(self):
+        self.protect('40')
+        state=self.store.load(self.bucket)
+        item=state['protection_timing'][self.b['card_id']]
+        first=min(f['at_ms'] for f in state['evidence']['snapshot']['fills'])
+        self.assertEqual(item['first_fill_at_ms'],first)
+        self.assertGreaterEqual(item['fill_to_saved_verification_ms'],item['fill_to_stop_public_ms'])
+        self.assertGreaterEqual(item['fill_to_stop_public_ms'],0)
 
     def test_short_close_is_reduce_only_buy(self):
         b,o=original(2,'SHORT');self.cards.record(o['card']);state=self.c.register(b['card_id'])

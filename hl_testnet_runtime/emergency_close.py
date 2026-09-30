@@ -20,7 +20,7 @@ DEADLINE_MS = 5000  # Testnet experiment setting, not a Mainnet latency guarante
 SLIPPAGE = Decimal('0.01')
 LOCK = 1729048241
 MAX_REQUESTS = 128
-DONE = ('OBSERVED', 'EXPIRED_NO_PUBLIC_ORDER', 'ABORTED_UNSENT')
+DONE = ('OBSERVED', 'EXPIRED_NO_PUBLIC_ORDER', 'EXPIRED_NO_PUBLIC_TERMINAL', 'ABORTED_UNSENT')
 _health = dict(running=False, last_pass_at_ms=None, last_status='DISABLED')
 _thread = None
 _lock = threading.Lock()
@@ -114,6 +114,49 @@ def safe_card(state, cid, now_ms):
     return binding, row
 
 
+def record_timing(state,request,lookup,now_ms):
+    """Keep venue activation separate from completed public/saved verification.
+
+    Never use acknowledgement time. Pre-existing stops without their exact
+    creation lookup retain unknown venue latency, not an invented measurement.
+    """
+    if not state['bindings'] or state['evidence'] is None:
+        return
+    report=life.review(state['bindings'],state['evidence']['snapshot'],now_ms=now_ms)
+    if report['bucket_issues']:
+        return
+    timing=state.setdefault('protection_timing',{})
+    snap=state['evidence']['snapshot']
+    for binding in state['bindings']:
+        entries=[f for f in snap['fills'] if f['oid'] in binding['orders']['ENTRY']]
+        if not entries:
+            continue
+        cid=binding['card_id'];first=min(f['at_ms'] for f in entries)
+        armed=state.get('entry_timing_armed',{}).get(cid)
+        if armed is None or first<armed:
+            continue
+        item=timing.setdefault(cid,dict(first_fill_at_ms=first,first_fill_verified_at_ms=now_ms))
+        row=next(v for v in report['cards'] if v['card_id']==cid)
+        remaining=life.number(row['remaining_quantity'],signed=True)
+        if (remaining<=0 or life.number(row['stop_quantity_observed'])!=remaining
+                or set(row['issues'])-{'TAKE_PROFIT_COVERAGE_MISSING','TAKE_PROFIT_EXCEEDS_CARD_REMAINDER'}
+                or 'stop_verified_at_ms' in item):
+            continue
+        activated=None
+        if (request and request['proposal']['card_id']==cid and request['proposal']['leg']=='STOP'
+                and request['proposal']['operation'] in ('CREATE_EXIT','MODIFY_EXIT')
+                and isinstance(lookup,dict) and lookup.get('status')=='order'
+                and lookup['order'].get('status')=='open'
+                and str(lookup['order']['order']['oid']) in binding['orders']['STOP']):
+            stamp=life.moment(lookup['order']['statusTimestamp'])
+            if first<=stamp<=now_ms:
+                activated=stamp
+        item.update(stop_verified_at_ms=now_ms,stop_public_status_at_ms=activated,
+                    quantity_at_stop_verification=life.text(remaining),
+                    fill_to_stop_public_ms=activated-first if activated is not None else None,
+                    fill_to_saved_verification_ms=now_ms-first)
+
+
 class Controller:
     def __init__(self, normal, venue=None):
         self.normal, self.store = normal, normal.store
@@ -153,6 +196,42 @@ class Controller:
                 current['evidence'] = dict(bindings=current['bindings'], snapshot=evidence['snapshot'])
                 return None
             return self._save(state, 'EMERGENCY_PUBLIC_CHECKPOINT', update)
+
+    def _retire_normal(self,state):
+        if not state['pending']:
+            return state
+        request=self.store.request(state['pending'])
+        if request['phase']=='PREPARED' and request['attempts']==0:
+            def unsent(conn,current):
+                r=self.store.pending_record(conn,current)
+                if r!=request:
+                    raise DispatchError('EMERGENCY_NORMAL_REQUEST_CHANGED')
+                r.update(phase='ABORTED_UNSENT',abort_reason='EMERGENCY_SUPERSEDED_UNSENT')
+                current['pending']=None
+                return r
+            return self._save(state,'EMERGENCY_NORMAL_UNSENT_INTENT_RETIRED',unsent)
+        if (request['phase'] not in ('OUTCOME_UNKNOWN','ACK_UNVERIFIED','REJECTED')
+                or request['proposal']['leg'] not in ('STOP','TAKE_PROFIT')
+                or request['proposal']['action']['type'] not in ('order','batchModify')
+                or request['attempt_at_ms'] is None
+                or self.venue.now()-request['attempt_at_ms']<120000):
+            return state
+        cloid=dispatch.requested_order(request['proposal']['action'])['c']
+        if any(self.venue.lookup(state['account'],cloid)!={'status':'unknownOid'} for _ in range(2)):
+            return state
+        evidence=self.venue.collect(state['evidence'])
+        safe_card({**state,'evidence':evidence},state['emergency']['card_id'],self.venue.now())
+        def expired(conn,current):
+            r=self.store.pending_record(conn,current)
+            if r!=request:
+                raise DispatchError('EMERGENCY_NORMAL_REQUEST_CHANGED')
+            _continues(current['evidence'],evidence)
+            current['evidence']=dict(bindings=current['bindings'],snapshot=evidence['snapshot'])
+            r.update(phase='OBSERVED',terminal_state='NO_PUBLIC_ORDER_AFTER_SIGNATURE_EXPIRY',
+                     observed_at_ms=evidence['snapshot']['at_ms'])
+            current['pending']=None
+            return r
+        return self._save(state,'EMERGENCY_UNKNOWN_NORMAL_EXIT_RECONCILED_AFTER_EXPIRY',expired)
 
     def _requests(self, state):
         return state['emergency']['requests']
@@ -208,7 +287,19 @@ class Controller:
         terminal = next((o for o in state['evidence']['snapshot']['terminal_orders']
                          if o['oid']==request['proposal']['old_oid']), None)
         if terminal is None:
-            return state  # This uncertainty cannot hold up a quantity-verified close.
+            # Only a fresh two-pass checkpoint of the same still-active owned
+            # order after signature expiry may release this cancellation lane.
+            if (self.venue.now()-request['attempt_at_ms']<120000
+                    or state['evidence']['snapshot']['at_ms']<=request['attempt_at_ms']+15000
+                    or not any(o['oid']==request['proposal']['old_oid']
+                               for o in state['evidence']['snapshot']['open_orders'])):
+                return state
+            def expired(conn,current):
+                r=next(r for r in self._requests(current) if r['request_id']==eid)
+                r.update(phase='EXPIRED_NO_PUBLIC_TERMINAL',observed_at_ms=current['evidence']['snapshot']['at_ms'])
+                current['emergency']['pending_cancel']=None
+                return None
+            return self._save(state,'EMERGENCY_CANCEL_EXPIRED_STILL_ACTIVE_RECONCILED',expired)
         if terminal['at_ms'] < request['proposal']['observed_at_ms']:
             raise DispatchError('EMERGENCY_CANCEL_TERMINAL_TIME_INVALID')
         def resolved(conn, current):
@@ -300,6 +391,9 @@ class Controller:
                 or proposal['observed_at_ms']!=state['evidence']['snapshot']['at_ms']):
             return False
         index,decimals=proposal['asset_index'],proposal['size_decimals']
+        draft=state['originals'][proposal['card_id']]['draft']
+        if index!=draft['entry_action']['orders'][0]['a'] or decimals!=draft['size_decimals']:
+            return False
         if type(index) is not int or not 0<=index<10000 or type(decimals) is not int or not 0<=decimals<=6:
             return False
         if proposal['operation']=='EMERGENCY_CLOSE':
@@ -350,6 +444,7 @@ class Controller:
             if not send:
                 return dict(status='EMERGENCY_PREVIEW',cause=cause,order_requests_sent=0)
             state=self.latch(state,cause)
+        state=self._retire_normal(state)
         state=self._resolve_cancel(state)
         proposal=self.proposal(state)
         if proposal is None:
@@ -361,7 +456,8 @@ class Controller:
                         current['emergency'].update(phase='CLOSED_VERIFIED', closed_at_ms=current['evidence']['snapshot']['at_ms'])
                         return None
                     state=self._save(state,'EMERGENCY_CLOSURE_VERIFIED_CIRCUIT_REMAINS_LATCHED',closed)
-            return dict(status=state['emergency']['phase'],card_id=state['emergency']['card_id'],order_requests_sent=0)
+            return dict(status=('FLAT_AWAITING_ORDER_FINALITY' if row['remaining_quantity']=='0' and state['emergency']['phase']!='CLOSED_VERIFIED' else state['emergency']['phase']),
+                        card_id=state['emergency']['card_id'],remaining_quantity=row['remaining_quantity'],order_requests_sent=0)
         if not send:
             return dict(status='EMERGENCY_PREVIEW',proposal=proposal,order_requests_sent=0)
         state,request=self._begin(state,proposal)
@@ -387,7 +483,11 @@ class Venue(dispatch.TestnetVenue):
         if (env.get('HL_TESTNET_EMERGENCY_CLOSE')!=APPROVAL
                 or env.get('RENDER_SERVICE_ID')!=dispatch.roles.SERVICE
                 or env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_testnet_v1'
-                or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')!='disabled'):
+                or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION')!='disabled'
+                or env.get('HL_TESTNET_FILLED_DISPATCH')!='approved_long_stream_v1'
+                or env.get('HL_TESTNET_LONG_STREAM')!='approved_alerts_v1'
+                or env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY')!=dispatch.AFTER_EXIT
+                or env.get('HL_TESTNET_SAFETY_PIPELINE') or env.get('HL_TESTNET_CARD_SYNC')):
             raise DispatchError('EMERGENCY_TESTNET_NOT_AUTHORIZED')
         binding,_=safe_card(state,proposal['card_id'],self.now())
         route=dispatch.roles.route_for(env,binding['role'],state['account'])

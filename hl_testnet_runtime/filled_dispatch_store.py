@@ -213,6 +213,8 @@ class DispatchStore:
             if nonce > now_ms+1000:
                 raise DispatchError('NONCE_CLOCK_REQUIRES_REVIEW')
             request.update(phase='OUTCOME_UNKNOWN',nonce=nonce,attempt_at_ms=now_ms,attempts=1)
+            if proposal['operation']=='ENTRY':
+                value.setdefault('entry_timing_armed',{})[proposal['card_id']]=now_ms
             return request
         agent_address=agent
         return self.change(state['bucket'],state['revision'],'ATTEMPT_BEGUN',now_ms,update)

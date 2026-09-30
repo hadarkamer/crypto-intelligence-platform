@@ -341,6 +341,8 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
                 issues=sorted(set(view['bucket_issues']) | set(row['issues'])),
                 protection_verified=protected,
                 closure_verified=row['closure_verified'],
+                protection_timing=deepcopy(state.get('protection_timing',{}).get(row['card_id'])),
+                emergency_status=(state.get('emergency') or {}).get('phase'),
                 evidence_at_ms=snap['at_ms'],order_requests_sent=0))
     return result
 

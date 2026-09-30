@@ -489,7 +489,7 @@ class Controller:
 
     def refresh(self,bucket):
         """Public reads first; one transaction records ownership, evidence and outcome."""
-        state=self.store.load(bucket);now=self.venue.now();request=None;oid=None
+        state=self.store.load(bucket);now=self.venue.now();request=None;oid=None;raw=None
         bs=deepcopy(state['bindings'])
         if state['pending']:
             request=self.store.request(state['pending'])
@@ -577,6 +577,8 @@ class Controller:
                 from .card_lifecycle_store import _continues
                 _continues(s['evidence'],dict(bindings=bs,snapshot=snap))
             s['bindings']=bs;s['evidence']=dict(bindings=bs,snapshot=snap)
+            from .emergency_close import record_timing
+            record_timing(s,request,raw,now)
             current=self.store.pending_record(conn,s)
             if current is None or current['attempt_at_ms'] is None: return None
             if snap['at_ms']<=current['attempt_at_ms']:
