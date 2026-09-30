@@ -547,12 +547,13 @@ class DurableLongStreamTests(NoExternal):
         self.assertEqual([row['card_id'] for row,_ in found],[card['card_id']])
         self.sweep([card['card_id']])
         state=self.store.for_account(self.route['account'])[0]
-        request=self.store.request(state['pending'])
-        result=app_delivery.project(found[0][0],state,created_at=found[0][1],
-                                    pending_request=request)
+        # The immediate maintenance cycle has observed the resting entry.
+        # Reconciled acceptance still is not a fill and must remain waiting.
+        self.assertIsNone(state['pending'])
+        result=app_delivery.project(found[0][0],state,created_at=found[0][1])
         self.assertGreater(result['revision'],1)
         self.assertEqual(result['payload']['status'],'WAITING_ENTRY')
-        self.assertIsNone(result['payload']['quantity_entered'])
+        self.assertEqual(result['payload']['quantity_entered'],0)
         self.assertFalse(result['payload']['pnl_verified'])
 
     def test_receipt_to_entry_protection_take_close_and_restart(self):
