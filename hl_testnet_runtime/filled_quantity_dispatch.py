@@ -689,7 +689,8 @@ class Controller:
         # must not hold the safety worker's lane; changed state is rejected again
         # before a durable intent is reserved or its attempt is begun.
         self.venue.authorize(state,proposal,self.after_exit_policy)
-        return self._begin_cycle(bucket,state,pending,proposal)
+        return self._begin_cycle(bucket,state,pending,proposal,
+            sample=sample,meta=meta,allowed_entry_card_id=allowed_entry_card_id)
 
     def _load_preparation_checkpoint(self,bucket):
         state=self.store.load(bucket)
@@ -739,34 +740,51 @@ class Controller:
         return state,pending,proposal
 
     @market_lane
-    def _begin_cycle(self,bucket,state,pending,proposal):
-        self._same_revision(bucket,state)
+    def _begin_cycle(self,bucket,state,pending,proposal,*,sample=None,meta=None,
+                     allowed_entry_card_id=None):
+        authorized=deepcopy(proposal)
         local_authorize=getattr(self.venue,'local_authorize',None)
         if callable(local_authorize):
-            # Source/grant and evidence can expire while this lane was busy,
-            # even if the revision stayed unchanged. Recheck before reserving
-            # a request; no HTTP, signing or budget work is performed here.
+            # A newer observation must not extend the original authorization's
+            # evidence age, source expiry or exact one-card permission.
+            local_authorize(authorized,self.after_exit_policy)
+        try:
+            self._same_revision(bucket,state)
+        except DispatchError as exc:
+            if (str(exc)!='CONCURRENT_DISPATCH_RELOAD_REQUIRED'
+                    or sample is None or meta is None):
+                raise
+            latest=self._load_preparation_checkpoint(bucket)
+            if (latest.get('pending')!=state.get('pending')
+                    or latest['originals'].get(authorized['card_id'])!=
+                       state['originals'].get(authorized['card_id'])):
+                raise DispatchError('AUTHORIZED_INTENT_CHANGED_REPREPARE_REQUIRED')
+            if latest.get('emergency') is not None:
+                return dict(status='EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE',order_requests_sent=0)
+            pending=self.store.request(latest['pending']) if latest['pending'] else None
+            if pending and pending['phase']!='PREPARED':
+                return dict(status=pending['phase'],order_requests_sent=0)
+            # Recompute from the winning evidence; freeze the already-authorized
+            # sequence/cloid. A timestamp-only checkpoint cannot invent a new
+            # order identity or authorize different quantities, prices or exits.
+            refreshed=choose(latest,self.routes,meta,sample,now_ms=self.venue.now(),
+                sequence=authorized['sequence'],after_exit_policy=self.after_exit_policy,
+                allowed_entry_card_id=allowed_entry_card_id)
+            def terms(value):
+                if value is None:return None
+                value=deepcopy(value)
+                value.pop('basis');value.pop('observed_at_ms')
+                return value
+            if terms(refreshed)!=terms(authorized):
+                raise DispatchError('AUTHORIZED_PLAN_CHANGED_REPREPARE_REQUIRED')
+            state,proposal=latest,refreshed
+        if callable(local_authorize):
             local_authorize(proposal,self.after_exit_policy)
-        if pending:
-            prior=deepcopy(pending['proposal']);fresh=deepcopy(proposal)
-            for item in (prior,fresh):
-                item.pop('basis');item.pop('observed_at_ms')
-                item.pop('cancel_sample_at_ms',None)
-            if prior!=fresh:
-                raise DispatchError('UNSENT_PLAN_CHANGED_EXPLICIT_REPLAN_REQUIRED')
-            # Preserve the frozen action identity but refresh the evidence used at begin.
-            def rebase(conn,s):
-                req=self.store.pending_record(conn,s)
-                if req['phase']!='PREPARED': raise DispatchError('CANNOT_REBASE_STARTED_REQUEST')
-                req['proposal']=deepcopy(proposal)
-                return req
-            state=self.store.change(bucket,state['revision'],'REVALIDATE_UNSENT',self.venue.now(),rebase)
-        else:
-            state=self.store.reserve(state,proposal,self.venue.now())
         route=self.routes[proposal['role']]
-        state=self.store.begin(state,proposal,route['agent'],self.venue.now())
-        request=self.store.request(state['pending'])
-        # A lost commit reply never reaches transport.
+        # Reservation/rebase and attempt share one PostgreSQL transaction. An
+        # independent process cannot checkpoint between these two decisions.
+        # Return only the exact positively acknowledged commit's sender token.
+        state,request=self.store.prepare_and_begin(state,proposal,route['agent'],self.venue.now())
         return state,request,proposal,route
 
 
