@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from unittest.mock import patch, Mock
 
@@ -175,6 +176,7 @@ class DispatchPureTests(NoExternal):
                 patch.object(venue,'_gate',return_value=ROUTES2['short_account']), \
                 patch.object(m.roles,'wallet_for_role',return_value=object()), \
                 patch.object(m.roles,'budget_for_role',return_value=budget), \
+                patch.object(venue,'_fund_info_plan',return_value=Mock()), \
                 patch.object(m.roles,'entry_action_headroom',return_value=100), \
                 patch.object(m.life,'review',side_effect=AssertionError('NO_PREDECESSOR')), \
                 patch('hl_testnet_runtime.long_stream_runtime._account_owned',return_value=True):
@@ -1078,6 +1080,7 @@ class EntryPreflightBoundaryTests(NoExternal):
     def public_checks(self,budget=None,headroom=None):
         report=dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True)
         with ExitStack() as stack:
+            stack.enter_context(patch.object(m.TestnetVenue,'_fund_info_plan',return_value=Mock()))
             reader=stack.enter_context(patch.object(m.checks,'InfoReader',return_value=object()))
             budget_mock=stack.enter_context(patch.object(m.roles,'budget_for_role',
                 side_effect=budget,return_value=report))
@@ -1136,7 +1139,8 @@ class EntryPreflightBoundaryTests(NoExternal):
                     calls.append((kind,account))
                 barrier.wait(timeout=2)
                 return [] if kind=='frontendOpenOrders' else dict(assetPositions=[])
-        with patch.object(m.evidence,'PublicReader',return_value=Reader()):
+        with patch.object(m.evidence,'PublicReader',return_value=Reader()), \
+                patch.object(venue,'request_budget',return_value=object()):
             snap=venue.empty_snapshot(A,'DOGE')
         self.assertEqual(snap['at_ms'],T)
         self.assertEqual(snap['position_quantity'],'0')
@@ -1268,6 +1272,164 @@ class EntryPreflightBoundaryTests(NoExternal):
             with self.assertRaisesRegex(DispatchError,'^EXACT_ENTRY_BUDGET_NOT_VERIFIED$'):
                 venue.authorize(state,proposal,m.AFTER_EXIT)
         headroom.assert_not_called()
+
+
+class EntryInfoAdmissionTests(NoExternal):
+    """Real finite permits and adapter coordination; only public venue I/O is doubled."""
+    setup_case=EntryPreflightBoundaryTests.setup_case
+    stream_authorization_case=EntryPreflightBoundaryTests.stream_authorization_case
+    def trial_case(self):
+        state,venue,proposal=self.stream_authorization_case()
+        venue.env['HL_TESTNET_PROTECTION_TIMING_CARD_ID']=proposal['card_id']
+        return state,venue,proposal
+
+    def test_whole_trial_refusal_precedes_every_read_and_durable_attempt(self):
+        from .request_budget import BudgetError
+        state,venue,proposal=self.trial_case()
+        venue.store.domain='testnet'
+        controller=m.Controller(venue.store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
+        venue.store.load.return_value=state
+        with patch.object(venue,'_fund_info_plan',side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')) as fund, \
+                patch.object(controller,'refresh',side_effect=AssertionError('NO_READ')) as refresh, \
+                self.assertRaisesRegex(BudgetError,'^TESTNET_REQUEST_BUDGET_EXHAUSTED$'):
+            controller.cycle(state['bucket'],send=True,allowed_entry_card_id=proposal['card_id'])
+        from .request_budget import request_weight
+        self.assertEqual(sum(request_weight('/info',b) for b in fund.call_args.args[0]),330)
+        refresh.assert_not_called();venue.store.prepare_and_begin.assert_not_called()
+        self.assertEqual(venue.sent,0)
+
+    def test_atomic_superset_covers_every_account_mode_without_reusing_a_response(self):
+        from . import request_budget as quota
+        for mode in ('default','disabled','unifiedAccount'):
+            state,venue,proposal=self.trial_case()
+            account=m.roles.PHANTOM
+            venue.env['HL_TESTNET_LONG_ACCOUNT_ADDRESS']=account
+            state['account']=proposal['account']=account
+            route={**ROUTES2['long_account'],'account':account}
+            funded=[];claimed=[];released=[];read=[]
+            owner=Mock()
+            owner._claim_observation.side_effect=lambda token,weight,deadline:claimed.append((token,weight))
+            owner._release_unclaimed_observation.side_effect=lambda entries:released.extend(entries)
+            def fund(bodies):
+                funded.append(deepcopy(bodies))
+                entries=[(quota._info_plan_key(b),format(i+1,'032x'),quota.request_weight('/info',b))
+                         for i,b in enumerate(bodies)]
+                return quota.InfoPlan(owner,entries,'background',time.monotonic_ns()+15_000_000_000)
+            def response(body):
+                read.append(deepcopy(body));kind=body['type']
+                if kind=='userAbstraction':return mode
+                if kind=='userRole':return ({'role':'user'} if body['user']==account
+                    else {'role':'agent','data':{'user':account}})
+                if kind=='frontendOpenOrders':return []
+                if kind=='clearinghouseState':return dict(assetPositions=[],withdrawable='100000',
+                    marginSummary=dict(accountValue='100000',totalRawUsd='100000',
+                        totalMarginUsed='0',totalNtlPos='0'))
+                if kind=='spotClearinghouseState':return {'balances':([] if mode=='default'
+                    else [dict(coin='USDC',token=0,total='100000',hold='0')])}
+                if kind=='activeAssetData':return dict(user=account,coin='DOGE',markPx='10',
+                    availableToTrade=['100000','100000'],maxTradeSzs=['100000','100000'],
+                    leverage=dict(type='cross',value=1))
+                if kind=='meta':return {'universe':[dict(name='DOGE',szDecimals=2,maxLeverage=50)]}
+                if kind=='userRateLimit':return dict(nRequestsCap=100,nRequestsUsed=0,nRequestsSurplus=0)
+                raise AssertionError('UNPLANNED_READ')
+            class Info:
+                def __init__(self,*,budget,parallel=False,priority='background'):
+                    self.budget,self.parallel,self.priority=budget,parallel,priority;self.calls=0
+                def read(self,kind,*,user=None,coin=None):
+                    body=dict(type=kind)
+                    if user is not None:body['user']=user
+                    if coin is not None:body['coin']=coin
+                    permit=self.budget.acquire('/info',body,priority=self.priority)
+                    permit.check();self.calls+=1;return response(body)
+                def read_many(self,requests):
+                    return [self.read(kind,**kw) for kind,kw in requests]
+            class Public:
+                def __init__(self,*,budget,priority='background'):self.reader=Info(budget=budget,priority=priority)
+                def read(self,kind,account):return self.reader.read(kind,user=account)
+            with patch.object(venue,'_fund_info_plan',side_effect=fund), \
+                    patch.object(venue,'_gate',return_value=route), \
+                    patch.object(m.roles,'wallet_for_role',return_value=object()), \
+                    patch.object(m.checks,'InfoReader',Info),patch.object(m.evidence,'PublicReader',Public), \
+                    patch.object(m.roles,'route_for',return_value=route):
+                with venue.entry_read_admission(state,send=True,allow_new_entries=True,
+                        allowed_entry_card_id=proposal['card_id']):
+                    venue.empty_snapshot(account,'DOGE')
+                    m.joined_public_reads(lambda:venue.sample(account,'DOGE'),venue.metadata)
+                    venue.authorize(state,proposal,m.AFTER_EXIT)
+            self.assertEqual(len(funded),1)
+            self.assertEqual(sum(quota.request_weight('/info',b) for b in funded[0]),330)
+            self.assertEqual(sum(b['type']=='userAbstraction' for b in read),2)
+            self.assertEqual(sum(b['type']=='frontendOpenOrders' for b in read),3)
+            self.assertEqual(sum(b['type']=='userRateLimit' for b in read),1)
+            self.assertEqual(len(claimed),len(read));self.assertEqual(len(claimed)+len(released),len(funded[0]))
+            self.assertEqual(venue.sent,0)
+
+    def test_public_plan_is_local_to_its_venue_and_exchange_has_a_separate_permit(self):
+        state,venue,proposal=self.trial_case();batch=Mock();raw=Mock();raw.acquire.return_value=Mock()
+        other=m.TestnetVenue({})
+        with patch.object(venue,'_fund_info_plan',return_value=batch), \
+                patch.object(m.roles,'route_for',return_value=ROUTES2['long_account']), \
+                patch('hl_testnet_runtime.request_budget.Budget.from_env',return_value=raw):
+            with venue.entry_read_admission(state,send=True,allow_new_entries=True,
+                    allowed_entry_card_id=proposal['card_id']):
+                self.assertEqual(m.joined_public_reads(venue.request_budget,other.request_budget),(batch,raw))
+                self.assertEqual(venue._public_priority(),'background')
+                admission=venue.reserve_transport(proposal)
+                self.assertIsInstance(admission,m.TransportAdmission)
+                batch.acquire.assert_not_called()
+                raw.acquire.assert_called_once()
+                self.assertEqual(raw.acquire.call_args.kwargs['priority'],'background')
+            self.assertIs(venue.request_budget(),raw)
+        batch.close.assert_called_once()
+
+    def test_preview_disabled_entries_and_other_cards_never_fund_trial_admission(self):
+        state,venue,proposal=self.trial_case()
+        for send,allowed,cid in ((False,True,proposal['card_id']),
+                (True,False,proposal['card_id']),(True,True,'f'*64)):
+            with patch.object(venue,'_fund_info_plan',side_effect=AssertionError('NO_TRIAL_ADMISSION')):
+                with venue.entry_read_admission(state,send=send,allow_new_entries=allowed,
+                                                allowed_entry_card_id=cid):pass
+
+    def test_coordinator_shares_only_same_store_routes_and_notification_feed_before_start(self):
+        state=state_from_case();store=Mock(domain='software');store.load.return_value=state
+        first=m.Controller(store,Venue(),ROUTES2);second=m.Controller(store,Venue(),ROUTES2)
+        feed=object();first.venue.fill_wakeups=second.venue.fill_wakeups=feed
+        first.venue.env={'entry_enabled':'false'};second.venue.env={'exact_trial':'true'}
+        second.share_observation_coordinator(first)
+        self.assertIs(second._observation_flights,first._observation_flights)
+        self.assertEqual(first.venue.env,{'entry_enabled':'false'})
+        self.assertEqual(second.venue.env,{'exact_trial':'true'})
+        with patch.object(second,'_refresh_once',return_value=state):second.refresh(state['bucket'])
+        with self.assertRaisesRegex(DispatchError,'^OBSERVATION_COORDINATOR_ALREADY_STARTED$'):
+            second.share_observation_coordinator(first)
+        third=m.Controller(Mock(domain='software'),Venue(),ROUTES2);third.venue.fill_wakeups=feed
+        with self.assertRaisesRegex(DispatchError,'^OBSERVATION_COORDINATOR_SCOPE_MISMATCH$'):
+            third.share_observation_coordinator(first)
+
+    def test_separate_trial_and_supervisor_join_one_committed_observation(self):
+        first,state,result,current=ObservationCoordinationTests.controller(self)
+        second=m.Controller(first.store,Venue(),ROUTES2)
+        first.venue.fill_wakeups=second.venue.fill_wakeups=object()
+        second.share_observation_coordinator(first)
+        started=threading.Event();release=threading.Event();joining=threading.Event()
+        def collect(bucket,prior):
+            started.set()
+            if not release.wait(2):raise AssertionError('TEST_COLLECTION_NOT_RELEASED')
+            current[0]=deepcopy(result);return deepcopy(result)
+        with patch.object(first,'_refresh_once',side_effect=collect) as reads, \
+                patch.object(second,'_refresh_once',side_effect=AssertionError('NO_DUPLICATE_READ')), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            owner=pool.submit(first.refresh,state['bucket'])
+            self.assertTrue(started.wait(1))
+            flight=first._observation_flights[state['bucket']][0];wait=flight.done.wait
+            def joined(seconds):joining.set();return wait(seconds)
+            with patch.object(flight.done,'wait',side_effect=joined):
+                observer=pool.submit(second.refresh,state['bucket'],emergency=True)
+                self.assertTrue(joining.wait(1));release.set()
+                self.assertEqual(owner.result(2),result);self.assertEqual(observer.result(2),result)
+            reads.assert_called_once()
+        self.assertEqual(current[0]['evidence']['snapshot']['at_ms'],T)
+        self.assertFalse(first._observation_flights)
 
 
 if __name__=='__main__':unittest.main()

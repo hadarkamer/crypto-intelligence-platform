@@ -17,10 +17,15 @@ from . import card_lifecycle as life, long_stream_runtime as stream
 from .source_window import source_fresh,timestamp
 from .trade_card_store import CardStore
 from .filled_dispatch_store import DispatchError
+from .request_budget import BudgetError
 
 MAX_OBSERVATION_MS = 600000
 FINALITY_GRACE_MS = 15000
 NOTIFICATION_BOOTSTRAP_SECONDS = 10
+ENTRY_BUDGET_WAIT_SECONDS = 5
+TRANSIENT_BUDGET_CODES = frozenset(('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+    'TESTNET_REQUEST_BUDGET_BUSY','TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',
+    'TESTNET_OBSERVATION_BATCH_EXPIRED'))
 
 
 def outcome(state, card_id, now_ms):
@@ -157,17 +162,65 @@ def _reconcile_notifications(base, feed, role, route, card):
         new_entries=False,role=role,dirty_symbols=() if symbols is None else symbols,
         full_reconciliation=symbols is None)
     if result['status'] not in ('ENTRIES_DISABLED','SWEEP_COMPLETE'):
+        if result.get('failure_code') in TRANSIENT_BUDGET_CODES:
+            raise BudgetError(result['failure_code'])
         return False
     return stream._finish_notification_reconciliation(base,feed,token,symbols,started_ms)
 
 
 def _wait_notifications(base, feed, role, route, card, expiry, stopped):
     deadline=time.monotonic()+NOTIFICATION_BOOTSTRAP_SECONDS
-    while base.venue.now()<expiry and time.monotonic()<deadline:
-        if _reconcile_notifications(base,feed,role,route,card):
+    # A connected feed whose authoritative read is waiting for quota may use
+    # the original grant, not a renewed grant. An absent/invalid feed retains
+    # its ten-second bootstrap limit; wall time also fences a stalled clock.
+    grant_deadline=time.monotonic()+max(0,expiry-base.venue.now())/1000
+    while base.venue.now()<expiry and time.monotonic()<grant_deadline:
+        try:
+            ready=_reconcile_notifications(base,feed,role,route,card)
+        except BudgetError as exc:
+            if str(exc) not in TRANSIENT_BUDGET_CODES:
+                raise
+            remaining=min((expiry-base.venue.now())/1000,grant_deadline-time.monotonic())
+            if remaining>0:
+                stopped.wait(min(ENTRY_BUDGET_WAIT_SECONDS,remaining))
+            continue
+        if ready:
             return
-        stopped.wait(.1)
+        if time.monotonic()>=deadline:
+            break
+        stopped.wait(min(.1,max(0,(expiry-base.venue.now())/1000),
+            max(0,deadline-time.monotonic())))
     raise DispatchError('TIMING_TRIAL_FILL_NOTIFICATION_GAP_NO_NEW_ENTRY')
+
+
+def _wait_entry_budget(operation, *, venue, expiry, wall_deadline, stopped):
+    """Retry public setup only, within the original grant and wall deadline.
+
+    Unknown outcomes, storage/policy errors and ownership failures propagate.
+    This helper must never enclose an order attempt or renew the card's source.
+    """
+    while venue.now()<expiry and time.monotonic()<wall_deadline:
+        try:
+            return operation(),None
+        except BudgetError as exc:
+            if str(exc) not in TRANSIENT_BUDGET_CODES:
+                raise
+            remaining=min((expiry-venue.now())/1000,wall_deadline-time.monotonic())
+            if remaining>0:
+                stopped.wait(min(ENTRY_BUDGET_WAIT_SECONDS,remaining))
+    return None,'ENTRY_REQUEST_BUDGET_WAIT_EXPIRED'
+
+
+def _unsubmitted(card_id, card, expiry, deadline, reason):
+    """No fill, timing, or durable attempt may be inferred from setup refusal."""
+    return dict(status='ENTRY_NOT_SUBMITTED',last_cycle_status=reason,card_id=card_id,
+        account_role=card['account_role'],symbol=card['prepared']['execution']['symbol'],
+        source_event_id=card['prepared']['source']['event_id'],timing=None,
+        observation=None,entry_authorization_expires_at_ms=expiry,
+        observation_deadline_ms=deadline,ongoing_management_required=False,
+        deployed_worker_handoff_verified=False,emergency_status=None,
+        continuous_entry_flags_changed=False,entry_attempts=0,
+        cycle_status_counts={},order_requests_sent=0,mainnet_enabled=False)
 
 
 def _trial_pause(state, observation, *, feed, account, now_ms, expiry_ms,
@@ -206,9 +259,9 @@ def _run_one(environment, card_id, base, card, now, expiry, feed):
     source_expiry=int(timestamp(card['source_expires_at']).timestamp()*1000)
     observation_deadline=min(source_expiry+FINALITY_GRACE_MS,now+MAX_OBSERVATION_MS)
     wall_deadline=time.monotonic()+max(0,observation_deadline-now)/1000
+    entry_wall_deadline=time.monotonic()+max(0,expiry-now)/1000
     role=card['account_role'];route=base.routes[role]
     states=base.store.for_account(route['account'])
-    stream._account_owned(base.venue,route['account'],states,role=role)
     if any(card_id in {b['card_id'] for b in state['bindings']} for state in states):
         raise DispatchError('TIMING_TRIAL_CARD_ALREADY_ATTEMPTED')
     # Snapshot config copies only: never update os.environ or Render settings.
@@ -221,14 +274,34 @@ def _run_one(environment, card_id, base, card, now, expiry, feed):
     controlled=dispatch.controller_from_env(trial_env)
     if feed is not None:
         controlled.venue.fill_wakeups=feed
-    state=controlled.register(card_id)
-    # A free symbol is required; historical cards must have public finality.
-    state=base.refresh(state['bucket'])
+    # Separate configuration gates, one durable store and one observation
+    # coordinator. The supervisor retains the original entries-disabled venue.
+    if isinstance(base,dispatch.Controller) and isinstance(controlled,dispatch.Controller):
+        controlled.store=base.store
+        controlled.venue.store=base.store
+        controlled.share_observation_coordinator(base)
+    stopped=threading.Event()
+    # Reconcile the existing account before registering an unbound candidate.
+    # Its own two-pass empty proof is then funded inside the ENTRY read plan.
+    # Final fresh account ownership remains mandatory in authorize(), before
+    # any durable attempt. Repeating it here would authorize no action.
+    if feed is not None:
+        _wait_notifications(base,feed,role,route,card,expiry,stopped)
+    state,blocked=_wait_entry_budget(lambda:controlled.register(card_id),
+        venue=base.venue,expiry=expiry,wall_deadline=entry_wall_deadline,stopped=stopped)
+    if blocked:
+        return _unsubmitted(card_id,card,expiry,observation_deadline,blocked)
+    # Historical cards require fresh public finality. A new empty bucket gets
+    # its first proof in the atomically admitted cycle, without duplicate reads.
+    if state['bindings']:
+        state,blocked=_wait_entry_budget(lambda:base.refresh(state['bucket']),
+            venue=base.venue,expiry=expiry,wall_deadline=entry_wall_deadline,stopped=stopped)
+        if blocked:
+            return _unsubmitted(card_id,card,expiry,observation_deadline,blocked)
     if state['bindings']:
         report=life.review(state['bindings'],state['evidence']['snapshot'],now_ms=base.venue.now())
         if report['bucket_issues'] or any(v['issues'] or v['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL') for v in report['cards']):
             raise DispatchError('TIMING_TRIAL_MARKET_PREDECESSOR_NOT_FINAL')
-    stopped=threading.Event()
     streams=[(role,route,None,key)]
     started=emergency.start(base,streams,stopped,only_bucket=state['bucket'])
     if not started:
@@ -241,8 +314,6 @@ def _run_one(environment, card_id, base, card, now, expiry, feed):
             stopped.wait(.25)
         if not emergency.healthy(base.venue.now()):
             raise DispatchError('EMERGENCY_SUPERVISOR_NOT_FRESH_NO_NEW_ENTRY')
-        if feed is not None:
-            _wait_notifications(base,feed,role,route,card,expiry,stopped)
         while base.venue.now()<observation_deadline and time.monotonic()<wall_deadline:
             if feed is not None:
                 # Clear before reads, so hints arriving during reconciliation
@@ -274,6 +345,10 @@ def _run_one(environment, card_id, base, card, now, expiry, feed):
                     status=result['status']
                 except (DispatchError,life.LifecycleError) as exc:
                     status=str(exc)
+                except BudgetError as exc:
+                    if str(exc) not in TRANSIENT_BUDGET_CODES:
+                        raise
+                    status=str(exc)
                 cycle_status_counts[status]=cycle_status_counts.get(status,0)+1
                 state=base.store.load(state['bucket'])
                 observation=outcome(state,card_id,base.venue.now())
@@ -288,6 +363,11 @@ def _run_one(environment, card_id, base, card, now, expiry, feed):
                 now_ms=base.venue.now(),expiry_ms=expiry,source_expiry_ms=source_expiry,
                 observation_deadline_ms=observation_deadline,
                 wall_remaining=wall_deadline-time.monotonic(),cycle_result=cycle_result)
+            if status in TRANSIENT_BUDGET_CODES and not entry_attempts(base.store,state,card_id):
+                # A rejected whole-plan admission has performed no ENTRY reads.
+                # Avoid repeatedly competing with protection for the same quota.
+                pause=min(ENTRY_BUDGET_WAIT_SECONDS,max(0,(expiry-base.venue.now())/1000),
+                    max(0,entry_wall_deadline-time.monotonic()))
             (feed.wake_event if feed is not None else stopped).wait(pause)
         state=base.store.load(state['bucket'])
         observation=outcome(state,card_id,base.venue.now())

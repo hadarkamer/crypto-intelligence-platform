@@ -21,6 +21,7 @@ import atexit
 import hashlib
 import json
 import os
+import re
 import time
 import threading
 import uuid
@@ -39,6 +40,9 @@ MAX_COORDINATORS = 4
 OBSERVATION_MS = 15000
 OBSERVATION_TYPES = frozenset(('userFillsByTime', 'frontendOpenOrders',
                              'clearinghouseState', 'orderStatus'))
+INFO_PLAN_TYPES = frozenset(('meta','userRole','userAbstraction',
+    'spotClearinghouseState','clearinghouseState','activeAssetData',
+    'userRateLimit','frontendOpenOrders'))
 POLICY = SCHEMA + '.request_budget_policy'
 TICKETS = SCHEMA + '.request_budget_tickets'
 PRIORITIES = frozenset(('background', 'protection'))
@@ -244,13 +248,35 @@ def _observation_key(body):
         raise BudgetError('TESTNET_OBSERVATION_BATCH_TYPE_NOT_ALLOWED') from None
 
 
+def _info_plan_key(body):
+    """Only exact read-only entry-preflight requests; no arbitrary /info body."""
+    if (not isinstance(body,dict) or not isinstance(body.get('type'),str)
+            or body['type'] not in INFO_PLAN_TYPES):
+        raise BudgetError('TESTNET_INFO_PLAN_TYPE_NOT_ALLOWED')
+    kind=body['type']
+    fields={'type'} if kind=='meta' else {'type','user'}
+    if kind=='activeAssetData':fields.add('coin')
+    if set(body)!=fields:
+        raise BudgetError('TESTNET_INFO_PLAN_BODY_NOT_ALLOWED')
+    if kind!='meta' and (not isinstance(body['user'],str)
+            or not re.fullmatch(r'0x[0-9a-fA-F]{40}',body['user'])
+            or int(body['user'][2:],16)==0):
+        raise BudgetError('TESTNET_INFO_PLAN_BODY_NOT_ALLOWED')
+    if kind=='activeAssetData' and (not isinstance(body['coin'],str)
+            or not re.fullmatch(r'[A-Z][A-Z0-9]{0,19}',body['coin'])):
+        raise BudgetError('TESTNET_INFO_PLAN_BODY_NOT_ALLOWED')
+    return json.dumps(body,sort_keys=True,separators=(',',':'),allow_nan=False)
+
+
 class ObservationBatch:
     """Exact finite observation credits, never a pre-issued HTTP permission.
 
     Each ticket is funded before the first read, then claimed once immediately
-    before its own HTTP. A failed/unused claim stays charged; neither closing
-    this local object nor losing a COMMIT can release shared quota.
+    before its own HTTP. A failed/uncertain claim stays charged. Closing can
+    release only acknowledged credits still present in this local object that
+    never began a claim; a lost funding COMMIT cannot produce such an object.
     """
+    _key=staticmethod(_observation_key)
     def __init__(self, owner, entries, priority, deadline_ns):
         self._owner, self._priority = owner, priority
         self._deadline_ns, self._pid = deadline_ns, os.getpid()
@@ -277,7 +303,7 @@ class ObservationBatch:
                        self._deadline_ns)
         if path != '/info' or host != HOST or priority != self._priority:
             raise BudgetError('TESTNET_OBSERVATION_BATCH_REQUEST_MISMATCH')
-        key = _observation_key(body)
+        key = self._key(body)
         self._guard()
         with self._lock:
             if self._closed or time.monotonic_ns() > self._deadline_ns:
@@ -342,7 +368,18 @@ class ObservationBatch:
         if os.getpid() != self._pid:
             return
         with self._lock:
+            if self._closed:
+                return
             self._closed = True
+            # Fence every future acquire before identifying definite non-use.
+            # acquire() removes a ticket before its SQL claim, so a racing,
+            # failed or uncertain claim is excluded even if no HTTP followed.
+            # Issued permits also retain their charge, regardless of whether
+            # their local check happened before or after this close.
+            unused=[entry for entries in self._entries.values() for entry in entries]
+            self._entries.clear()
+        if unused:
+            self._owner._release_unclaimed_observation(unused)
 
     def __enter__(self):
         self._guard()
@@ -350,6 +387,19 @@ class ObservationBatch:
 
     def __exit__(self, *exc):
         self.close()
+
+
+class InfoPlan(ObservationBatch):
+    """Finite exact pre-entry reads, separate from lifecycle observation plans.
+
+    These credits are accounting only, never account evidence or permission to
+    enter. All child clocks and body multiplicities remain independently fenced.
+    There is no pagination or undeclared work in this preflight plan.
+    """
+    _key=staticmethod(_info_plan_key)
+
+    def reserve_extra(self, bodies):
+        raise BudgetError('TESTNET_INFO_PLAN_EXTENSION_NOT_ALLOWED')
 
 
 class Budget:
@@ -484,6 +534,18 @@ class Budget:
         must plan its bounded work first; a plan too large for the unchanged
         ceiling fails without inserting any partial tickets.
         """
+        return self._reserve_plan(bodies,priority,host,_observation_key,ObservationBatch)
+
+    def reserve_info_plan(self, bodies, *, priority='background', host=HOST):
+        """Atomically admit an exact finite entry preflight before any HTTP.
+
+        Background keeps its existing 800 ceiling and 400 protection reserve.
+        This plan contains no exchange action or lifecycle/history observation;
+        missing headroom returns no batch and spends no partial tickets.
+        """
+        return self._reserve_plan(bodies,priority,host,_info_plan_key,InfoPlan)
+
+    def _reserve_plan(self, bodies, priority, host, key, batch_type):
         started = time.monotonic_ns()
         deadline = started + PERMIT_MS * 1000000
         batch_deadline = started + OBSERVATION_MS * 1000000
@@ -491,12 +553,12 @@ class Budget:
             raise BudgetError('TESTNET_REQUEST_BUDGET_PRIORITY_INVALID')
         if not isinstance(bodies,list) or not 1 <= len(bodies) <= 200:
             raise BudgetError('TESTNET_OBSERVATION_BATCH_PLAN_INVALID')
-        entries = [(_observation_key(body), uuid.uuid4().hex,
+        entries = [(key(body), uuid.uuid4().hex,
                     request_weight('/info',body,host=host)) for body in bodies]
         self._fund_observation(entries,priority,deadline)
         if time.monotonic_ns() > deadline:
             raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',stage='AFTER_COMMIT')
-        return ObservationBatch(self,entries,priority,batch_deadline)
+        return batch_type(self,entries,priority,batch_deadline)
 
     def _fund_observation(self, entries, priority, deadline):
         total = sum(weight for _,_,weight in entries)
@@ -541,6 +603,30 @@ class Budget:
                 RETURNING token''',(token,weight,WINDOW_MS)).fetchone()
             if row is None:
                 raise BudgetError('TESTNET_OBSERVATION_BATCH_CREDIT_UNAVAILABLE')
+
+    def _release_unclaimed_observation(self, entries):
+        """Best-effort removal of closed, acknowledged, never-claimed credits.
+
+        No claim, permission or transport can use these exact local tokens after
+        the batch close fence. Removal only lowers accounting, so admission's
+        advisory lock is unnecessary. Unknown/failed cleanup is not retried and
+        cannot make a closed batch usable or erase an issued request's charge.
+        """
+        try:
+            payload=json.dumps([dict(token=token,weight=weight) for token,weight in entries])
+            diagnostic={}
+            with self._transaction(diagnostic=diagnostic) as conn:
+                diagnostic['stage']='REFUND'
+                conn.execute(f'''WITH unused AS (
+                        SELECT * FROM jsonb_to_recordset(%s::jsonb)
+                        AS child(token text,weight integer))
+                    DELETE FROM {TICKETS} AS ticket USING unused
+                    WHERE ticket.token=unused.token
+                        AND ticket.weight=unused.weight
+                        AND ticket.settled=false''',(payload,))
+            return True
+        except BudgetError:
+            return False
 
     def _settle(self, token, weight):
         try:

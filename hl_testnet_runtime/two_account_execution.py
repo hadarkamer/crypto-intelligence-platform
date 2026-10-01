@@ -86,6 +86,16 @@ def default_native_snapshot(route, reader, symbol, *, plan=None, allow_owned_exp
         raise checks.Blocked('DEFAULT_SCOPE_NOT_APPROVED')
     started = time.monotonic()
     first = reader.read('userAbstraction', user=account)
+    return _default_native_snapshot(route,reader,symbol,first,started,plan=plan,
+        allow_owned_exposure=allow_owned_exposure)
+
+
+def _default_native_snapshot(route, reader, symbol, first, started, *, plan=None,
+                             allow_owned_exposure=False):
+    """Use only this invocation's first mode probe; never reuse prior evidence."""
+    account, agent = route['account'], route['agent']
+    if account != PHANTOM:
+        raise checks.Blocked('DEFAULT_SCOPE_NOT_APPROVED')
     if first != 'default':
         raise checks.Blocked('ACCOUNT_MODE_CHANGED_RECHECK')
     observations = None
@@ -168,9 +178,13 @@ def default_native_snapshot(route, reader, symbol, *, plan=None, allow_owned_exp
 
 def budget_for_role(env, role, account, agent, plan, reader):
     route = route_for(env, role, account, agent, plan['side'])
+    # Begin the original fifteen-second sample clock before its first mode read.
+    # The default path keeps this probe and its independent final probe, without
+    # immediately asking the same question a third time inside that invocation.
+    started = time.monotonic()
     mode = reader.read('userAbstraction', user=route['account'])
     if mode == 'default':
-        return default_native_snapshot(route, reader, plan['symbol'], plan=plan,
+        return _default_native_snapshot(route,reader,plan['symbol'],mode,started,plan=plan,
             allow_owned_exposure=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
                                   and role=='short_account'))
     if mode not in ('disabled', 'unifiedAccount'):

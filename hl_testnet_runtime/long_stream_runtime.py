@@ -141,10 +141,10 @@ def idle_flat(state):
         and row['state'] in ('CLOSED','CANCELED_WITHOUT_FILL') for row in report['cards'])
 
 
-def _account_owned(venue, account, states, *, role=None, priority='background'):
+def _account_owned(venue, account, states, *, role=None, priority='background', budget=None):
     """Unknown positions/orders block *new* entries, never exit maintenance."""
     from .card_sync_evidence import PublicReader
-    reader = PublicReader(priority=priority)
+    reader = PublicReader(priority=priority,budget=budget)
     if getattr(venue,'parallel_preflight',False) is True:
         orders,positions=dispatch.joined_public_reads(
             lambda:reader.read('frontendOpenOrders',account),

@@ -7,6 +7,8 @@ No existing normalTpsl order is converted. Release requires a separate approval.
 """
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar, copy_context
 from datetime import datetime, timezone
 from decimal import Decimal
 import http.client
@@ -29,6 +31,14 @@ AFTER_EXIT = 'cancel_remainder_after_exit_v1'
 HOST = 'api.hyperliquid-testnet.xyz'
 NORMAL_OBSERVATION_JOIN_SECONDS = 1.0
 EMERGENCY_OBSERVATION_JOIN_MS = 250
+_ENTRY_INFO_SCOPE = ContextVar('testnet_entry_info_scope', default=None)
+
+
+class _ObservationCoordinator:
+    def __init__(self):
+        self.guard=threading.Lock()
+        self.flights={}
+        self.started=False
 
 
 class _ObservationFlight:
@@ -129,7 +139,7 @@ def joined_public_reads(*calls):
     """
     pool=ThreadPoolExecutor(max_workers=min(4,len(calls)))
     try:
-        futures=[pool.submit(call) for call in calls]
+        futures=[pool.submit(copy_context().run,call) for call in calls]
         return tuple(future.result() for future in futures)
     finally:
         pool.shutdown(wait=True,cancel_futures=True)
@@ -564,8 +574,28 @@ class Controller:
         # this account, not only the bucket passed to authorize().
         self.venue.store=self.store
         self.after_exit_policy=after_exit_policy
-        self._observation_guard=threading.Lock()
-        self._observation_flights={}
+        self._observations=_ObservationCoordinator()
+
+    @property
+    def _observation_guard(self):
+        return self._observations.guard
+
+    @property
+    def _observation_flights(self):
+        return self._observations.flights
+
+    def share_observation_coordinator(self, other):
+        """Join reads for the same durable store; keep each venue's gates separate."""
+        if (not isinstance(other,Controller) or self.store is not other.store
+                or self.routes!=other.routes or self.venue.domain!=other.venue.domain
+                or vars(self.venue).get('fill_wakeups') is None
+                or vars(self.venue).get('fill_wakeups') is not vars(other.venue).get('fill_wakeups')):
+            raise DispatchError('OBSERVATION_COORDINATOR_SCOPE_MISMATCH')
+        own=self._observations
+        with own.guard:
+            if own.started or own.flights:
+                raise DispatchError('OBSERVATION_COORDINATOR_ALREADY_STARTED')
+            self._observations=other._observations
 
     def register(self, card_id, *, single_card=False):
         card=CardStore(self.store.journal).load(card_id)
@@ -647,8 +677,10 @@ class Controller:
             raise DispatchError('OBSERVATION_JOIN_BOUND_INVALID')
         state=self.store.load(bucket)
         stamp=self._feed_stamp(state['account'])
-        with self._observation_guard:
-            active=self._observation_flights.get(bucket,[])
+        coordinator=self._observations
+        with coordinator.guard:
+            coordinator.started=True
+            active=coordinator.flights.get(bucket,[])
             # The owner can already have committed while it is completing the
             # flight. A caller loading that exact result has its new revision;
             # join the owner's done event rather than launch a duplicate read.
@@ -661,7 +693,7 @@ class Controller:
                         or (active and any(item.emergency for item in active))):
                     raise DispatchError('OBSERVATION_IN_PROGRESS_RETRY')
                 flight=_ObservationFlight(state['revision'],stamp,emergency)
-                self._observation_flights.setdefault(bucket,[]).append(flight)
+                coordinator.flights.setdefault(bucket,[]).append(flight)
         if prior is not None:
             seconds=(emergency_wait_ms/1000 if emergency else NORMAL_OBSERVATION_JOIN_SECONDS)
             if prior.done.wait(seconds):
@@ -673,8 +705,8 @@ class Controller:
             elif not emergency:
                 raise DispatchError('OBSERVATION_IN_PROGRESS_RETRY')
         if flight is None:
-            with self._observation_guard:
-                active=self._observation_flights.setdefault(bucket,[])
+            with coordinator.guard:
+                active=coordinator.flights.setdefault(bucket,[])
                 # One independent urgent collection may bypass a stalled normal
                 # read. Further callers retry later rather than multiplying demand.
                 if (len(active)>=2 or (active and not emergency)
@@ -690,11 +722,11 @@ class Controller:
             flight.error=exc
             raise
         finally:
-            with self._observation_guard:
-                active=self._observation_flights[bucket]
+            with coordinator.guard:
+                active=coordinator.flights[bucket]
                 active.remove(flight)
                 if not active:
-                    del self._observation_flights[bucket]
+                    del coordinator.flights[bucket]
                 flight.done.set()
 
     def _refresh_once(self,bucket,state):
@@ -887,8 +919,18 @@ class Controller:
         # An already-latched emergency owns this bucket. Avoid competing full
         # public collections before discovering the same latch during planning.
         # A latch appearing after this read is still checked by planning/begin.
-        if self.store.load(bucket).get('emergency') is not None:
+        initial=self.store.load(bucket)
+        if initial.get('emergency') is not None:
             return dict(status='EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE',order_requests_sent=0)
+        admission=getattr(type(self.venue),'entry_read_admission',None)
+        context=(self.venue.entry_read_admission(initial,send=send,
+                    allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id)
+                 if callable(admission) else nullcontext())
+        with context:
+            return self._prepare_observed_cycle(bucket,send=send,
+                allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id)
+
+    def _prepare_observed_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id):
         try:
             state=self.refresh(bucket)
         except DispatchError as exc:
@@ -1099,21 +1141,89 @@ class TestnetVenue:
     @staticmethod
     def now(): return time.time_ns()//1000000
     def request_budget(self):
+        scope=_ENTRY_INFO_SCOPE.get()
+        if scope is not None and scope[0] is self:
+            return scope[1]
         from .request_budget import Budget
         return Budget.from_env(self.env)
+    def _public_priority(self):
+        scope=_ENTRY_INFO_SCOPE.get()
+        return 'background' if scope is not None and scope[0] is self else 'protection'
+    @staticmethod
+    def _entry_info_bodies(account,agent,symbol,*,stream,whole_cycle=False):
+        # Account mode is not guessed or cached: fund the finite superset of
+        # both balance branches, retaining the independent final mode probe.
+        bodies=[dict(type='userAbstraction',user=account)]*2
+        bodies.extend([dict(type='userRole',user=account),dict(type='userRole',user=agent),
+            dict(type='clearinghouseState',user=account),
+            dict(type='spotClearinghouseState',user=account),
+            dict(type='activeAssetData',user=account,coin=symbol),dict(type='meta'),
+            dict(type='userRateLimit',user=account)])
+        if stream:
+            bodies.extend([dict(type='frontendOpenOrders',user=account),
+                           dict(type='clearinghouseState',user=account)])
+        if whole_cycle:
+            bodies.extend([dict(type='frontendOpenOrders',user=account),
+                           dict(type='clearinghouseState',user=account)]*2)
+            bodies.extend([dict(type='activeAssetData',user=account,coin=symbol),dict(type='meta')])
+        return bodies
+    def _fund_info_plan(self,bodies):
+        budget=self.request_budget()
+        if budget is None:
+            raise DispatchError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')
+        return budget.reserve_info_plan(bodies,priority='background',host=HOST)
+    @contextmanager
+    def _entry_authorization_scope(self,account,agent,symbol,*,whole_cycle=False):
+        active=_ENTRY_INFO_SCOPE.get()
+        if active is not None and active[0] is self:
+            if whole_cycle:
+                raise DispatchError('NESTED_ENTRY_READ_ADMISSION_NOT_ALLOWED')
+            yield active[1]
+            return
+        batch=self._fund_info_plan(self._entry_info_bodies(account,agent,symbol,
+            stream=self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1',
+            whole_cycle=whole_cycle))
+        token=_ENTRY_INFO_SCOPE.set((self,batch))
+        try:
+            yield batch
+        finally:
+            _ENTRY_INFO_SCOPE.reset(token)
+            batch.close()
+    @contextmanager
+    def entry_read_admission(self,state,*,send,allow_new_entries,allowed_entry_card_id):
+        cid=self.env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID','')
+        if (send is not True or allow_new_entries is not True
+                or not re.fullmatch(r'[0-9a-f]{64}',cid) or allowed_entry_card_id!=cid
+                or state['bindings'] or state['pending'] is not None
+                or cid not in state['originals']):
+            yield
+            return
+        original=state['originals'][cid]['card']
+        route=roles.route_for(self.env,original['account_role'],state['account'])
+        # Fund the complete first-entry cycle before empty-inventory, price or
+        # metadata HTTP. Refusal spends no partial precheck and starts no order.
+        with self._entry_authorization_scope(route['account'],route['agent'],state['symbol'],
+                                              whole_cycle=True):
+            yield
     def reserve_transport(self,proposal):
         if HOST!='api.hyperliquid-testnet.xyz':
             raise DispatchError('ACTION_OR_HOST_FORBIDDEN')
-        budget=self.request_budget()
+        # A public-read plan can never authorize exchange transport. Acquire
+        # the existing independent one-use permit at the final attempt boundary.
+        token=_ENTRY_INFO_SCOPE.set(None)
+        try:
+            budget=self.request_budget()
+        finally:
+            _ENTRY_INFO_SCOPE.reset(token)
         if budget is None:
             raise DispatchError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')
         permit=budget.acquire('/exchange',dict(action=canonical_wire_action(proposal['action'])),
             host=HOST,priority='background' if proposal['operation']=='ENTRY' else 'protection')
         return TransportAdmission(proposal,permit)
     def metadata(self):
-        return checks.InfoReader(budget=self.request_budget(),priority='protection').read('meta')
+        return checks.InfoReader(budget=self.request_budget(),priority=self._public_priority()).read('meta')
     def sample(self,account,symbol):
-        start=self.now();raw=checks.InfoReader(budget=self.request_budget(),priority='protection').read('activeAssetData',user=account,coin=symbol)
+        start=self.now();raw=checks.InfoReader(budget=self.request_budget(),priority=self._public_priority()).read('activeAssetData',user=account,coin=symbol)
         checks.capacity(raw,account,symbol)
         return dict(mark_price=raw['markPx'],at_ms=start)
     def lookup(self,account,cloid):
@@ -1135,7 +1245,7 @@ class TestnetVenue:
                                 budget=self.request_budget(),priority=priority),
                                 reuse_verified_terminals=True)
     def empty_snapshot(self,account,symbol):
-        reader=evidence.PublicReader();start=self.now()
+        reader=evidence.PublicReader(budget=self.request_budget(),priority='background');start=self.now()
         for _ in range(2):
             if self.parallel_preflight is True:
                 orders,state=joined_public_reads(
@@ -1313,29 +1423,31 @@ class TestnetVenue:
                     now=datetime.fromtimestamp(self.now()/1000,timezone.utc)):
                 raise DispatchError('NEW_TRIAL_SOURCE_NOT_FRESH')
             plan={k:source[k] for k in ('symbol','side','entry','stop','take_profit')}
-            def budget():
-                return roles.budget_for_role(self.env,proposal['role'],route['account'],
-                    route['agent'],plan,checks.InfoReader(parallel=self.parallel_preflight is True))
-            if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
-                # Ownership and capacity are independent public checks. Neither
-                # can authorize an attempt alone; join both before final gates.
-                from .long_stream_runtime import _account_owned
-                def owned():
-                    return _account_owned(self,route['account'],self.store.for_account(route['account']),
-                                          role=proposal['role'])
-                if self.parallel_preflight is True:
-                    _,report=joined_public_reads(owned,budget)
+            with self._entry_authorization_scope(route['account'],route['agent'],plan['symbol']) as admission:
+                reader=checks.InfoReader(parallel=self.parallel_preflight is True,
+                                         budget=admission,priority='background')
+                def budget():
+                    return roles.budget_for_role(self.env,proposal['role'],route['account'],
+                        route['agent'],plan,reader)
+                if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
+                    # Independent ownership/capacity probes share admission,
+                    # never responses. Their whole finite plan is funded first.
+                    from .long_stream_runtime import _account_owned
+                    def owned():
+                        return _account_owned(self,route['account'],self.store.for_account(route['account']),
+                                              role=proposal['role'],budget=admission)
+                    if self.parallel_preflight is True:
+                        _,report=joined_public_reads(owned,budget)
+                    else:
+                        owned();report=budget()
                 else:
-                    owned();report=budget()
-            else:
-                report=budget()
-            if report.get('status')!='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION' or report.get('test_plan_checked') is not True:
-                raise DispatchError('EXACT_ENTRY_BUDGET_NOT_VERIFIED')
-            roles.entry_action_headroom(route['account'],checks.InfoReader())
-            # Slow account/budget reads must fail BEFORE a durable reservation
-            # and attempt, not leave an unsent entry marked outcome-unknown.
-            self._gate(proposal,after_exit_policy)
-            self._fresh_entry_evidence(proposal)
+                    report=budget()
+                if report.get('status')!='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION' or report.get('test_plan_checked') is not True:
+                    raise DispatchError('EXACT_ENTRY_BUDGET_NOT_VERIFIED')
+                roles.entry_action_headroom(route['account'],reader)
+                # Slow reads must fail BEFORE a durable reservation/attempt.
+                self._gate(proposal,after_exit_policy)
+                self._fresh_entry_evidence(proposal)
     def local_authorize(self,proposal,after_exit_policy):
         """Final configuration/source/evidence check; no public network calls."""
         self._gate(proposal,after_exit_policy)

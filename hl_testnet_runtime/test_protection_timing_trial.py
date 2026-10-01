@@ -9,6 +9,7 @@ from .test_filled_quantity_dispatch import NoExternal,state_from_case,ROUTES2
 from .test_long_stream_runtime import env
 from .test_card_lifecycle import T,terminal,fill
 from .filled_dispatch_store import DispatchError
+from .request_budget import BudgetError
 
 
 class TrialTests(NoExternal):
@@ -85,7 +86,7 @@ class TrialTests(NoExternal):
         self.assertEqual(trial.measured_status(state,self.cid,view),'CLOSED')
 
     def run_script(self,script,*,shutdown=True,notifications=None,setup_failure=False,
-                   hint_during_read=False):
+                   hint_during_read=False,cycle_failure=None):
         state=deepcopy(self.state)
         state['bindings']=[];state['evidence']['bindings']=[]
         state['evidence']['snapshot']['open_orders']=[]
@@ -102,12 +103,17 @@ class TrialTests(NoExternal):
             store=Store();venue=Venue();routes=ROUTES2
             def refresh(self,bucket):return self.store.load(bucket)
         class Controlled(Base):
-            def register(self,cid):return self.store.load(None)
+            def register(self,cid):
+                if setup_failure:
+                    raise DispatchError('TEST_SETUP_FAILURE')
+                return self.store.load(None)
             def cycle(self,bucket,**options):
                 if notifications is not None and 'allowed_entry_card_id' in options:
                     if not notifications.entry_allowed(ROUTES2[self.card_role]['account']):
                         raise AssertionError('No ENTRY before authoritative gap reconciliation')
                 shared['calls'].append((shared['now'],options))
+                if cycle_failure is not None:
+                    raise cycle_failure
                 if notifications is not None and hint_during_read:
                     notifications.allowed=False
                     notifications.wake_event.set()
@@ -140,9 +146,6 @@ class TrialTests(NoExternal):
             stack.enter_context(patch.object(trial.dispatch,'controller_from_env',
                 side_effect=[Base(),Controlled()]))
             stack.enter_context(patch.object(trial,'CardStore')).return_value.load.return_value=self.card
-            owned=stack.enter_context(patch.object(trial.stream,'_account_owned'))
-            if setup_failure:
-                owned.side_effect=DispatchError('TEST_SETUP_FAILURE')
             stack.enter_context(patch.object(trial.threading,'Event',return_value=event))
             stack.enter_context(patch.object(trial.time,'monotonic',
                 side_effect=lambda:(shared['now']-T)/1000))
@@ -200,7 +203,7 @@ class TrialTests(NoExternal):
                             notifications=feed,setup_failure=True)
         feed.start.assert_called_once_with()
         feed.stop.assert_called_once_with()
-        feed.finish_reconciliation.assert_not_called()
+        feed.finish_reconciliation.assert_called_once()
 
     def test_notification_reconciliation_requires_full_authoritative_sweep_not_snapshot_alone(self):
         feed=self.notification_feed()
@@ -346,3 +349,118 @@ class TrialTests(NoExternal):
         result,_=self.run_script(lambda call,now:self.protected(),shutdown=False)
         self.assertFalse(result['trial_supervisor_stopped'])
         self.assertEqual(result['status'],'RECONCILIATION_REQUIRED')
+
+    def test_quota_denial_waits_before_entry_and_preserves_grant(self):
+        feed=self.notification_feed()
+        result,calls=self.run_script(lambda *args:self.fail('no attempt'),notifications=feed,
+            cycle_failure=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED'))
+        self.assertEqual(result['status'],'ENTRY_NOT_SUBMITTED')
+        self.assertEqual(result['entry_authorization_expires_at_ms'],T+90000)
+        self.assertEqual(result['entry_attempts'],0)
+        self.assertEqual(result['order_requests_sent'],0)
+        self.assertTrue(all(b-a>=5000 for (a,_),(b,__) in zip(calls,calls[1:])))
+        self.assertLessEqual(len(calls),19)
+
+    def test_unknown_budget_policy_error_is_not_retried(self):
+        with self.assertRaisesRegex(BudgetError,'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE'):
+            self.run_script(lambda *args:self.fail('no attempt'),
+                cycle_failure=BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE'))
+
+    def test_public_setup_wait_has_fixed_deadline_and_no_attempts(self):
+        clock=[T]
+        venue=Mock();venue.now.side_effect=lambda:clock[0]
+        stopped=Mock();stopped.wait.side_effect=lambda seconds:clock.__setitem__(0,clock[0]+int(seconds*1000))
+        operation=Mock(side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED'))
+        with patch.object(trial.time,'monotonic',side_effect=lambda:(clock[0]-T)/1000):
+            value,reason=trial._wait_entry_budget(operation,venue=venue,expiry=T+7000,
+                wall_deadline=7,stopped=stopped)
+        self.assertIsNone(value)
+        self.assertEqual(reason,'ENTRY_REQUEST_BUDGET_WAIT_EXPIRED')
+        self.assertEqual(clock[0],T+7000)
+        self.assertEqual(operation.call_count,2)
+        self.assertEqual([c.args[0] for c in stopped.wait.call_args_list],[5,2])
+        result=trial._unsubmitted(self.cid,self.card,T+7000,T+315000,reason)
+        self.assertEqual(result['entry_attempts'],0)
+        self.assertEqual(result['order_requests_sent'],0)
+        self.assertIsNone(result['timing'])
+        self.assertIsNone(result['observation'])
+
+    def test_setup_recovery_runs_fresh_operation_without_extending_expiry(self):
+        clock=[T]
+        venue=Mock();venue.now.side_effect=lambda:clock[0]
+        stopped=Mock();stopped.wait.side_effect=lambda seconds:clock.__setitem__(0,clock[0]+int(seconds*1000))
+        original=deepcopy(self.card)
+        operation=Mock(side_effect=[BudgetError('TESTNET_REQUEST_BUDGET_BUSY'),self.card])
+        with patch.object(trial.time,'monotonic',side_effect=lambda:(clock[0]-T)/1000):
+            value,reason=trial._wait_entry_budget(operation,venue=venue,expiry=T+90000,
+                wall_deadline=90,stopped=stopped)
+        self.assertEqual(value,original)
+        self.assertIsNone(reason)
+        self.assertEqual(clock[0],T+5000)
+        self.assertEqual(self.card,original)
+        self.assertEqual(operation.call_count,2)
+
+    def test_setup_wall_deadline_blocks_even_if_venue_clock_stalls(self):
+        venue=Mock();venue.now.return_value=T
+        stopped=Mock();wall=[0]
+        stopped.wait.side_effect=lambda seconds:wall.__setitem__(0,wall[0]+seconds)
+        operation=Mock(side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED'))
+        with patch.object(trial.time,'monotonic',side_effect=lambda:wall[0]):
+            value,reason=trial._wait_entry_budget(operation,venue=venue,expiry=T+90000,
+                wall_deadline=6,stopped=stopped)
+        self.assertEqual(wall[0],6)
+        self.assertEqual(operation.call_count,2)
+        self.assertEqual(reason,'ENTRY_REQUEST_BUDGET_WAIT_EXPIRED')
+
+    def test_expired_setup_never_runs_and_unknown_errors_propagate(self):
+        venue=Mock();venue.now.return_value=T
+        operation=Mock();stopped=Mock()
+        value,reason=trial._wait_entry_budget(operation,venue=venue,expiry=T,
+            wall_deadline=trial.time.monotonic()+10,stopped=stopped)
+        operation.assert_not_called();stopped.wait.assert_not_called()
+        self.assertEqual(reason,'ENTRY_REQUEST_BUDGET_WAIT_EXPIRED')
+        for failure in (BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE'),
+                        DispatchError('UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY')):
+            operation.side_effect=failure
+            with self.assertRaises(type(failure)):
+                trial._wait_entry_budget(operation,venue=venue,expiry=T+90000,
+                    wall_deadline=trial.time.monotonic()+10,stopped=stopped)
+        self.assertEqual(operation.call_count,2)
+        stopped.wait.assert_not_called()
+
+    def test_connected_feed_quota_wait_does_not_spin_or_renew_original_grant(self):
+        clock=[T]
+        base=Mock();base.venue.now.side_effect=lambda:clock[0]
+        stopped=Mock();stopped.wait.side_effect=lambda seconds:clock.__setitem__(0,clock[0]+int(seconds*1000))
+        feed=self.notification_feed();role=self.card['account_role'];route=ROUTES2[role]
+        with patch.object(trial.time,'monotonic',side_effect=lambda:(clock[0]-T)/1000), \
+             patch.object(trial,'_reconcile_notifications',side_effect=
+                [BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')]*3+[True]) as reconcile:
+            trial._wait_notifications(base,feed,role,route,self.card,T+90000,stopped)
+        self.assertEqual(clock[0],T+15000)
+        self.assertEqual(reconcile.call_count,4)
+        self.assertEqual([call.args[0] for call in stopped.wait.call_args_list],[5,5,5])
+
+    def test_notification_quota_expires_before_registration_or_entry(self):
+        clock=[T]
+        base=Mock();base.venue.now.side_effect=lambda:clock[0]
+        stopped=Mock();stopped.wait.side_effect=lambda seconds:clock.__setitem__(0,clock[0]+int(seconds*1000))
+        role=self.card['account_role'];route=ROUTES2[role]
+        with patch.object(trial.time,'monotonic',side_effect=lambda:(clock[0]-T)/1000), \
+             patch.object(trial,'_reconcile_notifications',side_effect=
+                BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')) as reconcile:
+            with self.assertRaisesRegex(DispatchError,'TIMING_TRIAL_FILL_NOTIFICATION_GAP_NO_NEW_ENTRY'):
+                trial._wait_notifications(base,self.notification_feed(),role,route,self.card,T+7000,stopped)
+        self.assertEqual(clock[0],T+7000)
+        self.assertEqual(reconcile.call_count,2)
+
+    def test_notification_quota_failure_is_distinct_from_unknown_public_failure(self):
+        feed=self.notification_feed();base=Mock();base.venue.now.return_value=T
+        role=self.card['account_role'];route=ROUTES2[role]
+        with patch.object(trial.stream,'tick',return_value=dict(
+                status='EXISTING_RECONCILIATION_REQUIRED',failure_code='TESTNET_REQUEST_BUDGET_EXHAUSTED')):
+            with self.assertRaisesRegex(BudgetError,'TESTNET_REQUEST_BUDGET_EXHAUSTED'):
+                trial._reconcile_notifications(base,feed,role,route,self.card)
+        with patch.object(trial.stream,'tick',return_value=dict(
+                status='EXISTING_RECONCILIATION_REQUIRED',failure_code='UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY')):
+            self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card))
