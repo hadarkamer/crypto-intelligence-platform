@@ -830,7 +830,13 @@ class TestnetVenue:
     def lookup(self,account,cloid):
         import hyperliquid_testnet_executor as legacy
         return legacy.TestnetHTTP().info('orderStatus',user=account,oid=cloid)
-    def collect(self,value): return evidence.collect(value,evidence.PublicReader(parallel=True))
+    def collect(self,value):
+        # Dispatch callers pass the committed complete checkpoint (possibly
+        # copied with one newly owned binding), never a receipt or pass-one
+        # observation. Retain its final identities while both fresh passes
+        # still verify live orders, fills, inventory and actual position.
+        return evidence.collect(value,evidence.PublicReader(parallel=True),
+                                reuse_verified_terminals=True)
     def empty_snapshot(self,account,symbol):
         reader=evidence.PublicReader();start=self.now()
         for _ in range(2):
