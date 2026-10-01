@@ -58,6 +58,134 @@ class Reader:
         return deepcopy(self.data['position' if kind=='clearinghouseState' else 'inventory'])
 
 
+class TerminalCertificateTests(unittest.TestCase):
+    def setUp(self):
+        forbidden=patch('http.client.HTTPSConnection',side_effect=AssertionError('PUBLIC_NETWORK_NOT_ALLOWED'))
+        forbidden.start();self.addCleanup(forbidden.stop)
+
+    def collect(self,ev,reader=None,**kwargs):
+        return e.collect(ev,reader or Reader(ev),clock=lambda:T+10000,
+                         reuse_verified_terminals=True,**kwargs)
+
+    def test_many_completed_cards_do_not_expand_live_status_reads(self):
+        ev=evidence(binding(31),is_open=True)
+        for n in range(1,31):
+            old=evidence(binding(n))
+            ev['bindings']+=old['bindings']
+            for key in ('fills','open_orders','terminal_orders'):
+                ev['snapshot'][key]+=old['snapshot'][key]
+        reader=Reader(ev);status_reads=[];original=reader.read
+        def read(kind,*args,**kwargs):
+            if kind=='orderStatus':status_reads.append(kwargs['oid'])
+            return original(kind,*args,**kwargs)
+        reader.read=read
+        result=self.collect(ev,reader)
+        self.assertEqual(status_reads,['311','312','311','312'])
+        self.assertEqual(reader.calls,10)  # Two statuses + three account reads per pass.
+        self.assertEqual(reader.windows,[(T-60000,T+10000)]*2)
+        self.assertEqual(result['snapshot']['at_ms'],T+10000)
+        self.assertEqual(result['snapshot']['terminal_orders'],sorted(ev['snapshot']['terminal_orders'],key=lambda r:r['oid']))
+        self.assertFalse(result['report']['needs_review'])
+
+    def test_default_strict_path_still_rereads_every_terminal_identity(self):
+        ev=evidence();reader=Reader(ev)
+        result=e.collect(ev,reader,clock=lambda:T+10000)
+        self.assertEqual(reader.calls,12)
+        self.assertTrue(result['report']['cards'][0]['closure_verified'])
+
+    def test_dispatch_reuses_final_facts_but_reads_fresh_account_state_twice(self):
+        from .filled_quantity_dispatch import TestnetVenue
+        ev=evidence();reader=Reader(ev);original=e.collect
+        def timed(value,public_reader,**kwargs):
+            return original(value,public_reader,clock=lambda:T+10000,**kwargs)
+        with patch.object(e,'PublicReader',return_value=reader), \
+                patch.object(e,'collect',side_effect=timed):
+            result=TestnetVenue({}).collect(ev)
+        self.assertEqual(reader.calls,6)
+        self.assertEqual(reader.windows,[(T-60000,T+10000)]*2)
+        self.assertEqual(result['snapshot']['terminal_orders'],ev['snapshot']['terminal_orders'])
+        self.assertTrue(result['report']['cards'][0]['closure_verified'])
+
+    def test_first_time_final_order_is_independently_read_in_both_passes(self):
+        ev=evidence(is_open=True);reader=Reader(evidence())
+        status_reads=[];original=reader.read
+        def read(kind,*args,**kwargs):
+            if kind=='orderStatus':status_reads.append(kwargs['oid'])
+            return original(kind,*args,**kwargs)
+        reader.read=read
+        result=self.collect(ev,reader)
+        self.assertEqual(status_reads,['11','12','11','12'])
+        self.assertTrue(result['report']['cards'][0]['closure_verified'])
+        after=Reader(dict(bindings=ev['bindings'],snapshot=result['snapshot']))
+        self.collect(dict(bindings=ev['bindings'],snapshot=result['snapshot']),after)
+        self.assertEqual(after.calls,6)  # Only fresh fills/inventory/position in each pass.
+
+    def test_reappearing_certified_oid_blocks_even_with_unchanged_fill_total(self):
+        ev=evidence();reader=Reader(ev)
+        reader.data['inventory'].append(deepcopy(reader.data['statuses']['10']['order']['order']))
+        with self.assertRaisesRegex(e.SyncError,'TERMINAL_ORDER_BECAME_ACTIVE'):
+            self.collect(ev,reader)
+
+    def test_added_terminal_fill_before_or_after_terminal_time_blocks(self):
+        for at in (T-1000,T+100):
+            with self.subTest(at=at):
+                ev=evidence();reader=Reader(ev)
+                reader.data['fills'].append({**reader.data['fills'][0],'tid':99999,'sz':'1','time':at})
+                with self.assertRaisesRegex(e.SyncError,'TERMINAL_FACT_CHANGED'):
+                    self.collect(ev,reader)
+
+    def test_changed_or_missing_terminal_fill_in_overlap_still_blocks(self):
+        for change,code in ((lambda rows:rows[0].update(px='101'),'FILL_FACT_CHANGED'),
+                            (lambda rows:rows.pop(0),'PREVIOUS_FILL_MISSING_IN_OVERLAP')):
+            with self.subTest(code=code):
+                ev=evidence();reader=Reader(ev);change(reader.data['fills'])
+                with self.assertRaisesRegex(e.SyncError,code):self.collect(ev,reader)
+
+    def test_unverified_terminal_certificates_block_before_public_reads(self):
+        cases=('quantity','filled_zero','rejected_with_fill','fill_after_terminal','unknown_oid','open_and_terminal','history','inventory')
+        for case in cases:
+            with self.subTest(case=case):
+                ev=evidence();row=ev['snapshot']['terminal_orders'][0]
+                if case=='quantity':row['filled_quantity']='99'
+                elif case=='filled_zero':
+                    row['filled_quantity']='0';ev['snapshot']['fills']=ev['snapshot']['fills'][1:]
+                elif case=='rejected_with_fill':row['state']='REJECTED'
+                elif case=='fill_after_terminal':row['at_ms']=T-10001
+                elif case=='unknown_oid':row['oid']='999'
+                elif case=='open_and_terminal':ev['snapshot']['open_orders'].append(order(ev['bindings'][0],'ENTRY'))
+                elif case=='history':ev['snapshot']['history_complete']=False
+                else:ev['snapshot']['orders_complete']=False
+                reader=Reader(evidence())
+                with self.assertRaisesRegex(e.SyncError,'TERMINAL_CERTIFICATE_NOT_VERIFIED|VERIFIED_HISTORY_BOOTSTRAP_REQUIRED'):
+                    self.collect(ev,reader)
+                self.assertEqual(reader.calls,0)
+
+    def test_second_pass_changes_still_reject_full_checkpoint(self):
+        ev=evidence();reader=Reader(ev);original=reader.read
+        def read(kind,*args,**kwargs):
+            response=original(kind,*args,**kwargs)
+            if kind=='clearinghouseState' and reader.calls>3:
+                response['assetPositions'][0]['position']['szi']='1'
+            return response
+        reader.read=read
+        with self.assertRaisesRegex(e.SyncError,'OBSERVATION_CHANGED_RETRY'):
+            self.collect(ev,reader)
+
+    def test_duplicate_exact_durable_fills_do_not_invalidate_certificate(self):
+        ev=evidence();ev['snapshot']['fills']*=2
+        result=self.collect(ev)
+        self.assertTrue(result['report']['cards'][0]['closure_verified'])
+        self.assertEqual(len(result['snapshot']['fills']),2)
+
+    def test_opt_in_does_not_extend_original_observation_time_or_read_deadline(self):
+        ev=evidence();before=deepcopy(ev);times=iter((0,16))
+        with self.assertRaisesRegex(e.SyncError,'OBSERVATION_TOO_SLOW'):
+            self.collect(ev,elapsed=lambda:next(times))
+        self.assertEqual(ev,before)
+        with self.assertRaisesRegex(e.SyncError,'TERMINAL_CERTIFICATE_OPT_IN_INVALID'):
+            e.collect(ev,Reader(ev),reuse_verified_terminals=1,clock=lambda:T+10000)
+
+
 def collected(ev,target=None,**kw):
     return e.collect(ev,Reader(target or ev),clock=lambda:T+10000,**kw)
 
