@@ -145,7 +145,7 @@ def run_one(env, card_id):
             feed.stop()
 
 
-def _reconcile_notifications(base, feed, role, route, card):
+def _reconcile_notifications(base, feed, role, route, card, *, reconciliation=None):
     """An active socket never replaces authoritative saved account observation."""
     if feed.entry_allowed(route['account']):
         return True
@@ -158,6 +158,21 @@ def _reconcile_notifications(base, feed, role, route, card):
     if symbols==():
         symbols=None
     started_ms=base.venue.now()
+    previous=(reconciliation or {}).get('boundary')
+    if (previous is not None
+            and (previous[0].account,previous[0].generation,previous[0].revision)
+                ==(token.account,token.generation,token.revision)
+            and 0<=started_ms-previous[2]<=15000):
+        # A quota retry need not recollect what the deployed worker has saved
+        # since the same notification boundary. The ordinary proof path still
+        # checks exact bindings, full history/orders, freshness, current public
+        # ownership and the unchanged socket generation/revision.
+        token,symbols,started_ms=previous
+        if stream._finish_notification_reconciliation(base,feed,token,symbols,started_ms):
+            reconciliation.clear()
+            return True
+    if reconciliation is not None:
+        reconciliation['boundary']=(token,symbols,started_ms)
     result=stream.tick(base,route,timestamp(card['prepared']['source']['at']),
         new_entries=False,role=role,dirty_symbols=() if symbols is None else symbols,
         full_reconciliation=symbols is None)
@@ -165,7 +180,10 @@ def _reconcile_notifications(base, feed, role, route, card):
         if result.get('failure_code') in TRANSIENT_BUDGET_CODES:
             raise BudgetError(result['failure_code'])
         return False
-    return stream._finish_notification_reconciliation(base,feed,token,symbols,started_ms)
+    ready=stream._finish_notification_reconciliation(base,feed,token,symbols,started_ms)
+    if ready and reconciliation is not None:
+        reconciliation.clear()
+    return ready
 
 
 def _wait_notifications(base, feed, role, route, card, expiry, stopped):
@@ -174,9 +192,11 @@ def _wait_notifications(base, feed, role, route, card, expiry, stopped):
     # the original grant, not a renewed grant. An absent/invalid feed retains
     # its ten-second bootstrap limit; wall time also fences a stalled clock.
     grant_deadline=time.monotonic()+max(0,expiry-base.venue.now())/1000
+    reconciliation={}
     while base.venue.now()<expiry and time.monotonic()<grant_deadline:
         try:
-            ready=_reconcile_notifications(base,feed,role,route,card)
+            ready=_reconcile_notifications(base,feed,role,route,card,
+                reconciliation=reconciliation)
         except BudgetError as exc:
             if str(exc) not in TRANSIENT_BUDGET_CODES:
                 raise
