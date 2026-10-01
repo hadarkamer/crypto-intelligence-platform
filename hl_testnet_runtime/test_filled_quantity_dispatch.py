@@ -463,6 +463,51 @@ class ObservationCoordinationTests(NoExternal):
         self.assertEqual(calls[0]['revision'],state['revision'])
         self.assertEqual(result['evidence']['snapshot']['at_ms'],T)
 
+    def test_caller_loading_just_committed_revision_joins_its_exact_flight(self):
+        for emergency in (False,True):
+            with self.subTest(emergency=emergency):
+                controller,state,result,current=self.controller()
+                flight=m._ObservationFlight(state['revision'],None,False)
+                # Model the interval after the checkpoint committed and result
+                # was captured, before the owner's finalizer publishes done.
+                flight.result=deepcopy(result);current[0]=deepcopy(result)
+                controller._observation_flights[state['bucket']]=[flight]
+                waited=[];wait=flight.done.wait
+                def finish_owner(seconds):
+                    waited.append(seconds);flight.done.set()
+                    return wait(seconds)
+                with patch.object(flight.done,'wait',side_effect=finish_owner), \
+                        patch.object(controller,'_refresh_once',side_effect=AssertionError('NO_DUPLICATE_READ')):
+                    actual=controller.refresh(state['bucket'],emergency=emergency)
+                self.assertEqual(actual,result)
+                self.assertEqual(waited,[0.25 if emergency else m.NORMAL_OBSERVATION_JOIN_SECONDS])
+                self.assertEqual(actual['evidence']['snapshot']['at_ms'],T)
+                controller._observation_flights.clear()
+
+    def test_committed_revision_sharing_retains_done_identity_feed_and_freshness_guards(self):
+        for invalid in ('not_done','basis','durable','feed','stale','future','incomplete'):
+            with self.subTest(invalid=invalid):
+                controller,state,result,current=self.controller()
+                class Feed:
+                    revision=1
+                    def begin_reconciliation(self,account):
+                        return type('Token',(),dict(generation=1,revision=self.revision))()
+                feed=Feed();controller.venue.fill_wakeups=feed
+                flight=m._ObservationFlight(state['revision'],(1,1),False)
+                flight.result=deepcopy(result);flight.done.set()
+                loaded=deepcopy(result);current[0]=deepcopy(result)
+                if invalid=='not_done':flight.done.clear()
+                elif invalid=='basis':loaded['pending']='a'*64
+                elif invalid=='durable':current[0]['revision']+=1
+                elif invalid=='feed':feed.revision+=1
+                elif invalid=='stale':controller.venue.t=T+5001
+                elif invalid=='future':controller.venue.t=T-1
+                else:
+                    flight.result['evidence']['snapshot']['history_complete']=False
+                    loaded=deepcopy(flight.result);current[0]=deepcopy(flight.result)
+                self.assertIsNone(controller._share_observation(state['bucket'],flight,loaded,(1,1),
+                                                               emergency=True))
+
     def test_failed_background_collection_does_not_consume_independent_safety_attempt(self):
         from .request_budget import BudgetError
         controller,state,result,current=self.controller()

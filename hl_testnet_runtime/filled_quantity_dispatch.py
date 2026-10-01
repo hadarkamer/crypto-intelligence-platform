@@ -607,6 +607,8 @@ class Controller:
         return token.generation,token.revision
 
     def _share_observation(self,bucket,flight,state,feed_stamp,*,emergency):
+        if not flight.done.is_set():
+            return None
         if flight.error is not None:
             if emergency:
                 # A failed background observation is never safety evidence or
@@ -614,7 +616,7 @@ class Controller:
                 return None
             raise flight.error
         result=flight.result
-        if (result is None or flight.revision!=state['revision']
+        if (result is None or (flight.revision!=state['revision'] and state!=result)
                 or flight.feed_stamp!=feed_stamp
                 or self._feed_stamp(state['account'])!=feed_stamp):
             return None
@@ -647,8 +649,12 @@ class Controller:
         stamp=self._feed_stamp(state['account'])
         with self._observation_guard:
             active=self._observation_flights.get(bucket,[])
+            # The owner can already have committed while it is completing the
+            # flight. A caller loading that exact result has its new revision;
+            # join the owner's done event rather than launch a duplicate read.
             prior=next((flight for flight in reversed(active)
-                        if flight.revision==state['revision'] and flight.feed_stamp==stamp),None)
+                        if (flight.revision==state['revision'] or flight.result==state)
+                        and flight.feed_stamp==stamp),None)
             flight=None
             if prior is None:
                 if (len(active)>=2 or (active and not emergency)
@@ -1057,22 +1063,14 @@ def _fully_protected_no_work(state, now_ms):
 
 
 def _collection_priority(value, now_ms, *, fill_wakeups=None, pending_clear=False):
-    """Prior final-flat or quiet fully protected proof selects background reads.
+    """Only prior complete final-flat proof selects background reads.
 
     This classification never grants trade authority or changes evidence time.
-    Unknown risk, stale live protection or a dirty/gapped feed keeps its reserve.
+    Every live position or working order keeps the protection reserve, including
+    a quiet position with previously verified exits that still need fresh proof.
     """
     try:
         bindings,snapshot=value['bindings'],value['snapshot']
-        if pending_clear is True and fill_wakeups is not None and bindings:
-            dirty=fill_wakeups.dirty_symbols(snapshot['account'])
-            healthy=getattr(type(fill_wakeups),'entry_allowed',None)
-            quiet=(dirty is not None and snapshot['symbol'] not in dirty
-                   and callable(healthy) and fill_wakeups.entry_allowed(snapshot['account']) is True)
-            state=dict(bindings=bindings,evidence=value,pending=value.get('pending'),
-                       account=snapshot['account'],symbol=snapshot['symbol'])
-            if quiet and _fully_protected_no_work(state,now_ms):
-                return 'background'
         if (not bindings or not snapshot['history_complete'] or not snapshot['orders_complete']
                 or life.number(snapshot['position_quantity'],signed=True)!=0
                 or snapshot['open_orders']):
