@@ -326,6 +326,111 @@ class TrialTests(NoExternal):
         self.assertFalse(feed.entry_allowed(route['account']))
         self.assertEqual(feed.dirty_symbols(route['account']),None)
 
+    def shared_bootstrap(self):
+        from . import fill_wakeups
+        from .test_priority_fill_runtime import ready
+        from .test_fill_wakeups import Clock
+        role=self.card['account_role'];route=ROUTES2[role]
+        clock=Clock();feed=fill_wakeups.FillWakeups({role:route['account']},clock=clock)
+        ready(feed,route['account'])
+        state=state_from_case(q='100',stop='100',take='100')
+        base=Mock();base.routes=ROUTES2
+        base.venue=dispatch.TestnetVenue(env())
+        base.venue.now=Mock(return_value=T+100)
+        base.store.for_account.return_value=[state]
+        return base,feed,role,route,state,clock
+
+    def test_initial_bootstrap_wait_shares_deployed_post_token_proof_without_private_reads(self):
+        base,feed,role,route,state,clock=self.shared_bootstrap()
+        timing={'seconds':0.0};stopped=Mock()
+        def wait(seconds):
+            timing['seconds']+=seconds;clock.now+=seconds
+            base.venue.now.return_value=T+100+int(timing['seconds']*1000)
+            if timing['seconds']>=6:
+                state['revision']+=1
+                state['evidence']['snapshot']['at_ms']=base.venue.now()
+        stopped.wait.side_effect=wait
+        with patch.object(trial.time,'monotonic',side_effect=lambda:timing['seconds']), \
+             patch.object(trial.stream,'tick') as tick, \
+             patch.object(trial.stream,'_account_owned',return_value=True) as owned:
+            trial._wait_notifications(base,feed,role,route,self.card,T+90100,stopped)
+        tick.assert_not_called();owned.assert_called_once()
+        self.assertTrue(feed.entry_allowed(route['account']))
+        self.assertGreaterEqual(timing['seconds'],6)
+        self.assertLess(timing['seconds'],10)
+
+    def test_shared_bootstrap_original_ten_second_wait_falls_back_without_new_grant(self):
+        base,feed,role,route,state,clock=self.shared_bootstrap()
+        timing={'seconds':0.0};stopped=Mock()
+        def wait(seconds):
+            timing['seconds']+=seconds;clock.now+=seconds
+            base.venue.now.return_value=T+100+int(timing['seconds']*1000)
+        stopped.wait.side_effect=wait
+        def private_read(*args,**kwargs):
+            self.assertGreaterEqual(timing['seconds'],10)
+            state['evidence']['snapshot']['at_ms']=base.venue.now()
+            return dict(status='ENTRIES_DISABLED')
+        with patch.object(trial.time,'monotonic',side_effect=lambda:timing['seconds']), \
+             patch.object(trial.stream,'tick',side_effect=private_read) as tick, \
+             patch.object(trial.stream,'_account_owned',return_value=True):
+            trial._wait_notifications(base,feed,role,route,self.card,T+90100,stopped)
+        tick.assert_called_once();self.assertLess(timing['seconds'],10.2)
+        self.assertTrue(feed.entry_allowed(route['account']))
+
+    def test_new_hint_while_shared_bootstrap_waits_requires_direct_reconciliation(self):
+        from .test_fill_wakeups import fills
+        base,feed,role,route,state,clock=self.shared_bootstrap()
+        reconciliation={'shared_wait_deadline':10.0}
+        with patch.object(trial.time,'monotonic',return_value=0), \
+             patch.object(trial.stream,'tick') as tick:
+            self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card,
+                reconciliation=reconciliation))
+        tick.assert_not_called();original=reconciliation['boundary']
+        feed._receive(route['account'],original[0].generation,json.dumps(fills(
+            route['account'],rows=[dict(coin=state['symbol'],tid=303,oid=888,time=T+200)])))
+        # The initial full snapshot leaves dirty_all set. A changed token may
+        # still wait without ENTRY authority, but its old proof cannot clear it.
+        base.venue.now.return_value=T+300
+        state['evidence']['snapshot']['at_ms']=T+200
+        with patch.object(trial.time,'monotonic',return_value=1), \
+             patch.object(trial.stream,'tick') as tick, \
+             patch.object(trial.stream,'_account_owned') as owned:
+            self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card,
+                reconciliation=reconciliation))
+        tick.assert_not_called();owned.assert_not_called()
+        self.assertNotEqual(reconciliation['boundary'][0].revision,original[0].revision)
+        self.assertEqual(reconciliation['shared_wait_deadline'],10.0)
+        self.assertFalse(feed.entry_allowed(route['account']))
+
+    def test_shared_bootstrap_state_change_during_inventory_does_not_release_or_recollect(self):
+        base,feed,role,route,state,reconciliation=self.bootstrap_retry()
+        state['evidence']['snapshot']['at_ms']=T+500
+        base.venue.now.return_value=T+1000
+        def changed(*args,**kwargs):
+            state['revision']+=1
+            return True
+        with patch.object(trial.stream,'_account_owned',side_effect=changed) as owned, \
+             patch.object(trial.stream,'tick') as tick:
+            self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card,
+                reconciliation=reconciliation))
+        owned.assert_called_once();tick.assert_not_called()
+        self.assertFalse(feed.entry_allowed(route['account']))
+
+    def test_shared_bootstrap_unprotected_or_unresolved_work_is_never_deferred(self):
+        for variant in ('pending','missing-stop','missing-take','working-entry'):
+            with self.subTest(variant=variant):
+                base,feed,role,route,state,clock=self.shared_bootstrap()
+                if variant=='pending':state['pending']='b'*64
+                elif variant=='missing-stop':state.update(state_from_case(q='100',stop='40',take='100'))
+                elif variant=='missing-take':state.update(state_from_case(q='100',stop='100',take='40'))
+                elif variant=='working-entry':state.update(state_from_case(q='40',stop='40',take='40'))
+                with patch.object(trial.time,'monotonic',return_value=0), \
+                     patch.object(trial.stream,'tick',return_value=dict(status='ENTRIES_DISABLED')) as tick, \
+                     patch.object(trial.stream,'_account_owned') as owned:
+                    self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card,
+                        reconciliation={'shared_wait_deadline':10.0}))
+                tick.assert_called_once();owned.assert_not_called()
+
     def pause(self,state=None,**changes):
         state=deepcopy(self.state) if state is None else state
         feed=self.notification_feed();feed.allowed=True

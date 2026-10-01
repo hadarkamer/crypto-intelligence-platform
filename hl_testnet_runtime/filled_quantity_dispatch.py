@@ -31,6 +31,7 @@ AFTER_EXIT = 'cancel_remainder_after_exit_v1'
 HOST = 'api.hyperliquid-testnet.xyz'
 NORMAL_OBSERVATION_JOIN_SECONDS = 1.0
 EMERGENCY_OBSERVATION_JOIN_MS = 250
+QUIET_COMPLETED_OBSERVATION_SHARE_MS = 1000
 _ENTRY_INFO_SCOPE = ContextVar('testnet_entry_info_scope', default=None)
 
 
@@ -49,6 +50,7 @@ class _ObservationFlight:
         self.done=threading.Event()
         self.result=None
         self.error=None
+        self.completed_at_ms=None
 
 
 class AdmittedAttempt(tuple):
@@ -665,6 +667,36 @@ class Controller:
             return None
         return current
 
+    def _quiet_completed_observation(self,bucket,state,feed_stamp):
+        """Close the completed-flight scheduling race without extending proof age.
+
+        A worker can decide to refresh just before its peer commits and removes
+        a flight. Only that exact current quiet proof may serve the late worker;
+        errors, hints, pending work and uncovered fills always collect again.
+        """
+        feed=vars(self.venue).get('fill_wakeups')
+        if (feed_stamp is None or feed is None
+                or not callable(getattr(type(feed),'entry_allowed',None))
+                or not callable(getattr(type(feed),'dirty_symbols',None))):
+            return None
+        with self._observations.guard:
+            completed=self._observations.completed.get(bucket)
+        if completed is None or completed.completed_at_ms is None:
+            return None
+        now=self.venue.now()
+        if not 0<=now-completed.completed_at_ms<=QUIET_COMPLETED_OBSERVATION_SHARE_MS:
+            return None
+        # Use the existing safety age bound even for the ordinary worker. A
+        # completed timestamp is never a new observation or a new fill clock.
+        shared=self._share_observation(bucket,completed,state,feed_stamp,emergency=True)
+        if (shared is None or shared.get('emergency') is not None
+                or not _fully_protected_no_work(shared,self.venue.now())
+                or feed.entry_allowed(shared['account']) is not True
+                or feed.dirty_symbols(shared['account']) != ()
+                or self._feed_stamp(shared['account'])!=feed_stamp):
+            return None
+        return shared,completed.completed_at_ms
+
     def refresh(self,bucket,*,emergency=False,emergency_wait_ms=EMERGENCY_OBSERVATION_JOIN_MS):
         """Coalesce overlapping reads without putting HTTP inside a trade lane.
 
@@ -678,6 +710,9 @@ class Controller:
             raise DispatchError('OBSERVATION_JOIN_BOUND_INVALID')
         state=self.store.load(bucket)
         stamp=self._feed_stamp(state['account'])
+        shared=self._quiet_completed_observation(bucket,state,stamp)
+        if shared is not None:
+            return shared[0]
         coordinator=self._observations
         with coordinator.guard:
             coordinator.started=True
@@ -716,6 +751,14 @@ class Controller:
                 flight=_ObservationFlight(state['revision'],stamp,emergency)
                 active.append(flight)
         try:
+            # Recheck after flight selection: a peer may have committed between
+            # our initial durable load and this claim. Its completed proof must
+            # pass every identity/feed/freshness guard before HTTP is omitted.
+            shared=self._quiet_completed_observation(bucket,state,stamp)
+            if shared is not None:
+                flight.result=deepcopy(shared[0])
+                flight.completed_at_ms=shared[1]
+                return shared[0]
             result=self._refresh_once(bucket,state)
             flight.result=deepcopy(result)
             return result
@@ -734,14 +777,17 @@ class Controller:
                     at=snap.get('at_ms')
                     if type(at) is not int or not 0<=now-at<=15000:
                         del coordinator.completed[key]
-                # One positively completed checkpoint per bucket can serve an
-                # exact historical timing trial. Ordinary refresh and emergency
-                # paths never consult this sequential-read cache.
+                # Retain one completed proof for an exact historical trial or
+                # the tightly bounded quiet scheduling race above. No uncertain
+                # or failed read can become a sequential-sharing authority.
                 if flight.error is not None:
                     coordinator.completed.pop(bucket,None)
                 elif (flight.result is not None and flight.result.get('evidence') is not None
-                        and not emergency):
+                        and (not emergency or (flight.result.get('emergency') is None
+                            and _fully_protected_no_work(flight.result,now)))):
                     coordinator.completed[bucket]=flight
+                if flight.completed_at_ms is None:
+                    flight.completed_at_ms=now
                 flight.done.set()
 
     def _trial_preparation_checkpoint(self,state,*,send,allow_new_entries,allowed_entry_card_id):

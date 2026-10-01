@@ -427,6 +427,144 @@ class ObservationCoordinationTests(NoExternal):
         result['evidence']['snapshot']['at_ms']=T
         return controller,state,result,current
 
+    def protected_controller(self):
+        controller,_,_,current=self.controller()
+        state=state_from_case(q='100',stop='100',take='100')
+        current[0]=deepcopy(state)
+        result=deepcopy(state);result['revision']+=1
+        class Feed:
+            generation=1
+            revision=1
+            healthy=True
+            dirty=()
+            def begin_reconciliation(self,account):
+                return type('Token',(),dict(generation=self.generation,revision=self.revision))()
+            def entry_allowed(self,account):return self.healthy
+            def dirty_symbols(self,account):return self.dirty
+        controller.venue.fill_wakeups=Feed()
+        return controller,state,result,current
+
+    def test_late_quiet_worker_shares_exact_completed_proof_in_both_directions(self):
+        for owner_emergency in (False,True):
+            with self.subTest(owner_emergency=owner_emergency):
+                controller,state,result,current=self.protected_controller()
+                def collect(bucket,prior):
+                    current[0]=deepcopy(result)
+                    return deepcopy(result)
+                with patch.object(controller,'_refresh_once',side_effect=collect) as reads:
+                    self.assertEqual(controller.refresh(state['bucket'],emergency=owner_emergency),result)
+                    controller.venue.t+=500
+                    actual=controller.refresh(state['bucket'],emergency=not owner_emergency)
+                    self.assertEqual(actual,result)
+                    reads.assert_called_once()
+                self.assertEqual(actual['evidence']['snapshot']['at_ms'],T)
+                self.assertEqual(controller._observations.completed[state['bucket']].completed_at_ms,T)
+                self.assertEqual(controller.venue.sent,0)
+
+    def test_worker_scheduled_before_peer_commit_does_not_restart_quiet_collection(self):
+        controller,state,result,current=self.protected_controller()
+        captured=threading.Event();release=threading.Event();actual=[]
+        def load(bucket):
+            value=deepcopy(current[0])
+            if threading.current_thread().name=='late-quiet-refresh' and not captured.is_set():
+                captured.set()
+                if not release.wait(2):raise AssertionError('STALE_LOAD_NOT_RELEASED')
+            return value
+        controller.store.load.side_effect=load
+        def collect(bucket,prior):
+            current[0]=deepcopy(result)
+            return deepcopy(result)
+        worker=threading.Thread(target=lambda:actual.append(controller.refresh(state['bucket'],emergency=True)),
+            name='late-quiet-refresh')
+        with patch.object(controller,'_refresh_once',side_effect=collect) as reads:
+            worker.start()
+            try:
+                self.assertTrue(captured.wait(1))
+                self.assertEqual(controller.refresh(state['bucket']),result)
+            finally:
+                release.set();worker.join(2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(actual,[result])
+            reads.assert_called_once()
+        self.assertFalse(controller._observation_flights)
+
+    def test_completed_quiet_proof_never_hides_hints_uncertainty_or_old_clocks(self):
+        for invalid in ('hint','generation','dirty','gap','missing-feed','pending',
+                'emergency','missing-stop','missing-take','working-entry','changed-revision',
+                'changed-bindings','incomplete','stale','future','share-expired','completion-future','failed'):
+            with self.subTest(invalid=invalid):
+                controller,state,result,current=self.protected_controller()
+                feed=controller.venue.fill_wakeups
+                completed=m._ObservationFlight(state['revision'],(1,1),False)
+                completed.result=deepcopy(result);completed.done.set();completed.completed_at_ms=T
+                controller._observations.completed[state['bucket']]=completed
+                current[0]=deepcopy(result)
+                if invalid=='hint':feed.revision+=1
+                elif invalid=='generation':feed.generation+=1
+                elif invalid=='dirty':feed.dirty=('DOGE',)
+                elif invalid=='gap':feed.healthy=False
+                elif invalid=='missing-feed':del controller.venue.fill_wakeups
+                elif invalid=='pending':current[0]['pending']='a'*64
+                elif invalid=='emergency':current[0]['emergency']={'phase':'ACTIVE'}
+                elif invalid in ('missing-stop','missing-take','working-entry'):
+                    kwargs={'missing-stop':dict(q='100',stop='40',take='100'),
+                        'missing-take':dict(q='100',stop='100',take='40'),
+                        'working-entry':dict(q='40',stop='40',take='40')}[invalid]
+                    current[0]=state_from_case(**kwargs)
+                    current[0]['revision']=result['revision']
+                    completed.result=deepcopy(current[0])
+                elif invalid=='changed-revision':current[0]['revision']+=1
+                elif invalid=='changed-bindings':current[0]['bindings'][0]['orders']['STOP']=[]
+                elif invalid=='incomplete':
+                    current[0]['evidence']['snapshot']['history_complete']=False
+                    completed.result=deepcopy(current[0])
+                elif invalid=='stale':
+                    controller.venue.t=T+5001;completed.completed_at_ms=T+5001
+                elif invalid=='future':controller.venue.t=T-1;completed.completed_at_ms=T-1
+                elif invalid=='share-expired':controller.venue.t=T+1001
+                elif invalid=='completion-future':completed.completed_at_ms=T+1
+                else:completed.error=DispatchError('PUBLIC_READ_FAILED')
+                with patch.object(controller,'_refresh_once',return_value=deepcopy(current[0])) as reads:
+                    controller.refresh(state['bucket'],emergency=True)
+                    reads.assert_called_once()
+
+    def test_quiet_share_window_is_not_renewed_by_the_late_worker(self):
+        controller,state,result,current=self.protected_controller()
+        completed=m._ObservationFlight(state['revision'],(1,1),False)
+        completed.result=deepcopy(result);completed.done.set();completed.completed_at_ms=T
+        controller._observations.completed[state['bucket']]=completed
+        current[0]=deepcopy(result)
+        controller.venue.t=T+1000
+        with patch.object(controller,'_refresh_once',return_value=deepcopy(result)) as reads:
+            self.assertEqual(controller.refresh(state['bucket']),result)
+            reads.assert_not_called()
+            self.assertEqual(completed.completed_at_ms,T)
+            controller.venue.t+=1
+            controller.refresh(state['bucket'])
+            reads.assert_called_once()
+
+    def test_peer_completion_after_flight_claim_keeps_its_original_share_deadline(self):
+        controller,state,result,current=self.protected_controller()
+        completed=m._ObservationFlight(state['revision'],(1,1),True)
+        completed.result=deepcopy(result);completed.done.set();completed.completed_at_ms=T
+        controller._observations.completed[state['bucket']]=completed
+        current[0]=deepcopy(result);controller.venue.t=T+500
+        original=controller._quiet_completed_observation
+        calls=[]
+        def checkpoint(*args):
+            calls.append(1)
+            return None if len(calls)==1 else original(*args)
+        with patch.object(controller,'_quiet_completed_observation',side_effect=checkpoint), \
+                patch.object(controller,'_refresh_once',side_effect=AssertionError('NO_DUPLICATE_READ')):
+            self.assertEqual(controller.refresh(state['bucket'],emergency=True),result)
+        self.assertEqual(len(calls),2)
+        self.assertFalse(controller._observation_flights)
+        self.assertEqual(controller._observations.completed[state['bucket']].completed_at_ms,T)
+        controller.venue.t=T+1001
+        with patch.object(controller,'_refresh_once',return_value=deepcopy(result)) as reads:
+            controller.refresh(state['bucket'])
+            reads.assert_called_once()
+
     def joined(self,controller,state,result,current,*,failure=None,change=None):
         started=threading.Event();release=threading.Event();waiting=threading.Event()
         calls=[]
