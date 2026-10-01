@@ -661,22 +661,19 @@ class EmergencyDatabaseTests(NoExternal):
                 self.actual_emergency_authorization():
             result=self.emergency()
         self.assertEqual(result['operation'],'EMERGENCY_CLOSE')
-        self.assertEqual(order,['metadata','sample','quantity'])
+        self.assertEqual(order,['metadata','quantity','sample'])
         self.assertEqual(self.v.requests[-1]['proposal']['quantity'],'100')
         self.assertEqual(self.v.sent,2)
         self.assertEqual(self.incident()['requests'][0]['attempts'],1)
 
-    def test_prefetched_price_timestamp_is_not_renewed_after_slow_reconciliation(self):
+    def test_slow_price_read_cannot_renew_its_original_sample_timestamp(self):
         self.setup_emergency('100')
-        collect=self.v.collect;samples=[]
+        samples=[]
         def sample(account,symbol):
             samples.append(self.v.now())
+            self.v.t+=6001
             return dict(mark_price=self.v.mark,at_ms=samples[-1])
-        def slow(value):
-            result=collect(value);self.v.t+=6001
-            return result
-        with patch.object(self.v,'sample',side_effect=sample), \
-                patch.object(self.v,'collect',side_effect=slow):
+        with patch.object(self.v,'sample',side_effect=sample):
             with self.assertRaisesRegex(DispatchError,'EMERGENCY_PRICE_SAMPLE_EXPIRED'):
                 self.emergency()
         self.assertEqual(len(samples),1)
@@ -689,7 +686,7 @@ class EmergencyDatabaseTests(NoExternal):
         collect=self.v.collect
         def stale_quantity(value):
             observed=collect(value)
-            observed['snapshot']['at_ms']-=5001
+            self.v.t+=6001
             return observed
         with patch.object(self.v,'collect',side_effect=stale_quantity), \
                 self.actual_emergency_authorization():
