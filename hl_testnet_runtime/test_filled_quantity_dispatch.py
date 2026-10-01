@@ -508,9 +508,9 @@ class DispatchDatabaseTests(NoExternal):
         result=subprocess.run([sys.executable,'-c',script],check=True,capture_output=True,text=True,timeout=15)
         self.assertEqual(result.stdout.strip(),'OUTCOME_UNKNOWN 1')
     def test_commit_ack_loss_never_reaches_sender(self):
-        real=self.store.begin
+        real=self.store.prepare_and_begin
         def lost(*a,**kw):real(*a,**kw);raise JournalError('SIMULATED_COMMIT_ACK_LOSS')
-        with patch.object(self.store,'begin',side_effect=lost):
+        with patch.object(self.store,'prepare_and_begin',side_effect=lost):
             with self.assertRaises(JournalError):self.cycle()
         self.assertEqual(self.v.sent,0)
         rid=self.store.load(self.bucket)['pending'];self.assertEqual(self.store.request(rid)['phase'],'OUTCOME_UNKNOWN')
@@ -521,6 +521,201 @@ class DispatchDatabaseTests(NoExternal):
             except JournalError:return False
         with ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(reserve,range(4)))
         self.assertEqual(sum(results),1)
+
+    def atomic_entry_plan(self):
+        self.v.t+=1
+        state=self.c.refresh(self.bucket)
+        pending=self.store.request(state['pending']) if state['pending'] else None
+        proposal=m.choose(state,ROUTES2,META,self.v.sample(A,'DOGE'),now_ms=self.v.now(),
+                          sequence=pending['proposal']['sequence'] if pending else None)
+        return state,proposal
+
+    def test_atomic_entry_commits_exact_request_without_postcommit_reload(self):
+        state,proposal=self.atomic_entry_plan()
+        with patch.object(self.store,'load',side_effect=AssertionError('NO_POSTCOMMIT_RELOAD')):
+            committed,request=self.store.prepare_and_begin(state,proposal,AGENT,self.v.now())
+        self.assertEqual(committed['revision'],state['revision']+1)
+        self.assertEqual(committed['pending'],request['request_id'])
+        self.assertEqual(request,self.store.request(request['request_id']))
+        self.assertEqual((request['phase'],request['attempts']),('OUTCOME_UNKNOWN',1))
+        self.assertEqual(request['nonce'],self.v.now())
+        self.assertEqual(committed['entry_timing_armed'][self.b['card_id']],self.v.now())
+        self.assertEqual(self.v.sent,0)
+
+    def test_atomic_rebase_preserves_prepared_request_and_frozen_action(self):
+        state,proposal=self.atomic_entry_plan()
+        reserved=self.store.reserve(state,proposal,self.v.now())
+        previous=self.store.request(reserved['pending'])
+        state,fresh=self.atomic_entry_plan()
+        self.assertNotEqual(fresh['basis'],proposal['basis'])
+        committed,request=self.store.prepare_and_begin(state,fresh,AGENT,self.v.now())
+        self.assertEqual(request['request_id'],previous['request_id'])
+        self.assertEqual(request['prepared_at_ms'],previous['prepared_at_ms'])
+        self.assertEqual(request['proposal']['action'],previous['proposal']['action'])
+        self.assertEqual(request['proposal'],fresh)
+        self.assertEqual((request['phase'],request['attempts']),('OUTCOME_UNKNOWN',1))
+        self.assertEqual(committed['pending'],previous['request_id'])
+        with self.assertRaisesRegex(DispatchError,'NO_REPEAT'):
+            self.store.prepare_and_begin(committed,fresh,AGENT,self.v.now())
+
+    def test_atomic_rebase_never_begins_ambiguous_or_attempted_prepared_record(self):
+        state,proposal=self.atomic_entry_plan()
+        state=self.store.reserve(state,proposal,self.v.now())
+        original_request=self.store.request(state['pending'])
+        for field,value in (('phase','OUTCOME_UNKNOWN'),('attempts',True),('attempts',1),
+                ('nonce',self.v.now()),('attempt_at_ms',self.v.now()),
+                ('reply',dict(state='OUTCOME_UNKNOWN')),('observed_oid','1000')):
+            with self.subTest(field=field,value=value):
+                def corrupt(conn,current):
+                    request=deepcopy(original_request);request[field]=value
+                    return request
+                state=self.store.change(self.bucket,state['revision'],'FAULT_INJECTED_REQUEST',self.v.now(),corrupt)
+                before=self.store.request(state['pending'])
+                with self.assertRaisesRegex(DispatchError,'NO_REPEAT'):
+                    self.store.prepare_and_begin(state,proposal,AGENT,self.v.now())
+                self.assertEqual(self.store.load(self.bucket),state)
+                self.assertEqual(self.store.request(state['pending']),before)
+        with self.j._transaction() as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {SCHEMA}.nonces').fetchone()[0],0)
+
+    def test_atomic_rebase_rejects_changed_quantity_or_wire_before_nonce(self):
+        state,proposal=self.atomic_entry_plan()
+        state=self.store.reserve(state,proposal,self.v.now())
+        changed=deepcopy(proposal)
+        changed['quantity']='99';changed['action']['orders'][0]['s']='99'
+        with self.assertRaisesRegex(DispatchError,'UNSENT_PLAN_CHANGED'):
+            self.store.prepare_and_begin(state,changed,AGENT,self.v.now())
+        self.assertEqual(self.store.load(self.bucket),state)
+        self.assertEqual(self.store.request(state['pending'])['attempts'],0)
+
+    def test_atomic_concurrent_workers_return_only_one_sender_request(self):
+        state,proposal=self.atomic_entry_plan()
+        stores=[DispatchStore(PostgresJournal.for_ci(CI)) for _ in range(2)]
+        def attempt(store):
+            try:return store.prepare_and_begin(state,proposal,AGENT,self.v.now())[1]
+            except DispatchError:return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            requests=list(pool.map(attempt,stores))
+        winners=[request for request in requests if request is not None]
+        self.assertEqual(len(winners),1)
+        self.v.send(winners[0])
+        self.assertEqual(self.v.sent,1)
+        with self.j._transaction() as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {SCHEMA}.requests').fetchone()[0],1)
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {SCHEMA}.nonces').fetchone()[0],1)
+
+    def test_atomic_cross_process_checkpoint_cannot_observe_committed_prepared_gap(self):
+        state,proposal=self.atomic_entry_plan();transaction=self.j._transaction
+        script="""from hl_testnet_runtime.postgres_journal import PostgresJournal
+from hl_testnet_runtime.filled_dispatch_store import DispatchStore, DispatchError
+import os, sys
+store=DispatchStore(PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL']))
+state=store.load(sys.argv[1])
+print('UNBOUND' if state['pending'] is None else 'PARTIAL_PREPARE',flush=True)
+try:
+    store.change(state['bucket'],state['revision'],'INDEPENDENT_CHECKPOINT',int(sys.argv[2]),lambda conn,state:None)
+except DispatchError:
+    print('STALE_CHECKPOINT_REJECTED',flush=True)
+else:
+    print('CHECKPOINT_COMMITTED',flush=True)
+"""
+        children=[];seen=[]
+        class Connection:
+            def __init__(proxy,conn):proxy.conn=conn
+            def execute(proxy,query,*args,**kwargs):
+                if query.startswith(f'INSERT INTO {SCHEMA}.nonces'):
+                    child=subprocess.Popen([sys.executable,'-c',script,self.bucket,str(self.v.now())],
+                        stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                    children.append(child)
+                    seen.append(child.stdout.readline().strip())
+                return proxy.conn.execute(query,*args,**kwargs)
+        @contextmanager
+        def intercepted():
+            with transaction() as conn:yield Connection(conn)
+        try:
+            with patch.object(self.j,'_transaction',intercepted):
+                committed,request=self.store.prepare_and_begin(state,proposal,AGENT,self.v.now())
+            self.assertEqual(seen,['UNBOUND'])
+            self.assertEqual(len(children),1)
+            output,error=children[0].communicate(timeout=15)
+            self.assertEqual(children[0].returncode,0,error)
+            self.assertEqual(output.strip(),'STALE_CHECKPOINT_REJECTED')
+            self.assertEqual(self.store.load(self.bucket),committed)
+            self.assertEqual(self.store.request(request['request_id'])['attempts'],1)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill();child.communicate(timeout=5)
+
+    def test_atomic_lost_commit_ack_returns_no_sender_and_never_replays(self):
+        state,proposal=self.atomic_entry_plan();transaction=self.j._transaction
+        @contextmanager
+        def lost_ack():
+            with transaction() as conn:yield conn
+            raise JournalError('SIMULATED_COMMIT_ACK_LOSS')
+        with patch.object(self.v,'send',side_effect=AssertionError('NO_SEND')) as sender:
+            with patch.object(self.j,'_transaction',lost_ack):
+                with self.assertRaisesRegex(JournalError,'COMMIT_ACK_LOSS'):
+                    committed,request=self.store.prepare_and_begin(state,proposal,AGENT,self.v.now())
+                    sender(request)
+            sender.assert_not_called()
+        committed=self.store.load(self.bucket)
+        request=self.store.request(committed['pending'])
+        self.assertEqual((request['phase'],request['attempts']),('OUTCOME_UNKNOWN',1))
+        with self.assertRaisesRegex(DispatchError,'NO_REPEAT'):
+            self.store.prepare_and_begin(committed,proposal,AGENT,self.v.now())
+
+    def test_actionable_authorization_checkpoint_uses_winning_proof_and_one_frozen_send(self):
+        other=m.Controller(DispatchStore(PostgresJournal.for_ci(CI)),self.v,ROUTES2)
+        authorized=[];winning=[]
+        def advance(state,proposal,policy):
+            authorized.append(deepcopy(proposal))
+            self.v.t+=1
+            winning.append(other.refresh(self.bucket))
+        with patch.object(self.v,'authorize',side_effect=advance):
+            result=self.cycle()
+        self.assertEqual((result['status'],result['order_requests_sent']),('ACCEPTED_UNVERIFIED',1))
+        self.assertEqual((len(authorized),len(winning),self.v.sent),(1,1,1))
+        request=self.v.requests[0];proposal=request['proposal']
+        self.assertEqual(proposal['action'],authorized[0]['action'])
+        self.assertEqual(proposal['sequence'],authorized[0]['sequence'])
+        self.assertEqual(proposal['basis'],life.digest(winning[0]['evidence']))
+        self.assertEqual(proposal['observed_at_ms'],winning[0]['evidence']['snapshot']['at_ms'])
+        self.assertNotEqual(proposal['basis'],authorized[0]['basis'])
+        self.assertEqual(request['attempts'],1)
+        self.assertEqual(request['nonce'],request['attempt_at_ms'])
+        with self.j._transaction() as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {SCHEMA}.requests').fetchone()[0],1)
+
+    def test_authorization_checkpoint_with_larger_partial_fill_does_not_send_old_stop(self):
+        self.entry('40')
+        other=m.Controller(DispatchStore(PostgresJournal.for_ci(CI)),self.v,ROUTES2)
+        authorized=[]
+        def fill_during_authorization(state,proposal,policy):
+            authorized.append(deepcopy(proposal))
+            self.v.fill('1000','20')
+            other.refresh(self.bucket)
+        with patch.object(self.v,'authorize',side_effect=fill_during_authorization):
+            with self.assertRaisesRegex(DispatchError,'AUTHORIZED_PLAN_CHANGED_REPREPARE_REQUIRED'):
+                self.cycle()
+        self.assertEqual((authorized[0]['leg'],authorized[0]['quantity']),('STOP','40'))
+        self.assertEqual(self.v.sent,1)  # only the earlier entry, never the stale stop
+        self.assertEqual(len(self.v.requests),1)
+        self.assertEqual(self.remaining()[0]['entry_quantity'],'60')
+        self.assertIsNone(self.store.load(self.bucket)['pending'])
+
+    def test_authorization_checkpoint_retains_another_workers_unknown_attempt(self):
+        other=DispatchStore(PostgresJournal.for_ci(CI));started=[]
+        def uncertain_other_attempt(state,proposal,policy):
+            started.append(other.prepare_and_begin(state,proposal,AGENT,self.v.now())[1])
+        with patch.object(self.v,'authorize',side_effect=uncertain_other_attempt):
+            with self.assertRaisesRegex(DispatchError,'AUTHORIZED_INTENT_CHANGED_REPREPARE_REQUIRED'):
+                self.cycle()
+        self.assertEqual((len(started),self.v.sent),(1,0))
+        state=self.store.load(self.bucket)
+        self.assertEqual(state['pending'],started[0]['request_id'])
+        self.assertEqual(self.store.request(state['pending']),started[0])
+        self.assertEqual((started[0]['phase'],started[0]['attempts']),('OUTCOME_UNKNOWN',1))
     def test_overlapping_workers_cannot_send_same_entry_twice(self):
         workers=[m.Controller(DispatchStore(PostgresJournal.for_ci(CI)),self.v,ROUTES2)
                  for _ in range(2)]
