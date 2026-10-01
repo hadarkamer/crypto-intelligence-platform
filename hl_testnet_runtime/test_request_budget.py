@@ -26,6 +26,17 @@ def observation_bodies():
     return one+one
 
 
+def entry_info_bodies():
+    account='0x'+'1'*40;agent='0x'+'2'*40
+    return [dict(type='userAbstraction',user=account)]*2 + [
+        dict(type='userRole',user=account),dict(type='userRole',user=agent),
+        dict(type='clearinghouseState',user=account),
+        dict(type='clearinghouseState',user=account),
+        dict(type='spotClearinghouseState',user=account),
+        dict(type='activeAssetData',user=account,coin='BTC'),dict(type='meta'),
+        dict(type='userRateLimit',user=account),dict(type='frontendOpenOrders',user=account)]
+
+
 class CoordinatorTests(unittest.TestCase):
     """Simulated round-trip latency with real local locking; never a real DSN."""
     def setUp(self):
@@ -247,7 +258,7 @@ class ObservationBatchTests(unittest.TestCase):
                 batch.acquire('/info',body,priority='protection')
         owner._settle.assert_not_called()
 
-    def test_issued_child_is_clipped_to_batch_deadline_and_closing_never_refunds(self):
+    def test_close_releases_only_unclaimed_children_and_fences_issued_permits(self):
         body=observation_bodies()[0];batch,owner=self.batch([body,body])
         with patch.object(budget.time,'monotonic_ns',return_value=batch._deadline_ns-100):
             permit=batch.acquire('/info',body,priority='protection')
@@ -257,6 +268,57 @@ class ObservationBatchTests(unittest.TestCase):
         with self.assertRaisesRegex(budget.BudgetError,'CLOSED'):
             batch.acquire('/info',body,priority='protection')
         owner._settle.assert_not_called()
+        owner._release_unclaimed_observation.assert_called_once_with([(format(1,'032x'),120)])
+        batch.close()
+        owner._release_unclaimed_observation.assert_called_once()
+
+    def test_close_retains_failed_and_unknown_claims_without_retry(self):
+        body=observation_bodies()[0];batch,owner=self.batch([body])
+        owner._claim_observation.side_effect=budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+        with self.assertRaisesRegex(budget.BudgetError,'UNAVAILABLE'):
+            batch.acquire('/info',body,priority='protection')
+        batch.close()
+        owner._release_unclaimed_observation.assert_not_called()
+        owner._claim_observation.assert_called_once()
+
+    def test_close_racing_claim_burns_popped_ticket_and_releases_only_untouched_sibling(self):
+        body=observation_bodies()[0];batch,owner=self.batch([body,body])
+        claimed=threading.Event();release=threading.Event()
+        def pause_claim(*args):
+            claimed.set()
+            self.assertTrue(release.wait(2))
+        owner._claim_observation.side_effect=pause_claim
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(batch.acquire,'/info',body,priority='protection')
+            self.assertTrue(claimed.wait(2))
+            try:
+                batch.close()
+                owner._release_unclaimed_observation.assert_called_once_with([(format(1,'032x'),120)])
+            finally:release.set()
+            with self.assertRaisesRegex(budget.BudgetError,'CLOSED'):future.result(timeout=2)
+        owner._claim_observation.assert_called_once()
+
+    def test_close_winning_claim_race_sends_no_claim_sql(self):
+        body=observation_bodies()[0];batch,owner=self.batch([body])
+        batch.close()
+        with self.assertRaisesRegex(budget.BudgetError,'CLOSED'):
+            batch.acquire('/info',body,priority='protection')
+        owner._claim_observation.assert_not_called()
+        owner._release_unclaimed_observation.assert_called_once_with([(format(1,'032x'),120)])
+
+    def test_extension_with_unknown_commit_during_close_never_releases_its_unknown_tokens(self):
+        parent=observation_bodies()[0];batch,owner=self.batch([parent,parent])
+        batch.acquire('/info',parent,priority='protection').check()
+        children=[{**parent,'endTime':1500},{**parent,'startTime':1501}]
+        def lost_extension(*args):
+            batch.close()
+            raise budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+        owner._fund_observation.side_effect=lost_extension
+        with self.assertRaisesRegex(budget.BudgetError,'UNAVAILABLE'):batch.reserve_extra(children)
+        owner._release_unclaimed_observation.assert_called_once_with([(format(1,'032x'),120)])
+        owner._fund_observation.assert_called_once()
+        batch.close()
+        owner._release_unclaimed_observation.assert_called_once()
 
     def test_expired_or_forked_batch_does_not_touch_sql_or_inherited_lock(self):
         body=observation_bodies()[0];batch,owner=self.batch([body])
@@ -267,8 +329,10 @@ class ObservationBatchTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(budget.BudgetError,'PROCESS_CHANGED'):
                 batch.acquire('/info',body,priority='protection')
+            batch.close()
         finally:batch._lock.release()
         owner._claim_observation.assert_not_called()
+        owner._release_unclaimed_observation.assert_not_called()
 
     def test_forked_permit_cannot_send_or_refund_parent_charge(self):
         body=observation_bodies()[0];batch,owner=self.batch([body])
@@ -318,6 +382,58 @@ class ObservationBatchTests(unittest.TestCase):
         with self.assertRaisesRegex(budget.BudgetError,'EXTENSION_UNDECLARED'):batch.reserve_extra(children)
         owner._fund_observation.assert_not_called()
 
+
+
+class InfoPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.owner=budget.Budget(pg.PostgresJournal.for_ci(
+            'postgresql://offline:PRIVATE_VALUE@localhost/hl_journal_ci'))
+        self.funding=patch.object(self.owner,'_fund_observation')
+        self.fund=self.funding.start();self.addCleanup(self.funding.stop)
+
+    def test_complete_preflight_is_one_exact_finite_admission_before_any_child(self):
+        bodies=entry_info_bodies()
+        plan=self.owner.reserve_info_plan(bodies)
+        self.assertIs(type(plan),budget.InfoPlan)
+        self.assertEqual(sum(weight for _,_,weight in self.fund.call_args.args[0]),246)
+        self.assertEqual(self.fund.call_args.args[1],'background')
+        with patch.object(self.owner,'_claim_observation') as claim, \
+                patch.object(self.owner,'_release_unclaimed_observation') as release:
+            for body in bodies:
+                plan.acquire('/info',body).check()
+            self.assertEqual(claim.call_count,len(bodies))
+            with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
+                plan.acquire('/info',bodies[0])
+            plan.close()
+            release.assert_not_called()
+
+    def test_info_and_lifecycle_plans_do_not_widen_each_others_request_types(self):
+        invalid=[dict(type='userFillsByTime',user='0x'+'1'*40,startTime=1,endTime=2,
+                      aggregateByTime=False),dict(type='orderStatus',user='0x'+'1'*40,oid=1),
+                 dict(type='userRole',user='0x'+'0'*40),dict(type='meta',user='0x'+'1'*40),
+                 dict(type='activeAssetData',user='0x'+'1'*40,coin='btc'),
+                 dict(type='userRole',user='0x'+'1'*40,extra='PRIVATE_VALUE'),
+                 dict(type=['meta'])]
+        for body in invalid:
+            with self.subTest(body=body),self.assertRaises(budget.BudgetError):
+                self.owner.reserve_info_plan([body])
+        with self.assertRaisesRegex(budget.BudgetError,'OBSERVATION_BATCH_TYPE'):
+            self.owner.reserve_observation([dict(type='meta')])
+        self.fund.assert_not_called()
+
+    def test_altered_exact_body_or_host_priority_and_extension_have_no_claim(self):
+        plan=self.owner.reserve_info_plan(entry_info_bodies())
+        with patch.object(self.owner,'_claim_observation') as claim:
+            with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
+                plan.acquire('/info',dict(type='activeAssetData',user='0x'+'1'*40,coin='ETH'))
+            for path,host,priority in (('/exchange',budget.HOST,'background'),
+                    ('/info','api.hyperliquid.xyz','background'),
+                    ('/info',budget.HOST,'protection')):
+                with self.assertRaisesRegex(budget.BudgetError,'MISMATCH'):
+                    plan.acquire(path,dict(type='meta'),host=host,priority=priority)
+            with self.assertRaisesRegex(budget.BudgetError,'EXTENSION_NOT_ALLOWED'):
+                plan.reserve_extra(observation_bodies()[:2])
+            claim.assert_not_called()
 
 
 class TransportAdmissionTests(unittest.TestCase):
@@ -656,9 +772,9 @@ b.acquire('/exchange',{'action':{'type':'cancel','cancels':[{}]}},priority='prot
         with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
             self.budget.reserve_observation(bodies,priority='background')
         self.assertEqual(self.weights(),552)
-        self.budget.reserve_observation(bodies,priority=priority).close()
+        self.budget.reserve_observation(bodies,priority=priority)
         self.assertEqual(self.weights(),844)
-        self.budget.reserve_observation(bodies,priority=priority).close()
+        self.budget.reserve_observation(bodies,priority=priority)
         self.assertEqual(self.weights(),1136)
         with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
             self.budget.reserve_observation(bodies,priority=priority)
@@ -680,7 +796,7 @@ b.reserve_observation(observation_bodies(),priority='protection').close()
 '''
         subprocess.run([sys.executable,'-c',program],check=True,timeout=10,
             env={'HL_JOURNAL_CI_URL':CI_URL,'PATH':os.environ.get('PATH','')})
-        self.assertEqual(self.weights(),876)
+        self.assertEqual(self.weights(),584)
 
     def test_concurrent_whole_batches_never_partially_spend_protective_ceiling(self):
         barrier=threading.Barrier(4)
@@ -695,7 +811,90 @@ b.reserve_observation(observation_bodies(),priority='protection').close()
             self.budget.reserve_observation(observation_bodies(),priority='protection')
         self.assertEqual(self.weights(),1168)
 
-    def test_claim_refreshes_only_live_funded_ticket_without_releasing_unused_credits(self):
+    def test_abandoned_second_pass_releases_no_http_credits_but_keeps_every_started_read(self):
+        bodies=observation_bodies()
+        batch=self.budget.reserve_observation(bodies,priority='protection')
+        for body in bodies[:5]:
+            permit=batch.acquire('/info',body,priority='protection');permit.check()
+            if body['type']=='userFillsByTime':self.assertTrue(permit.finish([]))
+        self.assertEqual(self.weights(),192)
+        batch.close()
+        self.assertEqual(self.weights(),46)
+        # Repeated early failures retain real first-pass cost, not phantom
+        # reservations for a verification pass that never began.
+        other=self.budget.reserve_observation(bodies,priority='protection')
+        self.assertEqual(self.weights(),338)
+        other.close()
+        self.assertEqual(self.weights(),46)
+
+    def test_close_racing_a_slow_claim_preserves_its_ticket_and_invalidates_local_permission(self):
+        body=observation_bodies()[0]
+        batch=self.budget.reserve_observation([body,body],priority='protection')
+        original=self.budget._claim_observation
+        entered=threading.Event();release=threading.Event()
+        def paused(*args):
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return original(*args)
+        with patch.object(self.budget,'_claim_observation',side_effect=paused), \
+                ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(batch.acquire,'/info',body,priority='protection')
+            self.assertTrue(entered.wait(2))
+            try:
+                batch.close()
+                self.assertEqual(self.weights(),120)
+            finally:release.set()
+            with self.assertRaisesRegex(budget.BudgetError,'CLOSED'):future.result(timeout=2)
+        self.assertEqual(self.weights(),120)
+
+    def test_failed_cleanup_keeps_conservative_charge_and_never_reopens_or_retries(self):
+        batch=self.budget.reserve_observation(observation_bodies(),priority='protection')
+        with patch.object(self.budget,'_transaction',side_effect=budget.BudgetError(
+                'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')) as transaction:
+            batch.close()
+            batch.close()
+            transaction.assert_called_once()
+        self.assertEqual(self.weights(),292)
+        batch.close()
+        self.assertEqual(self.weights(),292)
+        with self.assertRaisesRegex(budget.BudgetError,'CLOSED'):
+            batch.acquire('/info',observation_bodies()[0],priority='protection')
+
+    def test_unknown_extension_commit_keeps_unknown_children_and_claimed_parent_after_close(self):
+        parent=observation_bodies()[0]
+        children=[{**parent,'endTime':1500},{**parent,'startTime':1501}]
+        batch=self.budget.reserve_observation([parent,parent],priority='protection')
+        batch.acquire('/info',parent,priority='protection').check()
+        original=self.budget._transaction
+        @contextmanager
+        def lost_ack(**kwargs):
+            with original(**kwargs) as conn:yield conn
+            raise budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+        with patch.object(self.budget,'_transaction',lost_ack):
+            with self.assertRaises(budget.BudgetError):batch.reserve_extra(children)
+        self.assertEqual(self.weights(),480)
+        batch.close()
+        self.assertEqual(self.weights(),360)
+
+    def test_preflight_plan_funds_all_or_none_before_background_headroom_then_retains_claimed_reads(self):
+        with self.journal._transaction() as conn:
+            conn.execute(f'INSERT INTO {budget.TICKETS}(token,weight) VALUES(%s,%s)',
+                         ('f'*32,555))
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
+            self.budget.reserve_info_plan(entry_info_bodies())
+        self.assertEqual(self.weights(),555)
+        with self.journal._transaction() as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {budget.TICKETS}').fetchone()[0],1)
+            conn.execute(f'UPDATE {budget.TICKETS} SET weight=552 WHERE token=%s',('f'*32,))
+        plan=self.budget.reserve_info_plan(entry_info_bodies())
+        self.assertEqual(self.weights(),798)
+        permit=plan.acquire('/info',dict(type='meta'));permit.check()
+        plan.close()
+        self.assertEqual(self.weights(),572)
+        with self.assertRaisesRegex(budget.BudgetError,'CLOSED'):
+            plan.acquire('/info',dict(type='meta'))
+
+    def test_claim_refreshes_live_ticket_and_close_releases_only_never_claimed_credits(self):
         bodies=observation_bodies();batch=self.budget.reserve_observation(bodies,priority='protection')
         with self.journal._transaction() as conn:
             conn.execute(f"UPDATE {budget.TICKETS} SET admitted_at=clock_timestamp()-interval '68 seconds'")
@@ -705,7 +904,7 @@ b.reserve_observation(observation_bodies(),priority='protection').close()
                              (permit._token,)).fetchone()[0]
         self.assertLess(age,1)
         batch.close()
-        self.assertEqual(self.weights(),292)
+        self.assertEqual(self.weights(),120)
         other=self.budget.reserve_observation([bodies[0]],priority='protection')
         with self.journal._transaction() as conn:
             conn.execute(f"UPDATE {budget.TICKETS} SET admitted_at=clock_timestamp()-interval '69.1 seconds'")
@@ -758,6 +957,7 @@ b.reserve_observation(observation_bodies(),priority='protection').close()
             with self.assertRaises(budget.BudgetError):batch.acquire('/info',body,priority='protection')
         with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
             batch.acquire('/info',body,priority='protection')
+        batch.close()
         self.assertEqual(self.weights(),120)
 
     def test_extension_atomicity_and_both_paginated_passes_preserve_shared_limit(self):
@@ -772,8 +972,8 @@ b.reserve_observation(observation_bodies(),priority='protection').close()
                 child=batch.acquire('/info',body,priority='protection');child.check()
                 self.assertTrue(child.finish([]))
         self.assertEqual(self.weights(),320)
-        self.budget.reserve_observation(observation_bodies(),priority='protection').close()
-        self.budget.reserve_observation(observation_bodies(),priority='protection').close()
+        self.budget.reserve_observation(observation_bodies(),priority='protection')
+        self.budget.reserve_observation(observation_bodies(),priority='protection')
         # 320+292+292+120=1024; the full sibling pair would exceed 1200.
         fresh=self.budget.reserve_observation([parent],priority='protection')
         fresh.acquire('/info',parent,priority='protection').check()

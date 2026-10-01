@@ -104,6 +104,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(out['account_mode'],'default');self.assertFalse(out['mode_was_renamed'])
         self.assertEqual(Decimal(out['balance_usd']),999)
         self.assertFalse(out['trade_authorized'])
+        self.assertEqual(self.reader.mode_calls,2)
     def test_other_default_account_not_silently_enabled(self):
         with self.assertRaisesRegex(checks.Blocked,'SCOPE_NOT_APPROVED'):
             r.default_native_snapshot({'account':A,'agent':B},self.reader,'BTC')
@@ -143,14 +144,14 @@ class ConnectionTests(unittest.TestCase):
         self.reader.switch=True
         with self.assertRaisesRegex(checks.Blocked,'MODE_CHANGED'):
             r.default_native_snapshot(self.route,self.reader,'BTC')
-    def test_serial_budget_retains_historical_probe_and_read_order(self):
+    def test_serial_budget_keeps_initial_and_final_probes_without_duplicate_initial_read(self):
         reader=checks.InfoReader()
         with patch.object(reader,'read',side_effect=self.reader.read), \
              patch.object(reader,'read_many',side_effect=AssertionError('Serial path must not batch')):
             report=r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
         self.assertTrue(report['test_plan_checked'])
         self.assertEqual(self.reader.seen,[
-            ('userAbstraction',C,None),('userAbstraction',C,None),
+            ('userAbstraction',C,None),
             ('userRole',C,None),('userRole',D,None),
             ('clearinghouseState',C,None),('spotClearinghouseState',C,None),
             ('activeAssetData',C,'BTC'),('meta',None,None),
@@ -184,8 +185,8 @@ class ConnectionTests(unittest.TestCase):
              patch.object(checks,'plan_check',side_effect=plan_check):
             report=r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
         self.assertTrue(report['test_plan_checked'])
-        self.assertEqual(mode_calls,3)
-        self.assertEqual(boundaries,[('mode',0),('mode',0),('mode',6)])
+        self.assertEqual(mode_calls,2)
+        self.assertEqual(boundaries,[('mode',0),('mode',6)])
         self.assertEqual(completed,6)
     def test_parallel_snapshot_rechecks_changed_mode_at_final_probe(self):
         reader=checks.InfoReader(parallel=True);lock=threading.Lock();mode_calls=0
@@ -194,12 +195,12 @@ class ConnectionTests(unittest.TestCase):
             with lock:
                 if kind=='userAbstraction':
                     mode_calls+=1
-                    return 'unifiedAccount' if mode_calls==3 else 'default'
+                    return 'unifiedAccount' if mode_calls==2 else 'default'
                 return self.reader.read(kind,**kwargs)
         with patch.object(reader,'read',side_effect=read):
             with self.assertRaisesRegex(checks.Blocked,'^ACCOUNT_MODE_CHANGED_RECHECK$'):
                 r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
-        self.assertEqual(mode_calls,3)
+        self.assertEqual(mode_calls,2)
     def test_failed_parallel_group_cannot_partially_validate_a_budget(self):
         reader=checks.InfoReader(parallel=True);lock=threading.Lock()
         def read(kind,**kwargs):
@@ -211,7 +212,31 @@ class ConnectionTests(unittest.TestCase):
             with self.assertRaisesRegex(checks.Blocked,'^READ_UNAVAILABLE$'):
                 r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
         number.assert_not_called();plan_check.assert_not_called()
-        self.assertEqual(self.reader.mode_calls,2)
+        self.assertEqual(self.reader.mode_calls,1)
+    def test_each_budget_invocation_reads_its_own_initial_and_final_mode(self):
+        for _ in range(2):
+            self.assertTrue(r.budget_for_role(ENV,'short_account',C,D,PLAN,
+                self.reader)['test_plan_checked'])
+        self.assertEqual(self.reader.mode_calls,4)
+        self.assertEqual([item[0] for item in self.reader.seen].count('userRole'),4)
+    def test_slow_initial_mode_read_is_included_in_original_snapshot_deadline(self):
+        for first_read_seconds,expired in [(15,False),(15.001,True)]:
+            with self.subTest(first_read_seconds=first_read_seconds):
+                reader=Reader();clock=[0]
+                original_read=reader.read
+                def read(kind,**kwargs):
+                    if kind=='userAbstraction' and reader.mode_calls==0:
+                        clock[0]=first_read_seconds
+                    return original_read(kind,**kwargs)
+                with patch.object(reader,'read',side_effect=read), \
+                     patch.object(r.time,'monotonic',side_effect=lambda:clock[0]):
+                    if expired:
+                        with self.assertRaisesRegex(checks.Blocked,'^ACCOUNT_SNAPSHOT_EXPIRED$'):
+                            r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
+                    else:
+                        self.assertTrue(r.budget_for_role(ENV,'short_account',C,D,PLAN,
+                            reader)['test_plan_checked'])
+                self.assertEqual(reader.mode_calls,2)
     def test_parallel_snapshot_keeps_original_fifteen_second_deadline(self):
         for elapsed,expired in [(15,False),(15.001,True)]:
             with self.subTest(elapsed=elapsed):

@@ -203,3 +203,48 @@ also require genuine exhaustion at the total ceiling to remain a no-HTTP denial.
 This correction does not enable entries or establish a new fill-to-STOP timing
 result. Deployment verification must check sustained current evidence, normal
 and emergency status, record-only intake, and disabled continuous entries.
+
+## Finite entry admission and unused-credit cleanup (2026-10-01)
+
+The 22:08 Israel timing runner stopped before registration or an ENTRY attempt
+when its early account-inventory check exhausted the background request budget.
+Starting each read independently also allowed an expensive preflight to spend
+quota before discovering that its remaining checks could not be funded.
+
+An exact unbound timing candidate now funds the complete finite public-read
+plan atomically before the cycle's first HTTP request: 330 weighted units,
+including both independent empty-market passes, price/metadata, account mapping,
+capacity, account-wide ownership and address action allowance. Other ENTRY
+authorizations fund their complete 246-unit stream preflight as one plan.
+Requests still obtain fresh single-use permissions immediately before transport.
+The final exchange request retains its own background admission and all durable
+attempt, source, evidence and operator-deadline fences. Public-plan admission
+does not guarantee that later exchange admission or a future fill will succeed.
+
+Closing a read plan releases only positively acknowledged credits whose claim
+never started. Claimed, failed, racing, or uncertain requests retain their
+charges. Unknown funding/cleanup commits never authorize a retry or refund.
+This avoids holding unsent second-pass credits through the full accounting
+window after a failed first pass, without undercounting actual requests.
+
+The default account path uses its invocation's first mode response as the first
+probe and still makes an independent final mode probe. It preserves the original
+sample clock and all mapping, balance, capacity and plan checks; no response is
+cached across invocations. The timing runner reconciles the existing account
+before registering a new empty candidate and obtains that candidate's mandatory
+two-pass proof inside the funded cycle. Its entries-disabled supervisor shares
+only the observation coordinator with the locally authorized trial controller.
+
+Only exact known temporary quota errors receive bounded pre-entry waits; the
+original source expiry and initial 90-second grant never renew. Feed gaps retain
+their ten-second bootstrap bound. Storage, policy, unknown ownership and uncertain
+order outcomes do not become blind order retries. Both service ENTRY flags stay
+false. The 800/1200 ceilings, 69-second accounting window, evidence clocks and
+250-millisecond emergency takeover wait are unchanged.
+
+The full local workflow selected 823 tests; 629 executed successfully and 194
+PostgreSQL-dependent tests skipped without a local database. Deployment requires
+the same full suite against disposable PostgreSQL with no skipped tests, followed
+by current saved protection evidence, fresh emergency/feed health and verification
+of the deployed commit. New-fill STOP timing remains a separate outstanding
+measurement; this change does not claim that measurement has passed.

@@ -450,7 +450,8 @@ class ConfigurationTests(NoExternal):
             def read(self,kind,account):
                 return ([dict(coin='BTC',oid=100)] if kind=='frontendOpenOrders'
                     else dict(assetPositions=[dict(position=dict(coin='BTC',szi='2'))]))
-        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=Reader()):
+        with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=Reader()), \
+             patch.object(dispatch.TestnetVenue,'request_budget',return_value=object()):
             venue=dispatch.TestnetVenue(env())
             snap=venue.empty_snapshot(A,'DOGE')
             self.assertEqual(snap['position_quantity'],'0')
