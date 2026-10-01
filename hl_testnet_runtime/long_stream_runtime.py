@@ -135,8 +135,13 @@ def _account_owned(venue, account, states, *, role=None):
     """Unknown positions/orders block *new* entries, never exit maintenance."""
     from .card_sync_evidence import PublicReader
     reader = PublicReader()
-    orders = reader.read('frontendOpenOrders',account)
-    positions = reader.read('clearinghouseState',account)
+    if getattr(venue,'parallel_preflight',False) is True:
+        orders,positions=dispatch.joined_public_reads(
+            lambda:reader.read('frontendOpenOrders',account),
+            lambda:reader.read('clearinghouseState',account))
+    else:
+        orders = reader.read('frontendOpenOrders',account)
+        positions = reader.read('clearinghouseState',account)
     if (not isinstance(orders,list) or len(orders)>10000
             or not isinstance(positions,dict)
             or not isinstance(positions.get('assetPositions'),list)):
