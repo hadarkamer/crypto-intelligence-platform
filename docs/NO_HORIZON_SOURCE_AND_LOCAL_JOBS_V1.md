@@ -132,3 +132,10 @@ versioned adapter and deployment task after this path has been reviewed.
 
 The source extraction, real-data run and CI receipts are kept with the execution
 evidence, rather than committing private snapshots to the repository.
+# Bounded manifest transport
+
+The source adapter also supports the separately attested
+`MANIFEST_ATTESTED_MULTI_READ_V1` mode. Its complete source snapshot is anchored
+by one read-only manifest statement; later bounded payload fetches must match
+the anchor byte-for-byte. See [the manifest transport contract](NO_HORIZON_MANIFEST_TRANSPORT_V1.md)
+for its distinct transaction claims and retained proof requirements.

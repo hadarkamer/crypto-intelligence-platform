@@ -21,13 +21,14 @@ import research_watch_scan_intake as intake
 import research_watch_scan_measurement as measurement
 import research_btc_parent_movement as btc
 
-VERSION = "no-horizon-accepted-watch-source-v1"
+VERSION = "no-horizon-accepted-watch-source-v2"
 EXPORT_VERSION = "no-horizon-watch-source-export-v1"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_ROWS = 256
 MAX_DAYS = 31
 ARCHIVE_ROUTE = "BINANCE_SPOT_TRADE_1M"
-CONSISTENT_READS = {"REPEATABLE_READ_READ_ONLY", "SINGLE_STATEMENT_READ_ONLY"}
+CONSISTENT_READS = {"REPEATABLE_READ_READ_ONLY", "SINGLE_STATEMENT_READ_ONLY",
+                    "MANIFEST_ATTESTED_MULTI_READ_V1"}
 
 
 def route_for_symbol(symbol: str) -> dict:
@@ -143,6 +144,14 @@ def build_snapshot(export: Mapping[str, Any], candidate_key: str, base_direction
     if not isinstance(receipt, Mapping):
         raise ValueError("SOURCE_EXTRACTION_RECEIPT_REQUIRED")
     blockers = []
+    if receipt.get("transaction_mode") == "MANIFEST_ATTESTED_MULTI_READ_V1":
+        # The source belongs to one manifest snapshot; its payload was fetched
+        # using separate read-only transactions. Never equate those claims.
+        from research_no_horizon_manifest import validate_export_binding
+        try:
+            validate_export_binding(export)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            blockers.append("INVALID_MANIFEST_ATTESTED_SOURCE_EXTRACTION")
     if (type(receipt.get("expected_accepted_rows")) is not int or receipt["expected_accepted_rows"] != len(rows)
             or receipt.get("rows_complete") is not True or receipt.get("truncated") is not False
             or receipt.get("expected_accepted_rows_exact",True) is not True

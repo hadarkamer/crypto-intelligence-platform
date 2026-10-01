@@ -154,6 +154,13 @@ class SourceTests(unittest.TestCase):
         for change in ({'symbol':'HYPE'},{'candidate_key':'invented'}, {'threshold_pct':True}, {'threshold_pct':100}):
             with self.assertRaises(ValueError): build(self.data,**change)
 
+    def test_manifest_mode_without_verified_binding_is_blocked(self):
+        self.data['source_receipt']['transaction_mode']='MANIFEST_ATTESTED_MULTI_READ_V1'
+        result=build(self.data)
+        self.assert_blocked(result)
+        self.assertIn('INVALID_MANIFEST_ATTESTED_SOURCE_EXTRACTION',
+                      result['source_receipt']['source_blockers'])
+
     def test_route_conflict_duplicate_and_future_prices_rejected(self):
         for mutation in (lambda x:x['candles'][0].update(route='FUTURES'),
                          lambda x:x['candles'].append(deepcopy(x['candles'][-1])),
