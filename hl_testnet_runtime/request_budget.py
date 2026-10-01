@@ -36,6 +36,9 @@ PERMIT_MS = 1000
 LOCK = 1729048160
 LOCK_WAIT_MS = 250
 MAX_COORDINATORS = 4
+OBSERVATION_MS = 15000
+OBSERVATION_TYPES = frozenset(('userFillsByTime', 'frontendOpenOrders',
+                             'clearinghouseState', 'orderStatus'))
 POLICY = SCHEMA + '.request_budget_policy'
 TICKETS = SCHEMA + '.request_budget_tickets'
 PRIORITIES = frozenset(('background', 'protection'))
@@ -188,9 +191,18 @@ class Permit:
     _deadline_ns: int = field(repr=False)
     _used: list = field(default_factory=lambda: [False], repr=False, compare=False)
     _lock: object = field(default_factory=threading.Lock, repr=False, compare=False)
+    _pid: int = field(default_factory=os.getpid, repr=False, compare=False)
+    _guard: object = field(default=None, repr=False, compare=False)
+
+    def _local_guard(self):
+        if os.getpid() != self._pid:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_PROCESS_CHANGED')
+        if self._guard is not None:
+            self._guard()
 
     def validate(self):
         """Reject an already stale permission without consuming or extending it."""
+        self._local_guard()
         with self._lock:
             if self._used[0]:
                 raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_ALREADY_USED')
@@ -199,6 +211,7 @@ class Permit:
 
     def check(self):
         """Consume immediately before HTTP. Expiry never releases a reservation."""
+        self._local_guard()
         with self._lock:
             if self._used[0]:
                 raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_ALREADY_USED')
@@ -212,13 +225,131 @@ class Permit:
         Fixed-size request weights need no database round trip. Invalid or
         unbounded responses retain their full reservation, as do failed requests.
         """
-        if not self._used[0] or self._kind not in SIZED:
+        if os.getpid() != self._pid or not self._used[0] or self._kind not in SIZED:
             return False
         if (not isinstance(response, list) or len(response) > 2000
                 or any(not isinstance(row, dict) for row in response)):
             return False
         weight = 20 + (len(response) + 19) // 20
         return self._budget._settle(self._token, weight)
+
+
+def _observation_key(body):
+    if (not isinstance(body, dict) or not isinstance(body.get('type'),str)
+            or body['type'] not in OBSERVATION_TYPES):
+        raise BudgetError('TESTNET_OBSERVATION_BATCH_TYPE_NOT_ALLOWED')
+    try:
+        return json.dumps(body, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    except (TypeError, ValueError):
+        raise BudgetError('TESTNET_OBSERVATION_BATCH_TYPE_NOT_ALLOWED') from None
+
+
+class ObservationBatch:
+    """Exact finite observation credits, never a pre-issued HTTP permission.
+
+    Each ticket is funded before the first read, then claimed once immediately
+    before its own HTTP. A failed/unused claim stays charged; neither closing
+    this local object nor losing a COMMIT can release shared quota.
+    """
+    def __init__(self, owner, entries, priority, deadline_ns):
+        self._owner, self._priority = owner, priority
+        self._deadline_ns, self._pid = deadline_ns, os.getpid()
+        self._lock, self._closed = threading.Lock(), False
+        self._entries = {}
+        self._claimed, self._extended = {}, {}
+        self._count = len(entries)
+        for key, token, weight in entries:
+            self._entries.setdefault(key, []).append((token, weight))
+
+    def _guard(self):
+        # Check the PID before touching an inherited lock after fork.
+        if os.getpid() != self._pid:
+            raise BudgetError('TESTNET_OBSERVATION_BATCH_PROCESS_CHANGED')
+        with self._lock:
+            if self._closed:
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_CLOSED')
+            if time.monotonic_ns() > self._deadline_ns:
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_EXPIRED')
+
+    def acquire(self, path, body, *, priority='background', host=HOST):
+        # This child's clock starts before local locking and every SQL step.
+        deadline = min(time.monotonic_ns() + PERMIT_MS * 1000000,
+                       self._deadline_ns)
+        if path != '/info' or host != HOST or priority != self._priority:
+            raise BudgetError('TESTNET_OBSERVATION_BATCH_REQUEST_MISMATCH')
+        key = _observation_key(body)
+        self._guard()
+        with self._lock:
+            if self._closed or time.monotonic_ns() > self._deadline_ns:
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_EXPIRED_OR_CLOSED')
+            entries = self._entries.get(key)
+            if not entries:
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_UNDECLARED_REQUEST')
+            # Burn before SQL. Unknown/failed COMMIT cannot reissue this child.
+            token, weight = entries.pop()
+            self._claimed[key] = self._claimed.get(key,0)+1
+        self._owner._claim_observation(token, weight, deadline)
+        self._guard()
+        if time.monotonic_ns() > deadline:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',stage='AFTER_COMMIT')
+        return Permit(self._owner, token, body['type'], weight, deadline,
+                      _guard=self._guard)
+
+    def reserve_extra(self, bodies):
+        """Fund both exact siblings of one claimed history page atomically.
+
+        Recursive history keeps its existing 200-read/depth bounds; ordinary
+        admission is never a fallback. An uncertain extension COMMIT consumes
+        this local parent slot and leaves any inserted tickets charged.
+        """
+        deadline=min(time.monotonic_ns()+PERMIT_MS*1000000,self._deadline_ns)
+        self._guard()
+        if not isinstance(bodies,list) or len(bodies)!=2:
+            raise BudgetError('TESTNET_OBSERVATION_BATCH_EXTENSION_INVALID')
+        fields={'type','user','startTime','endTime','aggregateByTime'}
+        for body in bodies:
+            if (not isinstance(body,dict) or set(body)!=fields
+                    or body['type']!='userFillsByTime' or body['aggregateByTime'] is not False
+                    or type(body['startTime']) is not int or type(body['endTime']) is not int
+                    or not 0<=body['startTime']<=body['endTime']):
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_EXTENSION_INVALID')
+        left,right=sorted(bodies,key=lambda body:body['startTime'])
+        if (left['user']!=right['user'] or left['endTime']+1!=right['startTime']):
+            raise BudgetError('TESTNET_OBSERVATION_BATCH_EXTENSION_INVALID')
+        parent={**left,'endTime':right['endTime']}
+        key=_observation_key(parent)
+        entries=[(_observation_key(body),uuid.uuid4().hex,
+                  request_weight('/info',body)) for body in (left,right)]
+        with self._lock:
+            if self._closed or time.monotonic_ns()>self._deadline_ns:
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_EXPIRED_OR_CLOSED')
+            if (self._extended.get(key,0)>=self._claimed.get(key,0)
+                    or self._count+len(entries)>200):
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_EXTENSION_UNDECLARED')
+            self._extended[key]=self._extended.get(key,0)+1
+            self._count+=len(entries)
+        self._owner._fund_observation(entries,self._priority,deadline)
+        self._guard()
+        if time.monotonic_ns()>deadline:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',stage='AFTER_COMMIT')
+        with self._lock:
+            if self._closed or time.monotonic_ns()>self._deadline_ns:
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_EXPIRED_OR_CLOSED')
+            for child_key,token,weight in entries:
+                self._entries.setdefault(child_key,[]).append((token,weight))
+
+    def close(self):
+        if os.getpid() != self._pid:
+            return
+        with self._lock:
+            self._closed = True
+
+    def __enter__(self):
+        self._guard()
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
 class Budget:
@@ -345,6 +476,71 @@ class Budget:
             raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',stage='AFTER_COMMIT',
                 elapsed_ms=PERMIT_MS+int((time.monotonic_ns()-deadline)/1_000_000))
         return permit
+
+    def reserve_observation(self, bodies, *, priority='background', host=HOST):
+        """Fund every declared two-pass/catchup read atomically before HTTP.
+
+        Undeclared pagination cannot fall back to ordinary admission. A caller
+        must plan its bounded work first; a plan too large for the unchanged
+        ceiling fails without inserting any partial tickets.
+        """
+        started = time.monotonic_ns()
+        deadline = started + PERMIT_MS * 1000000
+        batch_deadline = started + OBSERVATION_MS * 1000000
+        if host != HOST or not isinstance(priority,str) or priority not in PRIORITIES:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_PRIORITY_INVALID')
+        if not isinstance(bodies,list) or not 1 <= len(bodies) <= 200:
+            raise BudgetError('TESTNET_OBSERVATION_BATCH_PLAN_INVALID')
+        entries = [(_observation_key(body), uuid.uuid4().hex,
+                    request_weight('/info',body,host=host)) for body in bodies]
+        self._fund_observation(entries,priority,deadline)
+        if time.monotonic_ns() > deadline:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',stage='AFTER_COMMIT')
+        return ObservationBatch(self,entries,priority,batch_deadline)
+
+    def _fund_observation(self, entries, priority, deadline):
+        total = sum(weight for _,_,weight in entries)
+        ceiling = LIMIT if priority == 'protection' else BACKGROUND_LIMIT
+        if total > ceiling:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',stage='ACCOUNTING')
+        payload = json.dumps([dict(token=token,weight=weight) for _,token,weight in entries])
+        diagnostic = {}
+        with self._transaction(deadline_ns=deadline,diagnostic=diagnostic) as conn:
+            diagnostic['stage']='GLOBAL_LOCK'
+            conn.execute('SELECT pg_advisory_xact_lock(%s)',(LOCK,))
+            diagnostic['stage']='ACCOUNTING'
+            rows = conn.execute(f'''WITH stamp AS MATERIALIZED (
+                    SELECT clock_timestamp() AS at),
+                pruned AS (DELETE FROM {TICKETS} USING stamp
+                    WHERE admitted_at <= stamp.at-(%s*interval '1 millisecond') RETURNING token),
+                used AS (SELECT COALESCE(sum(weight),0) AS total FROM {TICKETS},stamp
+                    WHERE admitted_at > stamp.at-(%s*interval '1 millisecond')),
+                planned AS (SELECT * FROM jsonb_to_recordset(%s::jsonb)
+                    AS child(token text,weight integer))
+                INSERT INTO {TICKETS}(token,admitted_at,weight)
+                SELECT planned.token,stamp.at,planned.weight FROM stamp,used,planned
+                WHERE used.total+%s<=%s RETURNING token''',
+                (WINDOW_MS,WINDOW_MS,payload,total,ceiling)).fetchall()
+            if len(rows) != len(entries):
+                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+
+    def _claim_observation(self, token, weight, deadline):
+        diagnostic = {}
+        with self._transaction(deadline_ns=deadline,diagnostic=diagnostic) as conn:
+            diagnostic['stage']='GLOBAL_LOCK'
+            conn.execute('SELECT pg_advisory_xact_lock(%s)',(LOCK,))
+            diagnostic['stage']='ACCOUNTING'
+            # Refresh only an existing LIVE credit under the admission lock.
+            # Its original reservation was already included in the total; the
+            # later timestamp keeps the final child covered for a full window.
+            row = conn.execute(f'''WITH stamp AS MATERIALIZED (
+                    SELECT clock_timestamp() AS at)
+                UPDATE {TICKETS} SET admitted_at=stamp.at FROM stamp
+                WHERE token=%s AND settled=false AND weight=%s
+                    AND admitted_at > stamp.at-(%s*interval '1 millisecond')
+                RETURNING token''',(token,weight,WINDOW_MS)).fetchone()
+            if row is None:
+                raise BudgetError('TESTNET_OBSERVATION_BATCH_CREDIT_UNAVAILABLE')
 
     def _settle(self, token, weight):
         try:

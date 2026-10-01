@@ -5,6 +5,7 @@ No signer, order sender, wallet keys, transfers or account changes. Retain old
 fills and query a bounded overlapping interval; unknown activity is not hidden.
 """
 from copy import deepcopy
+from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, localcontext
 import http.client
@@ -49,6 +50,37 @@ class PublicReader:
         import os
         self.budget = budget if budget is not None else Budget.from_env(os.environ)
         self.priority = priority
+        self._observation_budget = None
+
+    @contextmanager
+    def observation_batch(self, bodies):
+        """Fund the complete known two-pass observation before its first HTTP.
+
+        Individual one-second permissions are claimed just before transport.
+        Recursive history splits fund both child pages atomically before either
+        is sent; they retain the same bounded original collection deadline.
+        """
+        if self._observation_budget is not None:
+            raise SyncError('NESTED_PUBLIC_OBSERVATION_NOT_ALLOWED')
+        if self.budget is None:
+            yield
+            return
+        batch=self.budget.reserve_observation(bodies,priority=self.priority,host=HOST)
+        self._observation_budget=batch
+        try:
+            yield
+        finally:
+            self._observation_budget=None
+            batch.close()
+
+    def reserve_history_split(self,account,start,middle,end):
+        batch=self._observation_budget
+        if batch is not None:
+            batch.reserve_extra([
+                dict(type='userFillsByTime',user=account,startTime=start,endTime=middle,
+                     aggregateByTime=False),
+                dict(type='userFillsByTime',user=account,startTime=middle+1,endTime=end,
+                     aggregateByTime=False)])
 
     def observation_inputs(self, account, oids, start, end):
         """Overlap independent info reads, never the two verification passes.
@@ -95,8 +127,9 @@ class PublicReader:
             if HOST != 'api.hyperliquid-testnet.xyz' or self.calls >= 200:
                 raise SyncError('READ_BUDGET_EXCEEDED')
             self.calls += 1
-        permit = (self.budget.acquire('/info', body, priority=self.priority, host=HOST)
-                  if self.budget is not None else None)
+        budget=self._observation_budget or self.budget
+        permit = (budget.acquire('/info', body, priority=self.priority, host=HOST)
+                  if budget is not None else None)
         connection = http.client.HTTPSConnection(HOST, timeout=4)
         try:
             if permit is not None:
@@ -125,6 +158,8 @@ def history(reader, account, start, end, *, depth=0):
     if len(rows) >= 2000 or len(times) >= 500:
         if start == end or depth >= 32: raise SyncError('FILL_HISTORY_TRUNCATED')
         middle = (start+end)//2
+        reserve=getattr(type(reader),'reserve_history_split',None)
+        if callable(reserve):reader.reserve_history_split(account,start,middle,end)
         return (history(reader,account,start,middle,depth=depth+1)
                 + history(reader,account,middle+1,end,depth=depth+1))
     return rows
@@ -352,6 +387,28 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
         open_orders=sorted(opens,key=lambda r:r['oid']),terminal_orders=sorted(terminals,key=lambda r:r['oid']))
 
 
+def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verified_terminals):
+    """Exact initial request multiset; unknown split history pages are excluded."""
+    account,_=life.validate_snapshot(previous)
+    certificates=(terminal_certificates(bindings,previous) if reuse_verified_terminals else {})
+    oids=sorted({oid for binding in bindings for leg in life.LEGS
+                 for oid in binding['orders'][leg]}-set(certificates))
+    bodies=[]
+    def fills(start, stop):
+        return dict(type='userFillsByTime',user=account,startTime=start,endTime=stop,
+                    aggregateByTime=False)
+    while end-cursor >= DAY_MS-OVERLAP_MS:
+        stop=cursor+DAY_MS-2*OVERLAP_MS
+        bodies.extend([fills(max(1,cursor-OVERLAP_MS),stop)]*2)
+        cursor=stop
+    start=max(1,cursor-OVERLAP_MS)
+    one_pass=[fills(start,end),dict(type='frontendOpenOrders',user=account),
+              dict(type='clearinghouseState',user=account)]
+    one_pass.extend(dict(type='orderStatus',user=account,oid=int(oid)) for oid in oids)
+    bodies.extend(one_pass*2)
+    return bodies
+
+
 def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.monotonic,
             plain_take_profit_oids=(), reuse_verified_terminals=False):
     if type(reuse_verified_terminals) is not bool:
@@ -370,6 +427,18 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
     if cursor < previous['at_ms']: raise SyncError('CHECKPOINT_BEHIND_EVIDENCE')
     end,started = clock(),elapsed()
     if not 0 <= end-cursor <= MAX_CATCHUP_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
+    plan=getattr(type(reader),'observation_batch',None)
+    context=(reader.observation_batch(_planned_observation_reads(bindings,previous,cursor,end,
+                reuse_verified_terminals=reuse_verified_terminals))
+             if callable(plan) else nullcontext())
+    with context:
+        return _collect_funded(bindings,previous,reader,cursor,end,started,clock,elapsed,
+            plain=plain,reuse_verified_terminals=reuse_verified_terminals)
+
+
+def _collect_funded(bindings, previous, reader, cursor, end, started, clock, elapsed,
+                    *, plain, reuse_verified_terminals):
+    account,symbol=life.validate_snapshot(previous)
     # Reconstruct a short missed interval before taking the current order and
     # position snapshot. Each bounded window is observed twice; nothing is
     # persisted until the final full lifecycle review succeeds.

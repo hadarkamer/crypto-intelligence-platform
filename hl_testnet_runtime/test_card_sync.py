@@ -2,13 +2,15 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
+from collections import Counter
 import inspect
+import json
 import os
 import subprocess
 import sys
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from . import card_lifecycle as life, card_sync_evidence as e, card_sync as worker
 from .card_lifecycle_store import LifecycleStore, SCHEMA
 from .card_sync_store import SyncStore, TABLE
@@ -549,6 +551,102 @@ class EvidenceTests(unittest.TestCase):
             text=inspect.getsource(module)
             for forbidden in ('import hyperliquid_testnet_executor','wallet_for_role(', 'sign_l1_action(', 'submit_persisted('):
                 self.assertNotIn(forbidden,text)
+
+
+class ObservationFundingTests(unittest.TestCase):
+    def test_denied_complete_plan_sends_no_partial_status_or_inventory_reads(self):
+        from .request_budget import BudgetError
+        budget=Mock()
+        budget.reserve_observation.side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+        reader=e.PublicReader(parallel=True,budget=budget,priority='protection')
+        original=evidence(is_open=True)
+        with patch.object(e.http.client,'HTTPSConnection') as connection:
+            with self.assertRaisesRegex(BudgetError,'EXHAUSTED'):
+                e.collect(original,reader,clock=lambda:T+10000,reuse_verified_terminals=True)
+        connection.assert_not_called()
+        budget.acquire.assert_not_called()
+        plan=budget.reserve_observation.call_args.args[0]
+        from .request_budget import request_weight
+        self.assertEqual(sum(request_weight('/info',body) for body in plan),292)
+        self.assertEqual(Counter(body['type'] for body in plan),
+                         {'userFillsByTime':2,'frontendOpenOrders':2,
+                          'clearinghouseState':2,'orderStatus':4})
+        self.assertEqual(original,evidence(is_open=True))
+
+    def test_complete_funded_plan_preserves_two_independent_passes_and_refunds(self):
+        source=Reader(evidence(is_open=True));lock=threading.Lock()
+        remaining=Counter();claimed=[];finished=[];closed=[]
+        class Permit:
+            def check(self):pass
+            def finish(self,response):finished.append(deepcopy(response))
+        class Batch:
+            def acquire(self,path,body,**kw):
+                key=json.dumps(body,sort_keys=True)
+                with lock:
+                    if not remaining[key]:raise AssertionError('UNDECLARED_HTTP')
+                    remaining[key]-=1;claimed.append(body['type'])
+                return Permit()
+            def close(self):closed.append(True)
+        class Budget:
+            def reserve_observation(self,bodies,**kw):
+                remaining.update(json.dumps(body,sort_keys=True) for body in bodies)
+                return Batch()
+            def acquire(self,*a,**kw):raise AssertionError('BATCH_BYPASS')
+        class Connection:
+            def __init__(self,*a,**kw):self.body=None
+            def request(self,method,path,body,headers):self.body=json.loads(body)
+            def getresponse(self):
+                body=self.body;kind=body['type'];kwargs={}
+                if kind=='orderStatus':kwargs['oid']=str(body['oid'])
+                if kind=='userFillsByTime':kwargs.update(start=body['startTime'],end=body['endTime'])
+                with lock:self.response=source.read(kind,body['user'],**kwargs)
+                self.status=200
+                return self
+            def read(self,*a):return json.dumps(self.response).encode()
+            def close(self):pass
+        reader=e.PublicReader(parallel=True,budget=Budget(),priority='protection')
+        with patch.object(e.http.client,'HTTPSConnection',Connection):
+            result=e.collect(evidence(is_open=True),reader,clock=lambda:T+10000,
+                             reuse_verified_terminals=True)
+        self.assertEqual(result,collected(evidence(is_open=True)))
+        self.assertEqual((len(claimed),len(finished),closed),(10,10,[True]))
+        self.assertFalse(any(remaining.values()))
+        self.assertEqual(source.windows,[source.windows[0]]*2)
+        self.assertIsNone(reader._observation_budget)
+
+    def test_plan_includes_both_catchup_reads_and_only_original_terminal_exclusions(self):
+        ev=evidence(is_open=True)
+        bodies=e._planned_observation_reads(ev['bindings'],ev['snapshot'],T,
+            T+DAY_AND_THREE_HOURS,reuse_verified_terminals=True)
+        fills=[body for body in bodies if body['type']=='userFillsByTime']
+        self.assertEqual(len(fills),4)
+        self.assertEqual(fills[0],fills[1]);self.assertEqual(fills[2],fills[3])
+        self.assertEqual(fills[0]['endTime'],T+e.DAY_MS-2*e.OVERLAP_MS)
+        self.assertEqual(fills[2]['startTime'],fills[0]['endTime']-e.OVERLAP_MS)
+        self.assertEqual(Counter(body['oid'] for body in bodies if body['type']=='orderStatus'),
+                         {11:2,12:2})
+
+    def test_recursive_history_split_funds_both_siblings_before_any_child_http(self):
+        from .request_budget import BudgetError
+        events=[]
+        class Batch:
+            def reserve_extra(self,bodies):
+                events.append(('reserve',deepcopy(bodies)))
+                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+        class ReaderWithBatch(e.PublicReader):
+            def __init__(self):
+                super().__init__(budget=None)
+                self._observation_budget=Batch()
+            def read(self,kind,account,*,start=None,end=None,**kw):
+                events.append(('http',start,end))
+                return [dict(time=T+i) for i in range(500)]
+        with self.assertRaisesRegex(BudgetError,'EXHAUSTED'):
+            e.history(ReaderWithBatch(),A,T,T+999)
+        self.assertEqual(events[0],('http',T,T+999))
+        self.assertEqual(len(events),2)
+        self.assertEqual(events[1][0],'reserve')
+        self.assertEqual([(row['startTime'],row['endTime']) for row in events[1][1]],
+                         [(T,T+499),(T+500,T+999)])
 
 
 @unittest.skipUnless(CI,'Disposable PostgreSQL required')

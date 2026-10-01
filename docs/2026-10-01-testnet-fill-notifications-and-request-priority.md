@@ -125,3 +125,44 @@ account ownership. This is a read-and-audit operation, not an ENTRY grant.
 Unresolved, stale or changed incidents remain fenced. Live verification and the
 single fresh-alert timing measurement remain pending until the corrected
 deployment is running; software success alone is not a timing result.
+
+## Complete-observation scheduling (2026-10-01)
+
+PR #118 restored both websocket acknowledgements and the explicit initial
+snapshot on both accounts. Live database admissions were then fast, but SHORT
+still could not reconcile. A read-only ledger sample showed 1,192 of 1,200
+weight consumed by 96 requests of weight 2 and 50 requests of weight 20, with
+no admitted fill-history request and no settled fill-response refund. The
+one-second emergency poll and ordinary observer repeatedly spent quota on
+partial fan-outs; fill history needed an initial 120 reservation and never fit.
+An independent metadata read used by record-only card intake was also denied
+with TESTNET_REQUEST_BUDGET_EXHAUSTED. This is scheduling starvation, not a
+reason to increase limits or shorten the evidence history.
+
+The correction reserves the exact known two-pass observation plan atomically
+before its first HTTP read. Each funded child still obtains its own single-use
+one-second permit immediately before transport. Its ticket timestamp is moved
+forward before HTTP so later reads remain charged for the complete 69-second
+window. Unused, failed or uncertain credits remain charged. Recursive history
+splits explicitly reserve both sibling pages together within the same original
+15-second collection deadline, with the existing 200-read bound. No schema,
+quota ceiling, account route, source expiry or protection deadline changes.
+
+Concurrent ordinary and emergency observations can share only a completed,
+committed checkpoint whose exact durable revision and feed generation/revision
+still match. Original evidence times are retained. A stalled ordinary observer
+does not prevent bounded independent emergency takeover. Fully STOP-covered
+nonincident probes continue complete reconciliation but omit unnecessary
+metadata and price calls. Known emergencies obtain metadata before final
+quantity verification, preserving slow-metadata recovery without relabeling
+old quantities as fresh.
+
+A separate rejected HYPE notification at 17:36 UTC had no source entry, STOP
+or take-profit prices. That rejection is correct; the intake must not fabricate
+them. Valid SOL and BTC source records retain their original times and prices,
+including if a delayed record has already expired for execution.
+
+Deployment verification must show complete current SHORT evidence and cleared
+feed gaps, no sustained partial-observation starvation, enabled record-only
+intake, and both continuous ENTRY flags still false. Software checks do not
+substitute for the later single fresh-fill STOP timing measurement.

@@ -27,6 +27,17 @@ from . import checks, two_account_execution as roles
 VERSION = 'connected-filled-quantity-dispatch-v1'
 AFTER_EXIT = 'cancel_remainder_after_exit_v1'
 HOST = 'api.hyperliquid-testnet.xyz'
+NORMAL_OBSERVATION_JOIN_SECONDS = 1.0
+EMERGENCY_OBSERVATION_JOIN_MS = 250
+
+
+class _ObservationFlight:
+    """Process-local duplicate suppression, never durable observation authority."""
+    def __init__(self, revision, feed_stamp, emergency):
+        self.revision,self.feed_stamp,self.emergency=revision,feed_stamp,emergency
+        self.done=threading.Event()
+        self.result=None
+        self.error=None
 
 
 class AdmittedAttempt(tuple):
@@ -553,6 +564,8 @@ class Controller:
         # this account, not only the bucket passed to authorize().
         self.venue.store=self.store
         self.after_exit_policy=after_exit_policy
+        self._observation_guard=threading.Lock()
+        self._observation_flights={}
 
     def register(self, card_id, *, single_card=False):
         card=CardStore(self.store.journal).load(card_id)
@@ -586,14 +599,106 @@ class Controller:
             s['originals'][card_id]=original
         return self.store.change(state['bucket'],state['revision'],'REGISTER_LOCAL_CARD',self.venue.now(),update)
 
-    def refresh(self,bucket):
+    def _feed_stamp(self, account):
+        feed=vars(self.venue).get('fill_wakeups')
+        if feed is None or not callable(getattr(type(feed),'begin_reconciliation',None)):
+            return None
+        token=feed.begin_reconciliation(account)
+        return token.generation,token.revision
+
+    def _share_observation(self,bucket,flight,state,feed_stamp,*,emergency):
+        if flight.error is not None:
+            if emergency:
+                # A failed background observation is never safety evidence or
+                # proof that the independent protection reserve is exhausted.
+                return None
+            raise flight.error
+        result=flight.result
+        if (result is None or flight.revision!=state['revision']
+                or flight.feed_stamp!=feed_stamp
+                or self._feed_stamp(state['account'])!=feed_stamp):
+            return None
+        # Only the checkpoint that actually committed can be shared. Preserve
+        # every original evidence clock; a newer durable revision or feed hint
+        # requires independent collection rather than rebasing an old result.
+        current=self.store.load(bucket)
+        if current!=result or current.get('evidence') is None:
+            return None
+        snap=current['evidence']['snapshot']
+        age=self.venue.now()-snap['at_ms']
+        if (current['bindings']!=current['evidence']['bindings']
+                or not snap['history_complete'] or not snap['orders_complete']
+                or not 0<=age<=(5000 if emergency else 15000)):
+            return None
+        return current
+
+    def refresh(self,bucket,*,emergency=False,emergency_wait_ms=EMERGENCY_OBSERVATION_JOIN_MS):
+        """Coalesce overlapping reads without putting HTTP inside a trade lane.
+
+        A safety worker waits at most 250ms (or its shorter original deadline)
+        and may take over one stalled normal collection. At most two reads can
+        be active for this bucket; normal workers never fan out on a timeout.
+        Joined results must be committed, fresh, and match the unchanged feed.
+        """
+        if (type(emergency) is not bool or type(emergency_wait_ms) is not int
+                or not 0<=emergency_wait_ms<=EMERGENCY_OBSERVATION_JOIN_MS):
+            raise DispatchError('OBSERVATION_JOIN_BOUND_INVALID')
+        state=self.store.load(bucket)
+        stamp=self._feed_stamp(state['account'])
+        with self._observation_guard:
+            active=self._observation_flights.get(bucket,[])
+            prior=next((flight for flight in reversed(active)
+                        if flight.revision==state['revision'] and flight.feed_stamp==stamp),None)
+            flight=None
+            if prior is None:
+                if (len(active)>=2 or (active and not emergency)
+                        or (active and any(item.emergency for item in active))):
+                    raise DispatchError('OBSERVATION_IN_PROGRESS_RETRY')
+                flight=_ObservationFlight(state['revision'],stamp,emergency)
+                self._observation_flights.setdefault(bucket,[]).append(flight)
+        if prior is not None:
+            seconds=(emergency_wait_ms/1000 if emergency else NORMAL_OBSERVATION_JOIN_SECONDS)
+            if prior.done.wait(seconds):
+                shared=self._share_observation(bucket,prior,state,stamp,emergency=emergency)
+                if shared is not None:
+                    return shared
+                state=self.store.load(bucket)
+                stamp=self._feed_stamp(state['account'])
+            elif not emergency:
+                raise DispatchError('OBSERVATION_IN_PROGRESS_RETRY')
+        if flight is None:
+            with self._observation_guard:
+                active=self._observation_flights.setdefault(bucket,[])
+                # One independent urgent collection may bypass a stalled normal
+                # read. Further callers retry later rather than multiplying demand.
+                if (len(active)>=2 or (active and not emergency)
+                        or (active and any(item.emergency for item in active))):
+                    raise DispatchError('OBSERVATION_IN_PROGRESS_RETRY')
+                flight=_ObservationFlight(state['revision'],stamp,emergency)
+                active.append(flight)
+        try:
+            result=self._refresh_once(bucket,state)
+            flight.result=deepcopy(result)
+            return result
+        except Exception as exc:
+            flight.error=exc
+            raise
+        finally:
+            with self._observation_guard:
+                active=self._observation_flights[bucket]
+                active.remove(flight)
+                if not active:
+                    del self._observation_flights[bucket]
+                flight.done.set()
+
+    def _refresh_once(self,bucket,state):
         """Read without the local lane; discard evidence if its revision advanced.
 
         A stalled public read must not prevent the emergency supervisor from
         making its own observations. Only the guarded checkpoint may apply the
         collected evidence, with the database revision fence retained as well.
         """
-        state=self.store.load(bucket);now=self.venue.now();request=None;oid=None;raw=None
+        now=self.venue.now();request=None;oid=None;raw=None
         bs=deepcopy(state['bindings'])
         if state['pending']:
             request=self.store.request(state['pending'])

@@ -414,6 +414,136 @@ class DispatchPureTests(NoExternal):
         self.assertIsNone(self.select(one))
 
 
+class ObservationCoordinationTests(NoExternal):
+    def controller(self):
+        state=state_from_case()
+        store=Mock(domain='software');current=[deepcopy(state)]
+        store.load.side_effect=lambda bucket:deepcopy(current[0])
+        venue=Venue()
+        controller=m.Controller(store,venue,ROUTES2)
+        result=deepcopy(state);result['revision']+=1
+        result['evidence']['snapshot']['at_ms']=T
+        return controller,state,result,current
+
+    def joined(self,controller,state,result,current,*,failure=None,change=None):
+        started=threading.Event();release=threading.Event();waiting=threading.Event()
+        calls=[]
+        def collect(bucket,original):
+            calls.append(deepcopy(original))
+            if len(calls)==1:
+                started.set()
+                if not release.wait(2):raise AssertionError('TEST_COLLECTION_NOT_RELEASED')
+                if failure is not None:raise failure
+            current[0]=deepcopy(result)
+            return deepcopy(result)
+        with patch.object(controller,'_refresh_once',side_effect=collect):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                owner=pool.submit(controller.refresh,state['bucket'])
+                self.assertTrue(started.wait(1))
+                flight=controller._observation_flights[state['bucket']][0]
+                original_wait=flight.done.wait
+                def wait(seconds):
+                    waiting.set();return original_wait(seconds)
+                with patch.object(flight.done,'wait',side_effect=wait):
+                    safety=pool.submit(controller.refresh,state['bucket'],emergency=True)
+                    self.assertTrue(waiting.wait(1))
+                    if change:change()
+                    release.set()
+                    if failure is not None:
+                        with self.assertRaises(type(failure)):owner.result(timeout=2)
+                    else:self.assertEqual(owner.result(timeout=2),result)
+                    self.assertEqual(safety.result(timeout=2),result)
+        self.assertFalse(controller._observation_flights)
+        return calls
+
+    def test_overlapping_safety_and_normal_share_only_one_committed_collection(self):
+        controller,state,result,current=self.controller()
+        calls=self.joined(controller,state,result,current)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0]['revision'],state['revision'])
+        self.assertEqual(result['evidence']['snapshot']['at_ms'],T)
+
+    def test_failed_background_collection_does_not_consume_independent_safety_attempt(self):
+        from .request_budget import BudgetError
+        controller,state,result,current=self.controller()
+        calls=self.joined(controller,state,result,current,
+            failure=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED'))
+        self.assertEqual(len(calls),2)
+
+    def test_new_feed_hint_forces_independent_safety_collection(self):
+        controller,state,result,current=self.controller()
+        class Feed:
+            revision=1
+            def begin_reconciliation(self,account):
+                return type('Token',(),dict(generation=1,revision=self.revision))()
+        feed=Feed();controller.venue.fill_wakeups=feed
+        calls=self.joined(controller,state,result,current,
+                          change=lambda:setattr(feed,'revision',2))
+        self.assertEqual(len(calls),2)
+
+    def test_safety_does_not_share_checkpoint_older_than_original_five_second_bound(self):
+        controller,state,result,current=self.controller()
+        controller.venue.t=T+5001
+        calls=self.joined(controller,state,result,current)
+        self.assertEqual(len(calls),2)
+
+    def test_safety_can_take_over_stalled_normal_without_third_parallel_collection(self):
+        controller,state,result,current=self.controller()
+        normal_started=threading.Event();safety_started=threading.Event()
+        normal_release=threading.Event();safety_release=threading.Event()
+        lock=threading.Lock();calls=[]
+        def collect(bucket,original):
+            with lock:
+                ordinal=len(calls);calls.append(original['revision'])
+            started,release=((normal_started,normal_release) if ordinal==0
+                             else (safety_started,safety_release))
+            started.set()
+            if not release.wait(2):raise AssertionError('TEST_COLLECTION_NOT_RELEASED')
+            if ordinal==0:
+                raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+            current[0]=deepcopy(result)
+            return deepcopy(result)
+        with patch.object(controller,'_refresh_once',side_effect=collect):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                normal=pool.submit(controller.refresh,state['bucket'])
+                self.assertTrue(normal_started.wait(1))
+                safety=pool.submit(controller.refresh,state['bucket'],
+                                   emergency=True,emergency_wait_ms=0)
+                self.assertTrue(safety_started.wait(1))
+                try:
+                    with self.assertRaisesRegex(DispatchError,'IN_PROGRESS_RETRY'):
+                        controller.refresh(state['bucket'],emergency=True,emergency_wait_ms=0)
+                    self.assertEqual(len(calls),2)
+                    safety_release.set()
+                    self.assertEqual(safety.result(timeout=1),result)
+                finally:
+                    normal_release.set();safety_release.set()
+                with self.assertRaisesRegex(DispatchError,'CONCURRENT_DISPATCH_RELOAD_REQUIRED'):
+                    normal.result(timeout=1)
+        self.assertFalse(controller._observation_flights)
+
+    def test_normal_timeout_never_starts_duplicate_public_collection(self):
+        controller,state,result,current=self.controller()
+        started=threading.Event();release=threading.Event()
+        def collect(bucket,original):
+            started.set()
+            if not release.wait(2):raise AssertionError('TEST_COLLECTION_NOT_RELEASED')
+            current[0]=deepcopy(result)
+            return deepcopy(result)
+        with patch.object(controller,'_refresh_once',side_effect=collect) as observation, \
+                patch.object(m,'NORMAL_OBSERVATION_JOIN_SECONDS',0):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                first=pool.submit(controller.refresh,state['bucket'])
+                self.assertTrue(started.wait(1))
+                try:
+                    with self.assertRaisesRegex(DispatchError,'IN_PROGRESS_RETRY'):
+                        controller.refresh(state['bucket'])
+                    self.assertEqual(observation.call_count,1)
+                finally:release.set()
+                first.result(timeout=1)
+        self.assertFalse(controller._observation_flights)
+
+
 @unittest.skipUnless(CI,'Disposable loopback PostgreSQL required')
 class DispatchDatabaseTests(NoExternal):
     def setUp(self):

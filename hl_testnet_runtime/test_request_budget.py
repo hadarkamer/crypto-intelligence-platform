@@ -15,6 +15,17 @@ from . import postgres_journal as pg, request_budget as budget
 CI_URL = os.environ.get('HL_JOURNAL_CI_URL')
 
 
+def observation_bodies():
+    """Two complete passes, two live OIDs; every body is owned and explicit."""
+    account='0x'+'1'*40
+    one=[dict(type='userFillsByTime',user=account,startTime=1000,endTime=2000,
+              aggregateByTime=False),dict(type='frontendOpenOrders',user=account),
+         dict(type='clearinghouseState',user=account),
+         dict(type='orderStatus',user=account,oid=1),
+         dict(type='orderStatus',user=account,oid=2)]
+    return one+one
+
+
 class CoordinatorTests(unittest.TestCase):
     """Simulated round-trip latency with real local locking; never a real DSN."""
     def setUp(self):
@@ -160,6 +171,7 @@ class PureTests(unittest.TestCase):
         self.assertFalse(permit.finish([]))
         owner._settle.assert_not_called()
 
+
     def test_refund_uses_ceiling_including_incomplete_twenty_item_group(self):
         for count, weight in ((0, 20), (1, 21), (20, 21), (21, 22), (2000, 120)):
             permit, owner = self.permit()
@@ -177,6 +189,135 @@ class PureTests(unittest.TestCase):
         permit.check()
         self.assertFalse(permit.finish({}))
         owner._settle.assert_not_called()
+
+
+class ObservationBatchTests(unittest.TestCase):
+    def batch(self,bodies=None):
+        owner=Mock()
+        bodies=observation_bodies() if bodies is None else bodies
+        entries=[(budget._observation_key(body),format(i+1,'032x'),
+                  budget.request_weight('/info',body)) for i,body in enumerate(bodies)]
+        return budget.ObservationBatch(owner,entries,'protection',
+            time.monotonic_ns()+budget.OBSERVATION_MS*1000000),owner
+
+    def test_exact_duplicates_can_be_claimed_only_declared_times_concurrently(self):
+        body=observation_bodies()[0];batch,owner=self.batch([body,body])
+        def claim(_):
+            try:
+                permit=batch.acquire('/info',body,priority='protection')
+                permit.check();return True
+            except budget.BudgetError:return False
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            self.assertEqual(sum(pool.map(claim,range(12))),2)
+        self.assertEqual(owner._claim_observation.call_count,2)
+        self.assertEqual(len({c.args[0] for c in owner._claim_observation.call_args_list}),2)
+
+    def test_altered_body_host_path_priority_and_unplanned_pagination_never_claim(self):
+        batch,owner=self.batch();body=observation_bodies()[0]
+        for altered in ({**body,'startTime':999},{**body,'user':'0x'+'2'*40},
+                        {**body,'endTime':2001}):
+            with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
+                batch.acquire('/info',altered,priority='protection')
+        for path,host,priority in (('/exchange',budget.HOST,'protection'),
+                ('/info','api.hyperliquid.xyz','protection'),
+                ('/info',budget.HOST,'background')):
+            with self.assertRaisesRegex(budget.BudgetError,'MISMATCH'):
+                batch.acquire(path,body,priority=priority,host=host)
+        owner._claim_observation.assert_not_called()
+
+    def test_failed_or_uncertain_credit_claim_is_burned_without_retry(self):
+        body=observation_bodies()[0];batch,owner=self.batch([body])
+        owner._claim_observation.side_effect=budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+        with self.assertRaisesRegex(budget.BudgetError,'UNAVAILABLE'):
+            batch.acquire('/info',body,priority='protection')
+        with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
+            batch.acquire('/info',body,priority='protection')
+        owner._claim_observation.assert_called_once()
+        owner._settle.assert_not_called()
+
+    def test_child_clock_begins_before_sql_and_never_restarts_after_claim(self):
+        body=observation_bodies()[0];clock=Mock(return_value=1000000000)
+        with patch.object(budget.time,'monotonic_ns',clock):
+            batch,owner=self.batch([body])
+            def slow_claim(token,weight,deadline):
+                self.assertEqual(deadline,2000000000)
+                clock.return_value=2000000001
+            owner._claim_observation.side_effect=slow_claim
+            with self.assertRaisesRegex(budget.BudgetError,'PERMIT_EXPIRED'):
+                batch.acquire('/info',body,priority='protection')
+        owner._settle.assert_not_called()
+
+    def test_issued_child_is_clipped_to_batch_deadline_and_closing_never_refunds(self):
+        body=observation_bodies()[0];batch,owner=self.batch([body,body])
+        with patch.object(budget.time,'monotonic_ns',return_value=batch._deadline_ns-100):
+            permit=batch.acquire('/info',body,priority='protection')
+            self.assertEqual(permit._deadline_ns,batch._deadline_ns)
+        batch.close()
+        with self.assertRaisesRegex(budget.BudgetError,'CLOSED'):permit.check()
+        with self.assertRaisesRegex(budget.BudgetError,'CLOSED'):
+            batch.acquire('/info',body,priority='protection')
+        owner._settle.assert_not_called()
+
+    def test_expired_or_forked_batch_does_not_touch_sql_or_inherited_lock(self):
+        body=observation_bodies()[0];batch,owner=self.batch([body])
+        batch._deadline_ns=time.monotonic_ns()-1
+        with self.assertRaisesRegex(budget.BudgetError,'EXPIRED'):
+            batch.acquire('/info',body,priority='protection')
+        batch._pid=-1;batch._lock.acquire()
+        try:
+            with self.assertRaisesRegex(budget.BudgetError,'PROCESS_CHANGED'):
+                batch.acquire('/info',body,priority='protection')
+        finally:batch._lock.release()
+        owner._claim_observation.assert_not_called()
+
+    def test_forked_permit_cannot_send_or_refund_parent_charge(self):
+        body=observation_bodies()[0];batch,owner=self.batch([body])
+        permit=batch.acquire('/info',body,priority='protection');permit.check()
+        permit._used[0]=False
+        with patch.object(budget.os,'getpid',return_value=-1):
+            with self.assertRaisesRegex(budget.BudgetError,'PROCESS_CHANGED'):permit.check()
+            self.assertFalse(permit.finish([]))
+        owner._settle.assert_not_called()
+
+    def test_both_passes_can_extend_their_own_claimed_parent_and_nested_children(self):
+        parent=observation_bodies()[0];batch,owner=self.batch([parent,parent])
+        left={**parent,'endTime':1500};right={**parent,'startTime':1501}
+        for _ in range(2):
+            batch.acquire('/info',parent,priority='protection').check()
+            batch.reserve_extra([left,right])
+            batch.acquire('/info',left,priority='protection').check()
+            batch.acquire('/info',right,priority='protection').check()
+        self.assertEqual(owner._fund_observation.call_count,2)
+        with self.assertRaisesRegex(budget.BudgetError,'EXTENSION_UNDECLARED'):
+            batch.reserve_extra([left,right])
+        nested=[{**left,'endTime':1250},{**left,'startTime':1251}]
+        batch.reserve_extra(nested)
+        self.assertEqual(owner._fund_observation.call_count,3)
+
+    def test_failed_extension_cannot_retry_or_issue_unfunded_children(self):
+        parent=observation_bodies()[0];batch,owner=self.batch([parent])
+        batch.acquire('/info',parent,priority='protection').check()
+        children=[{**parent,'endTime':1500},{**parent,'startTime':1501}]
+        owner._fund_observation.side_effect=budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+        with self.assertRaisesRegex(budget.BudgetError,'UNAVAILABLE'):batch.reserve_extra(children)
+        with self.assertRaisesRegex(budget.BudgetError,'EXTENSION_UNDECLARED'):batch.reserve_extra(children)
+        with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED_REQUEST'):
+            batch.acquire('/info',children[0],priority='protection')
+        owner._fund_observation.assert_called_once()
+
+    def test_extension_requires_exact_claimed_parent_and_existing_total_read_bound(self):
+        parent=observation_bodies()[0];batch,owner=self.batch([parent])
+        children=[{**parent,'endTime':1500},{**parent,'startTime':1501}]
+        with self.assertRaisesRegex(budget.BudgetError,'EXTENSION_UNDECLARED'):batch.reserve_extra(children)
+        batch.acquire('/info',parent,priority='protection').check()
+        for invalid in ([children[0],{**children[1],'startTime':1500}],
+                [children[0],{**children[1],'user':'0x'+'2'*40}],
+                [children[0],{**children[1],'aggregateByTime':True}]):
+            with self.assertRaisesRegex(budget.BudgetError,'EXTENSION_INVALID'):batch.reserve_extra(invalid)
+        batch._count=199
+        with self.assertRaisesRegex(budget.BudgetError,'EXTENSION_UNDECLARED'):batch.reserve_extra(children)
+        owner._fund_observation.assert_not_called()
+
 
 
 class TransportAdmissionTests(unittest.TestCase):
@@ -467,6 +608,145 @@ b.acquire('/exchange',{'action':{'type':'cancel','cancels':[{}]}},priority='prot
         self.assertIs(budget._coordinator(self.journal).connection,parent)
         self.assertFalse(parent.closed)
         self.assertEqual(self.weights(),40)
+
+    def test_partial_starvation_ledger_denies_whole_observation_without_partial_tickets(self):
+        with self.journal._transaction() as conn:
+            conn.execute(f'''INSERT INTO {budget.TICKETS}(token,weight)
+                SELECT md5(i::text),20 FROM generate_series(1,50) i''')
+            conn.execute(f'''INSERT INTO {budget.TICKETS}(token,weight)
+                SELECT md5((i+50)::text),2 FROM generate_series(1,96) i''')
+        self.assertEqual(self.weights(),1192)
+        for _ in range(3):
+            with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
+                self.budget.reserve_observation(observation_bodies(),priority='protection')
+        self.assertEqual(self.weights(),1192)
+        with self.journal._transaction() as conn:
+            conn.execute(f"UPDATE {budget.TICKETS} SET admitted_at=clock_timestamp()-interval '69.1 seconds'")
+        batch=self.budget.reserve_observation(observation_bodies(),priority='protection')
+        self.assertEqual(self.weights(),292)
+        def observe(body):
+            permit=batch.acquire('/info',body,priority='protection');permit.check()
+            if body['type']=='userFillsByTime':self.assertTrue(permit.finish([]))
+        with self.delayed_connection(),ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(observe,observation_bodies()))
+        batch.close()
+        self.assertEqual(self.weights(),92)
+
+    def test_batch_background_ceiling_and_other_process_share_all_reserved_children(self):
+        self.budget.reserve_observation(observation_bodies())
+        self.budget.reserve_observation(observation_bodies())
+        self.assertEqual(self.weights(),584)
+        program='''import os
+from hl_testnet_runtime.postgres_journal import PostgresJournal
+from hl_testnet_runtime.request_budget import Budget,BudgetError
+from hl_testnet_runtime.test_request_budget import observation_bodies
+b=Budget(PostgresJournal.for_ci(os.environ['HL_JOURNAL_CI_URL']))
+try:b.reserve_observation(observation_bodies())
+except BudgetError as e:assert str(e)=='TESTNET_REQUEST_BUDGET_EXHAUSTED'
+else:raise AssertionError('Partial/background overspend')
+b.reserve_observation(observation_bodies(),priority='protection').close()
+'''
+        subprocess.run([sys.executable,'-c',program],check=True,timeout=10,
+            env={'HL_JOURNAL_CI_URL':CI_URL,'PATH':os.environ.get('PATH','')})
+        self.assertEqual(self.weights(),876)
+
+    def test_concurrent_whole_batches_never_partially_spend_protective_ceiling(self):
+        barrier=threading.Barrier(4)
+        def reserve(_):
+            barrier.wait(timeout=2)
+            return self.budget.reserve_observation(observation_bodies(),priority='protection')
+        with self.delayed_connection(),ThreadPoolExecutor(max_workers=4) as pool:
+            batches=list(pool.map(reserve,range(4)))
+        self.assertEqual(len(batches),4)
+        self.assertEqual(self.weights(),1168)
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
+            self.budget.reserve_observation(observation_bodies(),priority='protection')
+        self.assertEqual(self.weights(),1168)
+
+    def test_claim_refreshes_only_live_funded_ticket_without_releasing_unused_credits(self):
+        bodies=observation_bodies();batch=self.budget.reserve_observation(bodies,priority='protection')
+        with self.journal._transaction() as conn:
+            conn.execute(f"UPDATE {budget.TICKETS} SET admitted_at=clock_timestamp()-interval '68 seconds'")
+        permit=batch.acquire('/info',bodies[0],priority='protection');permit.check()
+        with self.journal._transaction() as conn:
+            age=conn.execute(f'SELECT EXTRACT(epoch FROM clock_timestamp()-admitted_at) FROM {budget.TICKETS} WHERE token=%s',
+                             (permit._token,)).fetchone()[0]
+        self.assertLess(age,1)
+        batch.close()
+        self.assertEqual(self.weights(),292)
+        other=self.budget.reserve_observation([bodies[0]],priority='protection')
+        with self.journal._transaction() as conn:
+            conn.execute(f"UPDATE {budget.TICKETS} SET admitted_at=clock_timestamp()-interval '69.1 seconds'")
+        with self.assertRaisesRegex(budget.BudgetError,'CREDIT_UNAVAILABLE'):
+            other.acquire('/info',bodies[0],priority='protection')
+        with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
+            other.acquire('/info',bodies[0],priority='protection')
+
+    def test_lost_batch_reservation_commit_leaves_all_credits_without_batch_permission(self):
+        original=self.budget._transaction
+        @contextmanager
+        def lost_ack(**kwargs):
+            with original(**kwargs) as conn:yield conn
+            raise budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+        with patch.object(self.budget,'_transaction',lost_ack):
+            with self.assertRaises(budget.BudgetError):
+                self.budget.reserve_observation(observation_bodies(),priority='protection')
+        self.assertEqual(self.weights(),292)
+
+    def test_slow_batch_commit_cannot_restart_initial_or_child_permission_clocks(self):
+        original=self.budget._transaction;clock=Mock(return_value=1000000000)
+        @contextmanager
+        def slow_commit(**kwargs):
+            with original(**kwargs) as conn:yield conn
+            clock.return_value=2000000001
+        with patch.object(budget.time,'monotonic_ns',clock), \
+                patch.object(self.budget,'_transaction',slow_commit):
+            with self.assertRaisesRegex(budget.BudgetError,'PERMIT_EXPIRED'):
+                self.budget.reserve_observation(observation_bodies(),priority='protection')
+        self.assertEqual(self.weights(),292)
+        batch=self.budget.reserve_observation([observation_bodies()[0]],priority='protection')
+        clock.return_value=1000000000
+        with patch.object(budget.time,'monotonic_ns',clock), \
+                patch.object(self.budget,'_transaction',slow_commit):
+            with self.assertRaisesRegex(budget.BudgetError,'PERMIT_EXPIRED'):
+                batch.acquire('/info',observation_bodies()[0],priority='protection')
+        with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
+            batch.acquire('/info',observation_bodies()[0],priority='protection')
+        self.assertEqual(self.weights(),412)
+
+    def test_lost_claim_commit_burns_one_credit_without_deadline_restart_or_reissue(self):
+        body=observation_bodies()[0]
+        batch=self.budget.reserve_observation([body],priority='protection')
+        original=self.budget._transaction
+        @contextmanager
+        def lost_ack(**kwargs):
+            with original(**kwargs) as conn:yield conn
+            raise budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+        with patch.object(self.budget,'_transaction',lost_ack):
+            with self.assertRaises(budget.BudgetError):batch.acquire('/info',body,priority='protection')
+        with self.assertRaisesRegex(budget.BudgetError,'UNDECLARED'):
+            batch.acquire('/info',body,priority='protection')
+        self.assertEqual(self.weights(),120)
+
+    def test_extension_atomicity_and_both_paginated_passes_preserve_shared_limit(self):
+        parent=observation_bodies()[0]
+        children=[{**parent,'endTime':1500},{**parent,'startTime':1501}]
+        batch=self.budget.reserve_observation([parent,parent],priority='protection')
+        for _ in range(2):
+            permit=batch.acquire('/info',parent,priority='protection');permit.check()
+            self.assertTrue(permit.finish([{}]*2000))
+            batch.reserve_extra(children)
+            for body in children:
+                child=batch.acquire('/info',body,priority='protection');child.check()
+                self.assertTrue(child.finish([]))
+        self.assertEqual(self.weights(),320)
+        self.budget.reserve_observation(observation_bodies(),priority='protection').close()
+        self.budget.reserve_observation(observation_bodies(),priority='protection').close()
+        # 320+292+292+120=1024; the full sibling pair would exceed 1200.
+        fresh=self.budget.reserve_observation([parent],priority='protection')
+        fresh.acquire('/info',parent,priority='protection').check()
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):fresh.reserve_extra(children)
+        self.assertEqual(self.weights(),1024)
 
 
 if __name__ == '__main__':
