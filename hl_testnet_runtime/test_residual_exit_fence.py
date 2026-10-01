@@ -308,15 +308,15 @@ class ResidualDatabaseTests(NoExternal):
             allowed_entry_card_id=b['card_id'])
         return b,original_record,state,proposal
 
-    def test_reservation_commit_ack_loss_retires_only_after_original_source_expires(self):
-        b,original_record,_,_=self.expiring_entry()
+    def test_legacy_reservation_commit_ack_loss_retires_only_after_original_source_expires(self):
+        b,original_record,prepared,proposal=self.expiring_entry()
         reserve=self.store.reserve
         def commit_without_ack(*args):
             reserve(*args)
             raise DispatchError('COMMIT_ACK_UNCERTAIN')
         with patch.object(self.store,'reserve',side_effect=commit_without_ack):
             with self.assertRaisesRegex(DispatchError,'COMMIT_ACK_UNCERTAIN'):
-                self.c.cycle(self.bucket,send=True,allowed_entry_card_id=b['card_id'])
+                self.store.reserve(prepared,proposal,self.v.now())
         state=self.store.load(self.bucket);rid=state['pending']
         self.assertEqual(self.store.request(rid)['attempts'],0);self.assertEqual(self.v.sent,0)
         self.v.t=T+9999
