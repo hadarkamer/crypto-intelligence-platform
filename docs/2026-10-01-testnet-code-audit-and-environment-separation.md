@@ -18,6 +18,12 @@ no mainnet connector, credentials or account configuration.
    observation while a normal read stalls. Reacquire the lane and compare the
    exact revision before checkpoint, planning and attempt; retain database CAS,
    durable request identity, account ownership and actual-send fences.
+   Live verification exposed a liveness issue: the supervisor could advance
+   revisions during every normal read/precheck. Normal preparation discards its
+   losing collection and may use the latest already-persisted fresh complete
+   checkpoint. Planning rechecks pending work against that authoritative state;
+   reservation and actual attempt still require an exact revision. This is
+   checkpoint cooperation, never a retry of an order transmission.
 3. Separate the 90-second permission to submit one new entry from maintenance
    of that entry. Observe until protection or verified finality, with the original
    source expiry plus 15 seconds of reconciliation grace and a ten-minute cap.

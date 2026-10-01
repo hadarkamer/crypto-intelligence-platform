@@ -181,6 +181,116 @@ class EmergencyPureTests(NoExternal):
         self.assertEqual(normal_venue.sent,0)
         self.assertEqual(emergency.venue.sent,0)
 
+    def test_repeated_safety_checkpoints_do_not_starve_normal_maintenance(self):
+        # Both the ordinary collection and its later market sample are overtaken
+        # on every pass. The safety worker's actual controller saves the winning
+        # checkpoint; normal planning must consume it without repeating any send.
+        class MemoryStore:
+            domain='software'
+            def __init__(self):
+                self.state=state_from_case(q='100',stop='100',take='100')
+                self.writes=[]
+            def load(self,bucket):return deepcopy(self.state)
+            def pending_record(self,conn,state):return None
+            def change(self,bucket,revision,event,now,update):
+                if revision!=self.state['revision']:
+                    raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+                value=deepcopy(self.state);update(None,value)
+                value['revision']+=1;self.state=value;self.writes.append(event)
+                return deepcopy(value)
+            def reserve(self,*args):raise AssertionError('NO_REQUEST_RESERVATION')
+            def begin(self,*args):raise AssertionError('NO_ATTEMPT')
+        store=MemoryStore();venue=NormalVenue();safety_read=False
+        normal=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+        emergency=m.Controller(normal,Venue())
+        def safety_checkpoint():
+            nonlocal safety_read
+            safety_read=True
+            try:
+                result=emergency.cycle(store.state['bucket'],send=False)
+                self.assertEqual(result['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+            finally:safety_read=False
+        def collect(value):
+            if not safety_read:safety_checkpoint()
+            observed=deepcopy(value);venue.t+=1
+            observed['snapshot']['at_ms']=venue.t
+            return observed
+        def sample(account,symbol):
+            safety_checkpoint()
+            return dict(mark_price='10',at_ms=venue.t)
+        venue.collect=collect;venue.sample=sample
+        for _ in range(10):
+            before=store.state['revision']
+            result=normal.cycle(store.state['bucket'],send=True,allow_new_entries=False)
+            self.assertEqual(result,dict(status='NO_ACTION_NEEDED',order_requests_sent=0))
+            self.assertEqual(store.state['revision'],before+2)
+        self.assertEqual(store.writes,['PUBLIC_RECONCILIATION']*20)
+        self.assertEqual(venue.sent,0);self.assertEqual(emergency.venue.sent,0)
+
+    def test_plan_reload_recomputes_quantity_from_winning_partial_fill(self):
+        state=state_from_case(q='40',stop='40',take='40')
+        class Store:
+            domain='software'
+            def load(self,bucket):return deepcopy(current)
+        current=deepcopy(state);venue=NormalVenue()
+        normal=dispatch.Controller(Store(),venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+        def sample(account,symbol):
+            snap=current['evidence']['snapshot'];binding=current['bindings'][0]
+            second=fill(binding,qty='60');second.update(fill_id='later-entry-fill',at_ms=T+1)
+            snap['fills'].append(second);snap['position_quantity']='100';snap['at_ms']=T+2
+            from .test_card_lifecycle import terminal
+            snap['open_orders']=[o for o in snap['open_orders'] if o['oid'] not in binding['orders']['ENTRY']]
+            ending=terminal(binding,'ENTRY','100');ending['at_ms']=T+2
+            snap['terminal_orders'].append(ending)
+            current['revision']+=1;venue.t=T+2
+            return dict(mark_price='10',at_ms=venue.t)
+        with patch.object(normal,'refresh',return_value=state),patch.object(venue,'sample',side_effect=sample):
+            result=normal.cycle(state['bucket'],send=False)
+        proposal=result['proposal']
+        self.assertEqual((proposal['operation'],proposal['leg'],proposal['quantity'],proposal['old_oid']),
+                         ('MODIFY_EXIT','STOP','100','11'))
+        self.assertEqual(proposal['basis'],life.digest(current['evidence']))
+        self.assertEqual(proposal['observed_at_ms'],T+2)
+        self.assertEqual(venue.sent,0)
+
+    def test_plan_reload_retains_new_unknown_attempt_and_emergency_barriers(self):
+        from unittest.mock import Mock
+        for barrier in ('unknown','emergency'):
+            with self.subTest(barrier=barrier):
+                state=state_from_case(q='40')
+                latest=deepcopy(state);latest['revision']+=1
+                if barrier=='unknown':latest['pending']='a'*64
+                else:latest['emergency']=dict(phase='ACTIVE')
+                store=Mock(domain='software');store.load.return_value=latest
+                store.request.return_value=dict(phase='OUTCOME_UNKNOWN')
+                venue=NormalVenue()
+                normal=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+                with patch.object(normal,'refresh',return_value=state), \
+                        patch.object(dispatch,'choose',side_effect=AssertionError('NO_STALE_PLAN')):
+                    result=normal.cycle(state['bucket'],send=True)
+                self.assertEqual(result['status'],'OUTCOME_UNKNOWN' if barrier=='unknown'
+                                 else 'EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE')
+                store.reserve.assert_not_called();store.begin.assert_not_called()
+                store.change.assert_not_called();self.assertEqual(venue.sent,0)
+
+    def test_lost_refresh_cannot_fall_back_to_incomplete_or_expired_checkpoint(self):
+        from unittest.mock import Mock
+        for bad in ('stale','future','incomplete','bindings'):
+            with self.subTest(checkpoint=bad):
+                state=state_from_case(q='100',stop='100',take='100')
+                if bad=='future':state['evidence']['snapshot']['at_ms']=T+1
+                elif bad=='incomplete':state['evidence']['snapshot']['history_complete']=False
+                else:state['evidence']['bindings']=[]
+                store=Mock(domain='software');store.load.return_value=state
+                venue=NormalVenue()
+                if bad=='stale':venue.t=T+15001
+                normal=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+                with patch.object(normal,'refresh',side_effect=DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')), \
+                        self.assertRaisesRegex(DispatchError,'OBSERVATION_INCOMPLETE_OR_STALE'):
+                    normal.cycle(state['bucket'],send=True)
+                store.change.assert_not_called();store.reserve.assert_not_called();store.begin.assert_not_called()
+                self.assertEqual(venue.sent,0)
+
     def test_old_protected_trade_never_closes_just_because_fill_is_old(self):
         state=state_from_case(q='100',stop='100',take='100')
         self.assertIsNone(m.trigger(state,now_ms=T+9999999,mark='9'))
@@ -587,9 +697,13 @@ class EmergencyDatabaseTests(NoExternal):
                     self.assertEqual(self.v.sent,2)  # one entry, one emergency close
                 finally:
                     release.set()
-                with self.assertRaisesRegex(DispatchError,'CONCURRENT_DISPATCH_RELOAD_REQUIRED'):
-                    ordinary.result(timeout=2)
+                result=ordinary.result(timeout=2)
+                self.assertEqual(result,dict(status='EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE',
+                                             order_requests_sent=0))
         self.assertEqual(self.store.load(self.bucket),advanced)
+        self.assertEqual(self.v.sent,2)
+        self.assertEqual([r['proposal']['operation'] for r in self.v.requests],
+                         ['ENTRY','EMERGENCY_CLOSE'])
 
     def test_unowned_position_blocks_send_but_latches_new_entries(self):
         self.setup_emergency('100')
