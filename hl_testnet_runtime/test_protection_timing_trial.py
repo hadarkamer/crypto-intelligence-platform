@@ -1,6 +1,7 @@
 """Trial orchestration regressions; no exchange, signer or service credentials."""
 from contextlib import ExitStack
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -172,7 +173,8 @@ class TrialTests(NoExternal):
             snapshot_received=ready,subscriptions_acknowledged=2 if ready else 0)}
         feed.entry_allowed.side_effect=lambda account:feed.allowed
         feed.dirty_symbols.return_value=None
-        feed.begin_reconciliation.side_effect=lambda account:SimpleNamespace(account=account)
+        feed.begin_reconciliation.side_effect=lambda account:SimpleNamespace(
+            account=account,generation=1,revision=1)
         def finish(token, *, complete):
             feed.allowed=complete and reconcile
             return feed.allowed
@@ -232,6 +234,95 @@ class TrialTests(NoExternal):
         self.assertFalse(tick.call_args.kwargs['new_entries'])
         self.assertFalse(tick.call_args.kwargs['full_reconciliation'])
         self.assertEqual(tick.call_args.kwargs['dirty_symbols'],('SOL',))
+
+    def bootstrap_retry(self):
+        from . import fill_wakeups
+        from .test_priority_fill_runtime import ready
+        from .test_fill_wakeups import Clock
+        role=self.card['account_role'];route=ROUTES2[role]
+        clock=Clock();feed=fill_wakeups.FillWakeups({role:route['account']},clock=clock)
+        ready(feed,route['account'])
+        state=state_from_case(q='100',stop='100',take='100')
+        base=Mock();base.routes=ROUTES2
+        base.store.for_account.return_value=[state]
+        base.venue.now.return_value=T+100
+        reconciliation={}
+        with patch.object(trial.stream,'tick',
+                side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')):
+            with self.assertRaises(BudgetError):
+                trial._reconcile_notifications(base,feed,role,route,self.card,
+                    reconciliation=reconciliation)
+        return base,feed,role,route,state,reconciliation
+
+    def test_budget_bootstrap_retry_reuses_new_durable_proof_with_fresh_inventory(self):
+        base,feed,role,route,state,reconciliation=self.bootstrap_retry()
+        state['evidence']['snapshot']['at_ms']=T+500
+        base.venue.now.return_value=T+1000
+        with patch.object(trial.stream,'tick') as tick, \
+             patch.object(trial.stream,'_account_owned',return_value=True) as owned:
+            self.assertTrue(trial._reconcile_notifications(base,feed,role,route,self.card,
+                reconciliation=reconciliation))
+        tick.assert_not_called()
+        owned.assert_called_once_with(base.venue,route['account'],[state],
+            role=role,priority='protection')
+        self.assertTrue(feed.entry_allowed(route['account']))
+        self.assertEqual(reconciliation,{})
+
+    def test_bootstrap_reuse_cannot_accept_old_incomplete_changed_or_new_boundary_proof(self):
+        from .test_fill_wakeups import fills
+        from .test_priority_fill_runtime import ready
+        for variant in ('before-boundary','stale','bindings','history','orders','hint','generation'):
+            with self.subTest(variant=variant):
+                base,feed,role,route,state,reconciliation=self.bootstrap_retry()
+                snapshot=state['evidence']['snapshot'];snapshot['at_ms']=T+500
+                base.venue.now.return_value=T+1000
+                if variant=='before-boundary':snapshot['at_ms']=T+99
+                elif variant=='stale':base.venue.now.return_value=T+16001
+                elif variant=='bindings':state['evidence']['bindings']=[]
+                elif variant=='history':snapshot['history_complete']=False
+                elif variant=='orders':snapshot['orders_complete']=False
+                elif variant=='hint':
+                    feed._receive(route['account'],reconciliation['boundary'][0].generation,
+                        json.dumps(fills(route['account'],rows=[dict(
+                            coin=state['symbol'],tid=99,oid=999,time=T+600)])))
+                elif variant=='generation':ready(feed,route['account'])
+                with patch.object(trial.stream,'tick',return_value=dict(status='ENTRIES_DISABLED')) as tick, \
+                     patch.object(trial.stream,'_account_owned') as owned:
+                    self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card,
+                        reconciliation=reconciliation))
+                tick.assert_called_once()
+                owned.assert_not_called()
+                self.assertFalse(feed.entry_allowed(route['account']))
+
+    def test_reused_bootstrap_proof_still_fails_closed_on_unknown_account_inventory(self):
+        base,feed,role,route,state,reconciliation=self.bootstrap_retry()
+        state['evidence']['snapshot']['at_ms']=T+500
+        base.venue.now.return_value=T+1000
+        with patch.object(trial.stream,'tick') as tick, \
+             patch.object(trial.stream,'_account_owned',
+                 side_effect=DispatchError('UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY')):
+            with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY'):
+                trial._reconcile_notifications(base,feed,role,route,self.card,
+                    reconciliation=reconciliation)
+        tick.assert_not_called()
+        self.assertFalse(feed.entry_allowed(route['account']))
+
+    def test_new_hint_during_reused_inventory_does_not_clear_notification_gap(self):
+        from .test_fill_wakeups import fills
+        base,feed,role,route,state,reconciliation=self.bootstrap_retry()
+        state['evidence']['snapshot']['at_ms']=T+500
+        base.venue.now.return_value=T+1000
+        def hint_during_inventory(*args,**kwargs):
+            feed._receive(route['account'],reconciliation['boundary'][0].generation,
+                json.dumps(fills(route['account'],rows=[dict(
+                    coin=state['symbol'],tid=100,oid=999,time=T+1000)])))
+            return True
+        with patch.object(trial.stream,'tick',return_value=dict(status='ENTRIES_DISABLED')), \
+             patch.object(trial.stream,'_account_owned',side_effect=hint_during_inventory):
+            self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card,
+                reconciliation=reconciliation))
+        self.assertFalse(feed.entry_allowed(route['account']))
+        self.assertEqual(feed.dirty_symbols(route['account']),None)
 
     def pause(self,state=None,**changes):
         state=deepcopy(self.state) if state is None else state
@@ -440,6 +531,9 @@ class TrialTests(NoExternal):
         self.assertEqual(clock[0],T+15000)
         self.assertEqual(reconcile.call_count,4)
         self.assertEqual([call.args[0] for call in stopped.wait.call_args_list],[5,5,5])
+        self.assertTrue(all(call.kwargs['reconciliation'] is
+            reconcile.call_args_list[0].kwargs['reconciliation']
+            for call in reconcile.call_args_list))
 
     def test_notification_quota_expires_before_registration_or_entry(self):
         clock=[T]

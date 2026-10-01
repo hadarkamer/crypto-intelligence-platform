@@ -249,6 +249,29 @@ def _immutable_flat_checkpoint(state):
         and idle_flat(state))
 
 
+def _quiet_protected_checkpoint(controller, state, *, now_ms):
+    """Share the safety supervisor's current quiet proof, never its read flight.
+
+    Only a saved complete STOP/TAKE proof and a still reconciled live feed can
+    suppress both supervisors' duplicate probing up to the existing fifteen-
+    second checkpoint bound. Notifications and gaps require public observation
+    again; no evidence timestamp or emergency close deadline is extended.
+    """
+    if not dispatch._fully_protected_no_work(state,now_ms):
+        return False
+    feed=vars(controller.venue).get('fill_wakeups')
+    if feed is None:
+        # Preserve the older bounded behavior for callers with an explicit
+        # continuity assertion but no local notification transport.
+        return 0<=now_ms-state['evidence']['snapshot']['at_ms']<10000
+    healthy=getattr(type(feed),'entry_allowed',None)
+    if not callable(healthy) or feed.entry_allowed(state['account']) is not True:
+        return False
+    from .emergency_close import recent_normal_checkpoint
+    return (recent_normal_checkpoint(state,now_ms=now_ms,fill_wakeups=feed)
+            and feed.entry_allowed(state['account']) is True)
+
+
 def tick(controller, route, not_before, *, new_entries, role='long_account',
          dirty_symbols=(), full_reconciliation=False, notification_continuity=False):
     """One bounded sweep. Every old exposure is serviced before new cards."""
@@ -287,10 +310,10 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
                 continue
             maintenance_active += int(unfinished)
             if (notification_continuity and not forced and state['pending'] is None
-                    and dispatch._fully_protected_no_work(state,controller.venue.now())
-                    and 0<=controller.venue.now()-state['evidence']['snapshot']['at_ms']<10000):
-                # Live notifications wake this bucket immediately. Quiet,
-                # already protected positions retain a ten-second REST fallback.
+                    and _quiet_protected_checkpoint(controller,state,
+                                                    now_ms=controller.venue.now())):
+                # Both supervisors share the same saved quiet proof. Live
+                # notifications still wake authoritative reconciliation at once.
                 continue
             for result in _maintain_bucket(controller, state['bucket']):
                 sent += result['order_requests_sent']

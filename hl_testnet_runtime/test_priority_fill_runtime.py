@@ -320,6 +320,61 @@ class PriorityTests(NoExternal):
                 if calls:
                     controller.cycle.assert_called_once_with(state['bucket'],send=True,allow_new_entries=False)
 
+    def test_both_role_workers_share_the_existing_quiet_safety_checkpoint_bound(self):
+        for role,account,side in (('long_account',A,'LONG'),('short_account',B,'SHORT')):
+            for age,calls in ((9999,0),(10000,0),(14999,0),(15000,1)):
+                with self.subTest(role=role,age=age):
+                    state=state_from_case(q='100',side=side,stop='100',take='100')
+                    before=deepcopy(state)
+                    clock=Clock();feed=wake.FillWakeups({role:account},clock=clock)
+                    ready(feed,account)
+                    self.assertTrue(feed.finish_reconciliation(feed.begin_reconciliation(account),complete=True))
+                    clock.now+=age/1000
+                    controller=self.controller(state);controller.venue.fill_wakeups=feed
+                    controller.venue.now.return_value=T+age
+                    controller.cycle.return_value=dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
+                    result=stream.tick(controller,{'account':account},
+                        datetime.fromtimestamp(T/1000,timezone.utc),new_entries=False,
+                        role=role,notification_continuity=True)
+                    self.assertEqual(result['order_requests_sent'],0)
+                    self.assertEqual(controller.cycle.call_count,calls)
+                    self.assertEqual(state,before)
+
+    def test_saved_quiet_proof_does_not_hide_mid_tick_notifications_or_uncertain_work(self):
+        protected=state_from_case(q='100',stop='100',take='100')
+        for variant in ('new-fill','disconnected','missing-stop','missing-take',
+                        'working-entry','pending','incomplete-history','incomplete-orders'):
+            with self.subTest(case=variant):
+                state=deepcopy(protected)
+                if variant=='missing-stop':state=state_from_case(q='100',stop='40',take='100')
+                elif variant=='missing-take':state=state_from_case(q='100',stop='100',take='40')
+                elif variant=='working-entry':state=state_from_case(q='40',stop='40',take='40')
+                elif variant=='pending':state['pending']='a'*64
+                elif variant=='incomplete-history':state['evidence']['snapshot']['history_complete']=False
+                elif variant=='incomplete-orders':state['evidence']['snapshot']['orders_complete']=False
+                clock=Clock();feed=wake.FillWakeups({'long_account':A},clock=clock)
+                ready(feed,A);token=feed.begin_reconciliation(A)
+                self.assertTrue(feed.finish_reconciliation(token,complete=True))
+                clock.now+=12
+                controller=self.controller(state);controller.venue.fill_wakeups=feed
+                controller.venue.now.return_value=T+12000
+                controller.cycle.return_value=dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
+                # The caller already sampled a healthy feed. These changes
+                # occur inside this tick, without its older dirty-symbol args.
+                def states(account):
+                    if variant=='new-fill':
+                        feed._receive(A,token.generation,json.dumps(fills(A,rows=[
+                            dict(coin='DOGE',tid=77,oid=78,time=T+12000)])))
+                    elif variant=='disconnected':
+                        feed._disconnected(A,token.generation)
+                    return [state]
+                controller.store.for_account.side_effect=states
+                result=stream.tick(controller,{'account':A},
+                    datetime.fromtimestamp(T/1000,timezone.utc),new_entries=False,
+                    notification_continuity=True)
+                self.assertEqual(result['order_requests_sent'],0)
+                controller.cycle.assert_called_once_with(state['bucket'],send=True,allow_new_entries=False)
+
     def test_priority_scan_failure_keeps_both_role_workers_retryable(self):
         controller=self.controller(self.historical_flat())
         controller.store.for_account.side_effect=dispatch.DispatchError('STORAGE_TEMPORARILY_UNAVAILABLE')
