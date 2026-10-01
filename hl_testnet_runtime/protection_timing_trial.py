@@ -5,6 +5,7 @@ continuous entry flags remain false; an expiring in-process grant names exactly
 one card. No invented alert, source refresh, price chasing or risk-profile change.
 A still-working limit entry retains normal source-expiry/half-threshold handling.
 """
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import os
@@ -145,6 +146,63 @@ def run_one(env, card_id):
             feed.stop()
 
 
+def _shared_bootstrap_checkpoint(base, feed, role, route, token, symbols, started_ms):
+    """Reuse a committed post-boundary proof, followed by current inventory.
+
+    This is no notification evidence or ENTRY permission. Both durable account
+    revisions and the socket token must remain unchanged across the inventory
+    read; the ordinary authorization still performs its own final public checks.
+    """
+    states=deepcopy(base.store.for_account(route['account']))
+    expected=[state for state in states if
+        (symbols is None and not stream._immutable_flat_checkpoint(state))
+        or (symbols is not None and state['symbol'] in symbols)]
+    if symbols is not None and set(symbols)-{state['symbol'] for state in states}:
+        return False
+    now=base.venue.now()
+    for state in expected:
+        ev=state['evidence']
+        if (ev is None or ev['bindings']!=state['bindings']
+                or not ev['snapshot']['history_complete'] or not ev['snapshot']['orders_complete']
+                or not started_ms<=ev['snapshot']['at_ms']<=now
+                or not 0<=now-ev['snapshot']['at_ms']<=15000):
+            return False
+        if state['bindings']:
+            report=emergency.view(state,now)
+            if report['bucket_issues'] or any(row['issues'] for row in report['cards']):
+                return False
+    stream._account_owned(base.venue,route['account'],states,role=role,priority='protection')
+    after=base.venue.now()
+    if (base.store.for_account(route['account'])!=states
+            or any(not 0<=after-state['evidence']['snapshot']['at_ms']<=15000
+                   for state in expected)):
+        # Do not fall through to a second reconciliation in this same pass.
+        # The caller may poll again with the original token and grant.
+        return None
+    return feed.finish_reconciliation(token,complete=True)
+
+
+def _quiet_bootstrap_account(base, route, *, started_ms):
+    """Only existing fully protected work may wait for the deployed reader.
+
+    Waiting grants no authority and never pauses that independent reader. New
+    fills, working entries, missing exits or uncertain state need direct reads.
+    """
+    active=False
+    for state in base.store.for_account(route['account']):
+        if state['account']!=route['account'] or state.get('pending') is not None:
+            return False
+        if stream._immutable_flat_checkpoint(state):
+            continue
+        ev=state.get('evidence')
+        if (ev is None or state.get('emergency') is not None
+                or not 0<=started_ms-ev['snapshot']['at_ms']<=15000
+                or not dispatch._fully_protected_no_work(state,ev['snapshot']['at_ms'])):
+            return False
+        active=True
+    return active
+
+
 def _reconcile_notifications(base, feed, role, route, card, *, reconciliation=None):
     """An active socket never replaces authoritative saved account observation."""
     if feed.entry_allowed(route['account']):
@@ -163,16 +221,29 @@ def _reconcile_notifications(base, feed, role, route, card, *, reconciliation=No
             and (previous[0].account,previous[0].generation,previous[0].revision)
                 ==(token.account,token.generation,token.revision)
             and 0<=started_ms-previous[2]<=15000):
-        # A quota retry need not recollect what the deployed worker has saved
-        # since the same notification boundary. The ordinary proof path still
-        # checks exact bindings, full history/orders, freshness, current public
-        # ownership and the unchanged socket generation/revision.
+        # Neither a quota retry nor a bootstrap poll should recollect a proof
+        # the deployed worker has committed after this same socket boundary.
         token,symbols,started_ms=previous
-        if stream._finish_notification_reconciliation(base,feed,token,symbols,started_ms):
+        shared=_shared_bootstrap_checkpoint(base,feed,role,route,token,symbols,started_ms)
+        if shared is None:
+            return False
+        if shared:
+            reconciliation.clear()
+            return True
+    elif reconciliation is not None and 'shared_wait_deadline' in reconciliation:
+        shared=_shared_bootstrap_checkpoint(base,feed,role,route,token,symbols,started_ms)
+        if shared is None:
+            return False
+        if shared:
             reconciliation.clear()
             return True
     if reconciliation is not None:
         reconciliation['boundary']=(token,symbols,started_ms)
+        if (symbols is None and time.monotonic()<reconciliation.get('shared_wait_deadline',0)
+                and _quiet_bootstrap_account(base,route,started_ms=started_ms)):
+            # Original ten-second bootstrap only. The same token/deadline is
+            # preserved; at its boundary the ordinary private read is available.
+            return False
     result=stream.tick(base,route,timestamp(card['prepared']['source']['at']),
         new_entries=False,role=role,dirty_symbols=() if symbols is None else symbols,
         full_reconciliation=symbols is None)
@@ -192,7 +263,9 @@ def _wait_notifications(base, feed, role, route, card, expiry, stopped):
     # the original grant, not a renewed grant. An absent/invalid feed retains
     # its ten-second bootstrap limit; wall time also fences a stalled clock.
     grant_deadline=time.monotonic()+max(0,expiry-base.venue.now())/1000
-    reconciliation={}
+    reconciliation=({'shared_wait_deadline':deadline}
+        if isinstance(base.venue,dispatch.TestnetVenue)
+            and callable(getattr(type(feed),'begin_reconciliation',None)) else {})
     while base.venue.now()<expiry and time.monotonic()<grant_deadline:
         try:
             ready=_reconcile_notifications(base,feed,role,route,card,
