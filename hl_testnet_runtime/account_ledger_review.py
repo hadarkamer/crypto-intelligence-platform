@@ -21,8 +21,10 @@ AMOUNTS = ('usdc', 'amount', 'fee', 'usdcValue', 'gas', 'gasFee',
 
 
 class HistoryReader:
-    def __init__(self):
+    def __init__(self, *, budget=None):
         self.calls = 0
+        from .request_budget import default_budget
+        self.budget = default_budget() if budget is None else budget
 
     def read(self, kind, account, start, end):
         if (HOST != 'api.hyperliquid-testnet.xyz' or kind not in KINDS
@@ -31,10 +33,18 @@ class HistoryReader:
             raise checks.Blocked('PUBLIC_HISTORY_QUERY_REQUIRED')
         account = checks.address(account)
         body = {'type':kind, 'user':account, 'startTime':start, 'endTime':end}
+        from .request_budget import BudgetError
+        try:
+            permit = None if self.budget is None else self.budget.acquire(
+                '/info', body, priority='background', host=HOST)
+        except BudgetError as exc:
+            raise checks.Blocked(str(exc)) from None
         connection = http.client.HTTPSConnection('api.hyperliquid-testnet.xyz', timeout=4)
-        self.calls += 1
         started = time.monotonic()
         try:
+            if permit is not None:
+                permit.check()
+            self.calls += 1
             connection.request('POST', '/info', json.dumps(body).encode(),
                                {'Content-Type':'application/json'})
             response = connection.getresponse()
@@ -43,7 +53,12 @@ class HistoryReader:
             raw = response.read(checks.MAX_BYTES + 1)
             if len(raw) > checks.MAX_BYTES or time.monotonic()-started > 8:
                 raise checks.Blocked('PUBLIC_HISTORY_BOUND_EXCEEDED')
-            return checks.decode(raw)
+            decoded = checks.decode(raw)
+            if permit is not None:
+                permit.finish(decoded)
+            return decoded
+        except BudgetError as exc:
+            raise checks.Blocked(str(exc)) from None
         except (OSError, http.client.HTTPException):
             raise checks.Blocked('PUBLIC_HISTORY_UNAVAILABLE') from None
         finally:

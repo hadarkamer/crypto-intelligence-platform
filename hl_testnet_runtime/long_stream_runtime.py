@@ -24,9 +24,11 @@ MODE = 'long_stream_testnet_v1'
 RELEASE = 'approved_long_stream_v1'
 SOURCE = 'approved_alerts_v1'
 _stop = threading.Event()
+_wake = threading.Event()
 _lock = threading.Lock()
 _thread = None
 _app_thread = None
+_fill_wakeups = None
 _health = dict(configured=False, running=False, last_status='DISABLED',
                cycles=0, order_requests_sent=0, new_entries_enabled=False,
                short_entries_enabled=False, short_stream_configured=False,
@@ -88,8 +90,9 @@ def short_configuration(env):
 
 def _safe_failure(exc):
     """Expose only fixed internal codes and a source line; never private input."""
+    from .request_budget import BudgetError
     code = str(exc)
-    known = isinstance(exc, (DispatchError, roles.checks.Blocked, life.LifecycleError))
+    known = isinstance(exc, (DispatchError, roles.checks.Blocked, life.LifecycleError,BudgetError))
     safe_code = code if known and re.fullmatch(r'[A-Z][A-Z0-9_]{2,99}', code) else type(exc).__name__
     origin = traceback.extract_tb(exc.__traceback__)[-1]
     return dict(failure_code=safe_code,
@@ -110,7 +113,8 @@ def _unfinished(state, now):
                        or c['issues'] for c in view['cards'])):
             return True
     bound = {b['card_id'] for b in state['bindings']}
-    return any(cid not in bound and original.get('entry_rejected_no_retry') is not True and
+    return any(cid not in bound and original.get('entry_rejected_no_retry') is not True
+        and original.get('entry_unsent_no_retry') is not True and
         'source_expires_at' in original['card'] and
         source_fresh(timestamp(original['card']['prepared']['source']['at']),
                      original['card']['source_expires_at'], now=now)
@@ -203,10 +207,48 @@ def _maintain_bucket(controller, bucket):
             break
 
 
-def tick(controller, route, not_before, *, new_entries, role='long_account'):
+def _maintenance_priority(state, dirty_symbols=()):
+    """Hints reorder work; only the ordinary committed observer proves fills."""
+    dirty=dirty_symbols is None or state.get('symbol') in dirty_symbols
+    if state.get('pending') is not None:
+        return 0
+    if state.get('evidence') is not None and state.get('bindings'):
+        snap=state['evidence']['snapshot']
+        entry_ids={oid for binding in state['bindings']
+                   for oid in binding.get('orders',{}).get('ENTRY',[])}
+        if any(o['oid'] in entry_ids for o in snap.get('open_orders',[])):
+            return 0
+        try:
+            report=life.review(state['bindings'],snap,now_ms=snap['at_ms'])
+            if report['bucket_issues'] or any(row['issues'] for row in report['cards']):
+                return 0
+        except (KeyError,life.LifecycleError):
+            return 0
+        if life.number(snap.get('position_quantity','0'),signed=True)!=0:
+            return 0 if dirty else 1
+    return 2 if dirty else 3
+
+
+def _immutable_flat_checkpoint(state):
+    """Historical terminal proof may be retained; inventory must verify flat now."""
+    ev=state.get('evidence')
+    emergency=state.get('emergency')
+    if emergency is not None and (emergency['phase']!='CLOSED_VERIFIED'
+            or emergency.get('pending_close') or emergency.get('pending_cancel')):
+        return False
+    return (ev is not None and ev.get('bindings')==state.get('bindings')
+        and ev['snapshot']['account']==state['account']
+        and ev['snapshot']['symbol']==state['symbol']
+        and ev['snapshot']['history_complete'] and ev['snapshot']['orders_complete']
+        and idle_flat(state))
+
+
+def tick(controller, route, not_before, *, new_entries, role='long_account',
+         dirty_symbols=(), full_reconciliation=False, notification_continuity=False):
     """One bounded sweep. Every old exposure is serviced before new cards."""
     now = datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)
-    states = controller.store.for_account(route['account'])
+    states = sorted(controller.store.for_account(route['account']),
+                    key=lambda state:_maintenance_priority(state,dirty_symbols))
     sent = 0
     errors = 0
     maintenance_active = 0
@@ -214,24 +256,36 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
     rejection = None
     for state in states:
         try:
+            retained=full_reconciliation and _immutable_flat_checkpoint(state)
+            forced=((full_reconciliation and not retained)
+                    or state.get('symbol') in dirty_symbols)
             # A closed SHORT bucket can still be the predecessor of a new card.
             # Refresh its aged evidence periodically even while entries are off,
             # so a later entry cannot inherit an unreviewed history gap.
             if state.get('emergency') is not None:
                 maintenance_active += int(state['emergency']['phase'] != 'CLOSED_VERIFIED')
+                if forced and state['emergency']['phase']=='CLOSED_VERIFIED':
+                    from .emergency_close import Controller as EmergencyController
+                    EmergencyController(controller).cycle(state['bucket'],send=False)
                 continue
-            aged_closed_short = (role == 'short_account' and state['bindings']
+            aged_closed_short = (not retained and role == 'short_account' and state['bindings']
                 and state['evidence'] is not None
                 and 3600000 < int(now.timestamp()*1000)-state['evidence']['snapshot']['at_ms'])
             unfinished = _unfinished(state,now)
             # A locally registered, never-attempted candidate requires no
             # maintenance while entries are disabled. Preserve aged SHORT
             # history catch-up and all pending/working/exposed buckets.
-            if not new_entries and not aged_closed_short and idle_flat(state):
+            if not forced and not new_entries and not aged_closed_short and idle_flat(state):
                 unfinished=False
-            if not unfinished and not aged_closed_short:
+            if not unfinished and not aged_closed_short and not forced:
                 continue
             maintenance_active += int(unfinished)
+            if (notification_continuity and not forced and state['pending'] is None
+                    and dispatch._fully_protected_no_work(state,controller.venue.now())
+                    and 0<=controller.venue.now()-state['evidence']['snapshot']['at_ms']<10000):
+                # Live notifications wake this bucket immediately. Quiet,
+                # already protected positions retain a ten-second REST fallback.
+                continue
             for result in _maintain_bucket(controller, state['bucket']):
                 sent += result['order_requests_sent']
                 if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
@@ -259,6 +313,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account'):
                and any((trial_id is None or cid == trial_id)
                        and cid not in {b['card_id'] for b in state['bindings']}
                        and original.get('entry_rejected_no_retry') is not True
+                       and original.get('entry_unsent_no_retry') is not True
                        and 'source_expires_at' in original['card']
                        and source_fresh(timestamp(original['card']['prepared']['source']['at']),
                            original['card']['source_expires_at'],now=now)
@@ -371,15 +426,81 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
     return result
 
 
+def _finish_notification_reconciliation(controller, feed, token, symbols, started_ms):
+    """Release ENTRY only after exact current durable proofs and fresh inventory."""
+    states=controller.store.for_account(token.account)
+    expected=[state for state in states if
+        (symbols is None and not _immutable_flat_checkpoint(state))
+        or (symbols is not None and state['symbol'] in symbols)]
+    if symbols is not None and set(symbols)-{state['symbol'] for state in states}:
+        # An unowned market hint must not be silently discarded as harmless.
+        return False
+    now=controller.venue.now()
+    for state in expected:
+        ev=state['evidence']
+        if (ev is None or ev['bindings']!=state['bindings']
+                or not ev['snapshot']['history_complete'] or not ev['snapshot']['orders_complete']
+                or not started_ms<=ev['snapshot']['at_ms']<=now
+                or not 0<=now-ev['snapshot']['at_ms']<=15000):
+            return False
+        if state['bindings']:
+            from .emergency_close import view
+            report=view(state,now)
+            if report['bucket_issues'] or any(row['issues'] for row in report['cards']):
+                return False
+    role=next(role for role,route in controller.routes.items() if route['account']==token.account)
+    _account_owned(controller.venue,token.account,states,role=role)
+    return feed.finish_reconciliation(token,complete=True)
+
+
 def _loop(controller, streams):
     reported = set()
     while not _stop.is_set():
+        feed=vars(controller.venue).get('fill_wakeups')
+        if feed is not None:
+            _wake.clear()
+            pending=set(feed.pending_accounts())
+            def account_priority(item):
+                account=item[1]['account']
+                hints=feed.dirty_symbols(account) if account in pending else ()
+                states=controller.store.for_account(account)
+                return (min((_maintenance_priority(state,hints) for state in states),default=3),
+                        account not in pending)
+            try:
+                scheduled=sorted(streams,key=account_priority)
+            except Exception:
+                # Scheduling is optional. Each account's guarded tick retains
+                # its own diagnostic and retry path after a transient store read.
+                scheduled=streams
+        else:
+            scheduled=streams
         results = []
-        for role,route,start,enabled_key in streams:
+        for role,route,start,enabled_key in scheduled:
             before=getattr(controller.venue,'sent',0)
             try:
+                token=None
+                notification_args={}
+                notification_ready=False
+                if feed is not None and route['account'] in pending:
+                    notification_health=feed.health()[role]
+                    notification_ready=(notification_health['connected']
+                        and notification_health['snapshot_received']
+                        and notification_health['subscriptions_acknowledged']==2)
+                if notification_ready:
+                    token=feed.begin_reconciliation(route['account'])
+                    symbols=feed.dirty_symbols(route['account'])
+                    if symbols==():
+                        symbols=None
+                    started_ms=controller.venue.now()
+                    notification_args=dict(dirty_symbols=() if symbols is None else symbols,
+                                           full_reconciliation=symbols is None)
                 result=tick(controller,route,start,
-                            new_entries=controller.venue.env[enabled_key]=='true',role=role)
+                            new_entries=controller.venue.env[enabled_key]=='true'
+                                and (feed is None or feed.entry_allowed(route['account'])),
+                            role=role,notification_continuity=feed is not None
+                                and feed.entry_allowed(route['account']),**notification_args)
+                if token is not None:
+                    _finish_notification_reconciliation(controller,feed,token,symbols,started_ms)
             except Exception as exc:
                 failure = _safe_failure(exc)
                 result=dict(status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY',
@@ -404,8 +525,9 @@ def _loop(controller, streams):
                 except Exception:
                     label='testnet_long_trade_observation' if role=='long_account' else 'testnet_short_trade_observation'
                     print(json.dumps({label:'UNAVAILABLE_RETRY'}),flush=True)
-        _stop.wait(2 if (all(r['status']=='SWEEP_COMPLETE' for r in results)
-                        or any(r.get('maintenance_active',0) for r in results)) else 10)
+        delay=2 if (all(r['status']=='SWEEP_COMPLETE' for r in results)
+                    or any(r.get('maintenance_active',0) for r in results)) else 10
+        (_wake if feed is not None else _stop).wait(delay)
     with _lock:
         _health['running']=False
 
@@ -595,7 +717,7 @@ def _short_pending_readiness(controller, route):
 
 
 def start():
-    global _thread,_app_thread
+    global _thread,_app_thread,_fill_wakeups
     env=dict(os.environ)
     route,not_before=configuration(env)
     short=short_configuration(env)
@@ -614,10 +736,13 @@ def start():
     controller.store.for_account(route['account'])
     if short:
         controller.store.for_account(short[0]['account'])
+    from .request_budget import Budget
+    Budget(controller.store.journal).initialize()
     with _lock:
         if _thread is not None and _thread.is_alive():
             return False
         _stop.clear()
+        _wake.clear()
         _health.update(configured=True,running=True,last_status='STARTING',cycles=0,
                        order_requests_sent=0,
                        new_entries_enabled=env['HL_TESTNET_LONG_ENTRY_ENABLED']=='true',
@@ -627,6 +752,10 @@ def start():
         streams=[('long_account',route,not_before,'HL_TESTNET_LONG_ENTRY_ENABLED')]
         if short:
             streams.append(('short_account',short[0],short[1],'HL_TESTNET_SHORT_ENTRY_ENABLED'))
+        from .fill_wakeups import FillWakeups
+        _fill_wakeups=FillWakeups({role:route['account'] for role,route,*_ in streams},wake_event=_wake)
+        controller.venue.fill_wakeups=_fill_wakeups
+        _fill_wakeups.start()
         from .emergency_close import start as start_emergency
         start_emergency(controller,streams,_stop)
         _thread=threading.Thread(target=_loop,args=(controller,streams),
@@ -648,6 +777,9 @@ def start():
 
 def stop():
     _stop.set()
+    _wake.set()
+    if _fill_wakeups is not None:
+        _fill_wakeups.stop()
 
 
 def health():
@@ -655,4 +787,6 @@ def health():
         result=deepcopy(_health)
     from .emergency_close import health as emergency_health
     result['emergency_close']=emergency_health()
+    if _fill_wakeups is not None:
+        result['fill_notifications']=_fill_wakeups.health()
     return result

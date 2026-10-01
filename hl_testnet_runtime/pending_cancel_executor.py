@@ -114,7 +114,8 @@ class Exchange:
     def __init__(self, record, agent):
         import hyperliquid_testnet_executor as sender
         self.sender, self.record, self.agent = sender, record, agent
-        self.reader = sender.TestnetHTTP()  # Original order transport stays disabled.
+        self.reader = sender.TestnetHTTP(priority='protection')  # Original order transport stays disabled.
+        self.budget = self.reader.budget
         self.requests_attempted = 0
         self.cancel_requests_attempted = 0
 
@@ -170,8 +171,19 @@ class Exchange:
         expiry = nonce + 5000
         body = dict(action=action, nonce=nonce, expiresAfter=expiry,
                     signature=sign_l1_action(wallet,action,None,nonce,expiry,False))
+        from .request_budget import BudgetError
+        if self.budget is None:
+            raise CancelError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')
+        try:
+            permit = self.budget.acquire('/exchange', body, priority='protection', host=HOST)
+        except BudgetError as exc:
+            raise CancelError(str(exc)) from None
+        # Admission never resets the original nonce/freshness clock.
+        if not -1 <= sender.now_ms()-nonce <= 5000:
+            raise CancelError('CANCEL_NONCE_EXPIRED_NO_SEND')
         connection = http.client.HTTPSConnection(HOST, timeout=4)
         try:
+            permit.check()
             self.requests_attempted += 1
             if phase == 'cancel':
                 self.cancel_requests_attempted += 1

@@ -11,7 +11,7 @@ import json
 import threading
 
 from . import card_lifecycle as life, filled_quantity_dispatch as dispatch
-from .filled_dispatch_store import DispatchError, SCHEMA
+from .filled_dispatch_store import DispatchError, DefinitelyUnsent, SCHEMA
 from .card_lifecycle_store import _continues
 from .dispatch_concurrency import market_lane
 
@@ -79,6 +79,47 @@ def trigger(state, *, now_ms, mark=None):
                         reason='STOP_LEVEL_PASSED_UNPROTECTED' if crossed else 'STOP_VERIFICATION_DEADLINE',
                         uncovered_since_ms=oldest, uncovered_quantity=life.text(remaining-covered))
     return None
+
+
+def recent_normal_checkpoint(state, *, now_ms, fill_wakeups=None):
+    """A successful normal checkpoint can briefly serve both supervisors.
+
+    A running or stalled read provides no authority here. Events are only dirty
+    hints: they prevent this optimization but never supply fill/stop evidence.
+    An uncovered tranche also requires independent checking before its deadline,
+    since a current price can already have crossed the original stop.
+    """
+    if state.get('emergency') is not None or state['evidence'] is None:
+        return False
+    evidence=state['evidence'];snapshot=evidence['snapshot']
+    if (evidence['bindings'] != state['bindings']
+            or snapshot['account'] != state['account'] or snapshot['symbol'] != state['symbol']
+            or not snapshot['history_complete'] or not snapshot['orders_complete']
+            or not 0 <= now_ms-snapshot['at_ms'] < 15000):
+        return False
+    if fill_wakeups is not None:
+        dirty=fill_wakeups.dirty_symbols(state['account'])
+        if dirty is None or state['symbol'] in dirty:
+            return False
+    report=life.review(state['bindings'],snapshot,now_ms=now_ms)
+    if report['bucket_issues']:
+        return False
+    for row in report['cards']:
+        remaining=life.number(row['remaining_quantity'],signed=True)
+        if remaining < 0 or (remaining > 0 and
+                life.number(row['stop_quantity_observed']) != remaining):
+            return False
+    if now_ms-snapshot['at_ms'] < DEADLINE_MS:
+        return True
+    # Extend only duplicate probing of a quiet fully protected position. The
+    # underlying quantity/price bounds for an actual close remain five seconds.
+    # Working entries, uncertainty or a disconnected feed retain the base bound.
+    if (fill_wakeups is None or state.get('pending') is not None
+            or not dispatch._fully_protected_no_work(state,now_ms)):
+        return False
+    healthy_feed=getattr(type(fill_wakeups),'entry_allowed',None)
+    return (callable(healthy_feed)
+            and fill_wakeups.entry_allowed(state['account']) is True)
 
 
 def close_price(mark, decimals, *, buy):
@@ -166,6 +207,9 @@ class Controller:
         self.normal, self.store = normal, normal.store
         self.venue = venue or Venue(normal.venue.env)
         self.venue.store = self.store
+        fill_wakeups=vars(normal.venue).get('fill_wakeups')
+        if fill_wakeups is not None:
+            self.venue.fill_wakeups=fill_wakeups
         if self.venue.domain != self.store.domain:
             raise DispatchError('SOFTWARE_AND_ACCOUNT_STORAGE_MUST_NOT_MIX')
 
@@ -359,6 +403,8 @@ class Controller:
 
     def _begin(self, state, proposal):
         self.venue.authorize(state, proposal)
+        admission=dispatch.reserve_transport(self.venue,proposal)
+        self.venue.authorize(state, proposal)
         now = self.venue.now()
         def begin(conn, current):
             if len(self._requests(current)) >= MAX_REQUESTS:
@@ -391,7 +437,27 @@ class Controller:
         # and therefore never grants this process a sender token.
         state,_=self.store.change(state['bucket'],state['revision'],
             'EMERGENCY_ATTEMPT_BEGUN',now,begin,_return_committed_request=True)
-        return state, deepcopy(self._requests(state)[-1])
+        request=deepcopy(self._requests(state)[-1])
+        if type(admission) is dispatch.TransportAdmission:
+            admission.bind(request)
+        return dispatch.AdmittedAttempt((state,request),admission)
+
+    def _abort_unsent(self,state,request,certificate):
+        if type(certificate) is not DefinitelyUnsent or not certificate.matches(request):
+            raise DispatchError('EXACT_UNSENT_CERTIFICATE_REQUIRED')
+        now=self.venue.now()
+        def abort(conn,current):
+            key='pending_close' if request['proposal']['operation']=='EMERGENCY_CLOSE' else 'pending_cancel'
+            r=next((r for r in self._requests(current)
+                    if r['request_id']==request['request_id']),None)
+            if (current['emergency'][key]!=request['request_id'] or r is None
+                    or not certificate.matches(r) or now<r['attempt_at_ms']):
+                raise DispatchError('UNSENT_ATTEMPT_CHANGED_NO_RELEASE')
+            r.update(phase='ABORTED_UNSENT',abort_reason=certificate.reason,aborted_at_ms=now)
+            current['emergency'][key]=None
+            return None
+        return self.store.change(state['bucket'],state['revision'],
+            'EMERGENCY_EXACT_PRE_HTTP_ATTEMPT_ABORTED_UNSENT',now,abort)
 
     @staticmethod
     def proposal_without_io(state, proposal):
@@ -434,6 +500,13 @@ class Controller:
     @market_lane
     def cycle(self, bucket, *, send=False):
         state=self.store.load(bucket)
+        # Freeze new entries from known durable uncovered-fill proof before any
+        # potentially slow I/O. This latch never authorizes a send: final public
+        # quantity, ownership and fresh price still have to be verified below.
+        if send and state.get('emergency') is None:
+            cause=trigger(state,now_ms=self.venue.now())
+            if cause:
+                state=self.latch(state,cause)
         # Static metadata precedes quantity reconciliation. The live price is
         # obtained AFTER the final checkpoint, so a slow collection cannot age
         # a prefetched price before planning. Neither timestamp is relabeled:
@@ -496,12 +569,21 @@ class Controller:
                         card_id=state['emergency']['card_id'],remaining_quantity=row['remaining_quantity'],order_requests_sent=0)
         if not send:
             return dict(status='EMERGENCY_PREVIEW',proposal=proposal,order_requests_sent=0)
-        state,request=self._begin(state,proposal)
+        prepared=self._begin(state,proposal)
+        state,request=prepared
         before=self.venue.sent
         try:
-            raw=self.venue.send(request)
+            raw=dispatch.send_admitted(self.venue,request,getattr(prepared,'admission',None))
             route=self.normal.routes[proposal['role']]
             reply=dispatch.normalized_reply(raw,proposal['action']['type'],account=state['account'],agent=route['agent'])
+        except DefinitelyUnsent as certificate:
+            try:
+                self._abort_unsent(state,request,certificate)
+            except Exception:
+                return dict(status='OUTCOME_UNKNOWN',operation=proposal['operation'],
+                            card_id=proposal['card_id'],order_requests_sent=0)
+            return dict(status='ABORTED_UNSENT',operation=proposal['operation'],
+                        card_id=proposal['card_id'],reason=certificate.reason,order_requests_sent=0)
         except Exception:
             reply=dict(state='OUTCOME_UNKNOWN',code=None,oid=None)
         def replied(conn,current):
@@ -588,11 +670,8 @@ def start(normal, streams, stop_event, *, only_bucket=None):
                         from datetime import datetime,timezone
                         if not _unfinished(state,datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)):
                             continue
-                        if (not state.get('emergency') and not state['pending'] and state['evidence']
-                                and controller.venue.now()-state['evidence']['snapshot']['at_ms']<5000
-                                and trigger(state,now_ms=controller.venue.now()) is None
-                                and not any(o['oid'] in b['orders']['ENTRY']
-                                    for o in state['evidence']['snapshot']['open_orders'] for b in state['bindings'])):
+                        if recent_normal_checkpoint(state,now_ms=controller.venue.now(),
+                                fill_wakeups=vars(controller.venue).get('fill_wakeups')):
                             continue
                         if not state.get('emergency') and idle_flat(state):
                             continue

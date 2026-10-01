@@ -168,10 +168,18 @@ def build_action(message: dict, metadata: dict, account: str, *, exit_type: str,
 
 class TestnetHTTP:
     """Fixed TLS host, no redirects/proxies/custom URL; never retries a POST."""
-    def __init__(self, *, allow_orders: bool = False):
+    def __init__(self, *, allow_orders: bool = False, budget=None, priority='background'):
         self.allow_orders = allow_orders is True
         self.public_calls = 0
         self.order_attempts = 0
+        from hl_testnet_runtime.request_budget import Budget, BudgetError, PRIORITIES
+        if not isinstance(priority, str) or priority not in PRIORITIES:
+            raise TestnetError('TESTNET_REQUEST_BUDGET_PRIORITY_INVALID')
+        self.priority = priority
+        try:
+            self.budget = Budget.from_env(os.environ) if budget is None else budget
+        except BudgetError as exc:
+            raise TestnetError(str(exc)) from None
 
     def _post(self, path: str, body: dict) -> Any:
         if TESTNET_HOST != "api.hyperliquid-testnet.xyz":
@@ -182,15 +190,26 @@ class TestnetHTTP:
             if not self.allow_orders or body.get("action", {}).get("type") != "order":
                 raise TestnetError("ORDER_TRANSPORT_DISABLED")
             assert_new_entry_budget(body['action'])
-            self.order_attempts += 1
-        else:
-            self.public_calls += 1
+        raw = _json(body).encode()
+        if len(raw) > 16384:
+            raise TestnetError("REQUEST_TOO_LARGE")
+        if path == '/exchange' and self.budget is None:
+            raise TestnetError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')
+        from hl_testnet_runtime.request_budget import BudgetError
+        try:
+            permit = (None if self.budget is None else self.budget.acquire(
+                path, body, priority=self.priority, host=TESTNET_HOST))
+        except BudgetError as exc:
+            raise TestnetError(str(exc)) from None
         connection = http.client.HTTPSConnection("api.hyperliquid-testnet.xyz", timeout=4)
         started = time.monotonic()
         try:
-            raw = _json(body).encode()
-            if len(raw) > 16384:
-                raise TestnetError("REQUEST_TOO_LARGE")
+            if permit is not None:
+                permit.check()
+            if path == '/exchange':
+                self.order_attempts += 1
+            else:
+                self.public_calls += 1
             connection.request("POST", path, raw, {"Content-Type": "application/json"})
             response = connection.getresponse()
             if response.status != 200:
@@ -198,7 +217,12 @@ class TestnetHTTP:
             raw = response.read(MAX_BYTES+1)
             if len(raw) > MAX_BYTES or time.monotonic()-started > 10:
                 raise TestnetError("RESPONSE_BOUND_EXCEEDED")
-            return _decode(raw)
+            decoded = _decode(raw)
+            if permit is not None:
+                permit.finish(decoded)
+            return decoded
+        except BudgetError as exc:
+            raise TestnetError(str(exc)) from None
         except (OSError, http.client.HTTPException):
             raise TestnetError("TRANSPORT_UNCERTAIN_DO_NOT_RESEND") from None
         finally:

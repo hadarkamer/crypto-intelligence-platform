@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import hyperliquid_testnet_executor as sender
-from hyperliquid_testnet_executor_selftest import FakeExchange, ACCOUNT, AGENT, signal
+from hyperliquid_testnet_executor_selftest import FakeExchange, FakeRequestBudget, ACCOUNT, AGENT, signal
 from . import guarded_execution as guard
 from .test_guarded_execution import Reader
 
@@ -24,6 +24,8 @@ class IntegrationTests(unittest.TestCase):
         self.reader = Reader()
         self.exchange = FakeExchange()
         patches = [
+            patch('hl_testnet_runtime.request_budget.Budget.from_env',
+                  return_value=FakeRequestBudget()),
             patch.object(sender.http.client, 'HTTPSConnection', side_effect=self.exchange.connection),
             patch.object(guard.checks, 'InfoReader', return_value=self.reader),
             patch.object(sender, '_wallet', return_value=SimpleNamespace(address=AGENT)),

@@ -18,6 +18,45 @@ class DispatchError(JournalError, life.LifecycleError):
     """Stable redacted errors only."""
 
 
+class DefinitelyUnsent(DispatchError):
+    """Local pre-HTTP certificate for one exact durable attempt, never a reply.
+
+    Only transport admission may issue this after a known successful begin.
+    An HTTP exception, counter value or missing exchange response is not proof.
+    """
+    def __init__(self, request, reason):
+        if reason not in ('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',
+                          'TESTNET_REQUEST_BUDGET_EXHAUSTED',
+                          'TESTNET_REQUEST_BUDGET_BUSY',
+                          'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE',
+                          'TESTNET_SHARED_REQUEST_BUDGET_REQUIRED'):
+            raise DispatchError('UNSENT_CERTIFICATE_REASON_INVALID')
+        self._identity = self.identity(request)
+        self.reason = reason
+        super().__init__(reason)
+
+    @staticmethod
+    def identity(request):
+        if (not isinstance(request, dict) or request.get('phase') != 'OUTCOME_UNKNOWN'
+                or type(request.get('attempts')) is not int or request['attempts'] != 1
+                or request.get('reply') is not None or request.get('observed_oid') is not None):
+            raise DispatchError('UNSENT_CERTIFICATE_REQUEST_INVALID')
+        for field in ('request_id', 'bucket'):
+            life.ident(request[field], r'[0-9a-f]{64}')
+        if request.get('domain') not in ('software', 'testnet'):
+            raise DispatchError('UNSENT_CERTIFICATE_REQUEST_INVALID')
+        for field in ('nonce', 'attempt_at_ms', 'prepared_at_ms'):
+            life.moment(request[field])
+        return life.digest({key: request[key] for key in ('request_id', 'domain', 'bucket',
+            'proposal', 'nonce', 'attempt_at_ms', 'prepared_at_ms', 'attempts')})
+
+    def matches(self, request):
+        try:
+            return self._identity == self.identity(request)
+        except (KeyError, TypeError, life.LifecycleError):
+            return False
+
+
 def encode(value):
     text = life.encoded(value)
     if len(text.encode()) > 4 * 1024 * 1024:
@@ -301,3 +340,25 @@ class DispatchStore:
                 raise DispatchError('REPLY_TIME_MOVED_BACKWARDS')
             return request
         return self.change(state['bucket'],state['revision'],'REPLY',now_ms,update)
+
+    def abort_definitely_unsent(self, state, request, certificate, now_ms):
+        """Retire only an exact pre-HTTP refusal, retaining its nonce and audit.
+
+        A conflict or uncertain COMMIT raises and cannot authorize another send.
+        An entry is never retried automatically, even after this known refusal.
+        """
+        if type(certificate) is not DefinitelyUnsent or not certificate.matches(request):
+            raise DispatchError('EXACT_UNSENT_CERTIFICATE_REQUIRED')
+        def update(conn, value):
+            current = self.pending_record(conn, value)
+            if (current is None or value['pending'] != request['request_id']
+                    or not certificate.matches(current) or now_ms < current['attempt_at_ms']):
+                raise DispatchError('UNSENT_ATTEMPT_CHANGED_NO_RELEASE')
+            current.update(phase='ABORTED_UNSENT', abort_reason=certificate.reason,
+                           aborted_at_ms=now_ms)
+            value['pending'] = None
+            if current['proposal']['operation'] == 'ENTRY':
+                value['originals'][current['proposal']['card_id']]['entry_unsent_no_retry'] = True
+            return current
+        return self.change(state['bucket'], state['revision'],
+                           'EXACT_PRE_HTTP_ATTEMPT_ABORTED_UNSENT', now_ms, update)

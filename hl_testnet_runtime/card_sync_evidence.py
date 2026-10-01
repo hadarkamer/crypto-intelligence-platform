@@ -38,13 +38,17 @@ def facts(snapshot):
 
 class PublicReader:
     """Only fixed public /info requests. Bounded calls, bytes and request time."""
-    def __init__(self, *, parallel=False, parallel_workers=4):
+    def __init__(self, *, parallel=False, parallel_workers=4, budget=None, priority='background'):
         if type(parallel_workers) is not int or not 1<=parallel_workers<=MAX_OBSERVATION_READ_WORKERS:
             raise SyncError('PUBLIC_READ_PARALLEL_BOUND_INVALID')
         self.calls = 0
         self.parallel = parallel is True
         self.parallel_workers = parallel_workers
         self._calls_lock = threading.Lock()
+        from .request_budget import Budget
+        import os
+        self.budget = budget if budget is not None else Budget.from_env(os.environ)
+        self.priority = priority
 
     def observation_inputs(self, account, oids, start, end):
         """Overlap independent info reads, never the two verification passes.
@@ -91,14 +95,21 @@ class PublicReader:
             if HOST != 'api.hyperliquid-testnet.xyz' or self.calls >= 200:
                 raise SyncError('READ_BUDGET_EXCEEDED')
             self.calls += 1
+        permit = (self.budget.acquire('/info', body, priority=self.priority, host=HOST)
+                  if self.budget is not None else None)
         connection = http.client.HTTPSConnection(HOST, timeout=4)
         try:
+            if permit is not None:
+                permit.check()
             connection.request('POST','/info',json.dumps(body).encode(),{'Content-Type':'application/json'})
             response = connection.getresponse()
             if response.status != 200: raise SyncError('PUBLIC_READ_UNAVAILABLE')
             raw = response.read(checks.MAX_BYTES+1)
             if len(raw) > checks.MAX_BYTES: raise SyncError('PUBLIC_RESPONSE_TOO_LARGE')
-            return checks.decode(raw)
+            decoded = checks.decode(raw)
+            if permit is not None:
+                permit.finish(decoded)
+            return decoded
         except (OSError,http.client.HTTPException):
             raise SyncError('PUBLIC_READ_UNAVAILABLE') from None
         finally:

@@ -21,6 +21,10 @@ from .test_card_lifecycle import T,A,B,fill
 CI=os.environ.get('HL_JOURNAL_CI_URL')
 
 
+class ReconciledFillFeed:
+    def entry_allowed(self,account):return account in (A,B)
+
+
 class Venue(NormalVenue):
     def __init__(self):
         super().__init__();self.mark='10';self.reject_cancel=False
@@ -42,6 +46,108 @@ class Venue(NormalVenue):
 
 
 class EmergencyPureTests(NoExternal):
+    def test_recent_protected_pending_entry_uses_durable_normal_checkpoint(self):
+        state=state_from_case(q='40',stop='40',take='40')
+        # The remaining ENTRY can fill later; the existing 40-unit tranche is
+        # currently protected. A pending identity does not age this checkpoint.
+        state['pending']='a'*64
+        self.assertTrue(any(o['oid'] in state['bindings'][0]['orders']['ENTRY']
+                            for o in state['evidence']['snapshot']['open_orders']))
+        self.assertTrue(m.recent_normal_checkpoint(state,now_ms=T+4999))
+        self.assertFalse(m.recent_normal_checkpoint(state,now_ms=T+5000))
+
+    def test_recent_checkpoint_never_suppresses_dirty_gap_or_uncovered_tranche(self):
+        state=state_from_case(q='40',stop='40',take='40')
+        class Feed:
+            def __init__(self,dirty):self.dirty=dirty
+            def dirty_symbols(self,account):return self.dirty
+        for dirty, expected in (((),True),(('BTC',),True),(('DOGE',),False),(None,False)):
+            with self.subTest(dirty=dirty):
+                self.assertEqual(m.recent_normal_checkpoint(state,now_ms=T+1,
+                                 fill_wakeups=Feed(dirty)),expected)
+        uncovered=state_from_case(q='40',stop='20',take='40')
+        uncovered['evidence']['snapshot']['fills'][0]['at_ms']=T
+        self.assertIsNone(m.trigger(uncovered,now_ms=T+1))
+        self.assertFalse(m.recent_normal_checkpoint(uncovered,now_ms=T+1))
+
+    def test_recent_checkpoint_requires_matching_complete_current_evidence(self):
+        good=state_from_case(q='40',stop='40',take='40')
+        for invalid in ('future','history','orders','bindings','account','symbol','position'):
+            with self.subTest(invalid=invalid):
+                state=deepcopy(good);snap=state['evidence']['snapshot']
+                if invalid=='future':snap['at_ms']=T+1
+                elif invalid=='history':snap['history_complete']=False
+                elif invalid=='orders':snap['orders_complete']=False
+                elif invalid=='bindings':state['evidence']['bindings']=[]
+                elif invalid=='account':state['account']=B
+                elif invalid=='symbol':state['symbol']='BTC'
+                else:snap['position_quantity']='41'
+                self.assertFalse(m.recent_normal_checkpoint(state,now_ms=T))
+
+    def test_emergency_controller_preserves_same_explicit_fill_feed(self):
+        class Store:domain='software'
+        normal_venue=NormalVenue();feed=object();normal_venue.fill_wakeups=feed
+        normal=dispatch.Controller(Store(),normal_venue,ROUTES2)
+        emergency=m.Controller(normal,Venue())
+        self.assertIs(emergency.venue.fill_wakeups,feed)
+
+    def test_supervisor_coalesces_pending_entry_then_takes_over_aged_checkpoint(self):
+        selected=state_from_case(q='40',stop='40',take='40')
+        for age,dirty,expected in ((4999,(),0),(5000,(),1),(1,('DOGE',),1),(1,None,1)):
+            with self.subTest(age=age,dirty=dirty):
+                stop=threading.Event()
+                class Feed:
+                    def dirty_symbols(self,account):return dirty
+                class Store:
+                    domain='software'
+                    def load(self,bucket):return deepcopy(selected)
+                    def for_account(self,account):
+                        stop.set()  # complete exactly one bounded scan
+                        return [deepcopy(selected)]
+                venue=Venue();venue.t=T+age;venue.fill_wakeups=Feed()
+                venue.env=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
+                    HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+                normal=dispatch.Controller(Store(),venue,ROUTES2)
+                current=m.Controller(normal,venue)
+                status=dict(running=False,last_status=None,last_pass_at_ms=None)
+                with patch.object(m,'_thread',None),patch.object(m,'_stop_event',None), \
+                        patch.object(m,'_health',status), \
+                        patch.object(m,'Controller',return_value=current), \
+                        patch.object(venue,'metadata',wraps=venue.metadata) as metadata, \
+                        patch.object(normal,'refresh',return_value=deepcopy(selected)) as refresh:
+                    self.assertTrue(m.start(normal,[('long_account',dict(account=A),None,None)],stop))
+                    m._thread.join(1)
+                    self.assertFalse(m._thread.is_alive())
+                    self.assertEqual(metadata.call_count,expected)
+                    self.assertEqual(refresh.call_count,expected)
+                    self.assertEqual(status['last_status'],'PASS_COMPLETE')
+                self.assertEqual(venue.sent,0)
+
+    def test_known_deadline_latches_before_metadata_io_and_never_sends_old_quantity(self):
+        class MemoryStore:
+            domain='software'
+            def __init__(self):self.state=state_from_case(q='40',take='40');self.events=[]
+            def load(self,bucket):return deepcopy(self.state)
+            def change(self,bucket,revision,event,now,update):
+                if revision!=self.state['revision']:
+                    raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+                value=deepcopy(self.state);update(None,value);value['revision']+=1
+                self.state=value;self.events.append(event)
+                return deepcopy(value)
+        for send in (False,True):
+            with self.subTest(send=send):
+                store=MemoryStore();venue=Venue();normal=dispatch.Controller(store,venue,ROUTES2)
+                emergency=m.Controller(normal,venue)
+                def unavailable():
+                    self.assertEqual('emergency' in store.state,send)
+                    if send:self.assertEqual(store.state['emergency']['requests'],[])
+                    raise DispatchError('PUBLIC_READ_UNAVAILABLE')
+                with patch.object(venue,'metadata',side_effect=unavailable):
+                    with self.assertRaisesRegex(DispatchError,'PUBLIC_READ_UNAVAILABLE'):
+                        emergency.cycle(store.state['bucket'],send=send)
+                self.assertEqual(venue.sent,0)
+                self.assertEqual(store.events,['EMERGENCY_LATCHED_NEW_ENTRIES_BLOCKED'] if send else [])
+
     def test_supervisor_shutdown_timeout_is_reported_until_own_worker_exits(self):
         selected=state_from_case(q='40',stop='40',take='40')
         entered=threading.Event();release=threading.Event();stop=threading.Event()
@@ -186,10 +292,12 @@ class EmergencyPureTests(NoExternal):
         # Both the ordinary collection and its later market sample are overtaken
         # on every pass. The safety worker's actual controller saves the winning
         # checkpoint; normal planning must consume it without repeating any send.
+        # A still-working partial ENTRY needs planning rather than the completed
+        # fully-protected-position fast path.
         class MemoryStore:
             domain='software'
             def __init__(self):
-                self.state=state_from_case(q='100',stop='100',take='100')
+                self.state=state_from_case(q='40',stop='40',take='40')
                 self.writes=[]
             def load(self,bucket):return deepcopy(self.state)
             def pending_record(self,conn,state):return None
@@ -488,6 +596,7 @@ class EmergencyPureTests(NoExternal):
             'HL_TESTNET_LONG_ENTRY_ENABLED':'true','HL_TESTNET_LONG_NOT_BEFORE':datetime.fromtimestamp((T-60000)/1000,timezone.utc).isoformat(),
             'HL_TESTNET_PROTECTION_TIMING_CARD_ID':cid,'HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS':str(T+90000)}
         venue=dispatch.TestnetVenue(environment);venue.now=lambda:T
+        venue.fill_wakeups=ReconciledFillFeed()
         proposal=dict(operation='ENTRY',card_id=cid,role='long_account',account=A,symbol='DOGE',
             source_at=card['prepared']['execution']['at'],source_expires_at=card['source_expires_at'])
         with patch.object(m,'healthy',return_value=True):
@@ -519,6 +628,7 @@ class EmergencyPureTests(NoExternal):
                     source_expires_at=datetime.fromtimestamp(expires_source/1000,timezone.utc).isoformat())
                 store=Mock();store.domain='testnet';store.load.return_value=state
                 venue=dispatch.TestnetVenue(environment);venue.now=lambda:now['at']
+                venue.fill_wakeups=ReconciledFillFeed()
                 controller=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
                 entered=threading.Event();release=threading.Event()
                 @dispatch.market_lane
@@ -711,6 +821,22 @@ class EmergencyDatabaseTests(NoExternal):
                 self.emergency()
         self.assertEqual(self.v.sent,1)
         self.assertEqual(self.incident()['phase'],'ACTIVE')
+        self.assertEqual(self.incident()['requests'],[])
+
+    def test_deadline_latch_is_committed_before_public_metadata_read(self):
+        self.setup_emergency('100')
+        def unavailable():
+            # Inspect through the real PostgreSQL store while public I/O has
+            # not returned. The entry fence must already be durable.
+            incident=self.incident()
+            self.assertEqual(incident['phase'],'ACTIVE')
+            self.assertEqual(incident['reason'],'STOP_VERIFICATION_DEADLINE')
+            self.assertEqual(incident['requests'],[])
+            raise DispatchError('PUBLIC_READ_UNAVAILABLE')
+        with patch.object(self.v,'metadata',side_effect=unavailable):
+            with self.assertRaisesRegex(DispatchError,'PUBLIC_READ_UNAVAILABLE'):
+                self.emergency()
+        self.assertEqual(self.v.sent,1)
         self.assertEqual(self.incident()['requests'],[])
 
     def test_emergency_begin_returns_commit_local_sender_without_reload(self):

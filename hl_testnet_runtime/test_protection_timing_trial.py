@@ -1,12 +1,14 @@
 """Trial orchestration regressions; no exchange, signer or service credentials."""
 from contextlib import ExitStack
 from copy import deepcopy
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from . import protection_timing_trial as trial, emergency_close as emergency
 from .test_filled_quantity_dispatch import NoExternal,state_from_case,ROUTES2
 from .test_long_stream_runtime import env
 from .test_card_lifecycle import T,terminal,fill
+from .filled_dispatch_store import DispatchError
 
 
 class TrialTests(NoExternal):
@@ -82,7 +84,8 @@ class TrialTests(NoExternal):
         self.assertTrue(view['terminal_verified'])
         self.assertEqual(trial.measured_status(state,self.cid,view),'CLOSED')
 
-    def run_script(self,script,*,shutdown=True):
+    def run_script(self,script,*,shutdown=True,notifications=None,setup_failure=False,
+                   hint_during_read=False):
         state=deepcopy(self.state)
         state['bindings']=[];state['evidence']['bindings']=[]
         state['evidence']['snapshot']['open_orders']=[]
@@ -101,16 +104,33 @@ class TrialTests(NoExternal):
         class Controlled(Base):
             def register(self,cid):return self.store.load(None)
             def cycle(self,bucket,**options):
+                if notifications is not None and 'allowed_entry_card_id' in options:
+                    if not notifications.entry_allowed(ROUTES2[self.card_role]['account']):
+                        raise AssertionError('No ENTRY before authoritative gap reconciliation')
                 shared['calls'].append((shared['now'],options))
+                if notifications is not None and hint_during_read:
+                    notifications.allowed=False
+                    notifications.wake_event.set()
                 new=script(len(shared['calls']),shared['now'])
                 if new is not None:
                     shared['state']=deepcopy(new)
                 shared['state']['evidence']['snapshot']['at_ms']=shared['now']
                 return dict(status='WORKING')
+        Controlled.card_role=self.card['account_role']
         class ClockEvent:
             def wait(self,seconds):shared['now']+=100000
             def set(self):shared['shutdown']=True
         event=ClockEvent()
+        if notifications is not None:
+            wake_flag=[False]
+            notifications.wake_event.clear.side_effect=lambda:wake_flag.__setitem__(0,False)
+            notifications.wake_event.set.side_effect=lambda:wake_flag.__setitem__(0,True)
+            def wake_wait(seconds):
+                if wake_flag[0]:
+                    return True
+                shared['now']+=int(seconds*1000)
+                return False
+            notifications.wake_event.wait.side_effect=wake_wait
         environment={**env(),'HL_TESTNET_EMERGENCY_CLOSE':emergency.APPROVAL,
                      'HL_TESTNET_SHORT_ENTRY_ENABLED':'false'}
         def stop(stopped,timeout):
@@ -120,16 +140,158 @@ class TrialTests(NoExternal):
             stack.enter_context(patch.object(trial.dispatch,'controller_from_env',
                 side_effect=[Base(),Controlled()]))
             stack.enter_context(patch.object(trial,'CardStore')).return_value.load.return_value=self.card
-            stack.enter_context(patch.object(trial.stream,'_account_owned'))
+            owned=stack.enter_context(patch.object(trial.stream,'_account_owned'))
+            if setup_failure:
+                owned.side_effect=DispatchError('TEST_SETUP_FAILURE')
             stack.enter_context(patch.object(trial.threading,'Event',return_value=event))
             stack.enter_context(patch.object(trial.time,'monotonic',
                 side_effect=lambda:(shared['now']-T)/1000))
             stack.enter_context(patch.object(emergency,'start',return_value=True))
             stack.enter_context(patch.object(emergency,'healthy',return_value=True))
             stack.enter_context(patch.object(emergency,'stop_supervisor',side_effect=stop,create=True))
+            if notifications is not None:
+                stack.enter_context(patch.object(trial.dispatch,'TestnetVenue',Venue))
+                from . import fill_wakeups
+                factory=stack.enter_context(patch.object(fill_wakeups,'FillWakeups',return_value=notifications))
+                stack.enter_context(patch.object(trial.stream,'tick',return_value=dict(status='ENTRIES_DISABLED')))
+                stack.enter_context(patch.object(trial.stream,'_finish_notification_reconciliation',
+                    side_effect=lambda base,feed,token,symbols,started:feed.finish_reconciliation(token,complete=True)))
             result=trial.run_one(environment,self.cid)
+            if notifications is not None:
+                factory.assert_called_once_with({self.card['account_role']:ROUTES2[self.card['account_role']]['account']})
         self.assertTrue(shared['shutdown'])
         return result,shared['calls']
+
+    def notification_feed(self, *, ready=True, reconcile=True):
+        feed=Mock()
+        feed.allowed=False
+        feed.health.return_value={self.card['account_role']:dict(connected=ready,
+            snapshot_received=ready,subscriptions_acknowledged=2 if ready else 0)}
+        feed.entry_allowed.side_effect=lambda account:feed.allowed
+        feed.dirty_symbols.return_value=None
+        feed.begin_reconciliation.side_effect=lambda account:SimpleNamespace(account=account)
+        def finish(token, *, complete):
+            feed.allowed=complete and reconcile
+            return feed.allowed
+        feed.finish_reconciliation.side_effect=finish
+        return feed
+
+    def test_real_venue_trial_shares_one_feed_and_reconciles_before_entry_then_stops(self):
+        feed=self.notification_feed()
+        result,calls=self.run_script(lambda call,now:self.protected(),notifications=feed)
+        self.assertEqual(result['status'],'PROTECTED_TIMING_COMPLETE')
+        self.assertEqual(calls[0][1]['allowed_entry_card_id'],self.cid)
+        feed.start.assert_called_once_with()
+        feed.finish_reconciliation.assert_called_once()
+        feed.stop.assert_called_once_with()
+        self.assertEqual(result['entry_authorization_expires_at_ms'],T+90000)
+
+    def test_notification_bootstrap_timeout_prevents_entry_and_cleans_up_feed(self):
+        for feed in (self.notification_feed(ready=False),self.notification_feed(reconcile=False)):
+            with self.assertRaisesRegex(DispatchError,'TIMING_TRIAL_FILL_NOTIFICATION_GAP_NO_NEW_ENTRY'):
+                self.run_script(lambda call,now:self.fail('ENTRY must not run'),notifications=feed)
+            feed.start.assert_called_once_with()
+            feed.stop.assert_called_once_with()
+
+    def test_trial_setup_failure_after_feed_start_stops_feed(self):
+        feed=self.notification_feed()
+        with self.assertRaisesRegex(DispatchError,'TEST_SETUP_FAILURE'):
+            self.run_script(lambda call,now:self.fail('No trial cycle on setup failure'),
+                            notifications=feed,setup_failure=True)
+        feed.start.assert_called_once_with()
+        feed.stop.assert_called_once_with()
+        feed.finish_reconciliation.assert_not_called()
+
+    def test_notification_reconciliation_requires_full_authoritative_sweep_not_snapshot_alone(self):
+        feed=self.notification_feed()
+        base=Mock();base.venue.now.return_value=T
+        role=self.card['account_role'];route=ROUTES2[role]
+        with patch.object(trial.stream,'tick',return_value=dict(status='ENTRIES_DISABLED')) as tick, \
+             patch.object(trial.stream,'_finish_notification_reconciliation',return_value=False) as finish:
+            self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card))
+        self.assertFalse(feed.entry_allowed(route['account']))
+        self.assertFalse(tick.call_args.kwargs['new_entries'])
+        self.assertTrue(tick.call_args.kwargs['full_reconciliation'])
+        self.assertEqual(finish.call_args.args[-2:],(None,T))
+
+    def test_new_notification_before_entry_requires_another_saved_reconciliation(self):
+        feed=self.notification_feed()
+        role=self.card['account_role'];route=ROUTES2[role]
+        base=Mock();base.venue.now.return_value=T
+        with patch.object(trial.stream,'tick',return_value=dict(status='ENTRIES_DISABLED')) as tick, \
+             patch.object(trial.stream,'_finish_notification_reconciliation',
+                          side_effect=lambda *args:feed.finish_reconciliation(args[2],complete=True)):
+            self.assertTrue(trial._reconcile_notifications(base,feed,role,route,self.card))
+            feed.allowed=False
+            feed.dirty_symbols.return_value=('SOL',)
+            self.assertTrue(trial._reconcile_notifications(base,feed,role,route,self.card))
+        self.assertEqual(tick.call_count,2)
+        self.assertFalse(tick.call_args.kwargs['new_entries'])
+        self.assertFalse(tick.call_args.kwargs['full_reconciliation'])
+        self.assertEqual(tick.call_args.kwargs['dirty_symbols'],('SOL',))
+
+    def pause(self,state=None,**changes):
+        state=deepcopy(self.state) if state is None else state
+        feed=self.notification_feed();feed.allowed=True
+        arguments=dict(feed=feed,account=ROUTES2[self.card['account_role']]['account'],
+            now_ms=T,expiry_ms=T+90000,source_expiry_ms=T+300000,
+            observation_deadline_ms=T+315000,wall_remaining=315)
+        arguments.update(changes)
+        return trial._trial_pause(state,trial.outcome(state,self.cid,T),**arguments)
+
+    def test_quiet_entry_pause_requires_gap_clear_current_zero_exposure_proof(self):
+        self.assertEqual(self.pause(),5)
+        feed=self.notification_feed()
+        self.assertEqual(self.pause(feed=feed),.25)
+        self.assertEqual(self.pause(self.protected()),.25)
+        pending=deepcopy(self.state);pending['pending']='f'*64
+        self.assertEqual(self.pause(pending),.25)
+        emergency_state=deepcopy(self.state)
+        observation=trial.outcome(emergency_state,self.cid,T)
+        emergency_state['emergency']={'phase':'LATCHED'}
+        feed.allowed=True
+        self.assertEqual(trial._trial_pause(emergency_state,observation,feed=feed,
+            account=ROUTES2[self.card['account_role']]['account'],now_ms=T,
+            expiry_ms=T+90000,source_expiry_ms=T+300000,
+            observation_deadline_ms=T+315000,wall_remaining=315),.25)
+        stale=deepcopy(self.state);stale['evidence']['snapshot']['at_ms']=T-5001
+        self.assertEqual(self.pause(stale),.25)
+        incomplete=deepcopy(self.state);incomplete['evidence']['snapshot']['orders_complete']=False
+        self.assertEqual(self.pause(incomplete),.25)
+
+    def test_sends_continue_immediately_and_pauses_respect_original_deadlines(self):
+        self.assertEqual(self.pause(cycle_result=dict(order_requests_sent=1)),0)
+        self.assertEqual(self.pause(expiry_ms=T+100),.1)
+        self.assertEqual(self.pause(source_expiry_ms=T+150),.15)
+        self.assertEqual(self.pause(wall_remaining=.07),.07)
+        self.assertEqual(self.pause(observation_deadline_ms=T+20),.02)
+        self.assertEqual(self.pause(expiry_ms=T-1),5)
+        self.assertEqual(self.pause(feed=None),.25)
+
+    def test_hint_during_reconciliation_is_not_cleared_before_wait(self):
+        feed=self.notification_feed()
+        waiting=deepcopy(self.state);waiting['entry_timing_armed']={self.cid:T}
+        result,calls=self.run_script(lambda call,now:waiting if call==1 else self.protected(),
+                                   notifications=feed,hint_during_read=True)
+        self.assertEqual(result['status'],'PROTECTED_TIMING_COMPLETE')
+        self.assertEqual(calls[0][0],calls[1][0])
+        self.assertEqual(feed.wake_event.clear.call_count,2)
+        feed.wake_event.wait.assert_called_once_with(.25)
+
+    def test_definitely_unsent_marker_is_terminal_without_fill_or_closure_claim(self):
+        state=deepcopy(self.state)
+        state['bindings']=[];state['evidence']['bindings']=[]
+        state['evidence']['snapshot']['open_orders']=[]
+        state['originals'][self.cid]['entry_unsent_no_retry']=True
+        observed=trial.outcome(state,self.cid,T)
+        self.assertEqual(observed['lifecycle'],'ABORTED_UNSENT')
+        self.assertTrue(observed['terminal_verified'])
+        self.assertEqual(observed['entry_quantity'],'0')
+        self.assertFalse(observed['closure_verified'])
+        self.assertFalse(observed['protection_verified'])
+        result,calls=self.run_script(lambda call,now:state)
+        self.assertEqual(result['status'],'ABORTED_UNSENT')
+        self.assertEqual(len(calls),1)
 
     def test_management_continues_after_entry_grant_expires_without_new_entry(self):
         waiting=deepcopy(self.state);waiting['entry_timing_armed']={self.cid:T}
