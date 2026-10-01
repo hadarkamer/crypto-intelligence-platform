@@ -6,11 +6,13 @@ All output is a fixed, redacted report. A pass is not order acceptance.
 """
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, localcontext
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import hashlib
 import importlib.metadata
 import json
 import re
+import threading
 import time
 from .risk_policy import budget, CURRENT_RISK_USD, VERSION as RISK_VERSION
 
@@ -63,8 +65,28 @@ def decode(raw):
 
 class InfoReader:
     """Fixed Testnet /info, fixed read types, no retries or redirects."""
-    def __init__(self):
+    def __init__(self, *, parallel=False):
         self.calls = 0
+        self.parallel = parallel is True
+        self._calls_lock = threading.Lock()
+
+    def read_many(self, requests):
+        """Read an ordered independent group, joining every started read.
+
+        Each read owns its connection. Results live only in this invocation;
+        callers must keep repeated verification probes outside this group.
+        """
+        if not self.parallel:
+            return [self.read(kind, **kwargs) for kind, kwargs in requests]
+        pool = ThreadPoolExecutor(max_workers=4)
+        try:
+            futures = [pool.submit(self.read, kind, **kwargs)
+                       for kind, kwargs in requests]
+            return [future.result() for future in futures]
+        finally:
+            # Never leave reads from a failed authorization running into the
+            # next one. This also discards work that has not started yet.
+            pool.shutdown(wait=True, cancel_futures=True)
 
     def read(self, kind, *, user=None, coin=None):
         if HOST != 'api.hyperliquid-testnet.xyz':
@@ -78,7 +100,8 @@ class InfoReader:
         else:
             raise Blocked('READ_TYPE_NOT_ALLOWED')
         connection = http.client.HTTPSConnection(HOST, timeout=4)
-        self.calls += 1
+        with self._calls_lock:
+            self.calls += 1
         started = time.monotonic()
         try:
             connection.request('POST', '/info', json.dumps(body).encode(),
@@ -278,37 +301,55 @@ def run_check(env, *, client=None, local_key_check=key_matches):
             raise Blocked('INVALID_TEST_PLAN')
         plan = decode(raw_plan) if raw_plan else None
         client = client if client is not None else InfoReader()
-        if client.read('userRole', user=account) != {'role': 'user'}:
+        parallel = (getattr(client, 'parallel', False) is True
+                    and callable(getattr(client, 'read_many', None)))
+        identity = None
+        if parallel:
+            identity = client.read_many([('userRole', {'user': account}),
+                                         ('userRole', {'user': agent}),
+                                         ('userAbstraction', {'user': account})])
+        account_role = identity[0] if identity is not None else client.read('userRole', user=account)
+        if account_role != {'role': 'user'}:
             raise Blocked('INDEPENDENT_TEST_ACCOUNT_REQUIRED')
-        role = client.read('userRole', user=agent)
+        role = identity[1] if identity is not None else client.read('userRole', user=agent)
         if (not isinstance(role, dict) or role.get('role') != 'agent'
                 or not isinstance(role.get('data'), dict) or address(role['data'].get('user')) != account):
             raise Blocked('AGENT_ACCOUNT_MISMATCH')
         result['account_mapping_verified'] = True
-        mode = client.read('userAbstraction', user=account)
+        mode = identity[2] if identity is not None else client.read('userAbstraction', user=account)
+        balance_kind = ('spotClearinghouseState' if mode == 'unifiedAccount'
+                        else 'clearinghouseState' if mode == 'disabled' else None)
+        if balance_kind is None:
+            raise Blocked('ACCOUNT_MODE_REQUIRES_REVIEW')
+        samples = None
+        if parallel:
+            requests = [(balance_kind, {'user': account}),
+                        ('activeAssetData', {'user': account, 'coin': symbol})]
+            if plan is not None:
+                requests.append(('meta', {}))
+            samples = client.read_many(requests)
         if mode == 'unifiedAccount':
-            total, unheld = unified_usdc(client.read('spotClearinghouseState', user=account))
+            state = samples[0] if samples is not None else client.read('spotClearinghouseState', user=account)
+            total, unheld = unified_usdc(state)
             result['balance_source'] = 'unified_spot_state'
         elif mode == 'disabled':
-            state = client.read('clearinghouseState', user=account)
+            state = samples[0] if samples is not None else client.read('clearinghouseState', user=account)
             summary = state.get('marginSummary') if isinstance(state, dict) else None
             if not isinstance(summary, dict):
                 raise Blocked('INVALID_BALANCE_RESPONSE')
             total = number(summary.get('accountValue'), signed=True)
             unheld = number(state.get('withdrawable'))
             result['balance_source'] = 'standard_perp_state'
-        else:
-            raise Blocked('ACCOUNT_MODE_REQUIRES_REVIEW')
         result['positive_usdc_observed'] = total > 0
         result['unheld_balance_observed'] = unheld > 0
-        active = client.read('activeAssetData', user=account, coin=symbol)
+        active = samples[1] if samples is not None else client.read('activeAssetData', user=account, coin=symbol)
         available, max_size = capacity(active, account, symbol)
         result['exchange_capacity_observed'] = available > 0 and max_size > 0
         key = env.get('HL_TESTNET_AGENT_KEY', '')
         if key:
             result['local_key_address_checked'] = local_key_check(key, agent)
         if plan is not None:
-            meta = client.read('meta')
+            meta = samples[2] if samples is not None else client.read('meta')
             universe = meta.get('universe') if isinstance(meta, dict) else None
             if not isinstance(universe, list) or len(universe) > 10000:
                 raise Blocked('INVALID_METADATA')
