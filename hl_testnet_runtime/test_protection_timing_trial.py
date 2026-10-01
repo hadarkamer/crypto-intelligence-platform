@@ -11,6 +11,7 @@ from .test_long_stream_runtime import env
 from .test_card_lifecycle import T,terminal,fill
 from .filled_dispatch_store import DispatchError
 from .request_budget import BudgetError
+from . import filled_quantity_dispatch as dispatch
 
 
 class TrialTests(NoExternal):
@@ -214,6 +215,7 @@ class TrialTests(NoExternal):
         with patch.object(trial.stream,'tick',return_value=dict(status='ENTRIES_DISABLED')) as tick, \
              patch.object(trial.stream,'_finish_notification_reconciliation',return_value=False) as finish:
             self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card))
+
         self.assertFalse(feed.entry_allowed(route['account']))
         self.assertFalse(tick.call_args.kwargs['new_entries'])
         self.assertTrue(tick.call_args.kwargs['full_reconciliation'])
@@ -558,3 +560,149 @@ class TrialTests(NoExternal):
         with patch.object(trial.stream,'tick',return_value=dict(
                 status='EXISTING_RECONCILIATION_REQUIRED',failure_code='UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY')):
             self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card))
+
+class HistoricalTrialAdmissionTests(NoExternal):
+    def completed_case(self):
+        from . import fill_wakeups
+        from .test_fill_wakeups import Clock
+        from .test_priority_fill_runtime import ready
+        state=state_from_case(q='0',expiry_seconds=300)
+        binding=state['bindings'][0]
+        state['evidence']['snapshot']['open_orders']=[]
+        state['evidence']['snapshot']['terminal_orders']=[terminal(binding,'ENTRY','0')]
+        new=state_from_case(n=2,q='0',expiry_seconds=300)
+        cid=new['bindings'][0]['card_id']
+        state['originals'][cid]=new['originals'][cid]
+        role=new['originals'][cid]['card']['account_role'];route=ROUTES2[role]
+        environment={**env(),'HL_TESTNET_RUNTIME_MODE':'long_stream_testnet_v1',
+            'HL_TESTNET_PROTECTION_TIMING_CARD_ID':cid,
+            'HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS':str(T+90000)}
+        venue=dispatch.TestnetVenue(environment)
+        venue.now=Mock(return_value=T+100)
+        clock=Clock();feed=fill_wakeups.FillWakeups({role:route['account']},clock=clock)
+        ready(feed,route['account'])
+        feed.finish_reconciliation(feed.begin_reconciliation(route['account']),complete=True)
+        venue.fill_wakeups=feed
+        current=[deepcopy(state)]
+        store=Mock(domain='testnet');store.load.side_effect=lambda bucket:deepcopy(current[0])
+        controller=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+        def collect(bucket,prior):
+            current[0]['revision']+=1
+            current[0]['evidence']['snapshot']['at_ms']=venue.now()
+            return deepcopy(current[0])
+        with patch.object(controller,'_refresh_once',side_effect=collect):
+            controller.refresh(state['bucket'])
+        return controller,venue,feed,current,cid,role,route
+
+    def prepare(self,controller,current,cid,**kwargs):
+        return controller._prepare_cycle(current[0]['bucket'],send=True,
+            allow_new_entries=True,allowed_entry_card_id=cid,**kwargs)
+
+    def test_fresh_historical_trial_reuses_committed_checkpoint_then_funds_286_reads(self):
+        from .request_budget import request_weight
+        controller,venue,feed,current,cid,role,route=self.completed_case()
+        before=deepcopy(current[0]);batch=Mock()
+        with patch.object(venue,'_fund_info_plan',return_value=batch) as fund, \
+             patch.object(dispatch.roles,'route_for',return_value=route), \
+             patch.object(controller,'refresh',side_effect=AssertionError('NO_DUPLICATE_REFRESH')) as refresh, \
+             patch.object(venue,'sample',return_value=dict(mark_price='10',at_ms=T+100)), \
+             patch.object(venue,'metadata',return_value={}), \
+             patch.object(controller,'_plan_cycle',return_value=dict(status='NO_ACTION_NEEDED')) as plan:
+            self.assertEqual(self.prepare(controller,current,cid)['status'],'NO_ACTION_NEEDED')
+        self.assertEqual(sum(request_weight('/info',b) for b in fund.call_args.args[0]),286)
+        self.assertEqual(plan.call_args.args[1],before)
+        self.assertEqual(current[0],before)
+        refresh.assert_not_called();batch.close.assert_called_once()
+        self.assertTrue(feed.entry_allowed(route['account']))
+
+    def test_historical_admission_refusal_spends_no_further_http_or_attempt(self):
+        controller,venue,feed,current,cid,role,route=self.completed_case()
+        with patch.object(venue,'_fund_info_plan',
+                side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')), \
+             patch.object(dispatch.roles,'route_for',return_value=route), \
+             patch.object(controller,'refresh') as refresh, \
+             patch.object(venue,'sample') as sample,patch.object(venue,'metadata') as meta:
+            for _ in range(3):
+                with self.assertRaises(BudgetError):self.prepare(controller,current,cid)
+        for operation in (refresh,sample,meta):operation.assert_not_called()
+        controller.store.prepare_and_begin.assert_not_called()
+        self.assertEqual(venue.sent,0)
+
+    def test_historical_reuse_denied_for_changed_stale_incomplete_unfinished_or_attempted_state(self):
+        from .test_fill_wakeups import fills
+        for variant in ('revision','hint','generation','stale','future','pending',
+                        'history','orders','bindings','working','position','attempted',
+                        'wrong-card','disabled','preview'):
+            with self.subTest(variant=variant):
+                controller,venue,feed,current,cid,role,route=self.completed_case()
+                options=dict(send=True,allow_new_entries=True,allowed_entry_card_id=cid)
+                state=current[0];snapshot=state['evidence']['snapshot']
+                if variant=='revision':state['revision']+=1
+                elif variant=='hint':
+                    token=feed.begin_reconciliation(route['account'])
+                    feed._receive(route['account'],token.generation,json.dumps(fills(
+                        route['account'],rows=[dict(coin=state['symbol'],tid=88,oid=888,time=T+200)])))
+                elif variant=='generation':feed._opened(route['account'])
+                elif variant=='stale':venue.now.return_value=T+15101
+                elif variant=='future':venue.now.return_value=T+99
+                elif variant=='pending':state['pending']='e'*64
+                elif variant=='history':snapshot['history_complete']=False
+                elif variant=='orders':snapshot['orders_complete']=False
+                elif variant=='bindings':state['evidence']['bindings']=[]
+                elif variant=='working':snapshot['open_orders']=state_from_case(q='0')['evidence']['snapshot']['open_orders']
+                elif variant=='position':snapshot['position_quantity']='1'
+                elif variant=='attempted':state['entry_timing_armed']={cid:T}
+                elif variant=='wrong-card':options['allowed_entry_card_id']='e'*64
+                elif variant=='disabled':options['allow_new_entries']=False
+                elif variant=='preview':options['send']=False
+                self.assertIsNone(controller._trial_preparation_checkpoint(deepcopy(state),**options))
+
+    def test_hint_or_revision_change_during_admission_releases_plan_without_http(self):
+        from .test_fill_wakeups import fills
+        for variant in ('revision','hint'):
+            with self.subTest(variant=variant):
+                controller,venue,feed,current,cid,role,route=self.completed_case();batch=Mock()
+                def changed(bodies):
+                    if variant=='revision':current[0]['revision']+=1
+                    else:
+                        token=feed.begin_reconciliation(route['account'])
+                        feed._receive(route['account'],token.generation,json.dumps(fills(
+                            route['account'],rows=[dict(coin=current[0]['symbol'],tid=89,oid=889,time=T+200)])))
+                    return batch
+                with patch.object(venue,'_fund_info_plan',side_effect=changed), \
+                     patch.object(dispatch.roles,'route_for',return_value=route), \
+                     patch.object(controller,'refresh') as refresh, \
+                     patch.object(venue,'sample') as sample,patch.object(venue,'metadata') as meta:
+                    with self.assertRaisesRegex(DispatchError,'TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST'):
+                        self.prepare(controller,current,cid)
+                for operation in (refresh,sample,meta):operation.assert_not_called()
+                batch.close.assert_called_once()
+
+    def test_completed_trial_checkpoint_does_not_suppress_normal_or_emergency_refresh(self):
+        controller,venue,feed,current,cid,role,route=self.completed_case()
+        for urgent in (False,True):
+            with patch.object(controller,'_refresh_once',return_value=deepcopy(current[0])) as collect:
+                controller.refresh(current[0]['bucket'],emergency=urgent)
+            collect.assert_called_once()
+
+    def test_failed_new_collection_invalidates_prior_completed_trial_proof(self):
+        controller,venue,feed,current,cid,role,route=self.completed_case()
+        with patch.object(controller,'_refresh_once',
+                side_effect=DispatchError('OBSERVATION_CHANGED_RETRY')):
+            with self.assertRaises(DispatchError):controller.refresh(current[0]['bucket'])
+        self.assertIsNone(controller._trial_preparation_checkpoint(current[0],send=True,
+            allow_new_entries=True,allowed_entry_card_id=cid))
+
+    def test_completed_cache_keeps_one_per_bucket_and_prunes_expired_proofs(self):
+        controller,venue,feed,current,cid,role,route=self.completed_case()
+        bucket=current[0]['bucket'];old=controller._observations.completed[bucket]
+        with patch.object(controller,'_refresh_once',return_value=deepcopy(current[0])):
+            controller.refresh(bucket)
+        self.assertEqual(len(controller._observations.completed),1)
+        self.assertIsNot(controller._observations.completed[bucket],old)
+        controller._observations.completed['old-bucket']=old
+        venue.now.return_value=T+15101
+        current[0]['evidence']['snapshot']['at_ms']=venue.now()
+        with patch.object(controller,'_refresh_once',return_value=deepcopy(current[0])):
+            controller.refresh(bucket)
+        self.assertEqual(set(controller._observations.completed),{bucket})
