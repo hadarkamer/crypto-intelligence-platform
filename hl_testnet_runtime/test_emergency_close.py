@@ -405,6 +405,33 @@ class EmergencyDatabaseTests(NoExternal):
         self.assertEqual(self.store.load(self.bucket)['evidence']['snapshot']['position_quantity'],'0')
         self.assertEqual(self.store.load(self.bucket)['pending'],pending)
 
+    def test_stop_http_call_still_in_progress_does_not_hold_emergency_lane(self):
+        self.entry('100')
+        emergency_venue=VenueFromExisting(self.v)
+        emergency_venue.t+=5001
+        emergency=m.Controller(self.c,emergency_venue)
+        entered=threading.Event();release=threading.Event()
+        def delayed_stop(request):
+            self.assertEqual(request['proposal']['leg'],'STOP')
+            self.v.sent+=1
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError('TEST_STOP_TRANSPORT_WAS_NOT_RELEASED')
+            raise TimeoutError()
+        with patch.object(self.v,'send',side_effect=delayed_stop):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                ordinary=pool.submit(self.cycle)
+                try:
+                    self.assertTrue(entered.wait(1))
+                    pending=self.store.load(self.bucket)['pending']
+                    close=pool.submit(emergency.cycle,self.bucket,send=True).result(timeout=2)
+                    self.assertEqual(close['operation'],'EMERGENCY_CLOSE')
+                    self.assertEqual(emergency_venue.requests[-1]['proposal']['quantity'],'100')
+                    self.assertEqual(self.store.load(self.bucket)['pending'],pending)
+                finally:
+                    release.set()
+                self.assertEqual(ordinary.result(timeout=2)['status'],'OUTCOME_UNKNOWN')
+
     def test_unowned_position_blocks_send_but_latches_new_entries(self):
         self.setup_emergency('100')
         original_read=self.v.read

@@ -615,9 +615,44 @@ class Controller:
             return current
         return self.store.change(bucket,state['revision'],'PUBLIC_RECONCILIATION',now,update)
 
-    @market_lane
     def cycle(self,bucket,*,send=False,allow_new_entries=True,allowed_entry_card_id=None):
         """A false send flag never reserves, signs, cancels or places an order."""
+        prepared=self._prepare_cycle(bucket,send=send,allow_new_entries=allow_new_entries,
+                                     allowed_entry_card_id=allowed_entry_card_id)
+        if isinstance(prepared,dict):
+            return prepared
+        state,request,proposal,route=prepared
+        # Release the local reconciliation lane before transport. A delayed
+        # stop/entry HTTP reply must not prevent the independent emergency worker
+        # from observing a fill and acting on its durable request identity.
+        sent_before=getattr(self.venue,'sent',0)
+        try:
+            raw=self.venue.send(request)
+            reply=normalized_reply(raw,proposal['action']['type'],
+                                   account=proposal['account'],agent=route['agent'])
+        except Exception:
+            return dict(status='OUTCOME_UNKNOWN',order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
+        try:
+            self.store.reply(state,reply,self.venue.now())
+        except DispatchError as exc:
+            if str(exc)!='CONCURRENT_DISPATCH_RELOAD_REQUIRED':
+                raise
+            # Public reconciliation may overtake an HTTP receipt. Preserve its
+            # newer checkpoint and resolve through the existing pending fence;
+            # never replay or conceal that this transport was invoked.
+            return dict(status='OUTCOME_UNKNOWN',
+                        order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
+        result=dict(status=reply['state'],request_id=request['request_id'],
+                    order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
+        if reply['state']=='REJECTED':
+            result['rejection_code']=reply['code']
+            result['rejection_reason']=reply.get('venue_reason')
+            result['rejection_subject']=reply.get('rejection_subject')
+            result['symbol']=proposal['symbol']
+        return result
+
+    @market_lane
+    def _prepare_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id):
         state=self.refresh(bucket)
         if state['pending']:
             pending=self.store.request(state['pending'])
@@ -662,23 +697,8 @@ class Controller:
         route=self.routes[proposal['role']]
         state=self.store.begin(state,proposal,route['agent'],self.venue.now())
         request=self.store.request(state['pending'])
-        # A lost commit reply never reaches here. Once here, any error remains uncertain.
-        sent_before=getattr(self.venue,'sent',0)
-        try:
-            raw=self.venue.send(request)
-            reply=normalized_reply(raw,proposal['action']['type'],
-                                   account=proposal['account'],agent=route['agent'])
-        except Exception:
-            return dict(status='OUTCOME_UNKNOWN',order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
-        self.store.reply(state,reply,self.venue.now())
-        result=dict(status=reply['state'],request_id=request['request_id'],
-                    order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
-        if reply['state']=='REJECTED':
-            result['rejection_code']=reply['code']
-            result['rejection_reason']=reply.get('venue_reason')
-            result['rejection_subject']=reply.get('rejection_subject')
-            result['symbol']=proposal['symbol']
-        return result
+        # A lost commit reply never reaches transport.
+        return state,request,proposal,route
 
 
 class TestnetVenue:

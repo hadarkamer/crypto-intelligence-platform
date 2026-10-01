@@ -533,9 +533,11 @@ class DispatchDatabaseTests(NoExternal):
         self.assertEqual(len(self.v.requests),1)
         self.assertEqual(sum(r['order_requests_sent'] for r in results),1)
         state=self.store.load(self.bucket)
-        request=self.store.request(state['pending'])
+        request=self.store.request(state['last_request'])
         self.assertEqual(request['attempts'],1)
-        self.assertEqual(request['phase'],'ACK_UNVERIFIED')
+        self.assertIn(request['phase'],('ACK_UNVERIFIED','OBSERVED','OUTCOME_UNKNOWN'))
+        with self.j._transaction() as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {SCHEMA}.requests').fetchone()[0],1)
     def test_stale_before_begin_blocks_even_after_reservation(self):
         s=self.c.refresh(self.bucket);p=m.choose(s,ROUTES2,META,self.v.sample(A,'DOGE'),now_ms=self.v.now())
         s=self.store.reserve(s,p,self.v.now())
