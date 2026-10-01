@@ -6,6 +6,7 @@ HTTP control route, automatic startup, application callbacks or extra timer.
 No existing normalTpsl order is converted. Release requires a separate approval.
 """
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
 import http.client
@@ -25,6 +26,20 @@ from . import checks, two_account_execution as roles
 VERSION = 'connected-filled-quantity-dispatch-v1'
 AFTER_EXIT = 'cancel_remainder_after_exit_v1'
 HOST = 'api.hyperliquid-testnet.xyz'
+
+
+def joined_public_reads(*calls):
+    """Overlap independent reads, joining every started read before returning.
+
+    No result is reused across cycles and no read is retried. Callers keep
+    verification passes and final source/evidence checks sequential.
+    """
+    pool=ThreadPoolExecutor(max_workers=min(4,len(calls)))
+    try:
+        futures=[pool.submit(call) for call in calls]
+        return tuple(future.result() for future in futures)
+    finally:
+        pool.shutdown(wait=True,cancel_futures=True)
 
 
 def rejection_reason(raw):
@@ -665,6 +680,11 @@ class Controller:
         return result
 
     def _prepare_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id):
+        # An already-latched emergency owns this bucket. Avoid competing full
+        # public collections before discovering the same latch during planning.
+        # A latch appearing after this read is still checked by planning/begin.
+        if self.store.load(bucket).get('emergency') is not None:
+            return dict(status='EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE',order_requests_sent=0)
         try:
             state=self.refresh(bucket)
         except DispatchError as exc:
@@ -679,7 +699,11 @@ class Controller:
             if pending['phase']!='PREPARED':
                 return dict(status=pending['phase'],order_requests_sent=0)
         else: pending=None
-        sample=self.venue.sample(state['account'],state['symbol']);meta=self.venue.metadata()
+        if getattr(self.venue,'parallel_preflight',False) is True:
+            sample,meta=joined_public_reads(
+                lambda:self.venue.sample(state['account'],state['symbol']),self.venue.metadata)
+        else:
+            sample=self.venue.sample(state['account'],state['symbol']);meta=self.venue.metadata()
         prepared=self._plan_cycle(bucket,state,sample,meta,send=send,
             allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id)
         if isinstance(prepared,dict):
@@ -794,6 +818,7 @@ class TestnetVenue:
     Independent same-market OCO is not assumed; later cards wait for finality.
     """
     domain='testnet'
+    parallel_preflight=True
     def __init__(self,env): self.env=env;self.sent=0
     @staticmethod
     def now(): return time.time_ns()//1000000
@@ -809,7 +834,12 @@ class TestnetVenue:
     def empty_snapshot(self,account,symbol):
         reader=evidence.PublicReader();start=self.now()
         for _ in range(2):
-            orders=reader.read('frontendOpenOrders',account);state=reader.read('clearinghouseState',account)
+            if self.parallel_preflight is True:
+                orders,state=joined_public_reads(
+                    lambda:reader.read('frontendOpenOrders',account),
+                    lambda:reader.read('clearinghouseState',account))
+            else:
+                orders=reader.read('frontendOpenOrders',account);state=reader.read('clearinghouseState',account)
             if (not isinstance(orders,list) or not isinstance(state,dict)
                     or not isinstance(state.get('assetPositions'),list)
                     or any(not isinstance(o,dict) or not isinstance(o.get('coin'),str)
@@ -968,12 +998,6 @@ class TestnetVenue:
                         for v in view['cards']):
                     raise DispatchError('SHARED_MARKET_PREDECESSOR_NOT_FINAL')
         if proposal['operation']=='ENTRY':
-            if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
-                # An unrelated position or order appearing since the worker's
-                # sweep must block new entries at the final authorization gate.
-                from .long_stream_runtime import _account_owned
-                _account_owned(self,route['account'],self.store.for_account(route['account']),
-                               role=proposal['role'])
             source=state['originals'][proposal['card_id']]['card']['prepared']['execution']
             from .source_window import source_fresh, timestamp
             expiry=state['originals'][proposal['card_id']]['card'].get('source_expires_at',
@@ -982,7 +1006,22 @@ class TestnetVenue:
                     now=datetime.fromtimestamp(self.now()/1000,timezone.utc)):
                 raise DispatchError('NEW_TRIAL_SOURCE_NOT_FRESH')
             plan={k:source[k] for k in ('symbol','side','entry','stop','take_profit')}
-            report=roles.budget_for_role(self.env,proposal['role'],route['account'],route['agent'],plan,checks.InfoReader())
+            def budget():
+                return roles.budget_for_role(self.env,proposal['role'],route['account'],
+                    route['agent'],plan,checks.InfoReader(parallel=self.parallel_preflight is True))
+            if self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1':
+                # Ownership and capacity are independent public checks. Neither
+                # can authorize an attempt alone; join both before final gates.
+                from .long_stream_runtime import _account_owned
+                def owned():
+                    return _account_owned(self,route['account'],self.store.for_account(route['account']),
+                                          role=proposal['role'])
+                if self.parallel_preflight is True:
+                    _,report=joined_public_reads(owned,budget)
+                else:
+                    owned();report=budget()
+            else:
+                report=budget()
             if report.get('status')!='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION' or report.get('test_plan_checked') is not True:
                 raise DispatchError('EXACT_ENTRY_BUDGET_NOT_VERIFIED')
             roles.entry_action_headroom(route['account'],checks.InfoReader())
