@@ -46,6 +46,69 @@ class Venue(NormalVenue):
 
 
 class EmergencyPureTests(NoExternal):
+    @staticmethod
+    def closed_release_state():
+        state=state_from_case(q='40',stop='40');b=state['bindings'][0]
+        snap=state['evidence']['snapshot'];snap['open_orders']=[];snap['position_quantity']='0'
+        snap['fills'].append(fill(b,'STOP',qty='40'))
+        snap['terminal_orders']=[{**terminal(b,'ENTRY','40'),'state':'CANCELED'},terminal(b,'STOP','40')]
+        state['emergency']=dict(version=m.VERSION,phase='CLOSED_VERIFIED',latched_at_ms=T-10,
+            closed_at_ms=T,card_id=b['card_id'],pending_close=None,pending_cancel=None,
+            requests=[dict(phase='OBSERVED',proposal=dict(operation='EMERGENCY_CLOSE'),
+                           observed_oid=b['orders']['STOP'][0])])
+        return state
+
+    def test_closed_release_requires_fresh_complete_exact_finality(self):
+        good=self.closed_release_state()
+        self.assertTrue(m.closed_release_proof(good,now_ms=T,not_before_ms=T))
+        for invalid in ('stale','pre_release','future','account','symbol','pending','unknown',
+                        'active','incomplete','closure_time','working_order'):
+            with self.subTest(invalid=invalid):
+                state=deepcopy(good);snap=state['evidence']['snapshot'];now=T;start=T
+                if invalid=='stale':now=T+5001
+                elif invalid=='pre_release':start=T+1
+                elif invalid=='future':now=T-1
+                elif invalid=='account':snap['account']=B
+                elif invalid=='symbol':snap['symbol']='BTC'
+                elif invalid=='pending':state['pending']='a'*64
+                elif invalid=='unknown':state['emergency']['requests'][0]['phase']='OUTCOME_UNKNOWN'
+                elif invalid=='active':state['emergency']['phase']='ACTIVE'
+                elif invalid=='incomplete':snap['history_complete']=False
+                elif invalid=='closure_time':state['emergency']['closed_at_ms']=T+1
+                else:
+                    opened=state_from_case(q='40',stop='40')['evidence']['snapshot']['open_orders']
+                    snap['open_orders']=opened
+                self.assertFalse(m.closed_release_proof(state,now_ms=now,not_before_ms=start))
+
+    def test_release_inventory_rejects_unknown_or_target_orders_and_positions(self):
+        state=self.closed_release_state();account=state['account'];symbol=state['symbol']
+        self.assertEqual(m._release_inventory(account,symbol,'long_account',[state],[],
+                         dict(assetPositions=[])),dict(orders=[],positions=[]))
+        for orders,positions in (([dict(coin=symbol,oid=1000)],[]),
+                                ([dict(coin='ETH',oid=123)],[]),
+                                ([],[dict(position=dict(coin=symbol,szi='1'))]),
+                                ([],[dict(position=dict(coin='ETH',szi='1'))])):
+            with self.subTest(orders=orders,positions=positions):
+                with self.assertRaises(DispatchError):
+                    m._release_inventory(account,symbol,'long_account',[state],orders,
+                                         dict(assetPositions=positions))
+
+    def test_release_inventory_allows_only_consistent_unrelated_owned_position(self):
+        closed=self.closed_release_state();other=state_from_case(q='40',stop='40',take='40')
+        other['symbol']='ETH'
+        for b in other['bindings']:b['symbol']='ETH'
+        other['evidence']['snapshot']['symbol']='ETH'
+        orders=[dict(coin='ETH',oid=int(oid)) for b in other['bindings']
+                for ids in b['orders'].values() for oid in ids]
+        positions=dict(assetPositions=[dict(position=dict(coin='ETH',szi='40'))])
+        result=m._release_inventory(closed['account'],closed['symbol'],'long_account',
+                                     [closed,other],orders,positions)
+        self.assertEqual(result['positions'],[('ETH','40')])
+        other['pending']='b'*64
+        with self.assertRaisesRegex(DispatchError,'REQUEST_OR_OWNER'):
+            m._release_inventory(closed['account'],closed['symbol'],'long_account',
+                                 [closed,other],orders,positions)
+
     def test_recent_protected_pending_entry_uses_durable_normal_checkpoint(self):
         state=state_from_case(q='40',stop='40',take='40')
         # The remaining ENTRY can fill later; the existing 40-unit tranche is
@@ -858,6 +921,86 @@ class EmergencyDatabaseTests(NoExternal):
         return self.em.cycle(self.bucket,send=send)
 
     def incident(self):return self.store.load(self.bucket)['emergency']
+
+    def closed_release_setup(self):
+        self.setup_emergency('100');self.emergency();self.emergency()
+        state=self.store.load(self.bucket)
+        self.assertEqual(state['emergency']['phase'],'CLOSED_VERIFIED')
+        self.v.env=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
+            RENDER_SERVICE_ID=dispatch.roles.SERVICE,HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+            HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
+            HL_TESTNET_LONG_STREAM='approved_alerts_v1',HL_TESTNET_FILLED_AFTER_EXIT_POLICY=dispatch.AFTER_EXIT,
+            HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+        return state
+
+    @staticmethod
+    def flat_release_inventory(kind,account):
+        return [] if kind=='frontendOpenOrders' else dict(assetPositions=[])
+
+    def test_explicit_closed_release_archives_incident_and_unblocks_only_its_fence(self):
+        state=self.closed_release_setup();identity=m.incident_identity(state);sent=self.v.sent
+        from .card_sync_evidence import PublicReader
+        with patch.object(PublicReader,'read',side_effect=self.flat_release_inventory):
+            result=self.em.release_closed_incident(self.bucket,account=state['account'],incident_id=identity)
+        current=self.store.load(self.bucket)
+        self.assertEqual(result['status'],'CLOSED_INCIDENT_RELEASED')
+        self.assertNotIn('emergency',current)
+        self.assertEqual(current['emergency_history'][0]['incident'],state['emergency'])
+        self.assertEqual(current['emergency_history'][0]['incident_id'],identity)
+        self.assertEqual(self.v.sent,sent)
+        self.assertEqual(self.v.env['HL_TESTNET_LONG_ENTRY_ENABLED'],'false')
+        self.assertEqual(self.v.env['HL_TESTNET_SHORT_ENTRY_ENABLED'],'false')
+        with self.j._transaction() as conn:
+            m.fence(conn,current,'ENTRY')
+            event=conn.execute(f'SELECT event FROM {SCHEMA}.events WHERE bucket=%s ORDER BY revision DESC LIMIT 1',
+                               (self.bucket,)).fetchone()
+        self.assertEqual(event[0],'EMERGENCY_FINAL_INCIDENT_EXPLICITLY_ARCHIVED_ENTRIES_STAY_DISABLED')
+        self.assertEqual(life.review(current['bindings'],current['evidence']['snapshot'],
+                                    now_ms=self.v.now())['cards'][0]['state'],'CLOSED')
+
+    def test_closed_release_refuses_wrong_scope_active_unknown_and_entry_enabled(self):
+        state=self.closed_release_setup();identity=m.incident_identity(state)
+        with self.assertRaisesRegex(DispatchError,'INCIDENT_OR_ACCOUNT'):
+            self.em.release_closed_incident(self.bucket,account=B,incident_id=identity)
+        with self.assertRaisesRegex(DispatchError,'INCIDENT_OR_ACCOUNT'):
+            self.em.release_closed_incident(self.bucket,account=A,incident_id='a'*64)
+        self.v.env['HL_TESTNET_LONG_ENTRY_ENABLED']='true'
+        with self.assertRaisesRegex(DispatchError,'ENTRIES_DISABLED'):
+            self.em.release_closed_incident(self.bucket,account=A,incident_id=identity)
+        self.v.env['HL_TESTNET_LONG_ENTRY_ENABLED']='false'
+        def corrupt(conn,current):
+            current['emergency']['requests'][0]['phase']='OUTCOME_UNKNOWN'
+            return None
+        current=self.store.change(self.bucket,self.store.load(self.bucket)['revision'],'TEST_UNKNOWN_REQUEST',
+                                  self.v.now(),corrupt)
+        with self.assertRaisesRegex(DispatchError,'FRESH_FINALITY'):
+            self.em.release_closed_incident(self.bucket,account=A,incident_id=m.incident_identity(current))
+        self.assertIn('emergency',self.store.load(self.bucket))
+
+    def test_closed_release_rechecks_inventory_age_and_revision_at_commit(self):
+        state=self.closed_release_setup();identity=m.incident_identity(state)
+        from .card_sync_evidence import PublicReader
+        calls=[]
+        def stale(kind,account):
+            calls.append(kind)
+            if len(calls)==4:self.v.t+=5001
+            return self.flat_release_inventory(kind,account)
+        with patch.object(PublicReader,'read',side_effect=stale):
+            with self.assertRaisesRegex(DispatchError,'FRESH_FINALITY'):
+                self.em.release_closed_incident(self.bucket,account=A,incident_id=identity)
+        self.assertIn('emergency',self.store.load(self.bucket))
+        calls.clear()
+        def race(kind,account):
+            calls.append(kind)
+            if len(calls)==4:
+                current=self.store.load(self.bucket)
+                self.store.change(self.bucket,current['revision'],'TEST_REVISION_RACE',self.v.now(),
+                                  lambda conn,value:None)
+            return self.flat_release_inventory(kind,account)
+        with patch.object(PublicReader,'read',side_effect=race):
+            with self.assertRaisesRegex(DispatchError,'CONCURRENT_DISPATCH'):
+                self.em.release_closed_incident(self.bucket,account=A,incident_id=identity)
+        self.assertIn('emergency',self.store.load(self.bucket))
 
     @contextmanager
     def actual_emergency_authorization(self):

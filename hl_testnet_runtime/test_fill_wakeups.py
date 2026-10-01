@@ -113,7 +113,7 @@ class WakeupTests(unittest.TestCase):
         self.assertEqual(self.feed.dirty_symbols(A), ('ETH', 'SOL'))
         self.assertNotIn('fills', self.feed.health()['long_account'])
 
-    def test_optional_snapshot_flag_live_hint_after_explicit_initial_snapshot_only(self):
+    def test_optional_snapshot_flag_stages_live_hint_but_never_replaces_initial_snapshot(self):
         self.ready()
         self.reconcile()
         message = fills(rows=[fill('ETH', 2)])
@@ -124,7 +124,9 @@ class WakeupTests(unittest.TestCase):
         self.feed._opened(A)
         self.send(dict(channel='subscriptionResponse', data=dict(method='subscribe',
                   subscription=dict(type='userFills', user=A))))
-        self.assertFalse(self.send(message))
+        self.assertTrue(self.send(message))
+        self.assertFalse(self.feed.entry_allowed(A))
+        self.assertFalse(self.feed.finish_reconciliation(self.feed.begin_reconciliation(A),complete=True))
 
     def test_userless_order_updates_invalidate_only_the_bound_socket_account(self):
         self.ready(A)
@@ -254,11 +256,46 @@ class WakeupTests(unittest.TestCase):
 
     def test_data_before_ack_and_live_fills_before_snapshot_cannot_clear_startup_gap(self):
         self.feed._opened(A)
-        self.assertFalse(self.send(order()))
-        self.feed._opened(A)
+        self.assertTrue(self.send(order()))
+        self.assertFalse(self.feed.entry_allowed(A))
         self.send(dict(channel='subscriptionResponse', data=dict(method='subscribe',
                   subscription=dict(type='userFills', user=A))))
-        self.assertFalse(self.send(fills()))
+        self.assertTrue(self.send(fills()))
+        self.assertFalse(self.feed.finish_reconciliation(self.feed.begin_reconciliation(A),complete=True))
+
+    def test_pre_ack_snapshot_and_normalized_optional_ack_still_require_both_acks_and_rest(self):
+        self.feed._opened(A)
+        self.assertTrue(self.send(fills(snapshot=True,rows=[])))
+        self.assertFalse(self.feed.finish_reconciliation(self.feed.begin_reconciliation(A),complete=True))
+        for channel in ('orderUpdates','userFills'):
+            subscription=dict(type=channel,user=A)
+            if channel=='userFills':
+                subscription['aggregateByTime']=False
+            self.assertTrue(self.send(dict(channel='subscriptionResponse',
+                data=dict(method='subscribe',subscription=subscription))))
+            self.assertFalse(self.feed.entry_allowed(A))
+        self.reconcile()
+        self.assertTrue(self.feed.entry_allowed(A))
+
+    def test_exact_sdk_banner_is_transport_only_and_json_spoof_is_rejected(self):
+        generation=self.feed._opened(A)
+        self.assertTrue(self.feed._receive(A,generation,'Websocket connection established.'))
+        self.assertFalse(self.feed.entry_allowed(A))
+        self.assertEqual(self.feed.health()['long_account']['subscriptions_acknowledged'],0)
+        self.assertFalse(self.send(dict(channel='_transportBanner')))
+        self.assertEqual(self.feed.health()['long_account']['protocol_failure'],'UNEXPECTED_CHANNEL')
+
+    def test_changed_aggregation_or_extra_ack_fields_fail_closed_with_redacted_reason(self):
+        for extra,reason in ((dict(aggregateByTime=True),'ACK_PARAMETERS_CHANGED'),
+                             (dict(aggregateByTime='false'),'ACK_PARAMETERS_CHANGED'),
+                             (dict(privateUnexpectedField='never expose this'),'INVALID_ACK_SUBSCRIPTION')):
+            self.feed._opened(A)
+            self.assertFalse(self.send(dict(channel='subscriptionResponse',data=dict(method='subscribe',
+                subscription=dict(type='userFills',user=A,**extra)))))
+            health=self.feed.health()['long_account']
+            self.assertEqual(health['protocol_failure'],reason)
+            self.assertNotIn('never expose this',json.dumps(health))
+            self.assertFalse(self.feed.entry_allowed(A))
 
     def test_json_ping_pong_deadline_and_idle_gap_fail_closed(self):
         generation = self.ready()
@@ -307,11 +344,15 @@ class WakeupTests(unittest.TestCase):
 
 
 class FakeSocket:
-    def __init__(self):
+    def __init__(self, *, normalized_ack=False, snapshot_before_ack=False, banner=False):
         self.messages = queue.Queue()
         self.sent = []
         self.closed = False
         self.timeout = None
+        self.normalized_ack=normalized_ack
+        self.snapshot_before_ack=snapshot_before_ack
+        if banner:
+            self.messages.put('Websocket connection established.')
 
     def settimeout(self, value):
         self.timeout = value
@@ -320,10 +361,16 @@ class FakeSocket:
         message = json.loads(raw)
         self.sent.append(message)
         if message['method'] == 'subscribe':
-            self.messages.put(json.dumps(dict(channel='subscriptionResponse', data=message)))
             subscription = message['subscription']
+            acknowledgement=json.loads(raw)
+            if subscription['type']=='userFills' and self.normalized_ack:
+                acknowledgement['subscription']['aggregateByTime']=False
+            if subscription['type']=='userFills' and self.snapshot_before_ack:
+                self.messages.put(json.dumps(fills(subscription['user'],snapshot=True,rows=[])))
+            self.messages.put(json.dumps(dict(channel='subscriptionResponse', data=acknowledgement)))
             if subscription['type'] == 'userFills':
-                self.messages.put(json.dumps(fills(subscription['user'], snapshot=True, rows=[])))
+                if not self.snapshot_before_ack:
+                    self.messages.put(json.dumps(fills(subscription['user'], snapshot=True, rows=[])))
         elif message['method'] == 'ping':
             self.messages.put('{"channel":"pong"}')
         else:
@@ -341,6 +388,24 @@ class FakeSocket:
 
 
 class TransportTests(unittest.TestCase):
+    def test_protocol_bootstrap_handles_sdk_banner_normalized_ack_and_pre_ack_snapshot(self):
+        socket=FakeSocket(normalized_ack=True,snapshot_before_ack=True,banner=True)
+        feed=wake.FillWakeups({'long_account':A},connector=lambda *args,**kwargs:socket)
+        try:
+            feed.start()
+            deadline=time.monotonic()+2
+            while not (feed.health()['long_account']['snapshot_received']
+                       and feed.health()['long_account']['subscriptions_acknowledged']==2):
+                self.assertLess(time.monotonic(),deadline)
+                feed.wake_event.wait(.02)
+                feed.wake_event.clear()
+            self.assertIsNone(feed.health()['long_account']['protocol_failure'])
+            self.assertFalse(feed.entry_allowed(A))
+            self.assertTrue(feed.finish_reconciliation(feed.begin_reconciliation(A),complete=True))
+            self.assertTrue(feed.entry_allowed(A))
+        finally:
+            feed.stop()
+
     def test_failed_connections_use_interruptible_bounded_reconnect_budget(self):
         class Stop:
             def __init__(self):

@@ -89,3 +89,39 @@ of sustained admission failures. The remaining live measurement is one explicitl
 authorized fresh-alert Testnet fill with independently verified STOP activation
 and a durable-record-read upper bound. Existing successful emergency and closure
 experiments are reused instead of repeated.
+
+## Live failure diagnosis and correction (2026-10-01)
+
+The first live release at 16:18:28 UTC failed infrastructure verification even
+though its 733 software/PostgreSQL checks passed. Both notification feeds had
+only one acknowledged subscription and repeatedly disconnected. Concurrent
+REST admission produced sustained BUSY, EXHAUSTED and PERMIT_EXPIRED failures.
+At 16:36–16:47 UTC the staging database used roughly 72–100% of its CPU limit;
+the web worker used roughly 19–28%. No continuous entries were enabled.
+
+A bounded read-only probe inside the deployed service at approximately 17:00 UTC
+subscribed a synthetic public address on the fixed Testnet websocket host. The
+actual userFills acknowledgement contained `aggregateByTime: false`, a documented
+optional field the previous exact-key parser rejected. The orderUpdates ACK
+contained only type/user; an explicit userFills snapshot followed. Only envelope
+keys, booleans and row count were printed. No account credentials or fill rows
+were exposed. The corrected parser accepts this exact normalization while
+preserving both ACKs, explicit snapshot and current saved REST barriers.
+
+The admission path previously opened a new PostgreSQL connection for every read
+and performed separate identity, policy, clock, prune, sum and reservation steps.
+The correction reuses a bounded process-local connection, serializes local short
+transactions and combines accounting work. The cross-process advisory lock is
+still a separate statement before the fresh quota snapshot. Every reservation
+still requires a known commit before HTTP; admission starts the original
+one-second clock before waiting. The 69-second window, total/background ceilings,
+single-use permits and fail-closed behavior remain unchanged. A failed SQL or
+commit discards the connection; no uncertain exchange transmission is replayed.
+
+The old emergency circuit also remains latched after CLOSED_VERIFIED. A focused
+explicit release must preserve its incident history and require fresh terminal
+closure, empty target position/orders, resolved requests and complete consistent
+account ownership. This is a read-and-audit operation, not an ENTRY grant.
+Unresolved, stale or changed incidents remain fenced. Live verification and the
+single fresh-alert timing measurement remain pending until the corrected
+deployment is running; software success alone is not a timing result.

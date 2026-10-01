@@ -45,6 +45,96 @@ def view(state, now_ms):
                        emergency_stop_oids=ids)
 
 
+def incident_identity(state):
+    """Bind an explicit operator release to the full immutable incident record."""
+    incident=state.get('emergency')
+    if not isinstance(incident,dict) or incident.get('version')!=VERSION:
+        raise DispatchError('EXACT_CLOSED_EMERGENCY_INCIDENT_REQUIRED')
+    return life.digest([VERSION,state['account'],state['symbol'],incident])
+
+
+def closed_release_proof(state, *, now_ms, not_before_ms):
+    """A final incident can be archived only with newly observed flat finality.
+
+    Require ordinary lifecycle finality too: archival must never make an old
+    emergency-only exception unreadable by the ordinary controller.
+    """
+    try:
+        incident=state.get('emergency');evidence=state.get('evidence')
+        if (not isinstance(incident,dict) or incident.get('version')!=VERSION
+                or incident.get('phase')!='CLOSED_VERIFIED' or incident.get('provisional') is True
+                or state['pending'] is not None or incident['pending_close'] is not None
+                or incident['pending_cancel'] is not None or evidence is None
+                or evidence['bindings']!=state['bindings']
+                or not state['bindings'] or not incident['requests']
+                or any(r.get('phase') not in DONE for r in incident['requests'])):
+            return False
+        snap=evidence['snapshot']
+        if (snap['account']!=state['account'] or snap['symbol']!=state['symbol']
+                or any(b['account']!=state['account'] or b['symbol']!=state['symbol']
+                       for b in state['bindings'])
+                or snap['history_complete'] is not True or snap['orders_complete'] is not True
+                or type(incident.get('closed_at_ms')) is not int
+                or not incident['latched_at_ms']<=incident['closed_at_ms']<=snap['at_ms']
+                or not not_before_ms<=snap['at_ms']<=now_ms or now_ms-snap['at_ms']>5000
+                or life.number(snap['position_quantity'],signed=True)!=0 or snap['open_orders']):
+            return False
+        report=view(state,now_ms)
+        normal=life.review(state['bindings'],snap,now_ms=now_ms)
+        for check in (report,normal):
+            if (check['bucket_issues'] or not check['cards']
+                    or any(row['issues'] or row['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL')
+                           or life.number(row['remaining_quantity'],signed=True)!=0
+                           for row in check['cards'])):
+                return False
+        selected=next(row for row in report['cards'] if row['card_id']==incident['card_id'])
+        return selected['closure_verified'] is True and life.number(selected['entry_quantity'])>0
+    except (KeyError,TypeError,ValueError,StopIteration,life.LifecycleError):
+        return False
+
+
+def _release_inventory(account, symbol, role, states, orders, positions):
+    """Validate exact account ownership, allowing unrelated known positions."""
+    if (not isinstance(orders,list) or len(orders)>10000
+            or not isinstance(positions,dict) or not isinstance(positions.get('assetPositions'),list)
+            or len(positions['assetPositions'])>10000
+            or role not in dispatch.roles.ROLES):
+        raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_INVENTORY_INVALID')
+    by_symbol={state['symbol']:state for state in states}
+    if (len(by_symbol)!=len(states) or symbol not in by_symbol
+            or any(state['account']!=account or state['pending'] is not None
+                   or any(b['account']!=account or b['symbol']!=state['symbol'] or b['role']!=role
+                          for b in state['bindings']) for state in states)):
+        raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_REQUEST_OR_OWNER_CHANGED')
+    known={(state['symbol'],oid) for state in states for b in state['bindings']
+           for ids in b['orders'].values() for oid in ids}
+    expected={state['symbol']:(life.number(state['evidence']['snapshot']['position_quantity'],signed=True)
+              if state['evidence'] is not None else Decimal(0)) for state in states}
+    if any(q and (q>0)!=(role=='long_account') for q in expected.values()):
+        raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_DIRECTION_INVALID')
+    owned=[]
+    for row in orders:
+        if (not isinstance(row,dict) or not isinstance(row.get('coin'),str)
+                or type(row.get('oid')) is not int or row['coin']==symbol
+                or (row['coin'],str(row['oid'])) not in known):
+            raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_ORDER_NOT_VERIFIED')
+        owned.append((row['coin'],row['oid']))
+    if len(set(owned))!=len(owned):
+        raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_ORDER_NOT_VERIFIED')
+    actual={}
+    for row in positions['assetPositions']:
+        p=row.get('position') if isinstance(row,dict) else None
+        if (not isinstance(p,dict) or not isinstance(p.get('coin'),str) or p['coin'] in actual):
+            raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_INVENTORY_INVALID')
+        q=life.number(p.get('szi'),signed=True)
+        if q!=expected.get(p['coin'],Decimal(0)) or q and (q>0)!=(role=='long_account'):
+            raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_POSITION_NOT_VERIFIED')
+        actual[p['coin']]=q
+    if any(q and coin not in actual for coin,q in expected.items()) or actual.get(symbol,Decimal(0))!=0:
+        raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_POSITION_NOT_VERIFIED')
+    return dict(orders=sorted(owned),positions=sorted((coin,life.text(q)) for coin,q in actual.items() if q))
+
+
 def trigger(state, *, now_ms, mark=None):
     """Oldest still-uncovered fill tranche; a new partial fill cannot reset it."""
     if not state['bindings'] or state['evidence'] is None:
@@ -297,6 +387,88 @@ class Controller:
     def _save(self, state, event, update):
         return self.store.change(state['bucket'], state['revision'], event,
                                  self.venue.now(), update)
+
+    def release_closed_incident(self, bucket, *, account, incident_id):
+        """Explicit audited Testnet release; never called by startup or trading.
+
+        Keep continuous entries disabled, preserve the complete incident, and
+        revalidate two agreeing public account inventories before exact CAS.
+        Nothing signs, submits or enables an order here.
+        """
+        life.ident(bucket,r'[0-9a-f]{64}');life.address(account)
+        life.ident(incident_id,r'[0-9a-f]{64}')
+        env=getattr(self.normal.venue,'env',{})
+        expected=dict(HL_TESTNET_EMERGENCY_CLOSE=APPROVAL,
+            RENDER_SERVICE_ID=dispatch.roles.SERVICE,HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+            HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
+            HL_TESTNET_LONG_STREAM='approved_alerts_v1',HL_TESTNET_FILLED_AFTER_EXIT_POLICY=dispatch.AFTER_EXIT,
+            HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+        if (any(env.get(key)!=value for key,value in expected.items())
+                or env.get('HL_TESTNET_SAFETY_PIPELINE') or env.get('HL_TESTNET_CARD_SYNC')):
+            raise DispatchError('EXPLICIT_TESTNET_RELEASE_REQUIRES_ENTRIES_DISABLED')
+        started=self.venue.now();state=self.store.load(bucket)
+        if state['account']!=account or incident_identity(state)!=incident_id:
+            raise DispatchError('EMERGENCY_RELEASE_INCIDENT_OR_ACCOUNT_CHANGED')
+        incident=deepcopy(state['emergency'])
+        if incident.get('phase')!='CLOSED_VERIFIED':
+            raise DispatchError('EMERGENCY_RELEASE_FINAL_CLOSURE_REQUIRED')
+        state=self._refresh_normal(state)
+        if incident_identity(state)!=incident_id or not closed_release_proof(
+                state,now_ms=self.venue.now(),not_before_ms=started):
+            raise DispatchError('EMERGENCY_RELEASE_FRESH_FINALITY_REQUIRED')
+        binding=next(b for b in state['bindings'] if b['card_id']==incident['card_id'])
+        role=binding['role']
+        if self.normal.routes.get(role,{}).get('account')!=account:
+            raise DispatchError('EMERGENCY_RELEASE_INCIDENT_OR_ACCOUNT_CHANGED')
+        states=self.store.for_account(account)
+        fingerprints=sorted((item['bucket'],item['revision'],life.digest(item)) for item in states)
+        from .card_sync_evidence import PublicReader
+        budget=getattr(self.venue,'request_budget',None)
+        reader=PublicReader(budget=budget() if callable(budget) else None,priority='protection')
+        samples=[]
+        for _ in range(2):
+            at=self.venue.now()
+            orders,positions=dispatch.joined_public_reads(
+                lambda:reader.read('frontendOpenOrders',account),
+                lambda:reader.read('clearinghouseState',account))
+            samples.append(dict(at_ms=at,inventory=_release_inventory(
+                account,state['symbol'],role,states,orders,positions)))
+        if samples[0]['inventory']!=samples[1]['inventory']:
+            raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_INVENTORY_CHANGED')
+        def update(conn,current):
+            now=self.venue.now()
+            if (current['account']!=account or current.get('emergency')!=incident
+                    or incident_identity(current)!=incident_id
+                    or not closed_release_proof(current,now_ms=now,not_before_ms=started)
+                    or any(not started<=sample['at_ms']<=now or now-sample['at_ms']>5000 for sample in samples)):
+                raise DispatchError('EMERGENCY_RELEASE_FRESH_FINALITY_REQUIRED')
+            rows=conn.execute(f'''SELECT bucket,revision,value,digest FROM {SCHEMA}.buckets
+                WHERE value->>'account'=%s ORDER BY bucket''',(account,)).fetchall()
+            observed=[]
+            for other_bucket,revision,value,digest in rows:
+                if life.digest(value)!=digest:
+                    raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_STATE_CHANGED')
+                observed.append((other_bucket,revision,digest))
+            if observed!=fingerprints:
+                raise DispatchError('EMERGENCY_RELEASE_ACCOUNT_STATE_CHANGED')
+            if conn.execute(f'''SELECT 1 FROM {SCHEMA}.requests r JOIN {SCHEMA}.buckets b
+                    ON b.bucket=r.bucket WHERE b.value->>'account'=%s
+                    AND r.phase NOT IN ('OBSERVED','ABORTED_UNSENT') LIMIT 1''',(account,)).fetchone():
+                raise DispatchError('EMERGENCY_RELEASE_UNRESOLVED_ACCOUNT_REQUEST')
+            history=current.setdefault('emergency_history',[])
+            if not isinstance(history,list) or len(history)>=MAX_REQUESTS:
+                raise DispatchError('EMERGENCY_RELEASE_ARCHIVE_REQUIRES_REVIEW')
+            history.append(dict(incident=deepcopy(incident),incident_id=incident_id,
+                account=account,symbol=current['symbol'],released_at_ms=now,
+                final_evidence_digest=life.digest(current['evidence']),
+                account_inventory_digest=life.digest(samples[0]['inventory']),
+                account_inventory_observed_at_ms=[sample['at_ms'] for sample in samples]))
+            del current['emergency']
+            return None
+        released=self._save(state,'EMERGENCY_FINAL_INCIDENT_EXPLICITLY_ARCHIVED_ENTRIES_STAY_DISABLED',update)
+        return dict(status='CLOSED_INCIDENT_RELEASED',bucket=bucket,account=account,
+            card_id=incident['card_id'],incident_id=incident_id,revision=released['revision'],
+            continuous_entry_flags_changed=False,order_requests_sent=0)
 
     def latch(self, state, cause, *, provisional=False):
         def update(conn, current):
