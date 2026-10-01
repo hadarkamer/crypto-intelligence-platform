@@ -2,6 +2,7 @@
 from copy import deepcopy
 from io import StringIO
 import json
+import threading
 import unittest
 from unittest.mock import Mock, patch
 from . import checks, app
@@ -28,6 +29,110 @@ class Reader:
         if kind == 'userRole': return {'role':'user'} if user == A else deepcopy(self.role)
         return deepcopy({'userAbstraction':self.mode,'spotClearinghouseState':self.spot,
                          'clearinghouseState':self.perp,'activeAssetData':self.capacity,'meta':self.meta}[kind])
+
+
+class InfoReaderBatchTests(unittest.TestCase):
+    def test_default_batch_is_serial_in_request_order(self):
+        reader = checks.InfoReader()
+        requests = [('userRole', {'user': A}), ('meta', {})]
+        with patch.object(reader, 'read', side_effect=['role', 'metadata']) as read, \
+             patch.object(checks, 'ThreadPoolExecutor', side_effect=AssertionError('Serial default')):
+            self.assertEqual(reader.read_many(requests), ['role', 'metadata'])
+        self.assertEqual(read.call_args_list, [unittest.mock.call('userRole', user=A),
+                                              unittest.mock.call('meta')])
+
+    def test_parallel_reads_overlap_with_four_connections_and_ordered_results(self):
+        lock = threading.Lock()
+        first_four = threading.Barrier(4)
+        connections = []
+        active = 0
+        maximum = 0
+        started = 0
+
+        class Connection:
+            def __init__(self, host, timeout):
+                self.closed = False
+                self.entered = False
+                self.body = None
+                with lock:
+                    connections.append(self)
+            def request(self, method, path, body, headers):
+                self.body = json.loads(body)
+            def getresponse(self):
+                nonlocal active, maximum, started
+                with lock:
+                    self.entered = True
+                    active += 1
+                    maximum = max(maximum, active)
+                    started += 1
+                    ordinal = started
+                if ordinal <= 4:
+                    first_four.wait(timeout=2)
+                response = Mock(status=200)
+                response.read.return_value = json.dumps({'user': self.body['user']}).encode()
+                return response
+            def close(self):
+                nonlocal active
+                with lock:
+                    self.closed = True
+                    if self.entered:
+                        active -= 1
+
+        users = ['0x' + str(i)*40 for i in range(1, 7)]
+        reader = checks.InfoReader(parallel=True)
+        with patch.object(checks.http.client, 'HTTPSConnection', side_effect=Connection) as ctor:
+            values = reader.read_many([('userRole', {'user': user}) for user in users])
+        self.assertEqual(values, [{'user': user} for user in users])
+        self.assertEqual(maximum, 4)
+        self.assertEqual(active, 0)
+        self.assertEqual(reader.calls, 6)
+        self.assertEqual(len({id(connection) for connection in connections}), 6)
+        self.assertTrue(all(connection.closed for connection in connections))
+        self.assertEqual(ctor.call_count, 6)
+        for call in ctor.call_args_list:
+            self.assertEqual(call, unittest.mock.call('api.hyperliquid-testnet.xyz', timeout=4))
+
+    def test_failure_joins_running_reads_before_returning_without_retry(self):
+        reader = checks.InfoReader(parallel=True)
+        slow_started = threading.Event()
+        failing = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        outcomes = []
+
+        def read(kind, **kwargs):
+            if kind == 'meta':
+                if not slow_started.wait(timeout=2):
+                    raise AssertionError('Second independent read never started')
+                failing.set()
+                raise checks.Blocked('READ_UNAVAILABLE')
+            slow_started.set()
+            if not release.wait(timeout=2):
+                raise AssertionError('Test did not release running read')
+            return {'role': 'user'}
+
+        def collect():
+            try:
+                reader.read_many([('meta', {}), ('userRole', {'user': A})])
+            except Exception as exc:
+                outcomes.append(exc)
+            finally:
+                finished.set()
+
+        with patch.object(reader, 'read', side_effect=read) as mocked_read:
+            worker = threading.Thread(target=collect)
+            worker.start()
+            try:
+                self.assertTrue(failing.wait(timeout=2))
+                self.assertFalse(finished.wait(timeout=0.05))
+            finally:
+                release.set()
+                worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(mocked_read.call_count, 2)
+        self.assertEqual(len(outcomes), 1)
+        self.assertIsInstance(outcomes[0], checks.Blocked)
+        self.assertEqual(str(outcomes[0]), 'READ_UNAVAILABLE')
 
 
 class RuntimeTests(unittest.TestCase):
@@ -66,6 +171,56 @@ class RuntimeTests(unittest.TestCase):
         self.reader.perp = {'marginSummary':{'accountValue':'1000'},'withdrawable':'900'}
         self.assertTrue(self.run_case()['positive_usdc_observed'])
         self.assertNotIn('spotClearinghouseState',self.reader.seen)
+    def test_opt_in_plan_groups_overlap_after_selecting_the_exact_balance_endpoint(self):
+        for mode,balance_kind in [('unifiedAccount','spotClearinghouseState'),
+                                  ('disabled','clearinghouseState')]:
+            with self.subTest(mode=mode):
+                fixture=Reader();fixture.mode=mode
+                fixture.perp={'marginSummary':{'accountValue':'1000'},'withdrawable':'900'}
+                reader=checks.InfoReader(parallel=True)
+                lock=threading.Lock();identity_barrier=threading.Barrier(3)
+                capacity_barrier=threading.Barrier(3)
+                identity_done=0;capacity_done=0;maximum_identity=0;maximum_capacity=0
+                active_identity=0;active_capacity=0
+                def read(kind,**kwargs):
+                    nonlocal identity_done,capacity_done,active_identity,active_capacity
+                    nonlocal maximum_identity,maximum_capacity
+                    identity=kind in ('userRole','userAbstraction')
+                    with lock:
+                        if identity:
+                            active_identity+=1
+                            maximum_identity=max(maximum_identity,active_identity)
+                        else:
+                            self.assertEqual(identity_done,3)
+                            active_capacity+=1
+                            maximum_capacity=max(maximum_capacity,active_capacity)
+                    try:
+                        (identity_barrier if identity else capacity_barrier).wait(timeout=2)
+                        with lock:return fixture.read(kind,**kwargs)
+                    finally:
+                        with lock:
+                            if identity:active_identity-=1;identity_done+=1
+                            else:active_capacity-=1;capacity_done+=1
+                with patch.object(reader,'read',side_effect=read):
+                    report=checks.run_check({**ENV,'HL_TESTNET_CHECK_PLAN':json.dumps(PLAN)},client=reader)
+                self.assertEqual(report['status'],'PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION')
+                self.assertTrue(report['test_plan_checked'])
+                self.assertEqual(maximum_identity,3)
+                self.assertEqual(maximum_capacity,3)
+                self.assertEqual(capacity_done,3)
+                self.assertEqual(fixture.seen.count(balance_kind),1)
+                other='clearinghouseState' if mode=='unifiedAccount' else 'spotClearinghouseState'
+                self.assertNotIn(other,fixture.seen)
+                self.assertEqual(fixture.seen.count('userAbstraction'),1)
+    def test_unknown_parallel_mode_never_starts_capacity_group(self):
+        reader=checks.InfoReader(parallel=True)
+        self.reader.mode='default';lock=threading.Lock()
+        def read(kind,**kwargs):
+            with lock:return self.reader.read(kind,**kwargs)
+        with patch.object(reader,'read',side_effect=read):
+            report=checks.run_check(ENV,client=reader)
+        self.assertEqual(report['status'],'ACCOUNT_MODE_REQUIRES_REVIEW')
+        self.assertCountEqual(self.reader.seen,['userRole','userRole','userAbstraction'])
     def test_unknown_modes_fail_closed(self):
         for mode in ('portfolioMargin','default','dexAbstraction','future'):
             self.reader.mode = mode
