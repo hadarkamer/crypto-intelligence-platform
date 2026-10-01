@@ -13,6 +13,7 @@ import threading
 from . import card_lifecycle as life, filled_quantity_dispatch as dispatch
 from .filled_dispatch_store import DispatchError, SCHEMA
 from .card_lifecycle_store import _continues
+from .dispatch_concurrency import market_lane
 
 VERSION = 'testnet-emergency-close-v1'
 APPROVAL = 'approved_testnet_v1'
@@ -421,6 +422,7 @@ class Controller:
                 and proposal['quantity']=='0' and proposal['sample'] is None)
         return False
 
+    @market_lane
     def cycle(self, bucket, *, send=False):
         state=self.store.load(bucket)
         before_revision=state['revision']

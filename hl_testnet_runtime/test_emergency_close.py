@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime,timezone
 from decimal import Decimal
 import os
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -40,6 +41,61 @@ class Venue(NormalVenue):
 
 
 class EmergencyPureTests(NoExternal):
+    def test_normal_and_emergency_reads_do_not_overwrite_same_process_checkpoint(self):
+        # Hold a real normal refresh in public I/O while the emergency cycle
+        # starts. Both must finish with separate checkpoints, without optimistic
+        # revision conflicts or a deadlock in the nested normal refresh.
+        class MemoryStore:
+            domain='software'
+            def __init__(self):
+                self.state=state_from_case(q='100',stop='100',take='100')
+            def load(self,bucket):
+                return deepcopy(self.state)
+            def pending_record(self,conn,state):
+                return None
+            def change(self,bucket,revision,event,now,update):
+                if revision!=self.state['revision']:
+                    raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+                value=deepcopy(self.state)
+                update(None,value)
+                value['revision']+=1
+                self.state=value
+                return deepcopy(value)
+        store=MemoryStore();normal_venue=NormalVenue()
+        entered=threading.Event();release=threading.Event();calls=[]
+        def collect(value):
+            calls.append(1)
+            if len(calls)==1:
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError('TEST_PUBLIC_READ_WAS_NOT_RELEASED')
+            observed=deepcopy(value)
+            normal_venue.t+=1
+            observed['snapshot']['at_ms']=normal_venue.t
+            return observed
+        normal_venue.collect=collect
+        normal=dispatch.Controller(store,normal_venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+        emergency=m.Controller(normal,Venue())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first=pool.submit(normal.refresh,store.state['bucket'])
+            self.assertTrue(entered.wait(1))
+            second_done=threading.Event()
+            def inspect_emergency():
+                try:
+                    return emergency.cycle(store.state['bucket'],send=False)
+                finally:
+                    second_done.set()
+            second=pool.submit(inspect_emergency)
+            try:
+                self.assertFalse(second_done.wait(.05))
+            finally:
+                release.set()
+            first.result(timeout=2)
+            self.assertEqual(second.result(timeout=2)['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+        self.assertEqual(store.state['revision'],3)
+        self.assertEqual(normal_venue.sent,0)
+        self.assertEqual(emergency.venue.sent,0)
+
     def test_old_protected_trade_never_closes_just_because_fill_is_old(self):
         state=state_from_case(q='100',stop='100',take='100')
         self.assertIsNone(m.trigger(state,now_ms=T+9999999,mark='9'))

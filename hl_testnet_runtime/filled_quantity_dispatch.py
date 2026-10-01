@@ -19,6 +19,7 @@ from . import filled_pending_cancel as half_cancel
 from . import residual_exit_fence as residual
 from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
 from .trade_card_store import CardStore
+from .dispatch_concurrency import market_lane
 from . import checks, two_account_execution as roles
 
 VERSION = 'connected-filled-quantity-dispatch-v1'
@@ -487,6 +488,7 @@ class Controller:
             s['originals'][card_id]=original
         return self.store.change(state['bucket'],state['revision'],'REGISTER_LOCAL_CARD',self.venue.now(),update)
 
+    @market_lane
     def refresh(self,bucket):
         """Public reads first; one transaction records ownership, evidence and outcome."""
         state=self.store.load(bucket);now=self.venue.now();request=None;oid=None;raw=None
@@ -613,6 +615,7 @@ class Controller:
             return current
         return self.store.change(bucket,state['revision'],'PUBLIC_RECONCILIATION',now,update)
 
+    @market_lane
     def cycle(self,bucket,*,send=False,allow_new_entries=True,allowed_entry_card_id=None):
         """A false send flag never reserves, signs, cancels or places an order."""
         state=self.refresh(bucket)

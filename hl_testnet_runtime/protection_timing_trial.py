@@ -67,6 +67,7 @@ def run_one(env, card_id):
     if not started:
         raise DispatchError('TIMING_TRIAL_REQUIRES_OWN_SUPERVISOR')
     start=time.monotonic();status='SUPERVISOR_STARTING';entry_invoked=False
+    cycle_status_counts={}
     try:
         while time.monotonic()-start<10 and not emergency.healthy(base.venue.now()):
             stopped.wait(.25)
@@ -89,6 +90,7 @@ def run_one(env, card_id):
                     status=result['status']
                 except (DispatchError,life.LifecycleError) as exc:
                     status=str(exc)
+                cycle_status_counts[status]=cycle_status_counts.get(status,0)+1
                 state=base.store.load(state['bucket'])
                 if any(b['card_id']==card_id for b in state['bindings']):
                     entry_invoked=True
@@ -111,6 +113,7 @@ def run_one(env, card_id):
             timing=state.get('protection_timing',{}).get(card_id),
             emergency_status=(state.get('emergency') or {}).get('phase'),
             continuous_entry_flags_changed=False,entry_attempts=1 if entry_invoked else 0,
+            cycle_status_counts=cycle_status_counts,
             order_requests_sent=controlled.venue.sent,
             mainnet_enabled=False)
     finally:
