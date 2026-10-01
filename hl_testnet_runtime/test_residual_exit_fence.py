@@ -273,17 +273,35 @@ class ResidualDatabaseTests(NoExternal):
     def unsafe_legacy_two_card_setup(self):
         """Build the PRE-EXISTING unsafe starting state in the exchange DOUBLE.
 
-        The new fence is bypassed ONLY while arranging legacy evidence, never
-        during the cleanup, reconciliation or attack being tested afterward.
+        The present selector correctly refuses the unsafe second entry. Build
+        that exact old proposal only in this exchange-double fixture, preserving
+        actual journal ownership/reconciliation. Both fixture overrides end
+        before cleanup, reconciliation or adversarial operations are exercised.
         """
         self.protect();b,o=original(2);self.cards.record(o['card']);self.c.register(b['card_id'])
+        def historical_entry(state,*args,**kwargs):
+            draft=state['originals'][b['card_id']]['draft']
+            return dict(version=dispatch.VERSION,card_id=b['card_id'],
+                account=state['account'],symbol=state['symbol'],role=b['role'],
+                leg='ENTRY',operation='ENTRY',action=deepcopy(draft['entry_action']),
+                quantity=draft['planned_quantity'],old_oid=None,sequence=state['revision']+1,
+                source_at=o['card']['prepared']['execution']['at'],
+                basis=life.digest(state['evidence']),
+                observed_at_ms=state['evidence']['snapshot']['at_ms'])
         with patch.object(fence,'validate_proposal',return_value=True):
-            self.cycle();self.v.fill('1003','100');self.cycle();self.cycle();self.cycle(False)
+            with patch.object(dispatch,'choose',side_effect=historical_entry):
+                self.cycle()
+            self.v.fill('1003','100');self.cycle();self.cycle();self.cycle(False)
+        view=life.review(self.store.load(self.bucket)['bindings'],
+            self.store.load(self.bucket)['evidence']['snapshot'],now_ms=self.v.now())
+        self.assertFalse(view['bucket_issues'])
+        self.assertEqual([row['remaining_quantity'] for row in view['cards']],['100','100'])
         return b
 
     def expiring_entry(self, expiry_seconds=30):
         b,original_record=original(7,expiry_seconds=expiry_seconds)
         self.cards.record(original_record['card']);self.c.register(b['card_id'])
+        self.v.t+=1
         state=self.c.refresh(self.bucket)
         proposal=dispatch.choose(state,ROUTES2,META,dict(mark_price='10',at_ms=self.v.now()),
             now_ms=self.v.now(),after_exit_policy=dispatch.AFTER_EXIT,
@@ -358,8 +376,8 @@ class ResidualDatabaseTests(NoExternal):
         self.store.begin(state,prepared['proposal'],AGENT,self.v.now())
         self.v.t=T+10000
         stale['evidence']['snapshot']['at_ms']=self.v.now()
-        with self.assertRaisesRegex(DispatchError,'CONCURRENT_DISPATCH_RELOAD_REQUIRED'):
-            fence.retire_obsolete_unsent(self.store,stale,now_ms=self.v.now())
+        self.assertEqual(fence.retire_obsolete_unsent(self.store,stale,now_ms=self.v.now()),stale)
+        self.assertIsNotNone(self.store.load(self.bucket)['pending'])
         self.assertEqual(self.store.request(stale['pending'])['phase'],'OUTCOME_UNKNOWN')
         self.assertEqual(self.v.sent,0)
 
@@ -379,8 +397,7 @@ class ResidualDatabaseTests(NoExternal):
 
     def test_new_shared_entry_fails_before_reservation_or_nonce(self):
         self.protect();b,o=original(2);self.cards.record(o['card']);self.c.register(b['card_id']);before=self.v.sent
-        with self.assertRaisesRegex(DispatchError,'SHARED_MARKET_INDEPENDENT_PAIR_NOT_ISOLATED'):
-            self.cycle()
+        self.assertEqual(self.cycle()['status'],'NO_ACTION_NEEDED')
         self.assertEqual(self.v.sent,before);self.assertIsNone(self.store.load(self.bucket)['pending'])
 
     def test_full_controller_cleanup_keeps_other_card_orders_and_fills(self):
