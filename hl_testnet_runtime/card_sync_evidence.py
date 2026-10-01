@@ -17,6 +17,7 @@ HOST = 'api.hyperliquid-testnet.xyz'
 DAY_MS = 86400000
 OVERLAP_MS = 60000
 MAX_CATCHUP_MS = 2*DAY_MS
+MAX_OBSERVATION_READ_WORKERS = 12
 
 
 class SyncError(life.LifecycleError):
@@ -37,9 +38,12 @@ def facts(snapshot):
 
 class PublicReader:
     """Only fixed public /info requests. Bounded calls, bytes and request time."""
-    def __init__(self, *, parallel=False):
+    def __init__(self, *, parallel=False, parallel_workers=4):
+        if type(parallel_workers) is not int or not 1<=parallel_workers<=MAX_OBSERVATION_READ_WORKERS:
+            raise SyncError('PUBLIC_READ_PARALLEL_BOUND_INVALID')
         self.calls = 0
         self.parallel = parallel is True
+        self.parallel_workers = parallel_workers
         self._calls_lock = threading.Lock()
 
     def observation_inputs(self, account, oids, start, end):
@@ -50,7 +54,12 @@ class PublicReader:
         """
         if not self.parallel:
             return observation_inputs(self, account, oids, start, end)
-        pool = ThreadPoolExecutor(max_workers=4)
+        # Historical terminal identities remain mandatory in BOTH passes. A
+        # fixed opt-in fan-out can avoid serial waves during a bounded recovery.
+        # Ordinary dispatch retains four workers: faster repeated sweeps need
+        # a separate per-IP rate budget. Call count, HTTP timeout and the total
+        # reader budget remain unchanged, including for an explicit wider pass.
+        pool = ThreadPoolExecutor(max_workers=self.parallel_workers)
         try:
             fills = pool.submit(history, self, account, start, end)
             inventory = pool.submit(self.read, 'frontendOpenOrders', account)
