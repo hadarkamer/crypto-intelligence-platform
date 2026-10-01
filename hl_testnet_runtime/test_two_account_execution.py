@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import os
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -22,6 +23,7 @@ PLAN=dict(symbol='BTC',side='SHORT',entry='100',stop='102',take_profit='98')
 class Reader:
     def __init__(self):
         self.calls=0;self.mode='default';self.switch=False;self.mode_calls=0
+        self.seen=[]
         self.perp=dict(assetPositions=[],withdrawable='999',marginSummary=dict(
             accountValue='999',totalRawUsd='999',totalMarginUsed='0',totalNtlPos='0'))
         self.spot={'balances':[]}
@@ -29,6 +31,7 @@ class Reader:
             maxTradeSzs=['50','50'],markPx='100',leverage=dict(type='cross',value=1))
     def read(self,kind,*,user=None,coin=None):
         self.calls+=1
+        self.seen.append((kind,user,coin))
         if kind=='userAbstraction':
             self.mode_calls+=1
             return 'unifiedAccount' if self.switch and self.mode_calls>1 else self.mode
@@ -140,6 +143,88 @@ class ConnectionTests(unittest.TestCase):
         self.reader.switch=True
         with self.assertRaisesRegex(checks.Blocked,'MODE_CHANGED'):
             r.default_native_snapshot(self.route,self.reader,'BTC')
+    def test_serial_budget_retains_historical_probe_and_read_order(self):
+        reader=checks.InfoReader()
+        with patch.object(reader,'read',side_effect=self.reader.read), \
+             patch.object(reader,'read_many',side_effect=AssertionError('Serial path must not batch')):
+            report=r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
+        self.assertTrue(report['test_plan_checked'])
+        self.assertEqual(self.reader.seen,[
+            ('userAbstraction',C,None),('userAbstraction',C,None),
+            ('userRole',C,None),('userRole',D,None),
+            ('clearinghouseState',C,None),('spotClearinghouseState',C,None),
+            ('activeAssetData',C,'BTC'),('meta',None,None),
+            ('userAbstraction',C,None)])
+    def test_parallel_budget_brackets_all_six_reads_with_uncached_mode_probes(self):
+        reader=checks.InfoReader(parallel=True)
+        lock=threading.Lock();first_four=threading.Barrier(4)
+        mode_calls=0;active=0;completed=0;started=0
+        boundaries=[]
+        original_plan_check=checks.plan_check
+        def read(kind,**kwargs):
+            nonlocal mode_calls,active,completed,started
+            if kind=='userAbstraction':
+                with lock:
+                    self.assertEqual(active,0)
+                    mode_calls+=1
+                    boundaries.append(('mode',completed))
+                    return self.reader.read(kind,**kwargs)
+            with lock:
+                active+=1;started+=1;ordinal=started
+            try:
+                if ordinal<=4:first_four.wait(timeout=2)
+                with lock:return self.reader.read(kind,**kwargs)
+            finally:
+                with lock:active-=1;completed+=1
+        def plan_check(*args,**kwargs):
+            self.assertEqual(active,0)
+            self.assertEqual(completed,6)
+            return original_plan_check(*args,**kwargs)
+        with patch.object(reader,'read',side_effect=read), \
+             patch.object(checks,'plan_check',side_effect=plan_check):
+            report=r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
+        self.assertTrue(report['test_plan_checked'])
+        self.assertEqual(mode_calls,3)
+        self.assertEqual(boundaries,[('mode',0),('mode',0),('mode',6)])
+        self.assertEqual(completed,6)
+    def test_parallel_snapshot_rechecks_changed_mode_at_final_probe(self):
+        reader=checks.InfoReader(parallel=True);lock=threading.Lock();mode_calls=0
+        def read(kind,**kwargs):
+            nonlocal mode_calls
+            with lock:
+                if kind=='userAbstraction':
+                    mode_calls+=1
+                    return 'unifiedAccount' if mode_calls==3 else 'default'
+                return self.reader.read(kind,**kwargs)
+        with patch.object(reader,'read',side_effect=read):
+            with self.assertRaisesRegex(checks.Blocked,'^ACCOUNT_MODE_CHANGED_RECHECK$'):
+                r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
+        self.assertEqual(mode_calls,3)
+    def test_failed_parallel_group_cannot_partially_validate_a_budget(self):
+        reader=checks.InfoReader(parallel=True);lock=threading.Lock()
+        def read(kind,**kwargs):
+            if kind=='meta':raise checks.Blocked('READ_UNAVAILABLE')
+            with lock:return self.reader.read(kind,**kwargs)
+        with patch.object(reader,'read',side_effect=read), \
+             patch.object(checks,'number',side_effect=AssertionError('No partial validation')) as number, \
+             patch.object(checks,'plan_check',side_effect=AssertionError('No partial plan')) as plan_check:
+            with self.assertRaisesRegex(checks.Blocked,'^READ_UNAVAILABLE$'):
+                r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
+        number.assert_not_called();plan_check.assert_not_called()
+        self.assertEqual(self.reader.mode_calls,2)
+    def test_parallel_snapshot_keeps_original_fifteen_second_deadline(self):
+        for elapsed,expired in [(15,False),(15.001,True)]:
+            with self.subTest(elapsed=elapsed):
+                reader=checks.InfoReader(parallel=True);lock=threading.Lock()
+                def read(kind,**kwargs):
+                    with lock:return self.reader.read(kind,**kwargs)
+                with patch.object(reader,'read',side_effect=read), \
+                     patch.object(r.time,'monotonic',side_effect=[0,elapsed]):
+                    if expired:
+                        with self.assertRaisesRegex(checks.Blocked,'^ACCOUNT_SNAPSHOT_EXPIRED$'):
+                            r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)
+                    else:
+                        self.assertTrue(r.budget_for_role(ENV,'short_account',C,D,PLAN,reader)['test_plan_checked'])
     def test_nonempty_account_stays_for_later_multi_card_stage(self):
         self.reader.perp['assetPositions']=[{'position':{'szi':'1'}}]
         with self.assertRaisesRegex(checks.Blocked,'NOT_EMPTY'):
