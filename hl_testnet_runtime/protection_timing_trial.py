@@ -63,7 +63,7 @@ def run_one(env, card_id):
             raise DispatchError('TIMING_TRIAL_MARKET_PREDECESSOR_NOT_FINAL')
     stopped=threading.Event()
     streams=[(role,route,None,key)]
-    started=emergency.start(base,streams,stopped)
+    started=emergency.start(base,streams,stopped,only_bucket=state['bucket'])
     if not started:
         raise DispatchError('TIMING_TRIAL_REQUIRES_OWN_SUPERVISOR')
     start=time.monotonic();status='SUPERVISOR_STARTING';entry_invoked=False

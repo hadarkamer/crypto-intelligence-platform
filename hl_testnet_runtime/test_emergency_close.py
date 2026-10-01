@@ -41,6 +41,55 @@ class Venue(NormalVenue):
 
 
 class EmergencyPureTests(NoExternal):
+    def test_scoped_supervisor_ignores_unrelated_market_conflicts(self):
+        selected=state_from_case(q='40',stop='40',take='40')
+        other=deepcopy(selected);other['bucket']='b'*64
+        called=threading.Event();stop=threading.Event();seen=[]
+        environment=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
+            HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+        class Store:
+            def load(self,bucket):
+                self.assert_bucket=bucket
+                return deepcopy(selected)
+            def for_account(self,account):
+                return [deepcopy(other),deepcopy(selected)]
+        class Adapter:
+            env=environment;sent=0
+            def now(self):return T+6000
+        class Supervisor:
+            def __init__(self,normal):self.store=normal.store;self.venue=normal.venue
+            def cycle(self,bucket,*,send):
+                seen.append(bucket)
+                if bucket!=selected['bucket']:
+                    raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+                called.set()
+                return dict(status='STOP_OBSERVED_OR_NO_EXPOSURE')
+        class Normal:
+            store=Store();venue=Adapter()
+        health=dict(running=False,last_status=None,last_pass_at_ms=None)
+        with patch.object(m,'_thread',None),patch.object(m,'_health',health),patch.object(m,'Controller',Supervisor):
+            self.assertTrue(m.start(Normal(),[('long_account',dict(account=A),None,None)],
+                stop,only_bucket=selected['bucket']))
+            try:self.assertTrue(called.wait(1))
+            finally:
+                stop.set();m._thread.join(1)
+            self.assertEqual(seen,[selected['bucket']])
+            self.assertEqual(health['last_status'],'PASS_COMPLETE')
+            self.assertFalse(m._thread.is_alive())
+
+    def test_scoped_supervisor_rejects_another_account_before_start(self):
+        selected=state_from_case(q='40',stop='40',take='40')
+        class Store:
+            def load(self,bucket):return deepcopy(selected)
+        class Adapter:
+            env=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
+                HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+        class Normal:
+            store=Store();venue=Adapter()
+        with self.assertRaisesRegex(DispatchError,'SCOPE_ACCOUNT_NOT_SELECTED'):
+            m.start(Normal(),[('short_account',dict(account=B),None,None)],
+                threading.Event(),only_bucket=selected['bucket'])
+
     def test_normal_and_emergency_reads_do_not_overwrite_same_process_checkpoint(self):
         # Hold a real normal refresh in public I/O while the emergency cycle
         # starts. Both must finish with separate checkpoints, without optimistic

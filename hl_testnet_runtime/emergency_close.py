@@ -526,7 +526,7 @@ def health():
         return deepcopy(_health)
 
 
-def start(normal, streams, stop_event):
+def start(normal, streams, stop_event, *, only_bucket=None):
     global _thread
     env=normal.venue.env
     if env.get('HL_TESTNET_EMERGENCY_CLOSE','')=='':
@@ -535,6 +535,11 @@ def start(normal, streams, stop_event):
         raise DispatchError('EMERGENCY_APPROVAL_MODE_INVALID')
     if env.get('HL_TESTNET_LONG_ENTRY_ENABLED')!='false' or env.get('HL_TESTNET_SHORT_ENTRY_ENABLED')!='false':
         raise DispatchError('EMERGENCY_RELEASE_REQUIRES_CONTINUOUS_ENTRIES_DISABLED')
+    if only_bucket is not None:
+        life.ident(only_bucket, r'[0-9a-f]{64}')
+        scoped = normal.store.load(only_bucket)
+        if scoped['account'] not in {route['account'] for _,route,*_ in streams}:
+            raise DispatchError('EMERGENCY_SCOPE_ACCOUNT_NOT_SELECTED')
     controller=Controller(normal)
     def loop():
         with _lock:
@@ -544,6 +549,8 @@ def start(normal, streams, stop_event):
             for _,route,*_ in streams:
                 try:
                     for state in controller.store.for_account(route['account']):
+                        if only_bucket is not None and state['bucket'] != only_bucket:
+                            continue
                         from .long_stream_runtime import _unfinished,idle_flat
                         from datetime import datetime,timezone
                         if not _unfinished(state,datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)):
