@@ -123,7 +123,7 @@ class DispatchStore:
                          (bucket,encode(value),life.digest(value)))
         return self.load(bucket)
 
-    def change(self, bucket, revision, event, now_ms, update):
+    def change(self, bucket, revision, event, now_ms, update, *, _return_committed_request=False):
         """An uncertain COMMIT raises; caller MUST NOT proceed to signing."""
         life.moment(now_ms)
         if type(revision) is not int or revision < 0:
@@ -158,6 +158,12 @@ class DispatchStore:
                     (request['request_id'],bucket,request['phase'],encode(request),life.digest(request)))
             conn.execute(f'INSERT INTO {SCHEMA}.events VALUES(%s,%s,%s,%s,%s,%s)',
                          (bucket,state['revision'],event,request['request_id'] if request else None,now_ms,life.digest([state,request])))
+            if _return_committed_request:
+                committed=(deepcopy(state),deepcopy(request))
+        if _return_committed_request:
+            # Return only AFTER the connection context positively acknowledges
+            # COMMIT. A later load could observe another worker's checkpoint.
+            return committed
         return self.load(bucket)
 
     @staticmethod
@@ -218,6 +224,66 @@ class DispatchStore:
             return request
         agent_address=agent
         return self.change(state['bucket'],state['revision'],'ATTEMPT_BEGUN',now_ms,update)
+
+    def prepare_and_begin(self, state, proposal, agent, now_ms):
+        """Reserve/revalidate and begin once in the same guarded transaction.
+
+        Public authorization belongs to the controller before this call. No
+        network or signing occurs under the journal locks. Only the exact
+        commit-local request returned after a known successful COMMIT may be
+        handed to transport; an uncertain commit never returns a sender token.
+        """
+        agent=life.address(agent)
+        def update(conn,value):
+            from .emergency_close import fence
+            fence(conn,value,proposal['operation'])
+            if proposal.get('basis')!=life.digest(value['evidence']):
+                raise DispatchError('PROPOSAL_EVIDENCE_CHANGED')
+            request=self.pending_record(conn,value)
+            if request is not None:
+                if (request['phase']!='PREPARED' or type(request['attempts']) is not int
+                        or request['attempts']!=0 or request['nonce'] is not None
+                        or request['attempt_at_ms'] is not None or request['reply'] is not None
+                        or request.get('observed_oid') is not None):
+                    raise DispatchError('ATTEMPT_MAY_HAVE_BEEN_SENT_NO_REPEAT')
+                if (request['domain']!=self.domain or request['bucket']!=value['bucket']
+                        or request['request_id']!=value['pending']):
+                    raise DispatchError('PENDING_RECORD_INTEGRITY_FAILURE')
+                prior=deepcopy(request['proposal']);fresh=deepcopy(proposal)
+                for item in (prior,fresh):
+                    item.pop('basis');item.pop('observed_at_ms')
+                    item.pop('cancel_sample_at_ms',None)
+                if prior!=fresh:
+                    raise DispatchError('UNSENT_PLAN_CHANGED_EXPLICIT_REPLAN_REQUIRED')
+                if now_ms<request['prepared_at_ms']:
+                    raise DispatchError('PRE_SEND_PLAN_CHANGED')
+            at=value['evidence']['snapshot']['at_ms']
+            if not 0<=now_ms-at<=15000:
+                raise DispatchError('PRE_SEND_EVIDENCE_EXPIRED')
+            from .residual_exit_fence import validate_proposal
+            from .residual_exit_contract import validate_wire_proposal
+            validate_proposal(value,proposal,now_ms=now_ms)
+            validate_wire_proposal(value,proposal,now_ms=now_ms)
+            if request is None:
+                rid=life.digest([VERSION,value['bucket'],value['revision']+1,proposal])
+                request=dict(request_id=rid,domain=self.domain,bucket=value['bucket'],phase='PREPARED',
+                    proposal=deepcopy(proposal),prepared_at_ms=now_ms,attempt_at_ms=None,nonce=None,
+                    reply=None,observed_oid=None,attempts=0,updated_at_ms=now_ms)
+                value['pending']=rid;value['last_request']=rid
+            else:
+                # Rebase evidence only; frozen action and durable identity stay.
+                request['proposal']=deepcopy(proposal)
+            nonce=conn.execute(f'''INSERT INTO {SCHEMA}.nonces VALUES(%s,%s)
+                ON CONFLICT(agent) DO UPDATE SET nonce=GREATEST({SCHEMA}.nonces.nonce+1,EXCLUDED.nonce)
+                RETURNING nonce''',(agent,now_ms)).fetchone()[0]
+            if nonce>now_ms+1000:
+                raise DispatchError('NONCE_CLOCK_REQUIRES_REVIEW')
+            request.update(phase='OUTCOME_UNKNOWN',nonce=nonce,attempt_at_ms=now_ms,attempts=1)
+            if proposal['operation']=='ENTRY':
+                value.setdefault('entry_timing_armed',{})[proposal['card_id']]=now_ms
+            return request
+        return self.change(state['bucket'],state['revision'],'ATTEMPT_BEGUN',now_ms,update,
+                           _return_committed_request=True)
 
     def reply(self, state, reply, now_ms):
         def update(conn,value):
