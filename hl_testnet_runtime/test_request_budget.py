@@ -632,6 +632,38 @@ b.acquire('/exchange',{'action':{'type':'cancel','cancels':[{}]}},priority='prot
         batch.close()
         self.assertEqual(self.weights(),92)
 
+    def test_quiet_live_position_funds_both_passes_after_552_weight_without_background_starvation(self):
+        from . import filled_quantity_dispatch as dispatch, card_sync_evidence as evidence
+        from .test_filled_quantity_dispatch import state_from_case
+        from .test_card_lifecycle import T
+        class Feed:
+            def dirty_symbols(self,account):return ()
+            def entry_allowed(self,account):return True
+        state=state_from_case(q='100',stop='100',take='100')
+        self.assertTrue(dispatch._fully_protected_no_work(state,T+1))
+        priority=dispatch._collection_priority(state['evidence'],T+1,
+            fill_wakeups=Feed(),pending_clear=True)
+        bodies=evidence._planned_observation_reads(state['bindings'],state['evidence']['snapshot'],
+            T,T+1,reuse_verified_terminals=True)
+        self.assertEqual(sum(budget.request_weight('/info',body) for body in bodies),292)
+        self.assertEqual((budget.LIMIT,budget.BACKGROUND_LIMIT),(1200,800))
+        with self.journal._transaction() as conn:
+            conn.execute(f'''INSERT INTO {budget.TICKETS}(token,weight)
+                SELECT md5(i::text),20 FROM generate_series(1,27) i''')
+            conn.execute(f'''INSERT INTO {budget.TICKETS}(token,weight)
+                SELECT md5((i+27)::text),2 FROM generate_series(1,6) i''')
+        self.assertEqual(self.weights(),552)
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
+            self.budget.reserve_observation(bodies,priority='background')
+        self.assertEqual(self.weights(),552)
+        self.budget.reserve_observation(bodies,priority=priority).close()
+        self.assertEqual(self.weights(),844)
+        self.budget.reserve_observation(bodies,priority=priority).close()
+        self.assertEqual(self.weights(),1136)
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
+            self.budget.reserve_observation(bodies,priority=priority)
+        self.assertEqual(self.weights(),1136)
+
     def test_batch_background_ceiling_and_other_process_share_all_reserved_children(self):
         self.budget.reserve_observation(observation_bodies())
         self.budget.reserve_observation(observation_bodies())

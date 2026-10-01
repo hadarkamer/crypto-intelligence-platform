@@ -174,13 +174,13 @@ class PureTests(NoExternal):
             self.assertEqual(dispatch._collection_priority(changed,T),'protection')
         self.assertEqual(dispatch._collection_priority(plan()[0]['evidence'],T),'protection')
 
-    def test_only_quiet_current_full_stop_and_take_with_continuous_feed_poll_background(self):
+    def test_quiet_current_full_stop_and_take_retain_protection_reserve_with_continuous_feed(self):
         state=state_from_case(q='100',stop='100',take='100')
         class Feed:
             def dirty_symbols(self,account):return ()
             def entry_allowed(self,account):return True
         feed=Feed()
-        self.assertEqual(dispatch._collection_priority(state['evidence'],T,fill_wakeups=feed,pending_clear=True),'background')
+        self.assertEqual(dispatch._collection_priority(state['evidence'],T,fill_wakeups=feed,pending_clear=True),'protection')
         self.assertEqual(dispatch._collection_priority(state['evidence'],T,fill_wakeups=feed),'protection')
         self.assertEqual(dispatch._collection_priority(state['evidence'],T),'protection')
         self.assertEqual(dispatch._collection_priority(state['evidence'],T+15001,fill_wakeups=feed,pending_clear=True),'protection')
@@ -198,7 +198,7 @@ class PureTests(NoExternal):
             def dirty_symbols(self,account):return ()
             def entry_allowed(self,account):return True
         venue=dispatch.TestnetVenue({});venue.fill_wakeups=Feed()
-        for pending,active,expected in ((None,False,'background'),('a'*64,False,'protection'),
+        for pending,active,expected in ((None,False,'protection'),('a'*64,False,'protection'),
                                        (None,True,'protection')):
             with patch.object(venue,'now',return_value=T), \
                     patch.object(venue,'request_budget',return_value=None), \

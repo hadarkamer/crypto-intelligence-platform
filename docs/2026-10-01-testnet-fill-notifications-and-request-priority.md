@@ -166,3 +166,40 @@ Deployment verification must show complete current SHORT evidence and cleared
 feed gaps, no sustained partial-observation starvation, enabled record-only
 intake, and both continuous ENTRY flags still false. Software checks do not
 substitute for the later single fresh-fill STOP timing measurement.
+
+## Live-position reserve correction (2026-10-01)
+
+PR #119 restored complete SHORT observations and drained all five pending alert
+records. The deployed service saved a fresh DOGE SHORT checkpoint proving
+6,016 units covered by both the original STOP and TAKE_PROFIT. However, repeated
+quiet-position refreshes still hit the background ceiling and triggered urgent
+duplicate observations after the previous checkpoint aged.
+
+A read-only ledger sample at 18:10 UTC contained 552 weight from six complete
+observations. The next two-pass observation needed an initial reservation of
+292, making 844. This exceeds the 800 background ceiling, but fits the unchanged
+1,200 protection ceiling. Previously verified protection had incorrectly made
+this live-position reconciliation background work. Its denial then induced
+emergency takeover and occasional competing checkpoints.
+
+Reconciliation of every live position or working order now uses protection
+priority. Only complete, final, flat history can use background priority. This
+preserves the atomic full-plan reservation, both independent observation passes,
+all original freshness/deadline checks, and the existing quota ceilings. Quiet
+protected positions still use the ten-second ordinary fallback; changed or
+gapped notifications and uncovered fills still receive immediate attention.
+
+The observer also recognizes a still-running flight whose exact committed
+result already equals the newly loaded durable state, even though its starting
+revision was older. A caller waits only for that flight's completion signal and
+shares only the exact still-current result with an unchanged feed token and
+original evidence age of at most five seconds for emergency work or fifteen
+seconds for normal work. It never shares an unfinished result, caches an old
+checkpoint, rebases a trading action, or extends the urgent takeover wait.
+
+Tests cover both account directions, live and orphan orders, terminal history,
+and the exact 552-plus-292 admission case against disposable PostgreSQL. They
+also require genuine exhaustion at the total ceiling to remain a no-HTTP denial.
+This correction does not enable entries or establish a new fill-to-STOP timing
+result. Deployment verification must check sustained current evidence, normal
+and emergency status, record-only intake, and disabled continuous entries.

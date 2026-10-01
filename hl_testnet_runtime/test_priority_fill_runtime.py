@@ -76,7 +76,7 @@ class PriorityTests(NoExternal):
                         evidence=dict(bindings=[old,live],snapshot=history))
                     self.assertTrue(dispatch._fully_protected_no_work(state,T+1))
                     self.assertEqual(dispatch._collection_priority(state['evidence'],T+1,
-                        fill_wakeups=Feed(),pending_clear=True),'background')
+                        fill_wakeups=Feed(),pending_clear=True),'protection')
                     controller=self.controller(state);controller.venue.now.return_value=T+1
                     result=stream.tick(controller,{'account':old['account']},
                         datetime.fromtimestamp(T/1000,timezone.utc),new_entries=False,
@@ -108,6 +108,28 @@ class PriorityTests(NoExternal):
                     snap['terminal_orders']=[row for row in snap['terminal_orders'] if row['oid']!=entry]
                     snap['open_orders'].append(order(partial['bindings'][1],'ENTRY','40'))
                     self.assertFalse(dispatch._fully_protected_no_work(partial,T+1))
+
+    def test_live_exposure_retains_protection_reserve_even_with_quiet_healthy_feed(self):
+        class Feed:
+            def dirty_symbols(self,account):return ()
+            def entry_allowed(self,account):return True
+        for side in ('LONG','SHORT'):
+            protected=state_from_case(q='100',side=side,stop='100',take='100')
+            self.assertTrue(dispatch._fully_protected_no_work(protected,T+1))
+            for age in (1,9999,15001):
+                with self.subTest(side=side,age=age):
+                    self.assertEqual(dispatch._collection_priority(protected['evidence'],T+age,
+                        fill_wakeups=Feed(),pending_clear=True),'protection')
+            flat=self.historical_flat(side)
+            self.assertEqual(dispatch._collection_priority(flat['evidence'],T+15001,
+                fill_wakeups=Feed(),pending_clear=True),'background')
+            # A leftover live exit requires cleanup even when exposure is zero.
+            working=deepcopy(flat);snap=working['evidence']['snapshot']
+            oid=working['bindings'][0]['orders']['STOP'][0]
+            snap['terminal_orders']=[row for row in snap['terminal_orders'] if row['oid']!=oid]
+            snap['open_orders'].append(order(working['bindings'][0],'STOP'))
+            self.assertEqual(dispatch._collection_priority(working['evidence'],T+1,
+                fill_wakeups=Feed(),pending_clear=True),'protection')
 
     def controller(self,state):
         controller=Mock()
