@@ -24,6 +24,7 @@ MAX_REQUESTS = 128
 DONE = ('OBSERVED', 'EXPIRED_NO_PUBLIC_ORDER', 'EXPIRED_NO_PUBLIC_TERMINAL', 'ABORTED_UNSENT')
 _health = dict(running=False, last_pass_at_ms=None, last_status='DISABLED')
 _thread = None
+_stop_event = None
 _lock = threading.Lock()
 
 
@@ -116,10 +117,11 @@ def safe_card(state, cid, now_ms):
 
 
 def record_timing(state,request,lookup,now_ms):
-    """Keep venue activation separate from completed public/saved verification.
+    """Keep venue activation separate from completed public observation.
 
     Never use acknowledgement time. Pre-existing stops without their exact
     creation lookup retain unknown venue latency, not an invented measurement.
+    Observation precedes the database commit; it is not a persistence timer.
     """
     if not state['bindings'] or state['evidence'] is None:
         return
@@ -136,12 +138,13 @@ def record_timing(state,request,lookup,now_ms):
         armed=state.get('entry_timing_armed',{}).get(cid)
         if armed is None or first<armed:
             continue
-        item=timing.setdefault(cid,dict(first_fill_at_ms=first,first_fill_verified_at_ms=now_ms))
+        item=timing.setdefault(cid,dict(first_fill_at_ms=first,first_fill_observed_at_ms=now_ms,
+            timing_semantics='public_observation_before_commit'))
         row=next(v for v in report['cards'] if v['card_id']==cid)
         remaining=life.number(row['remaining_quantity'],signed=True)
         if (remaining<=0 or life.number(row['stop_quantity_observed'])!=remaining
                 or set(row['issues'])-{'TAKE_PROFIT_COVERAGE_MISSING','TAKE_PROFIT_EXCEEDS_CARD_REMAINDER'}
-                or 'stop_verified_at_ms' in item):
+                or 'stop_observed_at_ms' in item or 'stop_verified_at_ms' in item):
             continue
         activated=None
         if (request and request['proposal']['card_id']==cid and request['proposal']['leg']=='STOP'
@@ -152,10 +155,10 @@ def record_timing(state,request,lookup,now_ms):
             stamp=life.moment(lookup['order']['statusTimestamp'])
             if first<=stamp<=now_ms:
                 activated=stamp
-        item.update(stop_verified_at_ms=now_ms,stop_public_status_at_ms=activated,
+        item.update(stop_observed_at_ms=now_ms,stop_public_status_at_ms=activated,
                     quantity_at_stop_verification=life.text(remaining),
                     fill_to_stop_public_ms=activated-first if activated is not None else None,
-                    fill_to_saved_verification_ms=now_ms-first)
+                    fill_to_stop_observation_ms=now_ms-first)
 
 
 class Controller:
@@ -527,7 +530,7 @@ def health():
 
 
 def start(normal, streams, stop_event, *, only_bucket=None):
-    global _thread
+    global _thread,_stop_event
     env=normal.venue.env
     if env.get('HL_TESTNET_EMERGENCY_CLOSE','')=='':
         return False
@@ -589,6 +592,24 @@ def start(normal, streams, stop_event, *, only_bucket=None):
     with _lock:
         if _thread is not None and _thread.is_alive():
             return False
+        _stop_event=stop_event
         _thread=threading.Thread(target=loop,daemon=True,name='testnet-emergency-stop-supervisor')
         _thread.start()
     return True
+
+
+def stop_supervisor(stop_event, *, timeout=5):
+    """Stop and join the caller's supervisor; a timeout is not verified shutdown."""
+    if isinstance(timeout,bool) or not isinstance(timeout,(int,float)) or not 0<=timeout<=30:
+        raise DispatchError('EMERGENCY_SHUTDOWN_TIMEOUT_INVALID')
+    with _lock:
+        thread=_thread
+        if thread is not None and _stop_event is not stop_event:
+            raise DispatchError('EMERGENCY_SUPERVISOR_STOP_EVENT_MISMATCH')
+    stop_event.set()
+    if thread is None:
+        return True
+    if thread is threading.current_thread():
+        return False
+    thread.join(timeout)
+    return not thread.is_alive()

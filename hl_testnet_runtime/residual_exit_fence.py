@@ -264,7 +264,7 @@ def confirm_cancel(state, request, snapshot, bindings, *, now_ms):
 
 
 def retire_obsolete_unsent(store, state, *, now_ms):
-    """An unsent exit intention cannot later attach itself to a different trade.
+    """Retire obsolete exits or an originally expired, never-attempted entry.
 
     Only PREPARED + zero attempts + no nonce/reply may be retired automatically.
     OUTCOME_UNKNOWN is never cleared, even after a long delay or apparent closure.
@@ -273,14 +273,18 @@ def retire_obsolete_unsent(store, state, *, now_ms):
     if not state.get('pending'):
         return state
     request = store.request(state['pending'])
-    if (request['phase'] != 'PREPARED' or request['attempts'] != 0
+    if (request['phase'] != 'PREPARED' or type(request['attempts']) is not int
+            or request['attempts'] != 0
             or request['nonce'] is not None or request['attempt_at_ms'] is not None
-            or request['reply'] is not None):
+            or request['reply'] is not None or request.get('observed_oid') is not None):
         return state
     bs, snap, view = _read(state, now_ms)
     p = request['proposal']
     if snap['at_ms'] <= p['observed_at_ms']:
         return state
+    if p['operation'] == 'ENTRY' and p['leg'] == 'ENTRY':
+        return _retire_expired_unsent_entry(store, state, request, bs, snap, view,
+                                          now_ms=now_ms)
     b = next((x for x in bs if x['card_id'] == p['card_id']), None)
     card = next((x for x in view['cards'] if x['card_id'] == p['card_id']), None)
     if b is None or card is None or view['bucket_issues']:
@@ -315,3 +319,56 @@ def retire_obsolete_unsent(store, state, *, now_ms):
         value['pending'] = None
         return current
     return store.change(state['bucket'],state['revision'],'RETIRE_OBSOLETE_UNSENT_EXIT',now_ms,update)
+
+
+def _retire_expired_unsent_entry(store, state, request, bindings, snapshot, view, *, now_ms):
+    """A grant expiring is not evidence of cancellation or permission to retry.
+
+    Only the immutable source expiry can retire this never-attempted barrier.
+    Preserve old fills and request identity; fresh empty/final market evidence
+    and an exact transactional recheck are required before clearing pending.
+    """
+    from .source_window import timestamp
+    from .trade_cards import validate_card
+    from .filled_quantity_exits import validate_draft
+    p = request['proposal']; cid = p['card_id']
+    if (any(b['card_id'] == cid for b in bindings) or view['bucket_issues']
+            or snapshot['open_orders']
+            or life.number(snapshot['position_quantity'], signed=True) != 0
+            or any(v['state'] not in ('CLOSED', 'CANCELED_WITHOUT_FILL')
+                   or v['issues'] for v in view['cards'])):
+        return state
+    original = state['originals'].get(cid)
+    if not isinstance(original, dict):
+        return state
+    card = validate_card(original['card'])
+    expiry = card.get('source_expires_at')
+    if expiry is None:
+        return state
+    expires_ms = int(timestamp(expiry).timestamp()*1000)
+    if (now_ms < expires_ms or snapshot['at_ms'] < expires_ms
+            or snapshot['at_ms'] <= life.moment(request['prepared_at_ms'])):
+        return state
+    draft = validate_draft(card, original['draft'],
+                           {card['account_role']: dict(account=state['account'])})
+    if (card['card_id'] != cid or request['bucket'] != state['bucket']
+            or request['request_id'] != state['pending']
+            or p['account'] != state['account'] or p['symbol'] != state['symbol']
+            or p['role'] != card['account_role'] or draft['symbol'] != state['symbol']
+            or p.get('source_at') != card['prepared']['execution']['at']
+            or p.get('source_expires_at') != expiry
+            or p['quantity'] != draft['planned_quantity']
+            or p['action'] != draft['entry_action']):
+        raise FenceError('EXPIRED_UNSENT_ENTRY_OWNER_OR_SOURCE_MISMATCH')
+    def update(conn, value):
+        current = store.pending_record(conn, value)
+        if (current != request or value['evidence'] != state['evidence']
+                or value['bindings'] != bindings or value['originals'].get(cid) != original):
+            raise FenceError('UNSENT_ENTRY_RETIREMENT_RELOAD_REQUIRED')
+        current['phase'] = 'ABORTED_UNSENT'
+        current['retired_reason'] = 'ENTRY_SOURCE_EXPIRED_WITHOUT_ATTEMPT'
+        current['retired_evidence_digest'] = life.digest(value['evidence'])
+        value['pending'] = None
+        return current
+    return store.change(state['bucket'], state['revision'],
+                        'RETIRE_EXPIRED_UNSENT_ENTRY', now_ms, update)

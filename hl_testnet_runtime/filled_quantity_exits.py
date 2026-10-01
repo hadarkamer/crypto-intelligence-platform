@@ -94,14 +94,23 @@ def assess(bindings, snapshot, context, *, originals, routes, now_ms):
         # The connected dispatcher may attach one durable, boolean recovery
         # fence after proving that a pre-canonical exit was rejected without
         # creating an order. Keep the immutable execution inputs strict while
-        # allowing only that audited marker; arbitrary metadata still fails.
+        # allowing only that audited marker and the exact U21 owner cancellation
+        # policy attached by the registrar; arbitrary metadata still fails.
         if (not isinstance(original,dict)
-                or set(original)-{'card','draft','exit_signature_recovery_used'}
+                or set(original)-{'card','draft','exit_signature_recovery_used','cancel_policy'}
                 or not {'card','draft'} <= set(original)
                 or ('exit_signature_recovery_used' in original
                     and original['exit_signature_recovery_used'] is not True)):
             raise life.LifecycleError('UNEXPECTED_FIELDS')
         draft = validate_draft(original['card'],original['draft'],routes)
+        rule = original['card']['rule']
+        if rule['threshold_pct'] is None:
+            from .filled_pending_cancel import U21_OWNER_POLICY
+            if (rule['id'] != 'U21_XRP_SHORT'
+                    or original.get('cancel_policy') != U21_OWNER_POLICY):
+                raise life.LifecycleError('SOURCE_CANCEL_POLICY_REQUIRES_OWNER_DECISION')
+        elif 'cancel_policy' in original:
+            raise life.LifecycleError('UNEXPECTED_CANCEL_POLICY_OVERRIDE')
         expected = life.binding_from_card(original['card'],account,routes,b['orders'])
         if b != expected or len(b['orders']['ENTRY']) != 1:
             raise life.LifecycleError('FILLED_ENTRY_BINDING_CHANGED')

@@ -60,6 +60,65 @@ class NoOrders(unittest.TestCase):
 
 
 class FilledQuantityTests(NoOrders):
+    def u21_case(self, *, stop=None):
+        from .filled_pending_cancel import U21_OWNER_POLICY
+        metadata = {'universe':[{'name':'XRP','szDecimals':1}]}
+        source = dict(kind='SIGNAL',event_id='u21-protection-regression',
+            symbol='XRP',side='SHORT',entry='1.234',stop='1.2402',take_profit='1.1353',
+            at=datetime.fromtimestamp((T-20000)/1000,timezone.utc).isoformat())
+        card = trade_cards.prepare_card(source,metadata,rule_id='U21_XRP_SHORT',
+            threshold_pct=None,record_kind='received_alert',
+            source_stream='u21_xrp_short:'+'a'*64,
+            source_expires_at=datetime.fromtimestamp((T+70000)/1000,timezone.utc).isoformat())
+        draft = m.prepare_entry(card,metadata,B,ROUTES)
+        b = life.binding_from_card(card,B,ROUTES,dict(ENTRY=['10'],STOP=[],TAKE_PROFIT=[]))
+        opens = [order(b,'ENTRY',life.text(life.number(b['planned_quantity'])-40))]
+        if stop is not None:
+            b['orders']['STOP']=['11'];opens.append(order(b,'STOP',stop))
+        s = snapshot(b,fills=[fill(b,qty='40')],opens=opens,position='-40')
+        original = dict(card=card,draft=draft,cancel_policy=deepcopy(U21_OWNER_POLICY))
+        return metadata,([b],s,controls([b],s,mark='1.234'),{b['card_id']:original})
+
+    def test_registered_u21_partial_fill_selects_original_stop_then_take(self):
+        from . import filled_quantity_dispatch as dispatch
+        for stop,leg in ((None,'STOP'),('40','TAKE_PROFIT')):
+            metadata,ev = self.u21_case(stop=stop)
+            before = deepcopy(ev)
+            self.assertEqual(assess(ev)['next_step']['leg'],leg)
+            bs,s,_,originals = ev
+            state = dict(bucket=life.digest(['testnet',B,'XRP']),account=B,symbol='XRP',
+                revision=1,bindings=bs,originals=originals,pending=None,
+                evidence=dict(bindings=bs,snapshot=s))
+            proposal = dispatch.choose(state,ROUTES,metadata,
+                dict(mark_price='1.234',at_ms=T),now_ms=T)
+            self.assertEqual((proposal['operation'],proposal['leg'],proposal['quantity']),
+                ('CREATE_EXIT',leg,'40'))
+            self.assertTrue(proposal['action']['orders'][0]['r'])
+            self.assertTrue(proposal['action']['orders'][0]['b'])
+            self.assertEqual(proposal['action']['orders'][0]['t']['trigger']['triggerPx'],
+                bs[0]['prices']['stop' if leg=='STOP' else 'take_profit'])
+            self.assertEqual(ev,before)
+
+    def test_u21_protection_rejects_missing_or_changed_owner_policy(self):
+        _,ev = self.u21_case();cid = ev[0][0]['card_id']
+        for policy in (None,dict(version='unapproved',threshold_pct='0.5',cancel_move_pct='0.25'),
+                dict(version='u21-owner-cancel-threshold-v1',threshold_pct='8',cancel_move_pct='0.25'),
+                dict(version='u21-owner-cancel-threshold-v1',threshold_pct='0.5',cancel_move_pct='0.5')):
+            changed = deepcopy(ev)
+            if policy is None:
+                del changed[3][cid]['cancel_policy']
+            else:
+                changed[3][cid]['cancel_policy']=policy
+            with self.assertRaisesRegex(life.LifecycleError,'SOURCE_CANCEL_POLICY_REQUIRES_OWNER_DECISION'):
+                assess(changed)
+
+    def test_non_u21_protection_cannot_inherit_owner_policy(self):
+        from .filled_pending_cancel import U21_OWNER_POLICY
+        ev = case();cid = ev[0][0]['card_id']
+        ev[3][cid]['cancel_policy']=deepcopy(U21_OWNER_POLICY)
+        with self.assertRaisesRegex(life.LifecycleError,'UNEXPECTED_CANCEL_POLICY_OVERRIDE'):
+            assess(ev)
+
     def test_audited_exit_signature_recovery_marker_is_schema_safe(self):
         ev=case();cid=ev[0][0]['card_id']
         ev[3][cid]['exit_signature_recovery_used']=True
