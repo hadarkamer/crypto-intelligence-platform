@@ -12,6 +12,14 @@ ENV = {'HL_TESTNET_ACCOUNT_ADDRESS': A, 'HL_TESTNET_AGENT_ADDRESS': B}
 PLAN = {'symbol':'BTC','side':'LONG','entry':'100','stop':'90','take_profit':'110'}
 
 
+def setUpModule():
+    # Render runs these offline fixtures with service settings in the build
+    # environment. Never inherit its real journal or account configuration.
+    environment = patch.dict('os.environ', {}, clear=True)
+    environment.start()
+    unittest.addModuleCleanup(environment.stop)
+
+
 class Reader:
     def __init__(self):
         self.calls = 0
