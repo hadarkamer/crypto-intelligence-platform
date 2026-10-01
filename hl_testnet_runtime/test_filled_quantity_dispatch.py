@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import unittest
 from unittest.mock import patch, Mock
 
@@ -917,6 +918,124 @@ class EntryPreflightBoundaryTests(NoExternal):
                 self.assertEqual(budget.call_args.args[1],proposal['role'])
                 self.assertEqual(headroom.call_args.args[0],proposal['account'])
             self.assertEqual(before,(state,proposal,venue.env));self.assertEqual(venue.sent,0)
+    def test_parallel_sample_and_metadata_join_before_planning(self):
+        state,venue,_=self.setup_case()
+        barrier=threading.Barrier(2)
+        def sample(*args):
+            barrier.wait(timeout=2)
+            return dict(mark_price='10',at_ms=T)
+        def metadata():
+            barrier.wait(timeout=2)
+            return META
+        store=Mock(domain='testnet');store.load.return_value=state
+        controller=m.Controller(store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
+        with patch.object(controller,'refresh',return_value=state), \
+                patch.object(venue,'sample',side_effect=sample), \
+                patch.object(venue,'metadata',side_effect=metadata), \
+                patch.object(controller,'_plan_cycle',return_value=dict(status='NO_ACTION_NEEDED')) as plan:
+            result=controller._prepare_cycle(state['bucket'],send=True,
+                allow_new_entries=True,allowed_entry_card_id=None)
+        self.assertEqual(result['status'],'NO_ACTION_NEEDED')
+        self.assertEqual(plan.call_args.args[2:],(dict(mark_price='10',at_ms=T),META))
+        self.assertEqual(venue.sent,0)
+    def test_latched_emergency_yields_before_every_public_preparation_read(self):
+        state,venue,_=self.setup_case()
+        state['emergency']=dict(phase='ACTIVE')
+        store=Mock(domain='testnet');store.load.return_value=state
+        controller=m.Controller(store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
+        with patch.object(controller,'refresh',side_effect=AssertionError('NO_PUBLIC_REFRESH')) as refresh, \
+                patch.object(venue,'sample',side_effect=AssertionError('NO_PUBLIC_SAMPLE')) as sample, \
+                patch.object(venue,'metadata',side_effect=AssertionError('NO_PUBLIC_META')) as metadata, \
+                patch.object(venue,'authorize',side_effect=AssertionError('NO_AUTHORIZATION')) as authorize, \
+                patch.object(venue,'send',side_effect=AssertionError('NO_SEND')) as send:
+            result=controller.cycle(state['bucket'],send=True)
+        self.assertEqual(result,dict(status='EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE',order_requests_sent=0))
+        for check in (refresh,sample,metadata,authorize,send):check.assert_not_called()
+        store.prepare_and_begin.assert_not_called()
+    def test_empty_snapshot_overlaps_each_inventory_pair_but_preserves_two_passes(self):
+        _,venue,_=self.setup_case()
+        barrier=threading.Barrier(2);lock=threading.Lock();calls=[]
+        class Reader:
+            def read(self,kind,account):
+                with lock:
+                    calls.append((kind,account))
+                barrier.wait(timeout=2)
+                return [] if kind=='frontendOpenOrders' else dict(assetPositions=[])
+        with patch.object(m.evidence,'PublicReader',return_value=Reader()):
+            snap=venue.empty_snapshot(A,'DOGE')
+        self.assertEqual(snap['at_ms'],T)
+        self.assertEqual(snap['position_quantity'],'0')
+        self.assertEqual(len(calls),4)
+        for start in (0,2):
+            self.assertEqual(set(calls[start:start+2]),
+                {('frontendOpenOrders',A),('clearinghouseState',A)})
+    def stream_authorization_case(self):
+        state,venue,proposal=self.setup_case()
+        venue.env['HL_TESTNET_RUNTIME_MODE']='long_stream_testnet_v1'
+        card=state['originals'][proposal['card_id']]['card']
+        card.update(record_kind='received_alert',account_role=proposal['role'])
+        venue.store=Mock()
+        venue.store.for_account.return_value=[]
+        return state,venue,proposal
+    def test_ownership_and_budget_overlap_and_both_finish_before_final_gate(self):
+        state,venue,proposal=self.stream_authorization_case()
+        barrier=threading.Barrier(2);finished=[]
+        def owned(*args,**kwargs):
+            barrier.wait(timeout=2);finished.append('owned');return True
+        def budget(*args):
+            barrier.wait(timeout=2);finished.append('budget')
+            return dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True)
+        def headroom(*args):
+            self.assertCountEqual(finished,['owned','budget']);return 100
+        with self.public_checks(budget=budget,headroom=headroom), \
+                patch.object(venue,'_gate',return_value=ROUTES2[proposal['role']]), \
+                patch.object(m.roles,'wallet_for_role',return_value=object()), \
+                patch('hl_testnet_runtime.long_stream_runtime._account_owned',side_effect=owned):
+            venue.authorize(state,proposal,m.AFTER_EXIT)
+        self.assertCountEqual(finished,['owned','budget']);self.assertEqual(venue.sent,0)
+    def test_failed_parallel_ownership_joins_budget_before_returning(self):
+        state,venue,proposal=self.stream_authorization_case()
+        barrier=threading.Barrier(2);release=threading.Event();ended=threading.Event()
+        failed=threading.Event()
+        def owned(*args,**kwargs):
+            barrier.wait(timeout=2)
+            failed.set()
+            raise DispatchError('UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY')
+        def budget(*args):
+            barrier.wait(timeout=2)
+            if not release.wait(timeout=2):raise AssertionError('JOIN_RELEASE_MISSING')
+            ended.set()
+            return dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True)
+        with self.public_checks(budget=budget) as (_,_,headroom), \
+                patch.object(venue,'_gate',return_value=ROUTES2[proposal['role']]), \
+                patch.object(m.roles,'wallet_for_role',return_value=object()), \
+                patch('hl_testnet_runtime.long_stream_runtime._account_owned',side_effect=owned), \
+                ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(venue.authorize,state,proposal,m.AFTER_EXIT)
+            try:
+                self.assertTrue(failed.wait(timeout=2))
+                with self.assertRaises(TimeoutError):
+                    future.result(timeout=.05)
+                self.assertFalse(ended.is_set())
+            finally:
+                release.set()
+            with self.assertRaisesRegex(DispatchError,'^UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY$'):
+                future.result(timeout=3)
+            self.assertTrue(ended.is_set());headroom.assert_not_called()
+        self.assertEqual(venue.sent,0)
+    def test_parallel_account_inventory_retains_unknown_order_block(self):
+        from . import long_stream_runtime as stream
+        _,venue,_=self.setup_case()
+        barrier=threading.Barrier(2)
+        class Reader:
+            def read(self,kind,account):
+                barrier.wait(timeout=2)
+                return ([dict(coin='DOGE',oid=100)] if kind=='frontendOpenOrders'
+                    else dict(assetPositions=[]))
+        with patch.object(m.evidence,'PublicReader',return_value=Reader()), \
+                self.assertRaisesRegex(DispatchError,'^UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY$'):
+            stream._account_owned(venue,A,[],role='long_account')
+        self.assertEqual(venue.sent,0)
     def test_old_future_and_missing_evidence_block_before_account_reads(self):
         for observed in (T-15001,T+1,None,True):
             state,venue,proposal=self.setup_case();proposal['observed_at_ms']=observed

@@ -88,13 +88,39 @@ def default_native_snapshot(route, reader, symbol, *, plan=None, allow_owned_exp
     first = reader.read('userAbstraction', user=account)
     if first != 'default':
         raise checks.Blocked('ACCOUNT_MODE_CHANGED_RECHECK')
-    if reader.read('userRole', user=account) != {'role': 'user'}:
+    observations = None
+    if (getattr(reader, 'parallel', False) is True
+            and callable(getattr(reader, 'read_many', None))):
+        requests = [('userRole', {'user': account}),
+                    ('userRole', {'user': agent}),
+                    ('clearinghouseState', {'user': account}),
+                    ('spotClearinghouseState', {'user': account}),
+                    ('activeAssetData', {'user': account, 'coin': symbol})]
+        if plan is not None:
+            requests.append(('meta', {}))
+        # All independent responses must complete before any validation. The
+        # first/final mode probes are deliberately uncached and sequential.
+        values = reader.read_many(requests)
+        observations = {(kind, kwargs.get('user'), kwargs.get('coin')): value
+                        for (kind, kwargs), value in zip(requests, values)}
+
+    def sample(kind, *, user=None, coin=None):
+        if observations is not None:
+            return observations[(kind, user, coin)]
+        kwargs = {}
+        if user is not None:
+            kwargs['user'] = user
+        if coin is not None:
+            kwargs['coin'] = coin
+        return reader.read(kind, **kwargs)
+
+    if sample('userRole', user=account) != {'role': 'user'}:
         raise checks.Blocked('INDEPENDENT_TEST_ACCOUNT_REQUIRED')
-    link = reader.read('userRole', user=agent)
+    link = sample('userRole', user=agent)
     if (not isinstance(link, dict) or link.get('role') != 'agent'
             or checks.address((link.get('data') or {}).get('user')) != account):
         raise checks.Blocked('AGENT_ACCOUNT_MISMATCH')
-    perp = reader.read('clearinghouseState', user=account)
+    perp = sample('clearinghouseState', user=account)
     if not isinstance(perp, dict) or not isinstance(perp.get('assetPositions'), list):
         raise checks.Blocked('INVALID_ACCOUNT_STATE')
     if not allow_owned_exposure and any(checks.number(p['position']['szi'], signed=True) != 0 for p in perp['assetPositions']):
@@ -109,11 +135,11 @@ def default_native_snapshot(route, reader, symbol, *, plan=None, allow_owned_exp
         raise checks.Blocked('DEFAULT_NATIVE_BALANCE_NOT_RECONCILED')
     if not allow_owned_exposure and not (equity == raw and used == 0 and notional == 0):
         raise checks.Blocked('DEFAULT_NATIVE_BALANCE_NOT_RECONCILED')
-    spot = reader.read('spotClearinghouseState', user=account)
+    spot = sample('spotClearinghouseState', user=account)
     total, _ = checks.unified_usdc(spot)
     if total != 0 or any(checks.number(row.get('total')) > 0 for row in spot['balances']):
         raise checks.Blocked('DEFAULT_OTHER_BALANCES_REQUIRE_REVIEW')
-    active = reader.read('activeAssetData', user=account, coin=symbol)
+    active = sample('activeAssetData', user=account, coin=symbol)
     available, max_size = checks.capacity(active, account, symbol)
     if available <= 0 or max_size <= 0:
         raise checks.Blocked('NO_USABLE_CAPACITY_OBSERVED')
@@ -123,7 +149,7 @@ def default_native_snapshot(route, reader, symbol, *, plan=None, allow_owned_exp
         exchange_reported_available_usd=str(available), test_plan_checked=False,
         budget_diagnostics=None, order_requests_sent=0, trade_authorized=False)
     if plan is not None:
-        meta = reader.read('meta')
+        meta = sample('meta')
         assets = [x for x in meta.get('universe', []) if x.get('name') == symbol]
         if len(assets) != 1 or assets[0].get('isDelisted', False) is not False:
             raise checks.Blocked('ASSET_UNAVAILABLE')

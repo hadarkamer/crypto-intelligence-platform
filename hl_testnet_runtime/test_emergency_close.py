@@ -1,5 +1,6 @@
 """Fault-injected actual controller/store tests; no keys or real exchange calls."""
 from copy import deepcopy
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime,timezone
 from decimal import Decimal
@@ -607,6 +608,20 @@ class EmergencyDatabaseTests(NoExternal):
 
     def incident(self):return self.store.load(self.bucket)['emergency']
 
+    @contextmanager
+    def actual_emergency_authorization(self):
+        self.v.env=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
+            RENDER_SERVICE_ID=dispatch.roles.SERVICE,
+            HL_TESTNET_RUNTIME_MODE='long_stream_testnet_v1',
+            HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',
+            HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
+            HL_TESTNET_LONG_STREAM='approved_alerts_v1',
+            HL_TESTNET_FILLED_AFTER_EXIT_POLICY=dispatch.AFTER_EXIT)
+        with patch.object(dispatch.roles,'route_for',return_value=ROUTES2[self.b['role']]), \
+                patch.object(dispatch.roles,'wallet_for_role',return_value=object()), \
+                patch.object(self.v,'authorize',side_effect=lambda s,p:m.Venue.authorize(self.v,s,p)):
+            yield
+
     def test_preview_never_latches_reserves_or_sends(self):
         self.setup_emergency()
         result=self.emergency(False)
@@ -627,6 +642,92 @@ class EmergencyDatabaseTests(NoExternal):
         self.assertEqual(state['evidence']['snapshot']['position_quantity'],'0')
         self.assertTrue(m.view(state,self.v.now())['cards'][0]['closure_verified'])
         self.assertEqual(self.v.sent,3)
+
+    def test_slow_metadata_is_read_before_final_quantity_checkpoint(self):
+        self.setup_emergency('100')
+        order=[];collect=self.v.collect
+        def metadata():
+            order.append('metadata');self.v.t+=6001
+            return META
+        def sample(account,symbol):
+            order.append('sample')
+            return dict(mark_price=self.v.mark,at_ms=self.v.now())
+        def observed(value):
+            order.append('quantity')
+            return collect(value)
+        with patch.object(self.v,'metadata',side_effect=metadata), \
+                patch.object(self.v,'sample',side_effect=sample), \
+                patch.object(self.v,'collect',side_effect=observed), \
+                self.actual_emergency_authorization():
+            result=self.emergency()
+        self.assertEqual(result['operation'],'EMERGENCY_CLOSE')
+        self.assertEqual(order,['metadata','sample','quantity'])
+        self.assertEqual(self.v.requests[-1]['proposal']['quantity'],'100')
+        self.assertEqual(self.v.sent,2)
+        self.assertEqual(self.incident()['requests'][0]['attempts'],1)
+
+    def test_prefetched_price_timestamp_is_not_renewed_after_slow_reconciliation(self):
+        self.setup_emergency('100')
+        collect=self.v.collect;samples=[]
+        def sample(account,symbol):
+            samples.append(self.v.now())
+            return dict(mark_price=self.v.mark,at_ms=samples[-1])
+        def slow(value):
+            result=collect(value);self.v.t+=6001
+            return result
+        with patch.object(self.v,'sample',side_effect=sample), \
+                patch.object(self.v,'collect',side_effect=slow):
+            with self.assertRaisesRegex(DispatchError,'EMERGENCY_PRICE_SAMPLE_EXPIRED'):
+                self.emergency()
+        self.assertEqual(len(samples),1)
+        self.assertEqual(self.v.sent,1)
+        self.assertEqual(self.incident()['requests'],[])
+        self.assertEqual(self.incident()['phase'],'ACTIVE')
+
+    def test_fresh_price_cannot_authorize_expired_final_quantity_evidence(self):
+        self.setup_emergency('100')
+        collect=self.v.collect
+        def stale_quantity(value):
+            observed=collect(value)
+            observed['snapshot']['at_ms']-=5001
+            return observed
+        with patch.object(self.v,'collect',side_effect=stale_quantity), \
+                self.actual_emergency_authorization():
+            with self.assertRaisesRegex(DispatchError,'EMERGENCY_FINAL_QUANTITY_EVIDENCE_EXPIRED'):
+                self.emergency()
+        self.assertEqual(self.v.sent,1)
+        self.assertEqual(self.incident()['requests'],[])
+
+    def test_metadata_mapping_change_is_rejected_before_emergency_attempt(self):
+        self.setup_emergency('100')
+        metadata=deepcopy(META);metadata['universe'][0]['szDecimals']-=1
+        with patch.object(self.v,'metadata',return_value=metadata):
+            with self.assertRaisesRegex(DispatchError,'EMERGENCY_WIRE_NOT_VERIFIED'):
+                self.emergency()
+        self.assertEqual(self.v.sent,1)
+        self.assertEqual(self.incident()['requests'],[])
+
+    def test_independent_preread_failure_still_latches_known_unprotected_fill(self):
+        self.setup_emergency('100')
+        with patch.object(self.v,'metadata',side_effect=DispatchError('PUBLIC_READ_UNAVAILABLE')):
+            with self.assertRaisesRegex(DispatchError,'PUBLIC_READ_UNAVAILABLE'):
+                self.emergency()
+        self.assertEqual(self.v.sent,1)
+        self.assertEqual(self.incident()['phase'],'ACTIVE')
+        self.assertEqual(self.incident()['requests'],[])
+
+    def test_emergency_begin_returns_commit_local_sender_without_reload(self):
+        self.setup_emergency('100');self.v.t+=1
+        state=self.em._refresh_normal(self.store.load(self.bucket))
+        state=self.em.latch(state,m.trigger(state,now_ms=self.v.now()))
+        proposal=self.em.proposal(state)
+        with patch.object(self.store,'load',side_effect=AssertionError('NO_POSTCOMMIT_RELOAD')):
+            committed,request=self.em._begin(state,proposal)
+        self.assertEqual(committed['revision'],state['revision']+1)
+        self.assertEqual(request,committed['emergency']['requests'][-1])
+        self.assertEqual((request['phase'],request['attempts']),('OUTCOME_UNKNOWN',1))
+        self.assertEqual(request['proposal'],proposal)
+        self.assertEqual(self.v.sent,1)
 
     def test_lost_close_reply_resolves_original_identity_without_replay(self):
         self.setup_emergency('100');self.v.lose_reply=True

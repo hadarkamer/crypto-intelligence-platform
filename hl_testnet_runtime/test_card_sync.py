@@ -266,7 +266,7 @@ class EvidenceTests(unittest.TestCase):
                         if self.active: raise AssertionError('OVERLAPPING_VERIFICATION_PASSES')
                     self.active+=1;self.peak=max(self.peak,self.active)
                 try:
-                    if ordinal % calls_per_pass < 4: barrier.wait()
+                    if ordinal % calls_per_pass < 4:barrier.wait()
                     with lock: return source.read(*args,**kwargs)
                 finally:
                     with lock: self.active-=1
@@ -275,6 +275,39 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(result,collected(ev))
         self.assertEqual((reader.started,reader.peak,reader.active),(12,4,0))
         self.assertEqual(source.windows,[source.windows[0]]*2)
+
+    def test_multi_card_parallel_reads_keep_all_statuses_and_fixed_fanout_bound(self):
+        barrier=threading.Barrier(e.MAX_OBSERVATION_READ_WORKERS,timeout=3)
+        lock=threading.Lock()
+        class Parallel(e.PublicReader):
+            def __init__(self):
+                super().__init__(parallel=True,parallel_workers=12)
+                self.started=0;self.active=0;self.peak=0;self.statuses=[]
+            def read(self,kind,account,*,oid=None,**kwargs):
+                with lock:
+                    ordinal=self.started;self.started+=1;self.active+=1
+                    self.peak=max(self.peak,self.active)
+                    if kind=='orderStatus':self.statuses.append(oid)
+                try:
+                    if ordinal<e.MAX_OBSERVATION_READ_WORKERS:barrier.wait()
+                    if kind=='userFillsByTime':return []
+                    return dict(kind=kind,oid=oid)
+                finally:
+                    with lock:self.active-=1
+        reader=Parallel();oids=[str(n) for n in range(1,16)]
+        statuses,fills,inventory,position=reader.observation_inputs(A,oids,T,T+1)
+        self.assertEqual(set(statuses),set(oids))
+        self.assertCountEqual(reader.statuses,oids)
+        self.assertEqual((reader.started,reader.peak,reader.active),(18,12,0))
+        self.assertEqual(fills,[])
+        self.assertEqual(inventory['kind'],'frontendOpenOrders')
+        self.assertEqual(position['kind'],'clearinghouseState')
+
+    def test_parallel_fanout_is_explicit_and_rejects_unbounded_or_ambiguous_values(self):
+        self.assertEqual(e.PublicReader(parallel=True).parallel_workers,4)
+        for bad in (0,13,-1,True,12.0,'12',None):
+            with self.subTest(bound=bad),self.assertRaisesRegex(e.SyncError,'PARALLEL_BOUND_INVALID'):
+                e.PublicReader(parallel=True,parallel_workers=bad)
 
     def test_parallel_inconsistent_second_pass_is_rejected(self):
         ev=evidence(is_open=True);source=Reader(ev);lock=threading.Lock()
@@ -295,7 +328,7 @@ class EvidenceTests(unittest.TestCase):
     def test_parallel_read_failure_returns_no_partial_evidence_and_joins_workers(self):
         ev=evidence();source=Reader(ev);lock=threading.Lock()
         class Parallel(e.PublicReader):
-            def __init__(self): super().__init__(parallel=True);self.active=0
+            def __init__(self): super().__init__(parallel=True,parallel_workers=12);self.active=0
             def read(self,kind,*args,**kwargs):
                 with lock: self.active+=1
                 try:
