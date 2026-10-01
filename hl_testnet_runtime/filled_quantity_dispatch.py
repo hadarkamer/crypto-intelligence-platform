@@ -38,6 +38,7 @@ class _ObservationCoordinator:
     def __init__(self):
         self.guard=threading.Lock()
         self.flights={}
+        self.completed={}
         self.started=False
 
 
@@ -727,7 +728,40 @@ class Controller:
                 active.remove(flight)
                 if not active:
                     del coordinator.flights[bucket]
+                now=self.venue.now()
+                for key,completed in tuple(coordinator.completed.items()):
+                    snap=(completed.result.get('evidence') or {}).get('snapshot') or {}
+                    at=snap.get('at_ms')
+                    if type(at) is not int or not 0<=now-at<=15000:
+                        del coordinator.completed[key]
+                # One positively completed checkpoint per bucket can serve an
+                # exact historical timing trial. Ordinary refresh and emergency
+                # paths never consult this sequential-read cache.
+                if flight.error is not None:
+                    coordinator.completed.pop(bucket,None)
+                elif (flight.result is not None and flight.result.get('evidence') is not None
+                        and not emergency):
+                    coordinator.completed[bucket]=flight
                 flight.done.set()
+
+    def _trial_preparation_checkpoint(self,state,*,send,allow_new_entries,allowed_entry_card_id):
+        if (send is not True or allow_new_entries is not True
+                or not isinstance(self.venue,TestnetVenue)
+                or not _historical_timing_candidate(state,self.venue.env,
+                    allowed_entry_card_id,self.venue.now())):
+            return None
+        feed=vars(self.venue).get('fill_wakeups')
+        if feed is None or not feed.entry_allowed(state['account']):
+            return None
+        stamp=self._feed_stamp(state['account'])
+        if stamp is None:
+            return None
+        with self._observations.guard:
+            previous=self._observations.completed.get(state['bucket'])
+        if previous is None:
+            return None
+        shared=self._share_observation(state['bucket'],previous,state,stamp,emergency=False)
+        return (shared,stamp) if shared is not None else None
 
     def _refresh_once(self,bucket,state):
         """Read without the local lane; discard evidence if its revision advanced.
@@ -922,24 +956,38 @@ class Controller:
         initial=self.store.load(bucket)
         if initial.get('emergency') is not None:
             return dict(status='EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE',order_requests_sent=0)
+        checkpoint=self._trial_preparation_checkpoint(initial,send=send,
+            allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id)
         admission=getattr(type(self.venue),'entry_read_admission',None)
         context=(self.venue.entry_read_admission(initial,send=send,
-                    allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id)
+                    allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id,
+                    historical_checkpoint=checkpoint is not None)
                  if callable(admission) else nullcontext())
         with context:
             return self._prepare_observed_cycle(bucket,send=send,
-                allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id)
+                allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id,
+                checkpoint=checkpoint)
 
-    def _prepare_observed_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id):
-        try:
-            state=self.refresh(bucket)
-        except DispatchError as exc:
-            if str(exc)!='CONCURRENT_DISPATCH_RELOAD_REQUIRED':
-                raise
-            # An independent safety observation can overtake this public read.
-            # Discard its entire result, then use only the fresh checkpoint that
-            # actually won the durable revision. This is not a request retry.
-            state=self._load_preparation_checkpoint(bucket)
+    def _prepare_observed_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id,
+                                checkpoint=None):
+        if checkpoint is not None:
+            state,stamp=checkpoint
+            current=self.store.load(bucket)
+            if (current!=state or self._feed_stamp(state['account'])!=stamp
+                    or not self.venue.fill_wakeups.entry_allowed(state['account'])
+                    or not _historical_timing_candidate(current,self.venue.env,
+                        allowed_entry_card_id,self.venue.now())):
+                raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+        else:
+            try:
+                state=self.refresh(bucket)
+            except DispatchError as exc:
+                if str(exc)!='CONCURRENT_DISPATCH_RELOAD_REQUIRED':
+                    raise
+                # An independent safety observation can overtake this public read.
+                # Discard its entire result, then use only the fresh checkpoint that
+                # actually won the durable revision. This is not a request retry.
+                state=self._load_preparation_checkpoint(bucket)
         if state['pending']:
             pending=self.store.request(state['pending'])
             if pending['phase']!='PREPARED':
@@ -1070,6 +1118,42 @@ class Controller:
         return AdmittedAttempt((state,request,proposal,route),admission)
 
 
+def _historical_timing_candidate(state,env,card_id,now_ms):
+    """Only a fresh exact unattempted trial in an entirely final flat market."""
+    if (env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_testnet_v1'
+            or not isinstance(card_id,str) or not re.fullmatch(r'[0-9a-f]{64}',card_id)
+            or env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID')!=card_id
+            or not state['bindings'] or state['pending'] is not None
+            or state.get('emergency') is not None
+            or card_id not in state['originals']
+            or card_id in state.get('entry_timing_armed',{})
+            or any(b['card_id']==card_id for b in state['bindings'])):
+        return False
+    original=state['originals'][card_id]
+    if original.get('entry_rejected_no_retry') or original.get('entry_unsent_no_retry'):
+        return False
+    try:
+        expiry=int(env.get('HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS',''))
+        card=original['card']
+        from .source_window import source_fresh,timestamp
+        if (not 0<expiry-now_ms<=120000 or card['record_kind']!='received_alert'
+                or not source_fresh(timestamp(card['prepared']['source']['at']),
+                    card['source_expires_at'],
+                    now=datetime.fromtimestamp(now_ms/1000,timezone.utc))):
+            return False
+        ev=state['evidence'];snap=ev['snapshot'];life.validate_snapshot(snap)
+        if (ev['bindings']!=state['bindings'] or snap['account']!=state['account']
+                or snap['symbol']!=state['symbol'] or not snap['history_complete']
+                or not snap['orders_complete'] or not 0<=now_ms-snap['at_ms']<=15000
+                or snap['open_orders'] or life.number(snap['position_quantity'],signed=True)!=0):
+            return False
+        report=life.review(state['bindings'],snap,now_ms=now_ms)
+        return (not report['bucket_issues'] and all(not row['issues']
+            and row['state'] in ('CLOSED','CANCELED_WITHOUT_FILL') for row in report['cards']))
+    except (KeyError,TypeError,ValueError,life.LifecycleError):
+        return False
+
+
 def _fully_protected_no_work(state, now_ms):
     """Only omit price/metadata for a freshly verified, fully covered position."""
     if not state['bindings'] or state['evidence'] is None or state['pending']:
@@ -1150,7 +1234,8 @@ class TestnetVenue:
         scope=_ENTRY_INFO_SCOPE.get()
         return 'background' if scope is not None and scope[0] is self else 'protection'
     @staticmethod
-    def _entry_info_bodies(account,agent,symbol,*,stream,whole_cycle=False):
+    def _entry_info_bodies(account,agent,symbol,*,stream,whole_cycle=False,
+                           historical_checkpoint=False):
         # Account mode is not guessed or cached: fund the finite superset of
         # both balance branches, retaining the independent final mode probe.
         bodies=[dict(type='userAbstraction',user=account)]*2
@@ -1163,8 +1248,9 @@ class TestnetVenue:
             bodies.extend([dict(type='frontendOpenOrders',user=account),
                            dict(type='clearinghouseState',user=account)])
         if whole_cycle:
-            bodies.extend([dict(type='frontendOpenOrders',user=account),
-                           dict(type='clearinghouseState',user=account)]*2)
+            if not historical_checkpoint:
+                bodies.extend([dict(type='frontendOpenOrders',user=account),
+                               dict(type='clearinghouseState',user=account)]*2)
             bodies.extend([dict(type='activeAssetData',user=account,coin=symbol),dict(type='meta')])
         return bodies
     def _fund_info_plan(self,bodies):
@@ -1173,7 +1259,8 @@ class TestnetVenue:
             raise DispatchError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')
         return budget.reserve_info_plan(bodies,priority='background',host=HOST)
     @contextmanager
-    def _entry_authorization_scope(self,account,agent,symbol,*,whole_cycle=False):
+    def _entry_authorization_scope(self,account,agent,symbol,*,whole_cycle=False,
+                                    historical_checkpoint=False):
         active=_ENTRY_INFO_SCOPE.get()
         if active is not None and active[0] is self:
             if whole_cycle:
@@ -1182,7 +1269,7 @@ class TestnetVenue:
             return
         batch=self._fund_info_plan(self._entry_info_bodies(account,agent,symbol,
             stream=self.env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1',
-            whole_cycle=whole_cycle))
+            whole_cycle=whole_cycle,historical_checkpoint=historical_checkpoint))
         token=_ENTRY_INFO_SCOPE.set((self,batch))
         try:
             yield batch
@@ -1190,20 +1277,25 @@ class TestnetVenue:
             _ENTRY_INFO_SCOPE.reset(token)
             batch.close()
     @contextmanager
-    def entry_read_admission(self,state,*,send,allow_new_entries,allowed_entry_card_id):
+    def entry_read_admission(self,state,*,send,allow_new_entries,allowed_entry_card_id,
+                              historical_checkpoint=False):
         cid=self.env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID','')
         if (send is not True or allow_new_entries is not True
                 or not re.fullmatch(r'[0-9a-f]{64}',cid) or allowed_entry_card_id!=cid
-                or state['bindings'] or state['pending'] is not None
+                or (state['bindings'] and not historical_checkpoint) or state['pending'] is not None
                 or cid not in state['originals']):
             yield
             return
+        if historical_checkpoint and not _historical_timing_candidate(
+                state,self.env,cid,self.now()):
+            raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
         original=state['originals'][cid]['card']
         route=roles.route_for(self.env,original['account_role'],state['account'])
-        # Fund the complete first-entry cycle before empty-inventory, price or
-        # metadata HTTP. Refusal spends no partial precheck and starts no order.
+        # Fund all remaining cycle reads before price/metadata HTTP. A new
+        # market additionally funds its empty proof; historical reuse supplies
+        # that cycle's exact committed final/flat checkpoint instead.
         with self._entry_authorization_scope(route['account'],route['agent'],state['symbol'],
-                                              whole_cycle=True):
+                whole_cycle=True,historical_checkpoint=historical_checkpoint):
             yield
     def reserve_transport(self,proposal):
         if HOST!='api.hyperliquid-testnet.xyz':
