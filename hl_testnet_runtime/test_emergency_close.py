@@ -147,6 +147,120 @@ class EmergencyPureTests(NoExternal):
                 else:snap['position_quantity']='41'
                 self.assertFalse(m.recent_normal_checkpoint(state,now_ms=T))
 
+    def test_fresh_stop_coverage_never_relabels_uncertain_or_uncovered_evidence(self):
+        good=state_from_case(q='40',stop='40')
+        # Missing TP is ordinary maintenance; an exact original STOP already
+        # covers the observed partial fill, even while the ENTRY can fill more.
+        self.assertTrue(m.fresh_stop_coverage(good,now_ms=T))
+        for invalid in ('age','future','history','orders','bindings','account','symbol',
+                        'pending','position','uncovered','oversized','terms','incident'):
+            with self.subTest(invalid=invalid):
+                state=deepcopy(good);snap=state['evidence']['snapshot'];now=T
+                if invalid=='age':now=T+5001
+                elif invalid=='future':snap['at_ms']=T+1
+                elif invalid=='history':snap['history_complete']=False
+                elif invalid=='orders':snap['orders_complete']=False
+                elif invalid=='bindings':state['evidence']['bindings']=[]
+                elif invalid=='account':state['account']=B
+                elif invalid=='symbol':state['symbol']='BTC'
+                elif invalid=='pending':state['pending']='a'*64
+                elif invalid=='position':snap['position_quantity']='41'
+                elif invalid in ('uncovered','oversized','terms'):
+                    stop=next(o for o in snap['open_orders'] if o['oid'] in state['bindings'][0]['orders']['STOP'])
+                    if invalid=='terms':stop['trigger_price']='9.7'
+                    else:stop['quantity']='20' if invalid=='uncovered' else '41'
+                else:state['emergency']=dict(phase='ACTIVE')
+                self.assertFalse(m.fresh_stop_coverage(state,now_ms=now))
+
+    def test_reconciled_stop_coverage_does_not_spend_metadata_or_mark_requests(self):
+        for take in (None,'40'):
+            with self.subTest(take=take):
+                state=state_from_case(q='40',stop='40',take=take)
+                class Store:
+                    domain='software'
+                    def load(self,bucket):return deepcopy(state)
+                venue=Venue();venue.mark='1'  # beyond the original stop
+                normal=dispatch.Controller(Store(),venue,ROUTES2)
+                current=m.Controller(normal,venue)
+                with patch.object(normal,'refresh',return_value=deepcopy(state)) as refresh, \
+                        patch.object(venue,'metadata',side_effect=AssertionError('NO_UNUSED_METADATA')), \
+                        patch.object(venue,'sample',side_effect=AssertionError('NO_UNUSED_MARK')):
+                    result=current.cycle(state['bucket'],send=True)
+                self.assertEqual(result['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+                refresh.assert_called_once_with(state['bucket'],emergency=True,emergency_wait_ms=250)
+                self.assertEqual(venue.sent,0)
+
+    def test_younger_uncovered_partial_fill_checks_crossed_stop_before_deadline(self):
+        state=state_from_case(q='40',stop='20',take='40')
+        state['evidence']['snapshot']['fills'][0]['at_ms']=T
+        class Store:
+            domain='software'
+            def load(self,bucket):return deepcopy(state)
+        venue=Venue();venue.t=T+100;venue.mark=state['bindings'][0]['prices']['stop']
+        self.assertIsNone(m.trigger(state,now_ms=venue.t))
+        normal=dispatch.Controller(Store(),venue,ROUTES2)
+        current=m.Controller(normal,venue)
+        with patch.object(normal,'refresh',return_value=deepcopy(state)), \
+                patch.object(venue,'sample',wraps=venue.sample) as sample, \
+                patch.object(venue,'metadata',side_effect=AssertionError('NO_PREVIEW_METADATA')):
+            result=current.cycle(state['bucket'],send=False)
+        self.assertEqual(result['status'],'EMERGENCY_PREVIEW')
+        self.assertEqual(result['cause']['reason'],'STOP_LEVEL_PASSED_UNPROTECTED')
+        self.assertEqual(result['cause']['uncovered_quantity'],'20')
+        sample.assert_called_once_with(state['account'],state['symbol'])
+        self.assertEqual(venue.sent,0)
+
+    def test_reconciliation_failure_never_spends_metadata_or_mark_quota(self):
+        state=state_from_case(q='40',stop='40',take='40')
+        class Store:
+            domain='software'
+            def load(self,bucket):return deepcopy(state)
+        venue=Venue();normal=dispatch.Controller(Store(),venue,ROUTES2)
+        current=m.Controller(normal,venue)
+        with patch.object(normal,'refresh',side_effect=DispatchError('TESTNET_REQUEST_BUDGET_EXHAUSTED')), \
+                patch.object(venue,'metadata',side_effect=AssertionError('NO_UNUSED_METADATA')), \
+                patch.object(venue,'sample',side_effect=AssertionError('NO_UNUSED_MARK')):
+            with self.assertRaisesRegex(DispatchError,'TESTNET_REQUEST_BUDGET_EXHAUSTED'):
+                current.cycle(state['bucket'],send=True)
+        self.assertEqual(venue.sent,0)
+
+    def test_join_wait_never_crosses_original_uncovered_fill_deadline(self):
+        state=state_from_case(q='40',stop='20',take='40')
+        state['evidence']['snapshot']['fills'][0]['at_ms']=T
+        class Store:
+            domain='software'
+            def load(self,bucket):return deepcopy(state)
+        venue=Venue();normal=dispatch.Controller(Store(),venue,ROUTES2)
+        current=m.Controller(normal,venue)
+        for age,wait in ((0,250),(4750,250),(4999,1),(5000,0),(6000,0)):
+            with self.subTest(age=age):
+                venue.t=T+age
+                with patch.object(normal,'refresh',return_value=deepcopy(state)) as refresh:
+                    current._refresh_normal(state)
+                refresh.assert_called_once_with(state['bucket'],emergency=True,emergency_wait_ms=wait)
+        self.assertEqual(venue.sent,0)
+
+    def test_unresolved_pending_close_spends_no_metadata_during_no_resend_window(self):
+        state=state_from_case(q='40',take='40');eid='a'*64
+        state['emergency']=dict(version=m.VERSION,phase='ACTIVE',card_id=state['bindings'][0]['card_id'],
+            pending_close=eid,pending_cancel=None,requests=[dict(request_id=eid,phase='OUTCOME_UNKNOWN',
+                attempt_at_ms=T-1,proposal=dict(operation='EMERGENCY_CLOSE',
+                    action=dict(orders=[dict(c='0x'+'a'*32)])))])
+        class Store:
+            domain='software'
+            def load(self,bucket):return deepcopy(state)
+        venue=Venue();normal=dispatch.Controller(Store(),venue,ROUTES2)
+        current=m.Controller(normal,venue)
+        with patch.object(normal,'refresh',side_effect=AssertionError('CLOSE_NOT_RESOLVED')), \
+                patch.object(venue,'lookup',return_value=dict(status='unknownOid')) as lookup, \
+                patch.object(venue,'metadata',side_effect=AssertionError('NO_UNUSED_METADATA')), \
+                patch.object(venue,'sample',side_effect=AssertionError('NO_UNUSED_MARK')):
+            with self.assertRaisesRegex(DispatchError,'EMERGENCY_CLOSE_OUTCOME_UNKNOWN_NO_RESEND'):
+                current.cycle(state['bucket'],send=True)
+        lookup.assert_called_once_with(state['account'],'0x'+'a'*32)
+        self.assertEqual(venue.sent,0)
+        self.assertEqual(len(state['emergency']['requests']),1)
+
     def test_emergency_controller_preserves_same_explicit_fill_feed(self):
         class Store:domain='software'
         normal_venue=NormalVenue();feed=object();normal_venue.fill_wakeups=feed
@@ -181,12 +295,12 @@ class EmergencyPureTests(NoExternal):
                     self.assertTrue(m.start(normal,[('long_account',dict(account=A),None,None)],stop))
                     m._thread.join(1)
                     self.assertFalse(m._thread.is_alive())
-                    self.assertEqual(metadata.call_count,expected)
+                    self.assertEqual(metadata.call_count,0)
                     self.assertEqual(refresh.call_count,expected)
                     self.assertEqual(status['last_status'],'PASS_COMPLETE')
                 self.assertEqual(venue.sent,0)
 
-    def test_known_deadline_latches_before_metadata_io_and_never_sends_old_quantity(self):
+    def test_known_deadline_latches_before_reconciliation_io_and_never_sends_old_quantity(self):
         class MemoryStore:
             domain='software'
             def __init__(self):self.state=state_from_case(q='40',take='40');self.events=[]
@@ -201,13 +315,13 @@ class EmergencyPureTests(NoExternal):
             with self.subTest(send=send):
                 store=MemoryStore();venue=Venue();normal=dispatch.Controller(store,venue,ROUTES2)
                 emergency=m.Controller(normal,venue)
-                def unavailable():
+                def unavailable(bucket,*,emergency=False,emergency_wait_ms=250):
                     self.assertEqual('emergency' in store.state,send)
                     if send:
                         self.assertEqual(store.state['emergency']['requests'],[])
                         self.assertIs(store.state['emergency']['provisional'],True)
                     raise DispatchError('PUBLIC_READ_UNAVAILABLE')
-                with patch.object(venue,'metadata',side_effect=unavailable):
+                with patch.object(normal,'refresh',side_effect=unavailable):
                     with self.assertRaisesRegex(DispatchError,'PUBLIC_READ_UNAVAILABLE'):
                         emergency.cycle(store.state['bucket'],send=send)
                 self.assertEqual(venue.sent,0)
@@ -296,7 +410,7 @@ class EmergencyPureTests(NoExternal):
             with self.subTest(incomplete=invalid):
                 store=MemoryStore();venue=Venue();normal=dispatch.Controller(store,venue,ROUTES2)
                 emergency=m.Controller(normal,venue)
-                def observed(bucket):
+                def observed(bucket,*,emergency=False,emergency_wait_ms=250):
                     self.assertIs(store.state['emergency']['provisional'],True)
                     state=state_from_case(q='100',stop='100');state['revision']=store.state['revision']+1
                     state['emergency']=deepcopy(store.state['emergency'])
@@ -491,6 +605,76 @@ class EmergencyPureTests(NoExternal):
         self.assertEqual(store.state['revision'],2)
         self.assertEqual(normal_venue.sent,0)
         self.assertEqual(emergency.venue.sent,0)
+
+    def test_emergency_join_allows_fast_normal_checkpoint_to_commit_once(self):
+        class MemoryStore:
+            domain='software'
+            def __init__(self):self.state=state_from_case(q='100',stop='100',take='100')
+            def load(self,bucket):return deepcopy(self.state)
+            def pending_record(self,conn,state):return None
+            def change(self,bucket,revision,event,now,update):
+                if revision!=self.state['revision']:
+                    raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+                value=deepcopy(self.state);update(None,value)
+                value['revision']+=1;self.state=value
+                return deepcopy(value)
+        store=MemoryStore();venue=NormalVenue()
+        entered=threading.Event();release=threading.Event();joined=threading.Event();calls=[]
+        def collect(value):
+            calls.append(1);entered.set()
+            if not release.wait(2):
+                raise AssertionError('TEST_PUBLIC_READ_WAS_NOT_RELEASED')
+            observed=deepcopy(value);venue.t+=1
+            observed['snapshot']['at_ms']=venue.t
+            return observed
+        venue.collect=collect
+        normal=dispatch.Controller(store,venue,ROUTES2)
+        emergency=m.Controller(normal,venue)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first=pool.submit(normal.refresh,store.state['bucket'])
+            self.assertTrue(entered.wait(1))
+            flight=normal._observation_flights[store.state['bucket']][0]
+            wait=flight.done.wait
+            def wait_for_normal(seconds):
+                self.assertEqual(seconds,0.25);joined.set()
+                return wait(seconds)
+            try:
+                with patch.object(flight.done,'wait',side_effect=wait_for_normal), \
+                        patch.object(venue,'metadata',side_effect=AssertionError('NO_UNUSED_METADATA')), \
+                        patch.object(venue,'sample',side_effect=AssertionError('NO_UNUSED_MARK')):
+                    second=pool.submit(emergency.cycle,store.state['bucket'],send=False)
+                    self.assertTrue(joined.wait(1))
+                    release.set()
+                    committed=first.result(timeout=1)
+                    result=second.result(timeout=1)
+            finally:
+                release.set()
+        self.assertEqual(result['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+        self.assertEqual(len(calls),1)
+        self.assertEqual(store.state,committed)
+        self.assertEqual(store.state['revision'],2)
+        self.assertEqual(venue.sent,0)
+
+    def test_changed_durable_bucket_before_action_rejects_collected_basis(self):
+        class Store:
+            domain='software'
+            def __init__(self):self.state=state_from_case(q='40',stop='40',take='40')
+            def load(self,bucket):return deepcopy(self.state)
+        store=Store();venue=Venue();normal=dispatch.Controller(store,venue,ROUTES2)
+        emergency=m.Controller(normal,venue)
+        def another_checkpoint(bucket,**kwargs):
+            collected=deepcopy(store.state)
+            store.state['revision']+=1
+            store.state['evidence']['snapshot']['at_ms']+=1
+            return collected
+        with patch.object(normal,'refresh',side_effect=another_checkpoint), \
+                patch.object(venue,'metadata',side_effect=AssertionError('NO_STALE_PLAN')), \
+                patch.object(venue,'sample',side_effect=AssertionError('NO_STALE_MARK')):
+            with self.assertRaisesRegex(DispatchError,'CONCURRENT_DISPATCH_RELOAD_REQUIRED'):
+                emergency.cycle(store.state['bucket'],send=True)
+        self.assertEqual(store.state['revision'],2)
+        self.assertEqual(venue.sent,0)
+        self.assertNotIn('emergency',store.state)
 
     def test_repeated_safety_checkpoints_do_not_starve_normal_maintenance(self):
         # Both the ordinary collection and its later market sample are overtaken
@@ -1064,6 +1248,38 @@ class EmergencyDatabaseTests(NoExternal):
         self.assertEqual(self.v.sent,2)
         self.assertEqual(self.incident()['requests'][0]['attempts'],1)
 
+    def test_new_crossed_stop_keeps_price_clock_then_known_incident_prefetches(self):
+        self.entry('100');self.v.t+=1;self.c.refresh(self.bucket)
+        self.v=VenueFromExisting(self.v);self.c.venue=self.v;self.v.store=self.store
+        self.em=m.Controller(self.c,self.v);self.v.mark=self.b['prices']['stop']
+        self.assertIsNone(m.trigger(self.store.load(self.bucket),now_ms=self.v.now()))
+        order=[];collect=self.v.collect
+        def metadata():
+            order.append('metadata');self.v.t+=6001
+            return META
+        def sample(account,symbol):
+            order.append('sample')
+            return dict(mark_price=self.v.mark,at_ms=self.v.now())
+        def observed(value):
+            order.append('quantity')
+            return collect(value)
+        with patch.object(self.v,'metadata',side_effect=metadata), \
+                patch.object(self.v,'sample',side_effect=sample), \
+                patch.object(self.v,'collect',side_effect=observed), \
+                self.actual_emergency_authorization():
+            with self.assertRaisesRegex(DispatchError,'EMERGENCY_PRICE_SAMPLE_EXPIRED'):
+                self.emergency()
+            self.assertEqual(order,['quantity','sample','metadata'])
+            self.assertEqual(self.v.sent,1)
+            self.assertEqual(self.incident()['reason'],'STOP_LEVEL_PASSED_UNPROTECTED')
+            self.assertEqual(self.incident()['requests'],[])
+            order.clear()
+            result=self.emergency()
+        self.assertEqual(result['operation'],'EMERGENCY_CLOSE')
+        self.assertEqual(order,['metadata','quantity','sample'])
+        self.assertEqual(self.v.sent,2)
+        self.assertEqual(self.incident()['requests'][0]['attempts'],1)
+
     def test_slow_price_read_cannot_renew_its_original_sample_timestamp(self):
         self.setup_emergency('100')
         samples=[]
@@ -1347,6 +1563,21 @@ class EmergencyDatabaseTests(NoExternal):
         self.assertEqual(self.emergency()['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
         self.assertNotIn('emergency',self.store.load(self.bucket))
         self.assertEqual(self.v.sent,2)
+
+    def test_actual_complete_stop_checkpoint_avoids_both_unused_public_reads(self):
+        self.protect('100')
+        self.v=VenueFromExisting(self.v);self.c.venue=self.v;self.v.store=self.store
+        self.em=m.Controller(self.c,self.v);self.v.t+=5001
+        before=self.store.load(self.bucket)['evidence']['snapshot']['at_ms']
+        with patch.object(self.v,'metadata',side_effect=AssertionError('NO_UNUSED_METADATA')), \
+                patch.object(self.v,'sample',side_effect=AssertionError('NO_UNUSED_MARK')):
+            result=self.emergency()
+        current=self.store.load(self.bucket)
+        self.assertEqual(result['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+        self.assertGreater(current['evidence']['snapshot']['at_ms'],before)
+        self.assertTrue(m.fresh_stop_coverage(current,now_ms=self.v.now()))
+        self.assertNotIn('emergency',current)
+        self.assertEqual(self.v.sent,3)
 
     def test_late_stop_withdraws_provisional_freeze_after_failed_read_and_restart(self):
         self.entry('100');self.cycle()

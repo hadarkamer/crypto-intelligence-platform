@@ -135,10 +135,10 @@ def _release_inventory(account, symbol, role, states, orders, positions):
     return dict(orders=sorted(owned),positions=sorted((coin,life.text(q)) for coin,q in actual.items() if q))
 
 
-def trigger(state, *, now_ms, mark=None):
+def _uncovered_tranches(state, *, now_ms):
     """Oldest still-uncovered fill tranche; a new partial fill cannot reset it."""
     if not state['bindings'] or state['evidence'] is None:
-        return None
+        return
     snap = state['evidence']['snapshot']
     report = life.review(state['bindings'], snap, now_ms=snap['at_ms'])
     for binding in state['bindings']:
@@ -160,6 +160,19 @@ def trigger(state, *, now_ms, mark=None):
             break
         if oldest is None or now_ms < oldest:
             raise DispatchError('UNPROTECTED_FILL_TIMELINE_INVALID')
+        yield binding,oldest,remaining-covered
+
+
+def reconciliation_wait_ms(state, *, now_ms):
+    """Joining another reader cannot extend any original uncovered deadline."""
+    wait=250
+    for _,oldest,_ in _uncovered_tranches(state,now_ms=now_ms):
+        wait=min(wait,max(0,oldest+DEADLINE_MS-now_ms))
+    return wait
+
+
+def trigger(state, *, now_ms, mark=None):
+    for binding,oldest,quantity in _uncovered_tranches(state,now_ms=now_ms):
         crossed = False
         if mark is not None:
             px, stop = life.number(mark, positive=True), life.number(binding['prices']['stop'])
@@ -167,7 +180,7 @@ def trigger(state, *, now_ms, mark=None):
         if crossed or now_ms-oldest >= DEADLINE_MS:
             return dict(card_id=binding['card_id'],
                         reason='STOP_LEVEL_PASSED_UNPROTECTED' if crossed else 'STOP_VERIFICATION_DEADLINE',
-                        uncovered_since_ms=oldest, uncovered_quantity=life.text(remaining-covered))
+                        uncovered_since_ms=oldest, uncovered_quantity=life.text(quantity))
     return None
 
 
@@ -291,6 +304,42 @@ def recent_normal_checkpoint(state, *, now_ms, fill_wakeups=None):
     healthy_feed=getattr(type(fill_wakeups),'entry_allowed',None)
     return (callable(healthy_feed)
             and fill_wakeups.entry_allowed(state['account']) is True)
+
+
+def fresh_stop_coverage(state, *, now_ms):
+    """A complete fresh STOP proof needs no mark or static asset metadata.
+
+    This only suppresses unrelated reads after public reconciliation. It does
+    not postpone reconciliation, extend a timestamp, or authorize an order.
+    A younger uncovered partial fill must still check the current price.
+    """
+    evidence=state.get('evidence')
+    if (state.get('emergency') is not None or state.get('pending') is not None
+            or evidence is None or evidence['bindings']!=state['bindings']
+            or not state['bindings']):
+        return False
+    snapshot=evidence['snapshot']
+    if (snapshot['account']!=state['account'] or snapshot['symbol']!=state['symbol']
+            or snapshot['history_complete'] is not True or snapshot['orders_complete'] is not True
+            or not 0<=now_ms-snapshot['at_ms']<=DEADLINE_MS
+            or any(b['account']!=state['account'] or b['symbol']!=state['symbol']
+                   for b in state['bindings'])):
+        return False
+    report=view(state,now_ms)
+    if report['bucket_issues'] or not report['cards']:
+        return False
+    for row in report['cards']:
+        remaining=life.number(row['remaining_quantity'],signed=True)
+        if remaining>0:
+            # TP work belongs to the ordinary lane. It cannot make an exact,
+            # active original STOP less protective of this observed tranche.
+            if (life.number(row['stop_quantity_observed'])!=remaining
+                    or set(row['issues'])-{'TAKE_PROFIT_COVERAGE_MISSING'}):
+                return False
+        elif (remaining!=0 or row['issues']
+                or row['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL')):
+            return False
+    return True
 
 
 def close_price(mark, decimals, *, buy):
@@ -517,7 +566,8 @@ class Controller:
     def _refresh_normal(self, state):
         """Resolve an accepted delayed stop; unknown replies do not bar the close lane."""
         try:
-            return self.normal.refresh(state['bucket'])
+            wait=reconciliation_wait_ms(state,now_ms=self.venue.now())
+            return self.normal.refresh(state['bucket'],emergency=True,emergency_wait_ms=wait)
         except (DispatchError, life.LifecycleError) as exc:
             if str(exc) not in {'OUTCOME_UNRESOLVED_NO_NEW_REQUEST', 'CONFLICT_REQUIRES_REVIEW',
                     'REJECTION_HISTORY_WINDOW_REQUIRES_REVIEW', 'REJECTION_FILL_FOUND_NO_RELEASE'}:
@@ -650,8 +700,6 @@ class Controller:
         emergency = state['emergency']; cid = emergency['card_id']; now = self.venue.now()
         binding, row = safe_card(state, cid, now)
         snapshot = state['evidence']['snapshot']
-        index, decimals = dispatch.asset(
-            self.venue.metadata() if metadata is None else metadata, state['symbol'])
         quantity = life.number(row['remaining_quantity'], signed=True)
         requests = self._requests(state)
         attempted_cancels = {r['proposal']['old_oid'] for r in requests
@@ -662,6 +710,14 @@ class Controller:
                       and (o['oid'] in entry_ids or quantity==0)
                       and o['oid'] not in attempted_cancels]
         candidates.sort(key=lambda o: (o['oid'] not in entry_ids, int(o['oid'])))
+        if (not (candidates and emergency['pending_cancel'] is None)
+                and not (quantity>0 and emergency['pending_close'] is None)):
+            return None
+        # Only actual close/cancel planning needs asset metadata. A slow read
+        # keeps the original quantity and price clocks; authorize() will reject
+        # expired evidence before an attempted order can become durable.
+        index, decimals = dispatch.asset(
+            self.venue.metadata() if metadata is None else metadata, state['symbol'])
         if candidates and emergency['pending_cancel'] is None:
             order = candidates[0]; operation='EMERGENCY_CANCEL'
             old_oid=order['oid']; q='0'
@@ -789,7 +845,7 @@ class Controller:
         return False
 
     @market_lane
-    def cycle(self, bucket, *, send=False):
+    def _initial_state(self, bucket, *, send):
         state=self.store.load(bucket)
         # Freeze new entries from known durable uncovered-fill proof before any
         # potentially slow I/O. This latch never authorizes a send: final public
@@ -798,21 +854,26 @@ class Controller:
             cause=trigger(state,now_ms=self.venue.now())
             if cause:
                 state=self.latch(state,cause,provisional=True)
-        # Static metadata precedes quantity reconciliation. The live price is
-        # obtained AFTER the final checkpoint, so a slow collection cannot age
-        # a prefetched price before planning. Neither timestamp is relabeled:
-        # a slow collection or price read still fails its five-second bound.
-        sample=None;sample_basis=None
-        try:
-            metadata=self.venue.metadata()
-        except Exception:
-            # A failed independent pre-read still freezes entries from known
-            # uncovered fills. It never authorizes a close using old quantities.
-            state=self.store.load(bucket)
-            cause=trigger(state,now_ms=self.venue.now())
-            if cause and state.get('emergency') is None and send:
-                self.latch(state,cause,provisional=True)
-            raise
+        return state
+
+    def cycle(self, bucket, *, send=False):
+        # Commit the entry freeze under a brief lane, then release it for public
+        # observation. A normal reader must be able to commit while this worker
+        # joins its flight; holding the action lane would force every join to
+        # time out and repeat the same full read.
+        state=self._initial_state(bucket,send=send)
+        # A known incident needs metadata before its final quantity checkpoint.
+        # A slow metadata read must not repeatedly expire otherwise usable
+        # quantity proof. Quiet protected buckets have no incident and spend
+        # no metadata request. New incidents discovered below may fetch it late;
+        # their original clocks still expire safely, and the next pass prefetches.
+        incident=state.get('emergency')
+        # An unresolved close cannot authorize another plan during its original
+        # no-resend window. Resolve it before spending metadata on a new plan.
+        # A pending cancellation may still need a protective close, so it does
+        # not suppress the known-incident prefetch.
+        metadata=(self.venue.metadata() if incident is not None
+                  and incident['pending_close'] is None else None)
         before_revision=state['revision']
         if state.get('emergency') is not None:
             state=self._resolve_close(state)
@@ -822,11 +883,18 @@ class Controller:
         except (DispatchError, life.LifecycleError):
             # Freeze new entries using already stored fill evidence. Never send
             # a close from that old evidence; a fresh verified checkpoint is required.
-            state=self.store.load(bucket)
-            cause=trigger(state,now_ms=self.venue.now())
-            if cause and state.get('emergency') is None and send:
-                self.latch(state,cause,provisional=True)
+            self._initial_state(bucket,send=send)
             raise
+        return self._action_cycle(bucket,state,metadata=metadata,send=send)
+
+    @market_lane
+    def _action_cycle(self, bucket, state, *, metadata, send):
+        # Public observation never lends authority to a changed durable bucket.
+        # Normal/emergency actions and checkpoint commits share this lane; the
+        # exact recheck preserves the collected quantity/identity/nonce basis.
+        if self.store.load(bucket)!=state:
+            raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+        sample=None;sample_basis=None
         if (state.get('emergency') or {}).get('provisional') is True:
             if provisional_stop_proof(state,now_ms=self.venue.now()):
                 if send:
@@ -840,6 +908,8 @@ class Controller:
             if send:
                 state=self._confirm_provisional(state)
         if state.get('emergency') is None:
+            if fresh_stop_coverage(state,now_ms=self.venue.now()):
+                return dict(status='STOP_OBSERVED_OR_NO_EXPOSURE',order_requests_sent=0)
             try:
                 sample=self.venue.sample(state['account'],state['symbol']) if state['bindings'] else None
             except Exception:
