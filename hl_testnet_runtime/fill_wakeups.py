@@ -94,6 +94,7 @@ observation is durably saved. Events concurrent with that observation prevent
             acknowledged=set(), snapshot=False, reconciled=False, dirty_all=True,
             dirty_symbols=set(), seen=OrderedDict(), last_receive=None,
             opened=None, ping_at=None, last_ping=None, last_rest=None,
+            protocol_failure=None,
             status='STARTUP_RECONCILIATION_REQUIRED')
             for account in self._routes.values()}
 
@@ -129,9 +130,10 @@ observation is durably saved. Events concurrent with that observation prevent
                 and (state['ping_at'] is None
                      or 0 <= now - state['ping_at'] < PONG_TIMEOUT))
 
-    def _gap_locked(self, state, code):
+    def _gap_locked(self, state, code, protocol_failure=None):
         state['connected'] = False
         state['status'] = code
+        state['protocol_failure'] = protocol_failure
         self._notify_locked(state, all_symbols=True)
 
     def _opened(self, account):
@@ -142,16 +144,18 @@ observation is durably saved. Events concurrent with that observation prevent
             state.update(connected=not self._stop.is_set(), acknowledged=set(),
                          snapshot=False, opened=self._clock(),
                          last_receive=self._clock(), last_ping=self._clock(),
-                         ping_at=None, status='SNAPSHOT_RECONCILIATION_REQUIRED')
+                         ping_at=None, protocol_failure=None,
+                         status='SNAPSHOT_RECONCILIATION_REQUIRED')
             state['seen'].clear()
             self._notify_locked(state, all_symbols=True)
             return state['generation']
 
-    def _disconnected(self, account, generation, code='DISCONNECTED_RECONCILIATION_REQUIRED'):
+    def _disconnected(self, account, generation, code='DISCONNECTED_RECONCILIATION_REQUIRED',
+                      protocol_failure=None):
         with self._lock:
             state = self._states[account]
             if state['generation'] == generation and state['connected']:
-                self._gap_locked(state, code)
+                self._gap_locked(state, code, protocol_failure)
 
     def begin_reconciliation(self, account):
         account = self._account(account)
@@ -202,6 +206,7 @@ observation is durably saved. Events concurrent with that observation prevent
     def health(self):
         with self._lock:
             return {role: dict(status=self._states[account]['status'],
+                protocol_failure=self._states[account]['protocol_failure'],
                 generation=self._states[account]['generation'],
                 revision=self._states[account]['revision'],
                 connected=self._states[account]['connected'],
@@ -218,11 +223,16 @@ observation is durably saved. Events concurrent with that observation prevent
         try:
             if not isinstance(raw, (str, bytes)) or len(raw) > MAX_FRAME_BYTES:
                 raise ValueError()
-            message = json.loads(raw)
+            # The official Python SDK handles this exact transport banner.
+            # It is not a subscription acknowledgement or a fills snapshot.
+            banner=raw in ('Websocket connection established.',
+                          b'Websocket connection established.')
+            message = dict(channel='_transportBanner') if banner else json.loads(raw)
             if not isinstance(message, dict):
                 raise ValueError()
         except (TypeError, ValueError, UnicodeError, RecursionError):
-            self._disconnected(account, generation, 'MALFORMED_NOTIFICATION_RECONCILIATION_REQUIRED')
+            self._disconnected(account, generation, 'MALFORMED_NOTIFICATION_RECONCILIATION_REQUIRED',
+                               'INVALID_JSON_OR_FRAME')
             return False
         with self._lock:
             state = self._states[account]
@@ -232,48 +242,70 @@ observation is durably saved. Events concurrent with that observation prevent
             try:
                 channel = message.get('channel')
                 data = message.get('data')
+                reason='UNEXPECTED_CHANNEL'
                 if channel == 'pong':
                     state['ping_at'] = None
+                elif channel == '_transportBanner' and banner:
+                    pass
                 elif channel == 'subscriptionResponse':
+                    reason='INVALID_ACK_ENVELOPE'
                     if not isinstance(data, dict) or data.get('method') != 'subscribe':
                         raise ValueError()
                     subscription = data.get('subscription')
+                    reason='INVALID_ACK_SUBSCRIPTION'
                     if (not isinstance(subscription, dict)
-                            or set(subscription) != {'type', 'user'}
-                            or subscription.get('type') not in CHANNELS
-                            or _address(subscription.get('user')) != account):
+                            or subscription.get('type') not in CHANNELS):
                         raise ValueError()
-                    state['acknowledged'].add(subscription['type'])
+                    kind=subscription['type']
+                    allowed={'type','user'} | ({'aggregateByTime'} if kind=='userFills' else set())
+                    if not {'type','user'}<=set(subscription)<=allowed:
+                        raise ValueError()
+                    reason='ACK_ACCOUNT_MISMATCH'
+                    if _address(subscription['user'])!=account:
+                        raise ValueError()
+                    # Omitted aggregation defaults to false. Accept its
+                    # documented explicit normalization, not a changed request.
+                    reason='ACK_PARAMETERS_CHANGED'
+                    if ('aggregateByTime' in subscription
+                            and subscription['aggregateByTime'] is not False):
+                        raise ValueError()
+                    state['acknowledged'].add(kind)
                 elif channel in CHANNELS:
-                    if channel not in state['acknowledged']:
-                        raise ValueError()
+                    # Data may race the independent subscription ACK. Validate
+                    # and stage bounded hints, but readiness still requires both
+                    # exact ACKs AND an explicit initial fills snapshot.
                     snapshot = False
                     if channel == 'userFills':
-                        if (not isinstance(data, dict)
-                                or _address(data.get('user')) != account
-                                or ('isSnapshot' in data
-                                    and type(data['isSnapshot']) is not bool)):
+                        reason='INVALID_FILLS_ENVELOPE'
+                        if not isinstance(data,dict):
+                            raise ValueError()
+                        reason='FILLS_ACCOUNT_MISMATCH'
+                        if _address(data.get('user'))!=account:
+                            raise ValueError()
+                        reason='INVALID_SNAPSHOT_FLAG'
+                        if ('isSnapshot' in data and type(data['isSnapshot']) is not bool):
                             raise ValueError()
                         # Official WsUserFills declares this flag optional. Its
-                        # absence is a live hint only AFTER an explicit snapshot.
+                        # absence never substitutes for an initial snapshot.
                         snapshot = data.get('isSnapshot', False)
                         rows = data.get('fills')
-                        if not snapshot and not state['snapshot']:
-                            raise ValueError()
                     else:
                         rows = data
+                    reason='INVALID_NOTIFICATION_BATCH'
                     if not isinstance(rows, list) or len(rows) > MAX_BATCH_ROWS:
                         raise ValueError()
                     hints = set()
                     identities = []
                     for row in rows:
                         if channel == 'userFills':
+                            reason='INVALID_FILL_IDENTITY'
                             if (not isinstance(row, dict) or not _symbol(row.get('coin'))
                                     or not all(_integer(row.get(k)) for k in ('time', 'tid', 'oid'))):
                                 raise ValueError()
                             symbol = row['coin']
                             identity = (channel, symbol, row['time'], row['tid'], row['oid'])
                         else:
+                            reason='INVALID_ORDER_HINT'
                             order = row.get('order') if isinstance(row, dict) else None
                             if (not isinstance(order, dict) or not _symbol(order.get('coin'))
                                     or not _integer(order.get('oid'))
@@ -303,7 +335,7 @@ observation is durably saved. Events concurrent with that observation prevent
                 state['last_receive'] = self._clock()
                 return True
             except (TypeError, ValueError, KeyError):
-                self._gap_locked(state, 'MALFORMED_NOTIFICATION_RECONCILIATION_REQUIRED')
+                self._gap_locked(state, 'MALFORMED_NOTIFICATION_RECONCILIATION_REQUIRED',reason)
                 return False
 
     def _heartbeat(self, account, generation):

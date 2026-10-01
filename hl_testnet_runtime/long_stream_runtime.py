@@ -95,8 +95,14 @@ def _safe_failure(exc):
     known = isinstance(exc, (DispatchError, roles.checks.Blocked, life.LifecycleError,BudgetError))
     safe_code = code if known and re.fullmatch(r'[A-Z][A-Z0-9_]{2,99}', code) else type(exc).__name__
     origin = traceback.extract_tb(exc.__traceback__)[-1]
-    return dict(failure_code=safe_code,
-                failure_origin=f'{os.path.basename(origin.filename)}:{origin.lineno}')
+    result = dict(failure_code=safe_code,
+                  failure_origin=f'{os.path.basename(origin.filename)}:{origin.lineno}')
+    if isinstance(exc, BudgetError):
+        if exc.stage is not None:
+            result['budget_stage'] = exc.stage
+        if exc.elapsed_ms is not None:
+            result['budget_elapsed_ms'] = exc.elapsed_ms
+    return result
 
 
 def _unfinished(state, now):

@@ -17,6 +17,10 @@ clients and a stalled OS are not measured. All original evidence clocks apply.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import atexit
+import hashlib
+import json
+import os
 import time
 import threading
 import uuid
@@ -30,6 +34,8 @@ BACKGROUND_LIMIT = 800
 WINDOW_MS = 69000
 PERMIT_MS = 1000
 LOCK = 1729048160
+LOCK_WAIT_MS = 250
+MAX_COORDINATORS = 4
 POLICY = SCHEMA + '.request_budget_policy'
 TICKETS = SCHEMA + '.request_budget_tickets'
 PRIORITIES = frozenset(('background', 'protection'))
@@ -44,6 +50,69 @@ SIZED = FILLS | frozenset(('userFunding',))
 
 class BudgetError(ValueError):
     """Fixed redacted codes only, never SQL, credentials, or remote text."""
+    def __init__(self, code, *, stage=None, elapsed_ms=None):
+        super().__init__(code)
+        self.stage = stage if stage in {'LOCAL_WAIT','CONNECT','READY','GLOBAL_LOCK',
+            'ACCOUNTING','REFUND','COMMIT','AFTER_COMMIT'} else None
+        self.elapsed_ms = elapsed_ms if type(elapsed_ms) is int and elapsed_ms >= 0 else None
+
+
+@dataclass
+class _Coordinator:
+    lock: object = field(default_factory=threading.Lock, repr=False)
+    connection: object = field(default=None, repr=False)
+
+
+_coordinators = {}
+_coordinators_lock = threading.Lock()
+
+
+def _coordinator(journal):
+    # Keep credentials out of registry identities and all diagnostic messages.
+    key=(os.getpid(),hashlib.sha256(json.dumps(journal._parameters,
+        sort_keys=True,separators=(',',':')).encode()).digest())
+    with _coordinators_lock:
+        if key not in _coordinators:
+            if len(_coordinators)>=MAX_COORDINATORS:
+                raise BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE',stage='LOCAL_WAIT')
+            _coordinators[key]=_Coordinator()
+        return _coordinators[key]
+
+
+def _close_coordinators():
+    for coordinator in tuple(_coordinators.values()):
+        if coordinator.lock.acquire(blocking=False):
+            try:
+                if coordinator.connection is not None:
+                    try:coordinator.connection.close()
+                    except Exception:pass
+                    coordinator.connection=None
+            finally:
+                coordinator.lock.release()
+
+
+atexit.register(_close_coordinators)
+
+
+def _after_fork():
+    global _coordinators,_coordinators_lock
+    inherited=tuple(_coordinators.values())
+    _coordinators={}
+    _coordinators_lock=threading.Lock()
+    for coordinator in inherited:
+        conn=coordinator.connection
+        if conn is not None:
+            try:
+                # Close the CHILD's descriptor before libpq cleanup, so its
+                # Terminate message cannot affect the parent's shared session.
+                fd=conn.pgconn.socket
+                if type(fd) is int and fd>=0:os.close(fd)
+                conn.close()
+            except Exception:pass
+
+
+if hasattr(os,'register_at_fork'):
+    os.register_at_fork(after_in_child=_after_fork)
 
 
 def request_weight(path, body, *, host=HOST):
@@ -99,13 +168,14 @@ def initialize(conn):
     ready(conn)
 
 
-def ready(conn):
-    row = conn.execute(f'''SELECT version,host,maximum,background_maximum,window_ms
-        FROM {POLICY} WHERE singleton=true''').fetchone()
-    if row != (VERSION, HOST, LIMIT, BACKGROUND_LIMIT, WINDOW_MS):
+def ready(conn, *, expected_database=None):
+    row = conn.execute(f'''SELECT current_database(),version,host,maximum,
+        background_maximum,window_ms,to_regclass(%s)
+        FROM {POLICY} WHERE singleton=true''',(TICKETS,)).fetchone()
+    if row is None or row[1:6] != (VERSION, HOST, LIMIT, BACKGROUND_LIMIT, WINDOW_MS) or row[6] is None:
         raise BudgetError('TESTNET_REQUEST_BUDGET_SCHEMA_REQUIRES_REVIEW')
-    if conn.execute('SELECT to_regclass(%s)', (TICKETS,)).fetchone()[0] is None:
-        raise BudgetError('TESTNET_REQUEST_BUDGET_SCHEMA_REQUIRES_REVIEW')
+    if expected_database is not None and row[0] != expected_database:
+        raise BudgetError('TESTNET_REQUEST_BUDGET_WRONG_DATABASE')
 
 
 @dataclass(frozen=True)
@@ -180,24 +250,68 @@ class Budget:
             self.journal._ready(conn)
             conn.execute('SELECT pg_advisory_xact_lock(%s)', (LOCK,))
             initialize(conn)
+        # Warm the single process connection before parallel public workers.
+        # Policy/database identity is still checked on every later transaction.
+        with self._transaction():
+            pass
 
     @contextmanager
-    def _transaction(self):
-        """Separate short transaction; no HTTP, sleeps or admission retries."""
+    def _transaction(self, *, deadline_ns=None, diagnostic=None):
+        """Serialized short SQL only; reusable connection, no HTTP or retries.
+
+        Local serialization avoids four same-process clients competing for the
+        database lock. The advisory lock still coordinates OTHER processes.
+        Every success commits before release; every failure discards the socket.
+        """
+        coordinator=_coordinator(self.journal)
+        diagnostic={} if diagnostic is None else diagnostic
+        started=time.monotonic()
+        diagnostic['stage']='LOCAL_WAIT'
+        remaining=(PERMIT_MS/1000 if deadline_ns is None else
+            (deadline_ns-time.monotonic_ns())/1_000_000_000)
+        if remaining<=0:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',stage='LOCAL_WAIT')
+        if not coordinator.lock.acquire(timeout=min(PERMIT_MS/1000,remaining)):
+            raise BudgetError('TESTNET_REQUEST_BUDGET_BUSY',stage='LOCAL_WAIT',
+                              elapsed_ms=int((time.monotonic()-started)*1000))
         try:
             import psycopg
-            with psycopg.connect(**self.journal._parameters, connect_timeout=2,
-                    options='-c statement_timeout=500 -c lock_timeout=50 -c idle_in_transaction_session_timeout=2000 -c synchronous_commit=on') as conn:
-                if conn.execute('SELECT current_database()').fetchone()[0] != self.journal._parameters['dbname']:
-                    raise BudgetError('TESTNET_REQUEST_BUDGET_WRONG_DATABASE')
-                yield conn
-                # Acknowledged synchronous COMMIT precedes return of the permit.
-        except BudgetError:
-            raise
-        except Exception as exc:
-            if getattr(exc, 'sqlstate', None) == '55P03':
-                raise BudgetError('TESTNET_REQUEST_BUDGET_BUSY') from None
-            raise BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE') from None
+            diagnostic['stage']='CONNECT'
+            conn=coordinator.connection
+            if conn is None or conn.closed:
+                conn=psycopg.connect(**self.journal._parameters,connect_timeout=2,
+                    options=f'-c statement_timeout=500 -c lock_timeout={LOCK_WAIT_MS} -c idle_in_transaction_session_timeout=2000 -c synchronous_commit=on')
+                coordinator.connection=conn
+                # READY runs before the lock. Each subsequent statement needs
+                # a fresh snapshot, regardless of database/role defaults.
+                conn.isolation_level=psycopg.IsolationLevel.READ_COMMITTED
+            if deadline_ns is not None and time.monotonic_ns()>deadline_ns:
+                raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED')
+            diagnostic['stage']='READY'
+            ready(conn,expected_database=self.journal._parameters['dbname'])
+            yield conn
+            diagnostic['stage']='COMMIT'
+            conn.commit()
+        except BaseException as exc:
+            keep=False
+            if isinstance(exc,BudgetError) and str(exc)=='TESTNET_REQUEST_BUDGET_EXHAUSTED':
+                # A quota refusal is not a broken connection. A positively
+                # acknowledged rollback makes it reusable without any retry.
+                try:coordinator.connection.rollback();keep=True
+                except Exception:pass
+            if coordinator.connection is not None and not keep:
+                try:coordinator.connection.close()
+                except Exception:pass
+                coordinator.connection=None
+            if not isinstance(exc,Exception):
+                raise
+            code=(str(exc) if isinstance(exc,BudgetError) else
+                'TESTNET_REQUEST_BUDGET_BUSY' if getattr(exc,'sqlstate',None)=='55P03'
+                else 'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+            raise BudgetError(code,stage=diagnostic['stage'],
+                elapsed_ms=int((time.monotonic()-started)*1000)) from None
+        finally:
+            coordinator.lock.release()
 
     def acquire(self, path, body, *, priority='background', host=HOST):
         weight = request_weight(path, body, host=host)
@@ -207,29 +321,36 @@ class Budget:
         # Start the local clock before database admission, not after COMMIT.
         # A slow database must not mint an apparently fresh transport permit.
         deadline = time.monotonic_ns() + PERMIT_MS * 1000000
-        with self._transaction() as conn:
-            ready(conn)
-            # Serialize the four healthy read workers for at most 50ms. This
-            # waits only for the admission transaction, never for quota refill.
+        diagnostic={}
+        with self._transaction(deadline_ns=deadline,diagnostic=diagnostic) as conn:
+            # Separate statement: the accounting snapshot MUST follow this lock
+            # acquisition, including a wait for another process's COMMIT.
+            diagnostic['stage']='GLOBAL_LOCK'
             conn.execute('SELECT pg_advisory_xact_lock(%s)', (LOCK,))
-            stamp = conn.execute('SELECT clock_timestamp()').fetchone()[0]
-            conn.execute(f'''DELETE FROM {TICKETS}
-                WHERE admitted_at <= %s - (%s * interval '1 millisecond')''', (stamp, WINDOW_MS))
-            used = conn.execute(f'SELECT COALESCE(sum(weight),0) FROM {TICKETS}').fetchone()[0]
             ceiling = LIMIT if priority == 'protection' else BACKGROUND_LIMIT
-            if used + weight > ceiling:
+            diagnostic['stage']='ACCOUNTING'
+            row=conn.execute(f'''WITH stamp AS MATERIALIZED (
+                    SELECT clock_timestamp() AS at),
+                pruned AS (DELETE FROM {TICKETS} USING stamp
+                    WHERE admitted_at <= stamp.at-(%s*interval '1 millisecond') RETURNING token),
+                used AS (SELECT COALESCE(sum(weight),0) AS total FROM {TICKETS},stamp
+                    WHERE admitted_at > stamp.at-(%s*interval '1 millisecond'))
+                INSERT INTO {TICKETS}(token,admitted_at,weight)
+                SELECT %s,stamp.at,%s FROM stamp,used WHERE used.total+%s<=%s
+                RETURNING token''',(WINDOW_MS,WINDOW_MS,token,weight,weight,ceiling)).fetchone()
+            if row is None:
                 raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
-            conn.execute(f'INSERT INTO {TICKETS}(token,admitted_at,weight) VALUES(%s,%s,%s)',
-                         (token, stamp, weight))
         permit = Permit(self, token, body.get('type') if path == '/info' else 'exchange', weight, deadline)
         if time.monotonic_ns() > deadline:
-            raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED')
+            raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',stage='AFTER_COMMIT',
+                elapsed_ms=PERMIT_MS+int((time.monotonic_ns()-deadline)/1_000_000))
         return permit
 
     def _settle(self, token, weight):
         try:
-            with self._transaction() as conn:
-                ready(conn)
+            diagnostic={}
+            with self._transaction(diagnostic=diagnostic) as conn:
+                diagnostic['stage']='REFUND'
                 # Smaller weight is safe concurrently with admission. Repeated
                 # finish calls cannot lower an already settled ticket again.
                 row = conn.execute(f'''UPDATE {TICKETS} SET weight=%s,settled=true

@@ -5,12 +5,97 @@ import os
 import subprocess
 import sys
 import time
+import threading
+from types import ModuleType
 import unittest
 from unittest.mock import Mock, patch
 
 from . import postgres_journal as pg, request_budget as budget
 
 CI_URL = os.environ.get('HL_JOURNAL_CI_URL')
+
+
+class CoordinatorTests(unittest.TestCase):
+    """Simulated round-trip latency with real local locking; never a real DSN."""
+    def setUp(self):
+        self.registry=patch.dict(budget._coordinators,{},clear=True)
+        self.registry.start();self.addCleanup(self.registry.stop)
+        self.addCleanup(budget._close_coordinators)
+        self.journal=pg.PostgresJournal.for_ci('postgresql://offline:PRIVATE_VALUE@localhost/hl_journal_ci')
+        self.budget=budget.Budget(self.journal);self.weights=[];self.connections=[]
+        owner=self
+        class Connection:
+            closed=False
+            fail_commit=False
+            fail_ready=False
+            def execute(self,sql,args=()):
+                time.sleep(0.025)
+                if self.fail_ready:raise RuntimeError('PRIVATE_VALUE')
+                if 'current_database()' in sql:
+                    row=('hl_journal_ci',budget.VERSION,budget.HOST,budget.LIMIT,
+                         budget.BACKGROUND_LIMIT,budget.WINDOW_MS,budget.TICKETS)
+                elif 'pg_advisory_xact_lock' in sql:row=(None,)
+                elif 'WITH stamp' in sql:
+                    _,_,token,weight,_,ceiling=args
+                    if sum(owner.weights)+weight>ceiling:row=None
+                    else:owner.weights.append(weight);row=(token,)
+                else:raise AssertionError('Unexpected coordinator statement')
+                return Mock(fetchone=lambda:row)
+            def commit(self):
+                time.sleep(0.025)
+                if self.fail_commit:raise RuntimeError('PRIVATE_VALUE')
+            def rollback(self):pass
+            def close(self):self.closed=True
+        self.Connection=Connection
+        def connect(**kwargs):
+            connection=Connection();self.connections.append(connection);return connection
+        module=ModuleType('psycopg');module.connect=Mock(side_effect=connect)
+        module.IsolationLevel=Mock(READ_COMMITTED='READ_COMMITTED')
+        self.connector=module.connect
+        patcher=patch.dict(sys.modules,{'psycopg':module})
+        patcher.start();self.addCleanup(patcher.stop)
+
+    def test_four_delayed_parallel_clients_reuse_one_connection_and_all_receive_fresh_permits(self):
+        barrier=threading.Barrier(4)
+        def admit(_):
+            barrier.wait(timeout=2)
+            permit=budget.Budget(self.journal).acquire('/info',{'type':'meta'})
+            permit.check();return permit
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            self.assertEqual(len(list(pool.map(admit,range(4)))),4)
+        self.assertEqual(self.connector.call_count,1)
+        self.assertEqual(self.connections[0].isolation_level,'READ_COMMITTED')
+        self.assertEqual(sum(self.weights),80)
+
+    def test_unknown_commit_discards_connection_without_retry_or_permit(self):
+        self.budget.acquire('/info',{'type':'meta'})
+        self.connections[0].fail_commit=True
+        with self.assertRaises(budget.BudgetError) as caught:
+            self.budget.acquire('/info',{'type':'meta'})
+        self.assertEqual(caught.exception.stage,'COMMIT')
+        self.assertNotIn('PRIVATE_VALUE',str(caught.exception))
+        self.assertTrue(self.connections[0].closed)
+        self.assertEqual(self.connector.call_count,1)
+        self.budget.acquire('/info',{'type':'meta'})
+        self.assertEqual(self.connector.call_count,2)
+
+    def test_quota_denial_rolls_back_without_reconnecting_or_overspending(self):
+        self.weights.append(800)
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
+            self.budget.acquire('/info',{'type':'meta'})
+        self.budget.acquire('/info',{'type':'meta'},priority='protection')
+        self.assertEqual(self.connector.call_count,1)
+        self.assertEqual(sum(self.weights),820)
+
+    def test_expired_local_wait_cannot_start_a_database_transaction(self):
+        coordinator=budget._coordinator(self.journal)
+        coordinator.lock.acquire()
+        try:
+            with self.assertRaises(budget.BudgetError) as caught:
+                with self.budget._transaction(deadline_ns=time.monotonic_ns()+20_000_000):pass
+            self.assertEqual(caught.exception.stage,'LOCAL_WAIT')
+            self.connector.assert_not_called()
+        finally:coordinator.lock.release()
 
 
 class PureTests(unittest.TestCase):
@@ -221,8 +306,8 @@ b.acquire('/exchange',{'action':{'type':'cancel','cancels':[{}]}},priority='prot
     def test_uncertain_admission_commit_returns_no_permit(self):
         original = self.budget._transaction
         @contextmanager
-        def lost_ack():
-            with original() as conn:
+        def lost_ack(**kwargs):
+            with original(**kwargs) as conn:
                 yield conn
             raise budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
         with patch.object(self.budget, '_transaction', lost_ack):
@@ -275,10 +360,113 @@ b.acquire('/exchange',{'action':{'type':'cancel','cancels':[{}]}},priority='prot
         self.assertEqual(self.weights(), 20)
 
     def test_slow_commit_does_not_restart_freshness_clock(self):
-        with patch.object(budget.time, 'monotonic_ns', side_effect=(1000000000, 2000000001)):
+        original=self.budget._transaction
+        clock=Mock(return_value=1000000000)
+        @contextmanager
+        def slow_commit(**kwargs):
+            with original(**kwargs) as conn:yield conn
+            clock.return_value=2000000001
+        with patch.object(budget.time,'monotonic_ns',clock), \
+                patch.object(self.budget,'_transaction',slow_commit):
             with self.assertRaisesRegex(budget.BudgetError, 'PERMIT_EXPIRED'):
                 self.budget.acquire('/info', {'type': 'meta'})
         self.assertEqual(self.weights(), 20)
+
+    @contextmanager
+    def delayed_connection(self,delay=0.025):
+        coordinator=budget._coordinator(self.journal)
+        original=coordinator.connection
+        class Delayed:
+            statements=0
+            commits=0
+            def __getattr__(self,name):return getattr(original,name)
+            def execute(self,*args,**kwargs):
+                self.statements+=1;time.sleep(delay)
+                return original.execute(*args,**kwargs)
+            def commit(self):
+                self.commits+=1;time.sleep(delay);return original.commit()
+        delayed=Delayed();coordinator.connection=delayed
+        try:yield delayed
+        finally:
+            if coordinator.connection is delayed:coordinator.connection=original
+
+    def test_delayed_real_pg_four_parallel_admissions_have_one_connection_and_no_lock_failures(self):
+        barrier=threading.Barrier(4)
+        def admit(_):
+            barrier.wait(timeout=2)
+            permit=budget.Budget(pg.PostgresJournal.for_ci(CI_URL)).acquire('/info',{'type':'meta'})
+            permit.check();return permit
+        with self.delayed_connection() as connection,ThreadPoolExecutor(max_workers=4) as pool:
+            self.assertEqual(len(list(pool.map(admit,range(4)))),4)
+        self.assertEqual(connection.statements,12)
+        self.assertEqual(connection.commits,4)
+        self.assertEqual(self.weights(),80)
+
+    def test_delayed_real_pg_race_preserves_background_and_protective_ceilings(self):
+        with self.journal._transaction() as conn:
+            conn.execute(f'''INSERT INTO {budget.TICKETS}(token,weight)
+                SELECT md5(i::text),20 FROM generate_series(1,38) i''')
+        def admit(_):
+            try:self.budget.acquire('/info',{'type':'meta'});return True
+            except budget.BudgetError as exc:
+                self.assertEqual(str(exc),'TESTNET_REQUEST_BUDGET_EXHAUSTED');return False
+        with self.delayed_connection(),ThreadPoolExecutor(max_workers=4) as pool:
+            self.assertEqual(sum(pool.map(admit,range(4))),2)
+        self.assertEqual(self.weights(),800)
+        for _ in range(20):self.budget.acquire('/info',{'type':'meta'},priority='protection')
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
+            self.budget.acquire('/info',{'type':'clearinghouseState'},priority='protection')
+        self.assertEqual(self.weights(),1200)
+
+    def test_sql_failure_discards_cached_connection_and_next_call_reconnects_once(self):
+        import psycopg
+        coordinator=budget._coordinator(self.journal)
+        previous=coordinator.connection
+        with self.assertRaises(budget.BudgetError):
+            with self.budget._transaction() as conn:conn.execute('SELECT 1/0')
+        self.assertTrue(previous.closed);self.assertIsNone(coordinator.connection)
+        with patch.object(psycopg,'connect',wraps=psycopg.connect) as connect:
+            self.budget.acquire('/info',{'type':'meta'})
+            self.budget.acquire('/info',{'type':'meta'})
+        self.assertEqual(connect.call_count,1)
+
+    def test_accounting_snapshot_after_wait_sees_other_connections_committed_charge(self):
+        waiting=threading.Event();coordinator=budget._coordinator(self.journal)
+        original=coordinator.connection
+        class Signaled:
+            def __getattr__(self,name):return getattr(original,name)
+            def execute(self,sql,*args):
+                if 'pg_advisory_xact_lock' in sql:waiting.set()
+                return original.execute(sql,*args)
+        coordinator.connection=Signaled()
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with self.journal._transaction() as conn:
+                    conn.execute('SELECT pg_advisory_xact_lock(%s)',(budget.LOCK,))
+                    conn.execute(f'''INSERT INTO {budget.TICKETS}(token,weight)
+                        SELECT md5(i::text),20 FROM generate_series(1,40) i''')
+                    future=pool.submit(self.budget.acquire,'/info',{'type':'meta'})
+                    self.assertTrue(waiting.wait(timeout=1));time.sleep(0.08)
+                with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):future.result(timeout=2)
+            self.assertEqual(self.weights(),800)
+        finally:
+            if coordinator.connection is not None:coordinator.connection=original
+
+    @unittest.skipUnless(hasattr(os,'fork'),'POSIX fork required')
+    def test_child_resets_inherited_connection_without_terminating_parent_session(self):
+        parent=budget._coordinator(self.journal).connection
+        child=os.fork()
+        if child==0:
+            try:
+                self.budget.acquire('/info',{'type':'meta'}).check()
+            except BaseException:os._exit(1)
+            os._exit(0)
+        _,status=os.waitpid(child,0)
+        self.assertEqual(os.waitstatus_to_exitcode(status),0)
+        self.budget.acquire('/info',{'type':'meta'}).check()
+        self.assertIs(budget._coordinator(self.journal).connection,parent)
+        self.assertFalse(parent.closed)
+        self.assertEqual(self.weights(),40)
 
 
 if __name__ == '__main__':
