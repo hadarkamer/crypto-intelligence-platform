@@ -931,6 +931,10 @@ class EmergencyDatabaseTests(NoExternal):
             HL_TESTNET_TWO_ACCOUNT_EXECUTION='disabled',HL_TESTNET_FILLED_DISPATCH='approved_long_stream_v1',
             HL_TESTNET_LONG_STREAM='approved_alerts_v1',HL_TESTNET_FILLED_AFTER_EXIT_POLICY=dispatch.AFTER_EXIT,
             HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+        # Public reads do not advance this deterministic venue's clock. A
+        # release must obtain a genuinely newer checkpoint, just as real
+        # network reads do; equal timestamps correctly fail _continues.
+        self.v.t+=1
         return state
 
     @staticmethod
