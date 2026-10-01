@@ -315,13 +315,13 @@ class Controller:
             return None
         return self._save(state, 'EMERGENCY_OWNED_ORDER_TERMINAL_RECONCILED', resolved)
 
-    def proposal(self, state):
+    def proposal(self, state, *, metadata=None, sample=None):
         emergency = state['emergency']; cid = emergency['card_id']; now = self.venue.now()
         binding, row = safe_card(state, cid, now)
         snapshot = state['evidence']['snapshot']
-        index, decimals = dispatch.asset(self.venue.metadata(), state['symbol'])
+        index, decimals = dispatch.asset(
+            self.venue.metadata() if metadata is None else metadata, state['symbol'])
         quantity = life.number(row['remaining_quantity'], signed=True)
-        sample=None
         requests = self._requests(state)
         attempted_cancels = {r['proposal']['old_oid'] for r in requests
                              if r['proposal']['operation']=='EMERGENCY_CANCEL' and r['phase'] not in DONE}
@@ -336,9 +336,11 @@ class Controller:
             old_oid=order['oid']; q='0'
             leg = next(leg for leg in life.LEGS if old_oid in binding['orders'][leg])
             action=dict(type='cancel', cancels=[dict(a=index, o=int(old_oid))])
+            sample=None
         elif quantity>0 and emergency['pending_close'] is None:
             operation='EMERGENCY_CLOSE'; old_oid=None; leg='STOP'; q=life.text(quantity)
-            sample = self.venue.sample(state['account'], state['symbol'])
+            if sample is None:
+                sample = self.venue.sample(state['account'], state['symbol'])
             if not 0<=self.venue.now()-sample['at_ms']<=5000:
                 raise DispatchError('EMERGENCY_PRICE_SAMPLE_EXPIRED')
             price=close_price(sample['mark_price'], decimals, buy=binding['side']=='SHORT')
@@ -384,7 +386,11 @@ class Controller:
             current['emergency']['requests'].append(request)
             current['emergency'][key]=eid
             return None
-        state=self._save(state, 'EMERGENCY_ATTEMPT_BEGUN', begin)
+        # Capture the exact acknowledged commit, not a later load which another
+        # worker may already have advanced. An uncertain COMMIT returns nothing
+        # and therefore never grants this process a sender token.
+        state,_=self.store.change(state['bucket'],state['revision'],
+            'EMERGENCY_ATTEMPT_BEGUN',now,begin,_return_committed_request=True)
         return state, deepcopy(self._requests(state)[-1])
 
     @staticmethod
@@ -428,6 +434,22 @@ class Controller:
     @market_lane
     def cycle(self, bucket, *, send=False):
         state=self.store.load(bucket)
+        # Independent metadata/price HTTP reads must precede the final public
+        # quantity checkpoint. Otherwise their latency consumes its five-second
+        # authorization bound before the exact reducing intent can even begin.
+        # Reuse the original sample timestamp; a slow reconciliation still fails
+        # the unchanged price freshness guard rather than renewing that clock.
+        try:
+            metadata=self.venue.metadata()
+            sample=self.venue.sample(state['account'],state['symbol']) if state['bindings'] else None
+        except Exception:
+            # A failed independent pre-read still freezes entries from known
+            # uncovered fills. It never authorizes a close using old quantities.
+            state=self.store.load(bucket)
+            cause=trigger(state,now_ms=self.venue.now())
+            if cause and state.get('emergency') is None and send:
+                self.latch(state,cause)
+            raise
         before_revision=state['revision']
         if state.get('emergency') is not None:
             state=self._resolve_close(state)
@@ -443,8 +465,8 @@ class Controller:
                 self.latch(state,cause)
             raise
         if state.get('emergency') is None:
-            sample=self.venue.sample(state['account'],state['symbol']) if state['bindings'] else None
-            cause=trigger(state,now_ms=self.venue.now(), mark=sample['mark_price'] if sample else None)
+            fresh_sample=(sample is not None and 0<=self.venue.now()-sample['at_ms']<=5000)
+            cause=trigger(state,now_ms=self.venue.now(), mark=sample['mark_price'] if fresh_sample else None)
             if cause is None:
                 return dict(status='STOP_OBSERVED_OR_NO_EXPOSURE',order_requests_sent=0)
             if not send:
@@ -452,7 +474,7 @@ class Controller:
             state=self.latch(state,cause)
         state=self._retire_normal(state)
         state=self._resolve_cancel(state)
-        proposal=self.proposal(state)
+        proposal=self.proposal(state,metadata=metadata,sample=sample)
         if proposal is None:
             report=view(state,self.venue.now())
             row=next(r for r in report['cards'] if r['card_id']==state['emergency']['card_id'])
