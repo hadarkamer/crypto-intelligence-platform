@@ -31,6 +31,15 @@ claim a new exchange fill or a measured fill-to-STOP success.
   New hints or connection gaps bypass that quiet cadence. The emergency lane
   retains independent takeover for delayed or uncertain protective work. Actual
   emergency quantity, price and send freshness remain five seconds.
+- Known uncovered fills freeze new entries before potentially slow public I/O.
+  This early freeze is provisional. A fresh complete checkpoint proving exact
+  STOP coverage can withdraw an unattempted provisional incident and return
+  management to the normal lane. Missing TAKE_PROFIT, or one exact owned
+  reduce-only TAKE_PROFIT needing a resize for a single positive card, does not
+  require a market exit. A fresh fully closed incident may cancel its exact owned
+  leftover orders without creating a market close. Other cards must already be
+  final for that cleanup. Explicit or promoted emergency incidents remain latched; an
+  emergency attempt, uncertain request or incomplete proof prevents withdrawal.
 - A fresh, fully protected no-action checkpoint avoids unnecessary metadata and
   price reads. Old flat history and quiet, currently protected positions with a
   healthy notification feed use background request priority. Public reads

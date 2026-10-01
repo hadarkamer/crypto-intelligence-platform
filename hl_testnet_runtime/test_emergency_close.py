@@ -16,7 +16,7 @@ from .test_filled_quantity_dispatch import (NoExternal,Venue as NormalVenue,
     state_from_case,ROUTES2,AGENT)
 from . import test_filled_quantity_dispatch as fixtures
 from .test_filled_quantity_exits import original,META
-from .test_card_lifecycle import T,A,B,fill
+from .test_card_lifecycle import T,A,B,fill,terminal
 
 CI=os.environ.get('HL_JOURNAL_CI_URL')
 
@@ -140,13 +140,154 @@ class EmergencyPureTests(NoExternal):
                 emergency=m.Controller(normal,venue)
                 def unavailable():
                     self.assertEqual('emergency' in store.state,send)
-                    if send:self.assertEqual(store.state['emergency']['requests'],[])
+                    if send:
+                        self.assertEqual(store.state['emergency']['requests'],[])
+                        self.assertIs(store.state['emergency']['provisional'],True)
                     raise DispatchError('PUBLIC_READ_UNAVAILABLE')
                 with patch.object(venue,'metadata',side_effect=unavailable):
                     with self.assertRaisesRegex(DispatchError,'PUBLIC_READ_UNAVAILABLE'):
                         emergency.cycle(store.state['bucket'],send=send)
                 self.assertEqual(venue.sent,0)
                 self.assertEqual(store.events,['EMERGENCY_LATCHED_NEW_ENTRIES_BLOCKED'] if send else [])
+
+    def test_provisional_withdrawal_requires_fresh_exact_stop_and_no_attempts(self):
+        protected=state_from_case(q='100',stop='100')
+        protected['emergency']=dict(version=m.VERSION,phase='ACTIVE',provisional=True,
+            latched_at_ms=T,card_id=protected['bindings'][0]['card_id'],
+            reason='STOP_VERIFICATION_DEADLINE',uncovered_since_ms=T-10000,
+            uncovered_quantity='100',requests=[],pending_close=None,pending_cancel=None)
+        self.assertTrue(m.provisional_stop_proof(protected,now_ms=T))
+        for variant in ('explicit','promoted','attempted','pending-close','pending-cancel',
+                        'normal-pending','before-freeze','old','incomplete-history',
+                        'incomplete-orders','wrong-account','wrong-symbol','bindings',
+                        'position','uncovered-stop','wrong-stop-terms','flat-not-final'):
+            with self.subTest(variant=variant):
+                state=deepcopy(protected);now=T;snap=state['evidence']['snapshot']
+                if variant=='explicit':del state['emergency']['provisional']
+                elif variant=='promoted':state['emergency']['provisional']=False
+                elif variant=='attempted':state['emergency']['requests']=[dict(phase='ABORTED_UNSENT')]
+                elif variant=='pending-close':state['emergency']['pending_close']='a'*64
+                elif variant=='pending-cancel':state['emergency']['pending_cancel']='a'*64
+                elif variant=='normal-pending':state['pending']='a'*64
+                elif variant=='before-freeze':state['emergency']['latched_at_ms']=T+1;now=T+1
+                elif variant=='old':now=T+5001
+                elif variant=='incomplete-history':snap['history_complete']=False
+                elif variant=='incomplete-orders':snap['orders_complete']=False
+                elif variant=='wrong-account':state['account']=B
+                elif variant=='wrong-symbol':state['symbol']='BTC'
+                elif variant=='bindings':state['evidence']['bindings']=[]
+                elif variant=='position':snap['position_quantity']='101'
+                elif variant=='uncovered-stop':snap['open_orders'][0]['quantity']='99'
+                elif variant=='wrong-stop-terms':snap['open_orders'][0]['reduce_only']=False
+                else:
+                    empty=state_from_case(q='0');empty['emergency']=state['emergency'];state=empty
+                self.assertFalse(m.provisional_stop_proof(state,now_ms=now))
+        from .test_card_lifecycle import closed
+        flat=state_from_case(q='100',stop='100',take='100')
+        flat['evidence']['snapshot']=closed(flat['bindings'][0]);flat['emergency']=protected['emergency']
+        self.assertTrue(m.provisional_stop_proof(flat,now_ms=T))
+
+    def test_provisional_stop_proof_allows_only_unambiguous_owned_tp_resize(self):
+        state=state_from_case(q='100',stop='100',take='120')
+        state['emergency']=dict(version=m.VERSION,phase='ACTIVE',provisional=True,
+            latched_at_ms=T,card_id=state['bindings'][0]['card_id'],
+            reason='STOP_VERIFICATION_DEADLINE',uncovered_since_ms=T-10000,
+            uncovered_quantity='100',requests=[],pending_close=None,pending_cancel=None)
+        self.assertTrue(m.provisional_stop_proof(state,now_ms=T))
+        proposal=dispatch.choose({key:value for key,value in state.items() if key!='emergency'},
+            ROUTES2,META,dict(mark_price='10',at_ms=T),now_ms=T)
+        self.assertEqual((proposal['operation'],proposal['leg'],proposal['quantity']),
+                         ('MODIFY_EXIT','TAKE_PROFIT','100'))
+        self.assertEqual(dispatch.requested_order(proposal['action'])['p'],'10.2')
+        for variant in ('other-live-card','foreign-account','non-reducing-tp','wrong-tp-price'):
+            with self.subTest(variant=variant):
+                current=deepcopy(state)
+                if variant in ('other-live-card','foreign-account'):
+                    other=state_from_case(q='100',n=2,side='SHORT' if variant=='foreign-account' else 'LONG',
+                        stop='100',take='100')
+                    current['bindings']+=other['bindings']
+                    current['originals'].update(other['originals'])
+                    current['evidence']['bindings']=deepcopy(current['bindings'])
+                    if variant=='other-live-card':
+                        for key in ('fills','open_orders','terminal_orders'):
+                            current['evidence']['snapshot'][key]+=other['evidence']['snapshot'][key]
+                        current['evidence']['snapshot']['position_quantity']='200'
+                else:
+                    take=current['evidence']['snapshot']['open_orders'][1]
+                    if variant=='non-reducing-tp':take['reduce_only']=False
+                    else:take['price']='10.3'
+                self.assertFalse(m.provisional_stop_proof(current,now_ms=T))
+
+    def test_early_freeze_is_withdrawn_only_after_fresh_stop_checkpoint(self):
+        class MemoryStore:
+            domain='software'
+            def __init__(self):self.state=state_from_case(q='100');self.events=[]
+            def load(self,bucket):return deepcopy(self.state)
+            def change(self,bucket,revision,event,now,update):
+                if revision!=self.state['revision']:
+                    raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+                value=deepcopy(self.state);update(None,value);value['revision']+=1
+                self.state=value;self.events.append(event)
+                return deepcopy(value)
+        for invalid in (False,True):
+            with self.subTest(incomplete=invalid):
+                store=MemoryStore();venue=Venue();normal=dispatch.Controller(store,venue,ROUTES2)
+                emergency=m.Controller(normal,venue)
+                def observed(bucket):
+                    self.assertIs(store.state['emergency']['provisional'],True)
+                    state=state_from_case(q='100',stop='100');state['revision']=store.state['revision']+1
+                    state['emergency']=deepcopy(store.state['emergency'])
+                    if invalid:state['evidence']['snapshot']['history_complete']=False
+                    store.state=state
+                    return deepcopy(state)
+                with patch.object(normal,'refresh',side_effect=observed):
+                    result=emergency.cycle(store.state['bucket'],send=True)
+                self.assertEqual(venue.sent,0)
+                if invalid:
+                    self.assertEqual(result['status'],'PROVISIONAL_STOP_RECONCILIATION_REQUIRED')
+                    self.assertIs(store.state['emergency']['provisional'],True)
+                else:
+                    self.assertEqual(result['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+                    self.assertNotIn('emergency',store.state)
+                    self.assertEqual(store.events,['EMERGENCY_LATCHED_NEW_ENTRIES_BLOCKED',
+                        'UNSENT_EMERGENCY_WITHDRAWN_AFTER_FRESH_STOP_PROOF'])
+
+    def test_provisional_latch_cannot_begin_an_emergency_attempt(self):
+        from unittest.mock import Mock
+        store=Mock();store.domain='software';venue=Venue();normal=dispatch.Controller(store,venue,ROUTES2)
+        emergency=m.Controller(normal,venue)
+        state=state_from_case(q='100');state['emergency']=dict(provisional=True)
+        with self.assertRaisesRegex(DispatchError,'PROVISIONAL_EMERGENCY_HAS_NO_SEND_AUTHORITY'):
+            emergency._begin(state,{})
+        store.change.assert_not_called();self.assertEqual(venue.sent,0)
+
+    def test_provisional_cleanup_needs_actual_filled_exit_and_exact_flat_ownership(self):
+        state=state_from_case(q='40',stop='40');binding=state['bindings'][0]
+        snap=state['evidence']['snapshot'];snap['fills'].append(fill(binding,'STOP',qty='40'))
+        snap['open_orders']=[order for order in snap['open_orders'] if order['oid'] not in binding['orders']['STOP']]
+        snap['terminal_orders'].append(terminal(binding,'STOP','40'));snap['position_quantity']='0'
+        state['emergency']=dict(version=m.VERSION,phase='ACTIVE',provisional=True,
+            latched_at_ms=T,card_id=binding['card_id'],reason='STOP_VERIFICATION_DEADLINE',
+            uncovered_since_ms=T-10000,uncovered_quantity='40',
+            requests=[],pending_close=None,pending_cancel=None)
+        self.assertFalse(m.provisional_stop_proof(state,now_ms=T))
+        self.assertTrue(m.provisional_cleanup_proof(state,now_ms=T))
+        for variant in ('old','incomplete','foreign-position','unconfirmed-exit','missing-fill','attempted'):
+            with self.subTest(variant=variant):
+                current=deepcopy(state);now=T;snap=current['evidence']['snapshot']
+                if variant=='old':now=T+5001
+                elif variant=='incomplete':snap['orders_complete']=False
+                elif variant=='foreign-position':snap['position_quantity']='1'
+                elif variant=='unconfirmed-exit':snap['terminal_orders']=[]
+                elif variant=='missing-fill':snap['fills']=snap['fills'][:1]
+                else:current['emergency']['requests']=[dict(phase='ABORTED_UNSENT')]
+                self.assertFalse(m.provisional_cleanup_proof(current,now_ms=now))
+        other=state_from_case(q='0',n=2)
+        current=deepcopy(state);current['bindings']+=other['bindings']
+        current['originals'].update(other['originals'])
+        current['evidence']['bindings']=deepcopy(current['bindings'])
+        current['evidence']['snapshot']['open_orders']+=other['evidence']['snapshot']['open_orders']
+        self.assertFalse(m.provisional_cleanup_proof(current,now_ms=T))
 
     def test_supervisor_shutdown_timeout_is_reported_until_own_worker_exits(self):
         selected=state_from_case(q='40',stop='40',take='40')
@@ -832,6 +973,10 @@ class EmergencyDatabaseTests(NoExternal):
             self.assertEqual(incident['phase'],'ACTIVE')
             self.assertEqual(incident['reason'],'STOP_VERIFICATION_DEADLINE')
             self.assertEqual(incident['requests'],[])
+            self.assertIs(incident['provisional'],True)
+            with self.j._transaction() as conn:
+                with self.assertRaisesRegex(DispatchError,'EMERGENCY_CIRCUIT_LATCHED_NO_NEW_ENTRY'):
+                    m.fence(conn,{},'ENTRY')
             raise DispatchError('PUBLIC_READ_UNAVAILABLE')
         with patch.object(self.v,'metadata',side_effect=unavailable):
             with self.assertRaisesRegex(DispatchError,'PUBLIC_READ_UNAVAILABLE'):
@@ -1055,6 +1200,78 @@ class EmergencyDatabaseTests(NoExternal):
         self.assertEqual(self.emergency()['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
         self.assertNotIn('emergency',self.store.load(self.bucket))
         self.assertEqual(self.v.sent,2)
+
+    def test_late_stop_withdraws_provisional_freeze_after_failed_read_and_restart(self):
+        self.entry('100');self.cycle()
+        self.v=VenueFromExisting(self.v);self.c.venue=self.v;self.v.store=self.store
+        self.em=m.Controller(self.c,self.v);self.v.t+=5001
+        with patch.object(self.v,'metadata',side_effect=DispatchError('PUBLIC_READ_UNAVAILABLE')):
+            with self.assertRaisesRegex(DispatchError,'PUBLIC_READ_UNAVAILABLE'):
+                self.emergency()
+        self.assertIs(self.incident()['provisional'],True)
+        self.assertEqual(self.incident()['requests'],[])
+        self.em=m.Controller(self.c,self.v)
+        self.assertEqual(self.emergency()['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+        self.assertNotIn('emergency',self.store.load(self.bucket))
+        self.assertEqual(self.v.sent,2)
+        with self.j._transaction() as conn:
+            events=[row[0] for row in conn.execute(
+                f'SELECT event FROM {SCHEMA}.events WHERE bucket=%s ORDER BY revision',
+                (self.bucket,)).fetchall()]
+        self.assertIn('EMERGENCY_LATCHED_NEW_ENTRIES_BLOCKED',events)
+        self.assertIn('UNSENT_EMERGENCY_WITHDRAWN_AFTER_FRESH_STOP_PROOF',events)
+        # Restore the ordinary software adapter; normal maintenance must now
+        # be able to create the still-missing TP without another ENTRY.
+        ordinary=NormalVenue();ordinary.__dict__.update(deepcopy(
+            {key:value for key,value in self.v.__dict__.items() if key!='store'}))
+        self.v=ordinary;self.c.venue=ordinary
+        self.assertEqual(self.cycle()['status'],'ACCEPTED_UNVERIFIED')
+        self.assertEqual(self.v.requests[-1]['proposal']['leg'],'TAKE_PROFIT')
+        self.assertEqual(self.v.sent,3)
+
+    def test_fresh_closed_partial_fill_cancels_remaining_entry_without_market_close(self):
+        self.entry('40');self.cycle();self.v.fill('1001','40')
+        self.v=VenueFromExisting(self.v);self.c.venue=self.v;self.v.store=self.store
+        self.em=m.Controller(self.c,self.v);self.v.t+=5001
+        first=self.emergency()
+        self.assertEqual(first['operation'],'EMERGENCY_CANCEL')
+        self.assertEqual(self.v.requests[-1]['proposal']['leg'],'ENTRY')
+        self.assertEqual(self.v.requests[-1]['proposal']['quantity'],'0')
+        self.assertIs(self.incident()['provisional'],False)
+        self.emergency()
+        self.assertEqual(self.incident()['phase'],'CLOSED_VERIFIED')
+        self.assertEqual(self.store.load(self.bucket)['evidence']['snapshot']['position_quantity'],'0')
+        self.assertEqual(self.v.sent,3)
+        self.assertNotIn('EMERGENCY_CLOSE',[request['proposal']['operation'] for request in self.v.requests])
+
+    def test_exact_stop_with_oversized_tp_withdraws_freeze_and_resumes_owned_resize(self):
+        self.protect('100');self.v.fill('1001','40')
+        # Simulate recovery of an unsent provisional freeze. The actual venue
+        # now has STOP 60 covering the remainder and an oversized sibling TP 100.
+        self.v=VenueFromExisting(self.v);self.c.venue=self.v;self.v.store=self.store
+        self.em=m.Controller(self.c,self.v)
+        self.em.latch(self.store.load(self.bucket),dict(card_id=self.b['card_id'],
+            reason='STOP_VERIFICATION_DEADLINE',uncovered_since_ms=self.v.now()-5000,
+            uncovered_quantity='60'),provisional=True)
+        before=self.v.sent
+        self.assertEqual(self.emergency()['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+        self.assertNotIn('emergency',self.store.load(self.bucket))
+        self.assertEqual(self.v.sent,before)
+        ordinary=NormalVenue();ordinary.__dict__.update(deepcopy(
+            {key:value for key,value in self.v.__dict__.items() if key!='store'}))
+        self.v=ordinary;self.c.venue=ordinary
+        self.assertEqual(self.cycle()['status'],'ACCEPTED_UNVERIFIED')
+        proposal=self.v.requests[-1]['proposal']
+        self.assertEqual((proposal['operation'],proposal['leg'],proposal['quantity'],proposal['old_oid']),
+                         ('MODIFY_EXIT','TAKE_PROFIT','60','1002'))
+        self.assertEqual(dispatch.requested_order(proposal['action'])['p'],'10.2')
+        self.cycle(False)
+        report=life.review(self.store.load(self.bucket)['bindings'],
+            self.store.load(self.bucket)['evidence']['snapshot'],now_ms=self.v.now())
+        self.assertEqual((report['cards'][0]['stop_quantity_observed'],
+                          report['cards'][0]['take_profit_quantity_observed']),('60','60'))
+        self.assertEqual(self.v.orders['1001']['order']['sz'],'60')
+        self.assertNotIn('EMERGENCY_CLOSE',[request['proposal']['operation'] for request in self.v.requests])
 
     def test_concurrent_begin_commits_only_one_emergency_intent(self):
         self.setup_emergency('100');self.v.t+=1

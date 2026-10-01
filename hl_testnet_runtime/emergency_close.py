@@ -81,6 +81,87 @@ def trigger(state, *, now_ms, mark=None):
     return None
 
 
+def provisional_stop_proof(state, *, now_ms):
+    """Only fresh complete STOP proof may withdraw an unsent early freeze."""
+    incident=state.get('emergency')
+    evidence=state.get('evidence')
+    if (incident is None or incident.get('provisional') is not True
+            or incident['phase']!='ACTIVE' or incident['requests']
+            or incident['pending_close'] is not None or incident['pending_cancel'] is not None
+            or state['pending'] is not None or evidence is None
+            or evidence['bindings']!=state['bindings']
+            or any(binding['account']!=state['account'] or binding['symbol']!=state['symbol']
+                   for binding in state['bindings'])):
+        return False
+    snap=evidence['snapshot']
+    if (snap['account']!=state['account'] or snap['symbol']!=state['symbol']
+            or snap['history_complete'] is not True or snap['orders_complete'] is not True
+            or not incident['latched_at_ms']<=snap['at_ms']<=now_ms
+            or now_ms-snap['at_ms']>5000):
+        return False
+    report=view(state,now_ms)
+    if report['bucket_issues'] or trigger(state,now_ms=now_ms) is not None:
+        return False
+    by_card={binding['card_id']:binding for binding in state['bindings']}
+    opened={order['oid'] for order in snap['open_orders']}
+    active=sum(life.number(row['remaining_quantity'],signed=True)>0 for row in report['cards'])
+    for row in report['cards']:
+        remaining=life.number(row['remaining_quantity'],signed=True)
+        if remaining>0:
+            # A late STOP can be proven before the normal lane creates TP.
+            # Normal maintenance may create or resize TP while the exact STOP
+            # remains active. Every other ownership/quantity issue still blocks.
+            if (set(row['issues'])-{'TAKE_PROFIT_COVERAGE_MISSING','TAKE_PROFIT_EXCEEDS_CARD_REMAINDER'}
+                    or life.number(row['stop_quantity_observed'])!=remaining):
+                return False
+            if 'TAKE_PROFIT_EXCEEDS_CARD_REMAINDER' in row['issues']:
+                take_ids=set(by_card[row['card_id']]['orders']['TAKE_PROFIT'])
+                takes=[order for order in snap['open_orders'] if order['oid'] in take_ids]
+                # An oversized aggregate reduce-only exit must not consume a
+                # different card's allocation, or require an ambiguous repair.
+                if active!=1 or len(takes)!=1 or takes[0]['state']!='ACTIVE':
+                    return False
+        else:
+            owned={oid for ids in by_card[row['card_id']]['orders'].values() for oid in ids}
+            if (remaining!=0 or row['issues']
+                    or row['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL') or opened&owned):
+                return False
+    return bool(report['cards'])
+
+
+def provisional_cleanup_proof(state, *, now_ms):
+    """Fresh filled exits can authorize cancellation of owned flat leftovers."""
+    incident=state.get('emergency');evidence=state.get('evidence')
+    if (incident is None or incident.get('provisional') is not True
+            or incident['phase']!='ACTIVE' or incident['requests']
+            or incident['pending_close'] is not None or incident['pending_cancel'] is not None
+            or evidence is None or evidence['bindings']!=state['bindings']):
+        return False
+    snap=evidence['snapshot']
+    if (snap['account']!=state['account'] or snap['symbol']!=state['symbol']
+            or snap['history_complete'] is not True or snap['orders_complete'] is not True
+            or not incident['latched_at_ms']<=snap['at_ms']<=now_ms
+            or now_ms-snap['at_ms']>5000
+            or life.number(snap['position_quantity'],signed=True)!=0):
+        return False
+    report=view(state,now_ms)
+    if (report['bucket_issues'] or not report['cards']
+            or any(life.number(row['remaining_quantity'],signed=True)!=0
+                   or set(row['issues'])-{'FLAT_WITH_WORKING_ORDERS'}
+                   or (row['card_id']!=incident['card_id'] and (row['issues']
+                       or row['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL')))
+                   for row in report['cards'])):
+        return False
+    binding,row=safe_card(state,incident['card_id'],now_ms)
+    exits=set(binding['orders']['STOP']+binding['orders']['TAKE_PROFIT'])
+    owned={oid for ids in binding['orders'].values() for oid in ids}
+    return (life.number(row['entry_quantity'])>0
+            and life.number(row['exit_quantity'])==life.number(row['entry_quantity'])
+            and any(order['oid'] in owned for order in snap['open_orders'])
+            and any(order['oid'] in exits and order['state']=='FILLED'
+                    and life.number(order['filled_quantity'])>0 for order in snap['terminal_orders']))
+
+
 def recent_normal_checkpoint(state, *, now_ms, fill_wakeups=None):
     """A successful normal checkpoint can briefly serve both supervisors.
 
@@ -217,15 +298,49 @@ class Controller:
         return self.store.change(state['bucket'], state['revision'], event,
                                  self.venue.now(), update)
 
-    def latch(self, state, cause):
+    def latch(self, state, cause, *, provisional=False):
         def update(conn, current):
             if current.get('emergency') is not None:
                 raise DispatchError('EMERGENCY_ALREADY_LATCHED_RELOAD')
             current['emergency'] = dict(version=VERSION, phase='ACTIVE',
                 latched_at_ms=self.venue.now(), requests=[], pending_close=None,
                 pending_cancel=None, **deepcopy(cause))
+            if provisional:
+                current['emergency']['provisional']=True
             return None
         return self._save(state, 'EMERGENCY_LATCHED_NEW_ENTRIES_BLOCKED', update)
+
+    def _withdraw_provisional(self, state):
+        expected=deepcopy(state['emergency'])
+        def update(conn,current):
+            if (current.get('emergency')!=expected
+                    or not provisional_stop_proof(current,now_ms=self.venue.now())):
+                raise DispatchError('PROVISIONAL_STOP_PROOF_CHANGED_RECONCILE_REQUIRED')
+            del current['emergency']
+            return None
+        return self._save(state,'UNSENT_EMERGENCY_WITHDRAWN_AFTER_FRESH_STOP_PROOF',update)
+
+    def _confirm_provisional(self, state):
+        expected=deepcopy(state['emergency'])
+        def update(conn,current):
+            if (current.get('emergency')!=expected
+                    or expected.get('provisional') is not True
+                    or expected['requests'] or expected['pending_close'] is not None
+                    or expected['pending_cancel'] is not None):
+                raise DispatchError('PROVISIONAL_EMERGENCY_CHANGED_RECONCILE_REQUIRED')
+            now=self.venue.now();snap=current['evidence']['snapshot']
+            if not 0<=now-snap['at_ms']<=5000:
+                raise DispatchError('EMERGENCY_FINAL_QUANTITY_EVIDENCE_EXPIRED')
+            if (current['evidence']['bindings']!=current['bindings']
+                    or snap['history_complete'] is not True or snap['orders_complete'] is not True
+                    or snap['account']!=current['account'] or snap['symbol']!=current['symbol']
+                    or view(current,now)['bucket_issues']
+                    or (trigger(current,now_ms=now) is None
+                        and not provisional_cleanup_proof(current,now_ms=now))):
+                raise DispatchError('EMERGENCY_POSITION_OR_HISTORY_NOT_VERIFIED')
+            current['emergency']['provisional']=False
+            return None
+        return self._save(state,'EMERGENCY_CONFIRMED_AFTER_FRESH_UNPROTECTED_PROOF',update)
 
     def _refresh_normal(self, state):
         """Resolve an accepted delayed stop; unknown replies do not bar the close lane."""
@@ -402,11 +517,15 @@ class Controller:
                     asset_index=index, size_decimals=decimals, sample=sample)
 
     def _begin(self, state, proposal):
+        if state['emergency'].get('provisional') is True:
+            raise DispatchError('PROVISIONAL_EMERGENCY_HAS_NO_SEND_AUTHORITY')
         self.venue.authorize(state, proposal)
         admission=dispatch.reserve_transport(self.venue,proposal)
         self.venue.authorize(state, proposal)
         now = self.venue.now()
         def begin(conn, current):
+            if current['emergency'].get('provisional') is True:
+                raise DispatchError('PROVISIONAL_EMERGENCY_HAS_NO_SEND_AUTHORITY')
             if len(self._requests(current)) >= MAX_REQUESTS:
                 raise DispatchError('EMERGENCY_ACTION_BUDGET_REQUIRES_REVIEW')
             if current['emergency']['phase'] != 'ACTIVE' or proposal['basis']!=life.digest(current['evidence']):
@@ -506,7 +625,7 @@ class Controller:
         if send and state.get('emergency') is None:
             cause=trigger(state,now_ms=self.venue.now())
             if cause:
-                state=self.latch(state,cause)
+                state=self.latch(state,cause,provisional=True)
         # Static metadata precedes quantity reconciliation. The live price is
         # obtained AFTER the final checkpoint, so a slow collection cannot age
         # a prefetched price before planning. Neither timestamp is relabeled:
@@ -520,7 +639,7 @@ class Controller:
             state=self.store.load(bucket)
             cause=trigger(state,now_ms=self.venue.now())
             if cause and state.get('emergency') is None and send:
-                self.latch(state,cause)
+                self.latch(state,cause,provisional=True)
             raise
         before_revision=state['revision']
         if state.get('emergency') is not None:
@@ -534,8 +653,20 @@ class Controller:
             state=self.store.load(bucket)
             cause=trigger(state,now_ms=self.venue.now())
             if cause and state.get('emergency') is None and send:
-                self.latch(state,cause)
+                self.latch(state,cause,provisional=True)
             raise
+        if (state.get('emergency') or {}).get('provisional') is True:
+            if provisional_stop_proof(state,now_ms=self.venue.now()):
+                if send:
+                    self._withdraw_provisional(state)
+                return dict(status='STOP_OBSERVED_OR_NO_EXPOSURE',order_requests_sent=0)
+            if (trigger(state,now_ms=self.venue.now()) is None
+                    and not provisional_cleanup_proof(state,now_ms=self.venue.now())):
+                # A still-uncertain or incomplete proof cannot release ENTRY,
+                # and full observed STOP coverage does not authorize a close.
+                return dict(status='PROVISIONAL_STOP_RECONCILIATION_REQUIRED',order_requests_sent=0)
+            if send:
+                state=self._confirm_provisional(state)
         if state.get('emergency') is None:
             try:
                 sample=self.venue.sample(state['account'],state['symbol']) if state['bindings'] else None

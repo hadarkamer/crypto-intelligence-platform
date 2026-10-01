@@ -124,6 +124,7 @@ class PriorityTests(NoExternal):
         with patch.object(stream,'_account_owned',return_value=True) as owned:
             self.assertTrue(stream._finish_notification_reconciliation(controller,feed,token,None,T))
         owned.assert_called_once()
+        self.assertEqual(owned.call_args.kwargs['priority'],'protection')
         self.assertTrue(feed.entry_allowed(A))
 
     def test_event_during_rest_retains_dirty_account_and_cannot_release_entry(self):

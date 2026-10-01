@@ -135,10 +135,10 @@ def idle_flat(state):
         and row['state'] in ('CLOSED','CANCELED_WITHOUT_FILL') for row in report['cards'])
 
 
-def _account_owned(venue, account, states, *, role=None):
+def _account_owned(venue, account, states, *, role=None, priority='background'):
     """Unknown positions/orders block *new* entries, never exit maintenance."""
     from .card_sync_evidence import PublicReader
-    reader = PublicReader()
+    reader = PublicReader(priority=priority)
     if getattr(venue,'parallel_preflight',False) is True:
         orders,positions=dispatch.joined_public_reads(
             lambda:reader.read('frontendOpenOrders',account),
@@ -449,7 +449,7 @@ def _finish_notification_reconciliation(controller, feed, token, symbols, starte
             if report['bucket_issues'] or any(row['issues'] for row in report['cards']):
                 return False
     role=next(role for role,route in controller.routes.items() if route['account']==token.account)
-    _account_owned(controller.venue,token.account,states,role=role)
+    _account_owned(controller.venue,token.account,states,role=role,priority='protection')
     return feed.finish_reconciliation(token,complete=True)
 
 
