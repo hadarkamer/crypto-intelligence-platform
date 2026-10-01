@@ -434,14 +434,13 @@ class Controller:
     @market_lane
     def cycle(self, bucket, *, send=False):
         state=self.store.load(bucket)
-        # Independent metadata/price HTTP reads must precede the final public
-        # quantity checkpoint. Otherwise their latency consumes its five-second
-        # authorization bound before the exact reducing intent can even begin.
-        # Reuse the original sample timestamp; a slow reconciliation still fails
-        # the unchanged price freshness guard rather than renewing that clock.
+        # Static metadata precedes quantity reconciliation. The live price is
+        # obtained AFTER the final checkpoint, so a slow collection cannot age
+        # a prefetched price before planning. Neither timestamp is relabeled:
+        # a slow collection or price read still fails its five-second bound.
+        sample=None;sample_basis=None
         try:
             metadata=self.venue.metadata()
-            sample=self.venue.sample(state['account'],state['symbol']) if state['bindings'] else None
         except Exception:
             # A failed independent pre-read still freezes entries from known
             # uncovered fills. It never authorizes a close using old quantities.
@@ -465,6 +464,13 @@ class Controller:
                 self.latch(state,cause)
             raise
         if state.get('emergency') is None:
+            try:
+                sample=self.venue.sample(state['account'],state['symbol']) if state['bindings'] else None
+            except Exception:
+                cause=trigger(state,now_ms=self.venue.now())
+                if cause and send:self.latch(state,cause)
+                raise
+            sample_basis=life.digest(state['evidence'])
             fresh_sample=(sample is not None and 0<=self.venue.now()-sample['at_ms']<=5000)
             cause=trigger(state,now_ms=self.venue.now(), mark=sample['mark_price'] if fresh_sample else None)
             if cause is None:
@@ -474,6 +480,8 @@ class Controller:
             state=self.latch(state,cause)
         state=self._retire_normal(state)
         state=self._resolve_cancel(state)
+        if sample_basis!=life.digest(state['evidence']):
+            sample=None
         proposal=self.proposal(state,metadata=metadata,sample=sample)
         if proposal is None:
             report=view(state,self.venue.now())
