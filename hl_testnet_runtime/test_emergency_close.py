@@ -253,6 +253,73 @@ class EmergencyPureTests(NoExternal):
         self.assertEqual(proposal['observed_at_ms'],T+2)
         self.assertEqual(venue.sent,0)
 
+    def test_authorization_checkpoint_can_preserve_exact_action_and_begin_once(self):
+        from unittest.mock import Mock
+        state=state_from_case(q='40',take='40');venue=NormalVenue()
+        sample=venue.sample(state['account'],state['symbol'])
+        authorized=dispatch.choose(state,ROUTES2,META,sample,now_ms=T,
+                                   after_exit_policy=dispatch.AFTER_EXIT)
+        latest=deepcopy(state);latest['revision']+=1
+        latest['evidence']['snapshot']['at_ms']=T+1;venue.t=T+1
+        store=Mock(domain='software');store.load.return_value=latest
+        request=dict(proposal=None,phase='OUTCOME_UNKNOWN',attempts=1)
+        def committed(current,proposal,agent,now):
+            self.assertEqual(current,latest)
+            request['proposal']=deepcopy(proposal)
+            return deepcopy(current),deepcopy(request)
+        store.prepare_and_begin.side_effect=committed
+        normal=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+        result=normal._begin_cycle(state['bucket'],state,None,authorized,sample=sample,meta=META)
+        self.assertEqual(result[2]['action'],authorized['action'])
+        self.assertEqual(result[2]['sequence'],authorized['sequence'])
+        self.assertEqual(result[2]['basis'],life.digest(latest['evidence']))
+        self.assertEqual(result[2]['observed_at_ms'],T+1)
+        store.prepare_and_begin.assert_called_once()
+        store.reserve.assert_not_called();store.begin.assert_not_called()
+        self.assertEqual(venue.sent,0)
+
+    def test_authorization_reload_cannot_reuse_approval_for_larger_fill(self):
+        from unittest.mock import Mock
+        state=state_from_case(q='40',take='40');venue=NormalVenue()
+        sample=venue.sample(state['account'],state['symbol'])
+        authorized=dispatch.choose(state,ROUTES2,META,sample,now_ms=T,
+                                   after_exit_policy=dispatch.AFTER_EXIT)
+        latest=state_from_case(q='70',take='40');latest['revision']+=1
+        latest['evidence']['snapshot']['at_ms']=T+1;venue.t=T+1
+        store=Mock(domain='software');store.load.return_value=latest
+        normal=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+        with self.assertRaisesRegex(DispatchError,'AUTHORIZED_PLAN_CHANGED_REPREPARE_REQUIRED'):
+            normal._begin_cycle(state['bucket'],state,None,authorized,sample=sample,meta=META)
+        store.prepare_and_begin.assert_not_called();self.assertEqual(venue.sent,0)
+
+    def test_authorization_reload_retains_emergency_priority(self):
+        from unittest.mock import Mock
+        state=state_from_case(q='40',take='40');venue=NormalVenue()
+        sample=venue.sample(state['account'],state['symbol'])
+        authorized=dispatch.choose(state,ROUTES2,META,sample,now_ms=T,
+                                   after_exit_policy=dispatch.AFTER_EXIT)
+        latest=deepcopy(state);latest['revision']+=1;latest['emergency']=dict(phase='ACTIVE')
+        store=Mock(domain='software');store.load.return_value=latest
+        normal=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+        result=normal._begin_cycle(state['bucket'],state,None,authorized,sample=sample,meta=META)
+        self.assertEqual(result,dict(status='EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE',order_requests_sent=0))
+        store.prepare_and_begin.assert_not_called();self.assertEqual(venue.sent,0)
+
+    def test_fresh_checkpoint_does_not_extend_old_authorization_evidence_age(self):
+        from unittest.mock import Mock
+        state=state_from_case(q='40',take='40');venue=NormalVenue()
+        sample=venue.sample(state['account'],state['symbol'])
+        authorized=dispatch.choose(state,ROUTES2,META,sample,now_ms=T,
+                                   after_exit_policy=dispatch.AFTER_EXIT)
+        latest=deepcopy(state);latest['revision']+=1
+        venue.t=T+15001;latest['evidence']['snapshot']['at_ms']=venue.t
+        venue.local_authorize=lambda p,policy:dispatch.TestnetVenue._fresh_entry_evidence(venue,p)
+        store=Mock(domain='software');store.load.return_value=latest
+        normal=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+        with self.assertRaisesRegex(DispatchError,'ENTRY_EVIDENCE_EXPIRED_BEFORE_RESERVATION'):
+            normal._begin_cycle(state['bucket'],state,None,authorized,sample=sample,meta=META)
+        store.prepare_and_begin.assert_not_called();self.assertEqual(venue.sent,0)
+
     def test_plan_reload_retains_new_unknown_attempt_and_emergency_barriers(self):
         from unittest.mock import Mock
         for barrier in ('unknown','emergency'):
