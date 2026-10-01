@@ -160,10 +160,11 @@ print('PERSISTENCE_AND_REPLAY_GUARD_PASSED')'''
         from contextlib import ExitStack
         from types import SimpleNamespace
         from .test_guarded_execution import Reader
-        from hyperliquid_testnet_executor_selftest import FakeExchange
+        from hyperliquid_testnet_executor_selftest import FakeExchange, FakeRequestBudget
         import hyperliquid_testnet_executor as sender
         stack=ExitStack(); self.addCleanup(stack.close)
         exchange=FakeExchange()
+        stack.enter_context(patch('hl_testnet_runtime.request_budget.Budget.from_env',return_value=FakeRequestBudget()))
         stack.enter_context(patch('hl_testnet_runtime.checks.InfoReader',return_value=Reader()))
         stack.enter_context(patch.object(sender.http.client,'HTTPSConnection',side_effect=exchange.connection))
         stack.enter_context(patch.object(sender,'_wallet',return_value=SimpleNamespace(address=B)))

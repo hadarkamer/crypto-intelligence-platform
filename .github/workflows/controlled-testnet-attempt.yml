@@ -47,3 +47,7 @@ jobs:
           hl_testnet_runtime.test_emergency_close
           hl_testnet_runtime.test_protection_timing_trial
           hl_testnet_runtime.test_residual_exit_fence
+          hl_testnet_runtime.test_fill_wakeups
+          hl_testnet_runtime.test_request_budget
+          hl_testnet_runtime.test_priority_fill_runtime
+          hl_testnet_runtime.test_transport_unsent

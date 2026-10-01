@@ -13,12 +13,13 @@ import http.client
 import json
 import re
 import time
+import threading
 
 from . import card_lifecycle as life, filled_quantity_exits as selected
 from . import card_exit_recovery as recovery, card_sync_evidence as evidence
 from . import filled_pending_cancel as half_cancel
 from . import residual_exit_fence as residual
-from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
+from .filled_dispatch_store import DispatchStore, DispatchError, DefinitelyUnsent, SCHEMA
 from .trade_card_store import CardStore
 from .dispatch_concurrency import market_lane
 from . import checks, two_account_execution as roles
@@ -26,6 +27,87 @@ from . import checks, two_account_execution as roles
 VERSION = 'connected-filled-quantity-dispatch-v1'
 AFTER_EXIT = 'cancel_remainder_after_exit_v1'
 HOST = 'api.hyperliquid-testnet.xyz'
+
+
+class AdmittedAttempt(tuple):
+    """Commit-local tuple API plus an ephemeral permission, never journal data."""
+    def __new__(cls, values, admission):
+        result = super().__new__(cls, values)
+        result.admission = admission
+        return result
+
+
+def reserve_transport(venue, proposal):
+    # Mock's arbitrary dynamic attributes are not an adapter capability.
+    method = vars(venue).get('reserve_transport')
+    if method is None and callable(getattr(type(venue), 'reserve_transport', None)):
+        method = venue.reserve_transport
+    return method(proposal) if callable(method) else None
+
+
+def send_admitted(venue, request, admission):
+    return venue.send(request, admission=admission) if admission is not None else venue.send(request)
+
+
+def collect_checkpoint(venue, value, state):
+    """Pass durable pending context only to adapters declaring the capability."""
+    method=getattr(type(venue),'collect_checkpoint',None)
+    if callable(method):
+        return venue.collect_checkpoint(value,pending=state['pending'],
+                                        emergency_active=state.get('emergency') is not None)
+    return venue.collect(value)
+
+
+def _transport_identity(proposal):
+    value = deepcopy(proposal)
+    for field in ('basis', 'observed_at_ms', 'cancel_sample_at_ms'):
+        value.pop(field, None)
+    value['action'] = canonical_wire_action(value['action'])
+    return life.digest(value)
+
+
+class TransportAdmission:
+    """One local reservation bound to exact terms and one durable request."""
+    def __init__(self, proposal, permit):
+        self._identity = _transport_identity(proposal)
+        self._permit = permit
+        self._used = False
+        self._request_identity = None
+        self._certifiable = False
+        self._lock = threading.Lock()
+
+    def bind(self, request, *, certifiable=True):
+        with self._lock:
+            if (self._request_identity is not None or self._used
+                    or _transport_identity(request['proposal']) != self._identity):
+                raise DispatchError('EXACT_SINGLE_USE_TRANSPORT_ADMISSION_REQUIRED')
+            self._request_identity = DefinitelyUnsent.identity(request)
+            self._certifiable = certifiable is True
+
+    def _check(self, request, *, consume):
+        from .request_budget import BudgetError
+        with self._lock:
+            if (self._used or self._request_identity is None
+                    or DefinitelyUnsent.identity(request) != self._request_identity
+                    or _transport_identity(request['proposal']) != self._identity):
+                # Reuse might follow a prior send. It can never release its fence.
+                raise DispatchError('EXACT_SINGLE_USE_TRANSPORT_ADMISSION_REQUIRED')
+            if consume:
+                self._used = True
+            try:
+                self._permit.check() if consume else self._permit.validate()
+            except BudgetError as exc:
+                self._used = True
+                if (str(exc) != 'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED'
+                        or not self._certifiable):
+                    raise DispatchError(str(exc)) from None
+                raise DefinitelyUnsent(request, str(exc)) from None
+
+    def validate(self, request):
+        self._check(request,consume=False)
+
+    def consume(self, request):
+        self._check(request,consume=True)
 
 
 def joined_public_reads(*calls):
@@ -441,7 +523,8 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
         if allowed_entry_card_id is not None and cid != allowed_entry_card_id:
             continue
         original=state['originals'][cid]
-        if original.get('entry_rejected_no_retry') is True:
+        if (original.get('entry_rejected_no_retry') is True
+                or original.get('entry_unsent_no_retry') is True):
             continue
         if 'source_expires_at' in original['card']:
             from .source_window import source_fresh, timestamp
@@ -589,7 +672,7 @@ class Controller:
         else:
             if state['evidence'] is None:
                 raise DispatchError('COMPLETE_PRE_ENTRY_CHECKPOINT_REQUIRED')
-            snap=self.venue.collect(dict(bindings=bs,snapshot=state['evidence']['snapshot']))['snapshot']
+            snap=collect_checkpoint(self.venue,dict(bindings=bs,snapshot=state['evidence']['snapshot']),state)['snapshot']
         now=self.venue.now();life.validate_snapshot(snap)
         if not snap['history_complete'] or not snap['orders_complete'] or not 0<=now-snap['at_ms']<=15000:
             raise DispatchError('OBSERVATION_INCOMPLETE_OR_STALE')
@@ -655,9 +738,19 @@ class Controller:
         # from observing a fill and acting on its durable request identity.
         sent_before=getattr(self.venue,'sent',0)
         try:
-            raw=self.venue.send(request)
+            raw=send_admitted(self.venue,request,getattr(prepared,'admission',None))
             reply=normalized_reply(raw,proposal['action']['type'],
                                    account=proposal['account'],agent=route['agent'])
+        except DefinitelyUnsent as certificate:
+            try:
+                self.store.abort_definitely_unsent(state,request,certificate,self.venue.now())
+            except Exception:
+                # Lost abort COMMIT acknowledgement or changed state preserves
+                # uncertainty. No follow-on send is authorized by this process.
+                return dict(status='OUTCOME_UNKNOWN',request_id=request['request_id'],
+                            order_requests_sent=0)
+            return dict(status='ABORTED_UNSENT',request_id=request['request_id'],
+                        reason=certificate.reason,order_requests_sent=0)
         except Exception:
             return dict(status='OUTCOME_UNKNOWN',order_requests_sent=max(0,getattr(self.venue,'sent',0)-sent_before))
         try:
@@ -699,6 +792,11 @@ class Controller:
             if pending['phase']!='PREPARED':
                 return dict(status=pending['phase'],order_requests_sent=0)
         else: pending=None
+        if (not allow_new_entries and pending is None
+                and _fully_protected_no_work(state,self.venue.now())):
+            # A complete current public checkpoint already proves all live
+            # exits. No price/metadata request is needed to select no action.
+            return dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
         if getattr(self.venue,'parallel_preflight',False) is True:
             sample,meta=joined_public_reads(
                 lambda:self.venue.sample(state['account'],state['symbol']),self.venue.metadata)
@@ -805,11 +903,86 @@ class Controller:
         if callable(local_authorize):
             local_authorize(proposal,self.after_exit_policy)
         route=self.routes[proposal['role']]
+        # Quota refusal precedes all nonce/attempt writes. There is no wait or
+        # exchange retry, and no SQL transaction remains open during admission.
+        admission=reserve_transport(self.venue,proposal)
+        if callable(local_authorize):
+            local_authorize(proposal,self.after_exit_policy)
         # Reservation/rebase and attempt share one PostgreSQL transaction. An
         # independent process cannot checkpoint between these two decisions.
         # Return only the exact positively acknowledged commit's sender token.
         state,request=self.store.prepare_and_begin(state,proposal,route['agent'],self.venue.now())
-        return state,request,proposal,route
+        if type(admission) is TransportAdmission:
+            admission.bind(request)
+        return AdmittedAttempt((state,request,proposal,route),admission)
+
+
+def _fully_protected_no_work(state, now_ms):
+    """Only omit price/metadata for a freshly verified, fully covered position."""
+    if not state['bindings'] or state['evidence'] is None or state['pending']:
+        return False
+    snap=state['evidence']['snapshot']
+    if (state['evidence']['bindings']!=state['bindings']
+            or not snap['history_complete'] or not snap['orders_complete']
+            or not 0<=now_ms-snap['at_ms']<=15000):
+        return False
+    report=life.review(state['bindings'],snap,now_ms=now_ms)
+    entry_ids={oid for binding in state['bindings'] for oid in binding['orders']['ENTRY']}
+    if (report['bucket_issues'] or any(o['oid'] in entry_ids for o in snap['open_orders'])):
+        return False
+    # Final history cannot make a later protected position poll constantly.
+    # A closed card with any remaining order still needs ordinary cleanup.
+    by_card={binding['card_id']:binding for binding in state['bindings']}
+    opened={order['oid'] for order in snap['open_orders']}
+    protected=False
+    for row in report['cards']:
+        remaining=life.number(row['remaining_quantity'],signed=True)
+        if row['issues'] or remaining<0:
+            return False
+        if remaining==0:
+            owned={oid for ids in by_card[row['card_id']]['orders'].values() for oid in ids}
+            if row['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL') or opened&owned:
+                return False
+        elif (life.number(row['stop_quantity_observed'])!=remaining
+                or life.number(row['take_profit_quantity_observed'])!=remaining):
+            return False
+        else:
+            protected=True
+    return protected
+
+
+def _collection_priority(value, now_ms, *, fill_wakeups=None, pending_clear=False):
+    """Prior final-flat or quiet fully protected proof selects background reads.
+
+    This classification never grants trade authority or changes evidence time.
+    Unknown risk, stale live protection or a dirty/gapped feed keeps its reserve.
+    """
+    try:
+        bindings,snapshot=value['bindings'],value['snapshot']
+        if pending_clear is True and fill_wakeups is not None and bindings:
+            dirty=fill_wakeups.dirty_symbols(snapshot['account'])
+            healthy=getattr(type(fill_wakeups),'entry_allowed',None)
+            quiet=(dirty is not None and snapshot['symbol'] not in dirty
+                   and callable(healthy) and fill_wakeups.entry_allowed(snapshot['account']) is True)
+            state=dict(bindings=bindings,evidence=value,pending=value.get('pending'),
+                       account=snapshot['account'],symbol=snapshot['symbol'])
+            if quiet and _fully_protected_no_work(state,now_ms):
+                return 'background'
+        if (not bindings or not snapshot['history_complete'] or not snapshot['orders_complete']
+                or life.number(snapshot['position_quantity'],signed=True)!=0
+                or snapshot['open_orders']):
+            return 'protection'
+        # Classify the prior checkpoint's final ownership at its own original
+        # observation time. This only selects quota priority; the ensuing public
+        # collection preserves its actual fresh clocks and validates every fact.
+        report=life.review(bindings,snapshot,now_ms=snapshot['at_ms'])
+        if (report['bucket_issues'] or not report['cards']
+                or any(row['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL')
+                       or row['issues'] for row in report['cards'])):
+            return 'protection'
+        return 'background'
+    except (KeyError,TypeError,life.LifecycleError):
+        return 'protection'
 
 
 class TestnetVenue:
@@ -822,20 +995,41 @@ class TestnetVenue:
     def __init__(self,env): self.env=env;self.sent=0
     @staticmethod
     def now(): return time.time_ns()//1000000
-    def metadata(self): return checks.InfoReader().read('meta')
+    def request_budget(self):
+        from .request_budget import Budget
+        return Budget.from_env(self.env)
+    def reserve_transport(self,proposal):
+        if HOST!='api.hyperliquid-testnet.xyz':
+            raise DispatchError('ACTION_OR_HOST_FORBIDDEN')
+        budget=self.request_budget()
+        if budget is None:
+            raise DispatchError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')
+        permit=budget.acquire('/exchange',dict(action=canonical_wire_action(proposal['action'])),
+            host=HOST,priority='background' if proposal['operation']=='ENTRY' else 'protection')
+        return TransportAdmission(proposal,permit)
+    def metadata(self):
+        return checks.InfoReader(budget=self.request_budget(),priority='protection').read('meta')
     def sample(self,account,symbol):
-        start=self.now();raw=checks.InfoReader().read('activeAssetData',user=account,coin=symbol)
+        start=self.now();raw=checks.InfoReader(budget=self.request_budget(),priority='protection').read('activeAssetData',user=account,coin=symbol)
         checks.capacity(raw,account,symbol)
         return dict(mark_price=raw['markPx'],at_ms=start)
     def lookup(self,account,cloid):
         import hyperliquid_testnet_executor as legacy
-        return legacy.TestnetHTTP().info('orderStatus',user=account,oid=cloid)
+        return legacy.TestnetHTTP(budget=self.request_budget(),priority='protection').info('orderStatus',user=account,oid=cloid)
     def collect(self,value):
+        return self._collect(value,pending_clear=False)
+    def collect_checkpoint(self,value,*,pending,emergency_active=False):
+        return self._collect(value,pending_clear=pending is None and not emergency_active,
+                             force_protection=pending is not None or emergency_active)
+    def _collect(self,value,*,pending_clear,force_protection=False):
         # Dispatch callers pass the committed complete checkpoint (possibly
         # copied with one newly owned binding), never a receipt or pass-one
         # observation. Retain its final identities while both fresh passes
         # still verify live orders, fills, inventory and actual position.
-        return evidence.collect(value,evidence.PublicReader(parallel=True),
+        priority=('protection' if force_protection else _collection_priority(value,self.now(),
+            fill_wakeups=vars(self).get('fill_wakeups'),pending_clear=pending_clear))
+        return evidence.collect(value,evidence.PublicReader(parallel=True,
+                                budget=self.request_budget(),priority=priority),
                                 reuse_verified_terminals=True)
     def empty_snapshot(self,account,symbol):
         reader=evidence.PublicReader();start=self.now()
@@ -974,6 +1168,10 @@ class TestnetVenue:
                     now=datetime.fromtimestamp(self.now()/1000,timezone.utc)):
                 raise DispatchError('NEW_TRIAL_SOURCE_NOT_FRESH')
         # Entry approval expiry must NOT silently terminate management of an open card.
+        if proposal['operation']=='ENTRY' and stream:
+            feed=vars(self).get('fill_wakeups')
+            if feed is None or not feed.entry_allowed(proposal['account']):
+                raise DispatchError('FILL_NOTIFICATION_RECONCILIATION_REQUIRED_NO_ENTRY')
         return roles.route_for(env,proposal['role'],proposal['account'])
     def authorize(self,state,proposal,after_exit_policy):
         route=self._gate(proposal,after_exit_policy)
@@ -1073,9 +1271,20 @@ class TestnetVenue:
         if not at<=nonce<=at+1000:
             raise DispatchError('PERSISTED_NONCE_TIME_INVALID')
         half_cancel.final_freshness(request,now_ms=now)
-    def send(self,request):
+    def send(self,request,*,admission=None):
+        if admission is not None:
+            if type(admission) is not TransportAdmission:
+                raise DispatchError('EXACT_SINGLE_USE_TRANSPORT_ADMISSION_REQUIRED')
+            admission.validate(request)
         p=request['proposal'];route=self._gate(p,self.env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY'))
         self._fresh_attempt(request)
+        if admission is None:
+            admission=self.reserve_transport(p)
+            if type(admission) is not TransportAdmission:
+                raise DispatchError('EXACT_SINGLE_USE_TRANSPORT_ADMISSION_REQUIRED')
+            # Standalone callers have no commit-local sender certificate.
+            admission.bind(request,certifiable=False)
+            admission.validate(request)
         wallet=roles.wallet_for_role(self.env,p['role'],route['account'],route['agent'])
         from hyperliquid.utils.signing import sign_l1_action
         expires=request['nonce']+15000
@@ -1087,6 +1296,9 @@ class TestnetVenue:
         if len(body)>16384: raise DispatchError('REQUEST_TOO_LARGE')
         self._gate(p,self.env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY'))
         self._fresh_attempt(request)
+        # Only this local check can issue a definitely-unsent certificate. Once
+        # HTTPS request is entered, every exception preserves OUTCOME_UNKNOWN.
+        admission.consume(request)
         connection=http.client.HTTPSConnection(HOST,timeout=4)
         try:
             self.sent+=1

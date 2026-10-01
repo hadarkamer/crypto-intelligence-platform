@@ -33,8 +33,10 @@ class ReviewError(life.LifecycleError):
 
 class PublicReader:
     """Exactly /info on Testnet; fixed read types, bounds, no redirects/retries."""
-    def __init__(self):
+    def __init__(self, *, budget=None):
         self.calls = 0
+        from .request_budget import default_budget
+        self.budget = default_budget() if budget is None else budget
 
     def read(self, kind, account, *, oid=None, start=None, end=None):
         account = life.address(account)
@@ -53,9 +55,17 @@ class PublicReader:
             raise ReviewError('PUBLIC_READ_TYPE_NOT_ALLOWED')
         if HOST != 'api.hyperliquid-testnet.xyz' or self.calls >= 12:
             raise ReviewError('PUBLIC_READ_BOUND_EXCEEDED')
-        conn = http.client.HTTPSConnection(HOST, timeout=4)
-        self.calls += 1
+        from .request_budget import BudgetError
         try:
+            permit = None if self.budget is None else self.budget.acquire(
+                '/info', body, priority='background', host=HOST)
+        except BudgetError as exc:
+            raise ReviewError(str(exc)) from None
+        conn = http.client.HTTPSConnection(HOST, timeout=4)
+        try:
+            if permit is not None:
+                permit.check()
+            self.calls += 1
             conn.request('POST', '/info', json.dumps(body).encode(), {'Content-Type': 'application/json'})
             response = conn.getresponse()
             if response.status != 200:
@@ -63,7 +73,12 @@ class PublicReader:
             raw = response.read(checks.MAX_BYTES+1)
             if len(raw) > checks.MAX_BYTES:
                 raise ReviewError('PUBLIC_RESPONSE_TOO_LARGE')
-            return checks.decode(raw)
+            decoded = checks.decode(raw)
+            if permit is not None:
+                permit.finish(decoded)
+            return decoded
+        except BudgetError as exc:
+            raise ReviewError(str(exc)) from None
         except (OSError, http.client.HTTPException):
             raise ReviewError('PUBLIC_READ_UNAVAILABLE') from None
         finally:

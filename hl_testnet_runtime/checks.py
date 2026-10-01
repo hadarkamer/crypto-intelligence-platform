@@ -65,10 +65,14 @@ def decode(raw):
 
 class InfoReader:
     """Fixed Testnet /info, fixed read types, no retries or redirects."""
-    def __init__(self, *, parallel=False):
+    def __init__(self, *, parallel=False, budget=None, priority='background'):
         self.calls = 0
         self.parallel = parallel is True
         self._calls_lock = threading.Lock()
+        from .request_budget import Budget
+        import os
+        self.budget = budget if budget is not None else Budget.from_env(os.environ)
+        self.priority = priority
 
     def read_many(self, requests):
         """Read an ordered independent group, joining every started read.
@@ -99,11 +103,15 @@ class InfoReader:
             body = {'type': kind, 'user': address(user), 'coin': coin}
         else:
             raise Blocked('READ_TYPE_NOT_ALLOWED')
+        permit = (self.budget.acquire('/info', body, priority=self.priority, host=HOST)
+                  if self.budget is not None else None)
         connection = http.client.HTTPSConnection(HOST, timeout=4)
         with self._calls_lock:
             self.calls += 1
         started = time.monotonic()
         try:
+            if permit is not None:
+                permit.check()
             connection.request('POST', '/info', json.dumps(body).encode(),
                                {'Content-Type': 'application/json', 'Accept': 'application/json'})
             response = connection.getresponse()
@@ -112,7 +120,10 @@ class InfoReader:
             raw = response.read(MAX_BYTES + 1)
             if len(raw) > MAX_BYTES or time.monotonic() - started > 8:
                 raise Blocked('RESPONSE_BOUND_EXCEEDED')
-            return decode(raw)
+            decoded = decode(raw)
+            if permit is not None:
+                permit.finish(decoded)
+            return decoded
         except (OSError, http.client.HTTPException):
             raise Blocked('READ_UNAVAILABLE') from None
         finally:

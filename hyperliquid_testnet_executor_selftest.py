@@ -112,6 +112,21 @@ class FakeExchange:
         raise AssertionError('Unexpected request type')
 
 
+class FakeRequestBudget:
+    """Offline HTTP fixtures still exercise weighted admission before transport."""
+    def __init__(self):
+        self.calls = []
+    def acquire(self, path, body, *, priority='background', host='api.hyperliquid-testnet.xyz'):
+        from hl_testnet_runtime.request_budget import Permit, request_weight
+        weight = request_weight(path, body, host=host)
+        self.calls.append((path, weight, priority))
+        import time
+        return Permit(self, 'a'*32, body.get('type', 'exchange'), weight,
+                      time.monotonic_ns()+1000000000)
+    def _settle(self, token, weight):
+        return True
+
+
 class BuildTests(unittest.TestCase):
     def test_three_orders_and_native_grouping(self):
         built = action()
@@ -201,6 +216,9 @@ class ExecutionTests(unittest.TestCase):
         self.journal = self.root / 'attempts.hl-testnet.sqlite3'
         self.msg = signal()
         self.server = FakeExchange()
+        self.budget_patch = patch('hl_testnet_runtime.request_budget.Budget.from_env',
+                                  return_value=FakeRequestBudget())
+        self.budget_patch.start()
         self.network = patch.object(mod.http.client, 'HTTPSConnection', side_effect=self.server.connection)
         self.network.start()
         self.wallet_patch = patch.object(mod, '_wallet', return_value=SimpleNamespace(address=AGENT))
@@ -209,7 +227,7 @@ class ExecutionTests(unittest.TestCase):
             'action': act, 'nonce': nonce, 'signature': {'r': '0x1', 's': '0x2', 'v': 27}, 'expiresAfter': nonce+30000})
         self.signer = self.sign_patch.start()
     def tearDown(self):
-        self.sign_patch.stop(); self.wallet_patch.stop(); self.network.stop(); self.temp.cleanup()
+        self.sign_patch.stop(); self.wallet_patch.stop(); self.network.stop(); self.budget_patch.stop(); self.temp.cleanup()
     def submit(self, message=None, enabled=True):
         return mod.submit_once(message if message is not None else self.msg, account=ACCOUNT,
                                journal=self.journal, exit_type='market', enable_testnet=enabled)

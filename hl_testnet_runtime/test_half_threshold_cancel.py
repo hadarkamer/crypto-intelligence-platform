@@ -317,7 +317,9 @@ class TransportTests(unittest.TestCase):
         from types import SimpleNamespace
         self.agent='0x'+'2'*40
         self.sign=Mock(return_value={'r':'0x1','s':'0x2','v':27})
-        self.reader=SimpleNamespace(info=Mock(return_value={'role':'agent','data':{'user':A}}))
+        from hyperliquid_testnet_executor_selftest import FakeRequestBudget
+        self.reader=SimpleNamespace(info=Mock(return_value={'role':'agent','data':{'user':A}}),
+                                    budget=FakeRequestBudget())
         self.fake=SimpleNamespace(TestnetHTTP=Mock(return_value=self.reader), TESTNET_HOST=executor.HOST,
             _wallet=Mock(return_value=SimpleNamespace(address=self.agent)),_account=lambda x:x.lower(),
             now_ms=lambda:1000,_json=json.dumps,_decode=json.loads,MAX_BYTES=2048)
@@ -338,6 +340,20 @@ class TransportTests(unittest.TestCase):
         body=json.loads(args[2]);self.assertEqual(body['action'],executor.cancel_action(record()))
         self.assertEqual(body['expiresAfter'],6000)
         self.assertIs(self.sign.call_args.args[-1],False)
+    def test_shared_budget_denial_prevents_cancel_transport(self):
+        from .request_budget import BudgetError
+        self.http.budget = Mock()
+        self.http.budget.acquire.side_effect = BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+        with self.assertRaisesRegex(executor.CancelError, 'BUDGET_EXHAUSTED'):
+            self.http.write(executor.cancel_action(record()),1000,phase='cancel')
+        self.ctor.assert_not_called()
+        self.assertEqual(self.http.requests_attempted,0)
+    def test_admission_cannot_extend_original_cancel_nonce_deadline(self):
+        self.fake.now_ms = Mock(side_effect=(1000,1000,7001))
+        with self.assertRaisesRegex(executor.CancelError, 'NONCE_EXPIRED'):
+            self.http.write(executor.cancel_action(record()),1000,phase='cancel')
+        self.ctor.assert_not_called()
+        self.assertEqual(self.http.requests_attempted,0)
     def test_mainnet_is_refused_before_key(self):
         with patch.object(executor,'HOST','api.hyperliquid.xyz'):
             with self.assertRaises(executor.CancelError):self.http.write(executor.cancel_action(record()),1000,phase='cancel')

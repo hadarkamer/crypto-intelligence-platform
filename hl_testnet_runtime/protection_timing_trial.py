@@ -20,6 +20,7 @@ from .filled_dispatch_store import DispatchError
 
 MAX_OBSERVATION_MS = 600000
 FINALITY_GRACE_MS = 15000
+NOTIFICATION_BOOTSTRAP_SECONDS = 10
 
 
 def outcome(state, card_id, now_ms):
@@ -41,7 +42,9 @@ def outcome(state, card_id, now_ms):
         return result
     binding=next((b for b in state['bindings'] if b['card_id']==card_id),None)
     if binding is None:
-        if state['originals'][card_id].get('entry_rejected_no_retry') and pending is None:
+        if state['originals'][card_id].get('entry_unsent_no_retry') is True and pending is None:
+            result.update(lifecycle='ABORTED_UNSENT',terminal_verified=True)
+        elif state['originals'][card_id].get('entry_rejected_no_retry') and pending is None:
             result.update(lifecycle='REJECTED_WITHOUT_FILL',terminal_verified=True)
         return result
     review=emergency.view(state,now_ms)
@@ -123,6 +126,83 @@ def run_one(env, card_id):
     card=CardStore(base.store.journal).load(card_id)
     now=base.venue.now()
     expiry=validate(environment,card,now)
+    feed=None
+    try:
+        if isinstance(base.venue,dispatch.TestnetVenue):
+            from .fill_wakeups import FillWakeups
+            role=card['account_role'];route=base.routes[role]
+            feed=FillWakeups({role:route['account']})
+            base.venue.fill_wakeups=feed
+            feed.start()
+        return _run_one(environment,card_id,base,card,now,expiry,feed)
+    finally:
+        if feed is not None:
+            feed.stop()
+
+
+def _reconcile_notifications(base, feed, role, route, card):
+    """An active socket never replaces authoritative saved account observation."""
+    if feed.entry_allowed(route['account']):
+        return True
+    health=feed.health()[role]
+    if (not health['connected'] or not health['snapshot_received']
+            or health['subscriptions_acknowledged']!=2):
+        return False
+    token=feed.begin_reconciliation(route['account'])
+    symbols=feed.dirty_symbols(route['account'])
+    if symbols==():
+        symbols=None
+    started_ms=base.venue.now()
+    result=stream.tick(base,route,timestamp(card['prepared']['source']['at']),
+        new_entries=False,role=role,dirty_symbols=() if symbols is None else symbols,
+        full_reconciliation=symbols is None)
+    if result['status'] not in ('ENTRIES_DISABLED','SWEEP_COMPLETE'):
+        return False
+    return stream._finish_notification_reconciliation(base,feed,token,symbols,started_ms)
+
+
+def _wait_notifications(base, feed, role, route, card, expiry, stopped):
+    deadline=time.monotonic()+NOTIFICATION_BOOTSTRAP_SECONDS
+    while base.venue.now()<expiry and time.monotonic()<deadline:
+        if _reconcile_notifications(base,feed,role,route,card):
+            return
+        stopped.wait(.1)
+    raise DispatchError('TIMING_TRIAL_FILL_NOTIFICATION_GAP_NO_NEW_ENTRY')
+
+
+def _trial_pause(state, observation, *, feed, account, now_ms, expiry_ms,
+                 source_expiry_ms, observation_deadline_ms, wall_remaining,
+                 cycle_result=None):
+    """Wait only for a proven quiet entry; new hints interrupt every wait."""
+    if feed is None:
+        return .25  # Preserve socket-free software fixtures and their clocks.
+    sent=(cycle_result or {}).get('order_requests_sent',0)
+    delay=0 if type(sent) is int and sent>0 else .25
+    if delay:
+        try:
+            quiet=(feed.entry_allowed(account) and state.get('pending') is None
+                and not state.get('emergency') and not observation['issues']
+                and observation['lifecycle']=='WAITING_ENTRY'
+                and observation['working_entry_order_ids']
+                and not observation['working_exit_order_ids']
+                and life.number(observation['entry_quantity'])==0
+                and life.number(observation['remaining_quantity'])==0
+                and life.number(state['evidence']['snapshot']['position_quantity'],signed=True)==0
+                and type(observation['evidence_at_ms']) is int
+                and 0<=now_ms-observation['evidence_at_ms']<=5000)
+        except (KeyError,TypeError,life.LifecycleError):
+            quiet=False
+        if quiet:
+            delay=5
+    # Expired grants never become a renewed deadline or terminate management.
+    # Reach each still-future source/grant boundary before another quiet pause.
+    bounds=[max(0,wall_remaining),max(0,observation_deadline_ms-now_ms)/1000]
+    bounds.extend((bound-now_ms)/1000 for bound in (expiry_ms,source_expiry_ms) if bound>now_ms)
+    return min(delay,*bounds)
+
+
+def _run_one(environment, card_id, base, card, now, expiry, feed):
+    """Run with the original grant timestamp, never renewed during bootstrap."""
     source_expiry=int(timestamp(card['source_expires_at']).timestamp()*1000)
     observation_deadline=min(source_expiry+FINALITY_GRACE_MS,now+MAX_OBSERVATION_MS)
     wall_deadline=time.monotonic()+max(0,observation_deadline-now)/1000
@@ -139,6 +219,8 @@ def run_one(env, card_id):
     if role=='short_account':
         trial_env['HL_TESTNET_SHORT_TRIAL_CARD_ID']=card_id
     controlled=dispatch.controller_from_env(trial_env)
+    if feed is not None:
+        controlled.venue.fill_wakeups=feed
     state=controlled.register(card_id)
     # A free symbol is required; historical cards must have public finality.
     state=base.refresh(state['bucket'])
@@ -159,7 +241,14 @@ def run_one(env, card_id):
             stopped.wait(.25)
         if not emergency.healthy(base.venue.now()):
             raise DispatchError('EMERGENCY_SUPERVISOR_NOT_FRESH_NO_NEW_ENTRY')
+        if feed is not None:
+            _wait_notifications(base,feed,role,route,card,expiry,stopped)
         while base.venue.now()<observation_deadline and time.monotonic()<wall_deadline:
+            if feed is not None:
+                # Clear before reads, so hints arriving during reconciliation
+                # remain set and cannot be lost before the following wait.
+                feed.wake_event.clear()
+            cycle_result=None
             state=base.store.load(state['bucket'])
             incident=state.get('emergency')
             observation=outcome(state,card_id,base.venue.now())
@@ -173,10 +262,15 @@ def run_one(env, card_id):
                     break
             else:
                 try:
-                    if base.venue.now()<expiry and entry_attempts(base.store,state,card_id)==0:
+                    may_enter=(base.venue.now()<expiry
+                               and entry_attempts(base.store,state,card_id)==0)
+                    notification_ready=(feed is None or
+                        _reconcile_notifications(base,feed,role,route,card))
+                    if may_enter and notification_ready:
                         result=controlled.cycle(state['bucket'],send=True,allowed_entry_card_id=card_id)
                     else:
                         result=controlled.cycle(state['bucket'],send=True,allow_new_entries=False)
+                    cycle_result=result
                     status=result['status']
                 except (DispatchError,life.LifecycleError) as exc:
                     status=str(exc)
@@ -190,7 +284,11 @@ def run_one(env, card_id):
                 if base.venue.now()>=expiry and entry_attempts(base.store,state,card_id)==0 and not state.get('pending'):
                     status='ENTRY_NOT_SUBMITTED'
                     break
-            stopped.wait(.25)
+            pause=_trial_pause(state,observation,feed=feed,account=route['account'],
+                now_ms=base.venue.now(),expiry_ms=expiry,source_expiry_ms=source_expiry,
+                observation_deadline_ms=observation_deadline,
+                wall_remaining=wall_deadline-time.monotonic(),cycle_result=cycle_result)
+            (feed.wake_event if feed is not None else stopped).wait(pause)
         state=base.store.load(state['bucket'])
         observation=outcome(state,card_id,base.venue.now())
         if state.get('pending'):
