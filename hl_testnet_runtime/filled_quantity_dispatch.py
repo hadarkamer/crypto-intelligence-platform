@@ -201,7 +201,7 @@ def identity(raw, request, now_ms):
     oid=o.get('oid');stamp=life.moment(env.get('statusTimestamp'))
     if type(oid) is not int or not 0<oid<2**64 or not request['attempt_at_ms']<=stamp<=now_ms:
         raise DispatchError('ORDER_LOOKUP_ID_OR_TIME_MISMATCH')
-    leg=p['leg'];immediate=p['operation']=='CLOSE_PASSED_TAKE'
+    leg=p['leg'];immediate=p['operation'] in ('CLOSE_PASSED_TAKE','EMERGENCY_CLOSE')
     typ='Limit' if leg=='ENTRY' or immediate else 'Stop Market' if leg=='STOP' else 'Take Profit Limit'
     if (o.get('cloid')!=expected['c'] or o.get('coin')!=p['symbol']
             or o.get('side')!=('B' if expected['b'] else 'A')
@@ -489,7 +489,7 @@ class Controller:
 
     def refresh(self,bucket):
         """Public reads first; one transaction records ownership, evidence and outcome."""
-        state=self.store.load(bucket);now=self.venue.now();request=None;oid=None
+        state=self.store.load(bucket);now=self.venue.now();request=None;oid=None;raw=None
         bs=deepcopy(state['bindings'])
         if state['pending']:
             request=self.store.request(state['pending'])
@@ -577,6 +577,8 @@ class Controller:
                 from .card_lifecycle_store import _continues
                 _continues(s['evidence'],dict(bindings=bs,snapshot=snap))
             s['bindings']=bs;s['evidence']=dict(bindings=bs,snapshot=snap)
+            from .emergency_close import record_timing
+            record_timing(s,request,raw,now)
             current=self.store.pending_record(conn,s)
             if current is None or current['attempt_at_ms'] is None: return None
             if snap['at_ms']<=current['attempt_at_ms']:
@@ -760,6 +762,19 @@ class TestnetVenue:
         return observed['snapshot']
     def _gate(self,proposal,after_exit_policy):
         env=self.env
+        if hasattr(self,'store'):
+            self.store.action_allowed(proposal)
+        if proposal.get('operation')=='ENTRY' and env.get('HL_TESTNET_EMERGENCY_CLOSE'):
+            from .emergency_close import APPROVAL, healthy
+            if env['HL_TESTNET_EMERGENCY_CLOSE']!=APPROVAL or not healthy(self.now()):
+                raise DispatchError('EMERGENCY_SUPERVISOR_NOT_FRESH_NO_NEW_ENTRY')
+            trial=env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID','')
+            try: trial_expires=int(env.get('HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS',''))
+            except (ValueError,TypeError):
+                raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED') from None
+            if (not re.fullmatch(r'[0-9a-f]{64}',trial) or trial!=proposal.get('card_id')
+                    or not 0<trial_expires-self.now()<=120000):
+                raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED')
         stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
             and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
             and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'
