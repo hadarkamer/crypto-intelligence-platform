@@ -165,16 +165,61 @@ def observation_inputs(reader, account, oids, start, end):
     return responses, raw_fills, inventory, position
 
 
-def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()):
+def _fill_facts_by_oid(fills):
+    facts={}
+    for fill in fills:
+        facts.setdefault(fill['oid'],{})[fill['fill_id']]=fill
+    return facts
+
+
+def terminal_certificates(bindings, previous):
+    """Validate immutable terminal facts from a complete durable checkpoint.
+
+    This is an internal opt-in contract: the caller must supply the integrity-
+    checked committed checkpoint, never an acknowledgement or an uncommitted
+    first verification pass. Fresh inventory and overlapping fills must still
+    prove that these exact final identities have not reappeared or changed.
+    """
+    life.validate_bindings(bindings)
+    account,symbol=life.validate_snapshot(previous)
+    if not previous['history_complete'] or not previous['orders_complete']:
+        raise SyncError('VERIFIED_HISTORY_BOOTSTRAP_REQUIRED')
+    links={oid for b in bindings if life.address(b['account'])==account and b['symbol']==symbol
+           for leg in life.LEGS for oid in b['orders'][leg]}
+    opened={row['oid'] for row in previous['open_orders']}
+    old_facts=_fill_facts_by_oid(previous['fills'])
+    certificates={}
+    with localcontext() as ctx:
+        ctx.prec=80
+        for row in previous['terminal_orders']:
+            oid=row['oid']
+            fills=old_facts.get(oid,{}).values()
+            quantity=sum((life.number(f['quantity']) for f in fills),Decimal(0))
+            if (oid not in links or oid in opened
+                    or life.number(row['filled_quantity'])!=quantity
+                    or any(f['at_ms']>row['at_ms'] for f in fills)
+                    or (row['state']=='FILLED' and quantity<=0)
+                    or (row['state']=='REJECTED' and quantity!=0)):
+                raise SyncError('TERMINAL_CERTIFICATE_NOT_VERIFIED')
+            certificates[oid]=deepcopy(row)
+    return certificates
+
+
+def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=(),
+            reuse_verified_terminals=False):
     account,symbol = life.validate_snapshot(previous)
     plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
     links = {oid:(b,leg) for b in bindings for leg in life.LEGS for oid in b['orders'][leg]}
     old_terminal = {r['oid']:r for r in previous['terminal_orders']}
+    certificates=terminal_certificates(bindings,previous) if reuse_verified_terminals else {}
+    current_oids={oid:link for oid,link in links.items() if oid not in certificates}
     read_inputs = getattr(reader, 'observation_inputs', None)
     responses, raw_fills, raw_inventory, position = (
-        read_inputs(account, links, start, end) if callable(read_inputs)
-        else observation_inputs(reader, account, links, start, end))
+        read_inputs(account, current_oids, start, end) if callable(read_inputs)
+        else observation_inputs(reader, account, current_oids, start, end))
     fills = merge_fills(previous['fills'],raw_fills,account,symbol,start,end)
+    old_facts=_fill_facts_by_oid(previous['fills']) if certificates else {}
+    new_facts=_fill_facts_by_oid(fills) if certificates else {}
     totals = {}; last_fill = {}
     with localcontext() as ctx:
         ctx.prec = 80
@@ -194,6 +239,16 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
     if set(inventory)-set(links): raise SyncError('UNASSIGNED_EXCHANGE_ORDER')
     terminals,opens = [],[]
     for oid,(binding,leg) in links.items():
+        if oid in certificates:
+            certificate=certificates[oid]
+            if oid in inventory:
+                raise SyncError('TERMINAL_ORDER_BECAME_ACTIVE')
+            if (new_facts.get(oid,{})!=old_facts.get(oid,{})
+                    or totals.get(oid,Decimal(0))!=life.number(certificate['filled_quantity'])
+                    or last_fill.get(oid,0)>certificate['at_ms']):
+                raise SyncError('TERMINAL_FACT_CHANGED')
+            terminals.append(deepcopy(certificate))
+            continue
         raw = responses[oid]
         if not isinstance(raw,dict) or raw.get('status')!='order': raise SyncError('ORDER_STATUS_UNRESOLVED')
         envelope = raw.get('order',{}); order = envelope.get('order',{})
@@ -287,7 +342,9 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
 
 
 def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.monotonic,
-            plain_take_profit_oids=()):
+            plain_take_profit_oids=(), reuse_verified_terminals=False):
+    if type(reuse_verified_terminals) is not bool:
+        raise SyncError('TERMINAL_CERTIFICATE_OPT_IN_INVALID')
     bindings,previous = deepcopy(evidence['bindings']),deepcopy(evidence['snapshot'])
     life.validate_bindings(bindings)
     account,symbol = life.validate_snapshot(previous)
@@ -296,6 +353,8 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
         raise SyncError('MIXED_BUCKET_BINDINGS')
     if not previous['history_complete'] or not previous['orders_complete']:
         raise SyncError('VERIFIED_HISTORY_BOOTSTRAP_REQUIRED')
+    if reuse_verified_terminals:
+        terminal_certificates(bindings,previous)
     cursor = previous['at_ms'] if cursor_ms is None else life.moment(cursor_ms)
     if cursor < previous['at_ms']: raise SyncError('CHECKPOINT_BEHIND_EVIDENCE')
     end,started = clock(),elapsed()
@@ -314,8 +373,13 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
         previous['fills'] = first_fills
         cursor = stop
     start = max(1,cursor-OVERLAP_MS)
-    first = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain)
-    second = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain)
+    # Both passes use only the ORIGINAL durable certificates. A newly final
+    # order in pass one must still receive an independent status read in pass
+    # two before its complete checkpoint can ever be reused by a later cycle.
+    first = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
+                    reuse_verified_terminals=reuse_verified_terminals)
+    second = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
+                     reuse_verified_terminals=reuse_verified_terminals)
     if first != second: raise SyncError('OBSERVATION_CHANGED_RETRY')
     if elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')
     result = life.review(bindings,second,now_ms=clock(),plain_take_profit_oids=plain)
