@@ -63,6 +63,12 @@ can still require reconciliation, without blind retries or invented finality.
 
 ## Mandatory future routing invariant
 
+Owner clarification on 1 October 2026: every existing alert/card is assigned to
+the demo environment. Future cards explicitly designate demo experimentation or
+real trading; this designation belongs to the card, even when formula rules
+provide its default. No existing card is promoted or replayed in a real account.
+Real account connections remain deferred until the infrastructure is stable.
+
 Later retain two demo accounts and add two real accounts. Formula/alert rules
 select one environment first; direction then selects exactly one account in
 that environment. One original alert must never execute in two accounts, even
