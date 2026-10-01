@@ -41,6 +41,39 @@ class Venue(NormalVenue):
 
 
 class EmergencyPureTests(NoExternal):
+    def test_supervisor_shutdown_timeout_is_reported_until_own_worker_exits(self):
+        selected=state_from_case(q='40',stop='40',take='40')
+        entered=threading.Event();release=threading.Event();stop=threading.Event()
+        class Store:
+            def for_account(self,account):return [deepcopy(selected)]
+        class Adapter:
+            env=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
+                HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+            sent=0
+            def now(self):return T+6000
+        class Supervisor:
+            def __init__(self,normal):self.store=normal.store;self.venue=normal.venue
+            def cycle(self,bucket,*,send):
+                entered.set()
+                if not release.wait(2):raise AssertionError('TEST_WORKER_WAS_NOT_RELEASED')
+                return dict(status='STOP_OBSERVED_OR_NO_EXPOSURE')
+        class Normal:
+            store=Store();venue=Adapter()
+        with patch.object(m,'_thread',None),patch.object(m,'_stop_event',None),patch.object(m,'Controller',Supervisor):
+            self.assertTrue(m.start(Normal(),[('long_account',dict(account=A),None,None)],stop))
+            try:
+                self.assertTrue(entered.wait(1))
+                with self.assertRaisesRegex(DispatchError,'STOP_EVENT_MISMATCH'):
+                    m.stop_supervisor(threading.Event(),timeout=0)
+                self.assertFalse(stop.is_set())
+                self.assertFalse(m.stop_supervisor(stop,timeout=0))
+                self.assertTrue(m._thread.is_alive())
+            finally:
+                release.set()
+                self.assertTrue(m.stop_supervisor(stop,timeout=1))
+            self.assertFalse(m._thread.is_alive())
+            self.assertFalse(m.health()['running'])
+
     def test_scoped_supervisor_ignores_unrelated_market_conflicts(self):
         selected=state_from_case(q='40',stop='40',take='40')
         other=deepcopy(selected);other['bucket']='b'*64
@@ -90,10 +123,10 @@ class EmergencyPureTests(NoExternal):
             m.start(Normal(),[('short_account',dict(account=B),None,None)],
                 threading.Event(),only_bucket=selected['bucket'])
 
-    def test_normal_and_emergency_reads_do_not_overwrite_same_process_checkpoint(self):
+    def test_emergency_observation_overtakes_stalled_normal_read_without_stale_write(self):
         # Hold a real normal refresh in public I/O while the emergency cycle
-        # starts. Both must finish with separate checkpoints, without optimistic
-        # revision conflicts or a deadlock in the nested normal refresh.
+        # completes its own checkpoint. The old reader must discard its result,
+        # preserving the newer revision instead of overwriting safety evidence.
         class MemoryStore:
             domain='software'
             def __init__(self):
@@ -136,12 +169,15 @@ class EmergencyPureTests(NoExternal):
                     second_done.set()
             second=pool.submit(inspect_emergency)
             try:
-                self.assertFalse(second_done.wait(.05))
+                self.assertTrue(second_done.wait(1))
+                self.assertEqual(second.result(timeout=1)['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
+                advanced=deepcopy(store.state)
             finally:
                 release.set()
-            first.result(timeout=2)
-            self.assertEqual(second.result(timeout=2)['status'],'STOP_OBSERVED_OR_NO_EXPOSURE')
-        self.assertEqual(store.state['revision'],3)
+            with self.assertRaisesRegex(DispatchError,'CONCURRENT_DISPATCH_RELOAD_REQUIRED'):
+                first.result(timeout=2)
+        self.assertEqual(store.state,advanced)
+        self.assertEqual(store.state['revision'],2)
         self.assertEqual(normal_venue.sent,0)
         self.assertEqual(emergency.venue.sent,0)
 
@@ -234,7 +270,10 @@ class EmergencyPureTests(NoExternal):
         m.record_timing(state,request,lookup,T)
         item=state['protection_timing'][cid]
         self.assertEqual(item['fill_to_stop_public_ms'],8000)
-        self.assertEqual(item['fill_to_saved_verification_ms'],10000)
+        self.assertEqual(item['fill_to_stop_observation_ms'],10000)
+        self.assertEqual(item['timing_semantics'],'public_observation_before_commit')
+        self.assertNotIn('fill_to_saved_verification_ms',item)
+        self.assertNotIn('stop_verified_at_ms',item)
         m.record_timing(state,request,lookup,T+1)
         self.assertEqual(state['protection_timing'][cid],item)
 
@@ -281,6 +320,47 @@ class EmergencyPureTests(NoExternal):
             for deadline in [T-1,T,T+120001]:
                 venue.env['HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS']=str(deadline)
                 with self.assertRaisesRegex(DispatchError,'EXACT_TIMING'):venue._gate(proposal,dispatch.AFTER_EXIT)
+
+    def test_lane_wait_expiry_blocks_before_reservation_or_attempt(self):
+        from .test_long_stream_runtime import env
+        from unittest.mock import Mock
+        for expires_source,expires_grant,advance,code in (
+                (T+280000,T+1000,1001,'EXACT_TIMING_TRIAL_APPROVAL_REQUIRED'),
+                (T+1000,T+90000,1001,'NEW_TRIAL_SOURCE_NOT_FRESH'),
+                (T+280000,T+90000,15001,'ENTRY_EVIDENCE_EXPIRED_BEFORE_RESERVATION')):
+            with self.subTest(code=code):
+                card=original(expiry_seconds=300)[1]['card'];cid=card['card_id']
+                now={'at':T};state=dict(revision=1,bucket='c'*64)
+                environment={**env(),'HL_TESTNET_EMERGENCY_CLOSE':m.APPROVAL,
+                    'HL_TESTNET_LONG_ENTRY_ENABLED':'true',
+                    'HL_TESTNET_LONG_NOT_BEFORE':datetime.fromtimestamp((T-60000)/1000,timezone.utc).isoformat(),
+                    'HL_TESTNET_PROTECTION_TIMING_CARD_ID':cid,
+                    'HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS':str(expires_grant)}
+                proposal=dict(operation='ENTRY',card_id=cid,role='long_account',account=A,symbol='DOGE',
+                    source_at=card['prepared']['execution']['at'],observed_at_ms=T,
+                    source_expires_at=datetime.fromtimestamp(expires_source/1000,timezone.utc).isoformat())
+                store=Mock();store.domain='testnet';store.load.return_value=state
+                venue=dispatch.TestnetVenue(environment);venue.now=lambda:now['at']
+                controller=dispatch.Controller(store,venue,ROUTES2,after_exit_policy=dispatch.AFTER_EXIT)
+                entered=threading.Event();release=threading.Event()
+                @dispatch.market_lane
+                def hold_lane(owner,bucket):
+                    entered.set()
+                    if not release.wait(2):raise AssertionError('TEST_LANE_WAS_NOT_RELEASED')
+                with patch.object(m,'healthy',return_value=True):
+                    venue.local_authorize(proposal,dispatch.AFTER_EXIT)
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        holder=pool.submit(hold_lane,controller,state['bucket'])
+                        try:
+                            self.assertTrue(entered.wait(1))
+                            attempt=pool.submit(controller._begin_cycle,state['bucket'],state,None,proposal)
+                            now['at']+=advance
+                        finally:
+                            release.set()
+                        holder.result(timeout=1)
+                        with self.assertRaisesRegex(DispatchError,code):attempt.result(timeout=1)
+                store.reserve.assert_not_called()
+                store.begin.assert_not_called()
 
     def test_disabled_entry_tick_skips_idle_flat_unbound_candidate(self):
         from . import long_stream_runtime as stream
@@ -481,6 +561,36 @@ class EmergencyDatabaseTests(NoExternal):
                     release.set()
                 self.assertEqual(ordinary.result(timeout=2)['status'],'OUTCOME_UNKNOWN')
 
+    def test_stalled_normal_public_read_does_not_prevent_verified_emergency_close(self):
+        self.setup_emergency('100')
+        entered=threading.Event();release=threading.Event();calls=[]
+        collect=self.v.collect
+        def delayed_first_read(value):
+            observed=collect(value)
+            calls.append(1)
+            if len(calls)==1:
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError('TEST_PUBLIC_READ_WAS_NOT_RELEASED')
+            return observed
+        with patch.object(self.v,'collect',side_effect=delayed_first_read):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                ordinary=pool.submit(self.cycle)
+                try:
+                    self.assertTrue(entered.wait(1))
+                    close=pool.submit(self.emergency).result(timeout=2)
+                    self.assertEqual(close['operation'],'EMERGENCY_CLOSE')
+                    self.emergency()
+                    advanced=self.store.load(self.bucket)
+                    self.assertEqual(advanced['emergency']['phase'],'CLOSED_VERIFIED')
+                    self.assertEqual(advanced['evidence']['snapshot']['position_quantity'],'0')
+                    self.assertEqual(self.v.sent,2)  # one entry, one emergency close
+                finally:
+                    release.set()
+                with self.assertRaisesRegex(DispatchError,'CONCURRENT_DISPATCH_RELOAD_REQUIRED'):
+                    ordinary.result(timeout=2)
+        self.assertEqual(self.store.load(self.bucket),advanced)
+
     def test_unowned_position_blocks_send_but_latches_new_entries(self):
         self.setup_emergency('100')
         original_read=self.v.read
@@ -596,7 +706,7 @@ class EmergencyDatabaseTests(NoExternal):
         item=state['protection_timing'][self.b['card_id']]
         first=min(f['at_ms'] for f in state['evidence']['snapshot']['fills'])
         self.assertEqual(item['first_fill_at_ms'],first)
-        self.assertGreaterEqual(item['fill_to_saved_verification_ms'],item['fill_to_stop_public_ms'])
+        self.assertGreaterEqual(item['fill_to_stop_observation_ms'],item['fill_to_stop_public_ms'])
         self.assertGreaterEqual(item['fill_to_stop_public_ms'],0)
 
     def test_short_close_is_reduce_only_buy(self):

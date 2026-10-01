@@ -18,6 +18,87 @@ from .source_window import source_fresh,timestamp
 from .trade_card_store import CardStore
 from .filled_dispatch_store import DispatchError
 
+MAX_OBSERVATION_MS = 600000
+FINALITY_GRACE_MS = 15000
+
+
+def outcome(state, card_id, now_ms):
+    """Describe durable evidence; an entry receipt is never a fill or finality."""
+    pending=state.get('pending')
+    evidence=state.get('evidence')
+    result=dict(lifecycle='UNBOUND',entry_quantity='0',remaining_quantity='0',
+        working_entry_order_ids=[],working_exit_order_ids=[],pending_request_id=pending,
+        evidence_at_ms=None,issues=[],protection_verified=False,closure_verified=False,
+        terminal_verified=False)
+    if not evidence:
+        result['issues']=['BOT_EXECUTION_EVIDENCE_REQUIRED']
+        return result
+    snap=evidence['snapshot'];result['evidence_at_ms']=snap['at_ms']
+    life.validate_snapshot(snap)
+    if (evidence['bindings']!=state['bindings'] or not snap['history_complete']
+            or not snap['orders_complete'] or not 0<=now_ms-snap['at_ms']<=15000):
+        result['issues']=['OBSERVATION_INCOMPLETE_OR_STALE']
+        return result
+    binding=next((b for b in state['bindings'] if b['card_id']==card_id),None)
+    if binding is None:
+        if state['originals'][card_id].get('entry_rejected_no_retry') and pending is None:
+            result.update(lifecycle='REJECTED_WITHOUT_FILL',terminal_verified=True)
+        return result
+    review=emergency.view(state,now_ms)
+    view=next(v for v in review['cards'] if v['card_id']==card_id)
+    entry=set(binding['orders']['ENTRY'])
+    exits=set(binding['orders']['STOP']+binding['orders']['TAKE_PROFIT'])
+    result.update(lifecycle=view['state'],entry_quantity=view['entry_quantity'],
+        remaining_quantity=view['remaining_quantity'],
+        working_entry_order_ids=[o['oid'] for o in snap['open_orders'] if o['oid'] in entry],
+        working_exit_order_ids=[o['oid'] for o in snap['open_orders'] if o['oid'] in exits],
+        issues=sorted(set(review['bucket_issues']+view['issues'])),
+        closure_verified=view['closure_verified'])
+    clean=not result['issues'] and pending is None
+    result['terminal_verified']=clean and view['state'] in ('CLOSED','CANCELED_WITHOUT_FILL')
+    remaining=life.number(view['remaining_quantity'],signed=True)
+    result['protection_verified']=(clean and remaining>0
+        and life.number(view['entry_quantity'])>0
+        and life.number(view['stop_quantity_observed'])==remaining
+        and life.number(view['take_profit_quantity_observed'])==remaining)
+    return result
+
+
+def measured_status(state, card_id, observation):
+    if observation['terminal_verified']:
+        return observation['lifecycle']
+    timing=state.get('protection_timing',{}).get(card_id) or {}
+    if observation['protection_verified']:
+        if (type(timing.get('fill_to_stop_public_ms')) is int
+                and timing['fill_to_stop_public_ms']>=0):
+            return 'PROTECTED_TIMING_COMPLETE'
+        return 'PROTECTED_VENUE_TIME_UNKNOWN'
+    return None
+
+
+def entry_attempts(store, state, card_id):
+    # begin() arms timing in the same transaction as the sole ENTRY attempt.
+    attempts=int(card_id in state.get('entry_timing_armed',{}))
+    if state.get('pending'):
+        request=store.request(state['pending'])
+        if request['proposal']['card_id']==card_id and request['proposal']['operation']=='ENTRY':
+            attempts=max(attempts,request['attempts'])
+    return attempts
+
+
+def durable_timing(state, card_id, read_at_ms):
+    """A successful store.load proves commit preceded this read, not its exact time."""
+    item=state.get('protection_timing',{}).get(card_id)
+    if item is None:
+        return None
+    item=dict(item)
+    first=item.get('first_fill_at_ms')
+    stop=item.get('stop_observed_at_ms',item.get('stop_verified_at_ms'))
+    if type(first) is int and type(stop) is int and first<=stop<=read_at_ms:
+        item.update(stop_record_read_at_ms=read_at_ms,
+            fill_to_durable_record_read_upper_bound_ms=read_at_ms-first)
+    return item
+
 
 def validate(env, card, now_ms):
     if (env.get('HL_TESTNET_EMERGENCY_CLOSE')!=emergency.APPROVAL
@@ -40,7 +121,11 @@ def run_one(env, card_id):
     environment=dict(env)
     base=dispatch.controller_from_env(environment)
     card=CardStore(base.store.journal).load(card_id)
-    expiry=validate(environment,card,base.venue.now())
+    now=base.venue.now()
+    expiry=validate(environment,card,now)
+    source_expiry=int(timestamp(card['source_expires_at']).timestamp()*1000)
+    observation_deadline=min(source_expiry+FINALITY_GRACE_MS,now+MAX_OBSERVATION_MS)
+    wall_deadline=time.monotonic()+max(0,observation_deadline-now)/1000
     role=card['account_role'];route=base.routes[role]
     states=base.store.for_account(route['account'])
     stream._account_owned(base.venue,route['account'],states,role=role)
@@ -66,24 +151,29 @@ def run_one(env, card_id):
     started=emergency.start(base,streams,stopped,only_bucket=state['bucket'])
     if not started:
         raise DispatchError('TIMING_TRIAL_REQUIRES_OWN_SUPERVISOR')
-    start=time.monotonic();status='SUPERVISOR_STARTING';entry_invoked=False
+    start=time.monotonic();status='SUPERVISOR_STARTING'
     cycle_status_counts={}
+    result=None
     try:
         while time.monotonic()-start<10 and not emergency.healthy(base.venue.now()):
             stopped.wait(.25)
         if not emergency.healthy(base.venue.now()):
             raise DispatchError('EMERGENCY_SUPERVISOR_NOT_FRESH_NO_NEW_ENTRY')
-        while base.venue.now()<expiry:
+        while base.venue.now()<observation_deadline and time.monotonic()<wall_deadline:
             state=base.store.load(state['bucket'])
             incident=state.get('emergency')
-            timing=state.get('protection_timing',{}).get(card_id)
+            observation=outcome(state,card_id,base.venue.now())
+            complete=measured_status(state,card_id,observation)
+            if complete:
+                status=complete
+                break
             if incident:
                 status='EMERGENCY_'+incident['phase']
-                if incident['phase']=='CLOSED_VERIFIED':
+                if incident['phase']=='CLOSED_VERIFIED' and observation['terminal_verified']:
                     break
             else:
                 try:
-                    if not entry_invoked:
+                    if base.venue.now()<expiry and entry_attempts(base.store,state,card_id)==0:
                         result=controlled.cycle(state['bucket'],send=True,allowed_entry_card_id=card_id)
                     else:
                         result=controlled.cycle(state['bucket'],send=True,allow_new_entries=False)
@@ -92,32 +182,49 @@ def run_one(env, card_id):
                     status=str(exc)
                 cycle_status_counts[status]=cycle_status_counts.get(status,0)+1
                 state=base.store.load(state['bucket'])
-                if any(b['card_id']==card_id for b in state['bindings']):
-                    entry_invoked=True
-                if state['pending']:
-                    pending=base.store.request(state['pending'])
-                    entry_invoked=entry_invoked or (pending['proposal']['card_id']==card_id
-                        and pending['proposal']['operation']=='ENTRY' and pending['attempts']==1)
-                if state['originals'][card_id].get('entry_rejected_no_retry'):
-                    entry_invoked=True
-                if card_id in state.get('protection_timing',{}) and 'stop_verified_at_ms' in state['protection_timing'][card_id]:
-                    observed=stream.observed_trades(base,route,role=role,historical=True)
-                    trade=next((t for t in observed if t['card_id']==card_id),None)
-                    if trade and trade['protection_verified']:
-                        status='NEW_FILL_STOP_AND_TAKE_VERIFIED'
-                        break
+                observation=outcome(state,card_id,base.venue.now())
+                complete=measured_status(state,card_id,observation)
+                if complete:
+                    status=complete
+                    break
+                if base.venue.now()>=expiry and entry_attempts(base.store,state,card_id)==0 and not state.get('pending'):
+                    status='ENTRY_NOT_SUBMITTED'
+                    break
             stopped.wait(.25)
         state=base.store.load(state['bucket'])
-        return dict(status=status,card_id=card_id,account_role=role,symbol=state['symbol'],
+        observation=outcome(state,card_id,base.venue.now())
+        if state.get('pending'):
+            pending=base.store.request(state['pending'])
+            observation.update(pending_request_phase=pending['phase'],
+                               pending_request_attempts=pending['attempts'])
+        else:
+            observation.update(pending_request_phase=None,pending_request_attempts=0)
+        complete=measured_status(state,card_id,observation)
+        last_cycle_status=status
+        status=complete or ('ENTRY_NOT_SUBMITTED' if status=='ENTRY_NOT_SUBMITTED'
+            and not state.get('pending') and not entry_attempts(base.store,state,card_id)
+            else 'RECONCILIATION_REQUIRED')
+        result=dict(status=status,last_cycle_status=last_cycle_status,
+            card_id=card_id,account_role=role,symbol=state['symbol'],
             source_event_id=card['prepared']['source']['event_id'],
-            timing=state.get('protection_timing',{}).get(card_id),
+            timing=durable_timing(state,card_id,base.venue.now()),
+            observation=observation,entry_authorization_expires_at_ms=expiry,
+            observation_deadline_ms=observation_deadline,
+            ongoing_management_required=not observation['terminal_verified'] and
+                bool(state.get('pending') or any(b['card_id']==card_id for b in state['bindings'])),
+            deployed_worker_handoff_verified=False,
             emergency_status=(state.get('emergency') or {}).get('phase'),
-            continuous_entry_flags_changed=False,entry_attempts=1 if entry_invoked else 0,
+            continuous_entry_flags_changed=False,entry_attempts=entry_attempts(base.store,state,card_id),
             cycle_status_counts=cycle_status_counts,
             order_requests_sent=controlled.venue.sent,
             mainnet_enabled=False)
     finally:
-        stopped.set()
+        shutdown=emergency.stop_supervisor(stopped,timeout=2)
+        if result is not None and 'observation' in result:
+            result['trial_supervisor_stopped']=shutdown
+            if not shutdown:
+                result['status']='RECONCILIATION_REQUIRED'
+    return result
 
 
 if __name__=='__main__':

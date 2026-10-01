@@ -488,9 +488,13 @@ class Controller:
             s['originals'][card_id]=original
         return self.store.change(state['bucket'],state['revision'],'REGISTER_LOCAL_CARD',self.venue.now(),update)
 
-    @market_lane
     def refresh(self,bucket):
-        """Public reads first; one transaction records ownership, evidence and outcome."""
+        """Read without the local lane; discard evidence if its revision advanced.
+
+        A stalled public read must not prevent the emergency supervisor from
+        making its own observations. Only the guarded checkpoint may apply the
+        collected evidence, with the database revision fence retained as well.
+        """
         state=self.store.load(bucket);now=self.venue.now();request=None;oid=None;raw=None
         bs=deepcopy(state['bindings'])
         if state['pending']:
@@ -525,7 +529,7 @@ class Controller:
                         current['terminal_state']='REJECTED_NO_ORDER'
                         current['observed_at_ms']=snap['at_ms']
                         return current
-                    return self.store.change(bucket,state['revision'],
+                    return self._checkpoint(bucket,state,
                         'REJECTED_ENTRY_NO_ORDER_RECONCILED',self.venue.now(),retire)
                 if (raw == {'status':'unknownOid'} and request['phase']=='REJECTED'
                         and request['proposal']['leg'] in recovery.EXITS and bs
@@ -554,7 +558,7 @@ class Controller:
                         current['terminal_state']='REJECTED_NO_ORDER'
                         current['observed_at_ms']=snap['at_ms']
                         return current
-                    return self.store.change(bucket,state['revision'],
+                    return self._checkpoint(bucket,state,
                         'REJECTED_EXIT_SIGNATURE_NO_ORDER_RECONCILED',
                         self.venue.now(),retire_exit)
                 oid=identity(raw,request,self.venue.now())
@@ -613,7 +617,16 @@ class Controller:
                 current['cancellation_caused_terminal_state']=False
             current['phase']='OBSERVED';current['observed_at_ms']=snap['at_ms'];s['pending']=None
             return current
-        return self.store.change(bucket,state['revision'],'PUBLIC_RECONCILIATION',now,update)
+        return self._checkpoint(bucket,state,'PUBLIC_RECONCILIATION',now,update)
+
+    @market_lane
+    def _checkpoint(self,bucket,state,event,now,update):
+        self._same_revision(bucket,state)
+        return self.store.change(bucket,state['revision'],event,now,update)
+
+    def _same_revision(self,bucket,state):
+        if self.store.load(bucket)['revision'] != state['revision']:
+            raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
 
     def cycle(self,bucket,*,send=False,allow_new_entries=True,allowed_entry_card_id=None):
         """A false send flag never reserves, signs, cancels or places an order."""
@@ -651,7 +664,6 @@ class Controller:
             result['symbol']=proposal['symbol']
         return result
 
-    @market_lane
     def _prepare_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id):
         state=self.refresh(bucket)
         if state['pending']:
@@ -660,6 +672,20 @@ class Controller:
                 return dict(status=pending['phase'],order_requests_sent=0)
         else: pending=None
         sample=self.venue.sample(state['account'],state['symbol']);meta=self.venue.metadata()
+        prepared=self._plan_cycle(bucket,state,sample,meta,send=send,
+            allow_new_entries=allow_new_entries,allowed_entry_card_id=allowed_entry_card_id)
+        if isinstance(prepared,dict):
+            return prepared
+        state,pending,proposal=prepared
+        # Authorization includes public account/budget reads. A stalled precheck
+        # must not hold the safety worker's lane; changed state is rejected again
+        # before a durable intent is reserved or its attempt is begun.
+        self.venue.authorize(state,proposal,self.after_exit_policy)
+        return self._begin_cycle(bucket,state,pending,proposal)
+
+    @market_lane
+    def _plan_cycle(self,bucket,state,sample,meta,*,send,allow_new_entries,allowed_entry_card_id):
+        self._same_revision(bucket,state)
         # Retire only provably NEVER-ATTEMPTED obsolete exit work. Unknown
         # requests retain the same durable barrier across closure and restart.
         state=residual.retire_obsolete_unsent(self.store,state,now_ms=self.venue.now())
@@ -676,8 +702,17 @@ class Controller:
         if proposal is None: return dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
         if proposal['operation']=='ENTRY' and allow_new_entries is not True:
             return dict(status='NEW_ENTRIES_DISABLED',order_requests_sent=0)
-        # All release checks occur BEFORE reservation or any key access.
-        self.venue.authorize(state,proposal,self.after_exit_policy)
+        return state,pending,proposal
+
+    @market_lane
+    def _begin_cycle(self,bucket,state,pending,proposal):
+        self._same_revision(bucket,state)
+        local_authorize=getattr(self.venue,'local_authorize',None)
+        if callable(local_authorize):
+            # Source/grant and evidence can expire while this lane was busy,
+            # even if the revision stayed unchanged. Recheck before reserving
+            # a request; no HTTP, signing or budget work is performed here.
+            local_authorize(proposal,self.after_exit_policy)
         if pending:
             prior=deepcopy(pending['proposal']);fresh=deepcopy(proposal)
             for item in (prior,fresh):
@@ -902,6 +937,11 @@ class TestnetVenue:
             # Slow account/budget reads must fail BEFORE a durable reservation
             # and attempt, not leave an unsent entry marked outcome-unknown.
             self._gate(proposal,after_exit_policy)
+            self._fresh_entry_evidence(proposal)
+    def local_authorize(self,proposal,after_exit_policy):
+        """Final configuration/source/evidence check; no public network calls."""
+        self._gate(proposal,after_exit_policy)
+        if proposal['operation']=='ENTRY':
             self._fresh_entry_evidence(proposal)
     def _fresh_entry_evidence(self,proposal):
         try:

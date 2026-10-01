@@ -731,6 +731,7 @@ class EntryPreflightBoundaryTests(NoExternal):
     def test_slow_budget_blocks_before_controller_reservation_or_send(self):
         state,venue,proposal=self.setup_case()
         store=Mock(domain='testnet')
+        store.load.return_value=state
         controller=m.Controller(store,venue,ROUTES2,after_exit_policy=m.AFTER_EXIT)
         def slow(*args):
             self.clock=T+15001
