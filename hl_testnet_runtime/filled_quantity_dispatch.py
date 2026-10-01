@@ -665,7 +665,15 @@ class Controller:
         return result
 
     def _prepare_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id):
-        state=self.refresh(bucket)
+        try:
+            state=self.refresh(bucket)
+        except DispatchError as exc:
+            if str(exc)!='CONCURRENT_DISPATCH_RELOAD_REQUIRED':
+                raise
+            # An independent safety observation can overtake this public read.
+            # Discard its entire result, then use only the fresh checkpoint that
+            # actually won the durable revision. This is not a request retry.
+            state=self._load_preparation_checkpoint(bucket)
         if state['pending']:
             pending=self.store.request(state['pending'])
             if pending['phase']!='PREPARED':
@@ -683,9 +691,35 @@ class Controller:
         self.venue.authorize(state,proposal,self.after_exit_policy)
         return self._begin_cycle(bucket,state,pending,proposal)
 
+    def _load_preparation_checkpoint(self,bucket):
+        state=self.store.load(bucket)
+        ev=state['evidence']
+        if ev is None or ev['bindings']!=state['bindings']:
+            raise DispatchError('OBSERVATION_INCOMPLETE_OR_STALE')
+        snap=ev['snapshot'];life.validate_snapshot(snap)
+        if (snap['account']!=state['account'] or snap['symbol']!=state['symbol']
+                or not snap['history_complete'] or not snap['orders_complete']
+                or not 0<=self.venue.now()-snap['at_ms']<=15000):
+            raise DispatchError('OBSERVATION_INCOMPLETE_OR_STALE')
+        return state
+
     @market_lane
     def _plan_cycle(self,bucket,state,sample,meta,*,send,allow_new_entries,allowed_entry_card_id):
-        self._same_revision(bucket,state)
+        try:
+            self._same_revision(bucket,state)
+        except DispatchError as exc:
+            if str(exc)!='CONCURRENT_DISPATCH_RELOAD_REQUIRED':
+                raise
+            # Sample/metadata reads are outside the lane. A newer checkpoint
+            # must replace the old planning input, never merely rebase its
+            # proposal. Compute ownership, quantities and pending work anew.
+            state=self._load_preparation_checkpoint(bucket)
+        if state.get('emergency') is not None:
+            return dict(status='EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE',order_requests_sent=0)
+        if state['pending']:
+            pending=self.store.request(state['pending'])
+            if pending['phase']!='PREPARED':
+                return dict(status=pending['phase'],order_requests_sent=0)
         # Retire only provably NEVER-ATTEMPTED obsolete exit work. Unknown
         # requests retain the same durable barrier across closure and restart.
         state=residual.retire_obsolete_unsent(self.store,state,now_ms=self.venue.now())

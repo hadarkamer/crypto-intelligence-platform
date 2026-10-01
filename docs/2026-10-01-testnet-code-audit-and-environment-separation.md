@@ -18,6 +18,12 @@ no mainnet connector, credentials or account configuration.
    observation while a normal read stalls. Reacquire the lane and compare the
    exact revision before checkpoint, planning and attempt; retain database CAS,
    durable request identity, account ownership and actual-send fences.
+   Live verification exposed a liveness issue: the supervisor could advance
+   revisions during every normal read/precheck. Normal preparation discards its
+   losing collection and may use the latest already-persisted fresh complete
+   checkpoint. Planning rechecks pending work against that authoritative state;
+   reservation and actual attempt still require an exact revision. This is
+   checkpoint cooperation, never a retry of an order transmission.
 3. Separate the 90-second permission to submit one new entry from maintenance
    of that entry. Observe until protection or verified finality, with the original
    source expiry plus 15 seconds of reconciliation grace and a ten-minute cap.
@@ -56,6 +62,12 @@ can still require reconciliation, without blind retries or invented finality.
    review before any mainnet activation. Do not add real account connections now.
 
 ## Mandatory future routing invariant
+
+Owner clarification on 1 October 2026: every existing alert/card is assigned to
+the demo environment. Future cards explicitly designate demo experimentation or
+real trading; this designation belongs to the card, even when formula rules
+provide its default. No existing card is promoted or replayed in a real account.
+Real account connections remain deferred until the infrastructure is stable.
 
 Later retain two demo accounts and add two real accounts. Formula/alert rules
 select one environment first; direction then selects exactly one account in
