@@ -26,6 +26,27 @@ fixed-window labels do not decide membership in the new experiment. Unknown
 features remain distinct from a known non-match, and missing evidence blocks
 qualification rather than removing an inconvenient observation.
 
+### Upstream Flow read failures
+
+On a Flow cache miss, `market_confidence_engine._cached_flow` analyzes Futures
+and Spot once each and handles their exceptions separately. A successful
+market result is retained unchanged; only the failed market receives the
+existing unavailable/`NO_DATA` result and its exception reason. No immediate
+retry, expired-data substitution or new score calculation rule is introduced.
+
+If either market raises, the partial result is not cached. A later caller may
+make a fresh attempt; it cannot fill or rewrite a snapshot already captured.
+When neither market raises, existing cache expiry, invalidation and deep-copy
+behavior remain unchanged, including successfully read empty-data results.
+
+This affects operational callers of `_cached_flow` if deployed, including
+snapshot capture, `combine` and `attach_to_opportunities`; it is not limited to
+offline research. Direct callers of `coinglass_flow_engine.analyze_symbol`
+retain that function's existing exception behavior. Missing historical models
+remain unavailable, and their corresponding research decisions remain UNKNOWN.
+This isolation limits failure propagation; it does not repair a database outage
+or prove that the other market would have been available in an old capture.
+
 The explicit source scope currently supports the unambiguous Binance spot
 route. HYPE and implicit spot/perpetual or exchange substitutions are excluded.
 The new entry price is the actual open of the first full minute at or after
