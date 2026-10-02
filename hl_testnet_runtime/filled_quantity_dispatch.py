@@ -35,6 +35,7 @@ QUIET_COMPLETED_OBSERVATION_SHARE_MS = 1000
 QUIET_OBSERVATION_DUE_MS = 17000
 QUIET_OBSERVATION_HINT_POLL_SECONDS = .05
 _ENTRY_INFO_SCOPE = ContextVar('testnet_entry_info_scope', default=None)
+_TERMINAL_TRIAL_SCOPE = ContextVar('testnet_terminal_trial_scope', default=None)
 
 
 class _ObservationCoordinator:
@@ -954,20 +955,27 @@ class Controller:
                     b=life.binding_from_card(state['originals'][cid]['card'],state['account'],self.routes,
                                             dict(ENTRY=[oid],STOP=[],TAKE_PROFIT=[]));bs.append(b)
                 elif oid not in b['orders'][leg]: b['orders'][leg].append(oid)
+        collected=None
         if not bs:
             snap=self.venue.empty_snapshot(state['account'],state['symbol'])
         else:
             if state['evidence'] is None:
                 raise DispatchError('COMPLETE_PRE_ENTRY_CHECKPOINT_REQUIRED')
-            snap=collect_checkpoint(self.venue,dict(bindings=bs,snapshot=state['evidence']['snapshot']),state)['snapshot']
+            collected=collect_checkpoint(self.venue,dict(bindings=bs,snapshot=state['evidence']['snapshot']),state)
+            snap=collected['snapshot']
         now=self.venue.now();life.validate_snapshot(snap)
         if not snap['history_complete'] or not snap['orders_complete'] or not 0<=now-snap['at_ms']<=15000:
             raise DispatchError('OBSERVATION_INCOMPLETE_OR_STALE')
         def update(conn,s):
+            terminal_scope=_TERMINAL_TRIAL_SCOPE.get()
+            if terminal_scope is not None and terminal_scope[0] is self.venue:
+                self.venue._guard_terminal_trial(terminal_scope,s)
             if s['evidence'] is not None and s['bindings']:
                 from .card_lifecycle_store import _continues
                 _continues(s['evidence'],dict(bindings=bs,snapshot=snap))
             s['bindings']=bs;s['evidence']=dict(bindings=bs,snapshot=snap)
+            if collected is not None and 'immutable_terminal_inventory' in collected:
+                s['evidence']['immutable_terminal_inventory']=deepcopy(collected['immutable_terminal_inventory'])
             from .emergency_close import record_timing
             record_timing(s,request,raw,now)
             current=self.store.pending_record(conn,s)
@@ -1228,7 +1236,7 @@ class Controller:
         return AdmittedAttempt((state,request,proposal,route),admission)
 
 
-def _historical_timing_candidate(state,env,card_id,now_ms):
+def _historical_timing_candidate(state,env,card_id,now_ms,*,require_fresh=True):
     """Only a fresh exact unattempted trial in an entirely final flat market."""
     if (env.get('HL_TESTNET_RUNTIME_MODE')!='long_stream_testnet_v1'
             or not isinstance(card_id,str) or not re.fullmatch(r'[0-9a-f]{64}',card_id)
@@ -1254,10 +1262,13 @@ def _historical_timing_candidate(state,env,card_id,now_ms):
         ev=state['evidence'];snap=ev['snapshot'];life.validate_snapshot(snap)
         if (ev['bindings']!=state['bindings'] or snap['account']!=state['account']
                 or snap['symbol']!=state['symbol'] or not snap['history_complete']
-                or not snap['orders_complete'] or not 0<=now_ms-snap['at_ms']<=15000
+                or not snap['orders_complete'] or now_ms<snap['at_ms']
+                or (require_fresh and now_ms-snap['at_ms']>15000)
                 or snap['open_orders'] or life.number(snap['position_quantity'],signed=True)!=0):
             return False
-        report=life.review(state['bindings'],snap,now_ms=now_ms)
+        # Old final facts classify retained history only. Fresh action authority
+        # still requires the separately admitted inventory and final checks.
+        report=life.review(state['bindings'],snap,now_ms=now_ms if require_fresh else snap['at_ms'])
         return (not report['bucket_issues'] and all(not row['issues']
             and row['state'] in ('CLOSED','CANCELED_WITHOUT_FILL') for row in report['cards']))
     except (KeyError,TypeError,ValueError,life.LifecycleError):
@@ -1368,6 +1379,68 @@ class TestnetVenue:
         if budget is None:
             raise DispatchError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')
         return budget.reserve_info_plan(bodies,priority='background',host=HOST)
+    def _clean_trial_feed_stamp(self,account):
+        feed=vars(self).get('fill_wakeups')
+        if (feed is None or not feed.entry_allowed(account)
+                or feed.dirty_symbols(account)!=()):
+            raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+        token=feed.begin_reconciliation(account)
+        return token.generation,token.revision
+    def retain_trial_terminal_history(self,state,stamp):
+        """Retain one complete read from this original bounded trial only.
+
+        This is process-local planning evidence, not a refreshed fill history
+        or an action permission. The original feed boundary cannot be renewed.
+        """
+        cid=self.env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID','')
+        try:
+            started=int(self.env['HL_TESTNET_PROTECTION_TIMING_STARTED_MS'])
+            expiry=int(self.env['HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS'])
+            if ('trial_terminal_history' in vars(self) or not 0<expiry-started<=90000
+                    or not _historical_timing_candidate(state,self.env,cid,self.now())
+                    or not started<=state['evidence']['snapshot']['at_ms']<=self.now()<expiry
+                    or self._clean_trial_feed_stamp(state['account'])!=stamp):
+                raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+            certificates=evidence.terminal_certificates(state['bindings'],state['evidence']['snapshot'])
+            owned={oid for b in state['bindings'] for ids in b['orders'].values() for oid in ids}
+            if set(certificates)!=owned:
+                raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+            self.trial_terminal_history=dict(card_id=cid,started_ms=started,expires_ms=expiry,
+                feed_stamp=stamp,state=deepcopy(state),history_digest=life.digest(state['evidence']),
+                certificates_digest=life.digest(certificates))
+        except (KeyError,TypeError,ValueError,life.LifecycleError,evidence.SyncError):
+            raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST') from None
+    def _trial_terminal_anchor(self,state,cid):
+        anchor=vars(self).get('trial_terminal_history')
+        try:
+            if (anchor is None or cid!=anchor['card_id']
+                    or int(self.env['HL_TESTNET_PROTECTION_TIMING_STARTED_MS'])!=anchor['started_ms']
+                    or int(self.env['HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS'])!=anchor['expires_ms']
+                    or not anchor['started_ms']<=self.now()<anchor['expires_ms']
+                    or not _historical_timing_candidate(state,self.env,cid,self.now(),require_fresh=False)
+                    or self._clean_trial_feed_stamp(state['account'])!=anchor['feed_stamp']):
+                raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+            prior=anchor['state']
+            if any(state[k]!=prior[k] for k in ('bucket','account','symbol','bindings','originals')):
+                raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+            snapshot=deepcopy(state['evidence']['snapshot'])
+            snapshot['at_ms']=prior['evidence']['snapshot']['at_ms']
+            if (snapshot!=prior['evidence']['snapshot']
+                    or state['evidence']['bindings']!=prior['bindings']):
+                raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+            certificates=evidence.terminal_certificates(state['bindings'],snapshot)
+            owned={oid for b in state['bindings'] for ids in b['orders'].values() for oid in ids}
+            if (set(certificates)!=owned or life.digest(certificates)!=anchor['certificates_digest']
+                    or life.digest(prior['evidence'])!=anchor['history_digest']):
+                raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+            return anchor
+        except (KeyError,TypeError,ValueError,life.LifecycleError,evidence.SyncError):
+            raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST') from None
+    def _guard_terminal_trial(self,scope,state=None):
+        _,initial,anchor=scope
+        current=self.store.load(initial['bucket']) if state is None else state
+        if current!=initial or self._trial_terminal_anchor(current,anchor['card_id'])!=anchor:
+            raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
     @contextmanager
     def _entry_authorization_scope(self,account,agent,symbol,*,whole_cycle=False,
                                     historical_checkpoint=False):
@@ -1392,10 +1465,17 @@ class TestnetVenue:
         cid=self.env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID','')
         if (send is not True or allow_new_entries is not True
                 or not re.fullmatch(r'[0-9a-f]{64}',cid) or allowed_entry_card_id!=cid
-                or (state['bindings'] and not historical_checkpoint) or state['pending'] is not None
                 or cid not in state['originals']):
             yield
             return
+        attempted=(state['pending'] is not None or cid in state.get('entry_timing_armed',{})
+                   or any(b['card_id']==cid for b in state['bindings']))
+        if attempted:
+            # After an attempt, ordinary full fill/history recovery is mandatory.
+            yield
+            return
+        anchor=(self._trial_terminal_anchor(state,cid)
+                if state['bindings'] and not historical_checkpoint else None)
         if historical_checkpoint and not _historical_timing_candidate(
                 state,self.env,cid,self.now()):
             raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
@@ -1406,7 +1486,16 @@ class TestnetVenue:
         # that cycle's exact committed final/flat checkpoint instead.
         with self._entry_authorization_scope(route['account'],route['agent'],state['symbol'],
                 whole_cycle=True,historical_checkpoint=historical_checkpoint):
-            yield
+            if anchor is None:
+                yield
+            else:
+                scope=(self,deepcopy(state),deepcopy(anchor))
+                self._guard_terminal_trial(scope)
+                token=_TERMINAL_TRIAL_SCOPE.set(scope)
+                try:
+                    yield
+                finally:
+                    _TERMINAL_TRIAL_SCOPE.reset(token)
     def reserve_transport(self,proposal):
         if HOST!='api.hyperliquid-testnet.xyz':
             raise DispatchError('ACTION_OR_HOST_FORBIDDEN')
@@ -1437,6 +1526,33 @@ class TestnetVenue:
         return self._collect(value,pending_clear=pending is None and not emergency_active,
                              force_protection=pending is not None or emergency_active)
     def _collect(self,value,*,pending_clear,force_protection=False):
+        scope=_TERMINAL_TRIAL_SCOPE.get()
+        if scope is not None and scope[0] is self:
+            # Explicit original-grant proof route: retain every immutable owned
+            # terminal/fill fact and verify CURRENT target inventory twice.
+            # Ordinary observations still re-read overlapping fill history.
+            self._guard_terminal_trial(scope)
+            _,initial,anchor=scope
+            if (not pending_clear or force_protection or value!=dict(
+                    bindings=initial['bindings'],snapshot=initial['evidence']['snapshot'])):
+                raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
+            times=[]
+            fresh=self.empty_snapshot(initial['account'],initial['symbol'],
+                                      _observed_at_ms=times)
+            self._guard_terminal_trial(scope)
+            snapshot=deepcopy(anchor['state']['evidence']['snapshot'])
+            snapshot['at_ms']=fresh['at_ms']
+            provenance=dict(version='original-trial-terminal-inventory-v1',
+                snapshot_semantics='retained_terminal_history_with_two_current_inventory_passes',
+                historical_snapshot_at_ms=anchor['state']['evidence']['snapshot']['at_ms'],
+                historical_evidence_digest=anchor['history_digest'],
+                terminal_certificates_digest=anchor['certificates_digest'],
+                inventory_observed_at_ms=times,inventory_completed_at_ms=self.now(),
+                notification_boundary=dict(generation=anchor['feed_stamp'][0],revision=anchor['feed_stamp'][1]),
+                original_trial_started_at_ms=anchor['started_ms'],
+                original_trial_expires_at_ms=anchor['expires_ms'])
+            return dict(bindings=deepcopy(value['bindings']),snapshot=snapshot,
+                        immutable_terminal_inventory=provenance)
         # Dispatch callers pass the committed complete checkpoint (possibly
         # copied with one newly owned binding), never a receipt or pass-one
         # observation. Retain its final identities while both fresh passes
@@ -1446,9 +1562,11 @@ class TestnetVenue:
         return evidence.collect(value,evidence.PublicReader(parallel=True,
                                 budget=self.request_budget(),priority=priority),
                                 reuse_verified_terminals=True)
-    def empty_snapshot(self,account,symbol):
+    def empty_snapshot(self,account,symbol,*,_observed_at_ms=None):
         reader=evidence.PublicReader(budget=self.request_budget(),priority='background');start=self.now()
         for _ in range(2):
+            if _observed_at_ms is not None:
+                _observed_at_ms.append(self.now())
             if self.parallel_preflight is True:
                 orders,state=joined_public_reads(
                     lambda:reader.read('frontendOpenOrders',account),
@@ -1650,11 +1768,21 @@ class TestnetVenue:
                 # Slow reads must fail BEFORE a durable reservation/attempt.
                 self._gate(proposal,after_exit_policy)
                 self._fresh_entry_evidence(proposal)
+                scope=_TERMINAL_TRIAL_SCOPE.get()
+                if scope is not None and scope[0] is self:
+                    if (self.store.load(state['bucket'])!=state or
+                            self._trial_terminal_anchor(state,proposal['card_id'])!=scope[2]):
+                        raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
     def local_authorize(self,proposal,after_exit_policy):
         """Final configuration/source/evidence check; no public network calls."""
         self._gate(proposal,after_exit_policy)
         if proposal['operation']=='ENTRY':
             self._fresh_entry_evidence(proposal)
+            scope=_TERMINAL_TRIAL_SCOPE.get()
+            if scope is not None and scope[0] is self:
+                current=self.store.load(scope[1]['bucket'])
+                if self._trial_terminal_anchor(current,proposal['card_id'])!=scope[2]:
+                    raise DispatchError('TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST')
     def _fresh_entry_evidence(self,proposal):
         try:
             observed=life.moment(proposal['observed_at_ms'])

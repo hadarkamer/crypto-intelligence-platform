@@ -359,6 +359,7 @@ def _run_one(environment, card_id, base, card, now, expiry, feed):
         raise DispatchError('TIMING_TRIAL_CARD_ALREADY_ATTEMPTED')
     # Snapshot config copies only: never update os.environ or Render settings.
     trial_env={**environment,'HL_TESTNET_PROTECTION_TIMING_CARD_ID':card_id,
+               'HL_TESTNET_PROTECTION_TIMING_STARTED_MS':str(now),
                'HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS':str(expiry)}
     key='HL_TESTNET_LONG_ENTRY_ENABLED' if role=='long_account' else 'HL_TESTNET_SHORT_ENTRY_ENABLED'
     trial_env[key]='true'
@@ -387,10 +388,14 @@ def _run_one(environment, card_id, base, card, now, expiry, feed):
     # Historical cards require fresh public finality. A new empty bucket gets
     # its first proof in the atomically admitted cycle, without duplicate reads.
     if state['bindings']:
+        # Bind the mandatory full-history read to the original healthy feed
+        # boundary. Reconnecting/reconciling later cannot renew this authority.
+        history_stamp=controlled.venue._clean_trial_feed_stamp(state['account'])
         state,blocked=_wait_entry_budget(lambda:base.refresh(state['bucket']),
             venue=base.venue,expiry=expiry,wall_deadline=entry_wall_deadline,stopped=stopped)
         if blocked:
             return _unsubmitted(card_id,card,expiry,observation_deadline,blocked)
+        controlled.venue.retain_trial_terminal_history(state,history_stamp)
     if state['bindings']:
         report=life.review(state['bindings'],state['evidence']['snapshot'],now_ms=base.venue.now())
         if report['bucket_issues'] or any(v['issues'] or v['state'] not in ('CLOSED','CANCELED_WITHOUT_FILL') for v in report['cards']):
@@ -428,6 +433,11 @@ def _run_one(environment, card_id, base, card, now, expiry, feed):
                 try:
                     may_enter=(base.venue.now()<expiry
                                and entry_attempts(base.store,state,card_id)==0)
+                    if (base.venue.now()>=expiry and entry_attempts(base.store,state,card_id)==0
+                            and state['pending'] is None
+                            and not any(b['card_id']==card_id for b in state['bindings'])):
+                        status='ENTRY_NOT_SUBMITTED'
+                        break
                     notification_ready=(feed is None or
                         _reconcile_notifications(base,feed,role,route,card))
                     if may_enter and notification_ready:
