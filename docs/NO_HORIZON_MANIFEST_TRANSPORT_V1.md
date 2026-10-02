@@ -33,6 +33,39 @@ establish that the fetch transactions shared a database snapshot, authenticate
 an exchange, or prove that intake classification happened before the price
 cutoff. New rows after the anchor belong to a later source revision.
 
+## Frozen BTC parent fragments
+
+An OPEN BTC parent changes as its worker consumes more minutes: its observed
+coverage, checkpoint and update time advance, and a later reversal can close it.
+Fetching that live row again can therefore change an otherwise unchanged source
+leaf between the anchor and a chunk read.
+
+[`research_no_horizon_manifest_sql.py`](../research_no_horizon_manifest_sql.py)
+generates SQL without opening a database connection. Its API is
+`manifest_sql(plan)`, `source_chunk_sql(manifest, ordinals)` for 1–8 unique source
+ordinals, and `candle_chunk_sql(manifest, pageordinal)`.
+
+The builder records the complete parent fragment as `btc_parent_payload_text`
+in each source entry, from the same projected JSONB row whose full hash it
+computes. The anchor receipt declares
+`parent_snapshot_mode="ANCHOR_PARENT_JSONB_TEXT_V1"`.
+The fragment remains an untouched string, including its numeric representation;
+an absent parent is the literal JSON text `null`.
+
+Later source-chunk SQL uses the pinned text cast to JSONB and performs no live
+parent lookup. The assembler still checks the original full-leaf SHA-256 and
+UTF-8 byte length. Changes to other projected fragments still block extraction;
+the pin does not permit replacing hashes, omitting fields or filling an absent
+parent from a later read. Existing parent identity, confirmation, membership
+and observed-coverage validation remains unchanged. The pinned row represents
+the anchor's evidence, not a newly captured historical decision-time snapshot.
+
+This applies only to a fresh anchor under a new declaration naming the new
+implementation. A failed old anchor remains failed; missing historical parent
+text cannot be reconstructed from its hash. The new declaration references the
+old one and preserves its cohort, scopes and cutoff. Existing source, manifest
+and plan bounds, scoring, research gates and runtime authority are unchanged.
+
 ## Local validation and retained proof
 
 The assembled export embeds the small anchor manifest and a canonical binding
