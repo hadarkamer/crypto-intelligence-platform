@@ -66,9 +66,21 @@ def closed_release_proof(state, *, now_ms, not_before_ms):
                 or state['pending'] is not None or incident['pending_close'] is not None
                 or incident['pending_cancel'] is not None or evidence is None
                 or evidence['bindings']!=state['bindings']
-                or not state['bindings'] or not incident['requests']
+                or not state['bindings']
                 or any(r.get('phase') not in DONE for r in incident['requests'])):
             return False
+        if not incident['requests']:
+            # An operator's independently proved exit can close an incident
+            # before this bot sends anything. Require its durable exact audit.
+            binding=next(b for b in state['bindings'] if b['card_id']==incident['card_id'])
+            audits=[a for a in state.get('manual_exit_audit',[]) if
+                    a.get('card_id')==incident['card_id'] and a.get('origin')=='MANUAL'
+                    and a.get('order_id') in binding['orders'].get('MANUAL_EXIT',[])
+                    and a.get('entry_or_exit_order_sent') is False
+                    and a.get('observed_at_ms')==incident.get('closed_at_ms')
+                    and a.get('proof_digest')==incident.get('closure_proof_digest')]
+            if incident.get('closure_origin')!='MANUAL' or len(audits)!=1:
+                return False
         snap=evidence['snapshot']
         if (snap['account']!=state['account'] or snap['symbol']!=state['symbol']
                 or any(b['account']!=state['account'] or b['symbol']!=state['symbol']
@@ -263,6 +275,29 @@ def provisional_cleanup_proof(state, *, now_ms):
             and any(order['oid'] in owned for order in snap['open_orders'])
             and any(order['oid'] in exits and order['state']=='FILLED'
                     and life.number(order['filled_quantity'])>0 for order in snap['terminal_orders']))
+
+
+def recent_flat_unassigned_checkpoint(state, *, now_ms):
+    """Bound duplicate REST probing of already-observed flat manual activity.
+
+    At most FIVE seconds, matching the emergency quantity freshness bound.
+    Never applies to exposure, working orders, pending requests or incomplete
+    evidence. It grants no action and keeps the incident/entry latch unchanged.
+    """
+    ev = state.get('evidence'); incident = state.get('emergency')
+    if (not isinstance(incident, dict) or incident.get('phase') != 'ACTIVE'
+            or incident.get('pending_close') or incident.get('pending_cancel')
+            or state.get('pending') or not ev or ev['bindings'] != state['bindings']):
+        return False
+    snap = ev['snapshot']
+    if (snap['account'] != state['account'] or snap['symbol'] != state['symbol']
+            or not snap['history_complete'] or not snap['orders_complete']
+            or snap['open_orders'] or life.number(snap['position_quantity'], signed=True) != 0
+            or not 0 <= now_ms-snap['at_ms'] < 5000):
+        return False
+    report = life.review(state['bindings'], snap, now_ms=now_ms)
+    return set(report['bucket_issues']) == {
+        'POSITION_DOES_NOT_MATCH_CARDS', 'UNASSIGNED_EXCHANGE_ACTIVITY'}
 
 
 def recent_normal_checkpoint(state, *, now_ms, fill_wakeups=None):
@@ -862,6 +897,10 @@ class Controller:
         # joins its flight; holding the action lane would force every join to
         # time out and repeat the same full read.
         state=self._initial_state(bucket,send=send)
+        if recent_flat_unassigned_checkpoint(state, now_ms=self.venue.now()):
+            # A flat unassigned close remains blocked for operator adoption.
+            # No signing, entry release or closure claim is made from this hint.
+            return dict(status='MANUAL_EXIT_RECONCILIATION_REQUIRED', order_requests_sent=0)
         # A known incident needs metadata before its final quantity checkpoint.
         # A slow metadata read must not repeatedly expire otherwise usable
         # quantity proof. Quiet protected buckets have no incident and spend

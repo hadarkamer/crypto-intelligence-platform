@@ -447,7 +447,8 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
             remaining = life.number(row['remaining_quantity'])
             binding = bindings[row['card_id']]
             entry_ids = set(binding['orders']['ENTRY'])
-            exit_ids = set(binding['orders']['STOP']+binding['orders']['TAKE_PROFIT'])
+            exit_ids = set(binding['orders']['STOP']+binding['orders']['TAKE_PROFIT']+
+                           binding['orders'].get('MANUAL_EXIT', []))
             entries = [f for f in snap['fills'] if f['oid'] in entry_ids]
             exits = [f for f in snap['fills'] if f['oid'] in exit_ids]
             def weighted_price(fills):
@@ -473,6 +474,7 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
                 issues=sorted(set(view['bucket_issues']) | set(row['issues'])),
                 protection_verified=protected,
                 closure_verified=row['closure_verified'],
+                closure_origin=row.get('closure_origin'),
                 protection_timing=deepcopy(state.get('protection_timing',{}).get(row['card_id'])),
                 emergency_status=(state.get('emergency') or {}).get('phase'),
                 evidence_at_ms=snap['at_ms'],order_requests_sent=0))
