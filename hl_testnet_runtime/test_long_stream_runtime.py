@@ -672,6 +672,12 @@ class DurableLongStreamTests(NoExternal):
         self.assertFalse(opened[0]['issues'])
         self.assertTrue(opened[0]['protection_verified'])
         self.assertFalse(opened[0]['closure_verified'])
+        self.v.t+=16000
+        aged_open=stream.observed_trades(self.c,self.route)[0]
+        self.assertFalse(aged_open['protection_verified'])
+        self.assertFalse(aged_open['closure_verified'])
+        self.assertIn('STALE_OR_FUTURE_SNAPSHOT',aged_open['issues'])
+        self.v.t-=16000
         self.v.fill('1002','100')
         with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=self.v):
             for _ in range(3):
@@ -694,6 +700,13 @@ class DurableLongStreamTests(NoExternal):
         self.assertIsNotNone(closed[0]['actual_exit_price'])
         self.assertIsInstance(closed[0]['last_exit_at_ms'],int)
         self.assertEqual(closed[0]['remaining_quantity'],'0')
+        observed_at=closed[0]['evidence_at_ms']
+        self.v.t+=16000
+        aged_closed=stream.observed_trades(self.c,self.route)[0]
+        self.assertTrue(aged_closed['closure_verified'])
+        self.assertFalse(aged_closed['protection_verified'])
+        self.assertEqual(aged_closed['evidence_at_ms'],observed_at)
+        self.v.t-=16000
         # The immutable source card and its per-card evidence survive a new controller.
         restarted=dispatch.Controller(self.store,self.v,ROUTES2,
             after_exit_policy=dispatch.AFTER_EXIT)
