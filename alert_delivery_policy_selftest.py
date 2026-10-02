@@ -17,21 +17,23 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue(policy.ordinary_alerts_enabled())
             self.assertTrue(policy.other_experimental_alerts_enabled())
             self.assertTrue(policy.u21_experimental_enabled())
+            self.assertTrue(policy.xrp_r2732_experimental_enabled())
             self.assertTrue(all(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
             self.assertTrue(policy.status()['configuration_valid'])
 
-    def test_selected_profile_allows_only_u21_and_no_manual_rules(self):
+    def test_selected_profile_allows_named_xrp_rules_and_no_manual_rules(self):
         with patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'SELECTED_EXPERIMENTAL_ONLY'}):
             self.assertFalse(policy.ordinary_alerts_enabled())
             self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertTrue(policy.u21_experimental_enabled())
+            self.assertTrue(policy.xrp_r2732_experimental_enabled())
             self.assertEqual([rule for rule in store.rules.RULE_IDS if policy.manual_rule_enabled(rule)],
                              [])
             self.assertFalse(policy.manual_rule_enabled('unknown'))
             self.assertEqual(delivery.status()['active_rule_ids'], [])
             self.assertEqual(set(delivery.status()['paused_rule_ids']),
                              set(store.rules.RULE_IDS))
-            self.assertEqual(policy.status()['selected_experimental_rule_ids'], ['U21_XRP_SHORT'])
+            self.assertEqual(policy.status()['selected_experimental_rule_ids'], ['R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'U21_XRP_SHORT'])
             self.assertEqual(policy.status()['manual_rule_allowlist'], [])
 
     def test_ordinary_and_selected_preserves_exact_experimental_selection(self):
@@ -39,6 +41,7 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue(policy.ordinary_alerts_enabled())
             self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertTrue(policy.u21_experimental_enabled())
+            self.assertTrue(policy.xrp_r2732_experimental_enabled())
             self.assertFalse(policy.manual_rule_enabled('unknown'))
             self.assertEqual(delivery.status()['active_rule_ids'], [])
             self.assertEqual(set(delivery.status()['paused_rule_ids']),
@@ -47,7 +50,8 @@ class PolicyTests(unittest.TestCase):
                 'profile': 'ORDINARY_AND_SELECTED_EXPERIMENTAL', 'configuration_valid': True,
                 'ordinary_alerts_enabled': True, 'other_experimental_alerts_enabled': False,
                 'manual_rule_allowlist': [], 'u21_experimental_enabled': True,
-                'selected_experimental_rule_ids': ['U21_XRP_SHORT'],
+                'xrp_r2732_experimental_enabled': True,
+                'selected_experimental_rule_ids': ['R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'U21_XRP_SHORT'],
             })
 
     def test_unknown_profile_fails_closed(self):
@@ -56,6 +60,7 @@ class PolicyTests(unittest.TestCase):
                 self.assertFalse(policy.ordinary_alerts_enabled())
                 self.assertFalse(policy.other_experimental_alerts_enabled())
                 self.assertFalse(policy.u21_experimental_enabled())
+                self.assertFalse(policy.xrp_r2732_experimental_enabled())
                 self.assertFalse(any(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
                 self.assertFalse(policy.status()['configuration_valid'])
                 self.assertEqual(policy.status()['selected_experimental_rule_ids'], [])

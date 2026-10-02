@@ -42,6 +42,7 @@ import dual_cvd65_delivery
 import experimental_reference_price
 import manual_formula_alert_delivery
 import u21_experimental_worker
+import xrp_r2732_experimental_worker
 import ai_agent
 import ai_telegram
 import trade_telegram
@@ -6563,6 +6564,7 @@ async def health(request):
         "experimental_reference_prices": experimental_reference_price.status(),
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
         "u21_experimental": u21_experimental_worker.WORKER.status(),
+        "xrp_r2732_experimental": xrp_r2732_experimental_worker.WORKER.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
@@ -7884,6 +7886,9 @@ async def main():
     u21_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
+    xrp_r2732_experimental_worker.WORKER.start(
+        bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
+    )
     await asyncio.sleep(0)
 
     try:
@@ -7891,6 +7896,7 @@ async def main():
             await asyncio.sleep(3600)
     finally:
         await u21_experimental_worker.WORKER.stop()
+        await xrp_r2732_experimental_worker.WORKER.stop()
         if WATCH_SUPERVISOR_TASK is not None and not WATCH_SUPERVISOR_TASK.done():
             WATCH_SUPERVISOR_TASK.cancel()
             try:
