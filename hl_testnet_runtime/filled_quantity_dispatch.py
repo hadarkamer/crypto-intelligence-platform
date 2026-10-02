@@ -32,6 +32,8 @@ HOST = 'api.hyperliquid-testnet.xyz'
 NORMAL_OBSERVATION_JOIN_SECONDS = 1.0
 EMERGENCY_OBSERVATION_JOIN_MS = 250
 QUIET_COMPLETED_OBSERVATION_SHARE_MS = 1000
+QUIET_OBSERVATION_DUE_MS = 17000
+QUIET_OBSERVATION_HINT_POLL_SECONDS = .05
 _ENTRY_INFO_SCOPE = ContextVar('testnet_entry_info_scope', default=None)
 
 
@@ -45,8 +47,11 @@ class _ObservationCoordinator:
 
 class _ObservationFlight:
     """Process-local duplicate suppression, never durable observation authority."""
-    def __init__(self, revision, feed_stamp, emergency):
+    def __init__(self, revision, feed_stamp, emergency, *, state=None, now_ms=None):
         self.revision,self.feed_stamp,self.emergency=revision,feed_stamp,emergency
+        self.started=time.monotonic()
+        self.started_at_ms=now_ms
+        self.basis_digest=life.digest(state) if state is not None else None
         self.done=threading.Event()
         self.result=None
         self.error=None
@@ -697,13 +702,65 @@ class Controller:
             return None
         return shared,completed.completed_at_ms
 
+    def _quiet_observation_join(self,flight,state,feed_stamp):
+        """Classify a periodic read, never use its old proof for an action.
+
+        The fifteen-second quiet checkpoint can be due by up to the ordinary
+        two-second scheduler quantum. Only its exact previously complete full
+        STOP/TAKE proof can classify that bounded race. A new hint, gap or
+        durable change restores the independent safety read immediately.
+        """
+        feed=vars(self.venue).get('fill_wakeups')
+        ev=state.get('evidence');snap=(ev or {}).get('snapshot') or {}
+        at=snap.get('at_ms')
+        if (flight.emergency or flight.basis_digest is None
+                or flight.basis_digest!=life.digest(state)
+                or flight.revision!=state['revision'] or flight.feed_stamp!=feed_stamp
+                or feed_stamp is None or type(flight.started_at_ms) is not int
+                or type(at) is not int or state.get('emergency') is not None
+                or snap.get('account')!=state['account'] or snap.get('symbol')!=state['symbol']
+                or not 0<=flight.started_at_ms-at<=QUIET_OBSERVATION_DUE_MS
+                or not 0<=self.venue.now()-at<=QUIET_OBSERVATION_DUE_MS
+                or feed is None or not callable(getattr(type(feed),'entry_allowed',None))
+                or not callable(getattr(type(feed),'dirty_symbols',None))
+                or not _fully_protected_no_work(state,at)
+                or feed.entry_allowed(state['account']) is not True
+                or feed.dirty_symbols(state['account']) != ()
+                or self._feed_stamp(state['account'])!=feed_stamp):
+            return False
+        return True
+
+    def _wait_observation(self,flight,state,feed_stamp,*,emergency,emergency_wait_ms):
+        if not emergency:
+            return flight.done.wait(NORMAL_OBSERVATION_JOIN_SECONDS)
+        if (emergency_wait_ms!=EMERGENCY_OBSERVATION_JOIN_MS
+                or not self._quiet_observation_join(flight,state,feed_stamp)):
+            return flight.done.wait(emergency_wait_ms/1000)
+        # All callers share the ORIGINAL flight's absolute deadline. Further
+        # observers cannot renew this one-second duplicate-suppression window.
+        quiet_deadline=flight.started+NORMAL_OBSERVATION_JOIN_SECONDS
+        while True:
+            remaining=quiet_deadline-time.monotonic()
+            if remaining<=0:
+                return flight.done.is_set()
+            if flight.done.wait(min(QUIET_OBSERVATION_HINT_POLL_SECONDS,remaining)):
+                return True
+            if not self._quiet_observation_join(flight,state,feed_stamp):
+                return flight.done.is_set()
+            current=self.store.load(state['bucket'])
+            if not self._quiet_observation_join(flight,current,feed_stamp):
+                # A newly uncovered fill may already have reached its original
+                # deadline. Changed work bypasses further waiting entirely.
+                return flight.done.is_set()
+
     def refresh(self,bucket,*,emergency=False,emergency_wait_ms=EMERGENCY_OBSERVATION_JOIN_MS):
         """Coalesce overlapping reads without putting HTTP inside a trade lane.
 
-        A safety worker waits at most 250ms (or its shorter original deadline)
-        and may take over one stalled normal collection. At most two reads can
-        be active for this bucket; normal workers never fan out on a timeout.
-        Joined results must be committed, fresh, and match the unchanged feed.
+        Urgent safety work waits at most 250ms (or its shorter original deadline)
+        before independent takeover. An exact quiet periodic read shares only
+        its original one-second flight deadline, with hints checked every 50ms.
+        At most two reads can be active; joined proof must still be committed,
+        fresh and match the unchanged feed before it can authorize anything.
         """
         if (type(emergency) is not bool or type(emergency_wait_ms) is not int
                 or not 0<=emergency_wait_ms<=EMERGENCY_OBSERVATION_JOIN_MS):
@@ -728,11 +785,12 @@ class Controller:
                 if (len(active)>=2 or (active and not emergency)
                         or (active and any(item.emergency for item in active))):
                     raise DispatchError('OBSERVATION_IN_PROGRESS_RETRY')
-                flight=_ObservationFlight(state['revision'],stamp,emergency)
+                flight=_ObservationFlight(state['revision'],stamp,emergency,
+                    state=state,now_ms=self.venue.now())
                 coordinator.flights.setdefault(bucket,[]).append(flight)
         if prior is not None:
-            seconds=(emergency_wait_ms/1000 if emergency else NORMAL_OBSERVATION_JOIN_SECONDS)
-            if prior.done.wait(seconds):
+            if self._wait_observation(prior,state,stamp,emergency=emergency,
+                    emergency_wait_ms=emergency_wait_ms):
                 shared=self._share_observation(bucket,prior,state,stamp,emergency=emergency)
                 if shared is not None:
                     return shared
@@ -740,6 +798,11 @@ class Controller:
                 stamp=self._feed_stamp(state['account'])
             elif not emergency:
                 raise DispatchError('OBSERVATION_IN_PROGRESS_RETRY')
+            else:
+                # A hint or local request can change the durable state during
+                # either join. Reconcile its latest revision before takeover.
+                state=self.store.load(bucket)
+                stamp=self._feed_stamp(state['account'])
         if flight is None:
             with coordinator.guard:
                 active=coordinator.flights.setdefault(bucket,[])
@@ -748,7 +811,8 @@ class Controller:
                 if (len(active)>=2 or (active and not emergency)
                         or (active and any(item.emergency for item in active))):
                     raise DispatchError('OBSERVATION_IN_PROGRESS_RETRY')
-                flight=_ObservationFlight(state['revision'],stamp,emergency)
+                flight=_ObservationFlight(state['revision'],stamp,emergency,
+                    state=state,now_ms=self.venue.now())
                 active.append(flight)
         try:
             # Recheck after flight selection: a peer may have committed between
