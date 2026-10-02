@@ -431,7 +431,12 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
         # Reports of stored evidence must be evaluated at the observation time.
         # The caller must still show its age; this does not refresh live state.
         from .emergency_close import view as emergency_view
-        view = emergency_view(state, snap['at_ms'] if historical else controller.venue.now())
+        # Terminal, complete closure is an immutable historical fact. Its
+        # observation time stays visible and never becomes current inventory
+        # authority. Active or uncertain cards still require fresh evidence.
+        terminal_history = _immutable_flat_checkpoint(state)
+        view = emergency_view(state, snap['at_ms'] if historical or terminal_history
+                              else controller.venue.now())
         bindings = {b['card_id']:b for b in state['bindings']}
         for row in view['cards']:
             if life.number(row['entry_quantity']) <= 0:
