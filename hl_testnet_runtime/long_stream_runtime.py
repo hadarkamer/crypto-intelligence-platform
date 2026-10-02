@@ -272,8 +272,25 @@ def _quiet_protected_checkpoint(controller, state, *, now_ms):
             and feed.entry_allowed(state['account']) is True)
 
 
+def _current_reconciliation_checkpoint(state, started_ms, now_ms):
+    """A successful member of this still-pending account pass need not poll twice.
+
+    Another market may prevent finishing the notification gate. Retain only a
+    complete, current STOP/TAKE checkpoint collected after this pass began, for
+    less than the ordinary five-second safety bound. This is scheduling only:
+    ENTRY remains closed, unknown work still reconciles, and the independent
+    emergency supervisor keeps running. Neither clock is moved forward.
+    """
+    if (type(started_ms) is not int or state.get('emergency') is not None
+            or not dispatch._fully_protected_no_work(state,now_ms)):
+        return False
+    at=state['evidence']['snapshot']['at_ms']
+    return started_ms<=at<=now_ms and now_ms-at<5000
+
+
 def tick(controller, route, not_before, *, new_entries, role='long_account',
-         dirty_symbols=(), full_reconciliation=False, notification_continuity=False):
+         dirty_symbols=(), full_reconciliation=False, notification_continuity=False,
+         reconciliation_started_ms=None):
     """One bounded sweep. Every old exposure is serviced before new cards."""
     now = datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)
     states = sorted(controller.store.for_account(route['account']),
@@ -286,6 +303,9 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
     for state in states:
         try:
             retained=full_reconciliation and _immutable_flat_checkpoint(state)
+            current_reconciliation=(not new_entries and full_reconciliation and
+                _current_reconciliation_checkpoint(state,reconciliation_started_ms,
+                                                   controller.venue.now()))
             forced=((full_reconciliation and not retained)
                     or state.get('symbol') in dirty_symbols)
             # A closed SHORT bucket can still be the predecessor of a new card.
@@ -309,6 +329,8 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             if not unfinished and not aged_closed_short and not forced:
                 continue
             maintenance_active += int(unfinished)
+            if current_reconciliation:
+                continue
             if (notification_continuity and not forced and state['pending'] is None
                     and _quiet_protected_checkpoint(controller,state,
                                                     now_ms=controller.venue.now())):
@@ -325,6 +347,8 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             errors += 1
             if first_failure is None:
                 first_failure = _safe_failure(exc)
+                if isinstance(state.get('symbol'),str):
+                    first_failure['failure_symbol']=state['symbol']
     if errors or not new_entries:
         result = dict(status='EXISTING_RECONCILIATION_REQUIRED' if errors else 'ENTRIES_DISABLED',
                       active_buckets=len(states),
@@ -484,6 +508,7 @@ def _finish_notification_reconciliation(controller, feed, token, symbols, starte
 
 def _loop(controller, streams):
     reported = set()
+    reconciliation_passes = {}
     while not _stop.is_set():
         feed=vars(controller.venue).get('fill_wakeups')
         if feed is not None:
@@ -516,20 +541,33 @@ def _loop(controller, streams):
                         and notification_health['snapshot_received']
                         and notification_health['subscriptions_acknowledged']==2)
                 if notification_ready:
-                    token=feed.begin_reconciliation(route['account'])
+                    candidate=feed.begin_reconciliation(route['account'])
+                    started_ms=controller.venue.now()
+                    previous=reconciliation_passes.get(route['account'])
+                    if (previous is not None
+                            and (previous[0].generation,previous[0].revision)==
+                                (candidate.generation,candidate.revision)
+                            and 0<=started_ms-previous[1]<15000):
+                        token,started_ms=previous
+                    else:
+                        token=candidate
+                        reconciliation_passes[route['account']]=(token,started_ms)
                     symbols=feed.dirty_symbols(route['account'])
                     if symbols==():
                         symbols=None
-                    started_ms=controller.venue.now()
                     notification_args=dict(dirty_symbols=() if symbols is None else symbols,
-                                           full_reconciliation=symbols is None)
+                                           full_reconciliation=symbols is None,
+                                           reconciliation_started_ms=started_ms)
+                elif feed is not None:
+                    reconciliation_passes.pop(route['account'],None)
                 result=tick(controller,route,start,
                             new_entries=controller.venue.env[enabled_key]=='true'
                                 and (feed is None or feed.entry_allowed(route['account'])),
                             role=role,notification_continuity=feed is not None
                                 and feed.entry_allowed(route['account']),**notification_args)
                 if token is not None:
-                    _finish_notification_reconciliation(controller,feed,token,symbols,started_ms)
+                    if _finish_notification_reconciliation(controller,feed,token,symbols,started_ms):
+                        reconciliation_passes.pop(route['account'],None)
             except Exception as exc:
                 failure = _safe_failure(exc)
                 result=dict(status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY',

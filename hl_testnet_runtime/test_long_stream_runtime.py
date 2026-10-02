@@ -1,5 +1,6 @@
 """Long stream release boundaries; no network, wallet or real order."""
 from datetime import datetime, timezone
+from copy import deepcopy
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 from contextlib import nullcontext
@@ -15,7 +16,7 @@ from . import app_card_delivery as app_delivery
 from .filled_dispatch_store import DispatchError
 from .test_card_lifecycle import A, B
 from .test_filled_quantity_dispatch import NoExternal
-from .test_filled_quantity_dispatch import Venue, ROUTES2
+from .test_filled_quantity_dispatch import Venue, ROUTES2, state_from_case
 from .test_filled_quantity_exits import original, META
 from . import trade_cards
 from . import card_lifecycle as life
@@ -46,6 +47,90 @@ def env():
 
 
 class ConfigurationTests(NoExternal):
+    def test_current_account_reconciliation_retains_only_fresh_fully_protected_members(self):
+        good=state_from_case(q='100',stop='100',take='100')
+        self.assertTrue(stream._current_reconciliation_checkpoint(good,T-1,T+4999))
+        for invalid in ('before_pass','aged','future','pending','uncovered','incident','history'):
+            with self.subTest(invalid=invalid):
+                state=deepcopy(good);now=T+1;started=T-1
+                if invalid=='before_pass':started=T+1
+                elif invalid=='aged':now=T+5000
+                elif invalid=='future':now=T-1
+                elif invalid=='pending':state['pending']='a'*64
+                elif invalid=='uncovered':state['evidence']['snapshot']['open_orders'][0]['quantity']='99'
+                elif invalid=='incident':state['emergency']=dict(phase='ACTIVE')
+                else:state['evidence']['snapshot']['history_complete']=False
+                self.assertFalse(stream._current_reconciliation_checkpoint(state,started,now))
+
+    def test_pending_account_pass_skips_current_protected_member_but_services_uncertainty(self):
+        good=state_from_case(q='100',stop='100',take='100')
+        blocked=dict(bucket='a'*64,account=A,symbol='BTC',pending='request',
+                     evidence=None,bindings=[],originals={})
+        controller=Mock()
+        controller.venue.now.return_value=T+1
+        controller.store.for_account.return_value=[good,blocked]
+        controller.cycle.side_effect=DispatchError('OUTCOME_UNRESOLVED_NO_NEW_REQUEST')
+        result=stream.tick(controller,dict(account=A),datetime.now(timezone.utc),
+            new_entries=False,full_reconciliation=True,reconciliation_started_ms=T-1)
+        controller.cycle.assert_called_once_with(blocked['bucket'],send=True,allow_new_entries=False)
+        self.assertEqual(result['status'],'EXISTING_RECONCILIATION_REQUIRED')
+        self.assertEqual(result['failure_symbol'],'BTC')
+        self.assertEqual(result['order_requests_sent'],0)
+        self.assertEqual(result['new_cards_registered'],0)
+
+    def test_reconciliation_checkpoint_never_suppresses_maintenance_before_enabled_entries(self):
+        good=state_from_case(q='100',stop='100',take='100')
+        controller=Mock()
+        controller.venue.now.return_value=T+1
+        controller.venue.env={}
+        controller.store.for_account.return_value=[good]
+        controller.cycle.return_value=dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
+        with patch.object(stream,'_account_owned',return_value=True), \
+                patch.object(stream.selection,'page',return_value=([],None)):
+            result=stream.tick(controller,dict(account=A),datetime.now(timezone.utc),
+                new_entries=True,full_reconciliation=True,reconciliation_started_ms=T-1)
+        controller.cycle.assert_called_once_with(good['bucket'],send=True,allow_new_entries=False)
+        self.assertEqual(result['status'],'SWEEP_COMPLETE')
+
+    def test_notification_pass_keeps_its_original_token_until_change_or_expiry(self):
+        from .fill_wakeups import ReconciliationToken
+        for change in ('same','revision','generation','expiry'):
+            with self.subTest(change=change):
+                clock=[T];revision=[1];generation=[1]
+                class Feed:
+                    def pending_accounts(self):return (A,)
+                    def dirty_symbols(self,account):return None
+                    def entry_allowed(self,account):return False
+                    def health(self):return dict(long_account=dict(connected=True,
+                        snapshot_received=True,subscriptions_acknowledged=2))
+                    def begin_reconciliation(self,account):
+                        return ReconciliationToken(account,generation[0],revision[0],clock[0]/1000)
+                controller=Mock()
+                controller.venue.fill_wakeups=Feed()
+                controller.venue.now.side_effect=lambda:clock[0]
+                controller.venue.env=dict(enabled='false')
+                controller.venue.sent=0
+                controller.store.for_account.return_value=[]
+                stop=Mock();stop.is_set.side_effect=[False,False,True]
+                wake=Mock()
+                def wait(delay):
+                    clock[0]+=15000 if change=='expiry' else 2000
+                    if change=='revision':revision[0]+=1
+                    if change=='generation':generation[0]+=1
+                wake.wait.side_effect=wait
+                result=dict(status='ENTRIES_DISABLED',maintenance_active=0,
+                            active_buckets=0,order_requests_sent=0,new_cards_registered=0)
+                with patch.object(stream,'tick',return_value=result) as tick, \
+                        patch.object(stream,'_finish_notification_reconciliation',return_value=False) as finish, \
+                        patch.object(stream,'_stop',stop),patch.object(stream,'_wake',wake), \
+                        redirect_stdout(io.StringIO()):
+                    stream._loop(controller,[('long_account',dict(account=A),None,'enabled')])
+                starts=[call.kwargs['reconciliation_started_ms'] for call in tick.call_args_list]
+                self.assertEqual(starts,[T,T if change=='same' else T+(15000 if change=='expiry' else 2000)])
+                tokens=[call.args[2] for call in finish.call_args_list]
+                self.assertEqual(tokens[0]==tokens[1],change=='same')
+                self.assertTrue(all(call.kwargs['new_entries'] is False for call in tick.call_args_list))
+
     def test_maintenance_reconciles_between_actions_and_cannot_open_entries(self):
         controller=Mock()
         controller.cycle.side_effect=[

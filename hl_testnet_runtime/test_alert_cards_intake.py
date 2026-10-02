@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch,Mock
 
 import alert_cards_wire as w
-from alert_cards_forwarder_selftest import delivery,KEY
+from alert_cards_forwarder_selftest import delivery,producer_v5_delivery,KEY,SCOPE
 from . import alert_cards_intake as mod
 from . import test_trade_cards_phase1 as fixtures
 from .postgres_journal import JournalError
@@ -61,6 +61,29 @@ class HTTPTests(unittest.TestCase):
         with patch.object(mod.PostgresJournal,'from_env',side_effect=ValueError('SECRET_DATABASE_URL')):
             s,result=invoke(request())
         self.assertTrue(s.startswith('503'));self.assertNotIn('SECRET',str(result))
+        self.assertEqual(result['reason'],'RECORD_STORE_UNAVAILABLE')
+    def test_metadata_budget_refusal_is_retryable_and_logged_without_source_or_secret(self):
+        from .request_budget import BudgetError
+        with patch.object(mod.PostgresJournal,'from_env',return_value=object()),\
+             patch.object(mod,'ReceiptStore'),\
+             patch.object(mod,'accept',side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')),\
+             patch('sys.stdout',new_callable=StringIO) as output:
+            status,result=invoke(request())
+        self.assertTrue(status.startswith('503'))
+        self.assertEqual(result,dict(status='RECORDING_UNAVAILABLE_RETRY',
+            reason='TESTNET_REQUEST_BUDGET_EXHAUSTED'))
+        report=json.loads(output.getvalue())['testnet_cards_intake']
+        self.assertEqual(report['reason'],result['reason'])
+        self.assertEqual(report['order_requests_sent'],0)
+        for secret in (KEY,delivery()['text'],'DATABASE_URL','"entry"'):
+            self.assertNotIn(secret,output.getvalue())
+    def test_metadata_response_failure_is_retry_not_permanent_invalid_delivery(self):
+        with patch.object(mod.PostgresJournal,'from_env',return_value=object()),\
+             patch.object(mod,'ReceiptStore'),\
+             patch.object(mod,'accept',side_effect=mod.IntakeUnavailable('METADATA_UNAVAILABLE')):
+            status,result=invoke(request())
+        self.assertTrue(status.startswith('503'))
+        self.assertEqual(result['reason'],'METADATA_UNAVAILABLE')
     def test_incomplete_body_is_not_accepted(self):
         r=request();r['CONTENT_LENGTH']=str(int(r['CONTENT_LENGTH'])+1)
         self.assertTrue(invoke(r)[0].startswith('400'))
@@ -69,6 +92,59 @@ class HTTPTests(unittest.TestCase):
         src=inspect.getsource(mod)
         for text in ('import hyperliquid_testnet_executor','_wallet(',"'/exchange'",'submit_persisted(', 'AGENT_KEY'):
             self.assertNotIn(text,src)
+
+
+class MetadataTests(unittest.TestCase):
+    def setUp(self):
+        for name,value in (('_META',None),('_META_AT',0.0),('_META_RETRY_AT',0.0),('_META_FAILURE',None)):
+            p=patch.object(mod,name,value);p.start();self.addCleanup(p.stop)
+        p=patch('http.client.HTTPSConnection',side_effect=AssertionError('No exchange request'))
+        p.start();self.addCleanup(p.stop)
+
+    def test_one_background_refresh_is_shared_by_concurrent_record_requests(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with patch('hl_testnet_runtime.checks.InfoReader') as ctor:
+            ctor.return_value.read.return_value=fixtures.META
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results=list(pool.map(lambda _:mod.metadata(),range(8)))
+        ctor.assert_called_once_with(priority='background')
+        ctor.return_value.read.assert_called_once_with('meta')
+        self.assertEqual(results,[fixtures.META]*8)
+        results[0]['universe'][0]['szDecimals']=6
+        self.assertEqual(mod._META,fixtures.META)
+
+    def test_failed_refresh_backoff_avoids_repeated_budget_requests_and_retries_later(self):
+        from .request_budget import BudgetError
+        with patch.object(mod.time,'monotonic',return_value=100) as clock,\
+             patch('hl_testnet_runtime.checks.InfoReader') as ctor:
+            ctor.return_value.read.side_effect=[BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED'),fixtures.META]
+            for _ in range(8):
+                with self.assertRaisesRegex(mod.IntakeUnavailable,'TESTNET_REQUEST_BUDGET_EXHAUSTED'):
+                    mod.metadata()
+            ctor.return_value.read.assert_called_once_with('meta')
+            self.assertIsNone(mod._META)
+            clock.return_value=115
+            self.assertEqual(mod.metadata(),fixtures.META)
+            self.assertEqual(ctor.return_value.read.call_count,2)
+            self.assertIsNone(mod._META_FAILURE)
+
+    def test_old_metadata_never_used_to_replace_a_failed_refresh(self):
+        from .request_budget import BudgetError
+        with patch.object(mod,'_META',deepcopy(fixtures.META)),patch.object(mod,'_META_AT',1),\
+             patch.object(mod.time,'monotonic',return_value=400),\
+             patch('hl_testnet_runtime.checks.InfoReader') as ctor:
+            ctor.return_value.read.side_effect=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+            with self.assertRaises(mod.IntakeUnavailable):mod.metadata()
+            with self.assertRaises(mod.IntakeUnavailable):mod.metadata()
+            ctor.return_value.read.assert_called_once_with('meta')
+
+    def test_invalid_metadata_never_cached_or_reported_as_invalid_source(self):
+        with patch('hl_testnet_runtime.checks.InfoReader') as ctor:
+            ctor.return_value.read.return_value={'universe':[],'private':'DO_NOT_LOG'}
+            with self.assertRaisesRegex(mod.IntakeUnavailable,'METADATA_UNAVAILABLE'):
+                mod.metadata()
+            self.assertIsNone(mod._META)
+            self.assertNotIn('DO_NOT_LOG',str(mod._META_FAILURE))
 
 
 @unittest.skipUnless(fixtures.CI,'Requires disposable localhost PostgreSQL')
@@ -90,6 +166,21 @@ class IntakePostgresTests(unittest.TestCase):
         self.assertIsNone(card['actual_execution']);self.assertEqual(card['risk']['planned_usd'],'10')
         self.assertEqual(card['prepared']['source']['at'],delivery()['source_at'])
         self.assertEqual(card['source_expires_at'],delivery()['expires_at'])
+    def test_current_v5_watch_delivery_commits_original_terms_as_one_record_only_card(self):
+        item=producer_v5_delivery();value=w.manual_delivery(item,SCOPE)
+        meta={'universe':[{'name':'BTC','szDecimals':5}]}
+        raw=w.encoded(value)
+        first=mod.accept(raw,self.receipts,read_metadata=lambda:meta)
+        second=mod.accept(raw,self.receipts,read_metadata=Mock(side_effect=AssertionError('No metadata on duplicate')))
+        self.assertEqual((first['status'],second['status']),('RECORDED','DUPLICATE'))
+        card=self.store.load(self.receipts.get(first['receipt_id'])['card_id'])
+        self.assertEqual(card['prepared']['source'],w.normalize(value)['signal'])
+        self.assertEqual(card['source_expires_at'],item['expires_at'])
+        self.assertEqual(card['account_role'],'short_account')
+        self.assertEqual(card['state'],'RECORDED_ONLY')
+        self.assertFalse(card['dispatch_enabled'])
+        self.assertIsNone(card['actual_execution'])
+        self.assertEqual(self.counts(),(1,1,0))
     def test_both_sources_both_directions_are_supported_without_accounts(self):
         for side in ('LONG','SHORT'):
             for family in ('manual','dual_cvd65'):

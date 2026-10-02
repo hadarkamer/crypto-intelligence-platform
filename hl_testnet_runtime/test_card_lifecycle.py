@@ -138,6 +138,36 @@ class LifecycleTests(unittest.TestCase):
         for o in s['open_orders']:o['quantity']='60'
         r=run(b,s);self.assertEqual(r['cards'][0]['state'],'PARTIALLY_CLOSED');self.assertFalse(r['needs_review'])
 
+    def test_activated_take_limit_covers_only_exact_remaining_quantity_without_live_trigger(self):
+        for side in ('LONG','SHORT'):
+            b=binding(side=side);s=opened(b)
+            s['fills'].append(fill(b,'TAKE_PROFIT',qty='40'))
+            s['position_quantity']='60' if side=='LONG' else '-60'
+            for o in s['open_orders']:o['quantity']='60'
+            take=next(o for o in s['open_orders'] if o['oid'] in b['orders']['TAKE_PROFIT'])
+            take.update(order_type='TRIGGERED_TP_LIMIT',trigger_price=None)
+            result=run(b,s)
+            self.assertFalse(result['needs_review'])
+            self.assertEqual(result['cards'][0]['take_profit_quantity_observed'],'60')
+            self.assertEqual(result['cards'][0]['state'],'PARTIALLY_CLOSED')
+            self.assertFalse(result['cards'][0]['closure_verified'])
+            for change in (dict(price='105'),dict(trigger_price=b['prices']['take_profit']),
+                           dict(state='WAITING_PARENT')):
+                bad=deepcopy(s)
+                next(o for o in bad['open_orders'] if o['oid']==take['oid']).update(change)
+                view=run(b,bad)['cards'][0]
+                self.assertIn('ORDER_TERMS_MISMATCH',view['issues'])
+                self.assertIn('TAKE_PROFIT_COVERAGE_MISSING',view['issues'])
+
+    def test_activated_take_limit_never_counts_as_stop_or_entry(self):
+        b=binding();s=opened(b)
+        stop=next(o for o in s['open_orders'] if o['oid'] in b['orders']['STOP'])
+        stop.update(order_type='TRIGGERED_TP_LIMIT',trigger_price=None)
+        view=run(b,s)['cards'][0]
+        self.assertEqual(view['stop_quantity_observed'],'0')
+        self.assertIn('ORDER_TERMS_MISMATCH',view['issues'])
+        self.assertIn('STOP_COVERAGE_MISSING',view['issues'])
+
     def test_orphan_stop_after_close_detected_without_touching_other_card(self):
         a,b=binding(),binding(2,qty='60');s=closed(a);s['terminal_orders']=[t for t in s['terminal_orders'] if t['oid']!=a['orders']['STOP'][0]];s['open_orders']=[order(a,'STOP')]
         ob=opened(b)

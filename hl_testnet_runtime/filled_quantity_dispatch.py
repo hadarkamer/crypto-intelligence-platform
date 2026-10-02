@@ -349,7 +349,14 @@ def identity(raw, request, now_ms):
     known=(request.get('reply') or {}).get('oid')
     if known is not None and known!=str(oid):
         raise DispatchError('RECEIPT_AND_PUBLIC_ORDER_CONFLICT')
-    if env.get('status') not in {'open','filled'} | evidence.CANCELED | evidence.REJECTED:
+    statuses={'open','filled'} | evidence.CANCELED | evidence.REJECTED
+    if leg=='TAKE_PROFIT' and not immediate:
+        # The exact persisted TP may activate before its first cloid lookup.
+        # Activation identifies that signed intent only; the collector must
+        # separately prove its same-OID live limit or exact terminal fills.
+        # A triggered market stop has no equivalent resting-limit contract.
+        statuses=statuses | {'triggered'}
+    if env.get('status') not in statuses:
         raise DispatchError('ORDER_STATE_REQUIRES_REVIEW')
     return str(oid)
 

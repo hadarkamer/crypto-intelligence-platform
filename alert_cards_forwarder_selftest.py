@@ -26,6 +26,26 @@ def delivery(side='LONG',identity='intent-1',family='manual'):
             price_time_utc='2026-09-16T12:00:00+00:00',anchor_time_utc='2026-09-16T12:02:00+00:00',source='BINANCE_SPOT_TRADE_1M'))
 
 
+def producer_v5_delivery():
+    """Exact current producer field shape; a planned Watch source, already delivered."""
+    payload=dict(direction='SHORT',event_id='watch:'+'4'*64,
+        event_time='2026-10-02T02:06:27.245647+00:00',
+        predicate_version='manual-formula-experimental-alerts-v5',
+        price_reference=dict(price='84917.49',price_time_utc='2026-10-02T02:02:00+00:00',
+            anchor_time_utc='2026-10-02T02:02:39.530059+00:00',precision='CLOSED_1M',
+            source='BINANCE_SPOT_TRADE_1M',symbol='BTC',status='READY'),
+        rule_id='CONSENSUS_FULL',source_direction='LONG',symbol='BTC',threshold_bps=200)
+    return dict(status='DELIVERED',intent_id='b'*32,payload=payload,
+        acknowledged_at='2026-10-02T02:07:10.001+00:00',
+        expires_at='2026-10-02T02:16:27.245647+00:00',message_id=123,
+        text='🧪 <b>סף 2% — ניסיוני, לא למסחר</b>\n'
+            '<b>Max Pain עם הסכמה מלאה, הפוך</b>\n<b>BTC | ירידה — SHORT</b>\n'
+            '<b>שער בסיס — תחילת נתוני הבסיס (בקירוב לפי נר דקה):</b> 84917.49\n'
+            '<b>שעת שער הבסיס:</b> 02.10.2026 05:02:00 (שעון ישראל)\n'
+            '<b>סטופלוס:</b> 86615.84\n<b>טייק פרופיט:</b> 83219.14\n'
+            'תחילת נתוני הבסיס: 05:02:39 (שעון ישראל)')
+
+
 class WireTests(unittest.TestCase):
     def test_both_directions_and_sources(self):
         for side in ('LONG','SHORT'):
@@ -81,6 +101,21 @@ class WireTests(unittest.TestCase):
         item=dict(intent_id=v['intent_id'],payload=p,acknowledged_at=v['delivered_at'],expires_at=v['expires_at'],message_id=123,text=v['text'],private_key='NO_COPY')
         self.assertNotIn('NO_COPY',str(w.manual_delivery(item,SCOPE)))
         self.assertEqual(w.normalize(w.manual_delivery(item,SCOPE)),w.normalize(v))
+    def test_current_v5_watch_source_preserves_delivery_identity_direction_and_frozen_terms(self):
+        item=producer_v5_delivery();before=deepcopy(item)
+        result=w.normalize(w.manual_delivery(item,SCOPE))
+        self.assertEqual(result['signal'],dict(kind='SIGNAL',event_id=item['intent_id'],
+            symbol='BTC',side='SHORT',entry='84917.49',stop='86615.84',
+            take_profit='83219.14',at=item['payload']['event_time']))
+        self.assertEqual(result['source_expires_at'],item['expires_at'])
+        self.assertEqual(item,before)
+        self.assertNotIn('watch:',result['signal']['event_id'])
+    def test_v5_source_stays_original_when_forwarded_after_expiry(self):
+        item=producer_v5_delivery();value=w.manual_delivery(item,SCOPE)
+        value['delivered_at']='2026-10-02T02:27:10.001+00:00'
+        result=w.normalize(value)
+        self.assertEqual(result['signal']['at'],item['payload']['event_time'])
+        self.assertEqual(result['source_expires_at'],item['expires_at'])
     def test_dual_projection_keeps_db_receipt_without_faking_message_id(self):
         v=delivery(family='dual_cvd65')
         row=dict(intent_id=v['intent_id'],rule_id=v['rule_id'],symbol=v['symbol'],direction=v['side'],source_at_utc=v['source_at'],finished_at_utc=v['delivered_at'],expires_at=v['expires_at'],text=v['text'],payload={'observation':{'price_reference':v['reference']}})
@@ -148,6 +183,21 @@ class ForwarderTests(unittest.TestCase):
         with patch.object(f.http.client,'HTTPSConnection',return_value=conn):
             with self.assertRaises(w.WireError):f.post_record(delivery(),KEY)
         self.assertEqual(conn.request.call_count,1)
+    def test_receiver_retry_reason_is_fixed_and_never_an_acknowledgement(self):
+        for supplied,expected in (
+            ('TESTNET_REQUEST_BUDGET_EXHAUSTED','TESTNET_REQUEST_BUDGET_EXHAUSTED'),
+            ('PRIVATE_DATABASE_URL','RECEIVER_HTTP_503')):
+            conn=Mock();response=Mock(status=503)
+            response.read.return_value=json.dumps(dict(status='RECORDING_UNAVAILABLE_RETRY',
+                reason=supplied)).encode()
+            conn.getresponse.return_value=response
+            with patch.object(f.http.client,'HTTPSConnection',return_value=conn):
+                result=self.call([delivery()],f.post_record)
+            self.assertEqual(result['retry_reasons'],{expected:1})
+            self.assertEqual(result['pending_records'],1)
+            self.assertEqual(result['recorded'],0)
+            self.assertNotIn('PRIVATE_DATABASE_URL',str(result))
+            self.f=f.Forwarder()
 
 
 if __name__=='__main__':unittest.main()

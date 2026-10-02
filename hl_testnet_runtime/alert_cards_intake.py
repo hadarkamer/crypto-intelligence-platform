@@ -5,6 +5,7 @@ accepts one HMAC-authenticated delivered notification and persists a card.
 Record persistence is not an order, execution queue, or account authorization.
 """
 from datetime import datetime, timezone
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -21,6 +22,29 @@ RESOLUTIONS='hl_testnet_cards_v1.asset_receipt_resolutions'
 _LOCK=threading.Lock()
 _META=None
 _META_AT=0.0
+_META_RETRY_AT=0.0
+_META_FAILURE=None
+METADATA_RETRY_SECONDS=15
+RETRY_REASONS=frozenset(('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+    'TESTNET_REQUEST_BUDGET_BUSY','TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',
+    'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE',
+    'TESTNET_REQUEST_BUDGET_SCHEMA_REQUIRES_REVIEW',
+    'TESTNET_REQUEST_BUDGET_WRONG_DATABASE',
+    'METADATA_UNAVAILABLE','RECORD_STORE_UNAVAILABLE'))
+
+
+class IntakeUnavailable(RuntimeError):
+    """A retryable recording failure, with fixed diagnostics only."""
+    def __init__(self,reason):
+        self.reason=reason if reason in RETRY_REASONS else 'METADATA_UNAVAILABLE'
+        super().__init__(self.reason)
+
+
+def retry_reason(exc):
+    from .request_budget import BudgetError
+    if isinstance(exc,IntakeUnavailable): return exc.reason
+    if isinstance(exc,BudgetError) and str(exc) in RETRY_REASONS: return str(exc)
+    return 'RECORD_STORE_UNAVAILABLE'
 
 
 def enabled(env):
@@ -72,15 +96,31 @@ def initialize(journal):
 
 
 def metadata():
-    global _META,_META_AT
+    global _META,_META_AT,_META_RETRY_AT,_META_FAILURE
     with _LOCK:
-        if _META is None or time.monotonic()-_META_AT>=300:
+        now=time.monotonic()
+        if _META is None or now-_META_AT>=300:
+            # All cards share this public preparation snapshot. A failed refresh
+            # must not make each queued notification repeat the same blocked
+            # request. Stale metadata never becomes a fallback or live authority.
+            if _META_FAILURE is not None and now<_META_RETRY_AT:
+                raise IntakeUnavailable(_META_FAILURE)
             from .checks import InfoReader
-            value=InfoReader().read('meta')
-            if not isinstance(value,dict) or not isinstance(value.get('universe'),list):
-                raise wire.WireError('METADATA_UNAVAILABLE')
+            from .request_budget import BudgetError
+            try:
+                value=InfoReader(priority='background').read('meta')
+                if (not isinstance(value,dict) or not isinstance(value.get('universe'),list)
+                        or not 1<=len(value['universe'])<=10000):
+                    raise IntakeUnavailable('METADATA_UNAVAILABLE')
+            except Exception as exc:
+                reason=(str(exc) if isinstance(exc,BudgetError) and str(exc) in RETRY_REASONS
+                        else 'METADATA_UNAVAILABLE')
+                _META_FAILURE=reason
+                _META_RETRY_AT=time.monotonic()+METADATA_RETRY_SECONDS
+                raise IntakeUnavailable(reason) from None
             _META=value;_META_AT=time.monotonic()
-        return _META
+            _META_FAILURE=None;_META_RETRY_AT=0.0
+        return deepcopy(_META)
 
 
 class ReceiptStore:
@@ -136,7 +176,16 @@ def accept(raw,store,*,read_metadata=metadata):
         return dict(receipt_id=identity,status='REJECTED',record_only=True)
     try:
         try:
-            card=cards.prepare_card(spec['signal'],read_metadata(),rule_id=spec['rule_id'],
+            try:
+                meta=read_metadata()
+            except IntakeUnavailable:
+                raise
+            except Exception as exc:
+                from .request_budget import BudgetError
+                reason=(str(exc) if isinstance(exc,BudgetError) and str(exc) in RETRY_REASONS
+                        else 'METADATA_UNAVAILABLE')
+                raise IntakeUnavailable(reason) from None
+            card=cards.prepare_card(spec['signal'],meta,rule_id=spec['rule_id'],
                 threshold_pct=spec['threshold_pct'],record_kind='received_alert',
                 source_stream=spec['source_stream'],source_expires_at=spec.get('source_expires_at'))
             if not card['planning']['positive_quantity']:
@@ -191,8 +240,12 @@ def application(environ,start_response):
                     result=accept(raw,store);code='200 OK'
     except wire.WireError:
         code='400 Bad Request';result={'status':'INVALID_DELIVERY'}
-    except Exception:
-        code='503 Service Unavailable';result={'status':'RECORDING_UNAVAILABLE_RETRY'}
+    except Exception as exc:
+        code='503 Service Unavailable'
+        result={'status':'RECORDING_UNAVAILABLE_RETRY','reason':retry_reason(exc)}
+        print(json.dumps({'testnet_cards_intake':dict(status=result['status'],
+            reason=result['reason'],order_requests_sent=0,
+            observed_at_utc=datetime.now(timezone.utc).isoformat())}),flush=True)
     body=json.dumps(result,separators=(',',':')).encode()
     start_response(code,[('Content-Type','application/json'),('Content-Length',str(len(body))),
         ('Cache-Control','no-store'),('X-Content-Type-Options','nosniff')])

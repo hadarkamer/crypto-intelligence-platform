@@ -1,10 +1,18 @@
 name: Testnet Durable Postgres Journal
 on:
   push:
+    branches: [paper-trading-v1, codex/testnet-pipeline-recovery-20261002]
+    paths:
+      - 'hl_testnet_runtime/**'
+      - 'hyperliquid_testnet_executor*.py'
+      - 'alert_cards_forwarder*.py'
+      - '.github/workflows/testnet-postgres-journal.yml'
+  pull_request:
     branches: [paper-trading-v1]
     paths:
       - 'hl_testnet_runtime/**'
       - 'hyperliquid_testnet_executor*.py'
+      - 'alert_cards_forwarder*.py'
       - '.github/workflows/testnet-postgres-journal.yml'
 permissions:
   contents: read
@@ -14,7 +22,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 7
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:18
@@ -33,15 +41,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Install only PostgreSQL driver for disposable CI database
-        run: python3 -m pip install 'psycopg[binary]==3.2.3'
+      - name: Install the pinned Testnet runtime dependencies
+        run: python3 -m pip install -r hl_testnet_runtime/requirements.txt
       - name: Existing checks and actual PostgreSQL restart, race, lost-ack and mixed-exit tests
-        run: >-
-          python3 -m unittest -v
-          hl_testnet_runtime.test_runtime
-          hyperliquid_testnet_executor_selftest
-          hl_testnet_runtime.test_guarded_execution
-          hl_testnet_runtime.test_guarded_integration
-          hl_testnet_runtime.test_price_precision
-          hl_testnet_runtime.test_postgres_journal
-          hl_testnet_runtime.test_mixed_exits
+        run: |
+          python3 -m unittest -v hyperliquid_testnet_executor_selftest alert_cards_forwarder_selftest
+          python3 -m unittest discover -v -s hl_testnet_runtime -t . -p 'test_*.py'

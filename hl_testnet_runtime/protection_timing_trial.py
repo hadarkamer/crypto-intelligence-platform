@@ -1,6 +1,8 @@
 """One explicitly invoked, fresh received-alert Testnet timing experiment.
 
-Never called from HTTP, startup, intake, monitors or a schedule. The service's
+Never called from HTTP, intake, monitors or a recurring schedule. The explicitly
+approved bounded deployment controller may invoke this once in an isolated
+process, using a durable consumed run reservation. The service's
 continuous entry flags remain false; an expiring in-process grant names exactly
 one card. No invented alert, source refresh, price chasing or risk-profile change.
 A still-working limit entry retains normal source-expiry/half-threshold handling.
@@ -120,7 +122,15 @@ def validate(env, card, now_ms):
             or not source_fresh(timestamp(card['prepared']['source']['at']),card.get('source_expires_at'),
                 now=datetime.fromtimestamp(now_ms/1000,timezone.utc))):
         raise DispatchError('TIMING_TRIAL_REQUIRES_FRESH_DELIVERED_ALERT')
-    return min(now_ms+90000,int(timestamp(card['source_expires_at']).timestamp()*1000))
+    expiry = min(now_ms+90000,int(timestamp(card['source_expires_at']).timestamp()*1000))
+    if env.get('HL_TESTNET_SINGLE_TRIAL_CONTROLLER'):
+        from .single_trial_controller import config
+        selected = config(env)
+        deadline = int(timestamp(selected['deadline']).timestamp()*1000)
+        if now_ms >= deadline:
+            raise DispatchError('SINGLE_TRIAL_SELECTION_WINDOW_EXPIRED')
+        expiry = min(expiry, deadline)
+    return expiry
 
 
 def run_one(env, card_id):

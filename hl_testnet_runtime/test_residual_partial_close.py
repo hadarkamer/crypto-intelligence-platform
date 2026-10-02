@@ -22,7 +22,7 @@ from .trade_card_store import CardStore
 CI = os.environ.get('HL_JOURNAL_CI_URL')
 
 
-def partially_closed(*, side='LONG', leg='TAKE_PROFIT', quantity='20', q='100', n=1, second=True):
+def partially_closed(*, side='LONG', leg='TAKE_PROFIT', quantity='20', q='100', n=1, second=False):
     s = state_from_case(q=q, side=side, n=n, stop=q, take=q)
     b = s['bindings'][0]; snap = s['evidence']['snapshot']
     snap['fills'].append(fill(b, leg, qty=quantity, fid='partial-exit-'+str(n)))
@@ -41,34 +41,40 @@ def select(s, mark='10'):
 
 
 class PartialResidualPureTests(NoExternal):
-    def test_partial_tp_and_sl_both_directions_cancel_only_oversized_sibling(self):
+    def test_partial_tp_and_sl_both_directions_amend_only_oversized_sibling(self):
         for side in ('LONG','SHORT'):
             for leg in ('STOP','TAKE_PROFIT'):
                 with self.subTest(side=side, leg=leg):
                     s=partially_closed(side=side,leg=leg);before=deepcopy(s);p=select(s)
                     sibling='STOP' if leg=='TAKE_PROFIT' else 'TAKE_PROFIT'
                     b=s['bindings'][0]
-                    self.assertEqual((p['operation'],p['leg']),('CANCEL_FOR_RESIZE',sibling))
+                    self.assertEqual((p['operation'],p['leg']),('MODIFY_EXIT',sibling))
                     self.assertEqual(p['old_oid'],b['orders'][sibling][0])
                     self.assertEqual(p['card_id'],b['card_id'])
+                    self.assertEqual(p['action']['type'],'batchModify')
+                    amended=dispatch.requested_order(p['action'])
+                    self.assertEqual(amended['s'],'80')
+                    self.assertEqual(amended['p'],b['prices'][
+                        'stop' if sibling=='STOP' else 'take_profit'])
+                    self.assertTrue(amended['r'])
                     self.assertTrue(fence.validate_proposal(s,p,now_ms=T))
                     self.assertTrue(contract.validate_wire_proposal(s,p,now_ms=T))
                     self.assertEqual(s,before)
 
-    def test_crossed_level_does_not_leave_oversized_sibling_live(self):
+    def test_crossed_stop_cannot_be_canceled_or_repriced_as_a_resize(self):
         for side,mark in (('LONG','9'),('SHORT','11')):
-            s=partially_closed(side=side);p=select(s,mark)
-            self.assertEqual(p['operation'],'CANCEL_FOR_RESIZE')
-            self.assertEqual(p['card_id'],s['bindings'][0]['card_id'])
-            self.assertEqual(p['leg'],'STOP')
-            self.assertEqual(p['action']['type'],'cancel')
+            s=partially_closed(side=side);before=deepcopy(s)
+            with self.assertRaisesRegex(DispatchError,'^EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE$'):
+                select(s,mark)
+            self.assertEqual(s,before)
 
-    def test_other_card_missing_protection_does_not_suppress_exact_cleanup(self):
+    def test_other_active_card_does_not_authorize_an_unsafe_independent_pair(self):
         s=partially_closed(second=False)
         s=existing.merged(s,state_from_case(n=2,q='60'))
-        p=select(s,mark='9')
-        self.assertEqual(p['old_oid'],s['bindings'][0]['orders']['STOP'][0])
-        self.assertEqual(p['action']['cancels'],[dict(a=0,o=int(p['old_oid']))])
+        before=deepcopy(s)
+        with self.assertRaisesRegex(fence.FenceError,'^SHARED_CARD_INDEPENDENT_EXIT_CAPACITY_EXCEEDED$'):
+            select(s)
+        self.assertEqual(s,before)
 
     def test_pending_entry_after_exit_still_has_approved_priority(self):
         s=partially_closed(q='40',quantity='10');p=select(s)
@@ -87,7 +93,9 @@ class PartialResidualPureTests(NoExternal):
     def test_without_any_exit_existing_growth_recovery_is_unchanged(self):
         s=state_from_case(q='60',stop='40',take='40')
         self.assertIsNone(fence.cleanup(s,now_ms=T,after_exit_policy=dispatch.AFTER_EXIT))
-        self.assertEqual(select(s)['operation'],'CANCEL_FOR_RESIZE')
+        p=select(s)
+        self.assertEqual(p['operation'],'MODIFY_EXIT')
+        self.assertEqual(dispatch.requested_order(p['action'])['s'],'60')
 
     def test_subunit_exit_quantity_does_not_round_away_residual_risk(self):
         s=partially_closed(quantity='0.01');p=select(s)
@@ -112,8 +120,9 @@ class PartialResidualPureTests(NoExternal):
         self.assertIsNone(fence.cleanup(s,now_ms=T,after_exit_policy=dispatch.AFTER_EXIT))
 
     def test_two_independent_healthy_siblings_are_still_not_native_oco(self):
-        s=partially_closed();p=select(s)
-        self.assertEqual(p['action']['type'],'cancel')
+        s=partially_closed(second=True)
+        with self.assertRaisesRegex(fence.FenceError,'^SHARED_CARD_INDEPENDENT_EXIT_CAPACITY_EXCEEDED$'):
+            select(s)
         report=fence.exposure(s,now_ms=T)
         self.assertFalse(report['native_per_card_oco_verified'])
         self.assertFalse(report['shared_market_release_authorized'])
@@ -137,28 +146,33 @@ class PartialResidualDatabaseTests(NoExternal):
     protect=existing.ResidualDatabaseTests.protect
     unsafe_legacy_two_card_setup=existing.ResidualDatabaseTests.unsafe_legacy_two_card_setup
 
-    def test_partial_tp_cleanup_preserves_every_other_card_order(self):
+    def test_legacy_shared_card_resize_preserves_every_working_guard_and_blocks(self):
         other=self.unsafe_legacy_two_card_setup()
-        before={oid:deepcopy(self.v.orders[oid]) for oid in ('1003','1004','1005')}
-        self.v.fill('1002','20');self.cycle()
-        self.assertEqual(self.v.requests[-1]['proposal']['operation'],'CANCEL_FOR_RESIZE')
-        self.assertEqual(self.v.requests[-1]['proposal']['old_oid'],'1001')
-        self.cycle(False);s=self.store.load(self.bucket)
+        self.v.fill('1002','20')
+        before=deepcopy(self.v.orders);sent=self.v.sent
+        with self.assertRaisesRegex(fence.FenceError,'^SHARED_CARD_INDEPENDENT_EXIT_CAPACITY_EXCEEDED$'):
+            self.cycle()
+        s=self.store.load(self.bucket)
         self.assertIsNone(s['pending'])
         view=life.review(s['bindings'],s['evidence']['snapshot'],now_ms=self.v.now())
         own=next(c for c in view['cards'] if c['card_id']==self.b['card_id'])
         second=next(c for c in view['cards'] if c['card_id']==other['card_id'])
         self.assertEqual(own['remaining_quantity'],'80');self.assertFalse(own['closure_verified'])
         self.assertEqual(second['remaining_quantity'],'100')
-        self.assertEqual(before,{oid:self.v.orders[oid] for oid in before})
+        self.assertEqual(self.v.orders,before);self.assertEqual(self.v.sent,sent)
+        self.assertEqual(self.v.orders['1001']['status'],'open')
         self.assertEqual(self.v.orders['1002']['status'],'open')
         self.assertEqual(Decimal(self.v.orders['1002']['order']['sz']),Decimal('80'))
 
     def test_partial_stop_cleanup_does_not_cancel_the_remaining_stop(self):
-        self.unsafe_legacy_two_card_setup();self.v.fill('1001','20');self.cycle()
+        self.protect();self.v.fill('1001','20');self.cycle();self.cycle(False)
+        self.assertEqual(self.v.requests[-1]['proposal']['operation'],'MODIFY_EXIT')
         self.assertEqual(self.v.requests[-1]['proposal']['old_oid'],'1002')
         self.assertEqual(self.v.orders['1001']['status'],'open')
         self.assertEqual(Decimal(self.v.orders['1001']['order']['sz']),Decimal('80'))
+        self.assertEqual(self.v.orders['1003']['status'],'open')
+        self.assertEqual(Decimal(self.v.orders['1003']['order']['sz']),Decimal('80'))
+        self.assertTrue(all(r['proposal']['action']['type']!='cancel' for r in self.v.requests))
 
     def test_stale_never_sent_resize_becomes_exact_orphan_cleanup(self):
         self.protect();self.v.fill('1002','20');preview=self.cycle(False)
@@ -194,32 +208,42 @@ class PartialResidualDatabaseTests(NoExternal):
         self.protect();self.v.fill('1002','20')
         def unknown(request):
             self.v.sent+=1;self.v.t+=10
-            return None  # No evidence that the venue applied the cancellation.
+            return None  # No evidence that the venue applied the amendment.
         with patch.object(self.v,'send',side_effect=unknown):self.cycle()
         state=self.store.load(self.bucket);rid=state['pending'];before=self.v.sent
-        self.v.fill('1002','80');out=self.cycle(False)
-        self.assertEqual(out['status'],'OUTCOME_UNKNOWN')
+        self.v.fill('1002','80')
+        with self.assertRaisesRegex(DispatchError,'^OUTCOME_UNRESOLVED_NO_NEW_REQUEST$'):
+            self.cycle(False)
         self.assertEqual(self.store.load(self.bucket)['pending'],rid)
+        self.assertEqual(self.store.request(rid)['phase'],'OUTCOME_UNKNOWN')
         self.assertEqual(self.store.request(rid)['attempts'],1)
         self.assertEqual(self.v.sent,before)
 
     def test_fill_racing_partial_cleanup_is_counted_without_reattribution(self):
-        other=self.unsafe_legacy_two_card_setup();self.v.fill('1002','20')
-        self.v.cancel_race=lambda oid:self.v.fill(oid,'10')
-        self.cycle();self.cycle(False)
+        self.protect();self.v.fill('1002','20')
+        send=self.v.send
+        def fill_then_amend(request):
+            self.assertEqual(request['proposal']['operation'],'MODIFY_EXIT')
+            self.v.fill(request['proposal']['old_oid'],'10')
+            return send(request)
+        with patch.object(self.v,'send',side_effect=fill_then_amend):self.cycle()
+        self.c.refresh(self.bucket)
         s=self.store.load(self.bucket)
         report=life.review(s['bindings'],s['evidence']['snapshot'],now_ms=self.v.now())
         a=next(c for c in report['cards'] if c['card_id']==self.b['card_id'])
-        b=next(c for c in report['cards'] if c['card_id']==other['card_id'])
-        self.assertEqual(a['remaining_quantity'],'70');self.assertEqual(b['remaining_quantity'],'100')
+        self.assertEqual(a['remaining_quantity'],'70')
         self.assertIn('BOTH_EXIT_LEGS_FILLED_REVIEW',a['issues'])
         req=self.store.request(s['last_request'])
-        self.assertFalse(req['residual_verification']['other_cards_reassigned'])
-        self.assertFalse(req['residual_verification']['native_oco_or_pre_cancel_isolation_proven'])
+        self.assertEqual(req['phase'],'OBSERVED')
+        self.assertEqual(req['proposal']['card_id'],self.b['card_id'])
+        self.assertEqual(a['stop_quantity_observed'],'80')
+        self.assertIn('STOP_EXCEEDS_CARD_REMAINDER',a['issues'])
+        self.assertFalse(fence.exposure(s,now_ms=self.v.now())['native_per_card_oco_verified'])
 
-    def test_partial_cleanup_works_with_crossed_stop_without_repricing(self):
-        self.unsafe_legacy_two_card_setup();self.v.fill('1002','20')
+    def test_partial_cleanup_with_crossed_stop_preserves_existing_guard(self):
+        self.protect();self.v.fill('1002','20');before=deepcopy(self.v.orders);sent=self.v.sent
         with patch.object(self.v,'sample',side_effect=lambda account,symbol:dict(mark_price='9',at_ms=self.v.now())):
-            self.cycle()
-        self.assertEqual(self.v.requests[-1]['proposal']['old_oid'],'1001')
-        self.assertEqual(self.v.requests[-1]['proposal']['action'],dict(type='cancel',cancels=[dict(a=0,o=1001)]))
+            with self.assertRaisesRegex(DispatchError,'^EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE$'):
+                self.cycle()
+        self.assertEqual(self.v.orders,before);self.assertEqual(self.v.sent,sent)
+        self.assertIsNone(self.store.load(self.bucket)['pending'])
