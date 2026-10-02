@@ -171,7 +171,7 @@ def validate_snapshot(snapshot):
                 if row['trigger_price'] is not None: number(row['trigger_price'], positive=True)
                 if (row['side'] not in ('B', 'A') or type(row['reduce_only']) is not bool
                         or row['state'] not in ('ACTIVE', 'WAITING_PARENT')
-                        or row['order_type'] not in ('LIMIT', 'TP_LIMIT', 'SL_MARKET')):
+                        or row['order_type'] not in ('LIMIT', 'TP_LIMIT', 'SL_MARKET', 'TRIGGERED_TP_LIMIT')):
                     raise LifecycleError('INVALID_OPEN_ORDER_EVIDENCE')
             else:
                 if row['oid'] in seen_terminal or row['state'] not in ('FILLED', 'CANCELED', 'REJECTED'):
@@ -272,6 +272,11 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
                     price = b['prices']['stop' if leg == 'STOP' else 'take_profit']
                     if leg == 'TAKE_PROFIT' and oid in plain:
                         valid = valid and o['order_type'] == 'LIMIT' and o['trigger_price'] is None
+                    elif leg=='TAKE_PROFIT' and o['order_type']=='TRIGGERED_TP_LIMIT':
+                        # The live venue limit has already triggered. Its
+                        # original target still constrains its price, while
+                        # there is no longer a live trigger to claim.
+                        valid = valid and o['state']=='ACTIVE' and o['trigger_price'] is None
                     else:
                         valid = valid and o['order_type'] == ('SL_MARKET' if leg == 'STOP' else 'TP_LIMIT') and o['trigger_price'] is not None and number(o['trigger_price']) == number(price)
                     if leg == 'TAKE_PROFIT': valid = valid and number(o['price']) == number(price)

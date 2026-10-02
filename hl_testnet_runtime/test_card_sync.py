@@ -343,6 +343,151 @@ class EvidenceTests(unittest.TestCase):
         ev=evidence();reader=Reader(ev);reader.data['statuses']['10']['order']['status']='triggered'
         with self.assertRaises(e.SyncError):e.collect(ev,reader,clock=lambda:T+10000)
 
+    def triggered_short(self, *, quantity='255'):
+        """Real venue transition shape; original status and live order differ."""
+        b=binding(side='SHORT',qty='6016');ev=evidence(b,is_open=True);reader=Reader(ev)
+        oid=b['orders']['TAKE_PROFIT'][0]
+        raw=reader.data['statuses'][oid]
+        raw['order'].update(status='triggered',statusTimestamp=T+1000)
+        raw['order']['order'].update(cloid='0x'+'a'*32,timestamp=T-10000)
+        actual=next(row for row in reader.data['inventory'] if str(row['oid'])==oid)
+        actual.update(cloid='0x'+'a'*32,timestamp=T+1000,triggerCondition='Triggered',
+                      isTrigger=False,triggerPx='0.0',origSz='6016.0',sz='5761.0')
+        tp=fill(b,'TAKE_PROFIT',qty=quantity)
+        tp['fill_id']='hl:'+tp['fill_id'];tp['at_ms']=T+2000
+        reader.data['fills'].append(dict(coin=tp['symbol'],tid=int(tp['fill_id'].split(':')[-1]),
+            oid=int(tp['oid']),sz=tp['quantity'],px=tp['price'],fee=tp['fee'],
+            feeToken=tp['fee_token'],side=tp['side'],time=tp['at_ms']))
+        reader.data['position']['assetPositions'][0]['position']['szi']='-5761.0'
+        return ev,reader
+
+    def test_triggered_take_keeps_exact_partial_fills_and_live_limit_without_fabricated_trigger(self):
+        ev,reader=self.triggered_short();original=deepcopy(ev)
+        result=e.collect(ev,reader,clock=lambda:T+10000,reuse_verified_terminals=True)
+        row=result['report']['cards'][0]
+        take=next(o for o in result['snapshot']['open_orders'] if o['oid']=='11')
+        self.assertEqual((row['entry_quantity'],row['exit_quantity'],row['remaining_quantity']),
+                         ('6016','255','5761'))
+        self.assertEqual((take['order_type'],take['state'],take['trigger_price']),
+                         ('TRIGGERED_TP_LIMIT','ACTIVE',None))
+        self.assertEqual(row['take_profit_quantity_observed'],'5761.0')
+        self.assertEqual(row['issues'],['STOP_EXCEEDS_CARD_REMAINDER'])
+        self.assertFalse(row['closure_verified'])
+        self.assertEqual(ev,original)
+
+    def test_triggered_take_live_view_requires_exact_original_ownership_and_transition_terms(self):
+        changes=(dict(cloid='0x'+'b'*32),dict(timestamp=T+1001),dict(triggerCondition='N/A'),
+            dict(isTrigger=True),dict(triggerPx='96'),dict(reduceOnly=False),
+            dict(origSz='6017'),dict(limitPx='95'),dict(side='A'),dict(isPositionTpsl=True))
+        for change in changes:
+            with self.subTest(change=change):
+                ev,reader=self.triggered_short()
+                actual=next(row for row in reader.data['inventory'] if row['oid']==11)
+                actual.update(change)
+                with self.assertRaisesRegex(e.SyncError,'TRIGGERED_TAKE_LIVE_TERMS_MISMATCH'):
+                    e.collect(ev,reader,clock=lambda:T+10000)
+
+    def test_triggered_take_original_terms_and_activation_fill_time_must_be_proven(self):
+        for change,code in ((dict(triggerPx='95'),'TRIGGERED_TAKE_ORIGINAL_TERMS_MISMATCH'),
+                            (dict(limitPx='95'),'TRIGGERED_TAKE_ORIGINAL_TERMS_MISMATCH'),
+                            (dict(isTrigger=False),'TRIGGERED_TAKE_ORIGINAL_TERMS_MISMATCH'),
+                            (dict(timestamp=T+1001),'TRIGGERED_TAKE_ACTIVATION_TIME_INVALID')):
+            with self.subTest(change=change):
+                ev,reader=self.triggered_short()
+                reader.data['statuses']['11']['order']['order'].update(change)
+                with self.assertRaisesRegex(e.SyncError,code):
+                    e.collect(ev,reader,clock=lambda:T+10000)
+        ev,reader=self.triggered_short();reader.data['fills'][-1]['time']=T+999
+        with self.assertRaisesRegex(e.SyncError,'TRIGGERED_TAKE_FILL_TIME_INVALID'):
+            e.collect(ev,reader,clock=lambda:T+10000)
+
+    def test_triggered_take_missing_or_inexact_partial_history_never_becomes_a_close(self):
+        for quantity,keep_live in (('254',True),('256',True),('255',False)):
+            with self.subTest(quantity=quantity,keep_live=keep_live):
+                ev,reader=self.triggered_short(quantity=quantity)
+                if not keep_live:
+                    reader.data['inventory']=[row for row in reader.data['inventory'] if row['oid']!=11]
+                with self.assertRaisesRegex(e.SyncError,'HISTORY_INCOMPLETE|ACTIVATION_UNRESOLVED'):
+                    e.collect(ev,reader,clock=lambda:T+10000)
+
+    def test_triggered_take_full_fill_finality_uses_real_last_fill_and_all_exact_orders_final(self):
+        ev,reader=self.triggered_short(quantity='6016')
+        reader.data['inventory']=[]
+        reader.data['position']['assetPositions'][0]['position']['szi']='0'
+        reader.data['statuses']['12']['order'].update(status='siblingFilledCanceled',statusTimestamp=T+3000)
+        result=e.collect(ev,reader,clock=lambda:T+10000,reuse_verified_terminals=True)
+        terminal=next(row for row in result['snapshot']['terminal_orders'] if row['oid']=='11')
+        self.assertEqual((terminal['state'],terminal['at_ms'],terminal['filled_quantity']),
+                         ('FILLED',T+2000,'6016'))
+        self.assertTrue(result['report']['cards'][0]['closure_verified'])
+        self.assertEqual(e.terminal_certificates(result['bindings'],result['snapshot'])['11'],terminal)
+        reader.data['inventory'].append(deepcopy(reader.data['statuses']['12']['order']['order']))
+        with self.assertRaisesRegex(e.SyncError,'OBSERVATION_CHANGED_RETRY'):
+            e.collect(ev,reader,clock=lambda:T+10000)
+
+    def test_triggered_take_cannot_reassign_same_cloid_to_a_different_live_oid(self):
+        ev,reader=self.triggered_short()
+        next(row for row in reader.data['inventory'] if row['oid']==11)['oid']=999
+        with self.assertRaisesRegex(e.SyncError,'UNASSIGNED_EXCHANGE_ORDER'):
+            e.collect(ev,reader,clock=lambda:T+10000)
+
+    def test_triggered_take_second_pass_change_returns_no_partial_checkpoint(self):
+        ev,reader=self.triggered_short();before=deepcopy(ev);original=reader.read;passes=0
+        def read(kind,*args,**kwargs):
+            nonlocal passes
+            value=original(kind,*args,**kwargs)
+            if kind=='clearinghouseState':
+                passes+=1
+                if passes==2:value['assetPositions'][0]['position']['szi']='-5760'
+            return value
+        reader.read=read
+        with self.assertRaisesRegex(e.SyncError,'OBSERVATION_CHANGED_RETRY'):
+            e.collect(ev,reader,clock=lambda:T+10000)
+        self.assertEqual(ev,before)
+
+    def test_trigger_parent_later_filled_status_retains_exact_last_fill_certificate_time(self):
+        ev,reader=self.triggered_short(quantity='6016')
+        reader.data['inventory']=[]
+        reader.data['position']['assetPositions'][0]['position']['szi']='0'
+        reader.data['statuses']['12']['order'].update(status='siblingFilledCanceled',statusTimestamp=T+3000)
+        first=e.collect(ev,reader,clock=lambda:T+10000)
+        checkpoint=dict(bindings=first['bindings'],snapshot=first['snapshot'])
+        terminal=next(row for row in first['snapshot']['terminal_orders'] if row['oid']=='11')
+        reader.data['statuses']['11']['order'].update(status='filled',statusTimestamp=T+2500)
+        second=e.collect(checkpoint,reader,clock=lambda:T+20000)
+        self.assertEqual(next(row for row in second['snapshot']['terminal_orders'] if row['oid']=='11'),terminal)
+        self.assertTrue(second['report']['cards'][0]['closure_verified'])
+        reader.data['statuses']['11']['order']['status']='canceled'
+        with self.assertRaisesRegex(e.SyncError,'TERMINAL_FACT_CHANGED'):
+            e.collect(checkpoint,reader,clock=lambda:T+20000)
+
+    def test_triggered_take_partial_exit_replans_exact_stop_amendment_before_new_work(self):
+        from .test_filled_quantity_dispatch import state_from_case, ROUTES2, META
+        from . import filled_quantity_dispatch as dispatch
+        state=state_from_case(q='100',side='SHORT',stop='100',take='100')
+        b=state['bindings'][0];ev=deepcopy(state['evidence'])
+        for f in ev['snapshot']['fills']:f['fill_id']='hl:'+f['fill_id']
+        reader=Reader(ev);oid=b['orders']['TAKE_PROFIT'][0]
+        reader.data['statuses'][oid]['order'].update(status='triggered',statusTimestamp=T+1000)
+        reader.data['statuses'][oid]['order']['order'].update(cloid='0x'+'a'*32,timestamp=T-10000)
+        actual=next(row for row in reader.data['inventory'] if str(row['oid'])==oid)
+        actual.update(cloid='0x'+'a'*32,timestamp=T+1000,triggerCondition='Triggered',
+                      isTrigger=False,triggerPx='0',origSz='100',sz='60')
+        f=fill(b,'TAKE_PROFIT',qty='40');f['at_ms']=T+2000
+        reader.data['fills'].append(dict(coin=f['symbol'],tid=int(f['fill_id']),oid=int(f['oid']),
+            sz=f['quantity'],px=f['price'],fee=f['fee'],feeToken=f['fee_token'],side=f['side'],time=f['at_ms']))
+        reader.data['position']['assetPositions'][0]['position']['szi']='-60'
+        collected=e.collect(ev,reader,clock=lambda:T+10000)
+        state['evidence']=dict(bindings=collected['bindings'],snapshot=collected['snapshot'])
+        before=deepcopy(state)
+        proposal=dispatch.choose(state,ROUTES2,META,dict(mark_price='9.8',at_ms=T+10000),now_ms=T+10000)
+        self.assertEqual((proposal['operation'],proposal['leg'],proposal['quantity'],proposal['old_oid']),
+                         ('MODIFY_EXIT','STOP','60',b['orders']['STOP'][0]))
+        self.assertEqual(proposal['action']['modifies'][0]['order']['s'],'60')
+        self.assertTrue(proposal['action']['modifies'][0]['order']['r'])
+        self.assertEqual(proposal['action']['modifies'][0]['order']['t']['trigger']['triggerPx'],b['prices']['stop'])
+        self.assertEqual(state,before)
+
     def test_two_inconsistent_observations_defer(self):
         ev=evidence();reader=Reader(ev);original=reader.read
         def read(*args,**kwargs):

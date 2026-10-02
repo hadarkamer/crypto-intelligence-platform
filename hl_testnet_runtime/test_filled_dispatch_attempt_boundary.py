@@ -6,13 +6,15 @@ value. It does not compute a signature. The only HTTP class used is a local doub
 from copy import deepcopy
 import json
 import sys
+import time
 from types import ModuleType
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from . import filled_quantity_dispatch as m
 from . import test_filled_quantity_dispatch as fixtures
 from .filled_dispatch_store import DispatchError
+from .request_budget import Permit
 
 T=fixtures.T
 
@@ -21,7 +23,8 @@ def request():
     state=fixtures.state_from_case()
     proposal=m.choose(state,fixtures.ROUTES2,fixtures.META,
         dict(mark_price='10',at_ms=T),now_ms=T)
-    return dict(proposal=proposal,domain='testnet',phase='OUTCOME_UNKNOWN',attempts=1,
+    return dict(request_id='a'*64,bucket=state['bucket'],proposal=proposal,
+        domain='testnet',phase='OUTCOME_UNKNOWN',attempts=1,
         prepared_at_ms=T+1,attempt_at_ms=T+2,nonce=T+2)
 
 
@@ -40,6 +43,13 @@ class FinalAttemptBoundaryTests(fixtures.NoExternal):
     def venue(self,clock):
         venue=m.TestnetVenue({})
         venue.now=lambda:clock[0]
+        # The actual adapter now requires an independent exchange admission.
+        # Keep that guard active while substituting only its local quota owner.
+        budget=Mock()
+        budget.acquire.side_effect=lambda *args,**kwargs:Permit(
+            Mock(), 'a'*32, 'exchange', 1,
+            time.monotonic_ns()+10_000_000_000)
+        venue.request_budget=lambda:budget
         return venue
 
     def test_fresh_request_passes_without_mutation_or_io(self):

@@ -370,6 +370,41 @@ class DispatchPureTests(NoExternal):
         with self.assertRaisesRegex(DispatchError,'OUTCOME_UNRESOLVED_NO_NEW_REQUEST'):
             m.identity(dict(status='unknownOid'),request,T)
 
+    def test_triggered_take_lookup_identifies_only_the_exact_signed_trigger_intent(self):
+        venue=Venue()
+        action=dict(type='order',orders=[dict(a=0,b=False,p='11',s='100',r=True,
+            t=dict(trigger=dict(isMarket=False,triggerPx='11',tpsl='tp')),
+            c='0x'+'a'*32)],grouping='na')
+        request=dict(attempt_at_ms=T,reply=None,proposal=dict(account=A,symbol='DOGE',
+            leg='TAKE_PROFIT',operation='CREATE_EXIT',action=action))
+        venue.send(request)
+        raw=venue.lookup(A,action['orders'][0]['c'])
+        raw['order']['status']='triggered'
+        self.assertEqual(m.identity(raw,request,venue.now()),'1000')
+        for invalid in ('cloid','size','side','price','trigger','position_tpsl',
+                        'rejected','early','future','stop','entry','immediate'):
+            with self.subTest(invalid=invalid):
+                changed=deepcopy(raw);intent=deepcopy(request);order=changed['order']['order']
+                if invalid=='cloid':order['cloid']='0x'+'b'*32
+                elif invalid=='size':order['origSz']='99'
+                elif invalid=='side':order['side']='B'
+                elif invalid=='price':order['limitPx']='12'
+                elif invalid=='trigger':order['triggerPx']='12'
+                elif invalid=='position_tpsl':order['isPositionTpsl']=True
+                elif invalid=='rejected':intent['reply']=dict(state='REJECTED')
+                elif invalid=='early':changed['order']['statusTimestamp']=T-1
+                elif invalid=='future':changed['order']['statusTimestamp']=venue.now()+1
+                elif invalid=='stop':
+                    intent['proposal']['leg']='STOP';order['orderType']='Stop Market'
+                elif invalid=='entry':
+                    intent['proposal']['leg']='ENTRY';order.update(orderType='Limit',isTrigger=False,reduceOnly=False,side='A')
+                    intent['proposal']['action']['orders'][0].update(b=False,r=False)
+                else:
+                    intent['proposal']['operation']='CLOSE_PASSED_TAKE'
+                    intent['proposal']['action']['orders'][0]['t']=dict(limit=dict(tif='Ioc'))
+                    order.update(orderType='Limit',isTrigger=False)
+                with self.assertRaises(DispatchError):m.identity(changed,intent,venue.now())
+
     def test_malformed_cancel_responses_remain_unknown(self):
         for raw in (None,{},dict(status='ok',response=None),dict(status='ok',response='no')):
             self.assertEqual(m.normalized_reply(raw,'cancel')['state'],'OUTCOME_UNKNOWN')
@@ -892,6 +927,46 @@ class DispatchDatabaseTests(NoExternal):
         self.bucket=s['bucket'];self.b=b;self.protect()
         self.assertEqual(self.store.load(self.bucket)['account'],B)
         self.assertTrue(self.v.requests[1]['proposal']['action']['orders'][0]['b'])
+
+    def test_take_activates_before_first_binding_and_partial_fill_resizes_only_stop(self):
+        self.entry('100');self.cycle()  # Entry fill, then its verified stop.
+        send=self.v.send;read=self.v.read;live=[]
+        def activate(request):
+            reply=send(request)
+            if request['proposal']['leg']=='TAKE_PROFIT':
+                self.v.t+=1
+                row=self.v.orders['1002'];row['order']['timestamp']=self.v.t-1
+                row.update(status='triggered',statusTimestamp=self.v.t)
+                self.v.fill('1002','20')
+                row['order']['sz']='100'  # Original orderStatus parent survives.
+                live.append({**deepcopy(row['order']), 'sz':'80','isTrigger':False,
+                    'triggerPx':'0','triggerCondition':'Triggered',
+                    'timestamp':row['statusTimestamp']})
+            return reply
+        def observed(kind,account,**kwargs):
+            result=read(kind,account,**kwargs)
+            if kind=='frontendOpenOrders':result+=deepcopy(live)
+            return result
+        with patch.object(self.v,'send',side_effect=activate),patch.object(self.v,'read',side_effect=observed):
+            self.cycle()
+            request_id=self.store.load(self.bucket)['pending']
+            self.assertNotIn('1002',self.store.load(self.bucket)['bindings'][0]['orders']['TAKE_PROFIT'])
+            self.cycle(False)
+            state=self.store.load(self.bucket)
+            self.assertIsNone(state['pending'])
+            self.assertEqual(self.store.request(request_id)['phase'],'OBSERVED')
+            take=next(o for o in state['evidence']['snapshot']['open_orders'] if o['oid']=='1002')
+            self.assertEqual((take['order_type'],take['quantity'],take['trigger_price']),
+                ('TRIGGERED_TP_LIMIT','80',None))
+            self.cycle();self.cycle(False)
+        self.assertEqual(self.v.requests[-1]['proposal']['operation'],'MODIFY_EXIT')
+        self.assertEqual((self.v.requests[-1]['proposal']['leg'],self.v.requests[-1]['proposal']['old_oid']),('STOP','1001'))
+        self.assertEqual(self.v.sent,4)
+        view=self.remaining()[0]
+        self.assertEqual((view['remaining_quantity'],view['stop_quantity_observed'],
+                          view['take_profit_quantity_observed']),('80','80','80'))
+        self.assertFalse(view['issues']);self.assertFalse(view['closure_verified'])
+        self.assertEqual(self.store.request(request_id)['attempts'],1)
     def test_resize_is_one_venue_action_and_recomputes_later_partial_fill(self):
         self.protect();self.v.fill('1000','20');self.cycle()
         self.assertEqual(self.v.requests[-1]['proposal']['operation'],'MODIFY_EXIT')

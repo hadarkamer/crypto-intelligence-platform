@@ -251,6 +251,66 @@ def terminal_certificates(bindings, previous):
     return certificates
 
 
+def triggered_take_profit(binding, leg, oid, order, inventory, fills, original,
+                          filled, activation_at, end):
+    """Prove the venue's trigger-parent -> same-OID resting limit transition.
+
+    orderStatus retains the original trigger, while frontendOpenOrders describes
+    its live limit after activation. Neither view alone proves live coverage or
+    a fill. Keep the absent live trigger explicit instead of restoring the old
+    trigger metadata. This adapter never accepts an entry or a market stop as
+    a resting take-profit, nor discovers another order by coin/client id.
+    """
+    target=life.number(binding['prices']['take_profit'],positive=True)
+    if (leg!='TAKE_PROFIT' or order.get('orderType')!='Take Profit Limit'
+            or order.get('isTrigger') is not True
+            or order.get('isPositionTpsl',False) is not False
+            or life.number(order.get('triggerPx'),positive=True)!=target
+            or life.number(order.get('limitPx'),positive=True)!=target
+            or life.number(order.get('sz'),positive=True)!=original):
+        raise SyncError('TRIGGERED_TAKE_ORIGINAL_TERMS_MISMATCH')
+    cloid=life.ident(order.get('cloid'),r'0x[0-9a-f]{32}')
+    placed=life.moment(order.get('timestamp'))
+    if placed>activation_at:
+        raise SyncError('TRIGGERED_TAKE_ACTIVATION_TIME_INVALID')
+    own_fills=[row for row in fills if row['oid']==oid]
+    if any(not activation_at<=row['at_ms']<=end for row in own_fills):
+        raise SyncError('TRIGGERED_TAKE_FILL_TIME_INVALID')
+    actual=inventory.get(oid)
+    if actual is None:
+        # A trigger event is not a close. Exact original-size fills, the
+        # independently complete live inventory, and two agreeing collection
+        # passes prove completion. Its real last-fill time is the terminal
+        # evidence time; the earlier trigger event is never a fill timestamp.
+        if filled!=original or not own_fills:
+            raise SyncError('ORDER_ACTIVATION_UNRESOLVED')
+        return dict(account=life.address(binding['account']),symbol=binding['symbol'],oid=oid,
+                    state='FILLED',filled_quantity=life.text(filled),
+                    at_ms=max(row['at_ms'] for row in own_fills))
+    if (actual.get('cloid')!=cloid
+            or actual.get('isTrigger') is not False
+            or actual.get('isPositionTpsl',False) is not False
+            or actual.get('triggerCondition')!='Triggered'
+            or life.number(actual.get('triggerPx'))!=0
+            or life.moment(actual.get('timestamp'))!=activation_at
+            or actual.get('orderType')!='Take Profit Limit'
+            or actual.get('coin')!=order.get('coin')
+            or actual.get('side')!=order.get('side')
+            or actual.get('reduceOnly') is not True
+            or life.number(actual.get('origSz'),positive=True)!=original
+            or life.number(actual.get('limitPx'),positive=True)!=target):
+        raise SyncError('TRIGGERED_TAKE_LIVE_TERMS_MISMATCH')
+    remaining=life.number(actual.get('sz'),positive=True)
+    with localcontext() as ctx:
+        ctx.prec=80
+        if remaining+filled!=original:
+            raise SyncError('OPEN_ORDER_HISTORY_INCOMPLETE')
+    return dict(account=life.address(binding['account']),symbol=binding['symbol'],oid=oid,
+        quantity=actual['sz'],price=actual['limitPx'],trigger_price=None,
+        side=actual['side'],reduce_only=True,state='ACTIVE',
+        order_type='TRIGGERED_TP_LIMIT')
+
+
 def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=(),
             reuse_verified_terminals=False):
     account,symbol = life.validate_snapshot(previous)
@@ -313,6 +373,19 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
         original = life.number(order.get('origSz'),positive=True)
         filled = totals.get(oid,Decimal(0))
         if filled > original: raise SyncError('FILLS_EXCEED_ORIGINAL_SIZE')
+        if status=='triggered':
+            if oid in plain:
+                raise SyncError('REGISTERED_PLAIN_TP_TERMS_MISMATCH')
+            value=triggered_take_profit(binding,leg,oid,order,inventory,fills,
+                                        original,filled,stamp,end)
+            if value['state']=='ACTIVE':
+                if oid in old_terminal:raise SyncError('TERMINAL_ORDER_BECAME_ACTIVE')
+                opens.append(value)
+            else:
+                if oid in old_terminal and old_terminal[oid]!=value:
+                    raise SyncError('TERMINAL_FACT_CHANGED')
+                terminals.append(value)
+            continue
         state = 'FILLED' if status=='filled' else 'CANCELED' if status in CANCELED else 'REJECTED' if status in REJECTED else None
         if state:
             if oid in inventory: raise SyncError('OBSERVATION_CHANGED_RETRY')
@@ -323,7 +396,16 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
                          filled_quantity=life.text(filled),at_ms=stamp)
             if oid in old_terminal:
                 old = old_terminal[oid]
-                if (old['state']!=state or old['at_ms']!=stamp
+                # Trigger-parent status can later converge to 'filled'. A
+                # durable full-fill certificate timed at the real last fill
+                # remains immutable when the venue publishes a later status
+                # timestamp for the same completed quantity. Never extend the
+                # evidence clock, replace a canceled/rejected fact, or accept
+                # a status that precedes its already proven execution.
+                final_fill_time=(state=='FILLED' and old['state']=='FILLED'
+                    and old['at_ms']==last_fill.get(oid,0)
+                    and old['at_ms']<=stamp and filled==original)
+                if (old['state']!=state or (old['at_ms']!=stamp and not final_fill_time)
                         or life.number(old['filled_quantity'])!=filled):
                     raise SyncError('TERMINAL_FACT_CHANGED')
                 value = deepcopy(old)

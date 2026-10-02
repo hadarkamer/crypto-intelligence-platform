@@ -24,6 +24,8 @@ def post_worker_init(worker):
     if mode == 'long_stream_testnet_v1':
         from hl_testnet_runtime.long_stream_runtime import start
         start()
+        from hl_testnet_runtime.single_trial_controller import start as start_single_trial
+        start_single_trial()
         return
     if mode == 'filled_card_controlled_v1':
         # Mutually exclusive future release: never start old monitors alongside it.
@@ -69,6 +71,8 @@ def post_worker_init(worker):
 
 
 def worker_exit(server, worker):
+    from hl_testnet_runtime.single_trial_controller import stop as stop_single_trial
+    stop_single_trial()
     from hl_testnet_runtime.pending_cancel_monitor import stop
     stop()
     from hl_testnet_runtime.card_sync import stop as stop_card_sync

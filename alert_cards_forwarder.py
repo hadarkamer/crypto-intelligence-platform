@@ -23,6 +23,22 @@ _SCOPES = set()
 DELAY = 30
 MAX_PER_PASS = 16
 MAX_BUFFER = 8192
+RECEIVER_RETRY_REASONS = frozenset(('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+    'TESTNET_REQUEST_BUDGET_BUSY','TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',
+    'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE',
+    'TESTNET_REQUEST_BUDGET_SCHEMA_REQUIRES_REVIEW',
+    'TESTNET_REQUEST_BUDGET_WRONG_DATABASE',
+    'METADATA_UNAVAILABLE','RECORD_STORE_UNAVAILABLE'))
+
+
+class ReceiverUnavailable(wire.WireError):
+    """No acknowledgement: retry unchanged data, reporting fixed reasons only."""
+    def __init__(self,reason):
+        allowed=RECEIVER_RETRY_REASONS | frozenset(('RECEIVER_RESPONSE_TOO_LARGE',
+            'RECEIVER_HTTP_OTHER',*(f'RECEIVER_HTTP_{n}' for n in
+            (400,403,404,405,413,415,429,500,502,503,504))))
+        self.reason=reason if isinstance(reason,str) and reason in allowed else 'CARD_DELIVERY_UNAVAILABLE'
+        super().__init__('CARD_RECEIVER_UNAVAILABLE')
 
 
 def config(env):
@@ -107,8 +123,22 @@ def post_record(value, key):
             'X-Card-Timestamp': stamp, 'X-Card-Signature': wire.signature(key, stamp, raw)})
         reply = conn.getresponse()
         payload = reply.read(2049)
-        if reply.status != 200 or len(payload) > 2048:
-            raise wire.WireError('CARD_RECEIVER_UNAVAILABLE')
+        if len(payload) > 2048:
+            raise ReceiverUnavailable('RECEIVER_RESPONSE_TOO_LARGE')
+        if reply.status != 200:
+            reason=('RECEIVER_HTTP_'+str(reply.status) if reply.status in
+                    (400,403,404,405,413,415,429,500,502,503,504)
+                    else 'RECEIVER_HTTP_OTHER')
+            if reply.status==503:
+                try:
+                    error=wire.decoded(payload)
+                    if (isinstance(error,dict) and error.get('status')=='RECORDING_UNAVAILABLE_RETRY'
+                            and isinstance(error.get('reason'),str)
+                            and error['reason'] in RECEIVER_RETRY_REASONS):
+                        reason=error['reason']
+                except wire.WireError:
+                    pass
+            raise ReceiverUnavailable(reason)
         out = wire.decoded(payload)
         if (not isinstance(out, dict) or out.get('receipt_id') != hashlib.sha256(raw).hexdigest()
                 or out.get('record_only') is not True
@@ -135,7 +165,8 @@ class Forwarder:
         report = dict(mode=MODE, status='FORWARD_PASS_COMPLETED', recorded=0, duplicates=0,
             rejected=0, deferred=0, attempted=0, source_records_changed=0,
             order_requests_sent=0, observed_at_utc=now.isoformat(), scopes=len(scopes),
-            source_retention_seconds=3600, prior_process_coverage_verified=False)
+            source_retention_seconds=3600, prior_process_coverage_verified=False,
+            retry_reasons={})
         self.cycles += 1
         if started-(self.last_ok if self.last_ok is not None else self.started) >= 3600:
             self.coverage_gap = True
@@ -177,9 +208,12 @@ class Forwarder:
                 report[{'RECORDED': 'recorded', 'DUPLICATE': 'duplicates', 'REJECTED': 'rejected'}[status]] += 1
                 self.pending.pop(identity)
                 self.retry_after.pop(identity, None)
-            except Exception:
+            except Exception as exc:
                 self.retry_after[identity] = time.monotonic()+60
                 report['deferred'] += 1
+                reason=(exc.reason if isinstance(exc,ReceiverUnavailable)
+                        else 'CARD_DELIVERY_UNAVAILABLE')
+                report['retry_reasons'][reason]=report['retry_reasons'].get(reason,0)+1
         self.done = {k: v for k, v in self.done.items() if (now-v).total_seconds() < 7200}
         # Removing an optimization cache can cause duplicate DATA requests only.
         if len(self.done) > MAX_BUFFER:
