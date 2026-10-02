@@ -169,12 +169,15 @@ resource budget and individual part caps. Required fields are:
 The example is documentation, not an executed or approved research declaration.
 It does not claim that those parts fit their caps or contain sufficient parents.
 
-## Remaining integration
+## Outcome execution layer
 
 The existing [local experiment store](NO_HORIZON_EXPERIMENT_PLAN_V1.md) remains a
 single-export runner. Do not stitch a greater-than-256-row export into it or
-submit parts as separate experiments and combine their gates. The next layer
-must freeze this root identity, persist global representatives and the complete
-scope denominator, then replay outcomes in bounded resumable work under the
-same cutoff and unchanged evidence gate. Earlier research outcomes remain
-historical attempts, not additional observations silently added to this cohort.
+submit parts as separate experiments and combine their gates. The separate
+[global outcome coordinator](NO_HORIZON_GLOBAL_COHORT_OUTCOMES_V1.md) now freezes
+this root identity, persists global representatives and the complete scope
+denominator, and reuses the existing local first-touch engine for bounded,
+resumable global-scope jobs under the same cutoff and unchanged evidence gate.
+The coverage API itself remains outcome-free; its receipt flags describe that
+layer. Earlier research outcomes remain historical attempts, not additional
+observations silently added to this cohort.
