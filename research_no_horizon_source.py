@@ -108,6 +108,26 @@ def _validate_row(row: Mapping[str, Any], *, start, end, cutoff, symbol) -> tupl
     return observation, formulas.evaluate_coin(observation)
 
 
+def _extraction_blockers(export, rows, receipt):
+    """Shared receipt checks; keep feature preflight and snapshot semantics equal."""
+    blockers = []
+    if receipt.get("transaction_mode") == "MANIFEST_ATTESTED_MULTI_READ_V1":
+        # The source belongs to one manifest snapshot; its payload was fetched
+        # using separate read-only transactions. Never equate those claims.
+        from research_no_horizon_manifest import validate_export_binding
+        try:
+            validate_export_binding(export)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            blockers.append("INVALID_MANIFEST_ATTESTED_SOURCE_EXTRACTION")
+    if (type(receipt.get("expected_accepted_rows")) is not int or receipt["expected_accepted_rows"] != len(rows)
+            or receipt.get("rows_complete") is not True or receipt.get("truncated") is not False
+            or receipt.get("expected_accepted_rows_exact",True) is not True
+            or receipt.get("candle_truncated",False) is not False
+            or receipt.get("transaction_mode") not in CONSISTENT_READS):
+        blockers.append("INCOMPLETE_OR_INCONSISTENT_SOURCE_EXTRACTION")
+    return blockers
+
+
 def build_snapshot(export: Mapping[str, Any], candidate_key: str, base_direction: str,
                    symbol: str, threshold_pct: Any) -> dict[str, Any]:
     """Build the existing replay schema; all unknown decisions remain blockers.
@@ -143,21 +163,7 @@ def build_snapshot(export: Mapping[str, Any], candidate_key: str, base_direction
     receipt = export.get("source_receipt")
     if not isinstance(receipt, Mapping):
         raise ValueError("SOURCE_EXTRACTION_RECEIPT_REQUIRED")
-    blockers = []
-    if receipt.get("transaction_mode") == "MANIFEST_ATTESTED_MULTI_READ_V1":
-        # The source belongs to one manifest snapshot; its payload was fetched
-        # using separate read-only transactions. Never equate those claims.
-        from research_no_horizon_manifest import validate_export_binding
-        try:
-            validate_export_binding(export)
-        except (ValueError, TypeError, KeyError, OverflowError):
-            blockers.append("INVALID_MANIFEST_ATTESTED_SOURCE_EXTRACTION")
-    if (type(receipt.get("expected_accepted_rows")) is not int or receipt["expected_accepted_rows"] != len(rows)
-            or receipt.get("rows_complete") is not True or receipt.get("truncated") is not False
-            or receipt.get("expected_accepted_rows_exact",True) is not True
-            or receipt.get("candle_truncated",False) is not False
-            or receipt.get("transaction_mode") not in CONSISTENT_READS):
-        blockers.append("INCOMPLETE_OR_INCONSISTENT_SOURCE_EXTRACTION")
+    blockers = _extraction_blockers(export, rows, receipt)
     cleaned, by_open = [], {}
     for raw in bars:
         if raw.get("route") != ARCHIVE_ROUTE or raw.get("symbol") != symbol:

@@ -36,6 +36,42 @@ cannot be treated as known non-matches.
 
 ## Execution and completeness are separate
 
+New submissions first run a whole-plan source/feature preflight. Each accepted
+source row is revalidated once using the existing captured-feature and
+three-valued predicate evaluator, then accounted for in every declared scope.
+Intake acceptance, feature availability and predicate decisibility are reported
+separately, including unavailable-feature reasons and original row identities.
+The preflight does not build entries, assign parents, replay prices or evaluate
+the research gate. Passing it is permission to proceed with those checks, not
+evidence of a qualified formula.
+
+The default admission policy, `REQUIRE_DECIDABLE_SOURCE_V1`, blocks the entire
+submission if extraction is incomplete or any selected scope has `UNKNOWN` or
+`UNKNOWN_SOURCE`. A ready scope does not run ahead of another blocked scope.
+Unavailable captured zeros are not valid neutral scores. A known false
+conjunct still makes `NO_MATCH` even when another condition is missing; unrelated
+missing models do not prevent evaluating a decidable selected predicate.
+
+The pure `preflight_source_features(export, scopes)` API returns a deterministic
+receipt with the complete scope list and a receipt hash. `prepare_submission`
+raises `SourcePreflightBlocked`, carrying that receipt, before any plan/job
+record is inserted. CLI submission checks before opening SQLite, so blocked
+submission does not create a database. The class constructor may already have
+initialized an empty local schema for a direct API caller.
+
+For explicitly diagnostic historical work only, submission can select
+`DIAGNOSTIC_ALLOW_INCOMPLETE_SOURCE_V1` using `allow_incomplete_source=True`
+or the CLI's `--allow-incomplete-source`. The policy and complete preflight
+receipt are frozen into the plan identity. There is no run-time override.
+Source blockers, unknown decisions, partial outcome interpretation and the
+existing qualification gate are unchanged. This preserves the ability to
+inspect partial historical evidence without silently treating it as complete.
+
+The SQLite schema version is unchanged. Historical reports remain readable;
+the existing implementation hash fence still rejects resuming an old plan with
+different code. Previously frozen source exports and outcome receipts are not
+rewritten by preflight or by the new admission defaults.
+
 Every report accounts for every declared scope, including work not yet run.
 A partial report is useful for progress, but cannot claim that its completed
 subset represents the full search.
@@ -97,10 +133,20 @@ The source export supplies the symbol and cutoff. These example declarations
 do not assert that either scope has evidence or passes its gate.
 
 ```bash
-python research_no_horizon_experiment_cli.py --database experiment.sqlite submit source.json --scopes scopes.json --plan-key declared-plan-v1
+python research_no_horizon_experiment_cli.py preflight source.json --scopes scopes.json --output source-preflight.json
+python research_no_horizon_experiment_cli.py --database experiment.sqlite submit source.json --scopes scopes.json --plan-key declared-plan-v1 --preflight-output admitted-source-preflight.json
 python research_no_horizon_experiment_cli.py --database experiment.sqlite run PLAN_ID --worker-id local-1 --scope-budget 1 --candle-budget 1024 --entry-budget 128 --batch-size 128
 python research_no_horizon_experiment_cli.py --database experiment.sqlite report PLAN_ID --output experiment-report.json
 ```
+
+`preflight` needs no database and writes its complete report even when source
+readiness is false: exit 0 means ready; exit 2 means blocked. Invalid global
+inputs also exit 2 without manufacturing a valid report. Existing outputs are
+never overwritten. `submit` performs its own single preflight; it does not
+trust a caller-supplied readiness receipt. On a source block it prints the full
+receipt, optionally saves it with `--preflight-output`, and exits 2 before any
+database access. The standalone command is for inspecting source readiness;
+it need not be run separately before every `submit`.
 
 Each `run` is bounded and returns; there is no background daemon. Repeating it
 continues persisted work. The candle budget is shared across that invocation's
@@ -116,8 +162,9 @@ Every output uses exclusive creation; an existing report is never overwritten.
 database by accident. Duplicate JSON keys and nonfinite JSON numbers are
 rejected at input.
 
-The source adapter currently revalidates captures and candidate evidence per
-scope. The child store also retains full snapshot payloads and indexed candles
+Admission preflight revalidates each capture once across the declared scopes.
+Downstream snapshot preparation still revalidates captures and candidate evidence
+per scope. The child store also retains full snapshot payloads and indexed candles
 for each distinct child snapshot. Repeated scopes therefore cost preparation
 time and disk space even when their underlying prices overlap. Scope-count,
 input-size and execution limits do not make that cost disappear. This slice

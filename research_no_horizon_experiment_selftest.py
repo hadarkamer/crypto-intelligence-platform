@@ -119,7 +119,7 @@ class Experiments(unittest.TestCase):
         self.assertEqual(absent["emitted_opportunities"], 0)
         self.assertTrue(result["source_coverage_complete"])
         self.data = fixture(unavailable=True)
-        unknown = self.finish(self.submit())
+        unknown = self.finish(self.submit(allow_incomplete_source=True))
         self.assertTrue(unknown["all_scopes_processed"])
         self.assertTrue(unknown["computation_complete"])
         self.assertFalse(unknown["source_coverage_complete"])
@@ -129,7 +129,7 @@ class Experiments(unittest.TestCase):
 
     def test_missing_raw_source_is_preserved_not_omitted(self):
         self.data["source_rows"][0]["stored_source"] = None
-        report = self.finish(self.submit())
+        report = self.finish(self.submit(allow_incomplete_source=True))
         self.assertEqual(report["scopes"][0]["source_counts"]["UNKNOWN_SOURCE"], 1)
         self.assertFalse(report["source_coverage_complete"])
         self.assertTrue(report["all_scopes_processed"])
@@ -139,7 +139,7 @@ class Experiments(unittest.TestCase):
             with self.subTest(key=key):
                 self.data = deepcopy(self.original)
                 self.data[key] = [None]
-                report = self.finish(self.submit())
+                report = self.finish(self.submit(allow_incomplete_source=True))
                 self.assertEqual(len(report["scopes"]), 1)
                 self.assertEqual(report["scopes"][0]["status"], "INPUT_BLOCKED")
                 self.assertIsNone(report["scopes"][0]["gate"])
@@ -255,10 +255,24 @@ class Experiments(unittest.TestCase):
             self.assertIsNone(connection.execute("SELECT 1 FROM sqlite_master WHERE name='local_jobs'").fetchone())
 
     def test_inverse_scope_reports_base_and_effective_directions(self):
-        candidate = next(row for row in experiment.formulas.catalog_records() if row["supported"] and row["orientation"] == "INVERSE")
+        candidate = next(row for row in experiment.formulas.catalog_records()
+            if row["candidate_key"] == "captured-question-search-v3-experimental-binding:INVERSE:FUTURES_CVD_TOTAL_65")
         report = self.store.report(self.submit([scope("LONG", candidate=candidate["candidate_key"])]))
         self.assertEqual(report["scopes"][0]["base_direction"], "LONG")
         self.assertEqual(report["scopes"][0]["analysis_direction"], "SHORT")
+
+    def test_mutated_prepared_submission_cannot_be_persisted(self):
+        for target in ("export", "identity"):
+            with self.subTest(target=target):
+                prepared = experiment.prepare_submission(self.data, [scope()])
+                if target == "export":
+                    prepared.export["source_rows"] = []
+                else:
+                    prepared.identity["source_admission"]["policy"] = "changed"
+                with self.assertRaisesRegex(ValueError, "integrity/implementation"):
+                    self.store._submit_prepared(prepared)
+        self.assertEqual(self.store.connection.execute("SELECT COUNT(*) FROM experiment_plans").fetchone()[0], 0)
+        self.assertEqual(self.store.connection.execute("SELECT COUNT(*) FROM local_jobs").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

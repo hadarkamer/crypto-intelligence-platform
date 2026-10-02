@@ -8,6 +8,7 @@ is terminal for this immutable plan; corrected input requires a new plan.
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 from datetime import timedelta
 import hashlib
 import json
@@ -26,6 +27,26 @@ MAX_SCOPES = 64
 MAX_EXPANDED_BYTES = 256 * 1024 * 1024
 _AUTHORITY = {"runtime_authorized": False, "telegram_authorized": False, "trading_authorized": False}
 _TERMINAL = {"COMPLETE", "BLOCKED", "INPUT_BLOCKED"}
+REQUIRE_DECIDABLE_SOURCE = "REQUIRE_DECIDABLE_SOURCE_V1"
+DIAGNOSTIC_ALLOW_INCOMPLETE_SOURCE = "DIAGNOSTIC_ALLOW_INCOMPLETE_SOURCE_V1"
+
+
+class SourcePreflightBlocked(ValueError):
+    """All declared source decisions, preserved before any job is created."""
+    def __init__(self, receipt):
+        self.receipt = receipt
+        super().__init__("SOURCE_FEATURE_PREFLIGHT_BLOCKED")
+
+
+@dataclass(frozen=True)
+class _PreparedSubmission:
+    export: dict
+    identity: dict
+    plan_id: str
+
+    @property
+    def receipt(self):
+        return self.identity["source_admission"]["preflight_receipt"]
 
 
 def _implementation() -> dict:
@@ -110,6 +131,31 @@ def _scopes(scopes) -> list[dict]:
     return sorted(normalized, key=lambda item: (item["candidate_key"], item["base_direction"], item["threshold_pct"]))
 
 
+def prepare_submission(export, scopes, *, allow_incomplete_source=False):
+    """One whole-plan feature preflight, before SQLite or outcome processing.
+
+    Diagnostic admission is explicit and frozen; it never changes source
+    decisions or grants research qualification. Parent/entry/path validation
+    remains with the existing source adapter and child runner.
+    """
+    from research_no_horizon_preflight import preflight_source_features
+
+    if type(allow_incomplete_source) is not bool:
+        raise ValueError("EXPLICIT_BOOLEAN_DIAGNOSTIC_POLICY_REQUIRED")
+    frozen, size = _admit_export(export)
+    normalized = _scopes(scopes)
+    if size * len(normalized) > MAX_EXPANDED_BYTES:
+        raise ValueError("EXPERIMENT_EXPANDED_BYTE_LIMIT_EXCEEDED")
+    receipt = preflight_source_features(frozen, scopes)
+    if not receipt["ready_for_outcome_research"] and not allow_incomplete_source:
+        raise SourcePreflightBlocked(receipt)
+    policy = DIAGNOSTIC_ALLOW_INCOMPLETE_SOURCE if allow_incomplete_source else REQUIRE_DECIDABLE_SOURCE
+    identity = {"source_export_sha256": contracts.digest(frozen), "source_canonical_bytes": size,
+        "symbol": frozen["symbol"], "scopes": normalized, "versions": _implementation(),
+        "source_admission": {"policy": policy, "preflight_receipt": receipt}}
+    return _PreparedSubmission(frozen, identity, contracts.digest(identity))
+
+
 class LocalExperimentStore:
     """Composition over the fenced child store; only explicit linked jobs run.
 
@@ -176,17 +222,26 @@ class LocalExperimentStore:
     def __exit__(self, *_):
         self.close()
 
-    def submit_plan(self, export, scopes, *, plan_key=None) -> str:
+    def submit_plan(self, export, scopes, *, plan_key=None, allow_incomplete_source=False) -> str:
+        prepared = prepare_submission(export, scopes, allow_incomplete_source=allow_incomplete_source)
+        return self._submit_prepared(prepared, plan_key=plan_key)
+
+    def _submit_prepared(self, prepared, *, plan_key=None) -> str:
+        """Persist the internally prepared inputs without repeating row checks.
+
+        The CLI prepares before opening SQLite; the public submit_plan method
+        performs the same check. This is not an API for imported audit reports.
+        """
         if plan_key is not None:
             child._name(plan_key, "plan_key")
-        frozen, size = _admit_export(export)
-        normalized = _scopes(scopes)
-        if size * len(normalized) > MAX_EXPANDED_BYTES:
-            raise ValueError("EXPERIMENT_EXPANDED_BYTE_LIMIT_EXCEEDED")
+        if not isinstance(prepared, _PreparedSubmission):
+            raise ValueError("INTERNAL_PREPARED_SUBMISSION_REQUIRED")
+        frozen, identity, plan_id = prepared.export, prepared.identity, prepared.plan_id
         source_sha = contracts.digest(frozen)
-        identity = {"source_export_sha256": source_sha, "source_canonical_bytes": size,
-            "symbol": frozen["symbol"], "scopes": normalized, "versions": _implementation()}
-        plan_id = contracts.digest(identity)
+        if (contracts.digest(identity) != plan_id or identity["source_export_sha256"] != source_sha
+                or identity["versions"] != _implementation()):
+            raise ValueError("prepared submission integrity/implementation mismatch")
+        normalized = identity["scopes"]
         with self.children._write():
             if plan_key is not None:
                 named = self.connection.execute("SELECT plan_id FROM experiment_plans WHERE plan_key=?", (plan_key,)).fetchone()
