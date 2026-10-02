@@ -565,6 +565,111 @@ class ObservationCoordinationTests(NoExternal):
             controller.refresh(state['bucket'])
             reads.assert_called_once()
 
+    def quiet_inflight(self,*,age=15001,started=100.0,now=100.0):
+        controller,state,result,current=self.protected_controller()
+        controller.venue.t=T+age
+        result['evidence']['snapshot']['at_ms']=controller.venue.t
+        clock=[now]
+        with patch.object(m.time,'monotonic',return_value=started):
+            flight=m._ObservationFlight(state['revision'],(1,1),False,
+                state=state,now_ms=controller.venue.t)
+        controller._observation_flights[state['bucket']]=[flight]
+        return controller,state,result,current,flight,clock
+
+    def test_quiet_due_proof_joins_normal_completion_at_600ms_without_second_read(self):
+        controller,state,result,current,flight,clock=self.quiet_inflight()
+        waits=[]
+        def wait(seconds):
+            waits.append(seconds);clock[0]+=seconds
+            if clock[0]>=100.6:
+                current[0]=deepcopy(result);flight.result=deepcopy(result);flight.done.set()
+            return flight.done.is_set()
+        with patch.object(m.time,'monotonic',side_effect=lambda:clock[0]), \
+                patch.object(flight.done,'wait',side_effect=wait), \
+                patch.object(controller,'_refresh_once',side_effect=AssertionError('NO_DUPLICATE_READ')):
+            self.assertEqual(controller.refresh(state['bucket'],emergency=True),result)
+        self.assertGreater(sum(waits),.5)
+        self.assertLessEqual(sum(waits),1.0)
+        self.assertTrue(all(0<seconds<=.05 for seconds in waits))
+        self.assertEqual(result['evidence']['snapshot']['at_ms'],T+15001)
+        self.assertEqual(controller.venue.sent,0)
+        controller._observation_flights.clear()
+
+    def test_stalled_quiet_flight_uses_original_one_second_deadline_for_late_caller(self):
+        controller,state,result,current,flight,clock=self.quiet_inflight(now=100.9)
+        waits=[]
+        def wait(seconds):waits.append(seconds);clock[0]+=seconds;return False
+        def collect(bucket,prior):current[0]=deepcopy(result);return deepcopy(result)
+        with patch.object(m.time,'monotonic',side_effect=lambda:clock[0]), \
+                patch.object(flight.done,'wait',side_effect=wait), \
+                patch.object(controller,'_refresh_once',side_effect=collect) as reads:
+            self.assertEqual(controller.refresh(state['bucket'],emergency=True),result)
+            reads.assert_called_once()
+        self.assertAlmostEqual(sum(waits),.1,places=6)
+        self.assertEqual(flight.started,100.0)
+        self.assertEqual(controller._observation_flights[state['bucket']],[flight])
+        controller._observation_flights.clear()
+
+    def test_hint_or_durable_change_interrupts_quiet_join_before_original_urgent_bound(self):
+        for changed in ('hint','gap','durable-overdue-fill'):
+            with self.subTest(changed=changed):
+                controller,state,result,current,flight,clock=self.quiet_inflight()
+                waits=[];observed=[]
+                def wait(seconds):
+                    waits.append(seconds);clock[0]+=seconds
+                    if clock[0]>=100.05:
+                        if changed=='hint':controller.venue.fill_wakeups.revision=2
+                        elif changed=='gap':controller.venue.fill_wakeups.healthy=False
+                        else:
+                            current[0]=state_from_case(q='100',stop='40',take='100')
+                            current[0]['revision']=state['revision']+1
+                    return False
+                def collect(bucket,prior):
+                    observed.append(deepcopy(prior));current[0]=deepcopy(result)
+                    return deepcopy(result)
+                with patch.object(m.time,'monotonic',side_effect=lambda:clock[0]), \
+                        patch.object(flight.done,'wait',side_effect=wait), \
+                        patch.object(controller,'_refresh_once',side_effect=collect) as reads:
+                    controller.refresh(state['bucket'],emergency=True)
+                    reads.assert_called_once()
+                self.assertEqual(waits,[.05])
+                if changed=='durable-overdue-fill':
+                    self.assertEqual(observed[0]['revision'],state['revision']+1)
+                    self.assertEqual(observed[0]['evidence']['snapshot']['position_quantity'],'100')
+                else:self.assertEqual(observed[0]['revision'],state['revision'])
+                controller._observation_flights.clear()
+
+    def test_quiet_classification_never_extends_shorter_or_uncertain_join(self):
+        for invalid in ('short-deadline','already-due','dirty','working-entry',
+                'pending','emergency','missing-stop','missing-take','stale','future'):
+            with self.subTest(invalid=invalid):
+                controller,state,result,current,flight,clock=self.quiet_inflight()
+                wait_ms=250
+                if invalid=='short-deadline':wait_ms=100
+                elif invalid=='already-due':wait_ms=0
+                elif invalid=='dirty':controller.venue.fill_wakeups.dirty=('DOGE',)
+                elif invalid in ('working-entry','missing-stop','missing-take'):
+                    kw={'working-entry':dict(q='40',stop='40',take='40'),
+                        'missing-stop':dict(q='100',stop='40',take='100'),
+                        'missing-take':dict(q='100',stop='100',take='40')}[invalid]
+                    current[0]=state_from_case(**kw)
+                elif invalid=='pending':current[0]['pending']='a'*64
+                elif invalid=='emergency':current[0]['emergency']={'phase':'ACTIVE'}
+                elif invalid=='stale':controller.venue.t=T+17001
+                else:controller.venue.t=T-1
+                # Match the exact changed basis where possible: suppression is
+                # still forbidden by its work/coverage/clock classification.
+                flight.basis_digest=life.digest(current[0])
+                waits=[]
+                def wait(seconds):waits.append(seconds);clock[0]+=seconds;return False
+                with patch.object(m.time,'monotonic',side_effect=lambda:clock[0]), \
+                        patch.object(flight.done,'wait',side_effect=wait), \
+                        patch.object(controller,'_refresh_once',return_value=deepcopy(result)) as reads:
+                    controller.refresh(state['bucket'],emergency=True,emergency_wait_ms=wait_ms)
+                    reads.assert_called_once()
+                self.assertEqual(waits,[wait_ms/1000])
+                controller._observation_flights.clear()
+
     def joined(self,controller,state,result,current,*,failure=None,change=None):
         started=threading.Event();release=threading.Event();waiting=threading.Event()
         calls=[]
