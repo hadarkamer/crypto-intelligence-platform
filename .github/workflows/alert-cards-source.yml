@@ -1,5 +1,11 @@
 name: Data Only Alert Card Forwarding
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'alert_cards_*.py'
+      - 'manual_formula_alert_delivery.py'
+      - '.github/workflows/alert-cards-source.yml'
   push:
     branches: [main, alert-cards-source-v1]
     paths:
