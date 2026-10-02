@@ -209,12 +209,22 @@ class HalfThresholdDatabaseTests(fx.NoExternal):
         self.assertEqual(self.store.load(self.bucket)['pending'],rid)
 
     def test_lost_begin_commit_ack_never_reaches_cancel_sender(self):
-        self.entry();self.mark='10.08';before=self.v.sent;real=self.store.begin
-        def lost(*args,**kwargs):real(*args,**kwargs);raise JournalError('SIMULATED_COMMIT_ACK_LOSS')
-        with patch.object(self.store,'begin',side_effect=lost):
-            with self.assertRaises(JournalError):self.cycle()
+        self.entry();self.mark='10.08';before=self.v.sent;real=self.store.prepare_and_begin
+        def lost(*args,**kwargs):
+            real(*args,**kwargs)
+            raise JournalError('SIMULATED_COMMIT_ACK_LOSS')
+        # Inject immediately after the actual atomic attempt commit, rather
+        # than the legacy split begin path that the controller no longer uses.
+        with patch.object(self.store,'prepare_and_begin',side_effect=lost) as begin:
+            with self.assertRaisesRegex(JournalError,'^SIMULATED_COMMIT_ACK_LOSS$'):
+                self.cycle()
+            begin.assert_called_once()
         self.assertEqual(self.v.sent,before)
-        rid=self.store.load(self.bucket)['pending'];self.assertEqual(self.store.request(rid)['phase'],'OUTCOME_UNKNOWN')
+        rid=self.store.load(self.bucket)['pending'];request=self.store.request(rid)
+        self.assertEqual(request['phase'],'OUTCOME_UNKNOWN')
+        self.assertEqual(request['attempts'],1)
+        self.assertIsNotNone(request['nonce'])
+        self.assertEqual(request['proposal']['operation'],half.OPERATION)
 
     def test_partial_fill_before_unsent_cancel_yields_to_protection_without_cancel(self):
         rid=self.prepared_cancel();self.v.fill('1000','40');self.cycle()

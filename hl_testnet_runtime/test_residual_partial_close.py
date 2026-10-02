@@ -211,9 +211,11 @@ class PartialResidualDatabaseTests(NoExternal):
             return None  # No evidence that the venue applied the amendment.
         with patch.object(self.v,'send',side_effect=unknown):self.cycle()
         state=self.store.load(self.bucket);rid=state['pending'];before=self.v.sent
-        self.v.fill('1002','80');out=self.cycle(False)
-        self.assertEqual(out['status'],'OUTCOME_UNKNOWN')
+        self.v.fill('1002','80')
+        with self.assertRaisesRegex(DispatchError,'^OUTCOME_UNRESOLVED_NO_NEW_REQUEST$'):
+            self.cycle(False)
         self.assertEqual(self.store.load(self.bucket)['pending'],rid)
+        self.assertEqual(self.store.request(rid)['phase'],'OUTCOME_UNKNOWN')
         self.assertEqual(self.store.request(rid)['attempts'],1)
         self.assertEqual(self.v.sent,before)
 
