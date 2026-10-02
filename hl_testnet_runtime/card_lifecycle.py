@@ -15,6 +15,11 @@ ROLES = {'long_account': 'LONG', 'short_account': 'SHORT'}
 LEGS = ('ENTRY', 'TAKE_PROFIT', 'STOP')
 
 
+def order_legs(binding):
+    """Manual exits are observed history, never a stop or submission leg."""
+    return LEGS + (('MANUAL_EXIT',) if 'MANUAL_EXIT' in binding['orders'] else ())
+
+
 class LifecycleError(ValueError):
     """Fixed codes only; do not interpolate private input."""
 
@@ -119,8 +124,9 @@ def validate_bindings(bindings):
         e, s, t = [number(b['prices'][key], positive=True) for key in ('entry', 'stop', 'take_profit')]
         if not (s < e < t if b['side'] == 'LONG' else t < e < s):
             raise LifecycleError('INVALID_PRICE_ORDER')
-        shape(b['orders'], 'ENTRY TAKE_PROFIT STOP')
-        for leg in LEGS:
+        shape(b['orders'], 'ENTRY TAKE_PROFIT STOP' +
+              (' MANUAL_EXIT' if 'MANUAL_EXIT' in b['orders'] else ''))
+        for leg in order_legs(b):
             values = b['orders'][leg]
             if not isinstance(values, list) or (leg == 'ENTRY' and not values):
                 raise LifecycleError('ENTRY_ID_REQUIRED')
@@ -221,7 +227,7 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
     selected = sorted((b for b in bindings if address(b['account']) == account and b['symbol'] == symbol), key=lambda b: b['card_id'])
     if not selected:
         raise LifecycleError('BUCKET_NOT_REGISTERED')
-    bucket_links = {oid: (b['card_id'], leg) for b in selected for leg in LEGS for oid in b['orders'][leg]}
+    bucket_links = {oid: (b['card_id'], leg) for b in selected for leg in order_legs(b) for oid in b['orders'][leg]}
     issues = set()
     if not 0 <= now_ms - snapshot['at_ms'] <= max_age_ms: issues.add('STALE_OR_FUTURE_SNAPSHOT')
     if not snapshot['history_complete']: issues.add('FILL_HISTORY_INCOMPLETE')
@@ -237,9 +243,9 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
         ctx.prec = 80
         total_remaining = Decimal(0)
         for b in selected:
-            local = set(); quantities = {leg: Decimal(0) for leg in LEGS}
-            cash = {leg: Decimal(0) for leg in LEGS}; fees = {}; filled_by_oid = {}
-            own = {oid: leg for leg in LEGS for oid in b['orders'][leg]}
+            local = set(); quantities = {leg: Decimal(0) for leg in LEGS + ('MANUAL_EXIT',)}
+            cash = {leg: Decimal(0) for leg in quantities}; fees = {}; filled_by_oid = {}
+            own = {oid: leg for leg in order_legs(b) for oid in b['orders'][leg]}
             entry_side = 'B' if b['side'] == 'LONG' else 'A'
             for f in fills:
                 if f['oid'] not in own: continue
@@ -249,7 +255,7 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
                 quantities[leg] += q; cash[leg] += q * px
                 fees[f['fee_token']] = fees.get(f['fee_token'], Decimal(0)) + number(f['fee'], signed=True)
                 filled_by_oid[f['oid']] = filled_by_oid.get(f['oid'], Decimal(0)) + q
-            entered = quantities['ENTRY']; exited = quantities['TAKE_PROFIT'] + quantities['STOP']
+            entered = quantities['ENTRY']; exited = quantities['TAKE_PROFIT'] + quantities['STOP'] + quantities['MANUAL_EXIT']
             remaining = entered - exited
             if entered > number(b['planned_quantity']): local.add('ENTRY_EXCEEDS_PLAN')
             if remaining < 0: local.add('EXIT_EXCEEDS_CARD_QUANTITY')
@@ -263,6 +269,9 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
             own_opens = sorted(set(own) & set(opens))
             for oid in own_opens:
                 o = opens[oid]; leg = own[oid]
+                if leg == 'MANUAL_EXIT':
+                    local.add('MANUAL_EXIT_NOT_TERMINAL')
+                    continue
                 side = entry_side if leg == 'ENTRY' else ('A' if entry_side == 'B' else 'B')
                 valid = o['side'] == side and o['reduce_only'] == (leg != 'ENTRY')
                 if leg == 'ENTRY':
@@ -298,7 +307,7 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
             if all_terminal and not own_opens and remaining == 0:
                 state = 'CLOSED' if entered > 0 else 'CANCELED_WITHOUT_FILL'
             if any(token != 'USDC' for token in fees): local.add('NON_USDC_FEE_REQUIRES_CONVERSION')
-            gross = (cash['TAKE_PROFIT'] + cash['STOP'] - cash['ENTRY']) * (1 if b['side'] == 'LONG' else -1)
+            gross = (cash['TAKE_PROFIT'] + cash['STOP'] + cash['MANUAL_EXIT'] - cash['ENTRY']) * (1 if b['side'] == 'LONG' else -1)
             views.append(dict(card_id=b['card_id'], role=b['role'], state=state,
                 entry_quantity=text(entered), exit_quantity=text(exited), remaining_quantity=text(remaining),
                 issues=sorted(local), stop_quantity_observed=text(coverage['STOP']),
@@ -310,6 +319,9 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
         if number(snapshot['position_quantity'], signed=True) != total_remaining:
             issues.add('POSITION_DOES_NOT_MATCH_CARDS')
     for v in views:
+        binding = next(b for b in selected if b['card_id'] == v['card_id'])
+        if binding['orders'].get('MANUAL_EXIT'):
+            v['closure_origin'] = 'MANUAL'
         v['closure_verified'] = v['state'] == 'CLOSED' and not issues and not v['issues']
         if not v['closure_verified']:
             v['gross_pnl_usdc'] = v['net_before_funding_usdc'] = None

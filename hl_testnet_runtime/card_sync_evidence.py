@@ -231,7 +231,7 @@ def terminal_certificates(bindings, previous):
     if not previous['history_complete'] or not previous['orders_complete']:
         raise SyncError('VERIFIED_HISTORY_BOOTSTRAP_REQUIRED')
     links={oid for b in bindings if life.address(b['account'])==account and b['symbol']==symbol
-           for leg in life.LEGS for oid in b['orders'][leg]}
+           for leg in life.order_legs(b) for oid in b['orders'][leg]}
     opened={row['oid'] for row in previous['open_orders']}
     old_facts=_fill_facts_by_oid(previous['fills'])
     certificates={}
@@ -315,7 +315,7 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
             reuse_verified_terminals=False):
     account,symbol = life.validate_snapshot(previous)
     plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
-    links = {oid:(b,leg) for b in bindings for leg in life.LEGS for oid in b['orders'][leg]}
+    links = {oid:(b,leg) for b in bindings for leg in life.order_legs(b) for oid in b['orders'][leg]}
     old_terminal = {r['oid']:r for r in previous['terminal_orders']}
     certificates=terminal_certificates(bindings,previous) if reuse_verified_terminals else {}
     current_oids={oid:link for oid,link in links.items() if oid not in certificates}
@@ -473,7 +473,7 @@ def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verifie
     """Exact initial request multiset; unknown split history pages are excluded."""
     account,_=life.validate_snapshot(previous)
     certificates=(terminal_certificates(bindings,previous) if reuse_verified_terminals else {})
-    oids=sorted({oid for binding in bindings for leg in life.LEGS
+    oids=sorted({oid for binding in bindings for leg in life.order_legs(binding)
                  for oid in binding['orders'][leg]}-set(certificates))
     bodies=[]
     def fills(start, stop):
