@@ -38,6 +38,14 @@ class SourcePreflightBlocked(ValueError):
         super().__init__("SOURCE_FEATURE_PREFLIGHT_BLOCKED")
 
 
+class ParentCoverageBlocked(ValueError):
+    """Explicit all-scope feasibility requirement failed before any job write."""
+    def __init__(self, receipt):
+        self.receipt = receipt
+        self.source_receipt = receipt["source_preflight"]
+        super().__init__("MATCHED_PARENT_COVERAGE_PREFLIGHT_BLOCKED")
+
+
 @dataclass(frozen=True)
 class _PreparedSubmission:
     export: dict
@@ -47,6 +55,11 @@ class _PreparedSubmission:
     @property
     def receipt(self):
         return self.identity["source_admission"]["preflight_receipt"]
+
+    @property
+    def parent_coverage_receipt(self):
+        admission = self.identity.get("parent_coverage_admission")
+        return admission["preflight_receipt"] if admission else None
 
 
 def _implementation() -> dict:
@@ -131,28 +144,39 @@ def _scopes(scopes) -> list[dict]:
     return sorted(normalized, key=lambda item: (item["candidate_key"], item["base_direction"], item["threshold_pct"]))
 
 
-def prepare_submission(export, scopes, *, allow_incomplete_source=False):
+def prepare_submission(export, scopes, *, allow_incomplete_source=False, require_parent_coverage=False):
     """One whole-plan feature preflight, before SQLite or outcome processing.
 
     Diagnostic admission is explicit and frozen; it never changes source
-    decisions or grants research qualification. Parent/entry/path validation
-    remains with the existing source adapter and child runner.
+    decisions or grants research qualification. Optional all-scope parent
+    coverage is a necessary feasibility check, not a qualification gate.
+    The child runner still validates parents, entries and outcome paths.
     """
     from research_no_horizon_preflight import preflight_source_features
+    from research_no_horizon_parent_coverage import _coverage_from_preflight, REQUIRE_ALL_SCOPES
 
     if type(allow_incomplete_source) is not bool:
         raise ValueError("EXPLICIT_BOOLEAN_DIAGNOSTIC_POLICY_REQUIRED")
+    if type(require_parent_coverage) is not bool:
+        raise ValueError("EXPLICIT_BOOLEAN_PARENT_COVERAGE_POLICY_REQUIRED")
     frozen, size = _admit_export(export)
     normalized = _scopes(scopes)
     if size * len(normalized) > MAX_EXPANDED_BYTES:
         raise ValueError("EXPERIMENT_EXPANDED_BYTE_LIMIT_EXCEEDED")
     receipt = preflight_source_features(frozen, scopes)
+    coverage = None
+    if require_parent_coverage:
+        coverage = _coverage_from_preflight(frozen, receipt, gate_policy=gate.make_policy())
+        if not coverage["all_scopes_potentially_sufficient"]:
+            raise ParentCoverageBlocked(coverage)
     if not receipt["ready_for_outcome_research"] and not allow_incomplete_source:
         raise SourcePreflightBlocked(receipt)
     policy = DIAGNOSTIC_ALLOW_INCOMPLETE_SOURCE if allow_incomplete_source else REQUIRE_DECIDABLE_SOURCE
     identity = {"source_export_sha256": contracts.digest(frozen), "source_canonical_bytes": size,
         "symbol": frozen["symbol"], "scopes": normalized, "versions": _implementation(),
         "source_admission": {"policy": policy, "preflight_receipt": receipt}}
+    if coverage is not None:
+        identity["parent_coverage_admission"] = {"policy": REQUIRE_ALL_SCOPES, "preflight_receipt": coverage}
     return _PreparedSubmission(frozen, identity, contracts.digest(identity))
 
 
@@ -222,8 +246,9 @@ class LocalExperimentStore:
     def __exit__(self, *_):
         self.close()
 
-    def submit_plan(self, export, scopes, *, plan_key=None, allow_incomplete_source=False) -> str:
-        prepared = prepare_submission(export, scopes, allow_incomplete_source=allow_incomplete_source)
+    def submit_plan(self, export, scopes, *, plan_key=None, allow_incomplete_source=False, require_parent_coverage=False) -> str:
+        prepared = prepare_submission(export, scopes, allow_incomplete_source=allow_incomplete_source,
+            require_parent_coverage=require_parent_coverage)
         return self._submit_prepared(prepared, plan_key=plan_key)
 
     def _submit_prepared(self, prepared, *, plan_key=None) -> str:

@@ -15,8 +15,9 @@ from typing import Any
 
 import research_no_horizon_replay as replay
 import research_no_horizon_source as source
-from research_no_horizon_experiment import LocalExperimentStore, SourcePreflightBlocked, prepare_submission
+from research_no_horizon_experiment import LocalExperimentStore, SourcePreflightBlocked, ParentCoverageBlocked, prepare_submission
 from research_no_horizon_preflight import preflight_source_features
+from research_no_horizon_parent_coverage import preflight_parent_coverage
 
 MAX_SCOPES_BYTES = 64 * 1024
 MAX_SCOPES = 64
@@ -54,12 +55,19 @@ def main() -> int:
     submit.add_argument("--scopes", type=Path, required=True)
     submit.add_argument("--plan-key")
     submit.add_argument("--preflight-output", type=Path)
+    submit.add_argument("--parent-coverage-output", type=Path)
+    submit.add_argument("--require-parent-coverage", action="store_true",
+        help="Require complete matched-parent coverage reaching the gate minimum in EVERY declared scope; not gate qualification.")
     submit.add_argument("--allow-incomplete-source", action="store_true",
         help="Freeze an explicit diagnostic policy; source blockers and false gate eligibility are preserved.")
     preflight = commands.add_parser("preflight")
     preflight.add_argument("export", type=Path)
     preflight.add_argument("--scopes", type=Path, required=True)
     preflight.add_argument("--output", type=Path, required=True)
+    coverage = commands.add_parser("coverage")
+    coverage.add_argument("export", type=Path)
+    coverage.add_argument("--scopes", type=Path, required=True)
+    coverage.add_argument("--output", type=Path, required=True)
     run = commands.add_parser("run")
     run.add_argument("plan_id")
     run.add_argument("--worker-id", required=True)
@@ -72,11 +80,17 @@ def main() -> int:
     report.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        if args.command != "preflight" and args.database is None:
+        if args.command not in ("preflight", "coverage") and args.database is None:
             raise ValueError("--database is required for submit, run and report")
         if args.command in ("run", "report") and not args.database.is_file():
             raise ValueError("local database does not exist")
-        if args.command in ("submit", "preflight"):
+        if args.command == "submit":
+            if args.parent_coverage_output is not None and not args.require_parent_coverage:
+                raise ValueError("--parent-coverage-output requires --require-parent-coverage")
+            if (args.preflight_output is not None and args.parent_coverage_output is not None
+                    and args.preflight_output.resolve() == args.parent_coverage_output.resolve()):
+                raise ValueError("source and parent coverage outputs must be distinct")
+        if args.command in ("submit", "preflight", "coverage"):
             export = load_json(args.export, max_bytes=source.MAX_BYTES)
             scopes = load_json(args.scopes, max_bytes=MAX_SCOPES_BYTES)
             if not isinstance(export, dict):
@@ -90,11 +104,28 @@ def main() -> int:
                 "ready_for_outcome_research": result["ready_for_outcome_research"],
                 "receipt_sha256": result["receipt_sha256"], "trading_authorized": False}))
             return 0 if result["ready_for_outcome_research"] else 2
+        if args.command == "coverage":
+            result = preflight_parent_coverage(export, scopes)
+            _write_report(args.output, result)
+            print(json.dumps({"output": str(args.output),
+                "all_scopes_potentially_sufficient": result["all_scopes_potentially_sufficient"],
+                "any_scope_potentially_sufficient": result["any_scope_potentially_sufficient"],
+                "receipt_sha256": result["receipt_sha256"], "trading_authorized": False}))
+            return 0 if result["all_scopes_potentially_sufficient"] else 2
         if args.command == "submit":
             # The whole scope set is checked once, before opening/creating SQLite.
             try:
                 prepared = prepare_submission(export, scopes,
-                    allow_incomplete_source=args.allow_incomplete_source)
+                    allow_incomplete_source=args.allow_incomplete_source,
+                    require_parent_coverage=args.require_parent_coverage)
+            except ParentCoverageBlocked as exc:
+                if args.preflight_output is not None:
+                    _write_report(args.preflight_output, exc.source_receipt)
+                if args.parent_coverage_output is not None:
+                    _write_report(args.parent_coverage_output, exc.receipt)
+                print(json.dumps(exc.receipt, ensure_ascii=False, allow_nan=False))
+                print("BLOCKED: MATCHED_PARENT_COVERAGE_PREFLIGHT_BLOCKED", file=sys.stderr)
+                return 2
             except SourcePreflightBlocked as exc:
                 if args.preflight_output is not None:
                     _write_report(args.preflight_output, exc.receipt)
@@ -103,6 +134,8 @@ def main() -> int:
                 return 2
             if args.preflight_output is not None:
                 _write_report(args.preflight_output, prepared.receipt)
+            if args.parent_coverage_output is not None:
+                _write_report(args.parent_coverage_output, prepared.parent_coverage_receipt)
         with LocalExperimentStore(args.database) as store:
             if args.command == "submit":
                 plan_id = store._submit_prepared(prepared, plan_key=args.plan_key)

@@ -72,6 +72,67 @@ the existing implementation hash fence still rejects resuming an old plan with
 different code. Previously frozen source exports and outcome receipts are not
 rewritten by preflight or by the new admission defaults.
 
+## Optional matched-parent coverage before outcomes
+
+`preflight_parent_coverage(export, scopes, gate_policy=None)` in
+`research_no_horizon_parent_coverage.py` adds a separate, versioned feasibility
+receipt. The existing feature preflight API, receipt and descriptive admission
+default remain unchanged. Coverage reuses a freshly computed feature preflight,
+then applies the existing parent-evidence and causal-membership checks to each
+`MATCH`. It neither looks up entry prices nor evaluates price paths or the gate.
+The preceding BTC candle is validated only as evidence of causal membership.
+
+Every exact scope retains all source decisions, including `NO_MATCH`, `UNKNOWN`,
+`UNKNOWN_SOURCE` and zero-match scopes. Verified matches are grouped by
+`btc_parent_movement_id`; each complete scope records the earliest decision and
+then lexical entry ID per group before any outcomes are read. An open parent is
+allowed when its causal evidence is valid. Checkpoint advancement alone is not
+a contradiction; conflicting causal identity or closing boundaries are.
+
+| Coverage status | Meaning |
+|---|---|
+| `BLOCKED` | Incomplete source decisions or unverifiable/conflicting matched-parent evidence; the proven upper bound is null and representatives are not selected from the surviving subset |
+| `INSUFFICIENT` | Complete decisions and matched-parent evidence, with fewer groups than the effective gate minimum; this exact scope cannot pass the unchanged gate |
+| `POSSIBLE` | Complete decisions and at least the required number of groups; entry availability, resolved outcomes, probability, asymmetry and qualification remain untested |
+
+`matched_parent_count` is the number of distinct groups with individually valid
+membership records. When blocked it is only a partial diagnostic count; conflicting
+groups remain explicitly identified. `matched_parent_upper_bound` is populated
+only for a complete scope: resolved earliest representatives can number no more
+than these groups. Missing membership is never treated as zero matches, and a
+later valid match cannot replace an unverified earlier representative. Missing
+parent data on a known `NO_MATCH` is irrelevant to that scope's coverage.
+
+The minimum comes from a complete policy validated with `gate.make_policy`.
+The standalone API accepts a different complete, explicitly versioned policy;
+plan admission always uses the child runner's existing default policy. Counts
+are never pooled across scopes. Neither five groups nor the word `POSSIBLE`
+claims statistical independence, good probability/asymmetry or a qualified
+formula. The existing atomic gate remains the sole qualification calculation.
+
+The receipt reports both `all_scopes_potentially_sufficient` and
+`any_scope_potentially_sufficient`. `ready_for_outcome_research` in this receipt
+means the former only. `gate` remains null and `outcome_evaluation` and
+`gate_evaluation` remain `NOT_EVALUATED`.
+
+For a plan explicitly intended to require sufficient coverage in **every**
+declared scope, use `require_parent_coverage=True` or CLI
+`--require-parent-coverage`. This freezes
+`REQUIRE_ALL_SCOPES_MATCHED_PARENT_COVERAGE_V1` and the full coverage receipt into
+`plan_identity.parent_coverage_admission`. If any scope is blocked or insufficient,
+`ParentCoverageBlocked` carries the complete receipt before plan or child writes;
+the CLI checks before opening SQLite. This is an optional whole-plan admission
+requirement, deliberately stricter than the per-scope research gate. A zero-match
+scope does not invalidate another scope's evidence, and no scope is silently
+discarded. The existing `allow_incomplete_source` diagnostic option does not
+override an explicitly requested coverage requirement.
+
+Omitting the option retains descriptive outcome research on small cohorts. It
+does not claim parent coverage was checked, and no parent admission field is
+added to the identity. Historical reports remain readable; the existing code
+identity fence prevents resuming old plans with changed code. No SQLite schema,
+source export, historical result, gate, runtime or trading permission changes.
+
 Every report accounts for every declared scope, including work not yet run.
 A partial report is useful for progress, but cannot claim that its completed
 subset represents the full search.
@@ -134,7 +195,9 @@ do not assert that either scope has evidence or passes its gate.
 
 ```bash
 python research_no_horizon_experiment_cli.py preflight source.json --scopes scopes.json --output source-preflight.json
+python research_no_horizon_experiment_cli.py coverage source.json --scopes scopes.json --output parent-coverage.json
 python research_no_horizon_experiment_cli.py --database experiment.sqlite submit source.json --scopes scopes.json --plan-key declared-plan-v1 --preflight-output admitted-source-preflight.json
+python research_no_horizon_experiment_cli.py --database coverage-experiment.sqlite submit source.json --scopes scopes.json --plan-key coverage-required-v1 --require-parent-coverage --parent-coverage-output admitted-parent-coverage.json
 python research_no_horizon_experiment_cli.py --database experiment.sqlite run PLAN_ID --worker-id local-1 --scope-budget 1 --candle-budget 1024 --entry-budget 128 --batch-size 128
 python research_no_horizon_experiment_cli.py --database experiment.sqlite report PLAN_ID --output experiment-report.json
 ```
@@ -147,6 +210,20 @@ trust a caller-supplied readiness receipt. On a source block it prints the full
 receipt, optionally saves it with `--preflight-output`, and exits 2 before any
 database access. The standalone command is for inspecting source readiness;
 it need not be run separately before every `submit`.
+
+`coverage` also needs no database and preserves a complete receipt when blocked
+or insufficient. It exits 0 only when every scope is `POSSIBLE`, otherwise 2.
+Invalid global inputs exit 2 without a fabricated receipt. Submission computes
+its own feature and requested coverage checks once; it never trusts imported
+readiness receipts. `--parent-coverage-output` requires
+`--require-parent-coverage` and must differ from `--preflight-output`. On a parent
+coverage block, the CLI prints the full coverage receipt and can save both the
+feature and coverage receipts before returning 2 without database access.
+
+These checks apply to the declared frozen population. They do not authorize
+adding observations to an already reviewed cohort until it passes, pooling old
+receipts, changing the scope set after results, or exceeding existing input
+bounds by splitting one undeclared global cohort into independent trials.
 
 Each `run` is bounded and returns; there is no background daemon. Repeating it
 continues persisted work. The candle budget is shared across that invocation's
