@@ -532,8 +532,8 @@ class TrialTests(NoExternal):
         self.assertEqual(result['status'],'ENTRY_NOT_SUBMITTED')
         self.assertEqual(result['entry_attempts'],0)
         self.assertFalse(result['ongoing_management_required'])
-        self.assertEqual(len(calls),2)
-        self.assertEqual(calls[-1][1]['allow_new_entries'],False)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0][1]['allowed_entry_card_id'],self.cid)
 
     def test_verified_cancellation_after_grant_expiry_is_terminal(self):
         waiting=deepcopy(self.state);waiting['entry_timing_armed']={self.cid:T}
@@ -667,14 +667,19 @@ class TrialTests(NoExternal):
             self.assertFalse(trial._reconcile_notifications(base,feed,role,route,self.card))
 
 class HistoricalTrialAdmissionTests(NoExternal):
-    def completed_case(self):
+    def completed_case(self,*,filled=False):
         from . import fill_wakeups
         from .test_fill_wakeups import Clock
         from .test_priority_fill_runtime import ready
-        state=state_from_case(q='0',expiry_seconds=300)
+        state=state_from_case(q='40',stop='40',take='40',expiry_seconds=300) if filled else state_from_case(q='0',expiry_seconds=300)
         binding=state['bindings'][0]
         state['evidence']['snapshot']['open_orders']=[]
         state['evidence']['snapshot']['terminal_orders']=[terminal(binding,'ENTRY','0')]
+        if filled:
+            state['evidence']['snapshot'].update(position_quantity='0',
+                fills=[fill(binding,'ENTRY','40'),fill(binding,'STOP','40')],
+                terminal_orders=[terminal(binding,'ENTRY','40'),terminal(binding,'STOP','40'),
+                                 terminal(binding,'TAKE_PROFIT','0')])
         new=state_from_case(n=2,q='0',expiry_seconds=300)
         cid=new['bindings'][0]['card_id']
         state['originals'][cid]=new['originals'][cid]
@@ -702,6 +707,212 @@ class HistoricalTrialAdmissionTests(NoExternal):
     def prepare(self,controller,current,cid,**kwargs):
         return controller._prepare_cycle(current[0]['bucket'],send=True,
             allow_new_entries=True,allowed_entry_card_id=cid,**kwargs)
+
+    def stale_case(self,*,filled=False):
+        controller,venue,feed,current,cid,role,route=self.completed_case(filled=filled)
+        venue.env['HL_TESTNET_PROTECTION_TIMING_STARTED_MS']=str(T)
+        venue.retain_trial_terminal_history(current[0],controller._feed_stamp(route['account']))
+        venue.now.return_value=T+16000
+        self.assertIsNone(controller._trial_preparation_checkpoint(current[0],send=True,
+            allow_new_entries=True,allowed_entry_card_id=cid))
+        return controller,venue,feed,current,cid,role,route
+
+    def test_stale_trial_funds_exact_330_and_retains_terminal_clocks_with_durable_provenance(self):
+        from .request_budget import Budget,request_weight,BACKGROUND_LIMIT
+        # Real finite InfoPlan/claim logic, with only the durable ledger and
+        # public transport replaced. Both measured steady-load cases admit it.
+        for baseline in (368,460):
+            with self.subTest(baseline=baseline):
+                controller,venue,feed,current,cid,role,route=self.stale_case(filled=baseline==460)
+                before=deepcopy(current[0]);budget=Budget.__new__(Budget)
+                funded=[];used=[baseline];reads=[];committed=[]
+                def fund(entries,priority,deadline):
+                    cost=sum(weight for _,_,weight in entries)
+                    if used[0]+cost>BACKGROUND_LIMIT:
+                        raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+                    used[0]+=cost;funded.append(cost)
+                budget._fund_observation=Mock(side_effect=fund)
+                budget._claim_observation=Mock();budget._release_unclaimed_observation=Mock()
+                def read(reader,kind,account,**kwargs):
+                    self.assertEqual(funded,[330])
+                    body=dict(type=kind,user=account,**kwargs)
+                    reader.budget.acquire('/info',body,priority='background')
+                    reads.append(body)
+                    return [] if kind=='frontendOpenOrders' else dict(assetPositions=[])
+                def change(bucket,revision,event,now,update):
+                    self.assertEqual(revision,current[0]['revision'])
+                    value=deepcopy(current[0]);update(Mock(),value)
+                    value['revision']+=1;current[0]=value;committed.append(event)
+                    return deepcopy(value)
+                controller.store.change.side_effect=change
+                controller.store.pending_record.return_value=None
+                with patch.object(venue,'request_budget',wraps=venue.request_budget), \
+                     patch('hl_testnet_runtime.request_budget.Budget.from_env',return_value=budget), \
+                     patch.object(dispatch.roles,'route_for',return_value=route), \
+                     patch.object(dispatch.evidence.PublicReader,'read',new=read), \
+                     patch.object(dispatch.evidence,'collect',side_effect=AssertionError('NO_SECOND_HISTORY_READ')), \
+                     patch.object(venue,'sample',return_value=dict(mark_price='10',at_ms=T+16000)), \
+                     patch.object(venue,'metadata',return_value={}), \
+                     patch.object(controller,'_plan_cycle',return_value=dict(status='NO_ACTION_NEEDED')):
+                    self.assertEqual(self.prepare(controller,current,cid)['status'],'NO_ACTION_NEEDED')
+                self.assertEqual(funded,[330]);self.assertLessEqual(used[0],800)
+                self.assertEqual([b['type'] for b in reads].count('frontendOpenOrders'),2)
+                self.assertEqual([b['type'] for b in reads].count('clearinghouseState'),2)
+                self.assertEqual(committed,['PUBLIC_RECONCILIATION'])
+                snapshot=current[0]['evidence']['snapshot']
+                for field in ('fills','terminal_orders','open_orders','position_quantity'):
+                    self.assertEqual(snapshot[field],before['evidence']['snapshot'][field])
+                self.assertEqual(snapshot['at_ms'],T+16000)
+                provenance=current[0]['evidence']['immutable_terminal_inventory']
+                self.assertEqual(provenance['historical_snapshot_at_ms'],T+100)
+                self.assertEqual(provenance['historical_evidence_digest'],dispatch.life.digest(before['evidence']))
+                self.assertEqual(provenance['inventory_observed_at_ms'],[T+16000,T+16000])
+                self.assertEqual(provenance['original_trial_started_at_ms'],T)
+                self.assertEqual(provenance['original_trial_expires_at_ms'],T+90000)
+                stamp=controller._feed_stamp(route['account'])
+                self.assertEqual(provenance['notification_boundary'],dict(generation=stamp[0],revision=stamp[1]))
+                self.assertEqual(venue.sent,0);controller.store.prepare_and_begin.assert_not_called()
+                budget._release_unclaimed_observation.assert_called_once()
+
+    def test_stale_refused_full_cycle_wait_does_not_refuel_ledger_with_setup_http(self):
+        controller,venue,feed,current,cid,role,route=self.stale_case()
+        before=deepcopy(current[0]);costs=[]
+        from .request_budget import request_weight
+        def refused(bodies):
+            costs.append(sum(request_weight('/info',b) for b in bodies))
+            raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+        with patch.object(venue,'_fund_info_plan',side_effect=refused), \
+             patch.object(dispatch.roles,'route_for',return_value=route), \
+             patch.object(controller,'refresh') as refresh, \
+             patch.object(venue,'sample') as sample,patch.object(venue,'metadata') as meta:
+            for at in (T+16000,T+21000,T+26000):
+                venue.now.return_value=at
+                with self.assertRaises(BudgetError):self.prepare(controller,current,cid)
+        self.assertEqual(costs,[330]*3)
+        for operation in (refresh,sample,meta):operation.assert_not_called()
+        self.assertEqual(current[0],before);self.assertEqual(venue.sent,0)
+        controller.store.prepare_and_begin.assert_not_called()
+
+    def test_invalid_retained_history_or_feed_reconciliation_blocks_before_funding_and_http(self):
+        from .test_fill_wakeups import fills
+        for variant in ('missing-anchor','expired','source','grant-start','grant-expiry',
+                        'binding','original','terminal','fill','history','pending',
+                        'hint','reconciled-revision','generation'):
+            with self.subTest(variant=variant):
+                controller,venue,feed,current,cid,role,route=self.stale_case()
+                state=current[0];snapshot=state['evidence']['snapshot']
+                if variant=='missing-anchor':del venue.trial_terminal_history
+                elif variant=='expired':venue.now.return_value=T+90000
+                elif variant=='source':state['originals'][cid]['card']['source_expires_at']='2020-01-01T00:00:00Z'
+                elif variant=='grant-start':venue.env['HL_TESTNET_PROTECTION_TIMING_STARTED_MS']=str(T+1)
+                elif variant=='grant-expiry':venue.env['HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS']=str(T+90001)
+                elif variant=='binding':state['bindings'][0]['orders']['ENTRY'].append('999')
+                elif variant=='original':state['originals'][cid]['entry_unsent_no_retry']=True
+                elif variant=='terminal':snapshot['terminal_orders'][0]['at_ms']+=1
+                elif variant=='fill':snapshot['fills'].append(fill(state['bindings'][0],'ENTRY','1'))
+                elif variant=='history':snapshot['history_complete']=False
+                elif variant=='pending':
+                    # This retains ordinary post-attempt observation ownership,
+                    # never the inventory-only history path.
+                    state['pending']='f'*64
+                elif variant in ('hint','reconciled-revision'):
+                    token=feed.begin_reconciliation(route['account'])
+                    feed._receive(route['account'],token.generation,json.dumps(fills(
+                        route['account'],rows=[dict(coin=state['symbol'],tid=88,oid=888,time=T+200)])))
+                    if variant=='reconciled-revision':
+                        feed.finish_reconciliation(feed.begin_reconciliation(route['account']),complete=True)
+                        self.assertTrue(feed.entry_allowed(route['account']))
+                elif variant=='generation':feed._opened(route['account'])
+                with patch.object(venue,'_fund_info_plan') as fund, \
+                     patch.object(controller,'refresh',side_effect=DispatchError('ORDINARY_RECOVERY_REQUIRED')) as refresh, \
+                     patch.object(venue,'sample') as sample,patch.object(venue,'metadata') as meta:
+                    for _ in range(2):
+                        with self.assertRaises(DispatchError):self.prepare(controller,current,cid)
+                fund.assert_not_called();sample.assert_not_called();meta.assert_not_called()
+                if variant=='pending':self.assertEqual(refresh.call_count,2)
+                else:refresh.assert_not_called()
+
+    def test_retained_history_requires_original_grant_full_read_and_all_terminal_certificates(self):
+        for variant in ('before-start','incomplete-terminal-coverage','changed-feed-after-read'):
+            with self.subTest(variant=variant):
+                controller,venue,feed,current,cid,role,route=self.completed_case()
+                venue.env['HL_TESTNET_PROTECTION_TIMING_STARTED_MS']=str(T)
+                stamp=controller._feed_stamp(route['account'])
+                if variant=='before-start':venue.env['HL_TESTNET_PROTECTION_TIMING_STARTED_MS']=str(T+101)
+                elif variant=='incomplete-terminal-coverage':current[0]['bindings'][0]['orders']['STOP'].append('999')
+                else:feed._opened(route['account'])
+                with self.assertRaisesRegex(DispatchError,'TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST'):
+                    venue.retain_trial_terminal_history(current[0],stamp)
+                self.assertNotIn('trial_terminal_history',vars(venue))
+
+    def test_stale_plan_rechecks_state_and_feed_after_funding_before_http(self):
+        for variant in ('revision','feed','grant','binding'):
+            with self.subTest(variant=variant):
+                controller,venue,feed,current,cid,role,route=self.stale_case();batch=Mock()
+                def changed(bodies):
+                    if variant=='revision':current[0]['revision']+=1
+                    elif variant=='feed':feed._opened(route['account'])
+                    elif variant=='grant':venue.now.return_value=T+90000
+                    else:current[0]['bindings'][0]['orders']['ENTRY'].append('999')
+                    return batch
+                with patch.object(venue,'_fund_info_plan',side_effect=changed), \
+                     patch.object(dispatch.roles,'route_for',return_value=route), \
+                     patch.object(controller,'refresh') as refresh, \
+                     patch.object(venue,'sample') as sample,patch.object(venue,'metadata') as meta:
+                    with self.assertRaisesRegex(DispatchError,'TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST'):
+                        self.prepare(controller,current,cid)
+                for operation in (refresh,sample,meta):operation.assert_not_called()
+                batch.close.assert_called_once()
+
+    def test_post_attempt_observation_never_uses_retained_terminal_inventory(self):
+        for variant in ('armed','bound','pending','working','newfill'):
+            with self.subTest(variant=variant):
+                controller,venue,feed,current,cid,role,route=self.stale_case()
+                state=current[0]
+                if variant=='armed':state['entry_timing_armed']={cid:T+200}
+                elif variant=='bound':state['bindings'].append(state_from_case(n=2,q='0')['bindings'][0])
+                elif variant=='pending':state['pending']='e'*64
+                elif variant=='working':state['evidence']['snapshot']['open_orders']=state_from_case(q='0')['evidence']['snapshot']['open_orders']
+                else:state['evidence']['snapshot']['fills'].append(fill(state['bindings'][0],'ENTRY','1'))
+                with patch.object(dispatch.evidence,'collect',return_value={}) as collect, \
+                     patch.object(venue,'request_budget',return_value=Mock()), \
+                     patch.object(venue,'empty_snapshot',side_effect=AssertionError('HISTORY_CANNOT_BE_INVENTORY_ONLY')):
+                    self.assertEqual(venue.collect_checkpoint(dict(bindings=state['bindings'],
+                        snapshot=state['evidence']['snapshot']),pending=state['pending']),{})
+                collect.assert_called_once()
+
+    def test_change_during_inventory_or_checkpoint_discards_all_retained_evidence(self):
+        from .test_fill_wakeups import fills
+        for variant in ('hint','revision','checkpoint'):
+            with self.subTest(variant=variant):
+                controller,venue,feed,current,cid,role,route=self.stale_case()
+                before=deepcopy(current[0]);batch=Mock();count=[0]
+                venue.parallel_preflight=False
+                def read(reader,kind,account):
+                    count[0]+=1
+                    if count[0]==2 and variant=='hint':
+                        token=feed.begin_reconciliation(account)
+                        feed._receive(account,token.generation,json.dumps(fills(account,
+                            rows=[dict(coin=before['symbol'],tid=89,oid=889,time=T+16100)])))
+                    if count[0]==4 and variant=='revision':current[0]['revision']+=1
+                    return [] if kind=='frontendOpenOrders' else dict(assetPositions=[])
+                def checkpoint(bucket,revision,event,now,update):
+                    value=deepcopy(current[0]);value['revision']+=1
+                    update(Mock(),value)
+                    self.fail('CHANGED_CHECKPOINT_MUST_NOT_COMMIT')
+                controller.store.change.side_effect=checkpoint
+                with patch.object(venue,'_fund_info_plan',return_value=batch), \
+                     patch.object(dispatch.roles,'route_for',return_value=route), \
+                     patch.object(dispatch.evidence.PublicReader,'read',new=read), \
+                     patch.object(venue,'sample') as sample,patch.object(venue,'metadata') as meta:
+                    with self.assertRaisesRegex(DispatchError,'TRIAL_CHECKPOINT_CHANGED_RECONCILE_FIRST'):
+                        self.prepare(controller,current,cid)
+                self.assertEqual(count[0],4)
+                self.assertEqual(current[0]['evidence'],before['evidence'])
+                self.assertNotIn('immutable_terminal_inventory',current[0]['evidence'])
+                if variant!='checkpoint':controller.store.change.assert_not_called()
+                sample.assert_not_called();meta.assert_not_called();batch.close.assert_called_once()
+                controller.store.prepare_and_begin.assert_not_called();self.assertEqual(venue.sent,0)
 
     def test_fresh_historical_trial_reuses_committed_checkpoint_then_funds_286_reads(self):
         from .request_budget import request_weight
