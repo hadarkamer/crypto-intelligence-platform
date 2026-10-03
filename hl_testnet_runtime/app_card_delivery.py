@@ -27,10 +27,12 @@ def number(value):
 def project(card, state, *, created_at, pending_request=None):
     """Use durable observations only; no inferred PnL or app control fields."""
     card = trade_cards.validate_card(card)
-    if card['record_kind'] != 'received_alert' or card['account_role'] != 'long_account':
+    if (card['record_kind'] != 'received_alert'
+            or card['account_role'] not in ('long_account','short_account')):
         raise DispatchError('APP_PROJECTION_SOURCE_REQUIRED')
     signal = card['prepared']['execution']
-    payload = dict(symbol=card['prepared']['source']['symbol'], side='long',
+    payload = dict(symbol=card['prepared']['source']['symbol'],
+        side='long' if card['account_role']=='long_account' else 'short',
         entry_price=number(signal['entry']) if signal else None,
         stop_price=number(signal['stop']) if signal else None,
         take_profit_price=number(signal['take_profit']) if signal else None,
@@ -40,6 +42,10 @@ def project(card, state, *, created_at, pending_request=None):
     observed = created_at
     revision = 1
     if state is not None and card['card_id'] in state['originals']:
+        original=state['originals'][card['card_id']]['card']
+        if (original != card or original['account_role'] != card['account_role']
+                or state['symbol'] != card['prepared']['source']['symbol']):
+            raise DispatchError('APP_PROJECTION_SOURCE_STATE_MISMATCH')
         revision = state['revision'] + 2
         if (pending_request is not None and
                 pending_request['proposal']['card_id'] == card['card_id'] and
@@ -65,8 +71,10 @@ def project(card, state, *, created_at, pending_request=None):
                 payload=payload, observed_at=observed)
 
 
-def records(journal, *, start_after=None):
+def records(journal, *, start_after=None, role='long_account'):
     """A bounded historical scan; failed sends retry from durable source on restart."""
+    if role not in ('long_account','short_account'):
+        raise DispatchError('APP_PROJECTION_ROLE_REQUIRED')
     after = start_after
     for _ in range(100):
         with journal._transaction() as conn:
@@ -79,7 +87,7 @@ def records(journal, *, start_after=None):
         for cid,manifest,digest,created in rows[:64]:
             if trade_cards.checksum(manifest) != digest or manifest['card_id'] != cid:
                 raise DispatchError('APP_PROJECTION_SOURCE_INTEGRITY_FAILURE')
-            if manifest.get('account_role') == 'long_account' and manifest.get('record_kind') == 'received_alert':
+            if manifest.get('account_role') == role and manifest.get('record_kind') == 'received_alert':
                 yield manifest,created
         if len(rows) <= 64:
             return
@@ -117,16 +125,20 @@ class Publisher:
         self.sent = {}
         self.cursor = None
         self.last_status = 'DISABLED'
+        self.retries = {}
 
-    def pass_once(self, controller, route, key, *, post=signed_post):
+    def pass_once(self, controller, route, key, *, post=signed_post,
+                  role='long_account', clock=time.monotonic):
         states = {s['symbol']:s for s in controller.store.for_account(route['account'])}
         attempted = 0
+        delivered = 0
+        failed = False
         start = self.cursor
         for wrapping in (False,True):
             if wrapping and start is None:
                 break
             for card, created in records(controller.store.journal,
-                    start_after=None if wrapping else start):
+                    start_after=None if wrapping else start,role=role):
                 if wrapping and card['card_id'] > start:
                     break
                 symbol = card['prepared']['source']['symbol']
@@ -134,16 +146,32 @@ class Publisher:
                 pending = (controller.store.request(state['pending'])
                     if state is not None and state['pending'] else None)
                 value = project(card,state,created_at=created,pending_request=pending)
-                fingerprint = hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
-                marker = (value['revision'],fingerprint)
-                if self.sent.get(card['card_id']) == marker:
+                # A new observation time/revision alone is not a changed trade.
+                # Send only changed visible facts; restart safely replays the
+                # durable revision through the receiver's idempotent upsert.
+                marker = hashlib.sha256(json.dumps(value['payload'],sort_keys=True).encode()).hexdigest()
+                cid=card['card_id']
+                self.cursor=cid
+                if self.sent.get(cid) == marker:
                     continue
-                post(value,key)
-                self.sent[card['card_id']] = marker
-                self.cursor = card['card_id']
+                retry=self.retries.get(cid)
+                if retry is not None and clock()<retry['due']:
+                    continue
                 attempted += 1
+                try:
+                    post(value,key)
+                except Exception:
+                    # A failed display cannot starve other cards/accounts or
+                    # touch execution. A changed payload keeps the same delay.
+                    count=min(5,(retry or {}).get('count',0)+1)
+                    self.retries[cid]=dict(count=count,due=clock()+min(300,10*2**count))
+                    failed=True
+                else:
+                    self.sent[cid] = marker
+                    self.retries.pop(cid,None)
+                    delivered += 1
                 if attempted == 4:
-                    self.last_status = 'DELIVERED'
-                    return attempted
-        self.last_status = 'DELIVERED' if attempted else 'UNCHANGED'
-        return attempted
+                    self.last_status = 'DELIVERY_UNAVAILABLE_RETRY' if failed else 'DELIVERED'
+                    return delivered
+        self.last_status = 'DELIVERY_UNAVAILABLE_RETRY' if failed else 'DELIVERED' if attempted else 'UNCHANGED'
+        return delivered

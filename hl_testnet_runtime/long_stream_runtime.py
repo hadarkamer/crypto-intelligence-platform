@@ -815,13 +815,21 @@ def _loop(controller, streams):
         _health['running']=False
 
 
-def _app_loop(controller, route, private_key):
+def _app_loop(controller, streams, private_key):
     from .app_card_delivery import Publisher
-    publisher = Publisher()
+    publishers={role:Publisher() for role,*_ in streams}
     while not _stop.is_set():
         try:
-            count = publisher.pass_once(controller, route, private_key)
-            status = publisher.last_status
+            count=0;statuses=[]
+            for role,route,*_ in streams:
+                publisher=publishers[role]
+                try:
+                    count += publisher.pass_once(controller,route,private_key,role=role)
+                    statuses.append(publisher.last_status)
+                except Exception:
+                    statuses.append('DELIVERY_UNAVAILABLE_RETRY')
+            status=('DELIVERY_UNAVAILABLE_RETRY' if 'DELIVERY_UNAVAILABLE_RETRY' in statuses
+                    else 'DELIVERED' if 'DELIVERED' in statuses else 'UNCHANGED')
         except Exception:
             count = 0
             status = 'DELIVERY_UNAVAILABLE_RETRY'
@@ -1052,7 +1060,7 @@ def start():
             threading.Thread(target=_short_pending_readiness,args=(controller,short[0]),
                              daemon=True,name='testnet-short-pending-readiness').start()
         if app_mode:
-            _app_thread=threading.Thread(target=_app_loop,args=(controller,route,private_key),
+            _app_thread=threading.Thread(target=_app_loop,args=(controller,streams,private_key),
                 daemon=True,name='testnet-app-card-delivery')
             _app_thread.start()
     return True
