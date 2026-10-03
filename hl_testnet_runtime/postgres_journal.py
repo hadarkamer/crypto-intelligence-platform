@@ -10,6 +10,8 @@ from contextlib import contextmanager
 import hashlib
 import json
 import re
+import os
+import threading
 from urllib.parse import unquote, urlsplit, parse_qs
 
 SCHEMA = 'hl_testnet_execution_v1'
@@ -138,6 +140,7 @@ class PostgresJournal:
     def __init__(self, parameters, *, _ci=False):
         self._parameters = dict(parameters)
         self._ci = _ci
+        self._connection_scope = threading.local()
         if not _ci and (parameters.get('host') != STAGING_HOST or parameters.get('dbname') != STAGING_DB):
             raise JournalError('STAGING_DATABASE_REQUIRED')
 
@@ -154,12 +157,62 @@ class PostgresJournal:
         return cls(dict(host=u.hostname, port=u.port or 5432, dbname='hl_journal_ci',
                         user=u.username, password=u.password, sslmode='disable'), _ci=True)
 
+    def _connect(self, *, autocommit=False):
+        import psycopg
+        return psycopg.connect(**self._parameters, connect_timeout=4,
+            autocommit=autocommit,
+            options='-c statement_timeout=5000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=5000 -c synchronous_commit=on')
+
+    @contextmanager
+    def reuse_connection(self):
+        """One thread-local socket, separate committed transactions, no retries.
+
+        Warm before the short transport permit. Never share a connection with
+        public-read workers, emergency threads or another process. A failed
+        transaction poisons the whole scope, including an uncertain COMMIT.
+        """
+        local=self._connection_scope
+        if getattr(local,'lease',None) is not None:
+            raise JournalError('JOURNAL_CONNECTION_SCOPE_ALREADY_ACTIVE')
+        lease=dict(conn=None,pid=os.getpid(),failed=False,active=False)
+        local.lease=lease
+        try:
+            try:
+                lease['conn']=self._connect(autocommit=True)
+            except Exception:
+                lease['failed']=True
+                raise JournalError('PERSISTENCE_UNAVAILABLE_NO_SEND') from None
+            yield
+        finally:
+            local.lease=None
+            if lease['conn'] is not None and lease['pid']==os.getpid():
+                try:lease['conn'].close()
+                except Exception:pass
+
     @contextmanager
     def _transaction(self):
+        lease=getattr(self._connection_scope,'lease',None)
+        if lease is not None:
+            if lease['failed'] or lease['active'] or lease['pid']!=os.getpid():
+                raise JournalError('PERSISTENCE_UNAVAILABLE_NO_SEND')
+            lease['active']=True
+            try:
+                with lease['conn'].transaction():
+                    actual=lease['conn'].execute('SELECT current_database()').fetchone()[0]
+                    if actual!=self._parameters['dbname']:
+                        raise JournalError('WRONG_DATABASE')
+                    yield lease['conn']
+                # Explicit transaction COMMIT completes before returning.
+            except BaseException as exc:
+                lease['failed']=True
+                if isinstance(exc,JournalError) or not isinstance(exc,Exception):
+                    raise
+                raise JournalError('PERSISTENCE_UNAVAILABLE_NO_SEND') from None
+            finally:
+                lease['active']=False
+            return
         try:
-            import psycopg
-            with psycopg.connect(**self._parameters, connect_timeout=4,
-                    options='-c statement_timeout=5000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=5000 -c synchronous_commit=on') as conn:
+            with self._connect() as conn:
                 actual = conn.execute('SELECT current_database()').fetchone()[0]
                 if actual != self._parameters['dbname']:
                     raise JournalError('WRONG_DATABASE')

@@ -1046,6 +1046,15 @@ class Controller:
             raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
 
     def cycle(self,bucket,*,send=False,allow_new_entries=True,allowed_entry_card_id=None):
+        from .postgres_journal import PostgresJournal
+        journal=getattr(self.store,'journal',None)
+        context=(journal.reuse_connection() if send is True and isinstance(journal,PostgresJournal)
+                 else nullcontext())
+        with context:
+            return self._cycle(bucket,send=send,allow_new_entries=allow_new_entries,
+                               allowed_entry_card_id=allowed_entry_card_id)
+
+    def _cycle(self,bucket,*,send=False,allow_new_entries=True,allowed_entry_card_id=None):
         """A false send flag never reserves, signs, cancels or places an order."""
         prepared=self._prepare_cycle(bucket,send=send,allow_new_entries=allow_new_entries,
                                      allowed_entry_card_id=allowed_entry_card_id)
