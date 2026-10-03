@@ -54,12 +54,15 @@ _DELIVERY_LOCK = threading.RLock()
 _DELIVERY_TURN = threading.Condition()
 _DELIVERY_WAITERS: "deque[object]" = deque()
 _DELIVERY_SLOT_LOCAL = threading.local()
+_TARGET_DEFERRALS: Dict[str, Dict[str, Any]] = {}
+_TARGET_DEFER_SECONDS = 300
 _METRICS = {
     "enqueued": 0,
     "delivered": 0,
     "queue_full_drops": 0,
     "delivery_failures": 0,
     "retries": 0,
+    "deferred": 0,
 }
 
 
@@ -197,6 +200,32 @@ def _receiver_error_code(body: Any) -> Optional[str]:
     return None
 
 
+def _delivery_target(envelope: Mapping[str, Any]) -> str:
+    """Scope backoff to one receiver/workbook/destination, never all Sheets."""
+    payload = _mapping(envelope.get("payload"))
+    upserts = payload.get("upserts")
+    sheets = sorted({str(item.get("sheet", "")) for item in upserts
+                     if isinstance(item, dict)}) if isinstance(upserts, list) else []
+    return hashlib.sha256(json.dumps([
+        _WEBHOOK_URL, envelope.get("spreadsheet_id"), payload.get("kind"), sheets
+    ], sort_keys=True).encode()).hexdigest()
+
+
+def _destination_deferred(target: str) -> bool:
+    """Call under the shared delivery lock, including after waiting for it."""
+    global _LAST_HTTP_DIAGNOSTIC
+    prior = _TARGET_DEFERRALS.get(target)
+    if prior is not None and time.monotonic() < prior["due"]:
+        _METRICS["deferred"] += 1
+        _LAST_HTTP_DIAGNOSTIC = {
+            "outcome": "DESTINATION_BACKOFF", "reason": prior["reason"],
+            "retry_after_seconds": max(1, math.ceil(prior["due"]-time.monotonic())),
+        }
+        return True
+    _TARGET_DEFERRALS.pop(target, None)
+    return False
+
+
 def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool:
     """Post one already-built envelope and report confirmed delivery.
 
@@ -205,6 +234,10 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
     committed, which prevents a Sheet row from preceding its durable source.
     """
     global _RECEIVER_VERSION, _LAST_HTTP_SECONDS, _LAST_HTTP_DIAGNOSTIC
+    target = _delivery_target(envelope)
+    with _DELIVERY_LOCK:
+        if _destination_deferred(target):
+            return False  # No ACK; the durable row stays pending/retry.
     for attempt in range(1, max(1, int(attempts)) + 1):
         started_at = time.monotonic()
         diagnostic: Dict[str, Any] = {
@@ -241,6 +274,8 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
                 method="POST",
             )
             with _DELIVERY_LOCK:
+                if _destination_deferred(target):
+                    return False
                 if _DURABLE_SNAPSHOT_MODE and _mapping(envelope.get("payload")).get("kind") in {
                     "alert", "neutral_snapshot"
                 }:
@@ -313,6 +348,20 @@ def _deliver_envelope(envelope: Mapping[str, Any], *, attempts: int = 5) -> bool
                                          elapsed_seconds=_LAST_HTTP_SECONDS,
                                          exception_type=type(exc).__name__)
             _METRICS["delivery_failures"] += 1
+            persistent = diagnostic.get("receiver_error_code")
+            if (persistent in _RECEIVER_ERROR_CODES or
+                    diagnostic.get("http_status") == 404):
+                # Capacity and missing destinations cannot be repaired by an
+                # immediate resend. Keep every durable payload unacknowledged,
+                # allow healthy destinations through and probe again later.
+                with _DELIVERY_LOCK:
+                    _TARGET_DEFERRALS[target] = {
+                        "due": time.monotonic()+_TARGET_DEFER_SECONDS,
+                        "reason": persistent or "HTTP_404",
+                    }
+                print("[google-sheets] destination deferred: " +
+                      json.dumps(_LAST_HTTP_DIAGNOSTIC, sort_keys=True), flush=True)
+                return False
             if attempt < max(1, int(attempts)):
                 _METRICS["retries"] += 1
                 time.sleep(min(30.0, 0.5 * (2 ** (attempt - 1))))
