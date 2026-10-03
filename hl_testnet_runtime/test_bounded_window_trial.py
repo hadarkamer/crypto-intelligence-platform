@@ -50,10 +50,12 @@ class WindowPureTests(NoExternal):
     def test_unknown_outcome_blocks_new_entry_even_below_cap(self):
         env = {**environment(), 'HL_TESTNET_ENTRY_ATTEMPT_CAP': cap.WINDOW_MODE}
         proposal = dict(operation='ENTRY', role='long_account', account=A)
-        with patch.object(cap, '_window_active', return_value=True), \
-                patch.object(cap, '_attempts', return_value=[dict(phase='OUTCOME_UNKNOWN')]):
-            with self.assertRaisesRegex(DispatchError, 'UNRESOLVED_ATTEMPT'):
-                cap.entry_guard(env, proposal)(Mock(), dict(account=A), proposal)
+        for phase in ['OUTCOME_UNKNOWN', 'ACK_UNVERIFIED', 'REJECTED', 'CONFLICT']:
+            with self.subTest(phase=phase), \
+                    patch.object(cap, '_window_active', return_value=True), \
+                    patch.object(cap, '_attempts', return_value=[dict(phase=phase)]):
+                with self.assertRaisesRegex(DispatchError, 'UNRESOLVED_ATTEMPT'):
+                    cap.entry_guard(env, proposal)(Mock(), dict(account=A), proposal)
 
     def test_expired_trial_does_not_disable_exit_or_cancellation_authority(self):
         env = {**environment(), 'HL_TESTNET_ENTRY_ATTEMPT_CAP': cap.WINDOW_MODE}

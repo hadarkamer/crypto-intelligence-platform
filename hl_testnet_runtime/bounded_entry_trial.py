@@ -5,7 +5,7 @@ unsent outcomes. Maintenance is unaffected. The fast scan grants no authority;
 the final guard runs under the dispatch store's common PostgreSQL locks.
 """
 from . import card_lifecycle as life, emergency_close as emergency
-from .filled_dispatch_store import DispatchError, SCHEMA
+from .filled_dispatch_store import DispatchError, SCHEMA, DONE
 from .source_window import timestamp
 
 MODE = 'one_per_role_v1'
@@ -89,7 +89,7 @@ def check_entry(store, env, proposal):
         attempts=_attempts(conn,scope)
         own = [r for r in attempts if r['proposal']==proposal]
         if not own and len(attempts) < _limit(scope):
-            if any(r['phase']=='OUTCOME_UNKNOWN' for r in attempts):
+            if any(r['phase'] not in DONE for r in attempts):
                 raise DispatchError('BOUNDED_ENTRY_TRIAL_UNRESOLVED_ATTEMPT')
             return
         # send() gates again AFTER the positively acknowledged durable begin.
@@ -97,7 +97,7 @@ def check_entry(store, env, proposal):
         # a new card/proposal cannot borrow the already-consumed permission.
         if (len(own)==1 and len(attempts)<=_limit(scope)
                 and own[0]['phase']=='OUTCOME_UNKNOWN' and own[0]['attempts']==1
-                and all(r is own[0] or r['phase']!='OUTCOME_UNKNOWN' for r in attempts)):
+                and all(r is own[0] or r['phase'] in DONE for r in attempts)):
             row=conn.execute(f'SELECT value,digest FROM {SCHEMA}.buckets WHERE bucket=%s',
                              (own[0]['bucket'],)).fetchone()
             if row and life.digest(row[0])==row[1] and row[0].get('pending')==own[0]['request_id']:
@@ -121,6 +121,6 @@ def entry_guard(env, proposal):
         attempts = _attempts(conn,scope)
         if len(attempts) >= _limit(scope):
             raise DispatchError('BOUNDED_ENTRY_TRIAL_CAP_REACHED')
-        if any(r['phase']=='OUTCOME_UNKNOWN' for r in attempts):
+        if any(r['phase'] not in DONE for r in attempts):
             raise DispatchError('BOUNDED_ENTRY_TRIAL_UNRESOLVED_ATTEMPT')
     return guard
