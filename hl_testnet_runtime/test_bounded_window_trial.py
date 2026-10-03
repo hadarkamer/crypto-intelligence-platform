@@ -88,6 +88,7 @@ class WindowPostgresTests(NoExternal):
         self.env = environment()
         self.meta = dict(universe=[])
         self.venue = Venue()
+        self.venue.t = fixtures.T
         self.venue.metadata = lambda: self.meta
         self.controller = dispatch.Controller(self.store, self.venue, ROUTES2)
         self.env['HL_TESTNET_ENTRY_ATTEMPT_CAP'] = cap.WINDOW_MODE
