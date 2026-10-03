@@ -530,6 +530,17 @@ class ConfigurationTests(NoExternal):
                 stream.tick(Controller(),dict(account=A),
                     datetime(2026,9,26,14,tzinfo=timezone.utc),new_entries=True)
 
+    def test_pending_manual_cleanup_does_not_hide_maintenance_failure(self):
+        controller=Mock()
+        controller.cycle.side_effect=DispatchError('STALE_OR_CONFLICTING_SNAPSHOT')
+        controller.store.load.return_value={'revision':5}
+        pending={'status':'MANUAL_EXIT_BOUND_AWAITING_OWNED_CLEANUP',
+                 'state':{'revision':5},'order_requests_sent':0}
+        with patch.object(stream,'_reconcile_manual_flat',return_value=pending):
+            with self.assertRaisesRegex(DispatchError,'STALE_OR_CONFLICTING_SNAPSHOT'):
+                list(stream._maintain_bucket(controller,'a'*64))
+        controller.cycle.assert_called_once()
+
     def test_empty_source_scan_spends_no_venue_quota(self):
         controller=Mock()
         controller.venue.now.return_value=T

@@ -214,8 +214,16 @@ def _maintain_bucket(controller, bucket):
         try:
             result = controller.cycle(bucket, send=True, allow_new_entries=False)
         except (DispatchError, life.LifecycleError):
+            before_manual = controller.store.load(bucket)
             manual = _reconcile_manual_flat(controller, bucket)
-            if manual is None:
+            after_manual = manual.get('state') if isinstance(manual, dict) else None
+            if (not isinstance(before_manual, dict) or not isinstance(after_manual, dict)
+                    or type(before_manual.get('revision')) is not int
+                    or type(after_manual.get('revision')) is not int
+                    or after_manual['revision'] <= before_manual['revision']):
+                # An already-bound close awaiting cleanup is not recovery from
+                # an unrelated failure. Surface it to the maintenance health
+                # report instead of concealing a quota, freshness or DB fault.
                 raise
             result = manual
         manual = _reconcile_manual_flat(controller, bucket)

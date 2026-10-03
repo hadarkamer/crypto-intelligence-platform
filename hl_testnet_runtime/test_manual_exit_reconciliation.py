@@ -416,9 +416,16 @@ class AutomaticManualExitDatabaseTests(unittest.TestCase):
         from .filled_dispatch_store import DispatchStore
         from .test_filled_quantity_dispatch import Venue, ROUTES2
         from .test_filled_quantity_exits import original
+        class ObservingVenue(Venue):
+            def collect(self,value):
+                # Each real public read occurs after its durable predecessor.
+                # The shared deterministic double otherwise freezes its clock
+                # until a send/fill, unlike the runtime's monotonic wall clock.
+                self.t+=1
+                return super().collect(value)
         for n,side in enumerate(('LONG','SHORT'),1):
             with self.subTest(side=side):
-                venue=Venue();controller=dispatch.Controller(self.store,venue,ROUTES2,
+                venue=ObservingVenue();controller=dispatch.Controller(self.store,venue,ROUTES2,
                     after_exit_policy=dispatch.AFTER_EXIT)
                 binding,record=original(n,side=side);card_id=binding['card_id']
                 self.cards.record(record['card'])
@@ -442,8 +449,18 @@ class AutomaticManualExitDatabaseTests(unittest.TestCase):
                 self.assertEqual(venue.sent,sent_before)
                 restarted=dispatch.Controller(DispatchStore(self.j),venue,ROUTES2,
                     after_exit_policy=dispatch.AFTER_EXIT)
-                results=list(_maintain_bucket(restarted,bucket))
-                self.assertEqual(sum(result['order_requests_sent'] for result in results),2)
+                blocked=[];cycle=restarted.cycle
+                def traced_cycle(*args,**kwargs):
+                    try:
+                        return cycle(*args,**kwargs)
+                    except (DispatchError,life.LifecycleError) as exc:
+                        blocked.append(str(exc))
+                        raise
+                with patch.object(restarted,'cycle',side_effect=traced_cycle):
+                    results=list(_maintain_bucket(restarted,bucket))
+                self.assertEqual(sum(result['order_requests_sent'] for result in results),2,
+                                 dict(statuses=[result['status'] for result in results],blocked=blocked))
+                self.assertEqual(blocked,[])
                 final=m.reconcile_controller(restarted,bucket)
                 self.assertEqual(final['status'],'NO_MANUAL_EXIT_CANDIDATE')
                 saved=DispatchStore(self.j).load(bucket)
@@ -459,8 +476,10 @@ class AutomaticManualExitDatabaseTests(unittest.TestCase):
                 self.assertEqual(venue.sent,sent_before+2)
         with self.j._transaction() as conn:
             events=[row[0] for row in conn.execute(f'SELECT event FROM {SCHEMA}.events').fetchall()]
-            self.assertEqual(events.count('MANUAL_EXIT_AUTOMATIC_BOUND_OWNED_CLEANUP_PENDING'),2)
-            self.assertEqual(events.count('MANUAL_EXIT_AUTOMATIC_CLOSURE_VERIFIED'),2)
+        # Assertions outside the DB wrapper preserve their useful failure
+        # instead of being redacted as a persistence exception on rollback.
+        self.assertEqual(events.count('MANUAL_EXIT_AUTOMATIC_BOUND_OWNED_CLEANUP_PENDING'),2)
+        self.assertEqual(events.count('MANUAL_EXIT_AUTOMATIC_CLOSURE_VERIFIED'),2)
 
     def test_failed_audit_commit_does_not_bind_or_authorize_cancellation(self):
         state,reader=automatic_fixture();created=self.store.create_bucket(state['account'],state['symbol'])

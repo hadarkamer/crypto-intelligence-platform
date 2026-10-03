@@ -43,6 +43,13 @@ jobs:
           persist-credentials: false
       - name: Install the pinned Testnet runtime dependencies
         run: python3 -m pip install -r hl_testnet_runtime/requirements.txt
+      - name: New durable manual-close, duplicate-event and quota regressions
+        run: >-
+          python3 -m unittest -v
+          hl_testnet_runtime.test_manual_exit_reconciliation
+          hl_testnet_runtime.test_execution_occurrence
+          hl_testnet_runtime.test_continuous_short_scope
+          hl_testnet_runtime.test_request_budget
       - name: Existing checks and actual PostgreSQL restart, race, lost-ack and mixed-exit tests
         run: |
           python3 -m unittest -v hyperliquid_testnet_executor_selftest alert_cards_forwarder_selftest
