@@ -385,6 +385,18 @@ def load_diagnostics(env=None):
                 attempts=int(r[7]) if r[7] in ('0','1') else None,
                 **{key:_moment(int(v)) if isinstance(v,str) and v.isdigit() and len(v)<16 else None
                    for key,v in zip(('prepared_at_ms','attempt_at_ms','updated_at_ms'),r[8:])}) for r in rows]
+            rows = conn.execute(f'''SELECT request_id,value->>'abort_reason',
+                value->>'attempt_at_ms',value->>'aborted_at_ms' FROM {REQUESTS}
+                WHERE phase='ABORTED_UNSENT'
+                ORDER BY (value->>'aborted_at_ms')::bigint DESC NULLS LAST LIMIT 10''').fetchall()
+            allowed_reasons = {'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',
+                'TESTNET_REQUEST_BUDGET_EXHAUSTED','TESTNET_REQUEST_BUDGET_BUSY',
+                'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE','TESTNET_SHARED_REQUEST_BUDGET_REQUIRED'}
+            result['requests']['aborted_recent'] = [dict(
+                request_id=_identifier(r[0],pattern=r'[0-9a-f]{64}'),
+                reason=r[1] if r[1] in allowed_reasons else None,
+                **{key:_moment(int(v)) if isinstance(v,str) and v.isdigit() and len(v)<16 else None
+                   for key,v in zip(('attempt_at_ms','aborted_at_ms'),r[2:])}) for r in rows]
         if present[EVENTS]:
             result['events'] = _counts(conn,EVENTS,'event')
             row = conn.execute(f'SELECT min(at_ms),max(at_ms) FROM {EVENTS}').fetchone()

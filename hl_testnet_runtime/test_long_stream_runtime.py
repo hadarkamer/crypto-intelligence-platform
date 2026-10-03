@@ -47,6 +47,31 @@ def env():
 
 
 class ConfigurationTests(NoExternal):
+    def test_start_keeps_authoritative_supervisors_without_extra_diagnostic_readers(self):
+        controller=Mock()
+        controller.store.journal._transaction.return_value=nullcontext(Mock())
+        settings={**env(),'HL_TESTNET_SHORT_ENTRY_ENABLED':'false'}
+        with patch.dict(os.environ,settings,clear=True), \
+             patch.object(stream,'configuration',return_value=({'account':A},datetime.now(timezone.utc))), \
+             patch.object(stream,'short_configuration',return_value=({'account':B},datetime.now(timezone.utc))), \
+             patch.object(dispatch,'controller_from_env',return_value=controller), \
+             patch.object(stream,'CardStore'),patch.object(intake,'initialize'), \
+             patch('hl_testnet_runtime.request_budget.Budget'), \
+             patch('hl_testnet_runtime.fill_wakeups.FillWakeups') as feeds, \
+             patch('hl_testnet_runtime.emergency_close.start') as emergency, \
+             patch.object(stream.threading,'Thread') as thread, \
+             patch.object(stream,'_thread',None),patch.object(stream,'_app_thread',None), \
+             patch.object(stream,'_fill_wakeups',None),patch.object(stream,'_health',{}), \
+             patch.object(stream,'_stop',Mock()),patch.object(stream,'_wake',Mock()), \
+             patch.object(stream,'_short_account_readiness') as diagnostic:
+            self.assertTrue(stream.start())
+            thread.assert_called_once()
+            self.assertIs(thread.call_args.kwargs['target'],stream._loop)
+            self.assertEqual(len(thread.call_args.kwargs['args'][1]),2)
+            feeds.return_value.start.assert_called_once()
+            emergency.assert_called_once()
+            diagnostic.assert_not_called()
+
     def test_current_account_reconciliation_retains_only_fresh_fully_protected_members(self):
         good=state_from_case(q='100',stop='100',take='100')
         self.assertTrue(stream._current_reconciliation_checkpoint(good,T-1,T+4999))

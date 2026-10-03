@@ -1052,13 +1052,8 @@ def start():
         _thread=threading.Thread(target=_loop,args=(controller,streams),
                                  daemon=True,name='testnet-card-stream')
         _thread.start()
-        if short:
-            threading.Thread(target=_short_account_readiness,args=(short[0],),
-                             daemon=True,name='testnet-short-account-readiness').start()
-            threading.Thread(target=_short_card_readiness,args=(controller,short[0]),
-                             daemon=True,name='testnet-short-card-readiness').start()
-            threading.Thread(target=_short_pending_readiness,args=(controller,short[0]),
-                             daemon=True,name='testnet-short-pending-readiness').start()
+        # The authoritative stream and emergency supervisor already reconcile both
+        # accounts. Diagnostic-only startup readers duplicate their venue requests.
         if app_mode:
             _app_thread=threading.Thread(target=_app_loop,args=(controller,streams,private_key),
                 daemon=True,name='testnet-app-card-delivery')

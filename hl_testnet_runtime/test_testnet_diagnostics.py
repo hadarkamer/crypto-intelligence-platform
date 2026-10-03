@@ -55,6 +55,30 @@ class ReadOnlyFixture:
 
 
 class EndpointTests(unittest.TestCase):
+    def test_unsent_reason_is_bounded_allowlisted_and_read_only(self):
+        fixture=ReadOnlyFixture();original=fixture.execute
+        def execute(sql,params=()):
+            if sql=='SELECT to_regclass(%s)' and params==(m.REQUESTS,):
+                return Cursor([(m.REQUESTS,)])
+            if m.REQUESTS in sql:
+                fixture.statements.append((sql,params))
+                if 'count(*)' in sql and 'GROUP BY' not in sql:return Cursor([(2,)])
+                if 'GROUP BY phase' in sql:return Cursor([('ABORTED_UNSENT',2)])
+                if "WHERE phase NOT IN" in sql:return Cursor([])
+                self.assertIn('LIMIT 10',sql)
+                return Cursor([('a'*64,'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',str(T),str(T+1)),
+                               ('b'*64,'DO_NOT_DISCLOSE',str(T),'bad')])
+            return original(sql,params)
+        with patch.object(fixture,'execute',side_effect=execute), \
+             patch.object(m.PostgresJournal,'from_env',return_value=fixture):
+            report=m.load_diagnostics(ENV)
+        rows=report['requests']['aborted_recent']
+        self.assertEqual(rows[0]['reason'],'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED')
+        self.assertIsNone(rows[1]['reason'])
+        self.assertIsNone(rows[1]['aborted_at_ms'])
+        self.assertNotIn('DO_NOT_DISCLOSE',json.dumps(report))
+        self.assertTrue(all(sql.lstrip().startswith('SELECT') for sql,_ in fixture.statements))
+
     def request(self, **overrides):
         response=[]
         env={'REQUEST_METHOD':'GET','PATH_INFO':'/internal/testnet-diagnostics/v1',
