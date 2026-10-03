@@ -54,6 +54,11 @@ def application(environ, start_response):
     if path == '/internal/testnet-cards/v1':
         from .alert_cards_intake import application as intake
         return intake(environ, start_response)
+    if path == '/internal/testnet-diagnostics/v1':
+        # Dedicated, authenticated journal reads only. This surface never
+        # instantiates a venue, signer or execution controller.
+        from .testnet_diagnostics import application as diagnostics
+        return diagnostics(environ, start_response)
     if path == '/internal/testnet-trades/v1':
         # Private read-only projection from this service's durable journal.
         # The Telegram bot receives no database credential or trading key.
