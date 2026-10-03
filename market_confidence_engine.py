@@ -44,8 +44,21 @@ def _cached_flow(symbol: str) -> Dict[str, Any]:
     cached = _FLOW_CACHE.get(symbol)
     if cached and now - cached[0] <= _FLOW_CACHE_TTL_SECONDS:
         return deepcopy(cached[1])
-    result = coinglass_flow_engine.analyze_symbol(symbol)
-    _FLOW_CACHE[symbol] = (now, deepcopy(result))
+    result: Dict[str, Any] = {"symbol": symbol}
+    read_failed = False
+    for market in ("futures", "spot"):
+        try:
+            result[market] = coinglass_flow_engine.analyze_market(symbol, market)
+        except Exception as exc:
+            read_failed = True
+            result[market] = {
+                "available": False,
+                "windows": {},
+                "quality": {"status": "NO_DATA", "reasons": [repr(exc)]},
+            }
+    # Keep each successful observation, but never cache a failed read.
+    if not read_failed:
+        _FLOW_CACHE[symbol] = (now, deepcopy(result))
     return result
 
 
