@@ -83,6 +83,13 @@ formula catalog, Ordered V7, outcome fan-outs or Sheet current views. The next
 research step can consume this separately versioned population after coverage
 has been verified.
 
+[Stage 8 source audit preparation](2026-09-13-operational-score-source-audit.md)
+defines the bounded read-only inspection path: retain all v4 anchor attempts,
+validate exact frozen pairs/bundles, select the latest durably-prior
+`WATCH_SHARED` archive row before requiring and validating its v2 block, and
+retain missing outcome/BTC evidence. Preparing that adapter does not run a
+database audit or connect it to runtime consumers.
+
 ## Checks
 
 The focused self-test verifies exact displayed item equality, one Max Pain

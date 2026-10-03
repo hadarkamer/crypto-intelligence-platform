@@ -20,6 +20,7 @@ import research_watch_scan_formula_score_change as score_change
 import research_watch_scan_formula_worker as old_worker
 import research_watch_scan_formula_timeframe as adapter
 import research_watch_scan_formula_timeframe_worker as worker
+import research_watch_scan_formula_leaderboard as leaderboard
 import research_watch_scan_formula_score_change_postgres_selftest as score_tests
 import research_watch_scan_formula_postgres_selftest as formula_tests
 import research_watch_scan_formula_btc_context_postgres_selftest as btc_tests
@@ -133,6 +134,12 @@ class WatchScanTimeframePostgresTests(unittest.TestCase):
         with self.connect() as conn:
             return measurement_worker.process_page(conn, now=now or BASE+timedelta(days=2))
 
+    def descriptive_leaderboard(self, **kwargs):
+        with self.connect() as conn:
+            with conn.transaction():
+                conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+                return leaderboard.read_leaderboard(conn, **kwargs)
+
     def test_exact_catalog_grid_activation_and_old_v5_evidence_are_preserved_without_implicit_ddl(self):
         self.seed_previous('tf-complete-grid')
         old = self.old_samples(score_change.VERSION)
@@ -238,6 +245,38 @@ class WatchScanTimeframePostgresTests(unittest.TestCase):
             self.assertEqual((row['distinct_waves'], row['matched_waves'], row['matched_success']), (1, 1, 1))
             self.assertFalse(row['statistical_test_performed'])
             self.assertFalse(row['qualifies_as_prospective_formula_evidence'])
+
+        # Execute the bounded leaderboard SQL on real PostgreSQL.  An exact
+        # SHORT analysis request must find the inverse LONG-base binding; the
+        # other catalog bindings remain visible even with n=0.  The eight tied
+        # symbols are one BTC parent, so full-window sums must consume the one
+        # conservative cohort aggregate rather than multiply it by eight.
+        report = self.descriptive_leaderboard(
+            dimension='SELECTED_TIMEFRAME', symbol_scope='ALL',
+            window_minutes=60, timeframe='12h', analysis_direction='SHORT',
+            threshold_bps=25, top_per_route=20)
+        partition = report['partitions'][0]
+        self.assertEqual(report['snapshot']['transaction_isolation'], 'repeatable read')
+        self.assertIn(str(report['snapshot']['transaction_read_only']).lower(), ('on', 'true'))
+        self.assertEqual(report['summary']['catalog_candidate_count'], 34)
+        self.assertEqual(report['summary']['enumerated_candidate_cell_count'], 34)
+        self.assertEqual(partition['candidate_count'], 34)
+        self.assertGreater(partition['both_routes_no_evidence_count'], 0)
+        target = next(row for row in partition['probability_leaders_by_evidence_band'][
+                          leaderboard.PROVISIONAL_BAND]
+                      if row['candidate_key'] == INVERSE_SUPPORTS)
+        self.assertEqual((target['base_direction'], target['analysis_direction']), ('LONG', 'SHORT'))
+        self.assertEqual((target['matched_waves'], target['probability_decisive_parent_count']), (1, 1))
+        self.assertEqual(target['probability_evidence_band'], leaderboard.PROVISIONAL_BAND)
+        source = next(row for row in inverse
+                      if row['timeframe'] == '12h' and row['window_minutes'] == 60
+                      and row['threshold_bps'] == 25)
+        self.assertEqual(source['cohort_members'], 8)
+        self.assertEqual((target['full_window_row_count'],
+                          target['full_window_parent_count']), (1, 1))
+        self.assertEqual(target['sum_mfe_pct'], source['full_window_mfe_pct'])
+        self.assertEqual(target['sum_mae_pct'], source['full_window_mae_pct'])
+        self.assertFalse(target['qualifies_as_prospective_formula_evidence'])
         self.assertEqual(self.samples(), frozen)
 
     def test_activation_requires_every_accepted_coin_even_if_intake_is_not_yet_enqueued(self):
