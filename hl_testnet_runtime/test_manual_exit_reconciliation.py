@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 from . import card_lifecycle as life, card_sync_evidence as sync, manual_exit_reconciliation as m
 from .emergency_close import recent_flat_unassigned_checkpoint
-from .filled_dispatch_store import DispatchError
+from .filled_dispatch_store import DispatchError, SCHEMA
 from .card_sync_evidence import SyncError
 from .test_card_lifecycle import binding, fill, terminal, snapshot, order, T
 from .test_card_sync import Reader

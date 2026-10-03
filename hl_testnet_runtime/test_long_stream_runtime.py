@@ -775,6 +775,9 @@ class DurableLongStreamTests(NoExternal):
     def test_short_receipt_to_fill_exits_closure_and_restart(self):
         card=self.card(98,side='SHORT')
         route=ROUTES2['short_account']
+        # This fixture exercises the original exact-card trial release. The
+        # production selector now reads the same venue scope as the sender.
+        self.v.env={'HL_TESTNET_SHORT_TRIAL_CARD_ID':card['card_id']}
         intake.initialize(self.j)
         intake.ReceiptStore(self.j).save('d'*64,'RECORDED',card['card_id'],
                                           {'source':'fixture'})
