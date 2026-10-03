@@ -39,6 +39,11 @@ def validator_ast(text):
 
 def prepare():
     prepare_browser()
+    # Generated Python modules must not reuse bytecode from a previously
+    # installed adapter. Deployment builds may restore this directory from a
+    # cache; regenerate it from reviewed sources on every build.
+    if RUNTIME.is_symlink():raise RuntimeError('Generated runtime cannot be a symlink')
+    if RUNTIME.exists():shutil.rmtree(RUNTIME)
     (RUNTIME/'market_vision').mkdir(parents=True,exist_ok=True)
     manifest={}
     for name,expected in PINNED.items():
@@ -52,7 +57,7 @@ def prepare():
     for name in ('model1_readiness.py','model1_diagnostics.py','model1_page_flow.py',
                  'model1_execution.py','image_detail.py','price_detail_input.py',
                  'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
-                 'model1_cache_policy.py','heatmap_models.py'):
+                 'model1_cache_policy.py','heatmap_models.py','prominent_levels.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -81,6 +86,10 @@ def prepare():
     # A fresh interpreter ensures each child's actual model configuration is tested.
     subprocess.run([sys.executable,'-m','unittest','test_heatmap_models','-v'],
         cwd=HERE,check=True,timeout=90)
+    from install_prominent_levels import install as install_prominent
+    install_prominent(RUNTIME)
+    subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','-v'],
+        cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
         'capture_flow':'one requested model/horizon; existing session, controls, PNG and same-image crop',
@@ -90,6 +99,8 @@ def prepare():
         'price_reference':'explicit visual range or validated legacy point; no fake midpoint',
         'initial_max_range_fraction':0.01,'numeric_thresholds_unchanged':True,
         'cache_scope':['heatmap_model','timeframe'],'single_worker':True,
+        'selection_policy':'prominent_right_edge.v1','level_contract_version':'prominent-rows.v1',
+        'zone_precision':'visible row label/tooltip or explicit axis uncertainty',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,
         'bot_started':False,'automatic_source_checks':False},indent=2))
     print('HEATMAP_MODELS_INSTALLED models=1,2,3 horizons=12H,24H,48H source_scans=0',flush=True)

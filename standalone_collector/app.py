@@ -150,6 +150,7 @@ def create_app():
     active=enabled and configured
     store=JobStore(os.getenv('DATABASE_URL',''),hourly_limit=2) if active else None
     async def health(_):
+        from prominent_levels import SELECTION_POLICY, CONTRACT
         result={'ok':True,'service':'decision-hub-model1-collector',
             'mode':'collection' if active else 'not_configured','bot_started':False,
             'scheduled_collection':False,'source_session_configured':source_session_configured(),
@@ -157,6 +158,7 @@ def create_app():
             'supported_models':[1,2,3],'supported_timeframes':['12H','24H','48H'],
             'new_capture_hourly_limit':store.hourly_limit if store is not None else None,
             'worker_concurrency':1,'automatic_cache_minutes':15}
+        result.update(selection_policy=SELECTION_POLICY,level_contract_version=CONTRACT)
         report=read_public_probe_report()
         if report is not None:result['source_probe']=report
         return web.json_response(result,headers={'Cache-Control':'no-store'})

@@ -20,7 +20,7 @@ def safe_scan(source):
     if not isinstance(source,dict):return {}
     out={}
     enums={'observed_timeframe':('12h','24h','48h','unknown'),
-        'observed_mode':('Symbol','Pair','unknown'),'observed_model':('Model 1','other','unknown'),
+        'observed_mode':('Symbol','Pair','unknown'),'observed_model':('Model 1','Model 2','Model 3','other','unknown'),
         'observed_symbol':('BTC','other','unknown'),'current_price_confidence':('high','medium','low'),
         'blocking_condition':('none','loading','login','blur','challenge','unknown')}
     for key,allowed in enums.items():
@@ -33,6 +33,26 @@ def safe_scan(source):
         if value.get('confidence') in ('high','medium','low'):interval['confidence']=value['confidence']
         if value.get('basis') in ('last_candle_axis_bracket','unreadable'):interval['basis']=value['basis']
         out['current_price_range']=interval
+    axis=source.get('price_axis_range')
+    if isinstance(axis,dict):
+        out['price_axis_range']={k:number(axis.get(k)) for k in ('low','high')}
+        if isinstance(axis.get('price_evidence'),str):out['price_axis_range']['price_evidence']=axis['price_evidence'][:500]
+    levels=source.get('prominent_levels')
+    if isinstance(levels,list):
+        out['prominent_levels']=[]
+        for level in levels[:40]:
+            if not isinstance(level,dict):continue
+            item={k:number(level.get(k)) for k in ('price_low','price_high','uncertainty_usd','strength_score')}
+            for k,allowed in {'side':('above','below'),'shape':('point','range'),
+                'intensity':('many','normal','few'),'row_colour':('yellow','green','blue'),
+                'confidence':('high','medium','low'),'price_precision':('verified_label','axis_estimate'),
+                'evidence_basis':('numeric_row_label','tooltip','axis_interpolation')}.items():
+                if level.get(k) in allowed:item[k]=level[k]
+            for k in ('continuous','weak_gap_present','right_edge_visible'):
+                if type(level.get(k)) is bool:item[k]=level[k]
+            if isinstance(level.get('price_evidence'),str):item['price_evidence']=level['price_evidence'][:500]
+            if isinstance(level.get('prices'),list):item['prices']=[number(p) for p in level['prices'][:2]]
+            out['prominent_levels'].append(item)
     for field in ('above_price','below_price'):
         group=source.get(field)
         if isinstance(group,dict):
