@@ -214,7 +214,8 @@ def _maintain_bucket(controller, bucket):
         try:
             result = controller.cycle(bucket, send=True, allow_new_entries=False)
         except (DispatchError, life.LifecycleError):
-            before_manual = controller.store.load(bucket)
+            load = getattr(controller.store, 'load', None)
+            before_manual = load(bucket) if callable(load) else None
             manual = _reconcile_manual_flat(controller, bucket)
             after_manual = manual.get('state') if isinstance(manual, dict) else None
             if (not isinstance(before_manual, dict) or not isinstance(after_manual, dict)
