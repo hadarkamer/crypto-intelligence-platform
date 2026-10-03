@@ -155,7 +155,7 @@ const CURRENT_PUBLICATION_ = {
 };
 const CURRENT_SYMBOLS_ = ["BTC", "ETH", "SOL", "HYPE", "DOGE", "ZEC", "BNB", "XRP"];
 const CURRENT_TIMEFRAMES_ = ["15m", "30m", "1h", "4h", "12h", "24h", "48h", "3d", "1w", "2w", "1m"];
-const TELEGRAM_MAX_ROWS_ = 32000;
+const TELEGRAM_MAX_ROWS_ = 40000;
 const TELEGRAM_PROTECTED_MS_ = 16 * 24 * 60 * 60 * 1000;
 
 function validateCurrentDimensions_(config, key) {
@@ -225,7 +225,7 @@ function reusableTelegramRow_(ss, state, row, keyNames) {
     if (timestamp < oldest) { oldest = timestamp; target = position; }
   }
   if (target === null) {
-    throw capacityError_("SHEET_CAPACITY", "Telegram protected window exceeds 32000 rows; no recent evidence overwritten");
+    throw capacityError_("SHEET_CAPACITY", "Telegram protected window exceeds 40000 rows; no recent evidence overwritten");
   }
   return target;
 }
@@ -430,7 +430,7 @@ function validateBatchCapacity_(ss, states) {
       throw capacityError_("SHEET_CAPACITY", "Current publication exceeds its fixed slot capacity");
     }
     if (name === "Telegram_Events" && (state.rowCount > TELEGRAM_MAX_ROWS_ || state.headers.length > 15)) {
-      throw capacityError_("SHEET_CAPACITY", "Telegram_Events is limited to 32000 data rows and 15 columns");
+      throw capacityError_("SHEET_CAPACITY", "Telegram_Events is limited to 40000 data rows and 15 columns");
     }
     if (name === "Formula_Current" && (state.rowCount > 38144 || state.headers.length > 25)) {
       throw capacityError_("SHEET_CAPACITY", "Formula_Current is limited to 38144 data rows and 25 columns");
