@@ -102,6 +102,66 @@ class EndpointTests(unittest.TestCase):
 
 
 class JournalDiagnosticTests(unittest.TestCase):
+    def test_staged_history_recovery_preserves_main_evidence_clock_and_facts(self):
+        state=ReadOnlyFixture().state
+        before=m._bucket(state,life.digest(state),1,{A:'long_account'},T+10000)
+        state['history_gap_recovery']=dict(version='history_gap_recovery_v1',base_at_ms=T,
+            cursor_ms=T+5000,chunks=1,basis_digest=before['snapshot_evidence_digest'],
+            started_at_ms=T+1000,last_checked_at_ms=T+6000,
+            anchor={'account':A,'raw_secret':'DO_NOT_DISCLOSE'},
+            staged_fills=[{'account':A,'raw_secret':'DO_NOT_DISCLOSE'}])
+        original=deepcopy(state)
+        after=m._bucket(state,life.digest(state),2,{A:'long_account'},T+10000)
+        self.assertEqual(state,original)
+        for key in ('evidence_at_ms','snapshot_evidence_digest','snapshot_fill_facts_count',
+                    'snapshot_terminal_order_facts_count'):
+            self.assertEqual(before[key],after[key])
+        self.assertEqual(after['history_gap_recovery']['status'],'STAGING_UNVERIFIED')
+        self.assertEqual(after['history_gap_recovery']['cursor_ms'],T+5000)
+        self.assertEqual(after['history_gap_recovery']['chunks'],1)
+        self.assertIsNone(after['history_gap_recovery_last'])
+        rendered=json.dumps(after)
+        self.assertNotIn(A,rendered)
+        self.assertNotIn('DO_NOT_DISCLOSE',rendered)
+        self.assertNotIn('staged_fills',rendered)
+        self.assertNotIn('anchor',rendered)
+    def test_saved_completion_discloses_new_clock_and_retained_fact_counts(self):
+        state=ReadOnlyFixture().state
+        before=m._bucket(state,life.digest(state),1,{A:'long_account'},T+10000)
+        old_fills=deepcopy(state['evidence']['snapshot']['fills'])
+        old_terms=deepcopy(state['evidence']['snapshot']['terminal_orders'])
+        state['evidence']['snapshot']['at_ms']=T+10000
+        state['history_gap_recovery_last']=dict(version='history_gap_recovery_v1',base_at_ms=T,
+            cursor_ms=T+10000,chunks=2,basis_digest=before['snapshot_evidence_digest'],
+            anchor_digest='b'*64,completed_at_ms=T+10000,
+            anchor={'account':A},staged_fills=[{'account':A}])
+        after=m._bucket(state,life.digest(state),3,{A:'long_account'},T+12000)
+        self.assertEqual(after['evidence_at_ms'],T+10000)
+        self.assertNotEqual(after['snapshot_evidence_digest'],before['snapshot_evidence_digest'])
+        self.assertEqual(after['snapshot_fill_facts_count'],before['snapshot_fill_facts_count'])
+        self.assertEqual(after['snapshot_terminal_order_facts_count'],before['snapshot_terminal_order_facts_count'])
+        self.assertEqual(state['evidence']['snapshot']['fills'],old_fills)
+        self.assertEqual(state['evidence']['snapshot']['terminal_orders'],old_terms)
+        self.assertIsNone(after['history_gap_recovery'])
+        self.assertEqual(after['history_gap_recovery_last'],dict(version='history_gap_recovery_v1',
+            status='SAVED_COMPLETION_METADATA',base_at_ms=T,cursor_ms=T+10000,chunks=2,
+            basis_digest=before['snapshot_evidence_digest'],anchor_digest='b'*64,
+            completed_at_ms=T+10000))
+    def test_recovery_projection_rejects_bad_metadata_and_never_echoes_anchors(self):
+        self.assertIsNone(m._history_recovery(None))
+        for record in ('DO_NOT_DISCLOSE',{}, {'version':'DO_NOT_DISCLOSE','anchor':A}):
+            self.assertEqual(m._history_recovery(record),{'status':'METADATA_REQUIRES_REVIEW'})
+        record=dict(version='history_gap_recovery_v1',base_at_ms=-1,cursor_ms=True,
+                    chunks=True,basis_digest=A,started_at_ms='DO_NOT_DISCLOSE',
+                    last_checked_at_ms=10**18,anchor={'account':A},staged_fills=[A])
+        projected=m._history_recovery(record)
+        for key in ('base_at_ms','cursor_ms','chunks','basis_digest','started_at_ms','last_checked_at_ms'):
+            self.assertIsNone(projected[key])
+        self.assertNotIn(A,json.dumps(projected))
+        self.assertNotIn('DO_NOT_DISCLOSE',json.dumps(projected))
+        done=m._history_recovery({**record,'anchor_digest':A,'completed_at_ms':-1},completed=True)
+        self.assertIsNone(done['anchor_digest'])
+        self.assertIsNone(done['completed_at_ms'])
     def test_original_expiry_and_risk_fields_are_preserved_without_execution(self):
         state=ReadOnlyFixture().state
         card=next(iter(state['originals'].values()))['card']

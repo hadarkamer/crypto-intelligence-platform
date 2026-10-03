@@ -14,6 +14,7 @@ import threading
 import traceback
 
 from . import approved_alert_selection as selection, card_lifecycle as life
+from . import history_gap_recovery as gap
 from . import filled_quantity_dispatch as dispatch, two_account_execution as roles
 from .filled_dispatch_store import DispatchError
 from .source_window import source_fresh, timestamp
@@ -157,6 +158,15 @@ def _account_owned(venue, account, states, *, role=None, priority='background', 
     else:
         orders = reader.read('frontendOpenOrders',account)
         positions = reader.read('clearinghouseState',account)
+    return _validate_account_inventory(account, states, orders, positions, role=role)
+
+
+def _validate_account_inventory(account, states, orders, positions, *, role=None):
+    """Validate complete public account inventory without additional HTTP.
+
+    Historical recovery reuses this gate on each already funded independent
+    observation pass. The same ownership checks gate ordinary registration.
+    """
     if (not isinstance(orders,list) or len(orders)>10000
             or not isinstance(positions,dict)
             or not isinstance(positions.get('assetPositions'),list)):
@@ -164,6 +174,8 @@ def _account_owned(venue, account, states, *, role=None, priority='background', 
     by_symbol = {s['symbol']:s for s in states}
     if len(by_symbol) != len(states):
         raise DispatchError('DUPLICATE_MARKET_BUCKET')
+    if any(state.get('account')!=account for state in states):
+        raise DispatchError('ACCOUNT_INVENTORY_BUCKET_MISMATCH')
     if role is not None:
         if role not in roles.ROLES:
             raise DispatchError('EXPLICIT_ACCOUNT_ROLE_REQUIRED')
@@ -171,6 +183,8 @@ def _account_owned(venue, account, states, *, role=None, priority='background', 
             raise DispatchError('ACCOUNT_BINDING_ROLE_MISMATCH')
     known = {(s['symbol'],oid) for s in states for b in s['bindings']
              for leg in life.LEGS for oid in b['orders'][leg]}
+    final_orders={(s['symbol'],row['oid']) for s in states if s['evidence'] is not None
+        for row in s['evidence']['snapshot']['terminal_orders']}
     expected = {s['symbol']:(life.number(s['evidence']['snapshot']['position_quantity'],signed=True)
                if s['evidence'] is not None else 0) for s in states}
     if role is not None and any(q and (q > 0) != (role == 'long_account')
@@ -184,6 +198,8 @@ def _account_owned(venue, account, states, *, role=None, priority='background', 
                 or row['coin'] not in by_symbol
                 or (row['coin'],str(row['oid'])) not in known):
             raise DispatchError('UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY')
+        if (row['coin'],str(row['oid'])) in final_orders:
+            raise DispatchError('FINAL_ACCOUNT_ORDER_REAPPEARED_RECONCILE_FIRST')
     seen=set()
     for row in positions['assetPositions']:
         if (not isinstance(row,dict) or not isinstance(row.get('position'),dict)
@@ -289,6 +305,10 @@ def _maintenance_priority(state, dirty_symbols=()):
 
 def _immutable_flat_checkpoint(state):
     """Historical terminal proof may be retained; inventory must verify flat now."""
+    if 'history_gap_recovery' in state:
+        # Final old orders remain final, but a staged history cursor has not
+        # yet established the account's current reconciliation boundary.
+        return False
     ev=state.get('evidence')
     emergency=state.get('emergency')
     if emergency is not None and (emergency['phase']!='CLOSED_VERIFIED'
@@ -299,6 +319,57 @@ def _immutable_flat_checkpoint(state):
         and ev['snapshot']['symbol']==state['symbol']
         and ev['snapshot']['history_complete'] and ev['snapshot']['orders_complete']
         and idle_flat(state))
+
+
+def _recover_history(controller, state):
+    """Per-market scheduling hints never change the durable recovery cursor.
+
+    A failed history observation delays only this read-only market. Live exits
+    in every other bucket still run first. Restart can discard these hints;
+    the shared quota and audited cursor remain the authoritative fences.
+    """
+    retries=vars(controller).setdefault('_history_gap_retries', {})
+    previous=retries.get(state['bucket'])
+    now=controller.venue.now()
+    revision=state.get('revision')
+    if previous is not None and previous['revision']==revision and now<previous['due_ms']:
+        return dict(status='HISTORY_GAP_RECOVERY_WAIT', order_requests_sent=0,
+            state=state, cursor_ms=previous['cursor_ms'],
+            remaining_ms=max(0, now-previous['cursor_ms']),
+            retry_after_ms=previous['due_ms']-now,
+            failure_code=previous['failure_code'])
+    try:
+        result=gap.step(controller, state)
+    except Exception as exc:
+        from .request_budget import BudgetError, fresh_entry_retry_ms
+        count=min(6, previous['count']+1 if previous is not None
+            and previous['revision']==revision else 1)
+        delay=(fresh_entry_retry_ms(exc, consecutive_failures=count)
+               if isinstance(exc, BudgetError) else min(30000, 1000*2**count))
+        snapshot=(state.get('evidence') or {}).get('snapshot', {})
+        cursor=(state.get('history_gap_recovery') or {}).get('cursor_ms',
+            snapshot.get('at_ms', now))
+        retries[state['bucket']]=dict(revision=revision, count=count,
+            due_ms=now+(delay if delay is not None else 30000), cursor_ms=cursor,
+            failure_code=_safe_failure(exc)['failure_code'])
+        raise
+    retries.pop(state['bucket'], None)
+    return result
+
+
+def _history_recovery_report(results):
+    statuses={item['status'] for item in results}
+    status=('HISTORY_GAP_RECOVERY_PROGRESS' if 'HISTORY_GAP_RECOVERY_PROGRESS' in statuses
+        else 'HISTORY_GAP_RECOVERY_WAIT' if 'HISTORY_GAP_RECOVERY_WAIT' in statuses
+        else 'HISTORY_GAP_RECOVERY_COMPLETE')
+    latest=results[-1]
+    report=dict(status=status, recovery_buckets=len(results),
+        recovery_cursor_ms=latest['cursor_ms'], recovery_remaining_ms=latest['remaining_ms'])
+    waits=[item for item in results if item['status']=='HISTORY_GAP_RECOVERY_WAIT']
+    if waits:
+        report.update(retry_after_ms=min(item['retry_after_ms'] for item in waits),
+                      failure_code=waits[0]['failure_code'])
+    return report
 
 
 def _quiet_protected_checkpoint(controller, state, *, now_ms):
@@ -350,6 +421,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
     sent = 0
     errors = 0
     maintenance_active = 0
+    history_recovery = []
     first_failure = None
     rejection = None
     for state in states:
@@ -373,15 +445,23 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             aged_closed_short = (not retained and role == 'short_account' and state['bindings']
                 and state['evidence'] is not None
                 and 3600000 < int(now.timestamp()*1000)-state['evidence']['snapshot']['at_ms'])
+            recover_history = gap.needed(state, now_ms=controller.venue.now())
             unfinished = _unfinished(state,now)
             # A locally registered, never-attempted candidate requires no
             # maintenance while entries are disabled. Preserve aged SHORT
             # history catch-up and all pending/working/exposed buckets.
             if not forced and not new_entries and not aged_closed_short and idle_flat(state):
                 unfinished=False
-            if not unfinished and not aged_closed_short and not forced:
+            if not unfinished and not aged_closed_short and not forced and not recover_history:
                 continue
             maintenance_active += int(unfinished)
+            if recover_history:
+                # A missing-history page is read-only work. Its separately
+                # committed cursor is never an entry or fill checkpoint. Keep
+                # servicing all live exposure first, then finish this bounded
+                # stage without ordinary dispatch or entry in this sweep.
+                history_recovery.append(_recover_history(controller, state))
+                continue
             if current_reconciliation:
                 continue
             if (notification_continuity and not forced and state['pending'] is None
@@ -409,7 +489,17 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
                       order_requests_sent=sent,new_cards_registered=0)
         if first_failure is not None:
             result.update(first_failure)
+        if history_recovery:
+            recovered=_history_recovery_report(history_recovery)
+            if errors:
+                recovered.pop('status'); recovered.pop('failure_code', None)
+            result.update(recovered)
         return result
+    if history_recovery:
+        return dict(**_history_recovery_report(history_recovery),
+            active_buckets=len(states), maintenance_active=maintenance_active,
+            order_requests_sent=sent, new_cards_registered=0,
+            )
     from .bounded_entry_trial import cap_reached
     if cap_reached(controller.store, getattr(controller.venue, 'env', {}), role, route['account']):
         return dict(status='BOUNDED_ENTRY_TRIAL_CAP_REACHED', active_buckets=len(states),

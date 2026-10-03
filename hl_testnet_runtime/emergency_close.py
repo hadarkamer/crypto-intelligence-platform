@@ -89,6 +89,15 @@ def fence(conn, state, operation):
     if operation == 'ENTRY' and conn.execute(
             f"SELECT 1 FROM {SCHEMA}.buckets WHERE value->'emergency' IS NOT NULL LIMIT 1").fetchone():
         raise DispatchError('EMERGENCY_CIRCUIT_LATCHED_NO_NEW_ENTRY')
+    if operation == 'ENTRY' and ('history_gap_recovery' in state or
+            (state.get('account') and conn.execute(f'''SELECT 1 FROM {SCHEMA}.buckets
+                WHERE value->>'account'=%s
+                AND value->'history_gap_recovery' IS NOT NULL LIMIT 1''',
+                (state['account'],)).fetchone())):
+        # The stream scheduler is only one caller. Persisted missing-history
+        # work fences every new ENTRY on this account under the common lock;
+        # protection, cancellation and reduction keep their existing authority.
+        raise DispatchError('ACCOUNT_HISTORY_GAP_REQUIRES_RECONCILIATION')
 
 
 def view(state, now_ms):

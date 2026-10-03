@@ -426,17 +426,17 @@ class ConfigurationTests(NoExternal):
             with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_POSITION'):
                 stream._account_owned(None,A,[])
             fake.positions=[]
-            state=dict(symbol='BTC',pending=None,bindings=[dict(orders={
+            state=dict(account=A,symbol='BTC',pending=None,bindings=[dict(orders={
                 'ENTRY':[], 'STOP':[], 'TAKE_PROFIT':[]})],
-                evidence=dict(snapshot=dict(position_quantity='0')))
+                evidence=dict(snapshot=dict(position_quantity='0',terminal_orders=[])))
             fake.positions=[dict(coin='BTC',szi='2')]
             with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_POSITION'):
                 stream._account_owned(None,A,[state])
             fake.positions=[dict(coin='BTC',szi='2'),dict(coin='ETH',szi='-3')]
             owned=[{**state,'symbol':'BTC',
-                    'evidence':dict(snapshot=dict(position_quantity='2'))},
+                    'evidence':dict(snapshot=dict(position_quantity='2',terminal_orders=[]))},
                    {**state,'symbol':'ETH',
-                    'evidence':dict(snapshot=dict(position_quantity='-3'))}]
+                    'evidence':dict(snapshot=dict(position_quantity='-3',terminal_orders=[]))}]
             self.assertTrue(stream._account_owned(None,A,owned))
 
     def test_account_inventory_rejects_opposite_direction_even_when_journal_agrees(self):
@@ -446,12 +446,13 @@ class ConfigurationTests(NoExternal):
                 if kind=='frontendOpenOrders': return []
                 return dict(assetPositions=[dict(position=dict(coin='BTC',szi=self.position))])
         reader=Reader()
-        state=dict(symbol='BTC',pending=None,bindings=[],
-                   evidence=dict(snapshot=dict(position_quantity='-2')))
+        state=dict(account=A,symbol='BTC',pending=None,bindings=[],
+                   evidence=dict(snapshot=dict(position_quantity='-2',terminal_orders=[])))
         with patch('hl_testnet_runtime.card_sync_evidence.PublicReader',return_value=reader):
             reader.position='-2'
             with self.assertRaisesRegex(DispatchError,'OPPOSITE_DIRECTION_ACCOUNT_EXPOSURE'):
                 stream._account_owned(None,A,[state],role='long_account')
+            state['account']=B
             self.assertTrue(stream._account_owned(None,B,[state],role='short_account'))
             state['evidence']['snapshot']['position_quantity']='2'
             reader.position='2'
@@ -459,8 +460,18 @@ class ConfigurationTests(NoExternal):
                 stream._account_owned(None,B,[state],role='short_account')
             state['bindings']=[dict(role='short_account',orders={
                 'ENTRY':[],'STOP':[],'TAKE_PROFIT':[]})]
+            state['account']=A
             with self.assertRaisesRegex(DispatchError,'ACCOUNT_BINDING_ROLE_MISMATCH'):
                 stream._account_owned(None,A,[state],role='long_account')
+
+    def test_account_inventory_rejects_other_account_bucket_even_with_matching_orders_and_position(self):
+        state=state_from_case(q='100',stop='100',take='100')
+        snap=state['evidence']['snapshot']
+        orders=[dict(coin=state['symbol'],oid=int(row['oid'])) for row in snap['open_orders']]
+        positions=dict(assetPositions=[dict(position=dict(coin=state['symbol'],szi='100'))])
+        self.assertTrue(stream._validate_account_inventory(A,[state],orders,positions,role='long_account'))
+        with self.assertRaisesRegex(DispatchError,'ACCOUNT_INVENTORY_BUCKET_MISMATCH'):
+            stream._validate_account_inventory(B,[state],orders,positions)
 
     def test_disabled_entries_still_service_existing_buckets(self):
         class Store:

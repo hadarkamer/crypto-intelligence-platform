@@ -177,6 +177,31 @@ def _timing(value):
     return result
 
 
+def _history_recovery(value, *, completed=False):
+    """Bounded progress metadata only; raw anchors/fills never leave storage.
+
+    Cursor progress is not a fill or fresh lifecycle proof. Completion metadata
+    is likewise reported as saved metadata, not independent venue authority.
+    """
+    if value is None:
+        return None
+    if not isinstance(value,dict) or value.get('version') != 'history_gap_recovery_v1':
+        return {'status':'METADATA_REQUIRES_REVIEW'}
+    result = dict(version='history_gap_recovery_v1',
+        status='SAVED_COMPLETION_METADATA' if completed else 'STAGING_UNVERIFIED',
+        base_at_ms=_moment(value.get('base_at_ms')),cursor_ms=_moment(value.get('cursor_ms')),
+        chunks=value['chunks'] if type(value.get('chunks')) is int
+               and 0 <= value['chunks'] <= 10**9 else None,
+        basis_digest=_identifier(value.get('basis_digest'),pattern=r'[0-9a-f]{64}'))
+    if completed:
+        result.update(anchor_digest=_identifier(value.get('anchor_digest'),pattern=r'[0-9a-f]{64}'),
+                      completed_at_ms=_moment(value.get('completed_at_ms')))
+    else:
+        result.update(started_at_ms=_moment(value.get('started_at_ms')),
+                      last_checked_at_ms=_moment(value.get('last_checked_at_ms')))
+    return result
+
+
 def _bucket(value, checksum, revision, roles, now_ms):
     from . import card_lifecycle as life
     if not isinstance(value, dict) or life.digest(value) != checksum:
@@ -195,6 +220,9 @@ def _bucket(value, checksum, revision, roles, now_ms):
         closed_at_ms=_moment(incident.get('closed_at_ms')),
         closure_origin=_identifier(incident.get('closure_origin'),pattern=r'[A-Z_]{1,80}'),
         provisional=incident.get('provisional') is True)
+    result['history_gap_recovery'] = _history_recovery(value.get('history_gap_recovery'))
+    result['history_gap_recovery_last'] = _history_recovery(
+        value.get('history_gap_recovery_last'),completed=True)
     ev = value.get('evidence')
     if not ev:
         result['evidence_status'] = 'NO_SAVED_SNAPSHOT'
@@ -204,6 +232,9 @@ def _bucket(value, checksum, revision, roles, now_ms):
         evidence_age_ms=max(0, now_ms-snap['at_ms']),
         history_complete=snap.get('history_complete') is True,
         orders_complete=snap.get('orders_complete') is True,
+        snapshot_evidence_digest=life.digest(ev),
+        snapshot_fill_facts_count=len(snap.get('fills',[])),
+        snapshot_terminal_order_facts_count=len(snap.get('terminal_orders',[])),
         position_quantity=_number(snap.get('position_quantity')))
     bindings = value.get('bindings', [])
     if not bindings:

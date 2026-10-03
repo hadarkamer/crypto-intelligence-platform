@@ -312,7 +312,7 @@ def triggered_take_profit(binding, leg, oid, order, inventory, fills, original,
 
 
 def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=(),
-            reuse_verified_terminals=False):
+            reuse_verified_terminals=False, inventory_guard=None):
     account,symbol = life.validate_snapshot(previous)
     plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
     links = {oid:(b,leg) for b in bindings for leg in life.order_legs(b) for oid in b['orders'][leg]}
@@ -323,6 +323,8 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
     responses, raw_fills, raw_inventory, position = (
         read_inputs(account, current_oids, start, end) if callable(read_inputs)
         else observation_inputs(reader, account, current_oids, start, end))
+    if inventory_guard is not None:
+        inventory_guard(raw_inventory,position)
     fills = merge_fills(previous['fills'],raw_fills,account,symbol,start,end)
     old_facts=_fill_facts_by_oid(previous['fills']) if certificates else {}
     new_facts=_fill_facts_by_oid(fills) if certificates else {}
@@ -518,8 +520,62 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
             plain=plain,reuse_verified_terminals=reuse_verified_terminals)
 
 
+def retained_anchor(reader, account, fill):
+    """Prove one exact old fill remains inside the venue's retained history.
+
+    A returned old fill bounds the account's latest-10,000-fill retention. An
+    empty historical interval alone provides no such bound. Keep the original
+    normalized identity and terms; an unrelated fill at that time is no proof.
+    """
+    stamp=life.moment(fill['at_ms'])
+    if fill['account']!=life.address(account):
+        raise SyncError('HISTORY_RETENTION_ANCHOR_ACCOUNT_MISMATCH')
+    rows=merge_fills([fill],history(reader,account,stamp,stamp),account,
+                     fill['symbol'],stamp,stamp)
+    if fill not in rows:
+        raise SyncError('HISTORY_RETENTION_ANCHOR_UNAVAILABLE')
+
+
+def _collect_retained(evidence, reader, *, cursor_ms, anchor, clock=now_ms,
+                     elapsed=time.monotonic, inventory_guard=None):
+    """Final bounded two-pass collection bracketed by a retained old fill.
+
+    All known reads, including both retention checks, are funded before any
+    HTTP. This does not enlarge normal catch-up bounds or alter prior facts.
+    The caller must have durably reviewed every interval before cursor_ms.
+    """
+    bindings,previous=deepcopy(evidence['bindings']),deepcopy(evidence['snapshot'])
+    life.validate_bindings(bindings)
+    account,symbol=life.validate_snapshot(previous)
+    if any(life.address(b['account'])!=account or b['symbol']!=symbol for b in bindings):
+        raise SyncError('MIXED_BUCKET_BINDINGS')
+    terminal_certificates(bindings,previous)
+    cursor=life.moment(cursor_ms)
+    end,started=clock(),elapsed()
+    if cursor<previous['at_ms'] or not 0<=end-cursor<=DAY_MS//2:
+        raise SyncError('HISTORY_RECOVERY_FINAL_WINDOW_INVALID')
+    stamp=life.moment(anchor['at_ms'])
+    if stamp>previous['at_ms']:
+        raise SyncError('HISTORY_RETENTION_ANCHOR_TOO_NEW')
+    body=dict(type='userFillsByTime',user=account,startTime=stamp,endTime=stamp,
+              aggregateByTime=False)
+    bodies=[body]+_planned_observation_reads(bindings,previous,cursor,end,
+                 reuse_verified_terminals=True)+[body]
+    plan=getattr(type(reader),'observation_batch',None)
+    context=reader.observation_batch(bodies) if callable(plan) else nullcontext()
+    with context:
+        retained_anchor(reader,account,anchor)
+        result=_collect_funded(bindings,previous,reader,cursor,end,started,clock,elapsed,
+                              plain=(),reuse_verified_terminals=True,
+                              inventory_guard=inventory_guard)
+        retained_anchor(reader,account,anchor)
+        if elapsed()-started>15:
+            raise SyncError('OBSERVATION_TOO_SLOW')
+        return result
+
+
 def _collect_funded(bindings, previous, reader, cursor, end, started, clock, elapsed,
-                    *, plain, reuse_verified_terminals):
+                    *, plain, reuse_verified_terminals, inventory_guard=None):
     account,symbol=life.validate_snapshot(previous)
     # Reconstruct a short missed interval before taking the current order and
     # position snapshot. Each bounded window is observed twice; nothing is
@@ -538,10 +594,11 @@ def _collect_funded(bindings, previous, reader, cursor, end, started, clock, ela
     # Both passes use only the ORIGINAL durable certificates. A newly final
     # order in pass one must still receive an independent status read in pass
     # two before its complete checkpoint can ever be reused by a later cycle.
+    guard={} if inventory_guard is None else dict(inventory_guard=inventory_guard)
     first = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
-                    reuse_verified_terminals=reuse_verified_terminals)
+                    reuse_verified_terminals=reuse_verified_terminals,**guard)
     second = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
-                     reuse_verified_terminals=reuse_verified_terminals)
+                     reuse_verified_terminals=reuse_verified_terminals,**guard)
     if first != second: raise SyncError('OBSERVATION_CHANGED_RETRY')
     if elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')
     result = life.review(bindings,second,now_ms=clock(),plain_take_profit_oids=plain)
