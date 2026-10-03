@@ -153,5 +153,6 @@ class WindowPostgresTests(NoExternal):
             _, proposal = self.planned('DOGE', 'long_account')
             with self.assertRaisesRegex(DispatchError, 'WINDOW_CLOSED'):
                 cap.check_entry(restarted, env, proposal)
-            with self.assertRaisesRegex(DispatchError, 'WINDOW_CLOSED'):
-                cap.entry_guard(env, proposal)(Mock(), dict(account=A), proposal)
+            with self.j._transaction() as conn:
+                with self.assertRaisesRegex(DispatchError, 'WINDOW_CLOSED'):
+                    cap.entry_guard(env, proposal)(conn, dict(account=A), proposal)
