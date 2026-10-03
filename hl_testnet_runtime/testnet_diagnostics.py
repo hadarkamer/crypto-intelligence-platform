@@ -43,7 +43,7 @@ ENUM_CONFIG = {
     'HL_TESTNET_SHORT_STREAM': ('approved_alerts_v1',),
     'HL_TESTNET_LONG_ENTRY_ENABLED': ('true', 'false'),
     'HL_TESTNET_SHORT_ENTRY_ENABLED': ('true', 'false'),
-    'HL_TESTNET_ENTRY_ATTEMPT_CAP': ('one_per_role_v1',),
+    'HL_TESTNET_ENTRY_ATTEMPT_CAP': ('one_per_role_v1', 'five_per_role_48h_v1'),
     'HL_TESTNET_FILLED_DISPATCH': ('approved_long_stream_v1', 'approved_single_card_v1'),
     'HL_TESTNET_FILLED_AFTER_EXIT_POLICY': ('cancel_remainder_after_exit_v1',),
     'HL_TESTNET_TWO_ACCOUNT_EXECUTION': ('disabled',),
