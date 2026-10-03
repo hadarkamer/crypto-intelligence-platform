@@ -17,6 +17,7 @@ from .dispatch_concurrency import market_lane
 
 VERSION = 'testnet-emergency-close-v1'
 APPROVAL = 'approved_testnet_v1'
+CONTINUOUS_RELEASE = 'continuous_testnet_v1'
 DEADLINE_MS = 5000  # Testnet experiment setting, not a Mainnet latency guarantee.
 SLIPPAGE = Decimal('0.01')
 LOCK = 1729048241
@@ -26,6 +27,59 @@ _health = dict(running=False, last_pass_at_ms=None, last_status='DISABLED')
 _thread = None
 _stop_event = None
 _lock = threading.Lock()
+
+
+def continuous_configuration(env):
+    """Explicit continuous Testnet scope; absent retains the old one-card trial.
+
+    This selects a safety integration, not ENTRY permission. Source freshness,
+    account ownership, live notification reconciliation, observed quantities,
+    admission and all durable attempt fences still run at their own boundaries.
+    """
+    release = env.get('HL_TESTNET_EMERGENCY_RELEASE', '')
+    if release == '':
+        return False
+    if (release != CONTINUOUS_RELEASE
+            or env.get('HL_TESTNET_EMERGENCY_CLOSE') != APPROVAL
+            or env.get('RENDER_SERVICE_ID') != dispatch.roles.SERVICE
+            or env.get('HL_TESTNET_RUNTIME_MODE') != 'long_stream_testnet_v1'
+            or env.get('HL_TESTNET_FILLED_DISPATCH') != 'approved_long_stream_v1'
+            or env.get('HL_TESTNET_LONG_STREAM') != 'approved_alerts_v1'
+            or env.get('HL_TESTNET_SHORT_STREAM') != 'approved_alerts_v1'
+            or env.get('HL_TESTNET_LONG_ENTRY_ENABLED') not in ('true', 'false')
+            or env.get('HL_TESTNET_SHORT_ENTRY_ENABLED') not in ('true', 'false')
+            or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION') != 'disabled'
+            or env.get('HL_TESTNET_JOURNAL_BACKEND') != 'staging_postgres_v1'
+            or env.get('HL_TESTNET_FILLED_AFTER_EXIT_POLICY') != dispatch.AFTER_EXIT
+            or env.get('HL_TESTNET_SAFETY_PIPELINE')
+            or env.get('HL_TESTNET_CARD_SYNC')
+            or env.get('HL_TESTNET_FILLED_CARD_ID')):
+        raise DispatchError('CONTINUOUS_EMERGENCY_TESTNET_CONFIGURATION_REQUIRED')
+    return True
+
+
+def continuous_storage(venue, *, verify_schema=False):
+    """Normal and emergency work must share the same real durable quota/journal.
+
+    Constructing the budget performs local fixed database identity checks. The
+    explicit startup verifies initialized schemas; individual reservations keep
+    verifying the durable policy. Never make schema repairs in an ENTRY gate.
+    """
+    from .postgres_journal import PostgresJournal
+    from .request_budget import Budget, ready
+    store = vars(venue).get('store')
+    if (venue.domain != 'testnet' or not isinstance(store, dispatch.DispatchStore)
+            or store.domain != 'testnet' or not isinstance(store.journal, PostgresJournal)
+            or store.journal._ci is not False or dispatch.HOST != 'api.hyperliquid-testnet.xyz'):
+        raise DispatchError('CONTINUOUS_EMERGENCY_DURABLE_TESTNET_STORE_REQUIRED')
+    budget = Budget.from_env(venue.env)
+    if budget is None or budget.journal._parameters != store.journal._parameters:
+        raise DispatchError('CONTINUOUS_EMERGENCY_SHARED_REQUEST_JOURNAL_REQUIRED')
+    if verify_schema:
+        with store.journal._transaction() as conn:
+            store.ready(conn)
+            ready(conn, expected_database=store.journal._parameters['dbname'])
+    return budget
 
 
 def fence(conn, state, operation):
@@ -1056,11 +1110,22 @@ def health():
 def start(normal, streams, stop_event, *, only_bucket=None):
     global _thread,_stop_event
     env=normal.venue.env
+    continuous = continuous_configuration(env)
     if env.get('HL_TESTNET_EMERGENCY_CLOSE','')=='':
         return False
     if env.get('HL_TESTNET_EMERGENCY_CLOSE')!=APPROVAL:
         raise DispatchError('EMERGENCY_APPROVAL_MODE_INVALID')
-    if env.get('HL_TESTNET_LONG_ENTRY_ENABLED')!='false' or env.get('HL_TESTNET_SHORT_ENTRY_ENABLED')!='false':
+    if continuous:
+        if only_bucket is not None:
+            raise DispatchError('CONTINUOUS_EMERGENCY_CANNOT_LIMIT_SUPERVISION_TO_ONE_BUCKET')
+        selected = {role:route['account'] for role,route,*_ in streams}
+        expected = {role:dispatch.roles.route_for(env,role)['account'] for role in dispatch.roles.ROLES}
+        if len(streams)!=2 or selected!=expected or len(set(selected.values()))!=2:
+            raise DispatchError('CONTINUOUS_EMERGENCY_BOTH_ACCOUNTS_REQUIRED')
+        if vars(normal.venue).get('fill_wakeups') is None:
+            raise DispatchError('CONTINUOUS_EMERGENCY_FILL_NOTIFICATIONS_REQUIRED')
+        continuous_storage(normal.venue, verify_schema=True)
+    elif env.get('HL_TESTNET_LONG_ENTRY_ENABLED')!='false' or env.get('HL_TESTNET_SHORT_ENTRY_ENABLED')!='false':
         raise DispatchError('EMERGENCY_RELEASE_REQUIRES_CONTINUOUS_ENTRIES_DISABLED')
     if only_bucket is not None:
         life.ident(only_bucket, r'[0-9a-f]{64}')

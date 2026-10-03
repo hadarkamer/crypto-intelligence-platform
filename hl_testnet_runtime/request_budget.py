@@ -5,10 +5,12 @@ https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-a
 Fill responses have at most 2000 rows and add weight per 20 returned rows:
 https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
 
-All configured Testnet processes share one staging PostgreSQL bucket, across
+All configured Testnet processes share one PostgreSQL journal bucket, across
 both accounts. This does not measure other clients behind the same NAT. It is
 an admission bound, never evidence, an exchange retry, or trade authorization.
 Background admission leaves 400 weight for protection/reconciliation/exits.
+Quota denials expose numeric ledger capacity and the next possible expiry only;
+fresh-entry scheduling must still reacquire permission and retain source expiry.
 No transaction survives into HTTP; reservations commit before transport. A
 one-second permit and conservative 69-second ledger window include allowance
 for the existing four-second TCP and TLS socket timeouts. This is conservative
@@ -57,11 +59,87 @@ SIZED = FILLS | frozenset(('userFunding',))
 
 class BudgetError(ValueError):
     """Fixed redacted codes only, never SQL, credentials, or remote text."""
-    def __init__(self, code, *, stage=None, elapsed_ms=None):
+    def __init__(self, code, *, stage=None, elapsed_ms=None, used_weight=None,
+                 requested_weight=None, ceiling=None, retry_after_ms=None):
         super().__init__(code)
         self.stage = stage if stage in {'LOCAL_WAIT','CONNECT','READY','GLOBAL_LOCK',
             'ACCOUNTING','REFUND','COMMIT','AFTER_COMMIT'} else None
         self.elapsed_ms = elapsed_ms if type(elapsed_ms) is int and elapsed_ms >= 0 else None
+        # Quota diagnostics are numbers only. They describe this ledger at the
+        # denial boundary, never an exchange guarantee or permission to retry.
+        self.used_weight = used_weight if type(used_weight) is int and 0 <= used_weight <= LIMIT else None
+        self.requested_weight = requested_weight if type(requested_weight) is int and requested_weight > 0 else None
+        self.ceiling = ceiling if ceiling in (BACKGROUND_LIMIT, LIMIT) and type(ceiling) is int else None
+        self.retry_after_ms = retry_after_ms if type(retry_after_ms) is int and 0 <= retry_after_ms <= WINDOW_MS else None
+
+
+def _quota_capacity(conn, requested_weight, ceiling):
+    """Earliest possible capacity from live ledger expiry, under admission lock.
+
+    Refunds can make capacity available sooner and concurrent work can consume
+    it later. The returned delay is a scheduling hint; every caller must still
+    acquire its ordinary permit before transport. No tokens or account data are
+    selected, and this read neither spends nor refreshes any reservation.
+    """
+    rows = conn.execute(f'''WITH stamp AS MATERIALIZED (
+            SELECT clock_timestamp() AS at)
+        SELECT ticket.weight, CEIL(EXTRACT(epoch FROM
+            (ticket.admitted_at+(%s*interval '1 millisecond')-stamp.at))*1000)::integer
+        FROM {TICKETS} AS ticket,stamp
+        WHERE ticket.admitted_at > stamp.at-(%s*interval '1 millisecond')
+        ORDER BY ticket.admitted_at''',(WINDOW_MS,WINDOW_MS)).fetchall()
+    if any(type(weight) is not int or not 1 <= weight <= LIMIT
+           or type(delay) is not int or not 1 <= delay <= WINDOW_MS
+           for weight,delay in rows):
+        raise BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+    used = sum(weight for weight,_ in rows)
+    if used > LIMIT:
+        raise BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
+    result = dict(used_weight=used,requested_weight=requested_weight,ceiling=ceiling,
+                  eligible=used+requested_weight<=ceiling,retry_after_ms=None)
+    if requested_weight > ceiling:
+        # Waiting cannot fund a plan larger than its unchanged role ceiling.
+        return result
+    if result['eligible']:
+        result['retry_after_ms'] = 0
+        return result
+    remaining = used
+    for weight,delay in rows:
+        remaining -= weight
+        if remaining+requested_weight <= ceiling:
+            result['retry_after_ms'] = delay
+            break
+    return result
+
+
+def _quota_denied(conn, requested_weight, ceiling):
+    capacity = _quota_capacity(conn,requested_weight,ceiling)
+    return BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+        **{key:capacity[key] for key in ('used_weight','requested_weight','ceiling','retry_after_ms')})
+
+
+def fresh_entry_retry_ms(exc, *, consecutive_failures=1):
+    """Scheduling delay for never-submitted fresh ENTRY setup only.
+
+    Callers must run protection/reconciliation independently during this wait,
+    retain the original source expiry, and recheck eligibility after it. Never
+    wrap an exchange attempt, pending request, or existing exposure in this
+    backoff. An impossible whole plan has no timed retry. Exact ledger expiry
+    takes precedence over the bounded graded fallback for older errors.
+    """
+    if type(consecutive_failures) is not int or not 1 <= consecutive_failures <= 10000:
+        raise BudgetError('TESTNET_ENTRY_BACKOFF_COUNT_INVALID')
+    if not isinstance(exc,BudgetError) or str(exc) not in (
+            'TESTNET_REQUEST_BUDGET_EXHAUSTED','TESTNET_REQUEST_BUDGET_BUSY',
+            'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED','TESTNET_OBSERVATION_BATCH_EXPIRED'):
+        raise BudgetError('TESTNET_ENTRY_BACKOFF_REASON_INVALID')
+    if (str(exc)=='TESTNET_REQUEST_BUDGET_EXHAUSTED'
+            and exc.requested_weight is not None and exc.ceiling is not None
+            and exc.requested_weight > exc.ceiling):
+        return None
+    if exc.retry_after_ms is not None:
+        return max(250,exc.retry_after_ms)
+    return min(10000,500*(2**min(consecutive_failures-1,5)))
 
 
 @dataclass
@@ -490,7 +568,9 @@ class Budget:
                 'TESTNET_REQUEST_BUDGET_BUSY' if getattr(exc,'sqlstate',None)=='55P03'
                 else 'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE')
             raise BudgetError(code,stage=diagnostic['stage'],
-                elapsed_ms=int((time.monotonic()-started)*1000)) from None
+                elapsed_ms=int((time.monotonic()-started)*1000),
+                **({key:getattr(exc,key) for key in ('used_weight','requested_weight',
+                    'ceiling','retry_after_ms')} if isinstance(exc,BudgetError) else {})) from None
         finally:
             coordinator.lock.release()
 
@@ -520,12 +600,29 @@ class Budget:
                 SELECT %s,stamp.at,%s FROM stamp,used WHERE used.total+%s<=%s
                 RETURNING token''',(WINDOW_MS,WINDOW_MS,token,weight,weight,ceiling)).fetchone()
             if row is None:
-                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+                raise _quota_denied(conn,weight,ceiling)
         permit = Permit(self, token, body.get('type') if path == '/info' else 'exchange', weight, deadline)
         if time.monotonic_ns() > deadline:
             raise BudgetError('TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',stage='AFTER_COMMIT',
                 elapsed_ms=PERMIT_MS+int((time.monotonic_ns()-deadline)/1_000_000))
         return permit
+
+    def capacity(self, *, requested_weight=1, priority='background'):
+        """Read-only numeric ledger status, never transport or entry authority."""
+        if type(requested_weight) is not int or not 1 <= requested_weight <= LIMIT:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_WEIGHT_INVALID')
+        if not isinstance(priority,str) or priority not in PRIORITIES:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_PRIORITY_INVALID')
+        ceiling = LIMIT if priority == 'protection' else BACKGROUND_LIMIT
+        diagnostic = {}
+        with self._transaction(diagnostic=diagnostic) as conn:
+            diagnostic['stage']='GLOBAL_LOCK'
+            conn.execute('SELECT pg_advisory_xact_lock(%s)',(LOCK,))
+            diagnostic['stage']='ACCOUNTING'
+            result = _quota_capacity(conn,requested_weight,ceiling)
+        return dict(version=VERSION,priority=priority,maximum_weight=LIMIT,
+                    background_maximum_weight=BACKGROUND_LIMIT,window_ms=WINDOW_MS,
+                    **result)
 
     def reserve_observation(self, bodies, *, priority='background', host=HOST):
         """Fund every declared two-pass/catchup read atomically before HTTP.
@@ -564,7 +661,8 @@ class Budget:
         total = sum(weight for _,_,weight in entries)
         ceiling = LIMIT if priority == 'protection' else BACKGROUND_LIMIT
         if total > ceiling:
-            raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',stage='ACCOUNTING')
+            raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',stage='ACCOUNTING',
+                              requested_weight=total,ceiling=ceiling)
         payload = json.dumps([dict(token=token,weight=weight) for _,token,weight in entries])
         diagnostic = {}
         with self._transaction(deadline_ns=deadline,diagnostic=diagnostic) as conn:
@@ -584,7 +682,7 @@ class Budget:
                 WHERE used.total+%s<=%s RETURNING token''',
                 (WINDOW_MS,WINDOW_MS,payload,total,ceiling)).fetchall()
             if len(rows) != len(entries):
-                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED')
+                raise _quota_denied(conn,total,ceiling)
 
     def _claim_observation(self, token, weight, deadline):
         diagnostic = {}

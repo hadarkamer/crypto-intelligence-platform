@@ -22,6 +22,45 @@ ROLES = {'long_account': 'LONG', 'short_account': 'SHORT'}
 # and one reduce-only close. This is neither a reservation nor a guarantee of
 # future capacity, retry coverage, IP headroom or an implemented emergency path.
 ENTRY_ACTION_HEADROOM = 5
+CONTINUOUS_RELEASE = 'continuous_testnet_v1'
+
+
+def short_entry_scope(env, card_id=None):
+    """Return an optional exact trial fence, never an execution authorization.
+
+    The original short release always needs its exact card. The continuous
+    Testnet release may omit that fence only beside the approved emergency
+    supervisor and the explicit two-account stream. An exact card, when set,
+    still restricts the continuous release to that one experiment. All ordinary
+    account, freshness, fill-notification and durable dispatch gates remain.
+    """
+    release = env.get('HL_TESTNET_EMERGENCY_RELEASE', '')
+    if release not in ('', CONTINUOUS_RELEASE):
+        raise checks.Blocked('SHORT_ENTRY_SCOPE_CONFIGURATION_REQUIRED')
+    trial = env.get('HL_TESTNET_SHORT_TRIAL_CARD_ID', '')
+    if trial and (not isinstance(trial, str) or not re.fullmatch(r'[0-9a-f]{64}', trial)):
+        raise checks.Blocked('SHORT_ENTRY_OUTSIDE_EXACT_TRIAL_CARD')
+    if not trial:
+        if (release != CONTINUOUS_RELEASE
+                or env.get('RENDER_SERVICE_ID') != SERVICE
+                or env.get('HL_TESTNET_RUNTIME_MODE') != 'long_stream_testnet_v1'
+                or env.get('HL_TESTNET_FILLED_DISPATCH') != 'approved_long_stream_v1'
+                or env.get('HL_TESTNET_LONG_STREAM') != 'approved_alerts_v1'
+                or env.get('HL_TESTNET_SHORT_STREAM') != 'approved_alerts_v1'
+                or env.get('HL_TESTNET_LONG_ENTRY_ENABLED') not in ('true', 'false')
+                or env.get('HL_TESTNET_SHORT_ENTRY_ENABLED') not in ('true', 'false')
+                or env.get('HL_TESTNET_TWO_ACCOUNT_EXECUTION') != 'disabled'
+                or env.get('HL_TESTNET_JOURNAL_BACKEND') != 'staging_postgres_v1'
+                or env.get('HL_TESTNET_EMERGENCY_CLOSE') != 'approved_testnet_v1'
+                or env.get('HL_TESTNET_FILLED_CARD_ID')
+                or env.get('HL_TESTNET_SAFETY_PIPELINE')
+                or env.get('HL_TESTNET_CARD_SYNC')):
+            raise checks.Blocked('SHORT_ENTRY_OUTSIDE_EXACT_TRIAL_CARD')
+    if card_id is not None:
+        if (not isinstance(card_id, str) or not re.fullmatch(r'[0-9a-f]{64}', card_id)
+                or (trial and trial != card_id)):
+            raise checks.Blocked('SHORT_ENTRY_OUTSIDE_EXACT_TRIAL_CARD')
+    return trial or None
 
 
 def route_for(env, role, account=None, agent=None, side=None):

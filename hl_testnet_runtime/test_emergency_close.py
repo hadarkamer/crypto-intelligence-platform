@@ -25,6 +25,147 @@ class ReconciledFillFeed:
     def entry_allowed(self,account):return account in (A,B)
 
 
+class ContinuousReleaseTests(NoExternal):
+    """Explicit scope broadens card selection, never execution evidence or risk."""
+    @staticmethod
+    def environment():
+        from .test_long_stream_runtime import env
+        from .postgres_journal import STAGING_HOST, STAGING_DB
+        return {**env(), 'HL_TESTNET_EMERGENCY_CLOSE':m.APPROVAL,
+            'HL_TESTNET_EMERGENCY_RELEASE':m.CONTINUOUS_RELEASE,
+            'HL_TESTNET_LONG_ENTRY_ENABLED':'true',
+            'HL_TESTNET_SHORT_ENTRY_ENABLED':'true',
+            'HL_TESTNET_SHORT_STREAM':'approved_alerts_v1',
+            'HL_TESTNET_SHORT_NOT_BEFORE':datetime.fromtimestamp((T-60000)/1000,timezone.utc).isoformat(),
+            'HL_TESTNET_LONG_NOT_BEFORE':datetime.fromtimestamp((T-60000)/1000,timezone.utc).isoformat(),
+            'HL_TESTNET_SHORT_ACCOUNT_ADDRESS':B,
+            'HL_TESTNET_SHORT_AGENT_ADDRESS':'0x'+'4'*40,
+            'HL_TESTNET_DATABASE_URL':f'postgresql://{STAGING_DB}_user:disposable-test-only@{STAGING_HOST}/{STAGING_DB}'}
+
+    def venue(self):
+        from .postgres_journal import PostgresJournal
+        environment=self.environment()
+        venue=dispatch.TestnetVenue(environment);venue.now=lambda:T
+        venue.store=DispatchStore(PostgresJournal.from_env(environment))
+        venue.fill_wakeups=ReconciledFillFeed()
+        return venue
+
+    @staticmethod
+    def proposal(role):
+        card=original(expiry_seconds=300,side='SHORT' if role=='short_account' else 'LONG')[1]['card']
+        return dict(operation='ENTRY',card_id=card['card_id'],role=role,
+            account=B if role=='short_account' else A,symbol='DOGE',
+            source_at=card['prepared']['execution']['at'],source_expires_at=card['source_expires_at'])
+
+    def test_continuous_scope_is_explicit_and_requires_complete_safety_configuration(self):
+        good=self.environment()
+        self.assertTrue(m.continuous_configuration(good))
+        self.assertFalse(m.continuous_configuration({**good,'HL_TESTNET_EMERGENCY_RELEASE':''}))
+        for key,value in (
+                ('HL_TESTNET_EMERGENCY_RELEASE','mainnet'),('HL_TESTNET_EMERGENCY_CLOSE',''),
+                ('RENDER_SERVICE_ID','production'),('HL_TESTNET_RUNTIME_MODE','read_only'),
+                ('HL_TESTNET_FILLED_DISPATCH','disabled'),('HL_TESTNET_SHORT_STREAM',''),
+                ('HL_TESTNET_SHORT_ENTRY_ENABLED',''),('HL_TESTNET_JOURNAL_BACKEND','memory'),
+                ('HL_TESTNET_TWO_ACCOUNT_EXECUTION','approved_single_attempt_v1'),
+                ('HL_TESTNET_FILLED_AFTER_EXIT_POLICY',''),('HL_TESTNET_FILLED_CARD_ID','a'*64),
+                ('HL_TESTNET_CARD_SYNC','enabled')):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(DispatchError,'CONTINUOUS_EMERGENCY_TESTNET_CONFIGURATION'):
+                    m.continuous_configuration({**good,key:value})
+
+    def test_scope_requires_real_testnet_store_and_matching_durable_budget(self):
+        from .request_budget import Budget
+        from .postgres_journal import PostgresJournal
+        venue=self.venue()
+        self.assertEqual(m.continuous_storage(venue).journal._parameters,venue.store.journal._parameters)
+        venue.store.domain='software'
+        with self.assertRaisesRegex(DispatchError,'DURABLE_TESTNET_STORE_REQUIRED'):
+            m.continuous_storage(venue)
+        venue=self.venue()
+        other=PostgresJournal({**venue.store.journal._parameters,'password':'another-disposable-test'})
+        with patch.object(Budget,'from_env',return_value=Budget(other)):
+            with self.assertRaisesRegex(DispatchError,'SHARED_REQUEST_JOURNAL_REQUIRED'):
+                m.continuous_storage(venue)
+
+    def test_both_roles_can_select_fresh_cards_only_after_supervisor_and_feed_proof(self):
+        for role in ('long_account','short_account'):
+            with self.subTest(role=role):
+                venue=self.venue();proposal=self.proposal(role)
+                with patch.object(venue.store,'action_allowed') as owned,patch.object(m,'healthy',return_value=True):
+                    self.assertEqual(venue._gate(proposal,dispatch.AFTER_EXIT)['account'],proposal['account'])
+                    owned.assert_called_once_with(proposal)
+                with patch.object(venue.store,'action_allowed'),patch.object(m,'healthy',return_value=False):
+                    with self.assertRaisesRegex(DispatchError,'SUPERVISOR_NOT_FRESH'):
+                        venue._gate(proposal,dispatch.AFTER_EXIT)
+                venue.fill_wakeups.entry_allowed=lambda account:False
+                with patch.object(venue.store,'action_allowed'),patch.object(m,'healthy',return_value=True):
+                    with self.assertRaisesRegex(DispatchError,'FILL_NOTIFICATION_RECONCILIATION_REQUIRED'):
+                        venue._gate(proposal,dispatch.AFTER_EXIT)
+
+    def test_existing_exact_trial_still_narrows_continuous_entry_permission(self):
+        venue=self.venue();proposal=self.proposal('long_account')
+        venue.env.update(HL_TESTNET_PROTECTION_TIMING_CARD_ID=proposal['card_id'],
+                         HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS=str(T+90000))
+        with patch.object(venue.store,'action_allowed'),patch.object(m,'healthy',return_value=True):
+            venue._gate(proposal,dispatch.AFTER_EXIT)
+            with self.assertRaisesRegex(DispatchError,'EXACT_TIMING_TRIAL'):
+                venue._gate({**proposal,'card_id':'f'*64},dispatch.AFTER_EXIT)
+            venue.env['HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS']=str(T)
+            with self.assertRaisesRegex(DispatchError,'EXACT_TIMING_TRIAL'):
+                venue._gate(proposal,dispatch.AFTER_EXIT)
+
+    def test_pausing_entries_or_unhealthy_feed_does_not_stop_protective_management(self):
+        venue=self.venue();proposal={**self.proposal('short_account'),'operation':'CREATE_EXIT','leg':'STOP'}
+        venue.env.update(HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+        venue.fill_wakeups.entry_allowed=lambda account:False
+        with patch.object(venue.store,'action_allowed'),patch.object(m,'healthy',return_value=False), \
+                patch.object(m,'continuous_storage',side_effect=AssertionError('NO_ENTRY_CAPACITY_CHECK_FOR_EXIT')):
+            self.assertEqual(venue._gate(proposal,dispatch.AFTER_EXIT)['account'],B)
+
+    def test_continuous_supervisor_cannot_be_scoped_away_from_an_account_or_market(self):
+        normal=dispatch.Controller(self.venue().store,self.venue(),ROUTES2)
+        # Controller supplies the same real store to its adapter.
+        streams=[('long_account',dict(account=A),None,None),('short_account',dict(account=B),None,None)]
+        with self.assertRaisesRegex(DispatchError,'CANNOT_LIMIT_SUPERVISION'):
+            m.start(normal,streams,threading.Event(),only_bucket='a'*64)
+        with self.assertRaisesRegex(DispatchError,'BOTH_ACCOUNTS_REQUIRED'):
+            m.start(normal,streams[:1],threading.Event())
+        del normal.venue.fill_wakeups
+        with self.assertRaisesRegex(DispatchError,'FILL_NOTIFICATIONS_REQUIRED'):
+            m.start(normal,streams,threading.Event())
+
+    def test_enabled_continuous_supervisor_verifies_schemas_then_scans_both_accounts(self):
+        from . import request_budget as quota
+        from unittest.mock import Mock
+        venue=self.venue();normal=dispatch.Controller(venue.store,venue,ROUTES2)
+        streams=[('long_account',dict(account=A),None,None),('short_account',dict(account=B),None,None)]
+        stop=threading.Event();seen=[]
+        def inventory(account):
+            seen.append(account)
+            if len(seen)==2:stop.set()
+            return []
+        @contextmanager
+        def transaction():
+            yield conn
+        conn=Mock()
+        conn.execute.return_value.fetchone.side_effect=[
+            ('filled-dispatch-store-v1','testnet'),
+            (venue.store.journal._parameters['dbname'],quota.VERSION,quota.HOST,
+             quota.LIMIT,quota.BACKGROUND_LIMIT,quota.WINDOW_MS,quota.TICKETS)]
+        status=dict(running=False,last_status=None,last_pass_at_ms=None)
+        with patch.object(venue.store.journal,'_transaction',transaction), \
+                patch.object(venue.store,'for_account',side_effect=inventory), \
+                patch.object(m,'_thread',None),patch.object(m,'_stop_event',None), \
+                patch.object(m,'_health',status):
+            self.assertTrue(m.start(normal,streams,stop))
+            m._thread.join(1)
+            self.assertFalse(m._thread.is_alive())
+            self.assertEqual(seen,[A,B])
+            self.assertEqual(status['last_status'],'PASS_COMPLETE')
+            self.assertEqual(venue.sent,0)
+            self.assertEqual(conn.execute.call_count,2)
+
+
 class Venue(NormalVenue):
     def __init__(self):
         super().__init__();self.mark='10';self.reject_cancel=False

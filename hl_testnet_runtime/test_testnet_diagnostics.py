@@ -102,6 +102,61 @@ class EndpointTests(unittest.TestCase):
 
 
 class JournalDiagnosticTests(unittest.TestCase):
+    def test_original_expiry_and_risk_fields_are_preserved_without_execution(self):
+        state=ReadOnlyFixture().state
+        card=next(iter(state['originals'].values()))['card']
+        source=card['prepared']['source'];rounded=card['prepared']['execution']
+        record=(card['card_id'],card['event_id'],card['account_role'],card['state'],source,rounded,
+                card['planning']['quantity'],datetime.fromtimestamp(T/1000,timezone.utc),
+                card['source_expires_at'],card['record_kind'],card['rule']['id'],
+                card['rule']['threshold_pct'],card['planning']['distance_risk_usd'],
+                'true',card['planning']['cancel_price'],card['risk']['planned_usd'],
+                card['risk']['policy'],card['risk']['costs_included'])
+        report=m._card_row(record)
+        self.assertEqual(report['source_expires_at'],card['source_expires_at'])
+        self.assertEqual(report['source']['at'],source['at'])
+        self.assertEqual(report['record_kind'],'received_alert')
+        self.assertEqual(report['planned_quantity'],card['planning']['quantity'])
+        self.assertEqual(report['planned_risk_usd'],card['risk']['planned_usd'])
+        self.assertTrue(report['positive_planned_quantity'])
+        self.assertEqual(report['planned_notional_usd'],'1000')
+        self.assertFalse(report['risk_costs_included'])
+        bad=list(record);bad[8]='DO_NOT_DISCLOSE';bad[16]='0x'+'f'*64
+        self.assertIsNone(m._card_row(bad)['source_expires_at'])
+        self.assertIsNone(m._card_row(bad)['risk_policy'])
+    def test_missing_role_queries_only_recent_bounded_receipts(self):
+        fixture=ReadOnlyFixture();state=fixture.state
+        card=next(iter(state['originals'].values()))['card']
+        def row(role):
+            return (card['card_id'],card['event_id'],role,card['state'],card['prepared']['source'],
+                card['prepared']['execution'],card['planning']['quantity'],
+                datetime.fromtimestamp(T/1000,timezone.utc),card['source_expires_at'],
+                card['record_kind'],card['rule']['id'],card['rule']['threshold_pct'],
+                card['planning']['distance_risk_usd'],'true',card['planning']['cancel_price'],
+                card['risk']['planned_usd'],card['risk']['policy'],False)
+        original_execute=fixture.execute
+        def execute(sql,params=()):
+            if sql=='SELECT to_regclass(%s)' and params==(m.CARD_TABLE,):
+                fixture.statements.append((sql,params));return Cursor([(m.CARD_TABLE,)])
+            if 'GROUP BY manifest' in sql:
+                fixture.statements.append((sql,params));return Cursor([('RECORDED_ONLY',21)])
+            if 'manifest->' in sql and 'SELECT card_id,' in sql:
+                fixture.statements.append((sql,params))
+                if params:
+                    self.assertEqual(params,('short_account',))
+                    self.assertIn("created_at >= clock_timestamp()-interval '10 minutes'",sql)
+                    self.assertIn('LIMIT 20',sql)
+                    return Cursor([row('short_account')])
+                return Cursor([row('long_account')]*20)
+            return original_execute(sql,params)
+        with patch.object(fixture,'execute',side_effect=execute), \
+             patch.object(m.PostgresJournal,'from_env',return_value=fixture):
+            report=m.load_diagnostics(ENV)
+        self.assertEqual(len(report['cards']['recent']),20)
+        self.assertEqual(list(report['cards']['recent_by_role_supplement']),['short_account'])
+        self.assertEqual(report['cards']['recent_by_role_supplement']['short_account'][0]['source_expires_at'],
+                         card['source_expires_at'])
+        self.assertTrue(all(sql.lstrip().startswith('SELECT') for sql,_ in fixture.statements))
     def test_readonly_journal_returns_partial_fill_and_reduce_only_proofs(self):
         fixture=ReadOnlyFixture();before=deepcopy(fixture.state)
         for target in ('http.client.HTTPSConnection','socket.create_connection',

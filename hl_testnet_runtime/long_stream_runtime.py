@@ -81,8 +81,7 @@ def short_configuration(env):
         raise DispatchError('SHORT_STREAM_START_IN_FUTURE')
     route = roles.route_for(env, 'short_account', side='SHORT')
     if env['HL_TESTNET_SHORT_ENTRY_ENABLED'] == 'true':
-        if not re.fullmatch(r'[0-9a-f]{64}', env.get('HL_TESTNET_SHORT_TRIAL_CARD_ID', '')):
-            raise DispatchError('EXACT_SHORT_TRIAL_CARD_REQUIRED')
+        roles.short_entry_scope(env)
         # Check the signer before the worker can reserve a durable request.
         roles.wallet_for_role(env, 'short_account', route['account'], route['agent'])
     return route, start
@@ -102,6 +101,10 @@ def _safe_failure(exc):
             result['budget_stage'] = exc.stage
         if exc.elapsed_ms is not None:
             result['budget_elapsed_ms'] = exc.elapsed_ms
+        for field in ('used_weight', 'requested_weight', 'ceiling', 'retry_after_ms'):
+            value = getattr(exc, field, None)
+            if value is not None:
+                result['budget_' + field] = value
     return result
 
 
@@ -119,8 +122,10 @@ def _unfinished(state, now):
                        or c['issues'] for c in view['cards'])):
             return True
     bound = {b['card_id'] for b in state['bindings']}
+    from .execution_occurrence import duplicate_attempt
     return any(cid not in bound and original.get('entry_rejected_no_retry') is not True
         and original.get('entry_unsent_no_retry') is not True and
+        duplicate_attempt(state,cid) is None and
         'source_expires_at' in original['card'] and
         source_fresh(timestamp(original['card']['prepared']['source']['at']),
                      original['card']['source_expires_at'], now=now)
@@ -206,11 +211,49 @@ def _maintain_bucket(controller, bucket):
     it never authorizes a resend. New entries stay disabled throughout.
     """
     for _ in range(3):
-        result = controller.cycle(bucket, send=True, allow_new_entries=False)
+        try:
+            result = controller.cycle(bucket, send=True, allow_new_entries=False)
+        except (DispatchError, life.LifecycleError):
+            manual = _reconcile_manual_flat(controller, bucket)
+            if manual is None:
+                raise
+            result = manual
+        manual = _reconcile_manual_flat(controller, bucket)
         yield result
+        if manual is not None and manual['status']=='MANUAL_EXIT_BOUND_AWAITING_OWNED_CLEANUP':
+            continue
         if (result.get('status') != 'ACCEPTED_UNVERIFIED'
                 or result['order_requests_sent'] != 1):
             break
+
+
+def _reconcile_manual_flat(controller, bucket):
+    """Only a complete saved flat discrepancy triggers independent close proof.
+
+    No extra public scan is scheduled for healthy active positions. The helper
+    never sends: it binds one unambiguous reducing manual close and leaves only
+    existing owned exit cancellation to the ordinary/emergency executor.
+    """
+    load=getattr(controller.store,'load',None)
+    if not callable(load):
+        return None
+    state=load(bucket)
+    if not isinstance(state,dict) or not state.get('bindings') or state.get('pending'):
+        return None
+    ev=state.get('evidence')
+    if not ev or life.number(ev['snapshot']['position_quantity'],signed=True)!=0:
+        return None
+    own=life.validate_bindings(state['bindings'])
+    unknown=any((state['account'],fill['oid']) not in own
+                for fill in ev['snapshot']['fills'])
+    unfinished=any(audit.get('automatic') is True and
+        audit.get('phase')=='OWNED_ORDER_CLEANUP_PENDING'
+        for audit in state.get('manual_exit_audit',[]))
+    if not unknown and not unfinished:
+        return None
+    from .manual_exit_reconciliation import reconcile_controller
+    result=reconcile_controller(controller,bucket)
+    return None if result['status']=='NO_MANUAL_EXIT_CANDIDATE' else result
 
 
 def _maintenance_priority(state, dirty_symbols=()):
@@ -316,6 +359,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
                 if forced and state['emergency']['phase']=='CLOSED_VERIFIED':
                     from .emergency_close import Controller as EmergencyController
                     EmergencyController(controller).cycle(state['bucket'],send=False)
+                _reconcile_manual_flat(controller,state['bucket'])
                 continue
             aged_closed_short = (not retained and role == 'short_account' and state['bindings']
                 and state['evidence'] is not None
@@ -358,47 +402,61 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             result.update(first_failure)
         return result
     states = controller.store.for_account(route['account'])
-    _account_owned(controller.venue,route['account'],states,role=role)
-    trial_id = (getattr(controller.venue, 'env', {}).get('HL_TESTNET_SHORT_TRIAL_CARD_ID')
+    trial_id = (roles.short_entry_scope(getattr(controller.venue, 'env', {}))
                 if role == 'short_account' else None)
+    timing_id=getattr(controller.venue,'env',{}).get('HL_TESTNET_PROTECTION_TIMING_CARD_ID','')
+    if timing_id:
+        if not re.fullmatch(r'[0-9a-f]{64}',timing_id) or (trial_id and trial_id!=timing_id):
+            raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED')
+        trial_id=timing_id
     known_cards = {cid for state in states for cid in state['originals']}
+    from .execution_occurrence import duplicate_attempt
     touched = [state['bucket'] for state in states if state['pending'] is None
                and any((trial_id is None or cid == trial_id)
                        and cid not in {b['card_id'] for b in state['bindings']}
                        and original.get('entry_rejected_no_retry') is not True
                        and original.get('entry_unsent_no_retry') is not True
+                       and duplicate_attempt(state,cid) is None
                        and 'source_expires_at' in original['card']
                        and source_fresh(timestamp(original['card']['prepared']['source']['at']),
                            original['card']['source_expires_at'],now=now)
                        for cid,original in state['originals'].items())]
     cursor = None
     registered = 0
+    fresh_cards = []
     for _ in range(100):
         candidates,cursor = selection.page(controller.store.journal,
             not_before=not_before.isoformat(),now=now,after=cursor)
         for cid,card_role in candidates:
             if role != card_role or cid in known_cards or (trial_id is not None and cid != trial_id):
                 continue
-            card=CardStore(controller.store.journal).load(cid)
-            if card['account_role'] != card_role:
-                raise DispatchError('STREAM_SOURCE_ROLE_CHANGED')
-            try:
-                state=controller.register(cid)
-            except DispatchError as exc:
-                if str(exc) in ('ORIGINAL_SOURCE_EXPIRED',
-                                'REGISTER_WHILE_REQUEST_UNRESOLVED'):
-                    continue
-                raise
-            if state['account']!=route['account']:
-                raise DispatchError('STREAM_CARD_ACCOUNT_MISMATCH')
+            fresh_cards.append((cid, card_role))
             known_cards.add(cid)
-            registered += 1
-            if state['bucket'] not in touched:
-                touched.append(state['bucket'])
         if cursor is None:
             break
     else:
         raise DispatchError('LONG_ALERT_SCAN_BUDGET_REQUIRES_REVIEW')
+    # A database-only source scan avoids spending venue quota every two
+    # seconds while both accounts are flat and no fresh candidate exists.
+    # Current inventory still gates EVERY registration and entry pass.
+    if fresh_cards or touched:
+        _account_owned(controller.venue,route['account'],states,role=role)
+    for cid,card_role in fresh_cards:
+        card=CardStore(controller.store.journal).load(cid)
+        if card['account_role'] != card_role:
+            raise DispatchError('STREAM_SOURCE_ROLE_CHANGED')
+        try:
+            state=controller.register(cid)
+        except DispatchError as exc:
+            if str(exc) in ('ORIGINAL_SOURCE_EXPIRED',
+                            'REGISTER_WHILE_REQUEST_UNRESOLVED'):
+                continue
+            raise
+        if state['account']!=route['account']:
+            raise DispatchError('STREAM_CARD_ACCOUNT_MISMATCH')
+        registered += 1
+        if state['bucket'] not in touched and duplicate_attempt(state,cid) is None:
+            touched.append(state['bucket'])
     for bucket in touched:
         result=controller.cycle(bucket,send=True,allowed_entry_card_id=trial_id)
         sent += result['order_requests_sent']
@@ -516,6 +574,8 @@ def _finish_notification_reconciliation(controller, feed, token, symbols, starte
 def _loop(controller, streams):
     reported = set()
     reconciliation_passes = {}
+    entry_retry_at = {}
+    entry_failures = {}
     while not _stop.is_set():
         feed=vars(controller.venue).get('fill_wakeups')
         if feed is not None:
@@ -569,6 +629,8 @@ def _loop(controller, streams):
                     reconciliation_passes.pop(route['account'],None)
                 result=tick(controller,route,start,
                             new_entries=controller.venue.env[enabled_key]=='true'
+                                and (role not in entry_retry_at or
+                                     controller.venue.now() >= entry_retry_at[role])
                                 and (feed is None or feed.entry_allowed(route['account'])),
                             role=role,notification_continuity=feed is not None
                                 and feed.entry_allowed(route['account']),**notification_args)
@@ -580,6 +642,28 @@ def _loop(controller, streams):
                 result=dict(status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY',
                     order_requests_sent=max(0,getattr(controller.venue,'sent',0)-before),
                     new_cards_registered=0, **failure)
+            # Quota waits suppress only new-entry work. The next pass still
+            # reconciles pending requests and maintains every existing exit.
+            # A later acquisition remains mandatory; no ambiguous submission
+            # is retried and no original source clock is extended.
+            quota_codes = {'TESTNET_REQUEST_BUDGET_EXHAUSTED',
+                           'TESTNET_REQUEST_BUDGET_BUSY',
+                           'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED'}
+            if result.get('failure_code') in quota_codes:
+                from .request_budget import BudgetError, fresh_entry_retry_ms
+                entry_failures[role] = min(6, entry_failures.get(role, 0) + 1)
+                error = BudgetError(result['failure_code'],
+                    requested_weight=result.get('budget_requested_weight'),
+                    ceiling=result.get('budget_ceiling'),
+                    retry_after_ms=result.get('budget_retry_after_ms'))
+                delay_ms = fresh_entry_retry_ms(error,
+                    consecutive_failures=entry_failures[role])
+                if delay_ms is not None:
+                    entry_retry_at[role] = controller.venue.now() + delay_ms
+                    result['fresh_entry_retry_after_ms'] = delay_ms
+            elif role in entry_retry_at and controller.venue.now() >= entry_retry_at[role]:
+                entry_failures.pop(role, None)
+                entry_retry_at.pop(role, None)
             results.append(result)
             with _lock:
                 _health['cycles'] += 1

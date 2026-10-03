@@ -55,6 +55,13 @@ ENUM_CONFIG = {
     'HL_TESTNET_APP_DELIVERY': ('ed25519_signed_v1',),
     'HL_TESTNET_SINGLE_TRIAL_CONTROLLER': ('approved_bounded_single_trial_v1',),
 }
+CARD_COLUMNS = """card_id,manifest->>'event_id',manifest->>'account_role',
+    manifest->>'state',manifest->'prepared'->'source',manifest->'prepared'->'execution',
+    manifest->'planning'->>'quantity',created_at,manifest->>'source_expires_at',
+    manifest->>'record_kind',manifest->'rule'->>'id',manifest->'rule'->>'threshold_pct',
+    manifest->'planning'->>'distance_risk_usd',manifest->'planning'->>'positive_quantity',
+    manifest->'planning'->>'cancel_price',manifest->'risk'->>'planned_usd',
+    manifest->'risk'->>'policy',manifest->'risk'->'costs_included'"""
 
 
 def _identifier(value, *, pattern=r'[A-Za-z0-9_.:-]{1,100}'):
@@ -96,6 +103,24 @@ def _source(value):
         side=value.get('side') if value.get('side') in ('LONG', 'SHORT') else None,
         at=_time(value.get('at')),
         **{key: _number(value.get(key)) for key in ('entry', 'stop', 'take_profit')})
+
+
+def _card_row(row):
+    source, rounded, quantity = _source(row[4]), _source(row[5]), _number(row[6])
+    notional = None
+    if quantity is not None and rounded['entry'] is not None:
+        notional = _number(format(Decimal(quantity)*Decimal(rounded['entry']),'f'))
+    return dict(card_id=_identifier(row[0],pattern=r'[0-9a-f]{64}'),
+        source_event_id=_identifier(row[1]),
+        account_role=row[2] if row[2] in ('long_account','short_account') else None,
+        state=_identifier(row[3],pattern=r'[A-Z_]{1,80}'),source=source,rounded=rounded,
+        planned_quantity=quantity,received_at=_time(row[7]),source_expires_at=_time(row[8]),
+        record_kind=row[9] if row[9] in ('received_alert','historical_review','synthetic_test') else None,
+        rule_id=_identifier(row[10]),threshold_pct=_number(row[11]),
+        planned_distance_risk_usd=_number(row[12]),positive_planned_quantity=row[13]=='true',
+        cancel_price=_number(row[14]),planned_risk_usd=_number(row[15]),
+        risk_policy=_identifier(row[16]),risk_costs_included=row[17] is True,
+        planned_notional_usd=notional)
 
 
 def _config(env):
@@ -282,14 +307,22 @@ def load_diagnostics(env=None):
             result['legacy_attempts'] = _counts(conn,SCHEMA+'.attempts',"result->>'status'")
         if present[CARD_TABLE]:
             result['cards'] = _counts(conn,CARD_TABLE,"manifest->>'state'")
-            rows = conn.execute(f'''SELECT card_id,manifest->>'event_id',manifest->>'account_role',
-                manifest->>'state',manifest->'prepared'->'source',manifest->'prepared'->'execution',
-                manifest->'planning'->>'quantity',created_at FROM {CARD_TABLE}
+            rows = conn.execute(f'''SELECT {CARD_COLUMNS} FROM {CARD_TABLE}
                 ORDER BY created_at DESC,card_id LIMIT 20''').fetchall()
-            result['cards']['recent'] = [dict(card_id=_identifier(r[0],pattern=r'[0-9a-f]{64}'),
-                source_event_id=_identifier(r[1]),account_role=r[2] if r[2] in ('long_account','short_account') else None,
-                state=_identifier(r[3],pattern=r'[A-Z_]{1,80}'),source=_source(r[4]),rounded=_source(r[5]),
-                planned_quantity=_number(r[6]),received_at=_time(r[7])) for r in rows]
+            result['cards']['recent'] = [_card_row(row) for row in rows]
+            # Avoid a busy LONG batch hiding every SHORT card. Query only a
+            # missing role, only recent receipts, with the same bounded fields.
+            # Old sources stay old; this projection never refreshes expiry.
+            missing_roles = set(('long_account','short_account'))-{row[2] for row in rows}
+            if missing_roles:
+                supplementary = {}
+                for role in sorted(missing_roles):
+                    role_rows = conn.execute(f'''SELECT {CARD_COLUMNS} FROM {CARD_TABLE}
+                        WHERE created_at >= clock_timestamp()-interval '10 minutes'
+                        AND manifest->>'account_role'=%s
+                        ORDER BY created_at DESC,card_id LIMIT 20''',(role,)).fetchall()
+                    supplementary[role] = [_card_row(row) for row in role_rows]
+                result['cards']['recent_by_role_supplement'] = supplementary
         if present[RECEIPTS]:
             result['receipts'] = _counts(conn,RECEIPTS,'status')
             rows = conn.execute(f'''SELECT receipt_id,status,card_id,reason,received_at

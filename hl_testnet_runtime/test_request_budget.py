@@ -57,6 +57,8 @@ class CoordinatorTests(unittest.TestCase):
                     row=('hl_journal_ci',budget.VERSION,budget.HOST,budget.LIMIT,
                          budget.BACKGROUND_LIMIT,budget.WINDOW_MS,budget.TICKETS)
                 elif 'pg_advisory_xact_lock' in sql:row=(None,)
+                elif 'SELECT ticket.weight' in sql:
+                    return Mock(fetchall=lambda:[(weight,budget.WINDOW_MS) for weight in owner.weights])
                 elif 'WITH stamp' in sql:
                     _,_,token,weight,_,ceiling=args
                     if sum(owner.weights)+weight>ceiling:row=None
@@ -103,8 +105,11 @@ class CoordinatorTests(unittest.TestCase):
 
     def test_quota_denial_rolls_back_without_reconnecting_or_overspending(self):
         self.weights.append(800)
-        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED'):
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED') as caught:
             self.budget.acquire('/info',{'type':'meta'})
+        self.assertEqual((caught.exception.used_weight,caught.exception.requested_weight,
+                          caught.exception.ceiling,caught.exception.retry_after_ms),
+                         (800,20,800,budget.WINDOW_MS))
         self.budget.acquire('/info',{'type':'meta'},priority='protection')
         self.assertEqual(self.connector.call_count,1)
         self.assertEqual(sum(self.weights),820)
@@ -118,6 +123,77 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(caught.exception.stage,'LOCAL_WAIT')
             self.connector.assert_not_called()
         finally:coordinator.lock.release()
+
+    def test_read_only_capacity_does_not_spend_or_refresh_requests(self):
+        self.weights.extend([500,300])
+        status=self.budget.capacity(requested_weight=248)
+        self.assertFalse(status['eligible'])
+        self.assertEqual(status['used_weight'],800)
+        self.assertEqual(status['retry_after_ms'],budget.WINDOW_MS)
+        protected=self.budget.capacity(requested_weight=248,priority='protection')
+        self.assertTrue(protected['eligible'])
+        self.assertEqual(protected['retry_after_ms'],0)
+        self.assertEqual(self.weights,[500,300])
+        self.assertEqual(self.connector.call_count,1)
+
+
+class CapacityTests(unittest.TestCase):
+    def capacity(self,rows,request=248,ceiling=800):
+        conn=Mock()
+        conn.execute.return_value.fetchall.return_value=rows
+        return budget._quota_capacity(conn,request,ceiling)
+
+    def test_entry_waits_until_enough_cumulative_capacity_expires(self):
+        # Earliest expiry alone is too small for the exact finite entry plan.
+        status=self.capacity([(100,1000),(500,25000),(200,60000)])
+        self.assertEqual((status['used_weight'],status['eligible'],status['retry_after_ms']),
+                         (800,False,25000))
+        status=self.capacity([(100,1000),(500,25000),(200,60000)],ceiling=1200)
+        self.assertEqual((status['eligible'],status['retry_after_ms']),(True,0))
+
+    def test_empty_ledger_immediately_eligible_and_oversized_plan_has_no_wait(self):
+        self.assertEqual(self.capacity([])['retry_after_ms'],0)
+        status=self.capacity([],request=801)
+        self.assertFalse(status['eligible'])
+        self.assertIsNone(status['retry_after_ms'])
+
+    def test_invalid_ledger_fails_closed_with_no_private_values(self):
+        for rows in ([(1200,1),(1,2)],[(1,0)],[(1,69001)],[(True,100)],[(1,'PRIVATE_VALUE')]):
+            with self.assertRaises(budget.BudgetError) as caught:self.capacity(rows)
+            self.assertNotIn('PRIVATE_VALUE',str(caught.exception))
+
+    def test_invalid_capacity_request_or_priority_never_opens_database(self):
+        owner=budget.Budget(pg.PostgresJournal.for_ci(
+            'postgresql://offline:PRIVATE_VALUE@localhost/hl_journal_ci'))
+        with patch.object(owner,'_transaction') as transaction:
+            for request in (0,True,1201,'PRIVATE_VALUE'):
+                with self.assertRaisesRegex(budget.BudgetError,'WEIGHT_INVALID'):
+                    owner.capacity(requested_weight=request)
+            for priority in ('PRIVATE_VALUE',None,[]):
+                with self.assertRaisesRegex(budget.BudgetError,'PRIORITY_INVALID'):
+                    owner.capacity(priority=priority)
+            transaction.assert_not_called()
+
+    def test_fresh_entry_retry_uses_expiry_and_grades_only_unknown_delays(self):
+        denied=budget.BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+            requested_weight=248,used_weight=800,ceiling=800,retry_after_ms=25000)
+        self.assertEqual(budget.fresh_entry_retry_ms(denied),25000)
+        busy=budget.BudgetError('TESTNET_REQUEST_BUDGET_BUSY')
+        self.assertEqual([budget.fresh_entry_retry_ms(busy,consecutive_failures=n)
+                          for n in (1,2,3,6,10000)],[500,1000,2000,10000,10000])
+        impossible=budget.BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+            requested_weight=801,ceiling=800)
+        self.assertIsNone(budget.fresh_entry_retry_ms(impossible))
+
+    def test_backoff_never_classifies_storage_or_unknown_order_outcome_for_retry(self):
+        for error in (budget.BudgetError('TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE'),
+                      ValueError('UNCERTAIN_REQUIRES_REVIEW')):
+            with self.assertRaisesRegex(budget.BudgetError,'BACKOFF_REASON_INVALID'):
+                budget.fresh_entry_retry_ms(error)
+        for count in (0,True,10001,'PRIVATE_VALUE'):
+            with self.assertRaisesRegex(budget.BudgetError,'BACKOFF_COUNT_INVALID'):
+                budget.fresh_entry_retry_ms(budget.BudgetError('TESTNET_REQUEST_BUDGET_BUSY'),
+                                            consecutive_failures=count)
 
 
 class PureTests(unittest.TestCase):
@@ -513,6 +589,31 @@ class PostgresTests(unittest.TestCase):
         with self.assertRaisesRegex(budget.BudgetError, 'EXHAUSTED'):
             self.budget.acquire('/exchange', {'action': {'type': 'cancel', 'cancels': [{}]}},
                                 priority='protection')
+
+    def test_capacity_and_denial_preserve_ledger_and_report_cumulative_expiry(self):
+        with self.journal._transaction() as conn:
+            for token,weight,age in (('1'*32,100,68000),('2'*32,500,44000),('3'*32,200,9000)):
+                conn.execute(f'''INSERT INTO {budget.TICKETS}(token,weight,admitted_at)
+                    VALUES(%s,%s,clock_timestamp()-(%s*interval '1 millisecond'))''',
+                    (token,weight,age))
+            before=conn.execute(f'''SELECT token,admitted_at,weight,settled
+                FROM {budget.TICKETS} ORDER BY token''').fetchall()
+        capacity=self.budget.capacity(requested_weight=248)
+        self.assertEqual(capacity['used_weight'],800)
+        self.assertFalse(capacity['eligible'])
+        self.assertTrue(23000<=capacity['retry_after_ms']<=25000)
+        protective=self.budget.capacity(requested_weight=248,priority='protection')
+        self.assertTrue(protective['eligible'])
+        self.assertEqual(protective['retry_after_ms'],0)
+        with self.assertRaisesRegex(budget.BudgetError,'EXHAUSTED') as caught:
+            self.budget.reserve_info_plan(entry_info_bodies())
+        self.assertEqual((caught.exception.used_weight,caught.exception.requested_weight,
+                          caught.exception.ceiling),(800,246,800))
+        self.assertTrue(23000<=caught.exception.retry_after_ms<=25000)
+        with self.journal._transaction() as conn:
+            after=conn.execute(f'''SELECT token,admitted_at,weight,settled
+                FROM {budget.TICKETS} ORDER BY token''').fetchall()
+        self.assertEqual(before,after)
 
     def test_concurrent_workers_never_overspend_and_busy_is_bounded(self):
         self.fill_background()

@@ -525,10 +525,66 @@ class ConfigurationTests(NoExternal):
         with patch.object(stream,'_account_owned',
                           side_effect=DispatchError('UNOWNED_ACCOUNT_ORDER_NO_NEW_ENTRY')),\
              patch.object(stream.selection,'page',
-                          side_effect=AssertionError('SELECTION_MUST_WAIT')):
+                          return_value=([('a'*64,'long_account')],None)):
             with self.assertRaisesRegex(DispatchError,'UNOWNED_ACCOUNT_ORDER'):
                 stream.tick(Controller(),dict(account=A),
                     datetime(2026,9,26,14,tzinfo=timezone.utc),new_entries=True)
+
+    def test_empty_source_scan_spends_no_venue_quota(self):
+        controller=Mock()
+        controller.venue.now.return_value=T
+        controller.venue.env={}
+        controller.store.for_account.return_value=[]
+        with patch.object(stream.selection,'page',return_value=([],None)), \
+                patch.object(stream,'_account_owned',
+                    side_effect=AssertionError('NO_VENUE_READ_WITHOUT_CANDIDATE')):
+            result=stream.tick(controller,dict(account=A),
+                datetime(2026,9,26,14,tzinfo=timezone.utc),new_entries=True)
+        controller.register.assert_not_called()
+        controller.cycle.assert_not_called()
+        self.assertEqual(result['order_requests_sent'],0)
+        self.assertEqual(result['status'],'SWEEP_COMPLETE')
+
+    def test_exact_recipient_copy_after_terminal_attempt_is_idle(self):
+        from .test_execution_occurrence import two_cards, state as occurrence_state
+        first,second=two_cards()
+        saved=occurrence_state(first,second)
+        source=datetime.fromisoformat(first['prepared']['source']['at'])
+        now_ms=int(source.timestamp()*1000)+1000
+        saved.update(bucket='a'*64,account=A,symbol='DEMO',pending=None,
+            entry_timing_armed={first['card_id']:now_ms-500},
+            evidence=dict(bindings=[],snapshot=dict(environment='testnet',account=A,
+                symbol='DEMO',at_ms=now_ms,history_complete=True,orders_complete=True,
+                position_quantity='0',fills=[],open_orders=[],terminal_orders=[])))
+        saved['originals'][first['card_id']]['entry_rejected_no_retry']=True
+        self.assertFalse(stream._unfinished(saved,datetime.fromtimestamp(now_ms/1000,timezone.utc)))
+        controller=Mock();controller.venue.now.return_value=now_ms
+        controller.venue.env={};controller.store.for_account.return_value=[saved]
+        with patch.object(stream.selection,'page',return_value=([],None)), \
+                patch.object(stream,'_account_owned',side_effect=AssertionError('DUPLICATE_SPENDS_NO_QUOTA')):
+            result=stream.tick(controller,dict(account=A),source,new_entries=True)
+        controller.cycle.assert_not_called()
+        self.assertEqual(result['order_requests_sent'],0)
+
+    def test_quota_cooldown_disables_only_fresh_entries(self):
+        from .request_budget import BudgetError
+        controller=Mock()
+        controller.venue.env={'enabled':'true'}
+        controller.venue.sent=0
+        controller.venue.now.side_effect=lambda:T
+        controller.store.for_account.return_value=[]
+        stop=Mock();stop.is_set.side_effect=[False,False,True]
+        successful=dict(status='ENTRIES_DISABLED',maintenance_active=1,
+            active_buckets=1,order_requests_sent=0,new_cards_registered=0)
+        with patch.object(stream,'tick',side_effect=[BudgetError(
+                'TESTNET_REQUEST_BUDGET_EXHAUSTED',used_weight=780,
+                requested_weight=246,ceiling=800,retry_after_ms=5000),successful]) as tick, \
+                patch.object(stream,'_stop',stop),redirect_stdout(io.StringIO()):
+            stream._loop(controller,[('long_account',dict(account=A),None,'enabled')])
+        self.assertEqual([call.kwargs['new_entries'] for call in tick.call_args_list],
+                         [True,False])
+        self.assertEqual(tick.call_count,2)
+        self.assertEqual(stop.wait.call_args.args,(2,))
 
     def test_account_snapshot_is_market_scoped_only_for_long_stream(self):
         class Reader:

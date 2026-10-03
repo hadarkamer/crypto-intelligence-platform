@@ -563,6 +563,13 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
         if (original.get('entry_rejected_no_retry') is True
                 or original.get('entry_unsent_no_retry') is True):
             continue
+        if original['card'].get('record_kind')=='received_alert':
+            from .execution_occurrence import duplicate_attempt
+            if duplicate_attempt(state,cid) is not None:
+                # Recipient-specific delivery cards remain auditable, but the
+                # same exact strategy occurrence has one durable ENTRY attempt.
+                # Its peer remains fenced after timeout, closure and restart.
+                continue
         if 'source_expires_at' in original['card']:
             from .source_window import source_fresh, timestamp
             if not source_fresh(timestamp(original['card']['prepared']['source']['at']),
@@ -1644,17 +1651,26 @@ class TestnetVenue:
         env=self.env
         if hasattr(self,'store'):
             self.store.action_allowed(proposal)
+        from .emergency_close import continuous_configuration, continuous_storage
+        continuous = (continuous_configuration(env) if proposal.get('operation')=='ENTRY'
+                      else False)
         if proposal.get('operation')=='ENTRY' and env.get('HL_TESTNET_EMERGENCY_CLOSE'):
             from .emergency_close import APPROVAL, healthy
             if env['HL_TESTNET_EMERGENCY_CLOSE']!=APPROVAL or not healthy(self.now()):
                 raise DispatchError('EMERGENCY_SUPERVISOR_NOT_FRESH_NO_NEW_ENTRY')
             trial=env.get('HL_TESTNET_PROTECTION_TIMING_CARD_ID','')
-            try: trial_expires=int(env.get('HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS',''))
-            except (ValueError,TypeError):
-                raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED') from None
-            if (not re.fullmatch(r'[0-9a-f]{64}',trial) or trial!=proposal.get('card_id')
-                    or not 0<trial_expires-self.now()<=120000):
-                raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED')
+            if continuous:
+                continuous_storage(self)
+            # A present exact-card grant always narrows even a continuous
+            # deployment. Removing that restriction requires an explicit config
+            # change; a malformed or expired grant never widens its authority.
+            if not continuous or trial or env.get('HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS'):
+                try: trial_expires=int(env.get('HL_TESTNET_PROTECTION_TIMING_EXPIRES_MS',''))
+                except (ValueError,TypeError):
+                    raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED') from None
+                if (not re.fullmatch(r'[0-9a-f]{64}',trial) or trial!=proposal.get('card_id')
+                        or not 0<trial_expires-self.now()<=120000):
+                    raise DispatchError('EXACT_TIMING_TRIAL_APPROVAL_REQUIRED')
         stream=(env.get('HL_TESTNET_RUNTIME_MODE')=='long_stream_testnet_v1'
             and env.get('HL_TESTNET_FILLED_DISPATCH')=='approved_long_stream_v1'
             and env.get('HL_TESTNET_LONG_STREAM')=='approved_alerts_v1'
@@ -1683,10 +1699,11 @@ class TestnetVenue:
             if env.get(flag)!='true':
                 raise DispatchError('STREAM_ENTRIES_DISABLED_MANAGEMENT_CONTINUES'
                     if proposal['role']=='short_account' else 'LONG_ENTRIES_DISABLED_MANAGEMENT_CONTINUES')
-            if (proposal['role']=='short_account' and
-                    (not re.fullmatch(r'[0-9a-f]{64}', env.get('HL_TESTNET_SHORT_TRIAL_CARD_ID',''))
-                     or proposal['card_id']!=env['HL_TESTNET_SHORT_TRIAL_CARD_ID'])):
-                raise DispatchError('SHORT_ENTRY_OUTSIDE_EXACT_TRIAL_CARD')
+            if proposal['role']=='short_account':
+                try:
+                    roles.short_entry_scope(env, proposal['card_id'])
+                except checks.Blocked as exc:
+                    raise DispatchError(str(exc)) from None
         # Check original source age again at the final boundary, including after
         # a slow budget read. Never refresh an alert timestamp on retry.
         if proposal['operation']=='ENTRY':
