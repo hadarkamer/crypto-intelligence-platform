@@ -1,10 +1,12 @@
 """Fault-injected actual controller/store tests; no keys or real exchange calls."""
 from copy import deepcopy
-from contextlib import contextmanager
+from contextlib import contextmanager,redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime,timezone
 from decimal import Decimal
 import os
+import io
+import json
 import threading
 import unittest
 from unittest.mock import patch
@@ -1862,3 +1864,128 @@ class EmergencyDatabaseTests(NoExternal):
 def VenueFromExisting(venue):
     result=Venue();result.__dict__.update(deepcopy({k:v for k,v in venue.__dict__.items() if k!='store'}))
     return result
+
+
+class SupervisorEmptyCandidateTests(NoExternal):
+    """Run the real supervisor and controllers against bounded in-memory storage."""
+    @staticmethod
+    def candidate(side='LONG', *, evidence=True):
+        binding,record=original(side=side,expiry_seconds=60)
+        venue=Venue()
+        return dict(bucket=life.digest(['testnet',binding['account'],binding['symbol']]),
+            account=binding['account'],symbol=binding['symbol'],revision=1,
+            bindings=[],originals={binding['card_id']:record},pending=None,emergency=None,
+            evidence=(dict(bindings=[],snapshot=venue.empty_snapshot(binding['account'],binding['symbol']))
+                      if evidence else None))
+
+    def scan(self,states,*,accounts=(A,),now=T+1,cycle=None,scan_error=None):
+        stop=threading.Event();events=[]
+        class Store:
+            domain='software'
+            def __init__(self):self.values={s['bucket']:deepcopy(s) for s in states}
+            def load(self,bucket):return deepcopy(self.values[bucket])
+            def for_account(self,account):
+                if account==accounts[-1]:stop.set()  # one complete bounded pass
+                if account==scan_error:raise DispatchError('PERSISTENCE_UNAVAILABLE_NO_SEND')
+                return [deepcopy(s) for s in self.values.values() if s['account']==account]
+            def pending_record(self,conn,state):return None
+            def change(self,bucket,revision,event,at,update):
+                current=self.load(bucket)
+                if current['revision']!=revision:
+                    raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
+                update(None,current);current['revision']+=1
+                self.values[bucket]=current;events.append(event)
+                return deepcopy(current)
+        store=Store();venue=Venue();venue.t=now
+        venue.env=dict(HL_TESTNET_EMERGENCY_CLOSE=m.APPROVAL,
+            HL_TESTNET_LONG_ENTRY_ENABLED='false',HL_TESTNET_SHORT_ENTRY_ENABLED='false')
+        normal=dispatch.Controller(store,venue,ROUTES2);current=m.Controller(normal,venue)
+        status=dict(running=False,last_status=None,last_pass_at_ms=None);output=io.StringIO()
+        streams=[('long_account' if a==A else 'short_account',dict(account=a),None,None)
+                 for a in accounts]
+        with patch.object(m,'_thread',None),patch.object(m,'_stop_event',None), \
+                patch.object(m,'_health',status),patch.object(m,'Controller',return_value=current), \
+                patch.object(normal,'refresh',wraps=normal.refresh) as refresh, \
+                patch.object(current,'cycle',wraps=current.cycle) as called, \
+                redirect_stdout(output):
+            if cycle is not None:called.side_effect=cycle
+            self.assertTrue(m.start(normal,streams,stop));m._thread.join(1)
+            self.assertFalse(m._thread.is_alive(),'supervisor did not complete bounded pass')
+            self.assertFalse(status['running'])
+            status['running']=True
+            healthy=m.healthy(now);expired=m.healthy(now+15001)
+            status['running']=False
+            calls=called.call_args_list;refreshes=refresh.call_count
+        self.assertEqual(venue.sent,0)
+        logs=[json.loads(line)['testnet_emergency_close'] for line in output.getvalue().splitlines()]
+        return store,status,calls,refreshes,healthy,expired,logs,events
+
+    def test_fresh_unbound_candidate_both_accounts_is_verified_idle_without_protection_review(self):
+        states=[self.candidate(side) for side in ('LONG','SHORT')]
+        for state in states:
+            self.assertFalse(m.recent_normal_checkpoint(state,now_ms=T+1))
+            self.assertTrue(m._idle_flat_checkpoint(state,now_ms=T+1))
+        _,status,calls,refreshes,healthy,expired,logs,events=self.scan(states,accounts=(A,B))
+        self.assertEqual(status['last_status'],'PASS_COMPLETE')
+        self.assertEqual(calls,[]);self.assertEqual(refreshes,0)
+        self.assertTrue(healthy);self.assertFalse(expired);self.assertEqual(logs,[])
+        self.assertEqual(events,[])
+
+    def test_missing_evidence_and_null_incident_refresh_both_accounts_through_actual_controller(self):
+        states=[self.candidate(side,evidence=False) for side in ('LONG','SHORT')]
+        store,status,calls,refreshes,healthy,expired,logs,events=self.scan(states,accounts=(A,B))
+        self.assertEqual(status['last_status'],'PASS_COMPLETE')
+        self.assertEqual([c.args[0] for c in calls],[s['bucket'] for s in states])
+        self.assertEqual(refreshes,2);self.assertTrue(healthy);self.assertFalse(expired)
+        self.assertEqual(logs,[]);self.assertEqual(events,['PUBLIC_RECONCILIATION']*2)
+        for state in store.values.values():
+            life.validate_snapshot(state['evidence']['snapshot'])
+            self.assertEqual(state['bindings'],[]);self.assertIsNone(state['pending'])
+            self.assertIsNone(state['emergency'])
+
+    def test_idle_skip_needs_complete_fresh_flat_exact_proof_without_uncertainty(self):
+        good=self.candidate()
+        for variant in ('missing','history','orders','account','symbol','bindings','stale',
+                        'future','pending','position','working','past-fill','terminal'):
+            with self.subTest(variant=variant):
+                state=deepcopy(good);snap=state['evidence']['snapshot'];now=T+1
+                if variant=='missing':state['evidence']=None
+                elif variant=='history':snap['history_complete']=False
+                elif variant=='orders':snap['orders_complete']=False
+                elif variant=='account':state['account']=B
+                elif variant=='symbol':state['symbol']='BTC'
+                elif variant=='bindings':state['evidence']['bindings']=[original()[0]]
+                elif variant=='stale':now=T+15000
+                elif variant=='future':snap['at_ms']=T+2
+                elif variant=='pending':state['pending']='a'*64
+                elif variant=='position':snap['position_quantity']='1'
+                elif variant=='working':snap['open_orders']=deepcopy(state_from_case(q='0')['evidence']['snapshot']['open_orders'])
+                elif variant=='past-fill':snap['fills']=[fill(original()[0],qty='40')]
+                else:snap['terminal_orders']=[terminal(original()[0],'ENTRY','40')]
+                self.assertFalse(m._idle_flat_checkpoint(state,now_ms=now))
+
+    def test_bad_bucket_filter_does_not_starve_exposed_next_market_or_mark_pass_healthy(self):
+        bad=self.candidate();bad['symbol']='BTC';bad['bucket']='b'*64
+        bad['evidence']['snapshot'].pop('orders_complete')
+        exposed=state_from_case(q='40',take='40')
+        processed=[]
+        def cycle(bucket,*,send):
+            processed.append((bucket,send))
+            return dict(status='STOP_OBSERVED_OR_NO_EXPOSURE',order_requests_sent=0)
+        _,status,calls,_,healthy,_,logs,_=self.scan([bad,exposed],cycle=cycle)
+        self.assertEqual(processed,[(exposed['bucket'],True)])
+        self.assertEqual(len(calls),1)
+        self.assertEqual(status['last_status'],'RECONCILIATION_REQUIRED_NO_BLIND_RETRY')
+        self.assertFalse(healthy);self.assertEqual(len(logs),1)
+        self.assertEqual(logs[0]['failure_scope'],'BUCKET_REVIEW')
+        self.assertEqual(logs[0]['failure_code'],'UNEXPECTED_FIELDS')
+        self.assertEqual(logs[0]['order_requests_sent'],0)
+
+    def test_storage_failure_is_sanitized_unhealthy_and_does_not_starve_second_account(self):
+        _,status,_,_,healthy,_,logs,_=self.scan([self.candidate('SHORT')],
+            accounts=(A,B),scan_error=A)
+        self.assertEqual(status['last_status'],'STORAGE_OR_SCAN_UNAVAILABLE')
+        self.assertFalse(healthy);self.assertEqual(len(logs),1)
+        self.assertEqual(logs[0]['failure_scope'],'ACCOUNT_SCAN')
+        self.assertEqual(logs[0]['failure_code'],'PERSISTENCE_UNAVAILABLE_NO_SEND')
+        self.assertEqual(logs[0]['order_requests_sent'],0)

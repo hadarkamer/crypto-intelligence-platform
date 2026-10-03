@@ -371,7 +371,8 @@ def recent_normal_checkpoint(state, *, now_ms, fill_wakeups=None):
     An uncovered tranche also requires independent checking before its deadline,
     since a current price can already have crossed the original stop.
     """
-    if state.get('emergency') is not None or state['evidence'] is None:
+    if (state.get('emergency') is not None or state['evidence'] is None
+            or not state['bindings']):
         return False
     evidence=state['evidence'];snapshot=evidence['snapshot']
     if (evidence['bindings'] != state['bindings']
@@ -402,6 +403,25 @@ def recent_normal_checkpoint(state, *, now_ms, fill_wakeups=None):
     healthy_feed=getattr(type(fill_wakeups),'entry_allowed',None)
     return (callable(healthy_feed)
             and fill_wakeups.entry_allowed(state['account']) is True)
+
+
+def _idle_flat_checkpoint(state, *, now_ms):
+    """Skip only a fresh complete flat observation with no unresolved request."""
+    if (state.get('emergency') is not None or state.get('pending') is not None
+            or state['evidence'] is None):
+        return False
+    evidence=state['evidence'];snapshot=evidence['snapshot']
+    life.validate_snapshot(snapshot)
+    if (evidence['bindings']!=state['bindings']
+            or snapshot['account']!=state['account'] or snapshot['symbol']!=state['symbol']
+            or snapshot['history_complete'] is not True or snapshot['orders_complete'] is not True
+            or not 0<=now_ms-snapshot['at_ms']<15000):
+        return False
+    # An empty ownership list cannot explain any past exchange activity.
+    if not state['bindings'] and (snapshot['fills'] or snapshot['terminal_orders']):
+        return False
+    from .long_stream_runtime import idle_flat
+    return idle_flat(state)
 
 
 def fresh_stop_coverage(state, *, now_ms):
@@ -1143,42 +1163,50 @@ def start(normal, streams, stop_event, *, only_bucket=None):
             raise DispatchError('EMERGENCY_SCOPE_ACCOUNT_NOT_SELECTED')
     controller=Controller(normal)
     def loop():
+        from .long_stream_runtime import _unfinished,_safe_failure
+        from datetime import datetime,timezone
         with _lock:
             _health.update(running=True,last_status='STARTING',last_pass_at_ms=None)
         while not stop_event.is_set():
             status='PASS_COMPLETE'
             for _,route,*_ in streams:
                 try:
-                    for state in controller.store.for_account(route['account']):
+                    states=controller.store.for_account(route['account'])
+                except Exception as exc:
+                    status='STORAGE_OR_SCAN_UNAVAILABLE'
+                    print(json.dumps({'testnet_emergency_close':dict(status=status,
+                        failure_scope='ACCOUNT_SCAN',order_requests_sent=0,
+                        **_safe_failure(exc))},sort_keys=True),flush=True)
+                    continue
+                for state in states:
+                    before=controller.venue.sent
+                    try:
                         if only_bucket is not None and state['bucket'] != only_bucket:
                             continue
-                        from .long_stream_runtime import _unfinished,idle_flat
-                        from datetime import datetime,timezone
                         if not _unfinished(state,datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)):
+                            continue
+                        if _idle_flat_checkpoint(state,now_ms=controller.venue.now()):
                             continue
                         if recent_normal_checkpoint(state,now_ms=controller.venue.now(),
                                 fill_wakeups=vars(controller.venue).get('fill_wakeups')):
                             continue
-                        if not state.get('emergency') and idle_flat(state):
-                            continue
-                        if state.get('emergency',{}).get('phase')=='CLOSED_VERIFIED':
+                        if (state.get('emergency') or {}).get('phase')=='CLOSED_VERIFIED':
                             continue
                         # Reconcile entry/stop independently of the ordinary
                         # sweep. A normal lane stall cannot stop this worker.
-                        before=controller.venue.sent
-                        try:
-                            result=controller.cycle(state['bucket'],send=True)
-                            if result.get('operation')=='EMERGENCY_CANCEL':
-                                controller.cycle(state['bucket'],send=True)
-                            if result['status']!='STOP_OBSERVED_OR_NO_EXPOSURE':
-                                print(json.dumps({'testnet_emergency_close':result},sort_keys=True),flush=True)
-                        except Exception as exc:
-                            from .long_stream_runtime import _safe_failure
-                            status='RECONCILIATION_REQUIRED_NO_BLIND_RETRY'
-                            print(json.dumps({'testnet_emergency_close':dict(status=status,
-                                order_requests_sent=controller.venue.sent-before,**_safe_failure(exc))},sort_keys=True),flush=True)
-                except Exception:
-                    status='STORAGE_OR_SCAN_UNAVAILABLE'
+                        result=controller.cycle(state['bucket'],send=True)
+                        if result.get('operation')=='EMERGENCY_CANCEL':
+                            controller.cycle(state['bucket'],send=True)
+                        if result['status']!='STOP_OBSERVED_OR_NO_EXPOSURE':
+                            print(json.dumps({'testnet_emergency_close':result},sort_keys=True),flush=True)
+                    except Exception as exc:
+                        failure='RECONCILIATION_REQUIRED_NO_BLIND_RETRY'
+                        if status!='STORAGE_OR_SCAN_UNAVAILABLE':
+                            status=failure
+                        print(json.dumps({'testnet_emergency_close':dict(status=failure,
+                            failure_scope='BUCKET_REVIEW',
+                            order_requests_sent=controller.venue.sent-before,
+                            **_safe_failure(exc))},sort_keys=True),flush=True)
             with _lock:
                 _health.update(last_pass_at_ms=controller.venue.now(),last_status=status)
             stop_event.wait(1)

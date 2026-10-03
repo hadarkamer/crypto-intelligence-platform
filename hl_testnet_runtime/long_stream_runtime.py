@@ -411,11 +411,21 @@ def _current_reconciliation_checkpoint(state, started_ms, now_ms):
     return started_ms<=at<=now_ms and now_ms-at<5000
 
 
+def _entry_supervisor_blocked(venue):
+    """A local health hint can postpone entry reads, never authorize an order."""
+    env=vars(venue).get('env')
+    if env is None or not env.get('HL_TESTNET_EMERGENCY_CLOSE'):
+        return False
+    from .emergency_close import APPROVAL,healthy
+    return env['HL_TESTNET_EMERGENCY_CLOSE']!=APPROVAL or not healthy(venue.now())
+
+
 def tick(controller, route, not_before, *, new_entries, role='long_account',
          dirty_symbols=(), full_reconciliation=False, notification_continuity=False,
          reconciliation_started_ms=None):
     """One bounded sweep. Every old exposure is serviced before new cards."""
     now = datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)
+    entry_health_blocked=new_entries and _entry_supervisor_blocked(controller.venue)
     states = sorted(controller.store.for_account(route['account']),
                     key=lambda state:_maintenance_priority(state,dirty_symbols))
     sent = 0
@@ -448,9 +458,11 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             recover_history = gap.needed(state, now_ms=controller.venue.now())
             unfinished = _unfinished(state,now)
             # A locally registered, never-attempted candidate requires no
-            # maintenance while entries are disabled. Preserve aged SHORT
+            # maintenance while entries are disabled or the supervisor blocks
+            # entry. Preserve forced notification proof and aged SHORT
             # history catch-up and all pending/working/exposed buckets.
-            if not forced and not new_entries and not aged_closed_short and idle_flat(state):
+            if (not forced and (not new_entries or entry_health_blocked)
+                    and not aged_closed_short and idle_flat(state)):
                 unfinished=False
             if not unfinished and not aged_closed_short and not forced and not recover_history:
                 continue
@@ -500,6 +512,15 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             active_buckets=len(states), maintenance_active=maintenance_active,
             order_requests_sent=sent, new_cards_registered=0,
             )
+    if _entry_supervisor_blocked(controller.venue):
+        # Existing uncertainty, exits, feed reconciliation and history recovery
+        # have already run. A cold supervisor cannot permit a new entry, so do
+        # not repeatedly scan/register candidates or spend pre-entry HTTP quota.
+        # The final venue gate independently checks health again before begin.
+        return dict(status='NEW_ENTRIES_WAITING_FOR_EMERGENCY_SUPERVISOR',
+            failure_code='EMERGENCY_SUPERVISOR_NOT_FRESH_NO_NEW_ENTRY',
+            active_buckets=len(states),maintenance_active=maintenance_active,
+            order_requests_sent=sent,new_cards_registered=0)
     from .bounded_entry_trial import cap_reached
     if cap_reached(controller.store, getattr(controller.venue, 'env', {}), role, route['account']):
         return dict(status='BOUNDED_ENTRY_TRIAL_CAP_REACHED', active_buckets=len(states),
