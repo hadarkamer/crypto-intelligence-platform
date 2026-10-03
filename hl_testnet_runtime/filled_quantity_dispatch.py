@@ -1244,7 +1244,13 @@ class Controller:
         # Reservation/rebase and attempt share one PostgreSQL transaction. An
         # independent process cannot checkpoint between these two decisions.
         # Return only the exact positively acknowledged commit's sender token.
-        state,request=self.store.prepare_and_begin(state,proposal,route['agent'],self.venue.now())
+        from .bounded_entry_trial import entry_guard
+        guard=entry_guard(getattr(self.venue,'env',{}),proposal)
+        if guard is None:
+            state,request=self.store.prepare_and_begin(state,proposal,route['agent'],self.venue.now())
+        else:
+            state,request=self.store.prepare_and_begin(state,proposal,route['agent'],self.venue.now(),
+                                                       entry_guard=guard)
         if type(admission) is TransportAdmission:
             admission.bind(request)
         return AdmittedAttempt((state,request,proposal,route),admission)
@@ -1651,6 +1657,11 @@ class TestnetVenue:
         env=self.env
         if hasattr(self,'store'):
             self.store.action_allowed(proposal)
+        from .bounded_entry_trial import check_entry
+        if env.get('HL_TESTNET_ENTRY_ATTEMPT_CAP'):
+            if not hasattr(self,'store'):
+                raise DispatchError('BOUNDED_ENTRY_TRIAL_DURABLE_STORE_REQUIRED')
+            check_entry(self.store,env,proposal)
         from .emergency_close import continuous_configuration, continuous_storage
         continuous = (continuous_configuration(env) if proposal.get('operation')=='ENTRY'
                       else False)
@@ -1841,6 +1852,12 @@ class TestnetVenue:
             raise DispatchError('PERSISTED_NONCE_TIME_INVALID')
         half_cancel.final_freshness(request,now_ms=now)
     def send(self,request,*,admission=None):
+        if (admission is None and self.env.get('HL_TESTNET_ENTRY_ATTEMPT_CAP')
+                and request.get('proposal',{}).get('operation')=='ENTRY'):
+            # A previously stored uncertain request cannot mint a new sender
+            # permit. Only the original positively committed begin owns its
+            # ephemeral single-use admission; uncertainty cannot certify abort.
+            raise DispatchError('BOUNDED_ENTRY_TRIAL_COMMIT_LOCAL_ADMISSION_REQUIRED')
         if admission is not None:
             if type(admission) is not TransportAdmission:
                 raise DispatchError('EXACT_SINGLE_USE_TRANSPORT_ADMISSION_REQUIRED')

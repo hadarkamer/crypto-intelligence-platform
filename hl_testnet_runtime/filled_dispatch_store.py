@@ -264,7 +264,7 @@ class DispatchStore:
         agent_address=agent
         return self.change(state['bucket'],state['revision'],'ATTEMPT_BEGUN',now_ms,update)
 
-    def prepare_and_begin(self, state, proposal, agent, now_ms):
+    def prepare_and_begin(self, state, proposal, agent, now_ms, *, entry_guard=None):
         """Reserve/revalidate and begin once in the same guarded transaction.
 
         Public authorization belongs to the controller before this call. No
@@ -276,6 +276,13 @@ class DispatchStore:
         def update(conn,value):
             from .emergency_close import fence
             fence(conn,value,proposal['operation'])
+            if entry_guard is not None:
+                if proposal['operation']!='ENTRY' or not callable(entry_guard):
+                    raise DispatchError('BOUNDED_ENTRY_TRIAL_GUARD_INVALID')
+                # change() already holds the common global lock and this bucket
+                # lock. A cross-market cap read and its sole attempt commit are
+                # serialized with every normal/emergency dispatch process.
+                entry_guard(conn,value,proposal)
             if proposal.get('basis')!=life.digest(value['evidence']):
                 raise DispatchError('PROPOSAL_EVIDENCE_CHANGED')
             request=self.pending_record(conn,value)

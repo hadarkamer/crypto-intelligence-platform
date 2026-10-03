@@ -556,6 +556,23 @@ class ConfigurationTests(NoExternal):
         self.assertEqual(result['order_requests_sent'],0)
         self.assertEqual(result['status'],'SWEEP_COMPLETE')
 
+    def test_bounded_entry_cap_skips_scans_after_existing_maintenance(self):
+        controller=Mock();controller.venue.now.return_value=T;controller.venue.env={}
+        state={'bucket':'a'*64,'symbol':'DOGE','bindings':[],'evidence':None,'pending':None}
+        controller.store.for_account.return_value=[state]
+        maintained={'status':'ACCEPTED_UNVERIFIED','order_requests_sent':2}
+        with patch.object(stream,'_unfinished',return_value=True), \
+                patch.object(stream,'_maintain_bucket',return_value=iter([maintained])) as maintenance, \
+                patch('hl_testnet_runtime.bounded_entry_trial.cap_reached',return_value=True), \
+                patch.object(stream.selection,'page',side_effect=AssertionError('CAP_SPENDS_NO_SOURCE_SCAN')), \
+                patch.object(stream,'_account_owned',side_effect=AssertionError('CAP_SPENDS_NO_VENUE_QUOTA')):
+            result=stream.tick(controller,dict(account=A),
+                datetime(2026,9,26,14,tzinfo=timezone.utc),new_entries=True)
+        maintenance.assert_called_once_with(controller,state['bucket'])
+        self.assertEqual(result['status'],'BOUNDED_ENTRY_TRIAL_CAP_REACHED')
+        self.assertEqual(result['order_requests_sent'],2)
+        controller.register.assert_not_called()
+
     def test_exact_recipient_copy_after_terminal_attempt_is_idle(self):
         from .test_execution_occurrence import two_cards, state as occurrence_state
         first,second=two_cards()

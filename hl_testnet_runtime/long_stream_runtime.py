@@ -410,6 +410,11 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
         if first_failure is not None:
             result.update(first_failure)
         return result
+    from .bounded_entry_trial import cap_reached
+    if cap_reached(controller.store, getattr(controller.venue, 'env', {}), role, route['account']):
+        return dict(status='BOUNDED_ENTRY_TRIAL_CAP_REACHED', active_buckets=len(states),
+                    maintenance_active=maintenance_active, order_requests_sent=sent,
+                    new_cards_registered=0)
     states = controller.store.for_account(route['account'])
     trial_id = (roles.short_entry_scope(getattr(controller.venue, 'env', {}))
                 if role == 'short_account' else None)

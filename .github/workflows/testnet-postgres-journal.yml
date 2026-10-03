@@ -50,6 +50,7 @@ jobs:
           hl_testnet_runtime.test_execution_occurrence
           hl_testnet_runtime.test_continuous_short_scope
           hl_testnet_runtime.test_request_budget
+          hl_testnet_runtime.test_bounded_entry_trial
       - name: Existing checks and actual PostgreSQL restart, race, lost-ack and mixed-exit tests
         run: |
           python3 -m unittest -v hyperliquid_testnet_executor_selftest alert_cards_forwarder_selftest

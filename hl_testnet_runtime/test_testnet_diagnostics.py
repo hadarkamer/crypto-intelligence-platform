@@ -215,11 +215,16 @@ class JournalDiagnosticTests(unittest.TestCase):
         with self.assertRaises(ValueError):m._bucket(changed,life.digest(changed),1,{},T)
     def test_configuration_values_are_allowlisted_not_arbitrary_environment(self):
         report=m._config({**ENV,'HL_TESTNET_FILLED_AFTER_EXIT_POLICY':'cancel_remainder_after_exit_v1',
+                          'HL_TESTNET_ENTRY_ATTEMPT_CAP':'one_per_role_v1',
                           'HL_TESTNET_APP_DELIVERY':'DO_NOT_DISCLOSE',
                           'HL_TESTNET_SAFETY_PIPELINE':'DO_NOT_DISCLOSE'})
         self.assertEqual(report['HL_TESTNET_FILLED_AFTER_EXIT_POLICY'],'cancel_remainder_after_exit_v1')
         self.assertEqual(report['HL_TESTNET_APP_DELIVERY'],'UNRECOGNIZED')
         self.assertTrue(report['safety_pipeline_configured'])
+        self.assertEqual(report['HL_TESTNET_ENTRY_ATTEMPT_CAP'],'one_per_role_v1')
+        self.assertEqual(m._config({})['HL_TESTNET_ENTRY_ATTEMPT_CAP'],'UNSET')
+        self.assertEqual(m._config({'HL_TESTNET_ENTRY_ATTEMPT_CAP':'unlimited'})[
+            'HL_TESTNET_ENTRY_ATTEMPT_CAP'],'UNRECOGNIZED')
         self.assertNotIn('DO_NOT_DISCLOSE',json.dumps(report))
 
 
