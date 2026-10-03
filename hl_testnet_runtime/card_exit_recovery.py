@@ -198,10 +198,12 @@ def plan(bindings, snapshot, context, *, now_ms):
     proposals.sort(key=lambda item: (item[0], item[1]['card_id'], item[1]['leg'], item[1]['order_id'] or ''))
     next_step = proposals[0][1] if proposals and not reasons else None
     # A crossed old target still requires human review. Expose only an
-    # independently valid, missing STOP so the connected dispatcher can
-    # protect existing exposure without moving either original price.
+    # independently valid missing or undersized STOP so the dispatcher can
+    # protect further actual fills without moving either original price. The
+    # exact-owner modifier keeps the accepted old STOP in place until the venue
+    # atomically amends it; a crossed TAKE cannot suppress that protection.
     protective_stop_step = next((step for _, step in proposals
-        if step['leg'] == 'STOP' and step['operation'] == 'CREATE_EXIT'), None) \
+        if step['leg'] == 'STOP' and step['operation'] in ('CREATE_EXIT','RESIZE_EXIT')), None) \
         if reasons == {'EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE'} else None
     return dict(version=VERSION, environment='testnet', simulation_only=True,
         bucket=life.digest(['testnet', life.address(snapshot['account']), snapshot['symbol']]),

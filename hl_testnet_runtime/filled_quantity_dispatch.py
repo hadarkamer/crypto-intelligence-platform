@@ -502,21 +502,31 @@ def choose(state, routes, meta, sample, *, now_ms, sequence=None, after_exit_pol
                             dict(type='cancel',cancels=[dict(a=index,o=int(working[0]['oid']))]),'0',working[0]['oid'])
         if report['reasons']:
             # Once the original take level has passed, do not place that stale
-            # take order. A sole card with a final entry, confirmed position,
-            # no exits and a still-valid original stop can be protected first.
+            # take order. Preserve the sole-card missing-STOP exception, and
+            # permit an exact owned STOP amendment for further observed fills.
             # Every other review reason continues to block the dispatcher.
             stop=report.get('protective_stop_step')
             if (report['reasons'] != ['EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE']
                     or stop is None or len(bs)!=1 or views['bucket_issues']
-                    or 'STOP_COVERAGE_MISSING' not in views['cards'][0]['issues']
+                    or not set(views['cards'][0]['issues']) &
+                        {'STOP_COVERAGE_MISSING','STOP_EXCEEDS_CARD_REMAINDER'}
                     or set(views['cards'][0]['issues']) -
-                        {'STOP_COVERAGE_MISSING','TAKE_PROFIT_COVERAGE_MISSING'}
+                        {'STOP_COVERAGE_MISSING','STOP_EXCEEDS_CARD_REMAINDER',
+                         'TAKE_PROFIT_COVERAGE_MISSING','TAKE_PROFIT_EXCEEDS_CARD_REMAINDER'}
                     or life.number(views['cards'][0]['entry_quantity'])<=0
-                    or life.number(views['cards'][0]['remaining_quantity'],signed=True)<=0
-                    or snap['open_orders']
-                    or not any(o['oid'] in bs[0]['orders']['ENTRY']
-                        for o in snap['terminal_orders'])):
+                    or life.number(views['cards'][0]['remaining_quantity'],signed=True)<=0):
                 raise DispatchError('LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW')
+            if stop['operation']=='CREATE_EXIT':
+                # Preserve the narrower missing-STOP recovery contract. An
+                # existing partial ENTRY/exit is not an absent-order proof.
+                if (snap['open_orders'] or not any(o['oid'] in bs[0]['orders']['ENTRY']
+                        for o in snap['terminal_orders'])):
+                    raise DispatchError('LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW')
+            elif stop['operation']!='RESIZE_EXIT':
+                raise DispatchError('LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW')
+            # RESIZE still uses exit_modify_proposal below: exact active owned
+            # STOP, actual remaining quantity, pinned price/reduceOnly/side,
+            # uncrossed STOP, and both durable wire/quantity fences are required.
             step=stop
         else:
             step=report['next_step']

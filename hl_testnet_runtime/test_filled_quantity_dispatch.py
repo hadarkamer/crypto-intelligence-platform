@@ -23,7 +23,7 @@ from .filled_dispatch_store import DispatchStore, DispatchError, SCHEMA
 from .postgres_journal import PostgresJournal, JournalError
 from .trade_card_store import CardStore
 from .test_filled_quantity_exits import original, case, META, ROUTES
-from .test_card_lifecycle import T, A, B, terminal, order
+from .test_card_lifecycle import T, A, B, terminal, order, fill
 
 CI=os.environ.get('HL_JOURNAL_CI_URL')
 AGENT='0x'+'3'*40
@@ -123,6 +123,78 @@ class NoExternal(unittest.TestCase):
 class DispatchPureTests(NoExternal):
     def select(self,s,**kw):
         return m.choose(s,ROUTES2,META,dict(mark_price='10',at_ms=T),now_ms=T,**kw)
+    def further_partial(self,side='LONG'):
+        state=state_from_case(q='40',side=side,stop='40',take='40')
+        snap=state['evidence']['snapshot'];binding=state['bindings'][0]
+        snap['fills'].append(fill(binding,qty='20',fid='later-partial-entry'))
+        snap['position_quantity']='60' if side=='LONG' else '-60'
+        next(o for o in snap['open_orders'] if o['oid'] in binding['orders']['ENTRY'])['quantity']='40'
+        return state
+
+    def test_crossed_take_allows_only_exact_owned_stop_resize_for_new_partial_fills_both_roles(self):
+        for side,mark in (('LONG','10.3'),('SHORT','9.7')):
+            with self.subTest(side=side):
+                state=self.further_partial(side);before=deepcopy(state);binding=state['bindings'][0]
+                proposal=m.choose(state,ROUTES2,META,dict(mark_price=mark,at_ms=T),now_ms=T,
+                                  after_exit_policy=m.AFTER_EXIT)
+                order=m.requested_order(proposal['action'])
+                self.assertEqual((proposal['operation'],proposal['leg'],proposal['quantity']),('MODIFY_EXIT','STOP','60'))
+                self.assertEqual(proposal['old_oid'],binding['orders']['STOP'][0])
+                self.assertEqual((proposal['account'],proposal['role']),(binding['account'],binding['role']))
+                self.assertEqual((order['p'],order['s'],order['r'],order['b']),
+                                 (binding['prices']['stop'],'60',True,side=='SHORT'))
+                self.assertEqual(order['t'],dict(trigger=dict(isMarket=True,
+                    triggerPx=binding['prices']['stop'],tpsl='sl')))
+                self.assertEqual(state,before)
+
+    def test_crossed_take_stop_resize_keeps_ownership_freshness_and_quantity_fences(self):
+        for invalid in ('stale','wrong-owner','wrong-stop-side','wrong-reduce-only','wrong-price','wrong-entry-total','wrong-position','crossed-stop'):
+            with self.subTest(invalid=invalid):
+                state=self.further_partial();snap=state['evidence']['snapshot'];binding=state['bindings'][0]
+                stop=next(o for o in snap['open_orders'] if o['oid'] in binding['orders']['STOP'])
+                now=T;mark='10.3'
+                if invalid=='stale':now=T+15001
+                elif invalid=='wrong-owner':state['originals'][binding['card_id']]['card']=original(7)[1]['card']
+                elif invalid=='wrong-stop-side':stop['side']='B'
+                elif invalid=='wrong-reduce-only':stop['reduce_only']=False
+                elif invalid=='wrong-price':stop['trigger_price']='9.8'
+                elif invalid=='wrong-entry-total':next(o for o in snap['open_orders'] if o['oid'] in binding['orders']['ENTRY'])['quantity']='60'
+                elif invalid=='wrong-position':snap['position_quantity']='61'
+                else:mark='9.8'
+                with self.assertRaises(life.LifecycleError):
+                    m.choose(state,ROUTES2,META,dict(mark_price=mark,at_ms=now),now_ms=now,
+                             after_exit_policy=m.AFTER_EXIT)
+
+    def test_partial_take_plus_later_entry_fill_resizes_only_stop_after_entry_remainder_final(self):
+        for side,mark in (('LONG','10.3'),('SHORT','9.7')):
+            with self.subTest(side=side):
+                state=state_from_case(q='40',side=side,stop='40',take='40')
+                snap=state['evidence']['snapshot'];binding=state['bindings'][0]
+                snap['fills'] += [fill(binding,qty='40',fid='later-entry'),
+                                  fill(binding,'TAKE_PROFIT',qty='20',fid='partial-take')]
+                snap['open_orders']=[o for o in snap['open_orders'] if o['oid'] not in binding['orders']['ENTRY']]
+                next(o for o in snap['open_orders'] if o['oid'] in binding['orders']['TAKE_PROFIT'])['quantity']='20'
+                ending=terminal(binding,'ENTRY','80');ending['state']='CANCELED'
+                snap['terminal_orders']=[ending];snap['position_quantity']='60' if side=='LONG' else '-60'
+                p=m.choose(state,ROUTES2,META,dict(mark_price=mark,at_ms=T),now_ms=T,
+                           after_exit_policy=m.AFTER_EXIT)
+                self.assertEqual((p['operation'],p['leg'],p['quantity']),('MODIFY_EXIT','STOP','60'))
+                self.assertEqual(p['old_oid'],binding['orders']['STOP'][0])
+
+    def test_partial_take_shrinks_owned_stop_even_when_original_take_is_crossed(self):
+        for side,mark in (('LONG','10.3'),('SHORT','9.7')):
+            with self.subTest(side=side):
+                state=state_from_case(q='100',side=side,stop='100',take='100')
+                snap=state['evidence']['snapshot'];binding=state['bindings'][0]
+                snap['fills'].append(fill(binding,'TAKE_PROFIT',qty='20',fid='partial-target'))
+                next(o for o in snap['open_orders'] if o['oid'] in binding['orders']['TAKE_PROFIT'])['quantity']='80'
+                snap['position_quantity']='80' if side=='LONG' else '-80'
+                p=m.choose(state,ROUTES2,META,dict(mark_price=mark,at_ms=T),now_ms=T,
+                           after_exit_policy=m.AFTER_EXIT)
+                self.assertEqual((p['operation'],p['leg'],p['quantity']),('MODIFY_EXIT','STOP','80'))
+                order=m.requested_order(p['action'])
+                self.assertTrue(order['r'])
+                self.assertEqual(order['p'],binding['prices']['stop'])
     def test_exact_short_trial_skips_older_unbound_card_in_same_market(self):
         older, chosen = 'a'*64, 'b'*64
         source_at=datetime.fromtimestamp((T-1000)/1000,timezone.utc).isoformat()
@@ -232,7 +304,7 @@ class DispatchPureTests(NoExternal):
         snap['terminal_orders'].append(terminal(b,'TAKE_PROFIT','0'))
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
             m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
-    def test_crossed_target_stop_requires_final_entry_and_no_other_orders(self):
+    def test_crossed_target_missing_stop_requires_final_entry_but_owned_stop_can_be_amended(self):
         s=state_from_case(q='40',side='SHORT')
         snap=s['evidence']['snapshot'];b=s['bindings'][0]
         with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
@@ -241,8 +313,8 @@ class DispatchPureTests(NoExternal):
         snap['terminal_orders'][0]['state']='CANCELED'
         b['orders']['STOP']=['11']
         snap['open_orders']=[order(b,'STOP','1')]
-        with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
-            m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
+        p=m.choose(s,ROUTES2,META,dict(mark_price='9',at_ms=T),now_ms=T)
+        self.assertEqual((p['operation'],p['leg'],p['old_oid'],p['quantity']),('MODIFY_EXIT','STOP','11','40'))
     def test_canceled_immediate_take_does_not_retry_and_restores_missing_stop(self):
         s=state_from_case(q='40',side='SHORT')
         b=s['bindings'][0];snap=s['evidence']['snapshot']
@@ -892,6 +964,40 @@ class DispatchDatabaseTests(NoExternal):
     def remaining(self):
         s=self.store.load(self.bucket)
         return life.review(s['bindings'],s['evidence']['snapshot'],now_ms=self.v.now())['cards']
+    def crossed_take_stop_modify_lost_reply_restart(self,side):
+        if side=='SHORT':
+            self.b,self.o=original(2,'SHORT');self.cards.record(self.o['card'])
+            self.bucket=self.c.register(self.b['card_id'])['bucket']
+        self.protect('40');self.v.fill('1000','20')
+        mark='10.3' if side=='LONG' else '9.7'
+        self.v.sample=lambda account,symbol:dict(mark_price=mark,at_ms=self.v.now())
+        self.v.lose_reply=True;result=self.cycle()
+        self.assertEqual(result['status'],'OUTCOME_UNKNOWN')
+        pending=self.store.load(self.bucket)['pending'];request=self.store.request(pending)
+        self.assertEqual((request['proposal']['operation'],request['proposal']['leg'],request['proposal']['quantity']),
+                         ('MODIFY_EXIT','STOP','60'))
+        sent=self.v.sent
+        reopened=DispatchStore(PostgresJournal.for_ci(CI));self.c=m.Controller(reopened,self.v,ROUTES2)
+        state=self.c.refresh(self.bucket)
+        self.assertIsNone(state['pending']);self.assertEqual(reopened.request(pending)['phase'],'OBSERVED')
+        self.assertEqual(reopened.request(pending)['attempts'],1)
+        view=life.review(state['bindings'],state['evidence']['snapshot'],now_ms=self.v.now())['cards'][0]
+        self.assertEqual((view['remaining_quantity'],view['stop_quantity_observed']),('60','60'))
+        self.assertEqual(self.v.sent,sent)
+        self.assertEqual(state['bindings'][0]['orders']['TAKE_PROFIT'],['1002'])
+        self.assertEqual(self.v.orders['1002']['order']['origSz'],'40')
+        # The crossed TAKE still cannot be replaced. Its refusal must not mint
+        # another STOP intent or replay the already observed unknown attempt.
+        with self.assertRaisesRegex(DispatchError,'LIFECYCLE_OR_RECOVERY_REQUIRES_REVIEW'):
+            self.cycle()
+        self.assertEqual(self.v.sent,sent)
+        self.assertEqual(reopened.request(pending)['attempts'],1)
+
+    def test_long_crossed_take_stop_modify_unknown_reply_is_reconciled_once_after_restart(self):
+        self.crossed_take_stop_modify_lost_reply_restart('LONG')
+
+    def test_short_crossed_take_stop_modify_unknown_reply_is_reconciled_once_after_restart(self):
+        self.crossed_take_stop_modify_lost_reply_restart('SHORT')
     def test_preview_records_no_requests_and_no_attempts(self):
         r=self.cycle(False);self.assertEqual(r['status'],'PREVIEW_ONLY');self.assertEqual(self.v.sent,0)
         with self.j._transaction() as conn:self.assertEqual(conn.execute(f'SELECT count(*) FROM {SCHEMA}.requests').fetchone()[0],0)

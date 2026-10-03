@@ -71,6 +71,37 @@ class NoNetworkCase(unittest.TestCase):
 
 
 class RecoveryPlannerTests(NoNetworkCase):
+    def test_further_partial_fill_keeps_safe_stop_resize_available_after_take_crosses_both_sides(self):
+        for side,mark in (('LONG','105'),('SHORT','95')):
+            with self.subTest(side=side):
+                b=binding(side=side);s=partial(b)
+                s['fills'].append(fill(b,qty='20',fid='later-entry'))
+                s['open_orders'][0]['quantity']='40'
+                s['position_quantity']='60' if side=='LONG' else '-60'
+                before=deepcopy((b,s));p=plan(b,s,controls([b],s,mark=mark))
+                self.assertEqual(p['reasons'],['EXIT_LEVEL_REACHED_NO_AUTOMATIC_REPRICE'])
+                self.assertIsNone(p['next_step'])
+                stop=p['protective_stop_step']
+                self.assertEqual((stop['operation'],stop['leg'],stop['target_quantity']),('RESIZE_EXIT','STOP','60'))
+                self.assertEqual(stop['order_id'],b['orders']['STOP'][0])
+                self.assertEqual(stop['original_price'],b['prices']['stop'])
+                self.assertTrue(stop['reduce_only']);self.assertEqual((b,s),before)
+
+    def test_crossed_take_stop_override_never_ignores_ambiguity_or_quantity_issues(self):
+        for invalid in ('unknown-request','wrong-position','wrong-stop-side','wrong-stop-reduce-only','wrong-entry-total'):
+            with self.subTest(invalid=invalid):
+                b=binding();s=partial(b)
+                s['fills'].append(fill(b,qty='20',fid='later-entry'));s['position_quantity']='60'
+                s['open_orders'][0]['quantity']='40';c=controls([b],s,mark='105')
+                stop=next(row for row in s['open_orders'] if row['oid'] in b['orders']['STOP'])
+                if invalid=='unknown-request':c['cards'][b['card_id']]['requests']['STOP']['state']='OUTCOME_UNKNOWN'
+                elif invalid=='wrong-position':s['position_quantity']='61'
+                elif invalid=='wrong-stop-side':stop['side']='B'
+                elif invalid=='wrong-stop-reduce-only':stop['reduce_only']=False
+                else:s['open_orders'][0]['quantity']='60'
+                result=plan(b,s,c)
+                self.assertIsNone(result['protective_stop_step']);self.assertIsNone(result['next_step'])
+
     def test_healthy_partial_entry_is_not_canceled(self):
         b=binding();s=partial(b);p=plan(b,s)
         self.assertEqual(p['state'],'NO_CORRECTION_NEEDED')
