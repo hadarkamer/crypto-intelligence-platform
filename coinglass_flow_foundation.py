@@ -9,6 +9,8 @@ Stage 87.2 adds:
 - safe spacing under the Startup-plan rate limit
 - retry with exponential backoff for HTTP 429 / transient failures
 - resume/skip behaviour so already-current markets are not downloaded again
+- an explicit reverse-ordered frontfill path for extending history before the
+  earliest stored candle without changing the live tail refresh semantics
 - chunk-by-chunk commits, so successful work survives a later failure
 - continuous CVD rebuilt deterministically from saved Buy-Sell deltas
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -164,6 +167,25 @@ def _table_for_market(market: str) -> str:
     raise ValueError("market must be futures or spot")
 
 
+def _series_advisory_lock_id(table: str, symbol: str) -> int:
+    """Return a stable positive PostgreSQL bigint lock key per stored series."""
+    identity = f"coinglass-flow:{table}:{str(symbol).upper()}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(identity).digest()[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+def _acquire_series_write_lock(conn, table: str, symbol: str) -> None:
+    """Serialize insert plus cumulative repair for one market/symbol series."""
+    if _use_postgres():
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(%s)",
+            (_series_advisory_lock_id(table, symbol),),
+        )
+    else:
+        # SQLite permits one writer. Acquiring it before the insert prevents a
+        # concurrent tail refresh from interleaving with cumulative repair.
+        conn.execute("BEGIN IMMEDIATE")
+
+
 def _sqlite_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
@@ -286,6 +308,92 @@ def _chunks(start: datetime, end: datetime) -> Iterable[Tuple[datetime, datetime
         cursor = chunk_end
 
 
+def _reverse_chunks(start: datetime, end: datetime) -> Iterable[Tuple[datetime, datetime]]:
+    """Yield contiguous chunks newest-first for resumable prefix extension.
+
+    A frontfill advances its proven contiguous boundary backwards. Fetching
+    the adjacent chunk first means a failed run can resume from the newly
+    verified boundary without leaving an invisible hole in the requested
+    prefix.
+    """
+    cursor = end
+    while cursor > start:
+        chunk_start = max(start, cursor - timedelta(days=CHUNK_DAYS))
+        yield chunk_start, cursor
+        cursor = chunk_start
+
+
+def _half_open_rows(
+    rows: Dict[int, Tuple[float, float, float, float]],
+    start: datetime,
+    end: datetime,
+) -> Dict[int, Tuple[float, float, float, float]]:
+    """Keep only provider candles in ``[start, end)``.
+
+    CoinGlass endpoint boundary semantics are not relied upon here. In
+    particular, a frontfill ending at the current ``MIN(candle_time)`` must
+    not rewrite that existing boundary candle or any newer live-tail row.
+    """
+    start_ms = int(_as_utc(start).timestamp() * 1000)
+    end_ms = int(_as_utc(end).timestamp() * 1000)
+    return {ts: value for ts, value in rows.items() if start_ms <= int(ts) < end_ms}
+
+
+class IncompleteHistoricalGridError(RuntimeError):
+    """A provider response cannot safely advance the historical resume point."""
+
+
+def _complete_half_open_rows(
+    rows: Dict[int, Tuple[float, float, float, float]],
+    start: datetime,
+    end: datetime,
+) -> Dict[int, Tuple[float, float, float, float]]:
+    """Validate and return an exact 30-minute grid for ``[start, end)``.
+
+    A whole chunk is rejected before any write when its first, last, or an
+    interior candle is absent. Consequently the durable resume boundary moves
+    only across a prefix whose continuity has already been proven.
+    """
+    start_time = _as_utc(start)
+    end_time = _as_utc(end)
+    if start_time is None or end_time is None or start_time >= end_time:
+        raise ValueError("historical chunk must have a non-empty UTC range")
+    step_ms = CANDLE_INTERVAL_MINUTES * 60 * 1000
+    start_ms = int(start_time.timestamp() * 1000)
+    end_ms = int(end_time.timestamp() * 1000)
+    span_ms = end_ms - start_ms
+    if span_ms % step_ms:
+        raise ValueError("historical chunk boundaries must align to the 30-minute grid")
+
+    accepted = {
+        int(ts): value
+        for ts, value in _half_open_rows(rows, start_time, end_time).items()
+    }
+    expected = set(range(start_ms, end_ms, step_ms))
+    actual = set(accepted)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing or unexpected:
+        first_missing = (
+            datetime.fromtimestamp(missing[0] / 1000.0, tz=timezone.utc).isoformat()
+            if missing
+            else None
+        )
+        first_unexpected = (
+            datetime.fromtimestamp(unexpected[0] / 1000.0, tz=timezone.utc).isoformat()
+            if unexpected
+            else None
+        )
+        raise IncompleteHistoricalGridError(
+            "incomplete 30m provider grid: "
+            f"range=[{start_time.isoformat()},{end_time.isoformat()}) "
+            f"expected={len(expected)} received={len(actual)} "
+            f"missing={len(missing)} unexpected={len(unexpected)} "
+            f"first_missing={first_missing} first_unexpected={first_unexpected}"
+        )
+    return accepted
+
+
 def _normalise_timestamp(raw: Any) -> int:
     ts = int(raw)
     return ts * 1000 if ts < 10_000_000_000 else ts
@@ -372,6 +480,8 @@ def _store(
     symbol: str,
     market: str,
     rows: Dict[int, Tuple[float, float, float, float]],
+    *,
+    preserve_existing: bool = False,
 ) -> int:
     init_db()
     table = _table_for_market(market)
@@ -391,28 +501,37 @@ def _store(
         ))
     if not values:
         return 0
+    stored_count = len(values)
 
     if _use_postgres():
-        sql = f"""
-        INSERT INTO {table}
-        (symbol,candle_time,buy_volume_usd,sell_volume_usd,
-         api_cum_vol_delta_usd,continuous_cum_vol_delta_usd,
-         exchange_list,source,imported_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT (symbol,candle_time) DO UPDATE SET
+        conflict_action = (
+            "DO NOTHING"
+            if preserve_existing
+            else """DO UPDATE SET
           buy_volume_usd=EXCLUDED.buy_volume_usd,
           sell_volume_usd=EXCLUDED.sell_volume_usd,
           api_cum_vol_delta_usd=EXCLUDED.api_cum_vol_delta_usd,
           continuous_cum_vol_delta_usd=EXCLUDED.continuous_cum_vol_delta_usd,
           exchange_list=EXCLUDED.exchange_list,
           source=EXCLUDED.source,
-          imported_at=EXCLUDED.imported_at
+          imported_at=EXCLUDED.imported_at"""
+        )
+        sql = f"""
+        INSERT INTO {table}
+        (symbol,candle_time,buy_volume_usd,sell_volume_usd,
+         api_cum_vol_delta_usd,continuous_cum_vol_delta_usd,
+         exchange_list,source,imported_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (symbol,candle_time) {conflict_action}
         """
         for attempt in range(3):
             try:
                 with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+                    _acquire_series_write_lock(conn, table, str(symbol).upper())
                     with conn.cursor() as cur:
                         cur.executemany(sql, values)
+                        if preserve_existing and cur.rowcount >= 0:
+                            stored_count = int(cur.rowcount)
                     _repair_continuous_in_transaction(conn, table, str(symbol).upper())
                     conn.commit()
                 break
@@ -421,26 +540,43 @@ def _store(
                     raise
                 time.sleep(0.4 * (attempt + 1))
     else:
-        sql = f"""
-        INSERT INTO {table}
-        (symbol,candle_time,buy_volume_usd,sell_volume_usd,
-         api_cum_vol_delta_usd,continuous_cum_vol_delta_usd,
-         exchange_list,source,imported_at)
-        VALUES (?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(symbol,candle_time) DO UPDATE SET
+        conflict_action = (
+            "DO NOTHING"
+            if preserve_existing
+            else """DO UPDATE SET
           buy_volume_usd=excluded.buy_volume_usd,
           sell_volume_usd=excluded.sell_volume_usd,
           api_cum_vol_delta_usd=excluded.api_cum_vol_delta_usd,
           continuous_cum_vol_delta_usd=excluded.continuous_cum_vol_delta_usd,
           exchange_list=excluded.exchange_list,
           source=excluded.source,
-          imported_at=excluded.imported_at
+          imported_at=excluded.imported_at"""
+        )
+        sql = f"""
+        INSERT INTO {table}
+        (symbol,candle_time,buy_volume_usd,sell_volume_usd,
+         api_cum_vol_delta_usd,continuous_cum_vol_delta_usd,
+         exchange_list,source,imported_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(symbol,candle_time) {conflict_action}
         """
         with sqlite3.connect(DB_PATH) as conn:
-            conn.executemany(sql, values)
+            _acquire_series_write_lock(conn, table, str(symbol).upper())
+            cursor = conn.executemany(sql, values)
+            if preserve_existing and cursor.rowcount >= 0:
+                stored_count = int(cursor.rowcount)
             _repair_continuous_in_transaction(conn, table, str(symbol).upper())
             conn.commit()
-    return len(values)
+    return stored_count
+
+
+def _store_prefix(
+    symbol: str,
+    market: str,
+    rows: Dict[int, Tuple[float, float, float, float]],
+) -> int:
+    """Insert historical prefix rows without replacing concurrent/live data."""
+    return _store(symbol, market, rows, preserve_existing=True)
 
 
 def _as_utc(value: Any) -> Optional[datetime]:
@@ -520,6 +656,56 @@ def coverage(symbol: str, market: str) -> Dict[str, Any]:
         "max_time": _as_utc(data.get("max_time")),
     }
 
+
+def _contiguous_stored_start(
+    symbol: str,
+    market: str,
+    requested_start: datetime,
+    *,
+    existing: Optional[Dict[str, Any]] = None,
+) -> Optional[datetime]:
+    """Return the start of the exact 30m suffix ending at stored MAX.
+
+    Unlike ``MIN(candle_time)``, this cursor cannot jump backwards over sparse
+    rows left by an interrupted or older importer. Only a candle-by-candle
+    contiguous suffix is trusted as the durable frontfill boundary.
+    """
+    init_db()
+    table = _table_for_market(market)
+    symbol = str(symbol).upper()
+    start_time = _as_utc(requested_start)
+    data = existing if existing is not None else coverage(symbol, market)
+    latest = _as_utc(data.get("max_time"))
+    if start_time is None or latest is None:
+        return None
+    if latest < start_time:
+        return None
+
+    if _use_postgres():
+        sql = (
+            f"SELECT candle_time FROM {table} "
+            "WHERE symbol=%s AND candle_time>=%s AND candle_time<=%s"
+        )
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            rows = conn.execute(sql, (symbol, start_time, latest)).fetchall()
+        stored = {_as_utc(row["candle_time"]) for row in rows}
+    else:
+        sql = (
+            f"SELECT candle_time FROM {table} "
+            "WHERE symbol=? AND candle_time>=? AND candle_time<=?"
+        )
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                sql, (symbol, start_time.isoformat(), latest.isoformat())
+            ).fetchall()
+        stored = {_as_utc(row[0]) for row in rows}
+
+    cursor = latest
+    step = timedelta(minutes=CANDLE_INTERVAL_MINUTES)
+    while cursor >= start_time and cursor in stored:
+        cursor -= step
+    return cursor + step
+
 def latest_eligible_candle_time(now: Optional[datetime] = None) -> datetime:
     """Return the newest CoinGlass 30m timestamp that is safe to store.
 
@@ -585,10 +771,12 @@ def _rebuild_continuous_cvd(symbol: str, market: str) -> int:
     symbol = str(symbol).upper()
     if _use_postgres():
         with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            _acquire_series_write_lock(conn, table, symbol)
             total = _repair_continuous_in_transaction(conn, table, symbol)
             conn.commit()
             return total
     with sqlite3.connect(DB_PATH) as conn:
+        _acquire_series_write_lock(conn, table, symbol)
         total = _repair_continuous_in_transaction(conn, table, symbol)
         conn.commit()
         return total
@@ -674,6 +862,131 @@ def backfill_symbol(
         ).to_dict()
 
 
+def frontfill_symbol(
+    symbol: str,
+    market: str,
+    days: int = DEFAULT_BACKFILL_DAYS,
+    *,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Extend one stored series backwards without touching its live tail.
+
+    ``backfill_symbol`` intentionally retains its established tail-refresh
+    contract: it resumes at ``MAX(candle_time)``. Historical research instead
+    needs a separate operation which requests the missing half-open prefix
+    ``[requested_start, contiguous_suffix_start)``. Chunks are processed
+    newest-first so a partial failure remains resumable from the newly proven
+    contiguous boundary.
+
+    Every fetched chunk must contain its exact 30-minute grid before any row in
+    it is written. Existing timestamps are protected by a half-open boundary,
+    insert-only conflict handling and the shared per-series writer lock. Raw
+    tail candles are never deleted or updated; their derived continuous CVD is
+    rebuilt because adding older deltas changes the correct cumulative value
+    of every later candle.
+    """
+    symbol = str(symbol or "").upper()
+    market = market.lower()
+    _table_for_market(market)
+    days = max(1, min(int(days), MAX_BACKFILL_DAYS))
+    current_time = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    request_end = current_time.replace(
+        minute=30 if current_time.minute >= 30 else 0,
+        second=0,
+        microsecond=0,
+    )
+    requested_start = request_end - timedelta(days=days)
+    existing = coverage(symbol, market)
+    contiguous_start = _contiguous_stored_start(
+        symbol, market, requested_start, existing=existing
+    )
+
+    if contiguous_start is not None and contiguous_start <= requested_start:
+        total_rows = _rebuild_continuous_cvd(symbol, market)
+        return FlowBackfillResult(
+            symbol, market, 0, 0, total_rows,
+            requested_start.isoformat(), contiguous_start.isoformat(),
+            True, True, 0,
+            "Historical prefix has a complete 30m grid; live tail left unchanged",
+        ).to_dict()
+
+    # With no history, stop after the newest closed, grace-cleared candle.
+    # Otherwise stop exactly at the proven contiguous suffix and filter that
+    # timestamp out before every write.
+    eligible_end = latest_eligible_candle_time(current_time) + timedelta(
+        minutes=CANDLE_INTERVAL_MINUTES
+    )
+    prefix_end = (
+        min(contiguous_start, eligible_end)
+        if contiguous_start is not None
+        else eligible_end
+    )
+    if prefix_end <= requested_start:
+        total_rows = _rebuild_continuous_cvd(symbol, market)
+        return FlowBackfillResult(
+            symbol, market, 0, 0, total_rows,
+            requested_start.isoformat(), prefix_end.isoformat(),
+            True, True, 0,
+            "No historical prefix is missing; live tail left unchanged",
+        ).to_dict()
+
+    total_received = 0
+    total_stored = 0
+    attempts_used = 0
+    try:
+        chunk_list = list(_reverse_chunks(requested_start, prefix_end))
+        for index, (chunk_start, chunk_end) in enumerate(chunk_list, start=1):
+            print(
+                f"[flow-frontfill] {symbol} {market} chunk {index}/{len(chunk_list)} "
+                f"{chunk_start.isoformat()} -> {chunk_end.isoformat()}",
+                flush=True,
+            )
+            provider_rows, attempts = _fetch_chunk(
+                symbol, market, chunk_start, chunk_end
+            )
+            attempts_used += attempts
+            total_received += len(provider_rows)
+            prefix_rows = _complete_half_open_rows(
+                provider_rows, chunk_start, chunk_end
+            )
+            # Do not advance MIN(candle_time) over a sparse provider result.
+            # Validation above covers the complete chunk before its first write.
+            # Each prefix chunk and the corresponding cumulative repair are
+            # committed atomically by _store. A later failure keeps this chunk.
+            total_stored += _store_prefix(symbol, market, prefix_rows)
+
+        total_rows = _rebuild_continuous_cvd(symbol, market)
+        current = coverage(symbol, market)
+        verified_start = _contiguous_stored_start(
+            symbol, market, requested_start, existing=current
+        )
+        covered = verified_start is not None and verified_start <= requested_start
+        message = (
+            "OK — historical prefix filled; live tail left unchanged"
+            if covered
+            else "Historical prefix incomplete — earliest requested candle was not stored"
+        )
+        print(
+            f"[flow-frontfill] {symbol} {market} done: "
+            f"received={total_received} total={total_rows}",
+            flush=True,
+        )
+        return FlowBackfillResult(
+            symbol, market, total_received, total_stored, total_rows,
+            requested_start.isoformat(), prefix_end.isoformat(), covered, False,
+            attempts_used, message,
+        ).to_dict()
+    except Exception as exc:
+        # Newest-first complete chunks make the contiguous suffix a durable
+        # resume cursor; a sparse failed chunk has not written any rows.
+        current = coverage(symbol, market)
+        return FlowBackfillResult(
+            symbol, market, total_received, total_stored, int(current["count"]),
+            requested_start.isoformat(), prefix_end.isoformat(), False, False,
+            attempts_used, repr(exc),
+        ).to_dict()
+
+
 def backfill_all(
     days: int = DEFAULT_BACKFILL_DAYS,
     force: bool = False,
@@ -747,7 +1060,18 @@ def _cli() -> int:
         output = {market: backfill_symbol(symbol, market, days=2, force=True) for market in markets}
         print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
         return 0
-    print("Usage: python coinglass_flow_foundation.py probe BTC spot | freshness BTC spot | refresh BTC [spot|futures]")
+    if action == "frontfill" and len(sys.argv) >= 3:
+        symbol = sys.argv[2]
+        markets = (sys.argv[3].lower(),) if len(sys.argv) >= 4 else ("futures", "spot")
+        days = int(sys.argv[4]) if len(sys.argv) >= 5 else DEFAULT_BACKFILL_DAYS
+        output = {market: frontfill_symbol(symbol, market, days=days) for market in markets}
+        print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+        return 0
+    print(
+        "Usage: python coinglass_flow_foundation.py probe BTC spot | "
+        "freshness BTC spot | refresh BTC [spot|futures] | "
+        "frontfill BTC [spot|futures] [days]"
+    )
     return 2
 
 
