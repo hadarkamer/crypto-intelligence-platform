@@ -124,10 +124,7 @@ def calculate_counter_score(
     target_proximity = alert_engine._target_proximity_points(
         distance, allowed_distance
     )
-    cluster = alert_engine._cluster_map(deduped_rows).get(symbol, {}).get(
-        counter_side,
-        {"points": 0.0, "count": 0, "members": []},
-    )
+    cluster = alert_engine._cluster_for_target(row, counter_side, deduped_rows)
     gap = _counter_gap_points(row, counter_side)
 
     components = {
@@ -149,4 +146,7 @@ def calculate_counter_score(
         "components": components,
         "cluster_count": int(cluster.get("count", 0) or 0),
         "cluster_members": list(cluster.get("members", []) or []),
+        "cluster_member_targets": list(cluster.get("member_targets", []) or []),
+        "cluster_target_is_member": bool(cluster.get("target_is_member")),
+        "cluster_scoring_scope": cluster.get("scoring_scope"),
     }

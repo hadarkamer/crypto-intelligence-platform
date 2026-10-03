@@ -3496,7 +3496,7 @@ def _alert_card(index: int, item: Dict[str, Any], all_items, rows) -> str:
     multiple_cluster_note = ""
     if cluster_candidate_count > 1:
         multiple_cluster_note = (
-            f"⚠️ <b>נמצאו {cluster_candidate_count} קלאסטרים אפשריים בצד זה.</b> "
+            f"⚠️ <b>נמצאו {cluster_candidate_count} קלאסטרים הכוללים את מחיר היעד הזה.</b> "
             f"הניקוד משתמש בחזק ביותר: [{html.escape(cluster_members)}].\n"
         )
 
