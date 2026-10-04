@@ -158,6 +158,10 @@ AXIS_SCHEMA={'type':'object','additionalProperties':False,'properties':{
     'price_evidence':{'type':'string','maxLength':500}},'required':['low','high','price_evidence']}
 
 INSTRUCTIONS='''
+This request contains exactly ONE independent screenshot for ONE requested
+model/timeframe. An enlarged detail crop, if supplied, contains saved pixels
+from that same screenshot. Return exactly ONE object in scans for the pair,
+including if it is unreadable; never create another scan for the detail crop.
 Use the prominent_levels list as the authoritative extraction, with no target
 number of levels. Treat every requested model and timeframe independently.
 First transcribe the visible minimum/maximum PRICE-axis ticks into
@@ -193,7 +197,9 @@ original symbol/model/timeframe and source-readability safeguards.
 '''
 
 def install_schema(schema):
-    scan=schema['properties']['scans']['items']
+    scans=schema['properties']['scans']
+    scans.update(minItems=1,maxItems=1)
+    scan=scans['items']
     for key in ('above_price','below_price'):
         scan['properties'].pop(key,None)
         scan['required'].remove(key)
