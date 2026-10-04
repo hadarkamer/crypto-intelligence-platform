@@ -5,7 +5,9 @@ Only unrelated advertising/analytics hosts are excluded; CoinGlass, its assets,
 authentication and challenge providers are not intercepted or bypassed.
 """
 from __future__ import annotations
+from contextlib import contextmanager
 import json
+import math
 from pathlib import Path
 import re
 import time
@@ -17,13 +19,33 @@ CODES=frozenset({'source_capture_failed','source_timeout','source_not_readable',
     'price_uncertain','zones_invalid','worker_crashed'})
 STAGES=frozenset({'startup','capture','image_check','analysis','validation','saving'})
 PHASES=frozenset({'capture','select_12h','select_24h','select_48h','model_selection',
-    'symbol_selection','wait_for_chart','screenshot','navigation'})
+    'symbol_selection','wait_for_chart','screenshot','navigation','browser_launch',
+    'browser_context','source_session_setup','page_creation','overlay_dismissal',
+    'timeframe_selection','legend_preparation','chart_geometry','render_settle',
+    'context_close','browser_close'})
 KINDS=frozenset({'TimeoutError','TargetClosedError','Error','RuntimeError','ValueError',
     'MemoryError','OSError','FileNotFoundError','ReadTimeout','ConnectTimeout'})
 AD_HOSTS=re.compile(r'^https?://(?:[a-zA-Z0-9-]+\.)*(?:doubleclick\.net|googlesyndication\.com|google-analytics\.com|googletagmanager\.com)/')
 _current_stage='startup'
 _usage=None
 _analysis_facts={}
+_capture_events=[]
+
+@contextmanager
+def capture_operation(phase):
+    """Observe one existing operation; never change its call, timeout or pixels."""
+    if phase not in PHASES:raise ValueError('Unknown capture phase')
+    started=time.monotonic();status='completed'
+    try:
+        yield
+    except Exception as exc:
+        status='failed'
+        if not hasattr(exc,'_model1_capture_phase'):exc._model1_capture_phase=phase
+        raise
+    finally:
+        _capture_events.append({'phase':phase,'status':status,
+            'duration_seconds':round(time.monotonic()-started,2)})
+        del _capture_events[:-24]
 
 class StageFailure(RuntimeError):
     def __init__(self,code):
@@ -120,15 +142,15 @@ def classify(exc):
     return 'worker_crashed'
 
 def run_task(main,timeframe,job_id,output):
-    global _current_stage,_usage,_analysis_facts
-    _current_stage='startup';_usage=None;_analysis_facts={}
+    global _current_stage,_usage,_analysis_facts,_capture_events
+    _current_stage='startup';_usage=None;_analysis_facts={};_capture_events=[]
     started=time.monotonic();root=Path(output)
     try:
         main(timeframe,job_id,output);return 0
     except Exception as exc:
         report={'code':classify(exc),'stage':_current_stage,
             'elapsed_seconds':round(time.monotonic()-started,2),'usage':_usage,
-            **failure_detail(exc),**_analysis_facts}
+            **failure_detail(exc),**_analysis_facts,'capture_operations':list(_capture_events)}
         root.mkdir(parents=True,exist_ok=True);path=root/'error.json'
         path.write_text(json.dumps(report),encoding='utf-8');path.chmod(0o600)
         return 1
@@ -156,6 +178,17 @@ def read_failure(path,job_id,returncode):
                     report['scan_count']=raw['scan_count']
                 if type(raw.get('prominent_levels_present')) is bool:
                     report['prominent_levels_present']=raw['prominent_levels_present']
+                events=raw.get('capture_operations')
+                if isinstance(events,list):
+                    report['capture_operations']=[]
+                    for event in events[-24:]:
+                        if not isinstance(event,dict):continue
+                        duration=event.get('duration_seconds')
+                        if (isinstance(event.get('phase'),str) and event.get('phase') in PHASES
+                            and event.get('status') in ('completed','failed')
+                            and type(duration) in (int,float) and math.isfinite(duration) and 0<=duration<=360):
+                            report['capture_operations'].append({'phase':event['phase'],
+                                'status':event['status'],'duration_seconds':duration})
     except Exception:pass
     print('MODEL1_JOB_FAILURE '+json.dumps({'job_id':job_id,'exit_code':returncode,**report}),flush=True)
     return report['code']
