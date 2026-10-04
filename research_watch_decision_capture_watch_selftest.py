@@ -212,6 +212,10 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
                           context_scope['_WATCH_CONTEXT'].get()['experimental_reference_prices_by_symbol'])
             if dual_error:
                 raise ValueError('fixture dual failure')
+        async def observe_sol(value, chat_id):
+            order.append('sol_proximity')
+            self.assertIs(value, base_bundle)
+            self.assertEqual(chat_id, 1)
         async def prepare_references(value):
             order.append('prepare_references')
             self.assertIs(value, base_bundle)
@@ -257,6 +261,8 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             'research_watch_decision_capture': SimpleNamespace(failure=failed,
                 error_reason=lambda exc: type(exc).__name__, build_bundle=Mock(side_effect=decision_bundle)),
             'dual_cvd65_delivery': SimpleNamespace(record_watch=AsyncMock(side_effect=dual_record), drain=AsyncMock(return_value=0)),
+            'sol_proximity_experimental_worker': SimpleNamespace(
+                WORKER=SimpleNamespace(observe=AsyncMock(side_effect=observe_sol))),
             'experimental_reference_price': SimpleNamespace(prepare_reference_prices=AsyncMock(side_effect=prepare_references)),
             'watch_transition_delivery': SimpleNamespace(record_watch=AsyncMock(), drain=AsyncMock(return_value=0),
                 cycle_result=Mock(return_value={'status': 'COMPLETE'})),
@@ -287,7 +293,9 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['ok'], result)
         scope['market_confidence_engine'].capture_snapshot.assert_called_once_with(['ADA', 'BTC', 'SOL'])
         scope['experimental_reference_price'].prepare_reference_prices.assert_awaited_once_with(base)
-        self.assertLess(order.index('archive'), order.index('prepare_references'))
+        scope['sol_proximity_experimental_worker'].WORKER.observe.assert_awaited_once_with(base, 1)
+        self.assertLess(order.index('archive'), order.index('sol_proximity'))
+        self.assertLess(order.index('sol_proximity'), order.index('prepare_references'))
         self.assertLess(order.index('prepare_references'), order.index('c1274_manual'))
         self.assertLess(order.index('c1274_manual'), order.index('dual'))
         self.assertLess(order.index('prepare_references'), order.index('preview_manual_sources'))
@@ -373,6 +381,7 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(precompute_error=broken):
                 scope, result, order, archives, captures, bot, base = await self.run_cycle(
                     precompute_error=broken, general=False)
+                scope['sol_proximity_experimental_worker'].WORKER.observe.assert_not_awaited()
                 self.assertTrue(result['ok'], result)
                 self.assertEqual(scope['COMBINED_CONFIRMATION_STATE'], {})
                 self.assertNotIn('special_lifecycle', order)
