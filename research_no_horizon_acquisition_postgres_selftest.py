@@ -205,16 +205,18 @@ class AcquisitionPostgresTests(unittest.TestCase):
             self.fetched_parts(declaration, anchor)
         self.assertEqual(self.count('research_no_horizon_plans'), 0)
 
-    def test_mutated_live_score_cannot_pass_original_anchor_hash(self):
+    def test_archive_guard_preserves_anchored_input_against_live_score_mutation(self):
         ident = self.prepared()
         declaration = self.declaration()
         _, anchor = self.anchored(declaration)
-        with self.connect() as conn:
-            conn.execute('''UPDATE research_max_pain_snapshot_sets SET source_metadata=jsonb_set(
-                source_metadata,'{capture_metadata,operational_scores,coins,XRP,models,futures_flow,score}',
-                '-74'::jsonb,false) WHERE snapshot_set_id=%s''', (ident,))
-        with self.assertRaises(ValueError):
-            self.fetched_parts(declaration, anchor)
+        before = self.fetched_parts(declaration, anchor)
+        with self.assertRaisesRegex(self.psycopg.errors.RaiseException, 'append-only'):
+            with self.connect() as conn:
+                conn.execute('''UPDATE research_max_pain_snapshot_sets SET source_metadata=jsonb_set(
+                    source_metadata,'{capture_metadata,operational_scores,coins,XRP,models,futures_flow,score}',
+                    '-74'::jsonb,false) WHERE snapshot_set_id=%s''', (ident,))
+        self.assertEqual(self.fetched_parts(declaration, anchor), before)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
 
     def test_rehashed_transport_response_with_extra_row_remains_invalid(self):
         self.prepared()
