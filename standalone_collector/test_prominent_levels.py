@@ -51,6 +51,8 @@ class ProminentTests(unittest.TestCase):
     def reject(self,raw):
         with self.assertRaises(StageFailure):normalized(raw)
     def test_installed_scan_requires_variable_prominent_list(self):
+        scans=scanner.HEATMAP_SCHEMA['properties']['scans']
+        self.assertEqual((scans['minItems'],scans['maxItems']),(1,1))
         scan=scanner.HEATMAP_SCHEMA['properties']['scans']['items']
         self.assertIn('prominent_levels',scan['required'])
         self.assertIn('price_axis_range',scan['required'])
@@ -173,6 +175,28 @@ class ProminentTests(unittest.TestCase):
             scanner.analyze_heatmap_images([{'image':'data:image/png;base64,AAAA','timeframe':'12h'}],api_key='synthetic',model='synthetic')
         post.assert_called_once();self.assertEqual(post.call_args.kwargs['json']['max_output_tokens'],12000)
         self.assertFalse(post.call_args.kwargs['allow_redirects'])
+    def test_full_image_detail_pair_requires_one_scan_in_actual_request(self):
+        from PIL import Image
+        from price_detail_input import make_detail_file
+        response=Mock(ok=True)
+        response.json.return_value={'status':'completed','output_text':json.dumps(sample()),'usage':{}}
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'coinglass_btc_heatmap_12h.png'
+            Image.new('RGB',(1000,800)).save(path)
+            image={'image':str(path),'timeframe':'12h'}
+            image['price_detail']=make_detail_file(path,{'x':0,'y':20,'width':800,'height':600,'page_width':1000})
+            with patch.object(scanner.requests,'post',return_value=response) as post:
+                scanner.analyze_heatmap_images([image],api_key='synthetic',model='synthetic')
+        post.assert_called_once()
+        request=post.call_args.kwargs['json']
+        content=request['input'][0]['content']
+        self.assertEqual(sum(part['type']=='input_image' for part in content),2)
+        scans=request['text']['format']['schema']['properties']['scans']
+        self.assertEqual((scans['minItems'],scans['maxItems']),(1,1))
+    def test_two_scans_are_rejected_even_if_their_identity_agrees(self):
+        raw=sample();raw['scans'].append(copy.deepcopy(raw['scans'][0]))
+        with self.assertRaises(StageFailure) as caught:normalized(raw)
+        self.assertEqual(caught.exception.code,'analysis_response_invalid')
     def test_all_nine_model_timeframe_identities(self):
         template=sample()
         for model in (1,2,3):

@@ -88,7 +88,7 @@ def prepare():
         cwd=HERE,check=True,timeout=90)
     from install_prominent_levels import install as install_prominent
     install_prominent(RUNTIME)
-    subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','-v'],
+    subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape','-v'],
         cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,

@@ -77,8 +77,11 @@ def remember_analysis(raw):
     if not isinstance(raw,dict):return
     _usage=numeric_usage(raw.get('usage')) or _usage
     scans=raw.get('scans')
+    _analysis_facts={}
+    if isinstance(scans,list):_analysis_facts['scan_count']=min(len(scans),100)
     if not isinstance(scans,list) or len(scans)!=1 or not isinstance(scans[0],dict):return
-    scan=scans[0];facts={}
+    scan=scans[0];facts=dict(_analysis_facts)
+    facts['prominent_levels_present']='prominent_levels' in scan
     for key,allowed in {'observed_timeframe':{'12h','24h','48h','unknown'},
         'current_price_confidence':{'high','medium','low'},
         'blocking_condition':{'none','loading','login','blur','challenge','unknown'}}.items():
@@ -149,6 +152,10 @@ def read_failure(path,job_id,returncode):
                     report['elapsed_seconds']=raw['elapsed_seconds']
                 report['usage']=numeric_usage(raw.get('usage'))
                 if type(raw.get('readable')) is bool:report['readable']=raw['readable']
+                if type(raw.get('scan_count')) is int and 0<=raw['scan_count']<=100:
+                    report['scan_count']=raw['scan_count']
+                if type(raw.get('prominent_levels_present')) is bool:
+                    report['prominent_levels_present']=raw['prominent_levels_present']
     except Exception:pass
     print('MODEL1_JOB_FAILURE '+json.dumps({'job_id':job_id,'exit_code':returncode,**report}),flush=True)
     return report['code']

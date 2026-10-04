@@ -92,6 +92,9 @@ def save_analysis_snapshot(raw,root,image):
     scan=scans[0] if isinstance(scans,list) and len(scans)==1 else {}
     payload={'analysis':safe_scan(scan),'image_preprocessing':safe_detail(detail_provenance(image)),
              'assessment_validated':False}
+    if isinstance(scans,list):payload['scan_count']=min(len(scans),100)
+    if isinstance(scans,list) and len(scans)==1 and isinstance(scan,dict):
+        payload['prominent_levels_present']='prominent_levels' in scan
     encoded=json.dumps(payload,allow_nan=False)
     if len(encoded.encode())>MAX_JSON:raise ValueError('Evidence metadata too large')
     path=Path(root)/'analysis_evidence.json'
@@ -115,6 +118,10 @@ def evidence_payload(directory,timeframe):
         except (ValueError,OSError):value={}
         if isinstance(value,dict):
             diagnostic['analysis']=safe_scan(value.get('analysis'))
+            if type(value.get('scan_count')) is int and 0<=value['scan_count']<=100:
+                diagnostic['scan_count']=value['scan_count']
+            if type(value.get('prominent_levels_present')) is bool:
+                diagnostic['prominent_levels_present']=value['prominent_levels_present']
             detail=safe_detail(value.get('image_preprocessing'))
             if detail and detail['source_sha256']==diagnostic.get('image_sha256'):
                 diagnostic['image_preprocessing']=detail
