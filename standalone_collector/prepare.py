@@ -57,7 +57,8 @@ def prepare():
     for name in ('model1_readiness.py','model1_diagnostics.py','model1_page_flow.py',
                  'model1_execution.py','image_detail.py','price_detail_input.py',
                  'model1_price_range.py','model1_evidence_format.py','model1_legend.py',
-                 'model1_cache_policy.py','heatmap_models.py','prominent_levels.py'):
+                 'model1_cache_policy.py','heatmap_models.py','prominent_levels.py',
+                 'capture_readiness.py'):
         shutil.copy2(HERE/name,RUNTIME/name)
     from install_original_flow import install,expand_capture
     from install_price_detail import install as install_detail,expand_detail_capture
@@ -90,8 +91,10 @@ def prepare():
     install_prominent(RUNTIME)
     from install_capture_diagnostics import install as install_capture_diagnostics
     install_capture_diagnostics(RUNTIME)
+    from install_capture_readiness import install as install_capture_readiness
+    install_capture_readiness(RUNTIME)
     subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape',
-        'test_capture_diagnostics','-v'],
+        'test_capture_diagnostics','test_capture_readiness','-v'],
         cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
@@ -105,6 +108,7 @@ def prepare():
         'selection_policy':'prominent_right_edge.v1','level_contract_version':'prominent-rows.v1',
         'zone_precision':'visible row label/tooltip or explicit axis uncertainty',
         'capture_diagnostics':'bounded per-operation duration and failure phase',
+        'render_gate':'DOM loading/blur checks before one retained PNG and paid analysis',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,
         'bot_started':False,'automatic_source_checks':False},indent=2))
     print('HEATMAP_MODELS_INSTALLED models=1,2,3 horizons=12H,24H,48H source_scans=0',flush=True)

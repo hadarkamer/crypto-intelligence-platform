@@ -33,7 +33,8 @@ class CaptureDiagnosticsTests(unittest.TestCase):
             patch.object(capture,'sync_playwright',return_value=driver),\
             patch.object(capture,'_dismiss_capture_blockers'),patch.object(capture,'_wait_for_heatmap'),\
             patch.object(capture,'_select_model_one'),patch.object(capture,'_select_symbol_mode'),\
-            patch.object(capture,'_select_timeframe',new=lambda *args:None),patch('model1_legend.prepare_legend_for_capture'):
+            patch.object(capture,'_select_timeframe',new=lambda *args:None),patch('model1_legend.prepare_legend_for_capture'),\
+            patch.object(capture,'wait_for_render'),patch.object(capture,'verify_saved_render'):
             def main(*args):
                 execution.stage('capture')
                 capture.capture_heatmaps(Path(directory)/'capture',timeframes=('12h',))
