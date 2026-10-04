@@ -112,6 +112,14 @@ def evidence_payload(directory,timeframe):
         if data.startswith(b'\x89PNG\r\n\x1a\n'):
             image=data;diagnostic['image_retained']=True
             diagnostic['image_sha256']=hashlib.sha256(data).hexdigest()
+    render=image_path.with_suffix('.render.json')
+    if render.is_file() and not render.is_symlink() and render.stat().st_size<=8192:
+        try:value=json.loads(render.read_text(encoding='utf-8'))
+        except (ValueError,OSError):value={}
+        if isinstance(value,dict):
+            from capture_readiness import safe_readiness,safe_network
+            diagnostic['source_readiness']=safe_readiness(value.get('source_readiness'))
+            diagnostic['source_network']=safe_network(value.get('source_network'))
     snapshot=root/'analysis_evidence.json'
     if snapshot.is_file() and not snapshot.is_symlink() and snapshot.stat().st_size<=MAX_JSON:
         try:value=json.loads(snapshot.read_text())

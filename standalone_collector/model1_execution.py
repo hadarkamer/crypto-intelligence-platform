@@ -22,7 +22,7 @@ PHASES=frozenset({'capture','select_12h','select_24h','select_48h','model_select
     'symbol_selection','wait_for_chart','screenshot','navigation','browser_launch',
     'browser_context','source_session_setup','page_creation','overlay_dismissal',
     'timeframe_selection','legend_preparation','chart_geometry','render_settle',
-    'context_close','browser_close'})
+    'context_close','browser_close','render_readiness'})
 KINDS=frozenset({'TimeoutError','TargetClosedError','Error','RuntimeError','ValueError',
     'MemoryError','OSError','FileNotFoundError','ReadTimeout','ConnectTimeout'})
 AD_HOSTS=re.compile(r'^https?://(?:[a-zA-Z0-9-]+\.)*(?:doubleclick\.net|googlesyndication\.com|google-analytics\.com|googletagmanager\.com)/')
@@ -118,6 +118,14 @@ def failure_detail(exc):
     phase=getattr(exc,'_model1_capture_phase','capture')
     detail={'exception_kind':kind if kind in KINDS else 'other',
             'capture_phase':phase if phase in PHASES else 'capture'}
+    readiness=getattr(exc,'_model1_source_readiness',None)
+    if readiness is not None:
+        from capture_readiness import safe_readiness,safe_network
+        detail['source_readiness']=safe_readiness(readiness)
+        detail['source_network']=safe_network(getattr(exc,'_model1_source_network',None))
+        detail['readable']=False
+        detail['blocking_condition']={'loading-indicator':'loading','blur':'blur'}.get(
+            detail['source_readiness']['reason'],'unknown')
     # Only recognize fixed strings from our own selector; don't retain any text.
     text=str(exc)
     if text.startswith('Could not find the visible CoinGlass timeframe selector'):
@@ -178,6 +186,10 @@ def read_failure(path,job_id,returncode):
                     report['scan_count']=raw['scan_count']
                 if type(raw.get('prominent_levels_present')) is bool:
                     report['prominent_levels_present']=raw['prominent_levels_present']
+                if isinstance(raw.get('source_readiness'),dict):
+                    from capture_readiness import safe_readiness,safe_network
+                    report['source_readiness']=safe_readiness(raw['source_readiness'])
+                    report['source_network']=safe_network(raw.get('source_network'))
                 events=raw.get('capture_operations')
                 if isinstance(events,list):
                     report['capture_operations']=[]
