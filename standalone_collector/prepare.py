@@ -88,7 +88,10 @@ def prepare():
         cwd=HERE,check=True,timeout=90)
     from install_prominent_levels import install as install_prominent
     install_prominent(RUNTIME)
-    subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape','-v'],
+    from install_capture_diagnostics import install as install_capture_diagnostics
+    install_capture_diagnostics(RUNTIME)
+    subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape',
+        'test_capture_diagnostics','-v'],
         cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
@@ -101,6 +104,7 @@ def prepare():
         'cache_scope':['heatmap_model','timeframe'],'single_worker':True,
         'selection_policy':'prominent_right_edge.v1','level_contract_version':'prominent-rows.v1',
         'zone_precision':'visible row label/tooltip or explicit axis uncertainty',
+        'capture_diagnostics':'bounded per-operation duration and failure phase',
         'auto_reuse_minutes':15,'saved_review_max_hours':6,
         'bot_started':False,'automatic_source_checks':False},indent=2))
     print('HEATMAP_MODELS_INSTALLED models=1,2,3 horizons=12H,24H,48H source_scans=0',flush=True)
