@@ -122,6 +122,89 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.worker.metrics["runs"], 1)
         self.assertIsNone(self.worker.metrics["last_error_type"])
 
+    def acquisition_backend(self, *, result=None):
+        self.configure()
+        os.environ["RESEARCH_NO_HORIZON_ACQUISITION_ENABLED"] = "true"
+        os.environ["RESEARCH_NO_HORIZON_READ_DATABASE_URL"] = "postgresql://read-only-test-source"
+        backend = Mock()
+        backend.run_once.return_value = result
+        return backend
+
+    async def test_acquisition_flag_alone_does_not_enable_worker(self):
+        os.environ["RESEARCH_NO_HORIZON_ACQUISITION_ENABLED"] = "1"
+        with patch.object(runtime, "_connect", side_effect=AssertionError("connected")), \
+             patch.object(runtime, "_connect_source", side_effect=AssertionError("source connected")):
+            self.assertFalse(await self.worker.start())
+            self.assertEqual(self.worker.run_once()["reason"], "DISABLED")
+        self.assertFalse(self.worker.status()["automatic_source_admission"])
+
+    async def test_disabled_acquisition_never_opens_source(self):
+        self.configure()
+        with patch.object(runtime, "_connect_source", side_effect=AssertionError("source connected")), \
+             patch.object(runtime.acquisition, "schema_status", side_effect=AssertionError("intake inspected")):
+            result = self.worker._acquire_once(Mock(), runtime._settings())
+        self.assertEqual(result["reason"], "DISABLED")
+
+    async def test_no_due_request_does_not_open_source_connection(self):
+        backend = self.acquisition_backend()
+        with patch.object(runtime.acquisition, "schema_status", return_value={"schema_present": True}), \
+             patch.object(runtime.acquisition, "AcquisitionStore", return_value=backend), \
+             patch.object(runtime, "_connect_source", side_effect=AssertionError("source connected")):
+            result = self.worker._acquire_once(Mock(), runtime._settings())
+        self.assertFalse(result["claimed"])
+        self.assertEqual(backend.run_once.call_args.kwargs["leaf_budget"], 4)
+        self.assertEqual(self.worker.acquisition_metrics["runs"], 1)
+
+    async def test_source_factory_uses_explicit_read_database_and_compact_health(self):
+        backend = self.acquisition_backend()
+        def run(worker_id, **kwargs):
+            kwargs["source_connection_factory"]()
+            return {"request_id": "request", "status": "ADMITTED", "plan_id": "plan",
+                    "proof_count": 3, "raw_response_text": "private payload"}
+        backend.run_once.side_effect = run
+        with patch.object(runtime.acquisition, "schema_status", return_value={"schema_present": True}), \
+             patch.object(runtime.acquisition, "AcquisitionStore", return_value=backend), \
+             patch.object(runtime, "_connect_source", return_value=Mock()) as connect_source:
+            result = self.worker._acquire_once(Mock(), runtime._settings())
+        connect_source.assert_called_once_with("postgresql://read-only-test-source")
+        self.assertTrue(result["claimed"])
+        status = self.worker.status()
+        self.assertTrue(status["automatic_source_admission"])
+        self.assertNotIn("private payload", repr(status))
+        self.assertNotIn("postgresql://", repr(status))
+        self.assertFalse(status["provider_requests"])
+
+    async def test_invalid_acquisition_budget_or_missing_source_is_isolated(self):
+        self.acquisition_backend()
+        for budget, read_url in (("0", "configured"), ("4", "")):
+            os.environ["RESEARCH_NO_HORIZON_ACQUISITION_LEAF_BUDGET"] = budget
+            os.environ["RESEARCH_NO_HORIZON_READ_DATABASE_URL"] = read_url
+            with patch.object(runtime.acquisition, "schema_status", side_effect=AssertionError("DB touched")), \
+                 patch.object(runtime, "_connect_source", side_effect=AssertionError("source connected")):
+                result = self.worker._acquire_once(Mock(), runtime._settings())
+            self.assertIn(result["error_type"], ("ValueError", "RuntimeError"))
+        self.assertEqual(self.worker.acquisition_metrics["failures"], 2)
+
+    async def test_acquisition_failure_preserves_successful_execution_pass(self):
+        intake = self.acquisition_backend()
+        intake.run_once.side_effect = RuntimeError("secret DSN and private query payload")
+        connector = Mock()
+        connector.__enter__ = Mock(return_value=Mock())
+        connector.__exit__ = Mock(return_value=False)
+        executor = Mock()
+        executor.run_once.return_value = {"plan_id": "existing", "scope_ordinal": 0,
+                                          "candle_evaluations_this_run": 9}
+        with patch.object(runtime, "_connect", return_value=connector), \
+             patch.object(runtime.store, "PostgresCohortStore", return_value=executor), \
+             patch.object(runtime.acquisition, "schema_status", return_value={"schema_present": True}), \
+             patch.object(runtime.acquisition, "AcquisitionStore", return_value=intake):
+            result = self.worker.run_once()
+        self.assertTrue(result["claimed"])
+        self.assertEqual(result["work"]["plan_id"], "existing")
+        self.assertEqual(self.worker.metrics["failures"], 0)
+        self.assertEqual(self.worker.acquisition_metrics["failures"], 1)
+        self.assertNotIn("secret", repr(self.worker.status()))
+
 
 if __name__ == "__main__":
     unittest.main()

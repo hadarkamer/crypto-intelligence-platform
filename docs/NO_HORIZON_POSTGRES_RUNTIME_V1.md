@@ -22,9 +22,11 @@ never independent experiments.
   health hooks. One worker's startup failure does not prevent other workers
   from starting. Disabled means no connection, task or schema mutation.
 
-Automatic source acquisition, calendar-based cohort creation, broad candidate
-search/ranking, no-horizon prospective validation registration and delivery
-binding remain separate development. The worker does not infer a new scope,
+The optional [frozen-cohort acquisition layer](NO_HORIZON_ACQUISITION_V1.md)
+now acquires and admits explicitly registered declarations. Calendar-based
+cohort creation, broad candidate search/ranking, no-horizon prospective
+validation registration and delivery binding remain separate development.
+The worker does not infer a new scope,
 cutoff or policy when the queue is empty. It does not implement continuously
 extended live entries by mutating frozen cohorts. Adding either intake mode
 requires an explicit population/revision contract.
@@ -104,7 +106,8 @@ error types, never credentials, query text or raw research payloads.
 The receipt fields `runtime_authorized`, `telegram_authorized` and
 `trading_authorized` stay false. Background research execution is a distinct
 explicit opt-in; it grants no signal promotion, delivery or trading authority.
-The worker makes no provider or notification requests and leaves both the
+The optional acquisition pass uses a separately configured read-only database
+connection. The worker makes no provider or notification requests and leaves both the
 ordered-v7 pipeline and the legacy Formula quarantine unchanged.
 
 ## Verification

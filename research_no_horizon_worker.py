@@ -1,7 +1,8 @@
-"""Opt-in PostgreSQL executor for admitted, immutable no-horizon cohorts.
+"""Opt-in PostgreSQL execution and acquisition of frozen no-horizon cohorts.
 
-Executes bounded queued work only. It neither invents research populations nor
-collects provider data, promotes formulas, delivers messages or places trades.
+Acquisition requires its own opt-in and a separate read-only source connection.
+Neither path invents populations, contacts providers, promotes formulas,
+delivers messages or places trades.
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import os
 from uuid import uuid4
 
 import research_no_horizon_postgres_store as store
+import research_no_horizon_acquisition_store as acquisition
 
 try:
     import psycopg
@@ -31,6 +33,25 @@ def enabled():
 
 def _database_url():
     return os.getenv("RESEARCH_NO_HORIZON_DATABASE_URL", "").strip()
+
+
+def acquisition_enabled():
+    return enabled() and os.getenv("RESEARCH_NO_HORIZON_ACQUISITION_ENABLED", "").strip().lower() in _TRUE
+
+
+def _read_database_url():
+    return os.getenv("RESEARCH_NO_HORIZON_READ_DATABASE_URL", "").strip()
+
+
+def _acquisition_settings():
+    name = "RESEARCH_NO_HORIZON_ACQUISITION_LEAF_BUDGET"
+    try:
+        value = int(os.getenv(name, "4"))
+    except ValueError as exc:
+        raise ValueError("Invalid integer setting: " + name) from exc
+    if not 1 <= value <= 32:
+        raise ValueError("Out-of-range setting: " + name)
+    return {"leaf_budget": value}
 
 
 def _settings():
@@ -63,6 +84,16 @@ def _connect(url):
                 "-c application_name=no_horizon_research")
 
 
+def _connect_source(url):
+    if psycopg is None:
+        raise RuntimeError("No-horizon PostgreSQL driver unavailable")
+    return psycopg.connect(url, row_factory=dict_row, connect_timeout=5,
+        options="-c default_transaction_read_only=on -c timezone=UTC "
+                "-c statement_timeout=15000 -c lock_timeout=1000 "
+                "-c idle_in_transaction_session_timeout=20000 "
+                "-c application_name=no_horizon_acquisition_source")
+
+
 class ResearchNoHorizonWorker:
     def __init__(self):
         self._task = None
@@ -70,6 +101,9 @@ class ResearchNoHorizonWorker:
         self._lifecycle_lock = asyncio.Lock()
         self._schema_ready = False
         self._config = None
+        self._acquisition_schema_ready = False
+        self.acquisition_metrics = {"runs": 0, "claimed_passes": 0,
+            "failures": 0, "last_error_type": None, "last_work": None}
         self.worker_id = "no-horizon-" + uuid4().hex
         self.metrics = {"runs": 0, "claimed_passes": 0, "failures": 0,
             "last_run_utc": None, "last_error_type": None, "last_work": None}
@@ -79,8 +113,13 @@ class ResearchNoHorizonWorker:
             "running": bool(self._task and not self._task.done()),
             "schema_ready": self._schema_ready, "store_version": store.VERSION,
             "settings": dict(self._config) if self._config else None,
-            "execution_scope": "ALREADY_ADMITTED_FROZEN_GLOBAL_COHORTS",
-            "automatic_source_admission": False, "provider_requests": False,
+            "execution_scope": "EXPLICITLY_REGISTERED_FROZEN_GLOBAL_COHORTS",
+            "automatic_source_admission": acquisition_enabled(),
+            "acquisition": {"enabled": acquisition_enabled(),
+                "source_configured": bool(_read_database_url()),
+                "schema_ready": self._acquisition_schema_ready,
+                "metrics": dict(self.acquisition_metrics)},
+            "provider_requests": False,
             "live_effect": "NONE", "metrics": dict(self.metrics), **_AUTHORITY}
 
     def _check_schema(self):
@@ -148,6 +187,7 @@ class ResearchNoHorizonWorker:
                 result = store.PostgresCohortStore(conn).run_once(self.worker_id,
                     **{key: config[key] for key in
                        ("lease_seconds", "candle_budget", "entry_budget", "batch_size")})
+                intake_work = self._acquire_once(conn, config)
             work = None if result is None else {key: result[key] for key in
                 ("plan_id", "scope_ordinal", "candle_evaluations_this_run")}
             self.metrics["runs"] += 1
@@ -155,12 +195,43 @@ class ResearchNoHorizonWorker:
             self.metrics["last_run_utc"] = datetime.now(timezone.utc).isoformat()
             self.metrics["last_error_type"] = None
             self.metrics["last_work"] = work
-            return {"claimed": result is not None, "work": work, **_AUTHORITY}
+            return {"claimed": result is not None, "work": work,
+                    "acquisition": intake_work, **_AUTHORITY}
         except Exception as exc:
             self.metrics["failures"] += 1
             # Do not expose DSNs or query/payload contents in public health.
             self.metrics["last_error_type"] = type(exc).__name__
             raise
+
+    def _acquire_once(self, conn, config):
+        if not acquisition_enabled():
+            return {"claimed": False, "reason": "DISABLED"}
+        try:
+            settings = _acquisition_settings()
+            read_url = _read_database_url()
+            if not read_url:
+                raise RuntimeError("Explicit no-horizon read database required")
+            if not self._acquisition_schema_ready:
+                if not acquisition.schema_status(conn)["schema_present"]:
+                    raise RuntimeError("No-horizon acquisition migration is missing or incompatible")
+                self._acquisition_schema_ready = True
+            result = acquisition.AcquisitionStore(conn).run_once(self.worker_id,
+                source_connection_factory=lambda: _connect_source(read_url),
+                lease_seconds=config["lease_seconds"], **settings)
+            work = None if result is None else {key: result.get(key) for key in
+                ("request_id", "status", "plan_id", "proof_count")}
+            self.acquisition_metrics["runs"] += 1
+            self.acquisition_metrics["claimed_passes"] += int(result is not None)
+            self.acquisition_metrics["last_error_type"] = None
+            self.acquisition_metrics["last_work"] = work
+            return {"claimed": result is not None, "work": work}
+        except Exception as exc:
+            # Source availability or an intake configuration failure must not
+            # prevent already admitted cohorts from executing.
+            self._acquisition_schema_ready = False
+            self.acquisition_metrics["failures"] += 1
+            self.acquisition_metrics["last_error_type"] = type(exc).__name__
+            return {"claimed": False, "error_type": type(exc).__name__}
 
 
 WORKER = ResearchNoHorizonWorker()

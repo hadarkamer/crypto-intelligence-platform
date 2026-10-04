@@ -46,7 +46,7 @@ class PostgresAdmissionTests(unittest.TestCase):
         self.assertEqual([call.args for call in loader.call_args_list], [(0,), (1,)])
         prepared = self.store._submit_prepared.call_args.args[0]
         self.assertEqual(self.store._submit_prepared.call_args.kwargs,
-                         {'cohort_key': 'frozen-cohort'})
+                         {'cohort_key': 'frozen-cohort', '_transaction_guard': None})
         preparation.validate_prepared(prepared)
         selected = {item['entry_id'] for item in prepared.payload['scope_plans'][0]['representatives']}
         self.assertEqual(len(selected), 5)

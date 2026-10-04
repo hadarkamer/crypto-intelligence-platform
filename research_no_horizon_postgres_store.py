@@ -65,7 +65,8 @@ class PostgresCohortStore:
         self.versions = implementation()
         self.implementation_sha256 = contracts.digest(self.versions)
 
-    def submit_cohort(self, declaration, anchor, load_part, *, cohort_key=None):
+    def submit_cohort(self, declaration, anchor, load_part, *, cohort_key=None,
+                      _transaction_guard=None):
         """Raw anchored parts are validated before the first database write.
 
         PreparedCohort is deliberately not a public serialized receipt import
@@ -74,9 +75,10 @@ class PostgresCohortStore:
         """
         _idle(self.connection)
         prepared = preparation.prepare_cohort_submission(declaration, anchor, load_part)
-        return self._submit_prepared(prepared, cohort_key=cohort_key)
+        return self._submit_prepared(prepared, cohort_key=cohort_key,
+                                     _transaction_guard=_transaction_guard)
 
-    def _submit_prepared(self, prepared, *, cohort_key=None):
+    def _submit_prepared(self, prepared, *, cohort_key=None, _transaction_guard=None):
         _idle(self.connection)
         preparation.validate_prepared(prepared)
         if cohort_key is not None:
@@ -90,6 +92,11 @@ class PostgresCohortStore:
         backend_json = contracts.canonical(backend)
         p = prepared.payload
         with self.connection.transaction():
+            # Acquisition uses this internal hook to lock and fence its request
+            # in the same transaction as admission. Full source preparation
+            # above is mandatory regardless of whether a guard is supplied.
+            if _transaction_guard is not None:
+                _transaction_guard(self.connection)
             # The unique named key remains immutable even across implementations.
             inserted = self.connection.execute("""INSERT INTO research_no_horizon_plans
                 (plan_id,prepared_plan_id,cohort_key,implementation_sha256,
@@ -112,6 +119,8 @@ class PostgresCohortStore:
                 self.connection.execute("""SELECT scope_ordinal FROM research_no_horizon_scopes
                     WHERE plan_id=%s ORDER BY scope_ordinal FOR SHARE""", (plan_id,)).fetchall()
                 self._verify_materialized(row, prepared)
+                if _transaction_guard is not None:
+                    _transaction_guard(self.connection)
                 return plan_id
             with self.connection.cursor() as cursor:
                 cursor.executemany("INSERT INTO research_no_horizon_candles VALUES(%s,%s,%s)",
@@ -135,6 +144,8 @@ class PostgresCohortStore:
                          for index, entry in enumerate(entries)])
             self.connection.execute("UPDATE research_no_horizon_plans SET admission_sealed=TRUE WHERE plan_id=%s",
                                     (plan_id,))
+            if _transaction_guard is not None:
+                _transaction_guard(self.connection)
         return plan_id
 
     def _plan_header(self, plan_id, *, compatible=False):
