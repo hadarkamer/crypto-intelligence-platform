@@ -18,6 +18,7 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue(policy.other_experimental_alerts_enabled())
             self.assertTrue(policy.u21_experimental_enabled())
             self.assertTrue(policy.xrp_r2732_experimental_enabled())
+            self.assertTrue(policy.hype_row71205_experimental_enabled())
             self.assertTrue(all(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
             self.assertTrue(policy.status()['configuration_valid'])
 
@@ -27,13 +28,14 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertTrue(policy.u21_experimental_enabled())
             self.assertTrue(policy.xrp_r2732_experimental_enabled())
+            self.assertTrue(policy.hype_row71205_experimental_enabled())
             self.assertEqual([rule for rule in store.rules.RULE_IDS if policy.manual_rule_enabled(rule)],
                              [])
             self.assertFalse(policy.manual_rule_enabled('unknown'))
             self.assertEqual(delivery.status()['active_rule_ids'], [])
             self.assertEqual(set(delivery.status()['paused_rule_ids']),
                              set(store.rules.RULE_IDS))
-            self.assertEqual(policy.status()['selected_experimental_rule_ids'], ['R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'U21_XRP_SHORT'])
+            self.assertEqual(policy.status()['selected_experimental_rule_ids'], ['HYPE_ROW71205_SHORT', 'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'U21_XRP_SHORT'])
             self.assertEqual(policy.status()['manual_rule_allowlist'], [])
 
     def test_ordinary_and_selected_preserves_exact_experimental_selection(self):
@@ -42,6 +44,7 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertTrue(policy.u21_experimental_enabled())
             self.assertTrue(policy.xrp_r2732_experimental_enabled())
+            self.assertTrue(policy.hype_row71205_experimental_enabled())
             self.assertFalse(policy.manual_rule_enabled('unknown'))
             self.assertEqual(delivery.status()['active_rule_ids'], [])
             self.assertEqual(set(delivery.status()['paused_rule_ids']),
@@ -51,7 +54,8 @@ class PolicyTests(unittest.TestCase):
                 'ordinary_alerts_enabled': True, 'other_experimental_alerts_enabled': False,
                 'manual_rule_allowlist': [], 'u21_experimental_enabled': True,
                 'xrp_r2732_experimental_enabled': True,
-                'selected_experimental_rule_ids': ['R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'U21_XRP_SHORT'],
+                'hype_row71205_experimental_enabled': True,
+                'selected_experimental_rule_ids': ['HYPE_ROW71205_SHORT', 'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'U21_XRP_SHORT'],
             })
 
     def test_unknown_profile_fails_closed(self):
@@ -61,6 +65,7 @@ class PolicyTests(unittest.TestCase):
                 self.assertFalse(policy.other_experimental_alerts_enabled())
                 self.assertFalse(policy.u21_experimental_enabled())
                 self.assertFalse(policy.xrp_r2732_experimental_enabled())
+                self.assertFalse(policy.hype_row71205_experimental_enabled())
                 self.assertFalse(any(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
                 self.assertFalse(policy.status()['configuration_valid'])
                 self.assertEqual(policy.status()['selected_experimental_rule_ids'], [])
