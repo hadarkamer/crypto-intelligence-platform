@@ -44,6 +44,7 @@ import manual_formula_alert_delivery
 import u21_experimental_worker
 import xrp_r2732_experimental_worker
 import hype_row71205_experimental_worker
+import sol_proximity_experimental_worker
 import ai_agent
 import ai_telegram
 import trade_telegram
@@ -4871,6 +4872,10 @@ async def run_watch_cycle(
         # The user's standalone rule consumes the same frozen all-coin scores,
         # before display thresholds, Max Pain filtering or other Telegram sends.
         dual_cvd_bundle = live_result.pop("watch_dual_cvd_bundle", None)
+        # SOL consumes all frozen targets, before any presentation threshold.
+        # This adds no DOM/derivatives collector and has an isolated outbox.
+        if general_enabled and WATCH_GENERAL_ENABLED and WATCH_RUNTIME.get("chat_id") == chat_id:
+            await sol_proximity_experimental_worker.WORKER.observe(dual_cvd_bundle, chat_id)
         # Freeze source-clock references before any experimental intent. This is
         # a display-only contract; native outcome entry prices remain unchanged.
         try:
@@ -6567,6 +6572,7 @@ async def health(request):
         "u21_experimental": u21_experimental_worker.WORKER.status(),
         "xrp_r2732_experimental": xrp_r2732_experimental_worker.WORKER.status(),
         "hype_row71205_experimental": hype_row71205_experimental_worker.WORKER.status(),
+        "sol_proximity_experimental": sol_proximity_experimental_worker.WORKER.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
@@ -7888,6 +7894,9 @@ async def main():
     u21_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
+    sol_proximity_experimental_worker.WORKER.start(
+        bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
+    )
     hype_row71205_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
@@ -7903,6 +7912,7 @@ async def main():
         await u21_experimental_worker.WORKER.stop()
         await xrp_r2732_experimental_worker.WORKER.stop()
         await hype_row71205_experimental_worker.WORKER.stop()
+        await sol_proximity_experimental_worker.WORKER.stop()
         if WATCH_SUPERVISOR_TASK is not None and not WATCH_SUPERVISOR_TASK.done():
             WATCH_SUPERVISOR_TASK.cancel()
             try:
