@@ -43,6 +43,7 @@ import experimental_reference_price
 import manual_formula_alert_delivery
 import u21_experimental_worker
 import xrp_r2732_experimental_worker
+import hype_row71205_experimental_worker
 import ai_agent
 import ai_telegram
 import trade_telegram
@@ -6565,6 +6566,7 @@ async def health(request):
         "manual_formula_experimental": manual_formula_alert_delivery.status(),
         "u21_experimental": u21_experimental_worker.WORKER.status(),
         "xrp_r2732_experimental": xrp_r2732_experimental_worker.WORKER.status(),
+        "hype_row71205_experimental": hype_row71205_experimental_worker.WORKER.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
@@ -7886,6 +7888,9 @@ async def main():
     u21_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
+    hype_row71205_experimental_worker.WORKER.start(
+        bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
+    )
     xrp_r2732_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
@@ -7897,6 +7902,7 @@ async def main():
     finally:
         await u21_experimental_worker.WORKER.stop()
         await xrp_r2732_experimental_worker.WORKER.stop()
+        await hype_row71205_experimental_worker.WORKER.stop()
         if WATCH_SUPERVISOR_TASK is not None and not WATCH_SUPERVISOR_TASK.done():
             WATCH_SUPERVISOR_TASK.cancel()
             try:
