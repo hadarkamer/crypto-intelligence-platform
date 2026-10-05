@@ -147,6 +147,26 @@ def idle_flat(state):
         and row['state'] in ('CLOSED','CANCELED_WITHOUT_FILL') for row in report['cards'])
 
 
+def _entry_market_blocked(state):
+    """Omit ENTRY setup that the shared-market finality fence will reject.
+
+    This local hint can only postpone work. Maintenance still runs first and
+    every eventual entry obtains new public evidence and final authorization.
+    Recorded alerts retain their original expiry while waiting for the market.
+    """
+    return (state.get('pending') is not None or state.get('emergency') is not None
+            or 'history_gap_recovery' in state
+            or (bool(state['bindings']) and not idle_flat(state)))
+
+
+def _quiet_final_history(controller, state):
+    """Final idle history needs no periodic REST on a reconciled clean feed."""
+    feed=vars(controller.venue).get('fill_wakeups')
+    return (feed is not None and bool(state['bindings']) and _immutable_flat_checkpoint(state)
+            and feed.entry_allowed(state['account']) is True
+            and feed.dirty_symbols(state['account'])==())
+
+
 def _account_owned(venue, account, states, *, role=None, priority='background', budget=None):
     """Unknown positions/orders block *new* entries, never exit maintenance."""
     from .card_sync_evidence import PublicReader
@@ -467,8 +487,16 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             aged_closed_short = (not retained and role == 'short_account' and state['bindings']
                 and state['evidence'] is not None
                 and 3600000 < int(now.timestamp()*1000)-state['evidence']['snapshot']['at_ms'])
-            recover_history = gap.needed(state, now_ms=controller.venue.now())
             unfinished = _unfinished(state,now)
+            # Historical final orders cannot change or expose a position. With
+            # no live/local candidate and a reconciled notification feed, omit
+            # the hourly SHORT scan and idle old-history catch-up entirely.
+            # Notifications, disconnects, staged gaps and new candidates restore
+            # ordinary reconciliation; no timestamp or ENTRY fence is changed.
+            if (notification_continuity and not forced and not unfinished
+                    and _quiet_final_history(controller,state)):
+                continue
+            recover_history = gap.needed(state, now_ms=controller.venue.now())
             # A never-submitted flat candidate is setup work, not exit work.
             # The entry pass below obtains its authoritative fresh checkpoint;
             # do not collect the same empty account twice in this sweep.
@@ -559,7 +587,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
         trial_id=timing_id
     known_cards = {cid for state in states for cid in state['originals']}
     from .execution_occurrence import duplicate_attempt
-    touched = [state['bucket'] for state in states if state['pending'] is None
+    touched = [state['bucket'] for state in states if not _entry_market_blocked(state)
                and any((trial_id is None or cid == trial_id)
                        and cid not in {b['card_id'] for b in state['bindings']}
                        and original.get('entry_rejected_no_retry') is not True
@@ -584,6 +612,19 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             break
     else:
         raise DispatchError('LONG_ALERT_SCAN_BUDGET_REQUIRES_REVIEW')
+    waiting=0
+    blocked={state['symbol']:state for state in states if _entry_market_blocked(state)}
+    if blocked:
+        ready=[]
+        for cid,card_role in fresh_cards:
+            card=CardStore(controller.store.journal).load(cid)
+            if card['account_role']!=card_role:
+                raise DispatchError('STREAM_SOURCE_ROLE_CHANGED')
+            if card['prepared']['source']['symbol'] in blocked:
+                waiting+=1
+            else:
+                ready.append((cid,card_role))
+        fresh_cards=ready
     # A database-only source scan avoids spending venue quota every two
     # seconds while both accounts are flat and no fresh candidate exists.
     # Current inventory still gates EVERY registration and entry pass.
@@ -622,6 +663,8 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
     summary=dict(status='SWEEP_COMPLETE',active_buckets=len(states),
                  maintenance_active=maintenance_active,
                  order_requests_sent=sent,new_cards_registered=registered)
+    if waiting:
+        summary['new_cards_waiting_for_market']=waiting
     if rejection is not None:
         summary.update(rejection)
     return summary

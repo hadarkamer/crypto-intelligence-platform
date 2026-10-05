@@ -425,12 +425,15 @@ def _idle_flat_checkpoint(state, *, now_ms, fill_wakeups=None):
         return False
     if now_ms-snapshot['at_ms']<15000:
         return True
-    # A never-submitted candidate has no owned exposure for this supervisor
-    # to protect. A clean, reconciled feed suppresses its duplicate idle reads;
+    # A never-submitted candidate or fully final/flat owned history has no
+    # exposure for this supervisor to protect. A clean, reconciled feed omits
+    # these idle reads even when another recorded alert awaits ordinary entry;
     # this does NOT refresh evidence or grant entry permission. The ordinary
     # entry lane still obtains current account inventory and all final gates.
-    # Any attempt, notification, disconnection, or owned binding restores REST.
-    return (not state['bindings'] and state.get('last_request') is None
+    # A pending attempt, live order/exposure, staged gap, notification or
+    # disconnection restores REST. Final old bindings do not need polling.
+    return ('history_gap_recovery' not in state
+            and (bool(state['bindings']) or state.get('last_request') is None)
             and fill_wakeups is not None
             and fill_wakeups.entry_allowed(state['account']) is True
             and fill_wakeups.dirty_symbols(state['account'])==())

@@ -1144,10 +1144,11 @@ class Controller:
             if pending['phase']!='PREPARED':
                 return dict(status=pending['phase'],order_requests_sent=0)
         else: pending=None
-        if (not allow_new_entries and pending is None
-                and _fully_protected_no_work(state,self.venue.now())):
+        if (pending is None and _fully_protected_no_work(state,self.venue.now())):
             # A complete current public checkpoint already proves all live
-            # exits. No price/metadata request is needed to select no action.
+            # exits. An occupied shared market cannot accept another entry,
+            # even when account entries are enabled. Omit price/metadata reads
+            # in both cases; working entries and incomplete coverage still run.
             return dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
         if getattr(self.venue,'parallel_preflight',False) is True:
             sample,meta=joined_public_reads(
