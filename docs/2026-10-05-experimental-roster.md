@@ -4,6 +4,7 @@ Owner request: retain XRP R2732 and later experiments, replace the original
 SOL proximity experiment with the 48-closed-trade range variant, and add SOL
 g65/k49 plus the HYPE, DOGE and XRP MaxPain variants.
 
+The owner subsequently added ETH MaxPain long, bringing this roster to eight.
 The permanent roster in `alert_delivery_policy.py` applies even when the
 deployment still specifies `ALERT_DELIVERY_PROFILE=ALL`. Ordinary Watch
 notifications and research collection retain their existing policy. There are
@@ -18,6 +19,7 @@ no order, execution-service, exchange-account or position-sizing changes.
 | HYPE_MAXPAIN_DIST05_15_LONG_TF | 66e5f77c438ba155, explicitly prospective Hyperliquid source variant | Both |
 | DOGE_MAXPAIN_DIST15_25_LONG_TF | c39e5acaacf1247f | Both |
 | XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF | 8e6bdb02709aa0cc | Long |
+| ETH_MAXPAIN_LONG_DIST1_3 | 88a0ed51ab391d6e | Long |
 
 ## Retirement and migration
 

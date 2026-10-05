@@ -57,11 +57,33 @@ class Definitions(unittest.TestCase):
 
     def test_geometry_exact_source_midpoint(self):
         for spec, values in ((SOL_RANGE24, (96, 102, 90)), (HYPE_LONG_TF, (96, 101, 90)),
-                             (DOGE_LONG_TF, (96, 101, 90)), (XRP_SHORT_TF, (99, 102, 90))):
+                             (DOGE_LONG_TF, (96, 101, 90)), (XRP_SHORT_TF, (99, 102, 90)),
+                             (ETH_LONG, (96, 101, 90))):
             p = s.levels(100, 102, spec)
             self.assertEqual(tuple(p[k] for k in ('entry_price', 'take_price', 'stop_price')), values)
         p = s.levels(100, 98, DOGE_LONG_TF)
         self.assertEqual([p[k] for k in ('entry_price', 'take_price', 'stop_price')], [104, 99, 110])
+
+    def test_eth_long_all_timeframes_without_prior_range_filter(self):
+        d = decoded(ETH_LONG, BASE+10000, 102)
+        eligible = [r for r in d['rows'] if r['eligible']]
+        self.assertEqual({r['timeframe'] for r in eligible}, set(TIMEFRAMES))
+        self.assertTrue(all(r['levels']['direction'] == 1 for r in eligible))
+        self.assertFalse(any(r['eligible'] for r in decoded(ETH_LONG, BASE+10000, 98)['rows']))
+        self.assertFalse(ETH_LONG.require_range24)
+        self.assertTrue(ETH_LONG.liquidity_growth)
+
+    def test_eth_worker_uses_eth_spot_route_and_separate_scope(self):
+        response = SimpleNamespace(status_code=200, content=b'[]', json=lambda: [
+            [BASE, '2000', '2002', '1999', '2001', '1', BASE+M-1, '1', 1, '1', '1', '0']])
+        with patch.object(worker.requests, 'get', return_value=response) as request:
+            rows = worker.fetch_rows('ETH', BASE, BASE+M)
+        self.assertEqual(request.call_args.kwargs['params']['symbol'], 'ETHUSDT')
+        self.assertEqual(rows[0][1:], [2000., 2002., 1999., 2001.])
+        eth = worker.ADDITIONAL_WORKERS['ETH']
+        self.assertEqual(eth.spec.research_id, '88a0ed51ab391d6e')
+        self.assertNotEqual(eth.scope_for(1), worker.WORKER.scope_for(1))
+        self.assertTrue(eth.policy_enabled())
 
     def test_range_is_closed_complete_before_decision(self):
         now = BASE+10000
