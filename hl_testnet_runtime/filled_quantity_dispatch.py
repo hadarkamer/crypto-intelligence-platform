@@ -617,6 +617,24 @@ class Controller:
     def _observation_flights(self):
         return self._observations.flights
 
+    def observation_progress(self, state):
+        """Local reporting hint only; never wait, fetch or grant order authority.
+
+        Preserve the oldest matching flight's start so overlapping readers
+        cannot renew a report's bounded verification-in-progress interval.
+        """
+        basis=life.digest(state)
+        with self._observations.guard:
+            active=[flight for flight in self._observations.flights.get(state['bucket'],())
+                    if not flight.done.is_set() and flight.error is None
+                    and flight.revision==state['revision'] and flight.basis_digest==basis
+                    and type(flight.started_at_ms) is int]
+            if not active:
+                return None
+            first=min(active,key=lambda flight:flight.started)
+            return dict(started_at_ms=first.started_at_ms,
+                        elapsed_ms=max(0,int((time.monotonic()-first.started)*1000)))
+
     def share_observation_coordinator(self, other):
         """Join reads for the same durable store; keep each venue's gates separate."""
         if (not isinstance(other,Controller) or self.store is not other.store

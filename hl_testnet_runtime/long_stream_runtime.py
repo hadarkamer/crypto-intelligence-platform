@@ -683,6 +683,38 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
     return summary
 
 
+def _verification_in_progress(controller, state, now_ms):
+    """Bound a reporting transition; old proof never becomes fresh authority."""
+    from .simple_execution import audit_due, protected
+    if (vars(controller.venue).get('simple_execution') is not True
+            or not protected(state) or 'history_gap_recovery' in state):
+        return False
+    progress=getattr(type(controller),'observation_progress',None)
+    if not callable(progress):
+        return False
+    active=controller.observation_progress(state)
+    if active is None:
+        return False
+    at=state['evidence']['snapshot']['at_ms']
+    due=audit_due(state)
+    # A stalled/failed audit must remain visible. Neither a new reader nor a
+    # reporting call may move the original due time or observation timestamp.
+    deadline=(due+17000 if due is not None else at+32000)
+    return (0<=now_ms-at and 0<=now_ms-active['started_at_ms']<15000
+            and active['elapsed_ms']<15000 and now_ms<deadline)
+
+
+def _trade_report_changed(reported, trade):
+    """Deduplicate consecutive states, including every recovery transition."""
+    identity=(trade['account_role'],trade['card_id'])
+    marker=(trade['state'],trade['protection_verified'],trade['closure_verified'],
+            tuple(trade['issues']),trade.get('verification_status'))
+    if reported.get(identity)==marker:
+        return False
+    reported[identity]=marker
+    return True
+
+
 def observed_trades(controller, route, *, role='long_account', historical=False):
     """Read owned fills and working exits for monitoring; never authorize an order."""
     result = []
@@ -690,6 +722,7 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
         if not state['bindings'] or state['evidence'] is None:
             continue
         snap = state['evidence']['snapshot']
+        now_ms=snap['at_ms'] if historical else controller.venue.now()
         # Reports of stored evidence must be evaluated at the observation time.
         # The caller must still show its age; this does not refresh live state.
         from .emergency_close import view as emergency_view
@@ -698,10 +731,25 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
         # authority. Active or uncertain cards still require fresh evidence.
         terminal_history = _immutable_flat_checkpoint(state)
         from .simple_execution import quiet
-        scheduled_quiet=quiet(state,now_ms=controller.venue.now(),
+        scheduled_quiet=not historical and quiet(state,now_ms=now_ms,
                               feed=vars(controller.venue).get('fill_wakeups'))
+        if (not historical and not terminal_history and not scheduled_quiet
+                and vars(controller.venue).get('simple_execution') is True
+                and now_ms-snap['at_ms']>15000):
+            # A peer may have committed since for_account() loaded its rows.
+            # Reload the journal once, never add an exchange read for a report.
+            state=controller.store.load(state['bucket'])
+            snap=state['evidence']['snapshot']
+            now_ms=controller.venue.now()
+            terminal_history=_immutable_flat_checkpoint(state)
+            scheduled_quiet=quiet(state,now_ms=now_ms,
+                                  feed=vars(controller.venue).get('fill_wakeups'))
         view = emergency_view(state, snap['at_ms'] if historical or terminal_history or scheduled_quiet
-                              else controller.venue.now())
+                              else now_ms)
+        in_progress=(not historical and not terminal_history and not scheduled_quiet
+                     and view['bucket_issues']==['STALE_OR_FUTURE_SNAPSHOT']
+                     and _verification_in_progress(controller,state,now_ms))
+        previous_view=emergency_view(state,snap['at_ms'])
         bindings = {b['card_id']:b for b in state['bindings']}
         for row in view['cards']:
             if life.number(row['entry_quantity']) <= 0:
@@ -730,6 +778,19 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
             protected = (remaining > 0 and not view['bucket_issues'] and not row['issues'] and
                 life.number(row['stop_quantity_observed']) >= remaining and
                 life.number(row['take_profit_quantity_observed']) >= remaining)
+            previous=next(item for item in previous_view['cards'] if item['card_id']==row['card_id'])
+            last_known_protected=(remaining>0 and not previous_view['bucket_issues']
+                and not previous['issues']
+                and life.number(previous['stop_quantity_observed'])>=remaining
+                and life.number(previous['take_profit_quantity_observed'])>=remaining)
+            issues=sorted(set(view['bucket_issues']) | set(row['issues']))
+            if in_progress:
+                issues=[issue for issue in issues if issue!='STALE_OR_FUTURE_SNAPSHOT']
+            verification_status=('IN_PROGRESS' if in_progress else
+                'OVERDUE' if 'STALE_OR_FUTURE_SNAPSHOT' in issues else
+                'REQUIRES_REVIEW' if issues else
+                'HISTORICAL' if historical or terminal_history else
+                'DEFERRED' if scheduled_quiet else 'VERIFIED')
             result.append(dict(card_id=row['card_id'],
                 source_event_id=card['prepared']['source']['event_id'],
                 account_role=role,symbol=state['symbol'],state=row['state'],
@@ -741,7 +802,9 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
                 first_entry_at_ms=min(f['at_ms'] for f in entries),
                 last_exit_at_ms=max((f['at_ms'] for f in exits),default=None),
                 active_order_ids=active,
-                issues=sorted(set(view['bucket_issues']) | set(row['issues'])),
+                issues=issues,verification_status=verification_status,
+                last_known_protection_verified=last_known_protected,
+                evidence_age_ms=now_ms-snap['at_ms'],
                 protection_verified=protected,
                 closure_verified=row['closure_verified'],
                 closure_origin=row.get('closure_origin'),
@@ -779,7 +842,7 @@ def _finish_notification_reconciliation(controller, feed, token, symbols, starte
 
 
 def _loop(controller, streams):
-    reported = set()
+    reported = {}
     reconciliation_passes = {}
     entry_retry_at = {}
     entry_failures = {}
@@ -889,13 +952,9 @@ def _loop(controller, streams):
             if result.get('active_buckets',0) or result.get('new_cards_registered',0):
                 try:
                     for trade in observed_trades(controller,route,role=role):
-                        marker = (trade['card_id'],trade['state'],
-                                  trade['protection_verified'],trade['closure_verified'],
-                                  tuple(trade['issues']))
-                        if marker not in reported:
+                        if _trade_report_changed(reported,trade):
                             label='testnet_long_trade_observed' if role=='long_account' else 'testnet_short_trade_observed'
                             print(json.dumps({label:trade},sort_keys=True),flush=True)
-                            reported.add(marker)
                 except Exception:
                     label='testnet_long_trade_observation' if role=='long_account' else 'testnet_short_trade_observation'
                     print(json.dumps({label:'UNAVAILABLE_RETRY'}),flush=True)
