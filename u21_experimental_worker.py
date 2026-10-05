@@ -123,6 +123,8 @@ class U21Worker:
     def status(self):
         return {**deepcopy(self.runtime), "running": bool(self.task and not self.task.done()),
                 "delivery_allowed_by_profile": policy.u21_experimental_enabled(),
+                "new_entries_enabled": policy.u21_experimental_enabled(),
+                "retired_monitor_only": not policy.u21_experimental_enabled(),
                 "calendar_supported_through": "2026-12-31", "overlap_cap": 1,
                 "stop_pct": .5, "take_pct": 8, "price_source": "BINANCE_SPOT_1M"}
 
@@ -227,10 +229,24 @@ class U21Worker:
             return
         scope = subscription_scope(chat_id)
         allowed = self.allowed(chat_id)
+        # Missing retired scopes are also polled at most once per minute.
+        minute = self.clock() // MINUTE
+        if self.last_poll_minute == (scope, minute):
+            return
         if scope not in self.scopes:
             if not allowed:
-                return
-            state = await self.db(store.initialize_scope, scope, dt(self.clock()))
+                # A deploy clears this process-local set. Recover an existing
+                # observation read-only even while new U21 alerts are retired;
+                # never initialize a missing scope or warm signal history.
+                state = await asyncio.to_thread(store.snapshot, scope)
+                if state is None:
+                    self.runtime.update(ready=True, state="RETIRED", last_error_type=None,
+                                        active_position=None)
+                    self.last_poll_minute = (scope, self.clock() // MINUTE)
+                    return
+                store._validate(state, CONFIG_SHA256)
+            else:
+                state = await self.db(store.initialize_scope, scope, dt(self.clock()))
             self.scopes.add(scope)
         else:
             # Cheap polling is minute-aligned. Delivery retries never resend IN_FLIGHT.
@@ -244,7 +260,11 @@ class U21Worker:
         state = await self.monitor(scope, state, closed_end)
         self.runtime.update(ready=True, last_error_type=None)
         if not allowed:
-            self.runtime.update(state="WATCH_OFF")
+            retired = not policy.u21_experimental_enabled()
+            self.runtime.update(state=("RETIRED_MONITORING" if state.get("active") else "RETIRED")
+                                if retired else "WATCH_OFF", next_decision_at=None)
+            # Only the remaining XRP outcome bars above were fetched. No BTC
+            # data, new decision, signal history, intent or notification follows.
             return
         await self.deliver(scope, chat_id)
         decision = signal.last_closed_decision_ms(self.clock())

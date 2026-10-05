@@ -14,6 +14,18 @@ import manual_formula_alert_delivery as delivery
 from manual_formula_alert_store_selftest import BASE, MemoryDatabase, pair
 
 
+def setUpModule():
+    # Exercise archived delivery contracts under explicit former permissions.
+    # The production retirement roster is covered by alert_delivery_policy_selftest.
+    gate = patch.object(delivery.alert_delivery_policy, 'manual_rule_enabled',
+                        side_effect=lambda rule_id: delivery.alert_delivery_policy.profile() == 'ALL')
+    gate.start()
+    unittest.addModuleCleanup(gate.stop)
+    gate = patch.object(delivery.alert_delivery_policy, 'other_experimental_alerts_enabled',
+                        side_effect=lambda : delivery.alert_delivery_policy.profile() == 'ALL')
+    gate.start()
+    unittest.addModuleCleanup(gate.stop)
+
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         importlib.reload(delivery)

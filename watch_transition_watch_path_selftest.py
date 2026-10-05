@@ -12,7 +12,17 @@ import html
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
+
+import alert_delivery_policy
+
+
+def setUpModule():
+    # Archived recovery paths use simulated former permissions only in this suite.
+    gate = patch.object(alert_delivery_policy, 'other_experimental_alerts_enabled',
+                        side_effect=lambda: alert_delivery_policy.profile() == 'ALL')
+    gate.start()
+    unittest.addModuleCleanup(gate.stop)
 
 
 ROOT = Path(__file__).resolve().parent

@@ -66,7 +66,8 @@ class WorkerTests(unittest.TestCase):
         handler=next(node for node in source.body
                      if isinstance(node,ast.AsyncFunctionDef) and node.name=="health")
         empty=lambda:{}
-        module=SimpleNamespace(status=empty,WORKER=SimpleNamespace(status=empty))
+        module=SimpleNamespace(status=empty,WORKER=SimpleNamespace(status=empty),
+                               ADDITIONAL_WORKERS={})
         names={node.id for node in ast.walk(handler) if isinstance(node,ast.Name)}
         namespace={name:(empty if name.endswith("_status") else module)
                    for name in names if not hasattr(builtins,name)}

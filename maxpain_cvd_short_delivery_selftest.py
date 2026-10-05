@@ -16,6 +16,9 @@ import hashlib
 import html
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import alert_delivery_policy
 
 import google_sheets_sync
 import formula_readiness_measurement
@@ -340,7 +343,10 @@ def test_watch_only_hook_structure():
 
 def run():
     test_actual_transition_collection()
-    asyncio.run(test_delivery())
+    # Test historical transport semantics with explicit archived permissions.
+    with patch.object(alert_delivery_policy, 'other_experimental_alerts_enabled',
+                      side_effect=lambda: alert_delivery_policy.profile() == 'ALL'):
+        asyncio.run(test_delivery())
     test_runtime_capture_and_sheets()
     test_watch_only_hook_structure()
     print("Formula Watch delivery integration self-test: PASS (fake Telegram/writers; no network or DB)")

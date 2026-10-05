@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 
 ROOT = Path(__file__).resolve().parent
@@ -262,7 +262,9 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
                 error_reason=lambda exc: type(exc).__name__, build_bundle=Mock(side_effect=decision_bundle)),
             'dual_cvd65_delivery': SimpleNamespace(record_watch=AsyncMock(side_effect=dual_record), drain=AsyncMock(return_value=0)),
             'sol_proximity_experimental_worker': SimpleNamespace(
-                WORKER=SimpleNamespace(observe=AsyncMock(side_effect=observe_sol))),
+                WORKER=SimpleNamespace(observe=AsyncMock(side_effect=observe_sol)),
+                ADDITIONAL_WORKERS={symbol: SimpleNamespace(observe=AsyncMock())
+                                    for symbol in ('HYPE', 'DOGE', 'XRP')}),
             'experimental_reference_price': SimpleNamespace(prepare_reference_prices=AsyncMock(side_effect=prepare_references)),
             'watch_transition_delivery': SimpleNamespace(record_watch=AsyncMock(), drain=AsyncMock(return_value=0),
                 cycle_result=Mock(return_value={'status': 'COMPLETE'})),
@@ -284,7 +286,12 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         scope['_combined_confirmation_candidates'] = Mock(side_effect=precompute)
         load_main({'run_watch_cycle'}, scope)
         bot = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock(side_effect=send)))
-        result = await scope['run_watch_cycle'](bot, 1, top8_only=True, general_enabled=general)
+        # Exercise archived collector ordering with explicit fixture permission;
+        # production retirement is independently covered by policy tests.
+        import alert_delivery_policy
+        with patch('alert_delivery_policy.other_experimental_alerts_enabled',
+                   side_effect=lambda: alert_delivery_policy.profile() == 'ALL'):
+            result = await scope['run_watch_cycle'](bot, 1, top8_only=True, general_enabled=general)
         self.assertIsNone(context_scope['_WATCH_CONTEXT'].get())
         return scope, result, order, archives, captures, bot, base_bundle
 
@@ -294,6 +301,8 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
         scope['market_confidence_engine'].capture_snapshot.assert_called_once_with(['ADA', 'BTC', 'SOL'])
         scope['experimental_reference_price'].prepare_reference_prices.assert_awaited_once_with(base)
         scope['sol_proximity_experimental_worker'].WORKER.observe.assert_awaited_once_with(base, 1)
+        for worker in scope['sol_proximity_experimental_worker'].ADDITIONAL_WORKERS.values():
+            worker.observe.assert_awaited_once_with(base, 1)
         self.assertLess(order.index('archive'), order.index('sol_proximity'))
         self.assertLess(order.index('sol_proximity'), order.index('prepare_references'))
         self.assertLess(order.index('prepare_references'), order.index('c1274_manual'))
@@ -382,6 +391,8 @@ class SharedWatchCaptureTests(unittest.IsolatedAsyncioTestCase):
                 scope, result, order, archives, captures, bot, base = await self.run_cycle(
                     precompute_error=broken, general=False)
                 scope['sol_proximity_experimental_worker'].WORKER.observe.assert_not_awaited()
+                for worker in scope['sol_proximity_experimental_worker'].ADDITIONAL_WORKERS.values():
+                    worker.observe.assert_not_awaited()
                 self.assertTrue(result['ok'], result)
                 self.assertEqual(scope['COMBINED_CONFIRMATION_STATE'], {})
                 self.assertNotIn('special_lifecycle', order)

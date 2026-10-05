@@ -18,6 +18,14 @@ import research_ordered_validation_store as validation_store
 from research_ordered_validation_selftest import START, SCOPE, item, common
 
 
+def setUpModule():
+    # Exercise archived delivery contracts under explicit former permissions.
+    # The production retirement roster is covered by alert_delivery_policy_selftest.
+    gate = patch.object(worker.delivery_policy, 'other_experimental_alerts_enabled',
+                        side_effect=lambda : worker.delivery_policy.profile() == 'ALL')
+    gate.start()
+    unittest.addModuleCleanup(gate.stop)
+
 def fixture(n=5, inverse=False):
     key = ':INVERSE:PRICE_OI_TOTAL_65' if inverse else ':CORE_PRICE_OI_TOTAL_65'
     c = next(c for c in validation.evidence.candidate_catalog(include_extended=True) if c['formula_id'].endswith(key))

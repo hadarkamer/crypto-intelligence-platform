@@ -19,6 +19,9 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.enabled = True
         self.scope = worker.subscription_scope(1234)
         for p in (patch.object(store, '_connect', self.database.connect),
+                  # Replay the archived U21 delivery contract explicitly. The
+                  # deployed policy remains retired under every environment.
+                  patch.object(worker.policy, 'u21_experimental_enabled', return_value=True),
                   patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': 'ORDINARY_AND_SELECTED_EXPERIMENTAL'}),
                   patch.object(worker.signal, 'evaluate_signal', return_value={'valid': True, 'signal': True})):
             p.start(); self.addCleanup(p.stop)
@@ -98,6 +101,65 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.bot.send_message.assert_not_awaited()
         self.assertIsNone(self.state()['active'])
         self.assertEqual(self.fetches, [])
+
+    async def test_retirement_restart_drains_active_without_signal_history_or_send(self):
+        await self.work.tick()
+        before = self.state()
+        self.assertIsNotNone(before['active'])
+        cursor = before['decision_cursor']
+        receipt = before['intents'][0].copy()
+        self.clock[0] += 2 * worker.MINUTE
+        self.entry_high = 101  # The now-closed entry minute reaches the original stop.
+        self.fetches.clear()
+        restarted = self.new_worker()
+        with patch.object(worker.policy, 'u21_experimental_enabled', return_value=False), \
+             patch.object(worker.signal, 'evaluate_signal') as evaluate:
+            await restarted.tick()
+            state = self.state()
+            self.assertIsNone(state['active'])
+            self.assertEqual(state['history'][0]['outcome'], 'SL')
+            self.assertEqual(state['decision_cursor'], cursor)
+            self.assertEqual(state['intents'][0], receipt)
+            self.assertEqual(self.bot.send_message.await_count, 1)
+            self.assertEqual({r[0] for r in self.fetches}, {'XRP'})
+            self.assertTrue(all(r[1] >= int(ENTRY.timestamp()*1000) for r in self.fetches))
+            evaluate.assert_not_called()
+            self.assertEqual(restarted.status()['state'], 'RETIRED')
+            self.assertTrue(restarted.status()['retired_monitor_only'])
+            self.clock[0] += 15 * worker.MINUTE
+            self.fetches.clear()
+            await restarted.tick()
+            self.assertEqual(self.fetches, [])
+            self.assertEqual(self.state()['decision_cursor'], cursor)
+
+    async def test_retirement_keeps_open_unknown_and_never_resends(self):
+        self.bot.send_message.side_effect = TimeoutError('uncertain result')
+        await self.work.tick()
+        self.assertEqual(self.state()['intents'][0]['status'], 'UNKNOWN')
+        self.clock[0] += 2 * worker.MINUTE
+        self.fetches.clear()
+        restarted = self.new_worker()
+        with patch.object(worker.policy, 'u21_experimental_enabled', return_value=False):
+            await restarted.tick()
+        self.assertIsNotNone(self.state()['active'])
+        self.assertEqual(self.state()['intents'][0]['status'], 'UNKNOWN')
+        self.assertEqual(self.bot.send_message.await_count, 1)
+        self.assertEqual(restarted.status()['state'], 'RETIRED_MONITORING')
+        self.assertEqual({r[0] for r in self.fetches}, {'XRP'})
+
+    async def test_retirement_missing_scope_never_initializes_or_fetches(self):
+        self.database.values.clear()
+        with patch.object(worker.policy, 'u21_experimental_enabled', return_value=False), \
+             patch.object(store, 'initialize_scope') as initialize, \
+             patch.object(worker.signal, 'evaluate_signal') as evaluate:
+            await self.work.tick()
+            await self.work.tick()
+            initialize.assert_not_called()
+            evaluate.assert_not_called()
+        self.assertEqual(self.database.values, {})
+        self.assertEqual(self.fetches, [])
+        self.bot.send_message.assert_not_awaited()
+        self.assertEqual(self.work.status()['state'], 'RETIRED')
 
     async def test_subscription_change_during_claim_blocks_transport(self):
         original = store.claim_pending

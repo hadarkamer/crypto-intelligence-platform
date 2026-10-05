@@ -17,6 +17,14 @@ import dual_cvd65_delivery as delivery
 import main
 
 
+def setUpModule():
+    # Archived outbox and Watch contracts use simulated former permissions.
+    gate = patch.object(delivery.delivery_policy, 'other_experimental_alerts_enabled',
+                        side_effect=lambda: delivery.delivery_policy.profile() == 'ALL')
+    gate.start()
+    unittest.addModuleCleanup(gate.stop)
+
+
 class MemoryStore:
     """A transaction boundary fake; detector and transition math have own tests."""
     def __init__(self):

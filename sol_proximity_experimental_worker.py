@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import math
+from html import escape
 from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
@@ -15,10 +16,16 @@ from hype_row71205_experimental_worker import PriceCache
 from watch_transition_delivery import subscription_scope
 import sol_proximity_experimental_signal as signal
 import sol_proximity_experimental_store as store
+from maxpain_experimental_specs import SOL_RANGE24, SPECS
+import hype_row71205_hyperliquid_source as hyperliquid
 
 MINUTE = signal.MINUTE
-CONFIG_SHA256 = hashlib.sha256(Path(signal.__file__).read_bytes()+signal.CONFIG_VERSION.encode()
-                               +b'BINANCE_SPOT_SOLUSDT_TRADE_1M;NOTIFICATION_ONLY').hexdigest()
+def config_hash(spec):
+    route = 'HYPERLIQUID_HYPE_PERPETUAL_TRADE_1M' if spec.coin == 'HYPE' else f'BINANCE_SPOT_{spec.coin}USDT_TRADE_1M'
+    return hashlib.sha256(Path(signal.__file__).read_bytes()+spec.canonical()+signal.CONFIG_VERSION.encode()
+                          +route.encode()+b';NOTIFICATION_ONLY').hexdigest()
+
+CONFIG_SHA256 = config_hash(SOL_RANGE24)
 
 
 def now_ms():
@@ -31,14 +38,16 @@ def dt(ms):
 
 def fetch_rows(symbol, start, end):
     """One bounded canonical Binance Spot request, including optional live veto."""
-    if symbol != 'SOL' or start % MINUTE or end % MINUTE or not 0 < end-start <= 1000*MINUTE:
+    if symbol == 'HYPE':
+        return hyperliquid.fetch_rows(symbol, start, end)
+    if symbol not in ('SOL', 'DOGE', 'XRP') or start % MINUTE or end % MINUTE or not 0 < end-start <= 1000*MINUTE:
         raise ValueError('SOL minute fetch must be bounded to 1..1000 rows')
     response = requests.get(source.BINANCE_SPOT_BASE_URL+source.BINANCE_SPOT_KLINES_ENDPOINT,
-                            params={'symbol': 'SOLUSDT', 'interval': '1m', 'startTime': start,
+                            params={'symbol': symbol+'USDT', 'interval': '1m', 'startTime': start,
                                     'endTime': end-1, 'limit': (end-start)//MINUTE},
                             timeout=source.REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
     if response.status_code != 200:
-        raise source.BinanceSpotPathError('SOL_BINANCE_HTTP_'+str(response.status_code))
+        raise source.BinanceSpotPathError(symbol+'_BINANCE_HTTP_'+str(response.status_code))
     if len(getattr(response, 'content', b'')) > 2_000_000:
         raise ValueError('Oversized Binance response')
     payload = response.json()
@@ -57,44 +66,63 @@ def fetch_rows(symbol, start, end):
 
 
 class SolPriceCache(PriceCache):
-    def __init__(self, fetch=fetch_rows):
-        self.fetch, self.rows = fetch, {'SOL': {}}
+    def __init__(self, fetch=fetch_rows, symbol='SOL'):
+        self.fetch, self.rows = fetch, {symbol: {}}
 
 
 def render_alert(p):
+    coin = p.get('coin', 'SOL')
     direction = 'LONG' if p['direction'] == 1 else 'SHORT'
     when = dt(p['fill_ms']).astimezone(ZoneInfo('Asia/Jerusalem')).strftime('%Y-%m-%d %H:%M')
+    growth = ('חריג מותר רק בהוכחת גדילת נזילות בכל מדרגות הטווחים, באותו יעד ובאותו כיוון. '
+              if p.get('liquidity_growth') else 'אין חריג גדילת נזילות. ')
+    market = ('Hyperliquid חוזים, נרות עסקאות של דקה. זו גרסת מקור חדשה; נתוני המחקר אינם מאומתים לגרסת המקור הזו.'
+              if coin == 'HYPE' else 'Binance Spot, נרות עסקאות של דקה.')
+    quote = p.get('source_quote', {})
+    source_label = escape(' / '.join(str(quote[k]) for k in ('price_source', 'price_market', 'price_pair') if quote.get(k))) or 'המקור התפעולי שנאסף ב-Watch'
+    extra = (f"היעד בתוך טווח 24 השעות הסגורות שלפני ההחלטה: {p['range24_low']:.8g}–{p['range24_high']:.8g}.\n"
+             if p.get('range24_low') is not None else '')
     return (
-        f"🧪 <b>SOL · MaxPain proximity &gt;15 · {direction} — ניסיוני, לא למסחר</b>\n"
+        f"🧪 <b>{coin} · MaxPain · {direction} — ניסיוני, לא למסחר</b>\n"
+        f"נוסחה: {p.get('rule_id', 'SOL_MAXPAIN_PROXIMITY_GT15')}\n"
         f"רמת הכניסה במעקב נגעה במחיר: <b>{p['fill_price']:.8g}</b>\n"
         f"דקת הנגיעה בישראל: {when}\n"
-        f"סטופ: <b>{p['stop_price']:.8g}</b> · טייק MaxPain: <b>{p['take_price']:.8g}</b>\n"
-        f"מחיר המקור: {p['source_price']:.8g} · ציון קרבה: {p['score']:.2f} · טווח מקור: {p['timeframe']}\n"
-        "הכניסה לאחר תנועה נגדית של פי 2 מהמרחק המקורי ליעד; הסטופ במרחק פי 5 ממחיר המקור. "
-        "המתנה לכניסה עד 24 שעות, ולאחריה אין מגבלת זמן החזקה ואין קידום סטופ.\n"
-        "מותרות פוזיציות במעקב במקביל רק ביעדים המרוחקים זה מזה ביותר מ־0.2%. "
-        "מקור המחיר: Binance Spot, נרות עסקאות של דקה.\n"
-        "התראה ומעקב בלבד; הנגיעה ההיסטורית אינה אישור מילוי פקודה או מחיר זמין כעת. "
+        f"סטופ: <b>{p['stop_price']:.8g}</b> · טייק: <b>{p['take_price']:.8g}</b>\n"
+        f"מחיר המקור כפי שנאסף: {p['source_price']:.8g} ({source_label}) · יעד MaxPain המקורי: {p['target_price']:.8g} · טווח מקור: {p['timeframe']}\n"
+        f"כניסה לאחר תנועה נגדית פי {p.get('entry_adverse', 2):g} מהמרחק המקורי; "
+        f"טייק ב־{p.get('take_fraction', 1)*100:g}% מהדרך ממחיר המקור ליעד; סטופ פי 5 בכיוון הנגדי ממחיר המקור.\n"
+        +extra+
+        "המתנה לכניסה עד 24 שעות; אין מגבלת זמן החזקה ואין קידום סטופ. "
+        "פוזיציות באותה נוסחה יכולות להתקיים במקביל ביעדים המרוחקים ביותר מ־0.2%. "+growth+
+        f"מסלול המעקב: {market}\n"
+        "התראה ומעקב בלבד; הנגיעה אינה אישור מילוי או מחיר זמין כעת. "
         "אין הוראת מסחר, גודל פוזיציה או תקרת 5,000$ בהתראה."
     )
 
 
 class SolProximityWorker:
-    def __init__(self, *, cache=None, clock=now_ms):
-        self.cache, self.clock = cache or SolPriceCache(), clock
+    def __init__(self, *, spec=SOL_RANGE24, cache=None, clock=now_ms):
+        self.spec, self.config_sha256 = spec, config_hash(spec)
+        self.cache, self.clock = cache or SolPriceCache(symbol=spec.coin), clock
         self.task = self.bot = self.subscription = None
         self.scopes, self.lock = set(), asyncio.Lock()
         self.retry_ms, self.last_poll, self.last_price_poll = 0, None, None
-        self.runtime = {'rule_id': signal.RULE_ID, 'ready': False, 'state': 'NOT_STARTED',
-                        'config_sha256': CONFIG_SHA256, 'delivered': 0}
+        self.runtime = {'rule_id': self.spec.rule_id, 'research_id': self.spec.research_id, 'ready': False, 'state': 'NOT_STARTED',
+                        'config_sha256': self.config_sha256, 'delivered': 0}
 
     def status(self):
         return {**deepcopy(self.runtime), 'running': bool(self.task and not self.task.done()),
-                'delivery_allowed_by_profile': policy.sol_proximity_experimental_enabled(),
+                'delivery_allowed_by_profile': self.policy_enabled(),
                 'notification_only': True, 'live_order_execution': False,
                 'position_notional_cap': None, 'position_sizing': 'NOT_APPLICABLE_ALERT_ONLY',
-                'price_source': 'BINANCE_SPOT_SOLUSDT_TRADE_1M', 'minimum_proximity_score': '>15 rounded2dp',
-                'overlap_rule': 'distinct targets >0.2%; no liquidity-growth exception',
+                'price_source': ('HYPERLIQUID_HYPE_PERPETUAL_TRADE_1M' if self.spec.coin == 'HYPE' else f'BINANCE_SPOT_{self.spec.coin}USDT_TRADE_1M'),
+                'evidence_status': ('PROSPECTIVE_SOURCE_VARIANT_NOT_HISTORICALLY_VALIDATED' if self.spec.coin == 'HYPE' else 'PROSPECTIVE_RESEARCH_FORMULA'),
+                'distance_pct': {'minimum_inclusive': self.spec.lower_pct, 'maximum_exclusive': self.spec.upper_pct},
+                'target_inside_previous_closed_24h': self.spec.require_range24,
+                'source_timeframes': list(self.spec.timeframes), 'direction': self.spec.direction,
+                'growth_exception': self.spec.liquidity_growth,
+                'growth_evidence': 'CONSERVATIVE_CURRENT_TIERS_FULL_ADJACENT_CHAIN; all targets within 0.2%; exact old target at its timeframe; upstream research proof producer unavailable',
+                'overlap_rule': 'distinct targets >0.2%; exact causal growth proof required for exception' if self.spec.liquidity_growth else 'distinct targets >0.2%; no liquidity-growth exception',
                 'operational_state_capacity': signal.MAX_ACTIVE,
                 'pending_ttl_hours': 24, 'holding_time_limit': None,
                 'bootstrap_policy': 'existing targets unverified until complete absence then return'}
@@ -102,7 +130,7 @@ class SolProximityWorker:
     def start(self, bot, subscription):
         self.bot, self.subscription = bot, subscription
         if self.task is None or self.task.done():
-            self.task = asyncio.create_task(self.run(), name='sol-proximity-experimental')
+            self.task = asyncio.create_task(self.run(), name=self.spec.rule_id.lower())
 
     async def stop(self):
         if self.task:
@@ -112,16 +140,25 @@ class SolProximityWorker:
             except asyncio.CancelledError:
                 pass
 
+    def policy_enabled(self):
+        if self.spec.coin == 'SOL':
+            return policy.sol_proximity_experimental_enabled()
+        return policy.maxpain_component_experimental_enabled(self.spec.rule_id)
+
+    def scope_for(self, chat_id):
+        scope = subscription_scope(chat_id)
+        return scope if self.spec.coin == 'SOL' else scope+':'+self.spec.rule_id
+
     def allowed(self, chat_id):
         enabled, current = self.subscription() if self.subscription else (False, None)
-        return bool(enabled and current == chat_id and policy.sol_proximity_experimental_enabled())
+        return bool(enabled and current == chat_id and self.policy_enabled())
 
     async def db(self, func, *args, **kwargs):
-        return await asyncio.to_thread(func, *args, config_sha256=CONFIG_SHA256, **kwargs)
+        return await asyncio.to_thread(func, *args, config_sha256=self.config_sha256, **kwargs)
 
     async def initialize(self, scope):
         if scope not in self.scopes:
-            await self.db(store.initialize_scope, scope, self.clock())
+            await self.db(store.initialize_scope, scope, self.clock(), migrate_legacy_sol=self.spec.coin == 'SOL')
             self.scopes.add(scope)
         return await asyncio.to_thread(store.snapshot, scope)
 
@@ -139,7 +176,7 @@ class SolProximityWorker:
             if self.last_price_poll == slot:
                 return state
             if state['episodes'] or state['active']:
-                rows = await asyncio.to_thread(self.cache.fill, 'SOL', start, end)
+                rows = await asyncio.to_thread(self.cache.fill, self.spec.coin, start, end)
                 await self.db(store.advance, scope, rows, self.clock())
                 self.last_price_poll = slot
             else:
@@ -149,6 +186,9 @@ class SolProximityWorker:
         self.runtime.update(active_pending=sum(p['status'] == 'PENDING' for p in state['active']),
                             active_open=sum(p['status'] == 'OPEN' for p in state['active']),
                             active_unknown=sum(p['status'] == 'UNKNOWN' for p in state['active']),
+                            legacy_open=sum(p['status'] == 'OPEN' and p.get('legacy_formula', False) for p in state['active']),
+                            legacy_unknown=sum(p['status'] == 'UNKNOWN' and p.get('legacy_formula', False) for p in state['active']),
+                            formula_migration=state.get('formula_migration'),
                             counts=state['counts'], last_cycle_id=state['last_cycle_id'],
                             last_snapshot_complete=state['last_snapshot_complete'],
                             bootstrap_unverified_targets=sum(e.get('bootstrap_unverified', False) and e['present'] for e in state['episodes'].values()),
@@ -162,8 +202,17 @@ class SolProximityWorker:
         async with self.lock:
             try:
                 now = self.clock()
-                decoded = signal.decode_bundle(bundle, now)
-                scope = subscription_scope(chat_id)
+                range_bars = None
+                if self.spec.require_range24:
+                    computed = signal.milliseconds(bundle['computed_at_utc'])
+                    if computed > now or now-computed > 5*MINUTE:
+                        raise ValueError('Stale or future Watch generation')
+                    range_end = computed//MINUTE*MINUTE
+                    if range_end > now//MINUTE*MINUTE:
+                        raise ValueError('Future range requested')
+                    range_bars = await asyncio.to_thread(self.cache.fill, self.spec.coin, range_end-1440*MINUTE, range_end)
+                decoded = signal.decode_bundle(bundle, now, self.spec, range_bars)
+                scope = self.scope_for(chat_id)
                 state = await self.initialize(scope)
                 state = await self.monitor(scope, state)
                 if state['bar_cursor_ms'] < self.clock()//MINUTE*MINUTE-MINUTE:
@@ -173,7 +222,7 @@ class SolProximityWorker:
                 # it never serves as a closed-bar entry/exit or future feature.
                 start = min((min(r['observed_ms'], r['price_ms'])//MINUTE*MINUTE for r in decoded['rows']), default=now//MINUTE*MINUTE)
                 end = self.clock()//MINUTE*MINUTE+MINUTE
-                guards = await asyncio.to_thread(self.cache.fetch, 'SOL', start, end) if decoded['rows'] else []
+                guards = await asyncio.to_thread(self.cache.fetch, self.spec.coin, start, end) if decoded['rows'] else []
                 if not self.allowed(chat_id):
                     return
                 outcome = await self.db(store.ingest, scope, decoded, guards, self.clock())
@@ -194,7 +243,7 @@ class SolProximityWorker:
         try:
             p = intent['payload']
             end = self.clock()//MINUTE*MINUTE+MINUTE
-            rows = await asyncio.to_thread(self.cache.fetch, 'SOL', p['fill_ms'], end)
+            rows = await asyncio.to_thread(self.cache.fetch, self.spec.coin, p['fill_ms'], end)
             hit_barrier = any((l <= p['stop_price'] or h >= p['take_price']) if p['direction'] == 1
                               else (h >= p['stop_price'] or l <= p['take_price']) for t, o, h, l, c in rows)
             if hit_barrier:
@@ -232,7 +281,7 @@ class SolProximityWorker:
         enabled, chat_id = self.subscription()
         if chat_id is None:
             return
-        scope = subscription_scope(chat_id)
+        scope = self.scope_for(chat_id)
         if not self.allowed(chat_id) and scope not in self.scopes:
             return
         minute = self.clock()//MINUTE
@@ -258,7 +307,7 @@ class SolProximityWorker:
                                     last_error_type=None, next_retry_at=None)
             else:
                 self.runtime.update(ready=False, state='RECOVERING_PRICE_HISTORY')
-            self.cache.prune({'SOL': self.clock()-1005*MINUTE})
+            self.cache.prune({self.spec.coin: self.clock()-(1480 if self.spec.require_range24 else 1005)*MINUTE})
 
     async def run(self):
         while True:
@@ -273,3 +322,4 @@ class SolProximityWorker:
 
 
 WORKER = SolProximityWorker()
+ADDITIONAL_WORKERS = {coin: SolProximityWorker(spec=spec) for coin, spec in SPECS.items() if coin != 'SOL'}
