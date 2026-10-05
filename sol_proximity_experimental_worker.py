@@ -40,7 +40,7 @@ def fetch_rows(symbol, start, end):
     """One bounded canonical Binance Spot request, including optional live veto."""
     if symbol == 'HYPE':
         return hyperliquid.fetch_rows(symbol, start, end)
-    if symbol not in ('SOL', 'DOGE', 'XRP') or start % MINUTE or end % MINUTE or not 0 < end-start <= 1000*MINUTE:
+    if symbol not in ('SOL', 'DOGE', 'XRP', 'ETH') or start % MINUTE or end % MINUTE or not 0 < end-start <= 1000*MINUTE:
         raise ValueError('SOL minute fetch must be bounded to 1..1000 rows')
     response = requests.get(source.BINANCE_SPOT_BASE_URL+source.BINANCE_SPOT_KLINES_ENDPOINT,
                             params={'symbol': symbol+'USDT', 'interval': '1m', 'startTime': start,

@@ -32,4 +32,6 @@ DOGE_LONG_TF = FormulaSpec('DOGE_MAXPAIN_DIST15_25_LONG_TF', 'c39e5acaacf1247f',
                           take_fraction=.5, timeframes=TIMEFRAMES[3:])
 XRP_SHORT_TF = FormulaSpec('XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF', '8e6bdb02709aa0cc', 'XRP', 2, 4,
                           entry_adverse=.5, direction='LONG', timeframes=TIMEFRAMES[:3], liquidity_growth=True)
-SPECS = {s.coin: s for s in (SOL_RANGE24, HYPE_LONG_TF, DOGE_LONG_TF, XRP_SHORT_TF)}
+ETH_LONG = FormulaSpec('ETH_MAXPAIN_LONG_DIST1_3', '88a0ed51ab391d6e', 'ETH', 1, 3,
+                       take_fraction=.5, direction='LONG', liquidity_growth=True)
+SPECS = {s.coin: s for s in (SOL_RANGE24, HYPE_LONG_TF, DOGE_LONG_TF, XRP_SHORT_TF, ETH_LONG)}
