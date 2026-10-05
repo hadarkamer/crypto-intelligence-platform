@@ -118,3 +118,19 @@ class RetainedPhasePostgresTests(unittest.TestCase):
         self.assertEqual(store.load(state['bucket']),state)
         self.assertEqual(venue.sent,0)
         self.assertTrue(gap.needed(state,venue.now()))
+
+    def test_capacity_wait_does_not_spend_retention_reads_or_restart_history(self):
+        pure=recovery_tests.RecoveryPureTests()
+        state,store,venue,controller,_=pure.setup_case()
+        self.seed(600)
+        reader=evidence.PublicReader(budget=self.budget,priority='background')
+        for _ in range(3):
+            with self.assertRaises(budget.BudgetError) as caught:
+                gap.step(controller,state,reader=reader)
+            self.assertEqual(caught.exception.requested_weight,261)
+            self.assertEqual(caught.exception.used_weight,600)
+            self.assertEqual(self.total(),600)
+            self.assertEqual(reader.calls,0)
+            self.assertEqual(store.load(state['bucket']),state)
+        self.connection.assert_not_called()
+        self.assertEqual(venue.sent,0)

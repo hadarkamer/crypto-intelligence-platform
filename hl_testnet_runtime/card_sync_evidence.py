@@ -549,6 +549,21 @@ def retained_observation(reader, account, anchor, bodies):
     stamp=life.moment(anchor['at_ms'])
     body=dict(type='userFillsByTime',user=account,startTime=stamp,endTime=stamp,
               aggregateByTime=False)
+    from .request_budget import Budget,BudgetError,request_weight
+    owner=vars(reader).get('budget')
+    if isinstance(owner,Budget):
+        # A successful retained anchor returns at least one fill (minimum 21
+        # weight). Avoid spending that read repeatedly while the next complete
+        # two-pass plan cannot fit even after a successful size refund. This
+        # read-only hint neither reserves capacity nor grants an HTTP permit.
+        # Concurrent use/larger responses still require ordinary admission.
+        requested=max(request_weight('/info',body),
+                      sum(request_weight('/info',item) for item in bodies)+21)
+        available=owner.capacity(requested_weight=requested,priority=reader.priority)
+        if not available['eligible']:
+            raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+                **{key:available[key] for key in ('used_weight','requested_weight',
+                                                'ceiling','retry_after_ms')})
     plan=getattr(type(reader),'observation_batch',None)
     def phase(reads):
         return reader.observation_batch(reads) if callable(plan) else nullcontext()

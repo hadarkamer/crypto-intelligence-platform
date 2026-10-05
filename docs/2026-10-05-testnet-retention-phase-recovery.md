@@ -22,6 +22,14 @@ still funds both children before either is sent. The ordinary collector keeps
 its complete-plan admission. Response-size refunds are required to free proven
 excess only; failed refunds retain the original charge.
 
+Live verification exposed an additional scheduling issue: repeatedly paying
+for the opening anchor while the next two-pass plan cannot fit can starve the
+same recovery. A read-only ledger capacity hint now postpones the opening
+read until the two-pass plan plus the minimum successful anchor charge can
+fit. It spends no weight and is never a permit; all phases still acquire their
+normal funded credits, even after an eligible hint. Larger actual responses,
+failed refunds or concurrent readers can still safely deny a later phase.
+
 This reduces the largest recovery reservation to 240 for an ordinary chunk,
 or 284 for final history/inventory, without eliminating a read or raising the
 800/1200 ceilings. No partial observation is committed. Failure in any phase,
