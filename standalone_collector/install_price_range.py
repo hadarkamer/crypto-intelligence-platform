@@ -93,4 +93,38 @@ def install(runtime:Path):
                 "image_retained": retained_image is not None, "diagnostic_retained": True}), flush=True)
 '''
     text=replace_once(text,marker,marker+retain)
+    # Timeout skips the normal retention block. Reap the writer before reading
+    # its available private files, while preserving the existing timeout error.
+    old_timeout='''        except asyncio.TimeoutError:
+            raise BridgeError("scan_timeout", "Capture deadline exceeded", 504) from None'''
+    new_timeout='''        except asyncio.TimeoutError:
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
+            try:
+                from model1_evidence_format import evidence_payload
+                retained_image, diagnostic = evidence_payload(tmp, tf)
+                diagnostic["failure_code"] = "scan_timeout"
+                diagnostic["timeout_seconds"] = 300
+                evidence_store = JobStore(os.getenv("DATABASE_URL", ""))
+                await asyncio.to_thread(evidence_store.retain_evidence, jid, retained_image, diagnostic)
+                print("MODEL1_EVIDENCE " + json.dumps({"job_id": jid,
+                    "image_retained": retained_image is not None, "diagnostic_retained": True,
+                    "failure_code": "scan_timeout"}), flush=True)
+            except Exception:
+                print("MODEL1_EVIDENCE " + json.dumps({"job_id": jid,
+                    "image_retained": False, "diagnostic_retained": False,
+                    "failure_code": "scan_timeout"}), flush=True)
+            raise BridgeError("scan_timeout", "Capture deadline exceeded", 504) from None'''
+    text=replace_once(text,old_timeout,new_timeout)
     compile(text,str(path),'exec');path.write_text(text,encoding='utf-8')
