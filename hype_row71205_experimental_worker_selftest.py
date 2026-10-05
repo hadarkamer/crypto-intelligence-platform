@@ -133,26 +133,73 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state()['intents'][0]['status'], 'CANCELLED')
         self.assertIsNotNone(self.state()['active'])
 
-    async def test_restricted_source_fails_closed_with_five_minute_backoff(self):
+    async def test_restricted_source_fails_closed_with_six_hour_backoff(self):
         checks = []
         async def tick():
             checks.append(self.clock[0])
             raise worker.PriceEvidenceError('HYPE_BINANCE_HTTP_451')
-        steps = [10000, 290000, None]
+        steps = [10000, worker.RESTRICTED_SOURCE_RETRY_MS-10000, None]
         async def sleep(_):
             delta = steps.pop(0)
             if delta is None:
                 raise asyncio.CancelledError()
             self.clock[0] += delta
-        with patch.object(self.work, 'tick', side_effect=tick), patch.object(worker.asyncio, 'sleep', side_effect=sleep):
+        with patch.object(self.work, 'tick', side_effect=tick), patch.object(worker.asyncio, 'sleep', side_effect=sleep), \
+                patch.object(worker.source_probe, 'probe', return_value={'status': 'ACCESS_NOT_GRANTED'}) as probe:
             with self.assertRaises(asyncio.CancelledError):
                 await self.work.run()
         self.assertEqual(len(checks), 2)
-        self.assertEqual(checks[1]-checks[0], 5*worker.MINUTE)
+        self.assertEqual(checks[1]-checks[0], worker.RESTRICTED_SOURCE_RETRY_MS)
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(self.work.status()['source_diagnostic']['status'], 'ACCESS_NOT_GRANTED')
         self.assertFalse(self.work.status()['ready'])
         self.assertFalse(self.work.status()['hype_source_available'])
         self.assertEqual(self.work.status()['last_error_code'], 'HYPE_BINANCE_HTTP_451')
         self.bot.send_message.assert_not_awaited()
+
+    async def test_transient_source_failure_keeps_five_minute_backoff_no_probe(self):
+        async def tick():
+            raise worker.PriceEvidenceError('HYPE_BINANCE_HTTP_503')
+        with patch.object(self.work, 'tick', side_effect=tick), \
+                patch.object(worker.asyncio, 'sleep', side_effect=asyncio.CancelledError), \
+                patch.object(worker.source_probe, 'probe') as probe:
+            with self.assertRaises(asyncio.CancelledError):
+                await self.work.run()
+        self.assertEqual(self.work.next_retry_ms, self.clock[0] + 5*worker.MINUTE)
+        probe.assert_not_called()
+
+    async def test_diagnostic_exception_cannot_kill_worker_or_mask_original_error(self):
+        with patch.object(self.work, 'tick', side_effect=worker.PriceEvidenceError('HYPE_BINANCE_HTTP_451')), \
+                patch.object(worker.asyncio, 'sleep', side_effect=asyncio.CancelledError), \
+                patch.object(worker.source_probe, 'probe', side_effect=RuntimeError('private diagnostic')):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.work.run()
+        self.assertEqual(self.work.status()['last_error_code'], 'HYPE_BINANCE_HTTP_451')
+        self.assertEqual(self.work.status()['source_diagnostic']['status'], 'PROBE_INTERNAL_ERROR')
+        self.assertNotIn('private diagnostic', str(self.work.status()))
+
+    async def test_readiness_stays_false_during_failing_warmup(self):
+        seen = []
+        def failing_fetch(*_):
+            seen.append(self.work.status()['ready'])
+            raise worker.PriceEvidenceError('HYPE_BINANCE_HTTP_451')
+        self.work.cache.fetch = failing_fetch
+        with self.assertRaises(worker.PriceEvidenceError):
+            await self.work.tick()
+        self.assertEqual(seen, [False])
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_warm_cache_cannot_falsely_report_recovery(self):
+        await self.work.tick()
+        self.work.runtime.update(ready=False, last_error_code='HYPE_BINANCE_HTTP_451')
+        self.clock[0] += worker.MINUTE
+        def failing_fetch(*_):
+            raise worker.PriceEvidenceError('HYPE_BINANCE_HTTP_451')
+        self.work.cache.fetch = failing_fetch
+        with self.assertRaises(worker.PriceEvidenceError):
+            await self.work.tick()
+        self.assertFalse(self.work.status()['ready'])
+        self.assertEqual(self.bot.send_message.await_count, 1)
 
     async def test_source_recovery_resets_readiness_error_without_replaying_activation(self):
         self.work.runtime.update(ready=False, last_error_code='HYPE_BINANCE_HTTP_451',

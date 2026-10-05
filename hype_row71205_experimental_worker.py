@@ -15,10 +15,12 @@ import binance_spot_price_path as source
 from zoneinfo import ZoneInfo
 import hype_row71205_experimental_signal as signal
 import hype_row71205_experimental_store as store
+import hype_row71205_source_probe as source_probe
 from watch_transition_delivery import subscription_scope
 
 MINUTE = 60000
 PRICE_CONTRACT = b"HYPE:BINANCE_USDM_TRADE_KLINES_1M;BTC:BINANCE_SPOT_KLINES_1M;NO_FALLBACK"
+RESTRICTED_SOURCE_RETRY_MS = 6 * 60 * MINUTE
 
 
 class PriceEvidenceError(ValueError):
@@ -191,14 +193,28 @@ class Row71205Worker:
             except Exception as exc:
                 # Fail closed; an unavailable official source is never replaced.
                 # Rate-limit both HTTP restrictions and transient source/DB errors.
-                self.next_retry_ms = self.clock() + 5 * MINUTE
+                restricted = getattr(exc, "code", None) == "HYPE_BINANCE_HTTP_451"
+                self.next_retry_ms = self.clock() + (RESTRICTED_SOURCE_RETRY_MS if restricted else 5 * MINUTE)
                 self.runtime.update(ready=False, state="EVIDENCE_UNAVAILABLE",
                                     last_error_type=type(exc).__name__,
                                     last_error_code=getattr(exc, "code", None),
                                     next_retry_at=dt(self.next_retry_ms).isoformat())
                 if str(getattr(exc, "code", "")).startswith("HYPE_BINANCE_HTTP_"):
                     self.runtime["hype_source_available"] = False
-                print(f"[hype71205] evidence unavailable type={type(exc).__name__}", flush=True)
+                if restricted:
+                    # Diagnostic only: it cannot feed the formula, change the
+                    # frozen market contract, or release an existing position.
+                    try:
+                        self.runtime["source_diagnostic"] = await asyncio.to_thread(
+                            source_probe.probe, self.clock())
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        self.runtime["source_diagnostic"] = {"status": "PROBE_INTERNAL_ERROR"}
+                print(f"[hype71205] evidence unavailable type={type(exc).__name__} "
+                      f"code={getattr(exc, 'code', None)} "
+                      f"diagnostic={self.runtime.get('source_diagnostic', {}).get('status')} "
+                      f"retry_at={self.runtime['next_retry_at']}", flush=True)
             await asyncio.sleep(10)
 
     async def monitor(self, scope, state, closed_end):
@@ -288,10 +304,8 @@ class Row71205Worker:
         closed_end = current - current % MINUTE
         self.last_poll_minute = (scope, current // MINUTE)
         state = await self.monitor(scope, state, closed_end)
-        self.runtime.update(ready=True, last_error_type=None, last_error_code=None,
-                            next_retry_at=None)
         if not allowed:
-            self.runtime.update(state="WATCH_OFF")
+            self.runtime.update(ready=False, state="WATCH_OFF")
             return
         await self.deliver(scope, chat_id)
         decision = signal.last_closed_decision_ms(self.clock())
@@ -307,6 +321,11 @@ class Row71205Worker:
             # unnecessary BTC requests or a silently substituted market.
             await self.prices("fill", "HYPE", starts["HYPE"], decision)
             await self.prices("fill", "BTC", starts["BTC"], decision)
+        if not self.runtime.get("ready"):
+            # A warm cache or a no-op monitor is not proof of source recovery.
+            await self.prices("fetch", "HYPE", closed_end - MINUTE, closed_end)
+        self.runtime.update(ready=True, last_error_type=None, last_error_code=None,
+                            next_retry_at=None)
         if decision <= ms(state["activated_at"]) or (
                 state.get("decision_cursor") and decision <= ms(state["decision_cursor"])):
             self.runtime.update(state="WAITING_NEXT_SLOT")
