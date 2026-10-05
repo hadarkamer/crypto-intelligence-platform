@@ -15,11 +15,15 @@ import binance_spot_price_path as source
 from zoneinfo import ZoneInfo
 import hype_row71205_experimental_signal as signal
 import hype_row71205_experimental_store as store
-import hype_row71205_source_probe as source_probe
+import hype_row71205_hyperliquid_source as hype_source
 from watch_transition_delivery import subscription_scope
 
 MINUTE = 60000
-PRICE_CONTRACT = b"HYPE:BINANCE_USDM_TRADE_KLINES_1M;BTC:BINANCE_SPOT_KLINES_1M;NO_FALLBACK"
+PRICE_CONTRACT = b"HYPE:HYPERLIQUID_PERPETUAL_TRADE_1M_V1;BTC:BINANCE_SPOT_KLINES_1M;NO_FALLBACK"
+FORMULA_ID = "HYPE_ROW71205_HYPERLIQUID_SOURCE_VARIANT_V1"
+FORMULA_VERSION = "hype-row71205-hyperliquid-short-sl005-tp02-cap1-v1"
+PRICE_SOURCE = "HYPERLIQUID_PERPETUAL_TRADE_1M"
+EVIDENCE_STATUS = "PROSPECTIVE_SOURCE_VARIANT_NOT_HISTORICALLY_VALIDATED"
 RESTRICTED_SOURCE_RETRY_MS = 6 * 60 * MINUTE
 
 
@@ -48,15 +52,19 @@ def ms(value):
 
 def fetch_rows(symbol, start, end):
     """Fetch exact minute rows [start,end); caller controls closed-bar cutoff."""
-    if symbol not in {"HYPE", "BTC"}:
-        raise ValueError("ROW71205 allows only Binance Futures HYPE and Binance Spot BTC")
+    if symbol == "HYPE":
+        try:
+            return hype_source.fetch_rows(symbol, start, end)
+        except hype_source.HyperliquidSourceError as exc:
+            raise PriceEvidenceError(exc.code) from None
+    if symbol != "BTC":
+        raise ValueError("ROW71205 allows only Hyperliquid HYPE perpetual and Binance Spot BTC")
     if start % MINUTE or end % MINUTE or end < start:
         raise ValueError("Minute-aligned bounded request required")
     rows = []
     while start < end:
         response = requests.get(
-            ("https://fapi.binance.com/fapi/v1/klines" if symbol == "HYPE" else
-             source.BINANCE_SPOT_BASE_URL + source.BINANCE_SPOT_KLINES_ENDPOINT),
+            source.BINANCE_SPOT_BASE_URL + source.BINANCE_SPOT_KLINES_ENDPOINT,
             params={"symbol": symbol + "USDT", "interval": "1m", "startTime": start,
                     "endTime": end - 1, "limit": min(1000, (end - start) // MINUTE)},
             timeout=source.REQUEST_TIMEOUT_SECONDS, allow_redirects=False,
@@ -116,7 +124,7 @@ class PriceCache:
 def render_alert(price, entry):
     levels = signal.build_levels(price)
     return (
-        "🧪 <b>ROW71205 · HYPE · SHORT — ניסיוני, לא למסחר</b>\n"
+        "🧪 <b>ROW71205 · HYPE · SHORT · Hyperliquid — ניסיוני, לא למסחר</b>\n"
         "פוזיציה אחת במעקב בנוסחה זו · ללא נעילת רווח\n"
         f"מחיר ייחוס לכניסה: <b>{price:.8g}</b>\n"
         f"זמן הייחוס בישראל: {dt(entry).astimezone(ZoneInfo('Asia/Jerusalem')).strftime('%Y-%m-%d %H:%M')}\n"
@@ -126,7 +134,8 @@ def render_alert(price, entry):
         "טווח HYPE ב־24 שעות אינו עולה על 5.1%; היחס בין טווח 4 השעות "
         "לטווח 24 השעות גדול מ־0.5; תשואת HYPE ב־4 שעות אינה גבוהה משל BTC.\n"
         "בדיקה כל 30 דקות; מחיר הייחוס הוא פתיחת הדקה שאחרי ההחלטה. "
-        "מקור HYPE: Binance Futures, נרות עסקאות; BTC: Binance Spot.\n"
+        "מקור HYPE: חוזים ב־Hyperliquid, נרות עסקאות; BTC: Binance Spot.\n"
+        "גרסת מקור חדשה; תוצאות המחקר על Binance אינן נתונים מאומתים לגרסה זו.\n"
         "לא תישלח כניסה נוספת בנוסחה זו עד סיום המעקב; אין הגבלת זמן החזקה. "
         "התראה ומעקב בלבד, ללא הוראת מסחר; מחיר הייחוס אינו אישור ביצוע עסקה."
     )
@@ -142,7 +151,7 @@ class Row71205Worker:
         self.scopes = set()
         self.last_poll_minute = None
         self.next_retry_ms = 0
-        self.runtime = {"rule_id": "HYPE_ROW71205_SHORT", "formula_id": signal.FORMULA_ID,
+        self.runtime = {"rule_id": "HYPE_ROW71205_SHORT", "formula_id": FORMULA_ID,
                         "config_sha256": CONFIG_SHA256, "ready": False, "state": "NOT_STARTED",
                         "last_error_type": None, "active_position": None, "delivered": 0}
 
@@ -151,7 +160,11 @@ class Row71205Worker:
                 "delivery_allowed_by_profile": policy.hype_row71205_experimental_enabled(),
                 "overlap_cap": 1, "decision_step_minutes": 30,
                 "stop_pct": .5, "take_pct": 2, "profit_lock": False,
-                "price_source": "BINANCE_USDM_FUTURES_TRADE_1M",
+                "price_source": PRICE_SOURCE,
+                "formula_version": FORMULA_VERSION,
+                "research_parent_formula_id": signal.FORMULA_ID,
+                "evidence_status": EVIDENCE_STATUS,
+                "source_retention_minutes": 5000,
                 "btc_price_source": "BINANCE_SPOT_1M",
                 "notification_only": True, "live_order_execution": False,
                 "position_notional_cap": None, "position_sizing": "NOT_APPLICABLE_ALERT_ONLY"}
@@ -177,6 +190,8 @@ class Row71205Worker:
         return await asyncio.to_thread(func, *args, config_sha256=CONFIG_SHA256, **kwargs)
 
     async def prices(self, method, symbol, start, end):
+        if method == "fill" and end > self.clock() // MINUTE * MINUTE:
+            raise PriceEvidenceError("HYPE_CLOSED_CACHE_REQUEST_INCLUDES_UNFINISHED_BAR")
         rows = await asyncio.to_thread(getattr(self.cache, method), symbol, start, end)
         if symbol == "HYPE":
             self.runtime.update(hype_source_available=True,
@@ -193,27 +208,16 @@ class Row71205Worker:
             except Exception as exc:
                 # Fail closed; an unavailable official source is never replaced.
                 # Rate-limit both HTTP restrictions and transient source/DB errors.
-                restricted = getattr(exc, "code", None) == "HYPE_BINANCE_HTTP_451"
+                restricted = str(getattr(exc, "code", "")).endswith(("_HTTP_451", "_HTTP_403"))
                 self.next_retry_ms = self.clock() + (RESTRICTED_SOURCE_RETRY_MS if restricted else 5 * MINUTE)
                 self.runtime.update(ready=False, state="EVIDENCE_UNAVAILABLE",
                                     last_error_type=type(exc).__name__,
                                     last_error_code=getattr(exc, "code", None),
                                     next_retry_at=dt(self.next_retry_ms).isoformat())
-                if str(getattr(exc, "code", "")).startswith("HYPE_BINANCE_HTTP_"):
+                if str(getattr(exc, "code", "")).startswith("HYPE_HYPERLIQUID_"):
                     self.runtime["hype_source_available"] = False
-                if restricted:
-                    # Diagnostic only: it cannot feed the formula, change the
-                    # frozen market contract, or release an existing position.
-                    try:
-                        self.runtime["source_diagnostic"] = await asyncio.to_thread(
-                            source_probe.probe, self.clock())
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        self.runtime["source_diagnostic"] = {"status": "PROBE_INTERNAL_ERROR"}
                 print(f"[hype71205] evidence unavailable type={type(exc).__name__} "
                       f"code={getattr(exc, 'code', None)} "
-                      f"diagnostic={self.runtime.get('source_diagnostic', {}).get('status')} "
                       f"retry_at={self.runtime['next_retry_at']}", flush=True)
             await asyncio.sleep(10)
 
@@ -292,7 +296,9 @@ class Row71205Worker:
         if scope not in self.scopes:
             if not allowed:
                 return
-            state = await self.db(store.initialize_scope, scope, dt(self.clock()))
+            state = await self.db(store.initialize_scope, scope, dt(self.clock()),
+                                  migrate_from_config_sha256=store.LEGACY_BINANCE_CONFIG_SHA256)
+            self.runtime["source_migration"] = state.get("source_migration")
             self.scopes.add(scope)
         else:
             # Cheap polling is minute-aligned. Delivery retries never resend IN_FLIGHT.
@@ -346,6 +352,12 @@ class Row71205Worker:
             rows = await asyncio.gather(*(self.prices("fill", s, starts[s], decision)
                                           for s in ("HYPE", "BTC")))
             evaluation = signal.evaluate_signal(rows[0], rows[1], decision)
+            # Reuse the frozen mathematical rule, but never label this venue as
+            # the Binance research source or inherit its historical performance.
+            evaluation.update(formula_id=FORMULA_ID, version=FORMULA_VERSION,
+                              hype_price_source=PRICE_SOURCE,
+                              research_parent_formula_id=signal.FORMULA_ID,
+                              evidence_status=EVIDENCE_STATUS)
             if not evaluation.get("valid") or not evaluation.get("signal"):
                 result = await self.db(store.record_no_signal, scope, dt(decision), dt(self.clock()),
                                       reason=evaluation.get("reason", "NO_MATCH"))
