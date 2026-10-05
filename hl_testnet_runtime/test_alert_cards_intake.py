@@ -218,10 +218,18 @@ class IntakePostgresTests(unittest.TestCase):
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=4) as pool:answers=list(pool.map(lambda _:self.accept(),range(4)))
         self.assertEqual(sum(x['status']=='RECORDED' for x in answers),1);self.assertEqual(self.counts(),(1,1,0))
-    def test_logs_never_contain_messages_prices_or_auth(self):
+    def test_logs_link_public_source_prices_to_card_without_messages_or_auth(self):
         with patch('sys.stdout',new_callable=StringIO) as output:self.accept()
         value=output.getvalue()
-        for secret in (KEY,delivery()['text'],'DATABASE_URL','"entry"'):self.assertNotIn(secret,value)
+        for secret in (KEY,delivery()['text'],'DATABASE_URL'):self.assertNotIn(secret,value)
+        report=json.loads(value)['testnet_cards_intake']
+        source=w.normalize(delivery())['signal']
+        self.assertEqual(report['symbol'],source['symbol'])
+        self.assertEqual(report['side'],source['side'])
+        self.assertEqual(report['source_prices'],{key:source[key]
+            for key in ('entry','stop','take_profit')})
+        self.assertRegex(report['card_id'],r'^[0-9a-f]{64}$')
+        self.assertEqual(report['order_requests_sent'],0)
         self.assertIn('"order_requests_sent": 0',value)
     def test_schema_repeated_no_overwrites(self):
         self.accept();mod.initialize(self.journal);self.assertEqual(self.counts(),(1,1,0))
