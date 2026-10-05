@@ -111,8 +111,9 @@ five-independent-parent gate, probability policy and unavailable asymmetry
 route are unchanged.
 
 This increment completes finite repeated population generation and durable
-registration. Broad discovery/ranking, version-aware prospective validation
-and result publication remain separate development work. Production activation
+registration. [Bounded catalog discovery and single-window ranking](NO_HORIZON_DISCOVERY_V1.md)
+are available as a separate layer. Version-aware prospective validation and
+result publication remain development work. Production activation
 is separate. The October 4–18 experiment and its scheduled evaluation remain
 pinned to `e8d25e57`; Hyperliquid files, providers, Telegram, LIVE and trading are
 not used by this calendar implementation.

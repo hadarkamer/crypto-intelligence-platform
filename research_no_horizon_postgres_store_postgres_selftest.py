@@ -16,6 +16,8 @@ from uuid import uuid4
 import research_no_horizon_cohort_outcomes as preparation
 import research_no_horizon_cohort_store as local
 import research_no_horizon_contract as contracts
+import research_no_horizon_discovery as discovery
+import research_no_horizon_ranking as ranking
 import research_no_horizon_postgres_store as postgres
 from research_no_horizon_cohort_coverage_selftest import cross_part_rows
 from research_no_horizon_cohort_outcomes_selftest import outcome_fixture, _entry_time, _seal_exports
@@ -422,6 +424,36 @@ class PostgresCohortStoreTests(unittest.TestCase):
         conn.rollback()
         with conn.transaction():
             self.assertIsNone(conn.execute("SELECT to_regclass('caller_uncommitted') AS relation").fetchone()['relation'])
+
+
+    def test_discovery_ranking_reads_current_postgres_evidence_and_matches_sqlite(self):
+        fixture = outcome_fixture(scopes=[scope('SHORT'), scope('LONG')],
+                                  candles=deepcopy(self.original[2][0]['candles']))
+        search = discovery.build_plan(fixture[0], base_directions=['SHORT', 'LONG'],
+            thresholds_pct=[.25], candidate_keys=['FUTURES_CVD_TOTAL_65'])
+        declared = search['calendar_plan']['windows'][0]['declaration']
+        fixture = _seal_exports(declared, fixture[2])
+        plan = self.submit(fixture=fixture)
+        pending = ranking.rank_report(search, self.store.report(plan))
+        self.assertFalse(pending['global_ranking_complete'])
+        self.assertEqual(pending['ranked_scope_ids'], [])
+        actual = self.finish(plan)
+        expected = self.local_report(fixture)
+        with self.conn.transaction():
+            self.conn.execute('SET default_transaction_read_only=on')
+        # The real persisted report is read under a read-only destination
+        # session. Ranking itself opens no connection and creates no work.
+        before = self.count('research_no_horizon_work_commits')
+        postgres_rank = ranking.rank_report(search, self.store.report(plan))
+        sqlite_rank = ranking.rank_report(search, expected)
+        self.assertTrue(postgres_rank['global_ranking_complete'])
+        self.assertEqual(postgres_rank['ranked_scope_ids'], sqlite_rank['ranked_scope_ids'])
+        self.assertEqual(postgres_rank['rows'], sqlite_rank['rows'])
+        self.assertEqual(before, self.count('research_no_horizon_work_commits'))
+        self.assertEqual(len(postgres_rank['rows']), 2)
+        for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
+            self.assertIs(postgres_rank[key], False)
+
 
 
 if __name__ == '__main__':

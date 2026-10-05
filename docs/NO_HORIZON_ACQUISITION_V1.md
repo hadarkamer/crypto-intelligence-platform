@@ -139,8 +139,8 @@ original commit `e8d25e57`. This acquisition implementation does not register,
 reinterpret or replace that experiment. New requests have their own identities.
 
 Finite repeated population generation and upfront registration are provided by
-[the calendar layer](NO_HORIZON_CALENDAR_V1.md). Broad candidate discovery and
-ranking, version-aware prospective validation and result delivery remain
-separate work. The first-touch engine, probability policy and unavailable
+[the calendar layer](NO_HORIZON_CALENDAR_V1.md). [Bounded catalog discovery and
+single-window ranking](NO_HORIZON_DISCOVERY_V1.md) use these existing paths.
+Version-aware prospective validation and result delivery remain separate work. The first-touch engine, probability policy and unavailable
 asymmetry route are unchanged. No provider acquisition, production deployment,
 Telegram message or trade is performed by this implementation.
