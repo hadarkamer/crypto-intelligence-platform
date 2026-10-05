@@ -4,7 +4,20 @@ The owner authorized adding ROW71205 to experimental Telegram notifications on
 2026-10-04. This addition does not place exchange orders or alter XRP R2732,
 U21, SOL, the manual formulas, or their stored positions.
 
-## Frozen research rule
+## Active source variant (2026-10-05)
+
+The original Binance HYPE TRADE endpoint returned HTTP 451. Following the
+owner's request for a different practical solution, the active worker now uses
+public **Hyperliquid HYPE perpetual TRADE 1m candles**, with BTC still from Binance
+Spot. Its distinct formula ID is `HYPE_ROW71205_HYPERLIQUID_SOURCE_VARIANT_V1`.
+The mathematical thresholds and monitoring rules below remain identical, but
+Binance historical returns/win rates do **not** validate this venue variant.
+Health, Telegram text, and frozen position features identify the new source and
+`PROSPECTIVE_SOURCE_VARIANT_NOT_HISTORICALLY_VALIDATED` evidence status.
+This is an explicit source change, not an automatic fallback. No subscription,
+API key, proxy, exchange order, or paid-plan change is needed.
+
+## Frozen mathematical rule and research parent
 
 Canonical recipe: `DOGE_GRAMMAR_HYPE_F3_ROW71205_FULL_SOURCE_HISTORY_RETROSPECTIVE`
 in the recovered `rankings/replay_other_leaders.py`, rule `hype71205`.
@@ -63,40 +76,36 @@ capacity. Uncertain Telegram results are not retried; acknowledgements are
 persisted. Tests mock Telegram, so no test notification is sent.
 
 The existing process starts/stops this worker and exposes
-`hype_row71205_experimental` in `/health`. The price adapter requests only
-`https://fapi.binance.com/fapi/v1/klines` for HYPE and the existing Binance Spot
-klines endpoint for BTC. It does not follow redirects or choose another market.
-There is no new proxy or alternate-host workaround.
+`hype_row71205_experimental` in `/health`. HYPE uses only the public Hyperliquid
+`POST https://api.hyperliquid.xyz/info` candleSnapshot endpoint (`coin=HYPE`,
+`interval=1m`). Responses must provide exact contiguous minutes, correct
+instrument/interval, finite positive consistent OHLC, and exact minute bounds.
+Current-minute rows are fetched separately for reference OPEN and pre-send
+extrema veto only. They are never used in completed-bar features or exits.
 
-If the official source returns HTTP 451, health reports
-`state=EVIDENCE_UNAVAILABLE`, `ready=false`,
-`last_error_code=HYPE_BINANCE_HTTP_451`, and `hype_source_available=false`.
-An HTTP 451 opens a six-hour source cooldown; transient errors retain the
-five-minute retry. On each restricted-source attempt (including a new process),
-a separate bounded diagnostic makes at most one request to CoinGlass's documented
-`/api/futures/price/history`, for three closed 1m Binance HYPEUSDT candles using
-the existing `COINGLASS_API_KEY`. It never follows redirects or retries, and
-`source_diagnostic` exposes only fixed status labels, timestamps and numeric
-metadata. It exposes neither credentials, raw error text nor prices. This probe
-does not feed the strategy, assert provider parity, or enable a fallback.
-Even a successful probe requires full source/timing validation before activation.
-The formula remains
-enabled for future observations, but **cannot issue valid new alerts while
-its exact source is unavailable**. This is an enabled rule with unavailable
-evidence, not a working price feed. Successful validated HYPE reads refresh
-source health on startup, normal decisions, monitoring and pre-send checks.
-Verify the exact TRADE route's live availability after deployment; a previous
-MARK route health result is not itself that verification.
+A one-time, transaction-locked migration accepts only the original deployed
+Binance configuration hash, with no active observation and no pending, in-flight
+or unknown delivery. It preserves historical evidence/cursors/counts and records
+a source migration audit. Activation advances to migration time, preventing old
+alerts from being replayed. Subsequent restarts preserve this activation. Any
+incompatible or occupied old state blocks migration rather than discarding it.
+
+Hyperliquid provides a rolling 5,000-candle window. Incremental minute polling
+keeps ordinary monitoring inside it. If an outage loses a required older candle,
+recovery stops visibly with the active observation still occupying capacity;
+missing history is not filled from another market. Missing/invalid source data
+fails closed with a five-minute retry; HTTP 403/451 has a six-hour cooldown.
+The old CoinGlass source probe remains an offline diagnostic module and is no
+longer invoked by this worker. A cached history alone cannot establish recovery:
+the worker directly validates the latest completed HYPE minute before readiness.
 
 ## Validation
 
 Run the three `hype_row71205_experimental_*_selftest` modules,
-`hype_row71205_source_probe_selftest` and
-`alert_delivery_policy_selftest`. They cover frozen thresholds and floating-point
-arithmetic, missing and future candles, exact source URLs, no fallback on HTTP
-451, retry backoff and recovery, durable cap-one and delivery fences, restart,
-stale-slot suppression, partial-minute separation and pre-send barrier vetoes.
-PostgreSQL integration is opt-in using only an isolated local test database.
-Existing XRP R2732 signal/store/worker and U21 worker tests provide regression
-coverage. Independent research-fixture comparison is recorded outside the bot
-source tree in the task's review evidence.
+`hype_row71205_hyperliquid_source_selftest`, the existing standalone Hyperliquid
+provider tests, SOL proximity tests, and alert delivery policy regressions.
+They cover frozen mathematical thresholds, partial/closed separation, explicit
+source provenance, missing/invalid data, no fallback, retry and recovery,
+transactional migration, durable cap-one/outbox fences, restart, stale-slot
+suppression, and pre-send barrier vetoes. PostgreSQL integration runs only in an
+isolated test database; tests never send Telegram notifications.

@@ -13,12 +13,14 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import re
 from uuid import uuid4
 
 from watch_transition_store import _connect
 
 STORE_VERSION = 'hype-row71205-experimental-cap1-v1'
 CONFIG_VERSION = 'hype-row71205-short-sl005-tp02-corrected-closed1m-v1'
+LEGACY_BINANCE_CONFIG_SHA256 = '1ff204dc34cb97feddd91bbbf02818af29959237c15ea7ec689533c8f98d7e4d'
 SIGNAL_TTL = timedelta(seconds=90)
 ORPHAN_TIMEOUT = timedelta(minutes=2)
 MINUTE = timedelta(minutes=1)
@@ -77,6 +79,49 @@ def _validate(state, config_sha256=None):
         raise ValueError('ROW71205 frozen configuration hash mismatch; explicit migration required')
 
 
+def _validate_source_migration_request(config_sha256, migrate_from_config_sha256):
+    """Only the reviewed, one-way Binance-to-Hyperliquid transition is allowed."""
+    if migrate_from_config_sha256 != LEGACY_BINANCE_CONFIG_SHA256:
+        raise ValueError('ROW71205 source migration origin is not allowlisted')
+    if not isinstance(config_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', config_sha256) is None:
+        raise ValueError('ROW71205 source migration requires a lowercase SHA-256 destination')
+    if config_sha256 == LEGACY_BINANCE_CONFIG_SHA256:
+        raise ValueError('ROW71205 source migration requires a different destination')
+
+
+def _migrate_source_contract(state, moment, config_sha256, migrate_from_config_sha256):
+    """Migrate only a flat, fully settled scope while its transaction is locked.
+
+    Check the unmodified outbox before expiry/orphan maintenance. Even an old
+    pending notification or an uncertain delivery belongs to the original
+    market and must prevent a source change. Existing evidence is retained.
+    """
+    _validate_source_migration_request(config_sha256, migrate_from_config_sha256)
+    _validate(state, migrate_from_config_sha256)
+    if 'active' not in state or state['active'] is not None:
+        raise ValueError('ROW71205 source migration requires no active position')
+    intents = state.get('intents')
+    if not isinstance(intents, list) or any(
+            not isinstance(intent, dict) or intent.get('status') not in
+            {'DELIVERED', 'FAILED', 'CANCELLED', 'EXPIRED'} for intent in intents):
+        raise ValueError('ROW71205 source migration requires a fully settled outbox')
+    if 'source_migration' in state:
+        raise ValueError('ROW71205 source migration already recorded for another configuration')
+    original_activation = state['activated_at']
+    activation = max(utc(original_activation), moment)
+    state['config_sha256'] = config_sha256
+    state['activated_at'] = iso(activation)
+    state['source_migration'] = {
+        'version': 'row71205-binance-to-hyperliquid-v1',
+        'migrated_at': iso(moment),
+        'original_activated_at': original_activation,
+        'from_config_sha256': migrate_from_config_sha256,
+        'to_config_sha256': config_sha256,
+        'from_source': 'BINANCE_USDM_FUTURES_TRADE_1M',
+        'to_source': 'HYPERLIQUID_PERPETUAL_TRADE_1M',
+    }
+
+
 def _lock(conn, key):
     number = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], 'big', signed=True)
     conn.execute('SELECT pg_advisory_xact_lock(%s)', (number,))
@@ -130,8 +175,16 @@ def _maintain(state, now):
         state['intents'] = [i for i in state['intents'] if i['intent_id'] not in identities]
 
 
-def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None):
-    """Persist activation once. Repeated deploys preserve all state/fences."""
+def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None,
+                     migrate_from_config_sha256=None):
+    """Persist activation once, or atomically perform the reviewed source move.
+
+    Normal restarts preserve activation and all monotonic fences. A requested
+    source migration is permitted only from the exact legacy production hash
+    when no original-market position or unsettled delivery remains.
+    """
+    if migrate_from_config_sha256 is not None:
+        _validate_source_migration_request(config_sha256, migrate_from_config_sha256)
     key = key_for(scope)
     with _connect(database_url) as conn:
         _lock(conn, key)
@@ -140,8 +193,11 @@ def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None):
                      (key, _encode(_initial(moment, config_sha256))))
         row = conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()
         state = json.loads(row['value'])
-        _validate(state, config_sha256)
-        _maintain(state, moment)
+        if migrate_from_config_sha256 is not None and state.get('config_sha256') != config_sha256:
+            _migrate_source_contract(state, moment, config_sha256, migrate_from_config_sha256)
+        else:
+            _validate(state, config_sha256)
+            _maintain(state, moment)
         _save(conn, key, state)
         return deepcopy(state)
 

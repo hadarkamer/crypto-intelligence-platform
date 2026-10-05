@@ -41,6 +41,13 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
     def state(self):
         return store.snapshot(self.scope)
 
+    async def test_unfinished_bar_never_enters_closed_cache(self):
+        current = self.clock[0] // worker.MINUTE * worker.MINUTE
+        with self.assertRaises(worker.PriceEvidenceError):
+            await self.work.prices('fill', 'HYPE', current, current+worker.MINUTE)
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.work.cache.rows['HYPE'], {})
+
     async def test_fresh_reference_once_and_restart_preserves_cap(self):
         await self.work.tick()
         self.assertEqual(self.bot.send_message.await_count, 1)
@@ -120,11 +127,16 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(store.key_for(self.scope), old_store.key_for(self.scope))
         self.assertNotEqual(store.key_for(self.scope), xrp_store.key_for(self.scope))
         text = self.bot.send_message.call_args.kwargs['text']
-        for label in ['ROW71205', 'Binance Futures', 'ללא נעילת רווח', '1:4', 'לא למסחר']:
+        for label in ['ROW71205', 'Hyperliquid', 'ללא נעילת רווח', '1:4', 'לא למסחר']:
             self.assertIn(label, text)
         self.assertNotIn('U21', text)
         self.assertEqual(self.work.status()['position_notional_cap'], None)
         self.assertFalse(self.work.status()['live_order_execution'])
+        self.assertEqual(self.work.status()['price_source'], worker.PRICE_SOURCE)
+        self.assertEqual(self.state()['active']['features']['formula_id'], worker.FORMULA_ID)
+        self.assertEqual(self.state()['active']['features']['hype_price_source'], worker.PRICE_SOURCE)
+        self.assertEqual(self.state()['active']['features']['evidence_status'], worker.EVIDENCE_STATUS)
+        self.assertNotEqual(worker.FORMULA_ID, worker.signal.FORMULA_ID)
 
     async def test_already_reached_take_vetoes_live_reference(self):
         self.entry_low = 97.9
@@ -137,52 +149,37 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         checks = []
         async def tick():
             checks.append(self.clock[0])
-            raise worker.PriceEvidenceError('HYPE_BINANCE_HTTP_451')
+            raise worker.PriceEvidenceError('HYPE_HYPERLIQUID_HTTP_451')
         steps = [10000, worker.RESTRICTED_SOURCE_RETRY_MS-10000, None]
         async def sleep(_):
             delta = steps.pop(0)
             if delta is None:
                 raise asyncio.CancelledError()
             self.clock[0] += delta
-        with patch.object(self.work, 'tick', side_effect=tick), patch.object(worker.asyncio, 'sleep', side_effect=sleep), \
-                patch.object(worker.source_probe, 'probe', return_value={'status': 'ACCESS_NOT_GRANTED'}) as probe:
+        with patch.object(self.work, 'tick', side_effect=tick), patch.object(worker.asyncio, 'sleep', side_effect=sleep):
             with self.assertRaises(asyncio.CancelledError):
                 await self.work.run()
         self.assertEqual(len(checks), 2)
         self.assertEqual(checks[1]-checks[0], worker.RESTRICTED_SOURCE_RETRY_MS)
-        self.assertEqual(probe.call_count, 2)
-        self.assertEqual(self.work.status()['source_diagnostic']['status'], 'ACCESS_NOT_GRANTED')
         self.assertFalse(self.work.status()['ready'])
         self.assertFalse(self.work.status()['hype_source_available'])
-        self.assertEqual(self.work.status()['last_error_code'], 'HYPE_BINANCE_HTTP_451')
+        self.assertEqual(self.work.status()['last_error_code'], 'HYPE_HYPERLIQUID_HTTP_451')
         self.bot.send_message.assert_not_awaited()
 
     async def test_transient_source_failure_keeps_five_minute_backoff_no_probe(self):
         async def tick():
-            raise worker.PriceEvidenceError('HYPE_BINANCE_HTTP_503')
+            raise worker.PriceEvidenceError('HYPE_HYPERLIQUID_HTTP_503')
         with patch.object(self.work, 'tick', side_effect=tick), \
-                patch.object(worker.asyncio, 'sleep', side_effect=asyncio.CancelledError), \
-                patch.object(worker.source_probe, 'probe') as probe:
+                patch.object(worker.asyncio, 'sleep', side_effect=asyncio.CancelledError):
             with self.assertRaises(asyncio.CancelledError):
                 await self.work.run()
         self.assertEqual(self.work.next_retry_ms, self.clock[0] + 5*worker.MINUTE)
-        probe.assert_not_called()
-
-    async def test_diagnostic_exception_cannot_kill_worker_or_mask_original_error(self):
-        with patch.object(self.work, 'tick', side_effect=worker.PriceEvidenceError('HYPE_BINANCE_HTTP_451')), \
-                patch.object(worker.asyncio, 'sleep', side_effect=asyncio.CancelledError), \
-                patch.object(worker.source_probe, 'probe', side_effect=RuntimeError('private diagnostic')):
-            with self.assertRaises(asyncio.CancelledError):
-                await self.work.run()
-        self.assertEqual(self.work.status()['last_error_code'], 'HYPE_BINANCE_HTTP_451')
-        self.assertEqual(self.work.status()['source_diagnostic']['status'], 'PROBE_INTERNAL_ERROR')
-        self.assertNotIn('private diagnostic', str(self.work.status()))
 
     async def test_readiness_stays_false_during_failing_warmup(self):
         seen = []
         def failing_fetch(*_):
             seen.append(self.work.status()['ready'])
-            raise worker.PriceEvidenceError('HYPE_BINANCE_HTTP_451')
+            raise worker.PriceEvidenceError('HYPE_HYPERLIQUID_HTTP_451')
         self.work.cache.fetch = failing_fetch
         with self.assertRaises(worker.PriceEvidenceError):
             await self.work.tick()
@@ -191,10 +188,10 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_warm_cache_cannot_falsely_report_recovery(self):
         await self.work.tick()
-        self.work.runtime.update(ready=False, last_error_code='HYPE_BINANCE_HTTP_451')
+        self.work.runtime.update(ready=False, last_error_code='HYPE_HYPERLIQUID_HTTP_451')
         self.clock[0] += worker.MINUTE
         def failing_fetch(*_):
-            raise worker.PriceEvidenceError('HYPE_BINANCE_HTTP_451')
+            raise worker.PriceEvidenceError('HYPE_HYPERLIQUID_HTTP_451')
         self.work.cache.fetch = failing_fetch
         with self.assertRaises(worker.PriceEvidenceError):
             await self.work.tick()
@@ -202,7 +199,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.send_message.await_count, 1)
 
     async def test_source_recovery_resets_readiness_error_without_replaying_activation(self):
-        self.work.runtime.update(ready=False, last_error_code='HYPE_BINANCE_HTTP_451',
+        self.work.runtime.update(ready=False, last_error_code='HYPE_HYPERLIQUID_HTTP_451',
                                  hype_source_available=False)
         await self.work.tick()
         self.assertTrue(self.work.status()['ready'])
@@ -211,7 +208,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_warm_cache_monitor_recovery_refreshes_source_health(self):
         await self.work.tick()
-        self.work.runtime.update(ready=False, last_error_code='HYPE_BINANCE_HTTP_451',
+        self.work.runtime.update(ready=False, last_error_code='HYPE_HYPERLIQUID_HTTP_451',
                                  hype_source_available=False)
         self.clock[0] += worker.MINUTE
         await self.work.tick()
@@ -241,21 +238,28 @@ class SourceTests(unittest.TestCase):
                                raise_for_status=lambda: None,
                                json=lambda: rows or [[0,'100','101','99','100','4',59999]])
 
-    def test_explicit_trade_and_spot_routes_and_no_redirects(self):
-        with patch.object(worker.requests, 'get', return_value=self.response()) as request:
-            for symbol, url in [('HYPE','https://fapi.binance.com/fapi/v1/klines'),
-                                ('BTC',worker.source.BINANCE_SPOT_BASE_URL+worker.source.BINANCE_SPOT_KLINES_ENDPOINT)]:
-                self.assertEqual(worker.fetch_rows(symbol,0,worker.MINUTE), [[0,100,101,99,100]])
-                self.assertEqual(request.call_args.args[0], url)
-                self.assertEqual(request.call_args.kwargs['params']['symbol'], symbol+'USDT')
-                self.assertFalse(request.call_args.kwargs['allow_redirects'])
+    def test_hype_uses_only_explicit_hyperliquid_adapter(self):
+        with patch.object(worker.hype_source, 'fetch_rows', return_value=[[0,100,101,99,100]]) as request, \
+                patch.object(worker.requests, 'get') as binance:
+            self.assertEqual(worker.fetch_rows('HYPE',0,worker.MINUTE), [[0,100,101,99,100]])
+            request.assert_called_once_with('HYPE',0,worker.MINUTE)
+            binance.assert_not_called()
 
-    def test_http_restriction_never_tries_another_route(self):
-        with patch.object(worker.requests, 'get', return_value=self.response(status=451)) as request:
+    def test_btc_keeps_spot_route_and_no_redirects(self):
+        with patch.object(worker.requests, 'get', return_value=self.response()) as request:
+            self.assertEqual(worker.fetch_rows('BTC',0,worker.MINUTE), [[0,100,101,99,100]])
+            self.assertEqual(request.call_args.args[0], worker.source.BINANCE_SPOT_BASE_URL+worker.source.BINANCE_SPOT_KLINES_ENDPOINT)
+            self.assertEqual(request.call_args.kwargs['params']['symbol'], 'BTCUSDT')
+            self.assertFalse(request.call_args.kwargs['allow_redirects'])
+
+    def test_hyperliquid_failure_never_tries_another_route(self):
+        with patch.object(worker.hype_source, 'fetch_rows', side_effect=worker.hype_source.HyperliquidSourceError('HYPE_HYPERLIQUID_HTTP_451')) as request, \
+                patch.object(worker.requests, 'get') as binance:
             with self.assertRaises(worker.PriceEvidenceError) as error:
                 worker.fetch_rows('HYPE',0,worker.MINUTE)
-            self.assertEqual(error.exception.code, 'HYPE_BINANCE_HTTP_451')
-            self.assertEqual(request.call_count,1)
+            self.assertEqual(error.exception.code, 'HYPE_HYPERLIQUID_HTTP_451')
+            request.assert_called_once()
+            binance.assert_not_called()
 
     def test_bad_ohlc_and_wrong_minute_fail_closed(self):
         for row in [[60000,'100','101','99','100','4',119999],
@@ -263,7 +267,7 @@ class SourceTests(unittest.TestCase):
                     [0,'NaN','101','99','100','4',59999]]:
             with patch.object(worker.requests, 'get', return_value=self.response(rows=[row])):
                 with self.assertRaises(ValueError):
-                    worker.fetch_rows('HYPE',0,worker.MINUTE)
+                    worker.fetch_rows('BTC',0,worker.MINUTE)
 
 
 if __name__ == '__main__':
