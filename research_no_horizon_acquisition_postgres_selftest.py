@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 
 import research_no_horizon_acquisition_source as source
 import research_no_horizon_acquisition_store as acquisition
+import research_no_horizon_calendar as calendar
 import research_no_horizon_cohort as cohort
 import research_no_horizon_cohort_coverage as coverage
 import research_no_horizon_cohort_postgres_selftest as fixtures
@@ -515,6 +516,120 @@ class AcquisitionPostgresTests(unittest.TestCase):
         for table in executor.TABLES:
             if table != 'research_no_horizon_schema':
                 self.assertEqual(self.count(table), 0, table)
+
+
+    def calendar_declaration(self, days=1):
+        value = self.declaration()
+        with self.connect() as conn:
+            now = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        delta = now + timedelta(days=days) - contracts.utc(value['source_start_utc'])
+        value['declared_at_utc'] = (now - timedelta(days=3)).isoformat()
+        for key in ('source_start_utc', 'source_end_utc', 'cutoff_utc'):
+            value[key] = (contracts.utc(value[key]) + delta).isoformat()
+        for part in value['parts']:
+            for key in ('source_start_utc', 'source_end_utc'):
+                part[key] = (contracts.utc(part[key]) + delta).isoformat()
+        return cohort.normalize_declaration(value)
+
+    def test_calendar_registers_all_future_windows_once_without_source_reads(self):
+        plan = calendar.build_plan(self.calendar_declaration(), window_count=3)
+        first = calendar.register_plan(self.store, plan)
+        self.reopen()
+        self.assertEqual(calendar.register_plan(self.store, plan), first)
+        self.assertEqual(self.count(PREFIX + 'requests'), 3)
+        for entry, window in zip(first['registrations'], plan['windows']):
+            self.assertEqual(entry['declaration_sha256'], window['declaration_sha256'])
+            self.assertTrue(entry['registered_before_source_start'])
+            self.assertLessEqual(contracts.utc(entry['created_at_utc']),
+                                 contracts.utc(entry['source_start_utc']))
+        factory = Mock(side_effect=AssertionError('calendar opened source before cutoff'))
+        self.assertIsNone(self.store.run_once('calendar', source_connection_factory=factory))
+        factory.assert_not_called()
+        self.assertEqual(self.count(PREFIX + 'anchors'), 0)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+
+    def test_calendar_partial_registration_retries_without_duplicate_or_changed_alias(self):
+        plan = calendar.build_plan(self.calendar_declaration(), window_count=3)
+        first_id = self.store.register_request(plan['windows'][0]['declaration'],
+                                              request_key='already-registered')
+        original = self.store.register_request
+        calls = []
+
+        def interrupted(declaration, **kwargs):
+            calls.append(True)
+            if len(calls) == 3:
+                raise RuntimeError('fixture interruption')
+            return original(declaration, **kwargs)
+
+        with patch.object(self.store, 'register_request', side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, 'fixture interruption'):
+                calendar.register_plan(self.store, plan)
+        self.assertEqual(self.count(PREFIX + 'requests'), 2)
+        self.reopen()
+        receipt = calendar.register_plan(self.store, plan)
+        self.assertEqual(receipt['registrations'][0]['request_id'], first_id)
+        self.assertEqual(self.count(PREFIX + 'requests'), 3)
+        self.assertEqual(self.store.report(first_id)['request_key'], 'already-registered')
+
+    def test_calendar_late_new_registration_rolls_back_and_late_existing_cannot_be_promoted(self):
+        declaration = self.calendar_declaration(days=-2)
+        plan = calendar.build_plan(declaration, window_count=2)
+        with self.assertRaisesRegex(ValueError, 'REGISTRATION_AFTER_SOURCE_START'):
+            calendar.register_plan(self.store, plan)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+        request = self.store.register_request(plan['windows'][0]['declaration'])
+        before = self.store.registration_info(request)
+        self.assertFalse(before['registered_before_source_start'])
+        with self.assertRaisesRegex(ValueError, 'REGISTRATION_AFTER_SOURCE_START'):
+            calendar.register_plan(self.store, plan)
+        self.assertEqual(self.count(PREFIX + 'requests'), 1)
+        self.assertEqual(self.store.registration_info(request), before)
+        for invalid in (1, 0, 'true', None):
+            with self.assertRaisesRegex(ValueError, 'boolean'):
+                self.store.register_request(declaration, require_before_start=invalid)
+
+
+
+    def test_calendar_existing_timely_fixture_recovers_after_window_start(self):
+        plan = calendar.build_plan(self.calendar_declaration(days=-2), window_count=1)
+        declaration = plan['windows'][0]['declaration']
+        identity = {'version': acquisition.VERSION,
+            'declaration_sha256': contracts.digest(declaration),
+            'implementation_sha256': self.store.implementation_sha256,
+            'implementation': self.store.versions}
+        request = contracts.digest(identity)
+        created = contracts.utc(declaration['source_start_utc']) - timedelta(seconds=1)
+        due = max(contracts.utc(declaration['declared_at_utc']),
+                  contracts.utc(declaration['cutoff_utc']))
+        # Synthetic historical fixture, not a change to an immutable row.
+        with self.conn.transaction():
+            self.conn.execute('''INSERT INTO research_no_horizon_acquisition_requests
+                (request_id,identity_json,declaration_json,implementation_sha256,
+                 not_before_utc,created_at_utc) VALUES(%s,%s,%s,%s,%s,%s)''',
+                (request, contracts.canonical(identity), contracts.canonical(declaration),
+                 self.store.implementation_sha256, due, created))
+        receipt = calendar.register_plan(self.store, plan)
+        self.assertEqual(receipt['registrations'][0]['request_id'], request)
+        self.assertEqual(contracts.utc(receipt['registrations'][0]['created_at_utc']), created)
+        self.assertEqual(self.count(PREFIX + 'requests'), 1)
+
+    def test_calendar_fresh_clock_check_rejects_insert_with_earlier_fixture_timestamp(self):
+        declaration = self.calendar_declaration(days=-2)
+        # A fixture trigger forces an earlier creation field so only the fresh
+        # database-clock check can catch late new registration.
+        with self.connect() as conn:
+            conn.execute("""CREATE FUNCTION calendar_test_early_creation() RETURNS trigger
+                LANGUAGE plpgsql AS $body$ BEGIN
+                NEW.created_at_utc :=
+                    (NEW.declaration_json::jsonb->>'source_start_utc')::timestamptz - INTERVAL '1 second';
+                RETURN NEW; END $body$;
+                CREATE TRIGGER calendar_test_early_creation BEFORE INSERT
+                ON research_no_horizon_acquisition_requests FOR EACH ROW
+                EXECUTE FUNCTION calendar_test_early_creation();""", prepare=False)
+        with self.assertRaisesRegex(ValueError, 'REGISTRATION_AFTER_SOURCE_START'):
+            self.store.register_request(declaration, require_before_start=True)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+
 
 
 if __name__ == '__main__':

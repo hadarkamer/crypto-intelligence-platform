@@ -138,7 +138,8 @@ The October 4–18 declaration and scheduled evaluation remain pinned to their
 original commit `e8d25e57`. This acquisition implementation does not register,
 reinterpret or replace that experiment. New requests have their own identities.
 
-Automatic calendar-based population generation, broad candidate discovery and
+Finite repeated population generation and upfront registration are provided by
+[the calendar layer](NO_HORIZON_CALENDAR_V1.md). Broad candidate discovery and
 ranking, version-aware prospective validation and result delivery remain
 separate work. The first-touch engine, probability policy and unavailable
 asymmetry route are unchanged. No provider acquisition, production deployment,

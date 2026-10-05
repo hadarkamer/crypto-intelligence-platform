@@ -67,10 +67,17 @@ class AcquisitionStore:
         self.versions = implementation()
         self.implementation_sha256 = contracts.digest(self.versions)
 
-    def register_request(self, declaration, *, request_key=None):
-        """Register exactly one explicit population without reading its outcomes."""
+    def register_request(self, declaration, *, request_key=None, require_before_start=False):
+        """Register one population; optionally reject newly late registration atomically.
+
+        Existing identical requests retain their actual registration timestamp.
+        The timestamp records database row creation, not unseen-outcome proof.
+        """
         executor._idle(self.connection)
         frozen = cohort.normalize_declaration(declaration)
+        if type(require_before_start) is not bool:
+            raise ValueError("explicit boolean require_before_start required")
+        start = contracts.utc(frozen["source_start_utc"])
         if request_key is not None:
             child._name(request_key, "request_key")
         identity = {"version": VERSION, "declaration_sha256": contracts.digest(frozen),
@@ -83,15 +90,38 @@ class AcquisitionStore:
         with self.connection.transaction():
             inserted = self.connection.execute("""INSERT INTO research_no_horizon_acquisition_requests
                 (request_id,request_key,identity_json,declaration_json,implementation_sha256,not_before_utc)
-                VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING request_id""",
+                VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING request_id,created_at_utc""",
                 (request_id, request_key, identity_json, declaration_json, self.implementation_sha256, due)).fetchone()
             if inserted is None:
-                row = self.connection.execute("""SELECT request_key,identity_json,declaration_json
+                row = self.connection.execute("""SELECT request_key,identity_json,declaration_json,created_at_utc
                     FROM research_no_horizon_acquisition_requests WHERE request_id=%s""", (request_id,)).fetchone()
                 if (row is None or request_key is not None and row["request_key"] != request_key
                         or row["identity_json"] != identity_json or row["declaration_json"] != declaration_json):
                     raise ValueError("request key already binds another immutable cohort or implementation")
+                if require_before_start and row["created_at_utc"] > start:
+                    raise ValueError("REGISTRATION_AFTER_SOURCE_START")
+            elif require_before_start:
+                # Raising inside this transaction rolls the new row back, even
+                # when insertion waited on a conflicting transaction.
+                checked = self.connection.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
+                if inserted["created_at_utc"] > start or checked > start:
+                    raise ValueError("REGISTRATION_AFTER_SOURCE_START")
         return request_id
+
+    def registration_info(self, request_id):
+        """Read immutable registration identity without loading transport proofs."""
+        executor._idle(self.connection)
+        with self.connection.transaction():
+            row = self._request(request_id)
+            declaration = json.loads(row["declaration_json"])
+            start = contracts.utc(declaration["source_start_utc"])
+            return {"request_id": row["request_id"],
+                "declaration_sha256": json.loads(row["identity_json"])["declaration_sha256"],
+                "implementation_sha256": row["implementation_sha256"],
+                "created_at_utc": row["created_at_utc"].isoformat(),
+                "source_start_utc": start.isoformat(),
+                "registered_before_source_start": row["created_at_utc"] <= start}
+
 
     def _request(self, request_id, *, compatible=False, lock=False):
         row = self.connection.execute("SELECT * FROM research_no_horizon_acquisition_requests WHERE request_id=%s"
