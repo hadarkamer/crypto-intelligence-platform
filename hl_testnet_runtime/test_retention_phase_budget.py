@@ -76,10 +76,10 @@ class RetainedPhasePostgresTests(unittest.TestCase):
         self.assertEqual(len(calls),4)
         self.assertEqual(calls[0],calls[-1])
         self.assertLessEqual(max(weights),800)
-        self.assertEqual(self.total(),542) # two exact anchors: 21 each, two empty history: 20 each
+        self.assertEqual(self.total(),544) # anchors and original overlap: 21 per response
         for _ in range(20):
             self.budget.acquire('/info',{'type':'meta'},priority='protection').check()
-        self.assertEqual(self.total(),942)
+        self.assertEqual(self.total(),944)
         self.assertEqual(venue.sent,0)
 
     def test_final_real_collection_can_fit_460_load_without_fabricating_clocks(self):
