@@ -94,7 +94,7 @@ def prepare():
     from install_capture_readiness import install as install_capture_readiness
     install_capture_readiness(RUNTIME)
     subprocess.run([sys.executable,'-m','unittest','test_prominent_levels','test_response_shape',
-        'test_capture_diagnostics','test_capture_readiness','-v'],
+        'test_capture_diagnostics','test_capture_readiness','test_timeout_retention','-v'],
         cwd=HERE,check=True,timeout=90)
     (RUNTIME/'provenance.json').write_text(json.dumps({
         'source_blobs':manifest,'dependencies':BROWSER_REQUIREMENTS,
