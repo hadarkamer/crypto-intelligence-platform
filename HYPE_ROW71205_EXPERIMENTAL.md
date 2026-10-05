@@ -71,7 +71,16 @@ There is no new proxy or alternate-host workaround.
 If the official source returns HTTP 451, health reports
 `state=EVIDENCE_UNAVAILABLE`, `ready=false`,
 `last_error_code=HYPE_BINANCE_HTTP_451`, and `hype_source_available=false`.
-Retries are at most once every five minutes after an error. The formula remains
+An HTTP 451 opens a six-hour source cooldown; transient errors retain the
+five-minute retry. On each restricted-source attempt (including a new process),
+a separate bounded diagnostic makes at most one request to CoinGlass's documented
+`/api/futures/price/history`, for three closed 1m Binance HYPEUSDT candles using
+the existing `COINGLASS_API_KEY`. It never follows redirects or retries, and
+`source_diagnostic` exposes only fixed status labels, timestamps and numeric
+metadata. It exposes neither credentials, raw error text nor prices. This probe
+does not feed the strategy, assert provider parity, or enable a fallback.
+Even a successful probe requires full source/timing validation before activation.
+The formula remains
 enabled for future observations, but **cannot issue valid new alerts while
 its exact source is unavailable**. This is an enabled rule with unavailable
 evidence, not a working price feed. Successful validated HYPE reads refresh
@@ -81,7 +90,8 @@ MARK route health result is not itself that verification.
 
 ## Validation
 
-Run the three `hype_row71205_experimental_*_selftest` modules and
+Run the three `hype_row71205_experimental_*_selftest` modules,
+`hype_row71205_source_probe_selftest` and
 `alert_delivery_policy_selftest`. They cover frozen thresholds and floating-point
 arithmetic, missing and future candles, exact source URLs, no fallback on HTTP
 451, retry backoff and recovery, durable cap-one and delivery fences, restart,
