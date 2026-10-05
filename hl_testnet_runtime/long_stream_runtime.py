@@ -170,7 +170,8 @@ def _quiet_final_history(controller, state):
 def _account_owned(venue, account, states, *, role=None, priority='background', budget=None):
     """Unknown positions/orders block *new* entries, never exit maintenance."""
     from .card_sync_evidence import PublicReader
-    reader = PublicReader(priority=priority,budget=budget)
+    reader = PublicReader(priority=priority,budget=budget,
+                          reuse_cycle=getattr(venue,'simple_execution',False) is True)
     if getattr(venue,'parallel_preflight',False) is True:
         orders,positions=dispatch.joined_public_reads(
             lambda:reader.read('frontendOpenOrders',account),
@@ -400,6 +401,9 @@ def _quiet_protected_checkpoint(controller, state, *, now_ms):
     second checkpoint bound. Notifications and gaps require public observation
     again; no evidence timestamp or emergency close deadline is extended.
     """
+    from .simple_execution import quiet
+    if quiet(state,now_ms=now_ms,feed=vars(controller.venue).get('fill_wakeups')):
+        return True
     if not dispatch._fully_protected_no_work(state,now_ms):
         return False
     feed=vars(controller.venue).get('fill_wakeups')
@@ -533,6 +537,10 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
                 # Both supervisors share the same saved quiet proof. Live
                 # notifications still wake authoritative reconciliation at once.
                 continue
+            waiting=getattr(type(controller.venue),'waiting_entry_quiet',None)
+            if (notification_continuity and not forced and state['pending'] is None
+                    and callable(waiting) and controller.venue.waiting_entry_quiet(state)):
+                continue
             for result in _maintain_bucket(controller, state['bucket']):
                 sent += result['order_requests_sent']
                 if result.get('status')=='REJECTED' and result['order_requests_sent']==1:
@@ -633,7 +641,7 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
     # A database-only source scan avoids spending venue quota every two
     # seconds while both accounts are flat and no fresh candidate exists.
     # Current inventory still gates EVERY registration and entry pass.
-    if fresh_cards or touched:
+    if (fresh_cards or touched) and getattr(controller.venue,'simple_execution',False) is not True:
         _account_owned(controller.venue,route['account'],states,role=role)
     for cid,card_role in fresh_cards:
         card=CardStore(controller.store.journal).load(cid)
@@ -689,7 +697,10 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
         # observation time stays visible and never becomes current inventory
         # authority. Active or uncertain cards still require fresh evidence.
         terminal_history = _immutable_flat_checkpoint(state)
-        view = emergency_view(state, snap['at_ms'] if historical or terminal_history
+        from .simple_execution import quiet
+        scheduled_quiet=quiet(state,now_ms=controller.venue.now(),
+                              feed=vars(controller.venue).get('fill_wakeups'))
+        view = emergency_view(state, snap['at_ms'] if historical or terminal_history or scheduled_quiet
                               else controller.venue.now())
         bindings = {b['card_id']:b for b in state['bindings']}
         for row in view['cards']:
@@ -772,6 +783,15 @@ def _loop(controller, streams):
     reconciliation_passes = {}
     entry_retry_at = {}
     entry_failures = {}
+    warm=getattr(type(controller.venue),'warm_configuration',None)
+    if callable(warm):
+        try:
+            controller.venue.warm_configuration(streams)
+        except Exception as exc:
+            # Existing protection continues; entry authorization independently
+            # retries missing/invalid configuration on the next real candidate.
+            print(json.dumps({'testnet_configuration':dict(status='UNAVAILABLE_RETRY',
+                              **_safe_failure(exc))},sort_keys=True),flush=True)
     while not _stop.is_set():
         feed=vars(controller.venue).get('fill_wakeups')
         if feed is not None:
@@ -1121,6 +1141,7 @@ def start():
         from .fill_wakeups import FillWakeups
         _fill_wakeups=FillWakeups({role:route['account'] for role,route,*_ in streams},wake_event=_wake)
         controller.venue.fill_wakeups=_fill_wakeups
+        _fill_wakeups.simple_execution=controller.venue.simple_execution
         _fill_wakeups.start()
         from .emergency_close import start as start_emergency
         start_emergency(controller,streams,_stop)
@@ -1146,6 +1167,10 @@ def stop():
 def health():
     with _lock:
         result=deepcopy(_health)
+    from .simple_execution import AUDIT_DELAY_MS
+    result['simple_execution']=bool(_fill_wakeups is not None
+        and getattr(_fill_wakeups,'simple_execution',False) is True)
+    result['full_audit_delay_seconds']=AUDIT_DELAY_MS//1000
     from .emergency_close import health as emergency_health
     result['emergency_close']=emergency_health()
     if _fill_wakeups is not None:

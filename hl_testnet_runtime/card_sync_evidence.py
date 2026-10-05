@@ -39,7 +39,7 @@ def facts(snapshot):
 
 class PublicReader:
     """Only fixed public /info requests. Bounded calls, bytes and request time."""
-    def __init__(self, *, parallel=False, parallel_workers=4, budget=None, priority='background'):
+    def __init__(self, *, parallel=False, parallel_workers=4, budget=None, priority='background', reuse_cycle=False):
         if type(parallel_workers) is not int or not 1<=parallel_workers<=MAX_OBSERVATION_READ_WORKERS:
             raise SyncError('PUBLIC_READ_PARALLEL_BOUND_INVALID')
         self.calls = 0
@@ -51,6 +51,7 @@ class PublicReader:
         self.budget = budget if budget is not None else Budget.from_env(os.environ)
         self.priority = priority
         self._observation_budget = None
+        self.reuse_cycle = reuse_cycle is True
 
     @contextmanager
     def observation_batch(self, bodies):
@@ -123,6 +124,10 @@ class PublicReader:
             pass
         else:
             raise SyncError('READ_TYPE_NOT_ALLOWED')
+        from .simple_execution import read
+        return read(body, lambda:self._transport(body), cycle=self.reuse_cycle)
+
+    def _transport(self, body):
         with self._calls_lock:
             if HOST != 'api.hyperliquid-testnet.xyz' or self.calls >= 200:
                 raise SyncError('READ_BUDGET_EXCEEDED')
@@ -471,7 +476,8 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
         open_orders=sorted(opens,key=lambda r:r['oid']),terminal_orders=sorted(terminals,key=lambda r:r['oid']))
 
 
-def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verified_terminals):
+def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verified_terminals,
+                               verification_passes=2):
     """Exact initial request multiset; unknown split history pages are excluded."""
     account,_=life.validate_snapshot(previous)
     certificates=(terminal_certificates(bindings,previous) if reuse_verified_terminals else {})
@@ -489,12 +495,14 @@ def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verifie
     one_pass=[fills(start,end),dict(type='frontendOpenOrders',user=account),
               dict(type='clearinghouseState',user=account)]
     one_pass.extend(dict(type='orderStatus',user=account,oid=int(oid)) for oid in oids)
-    bodies.extend(one_pass*2)
+    bodies.extend(one_pass*verification_passes)
     return bodies
 
 
 def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.monotonic,
-            plain_take_profit_oids=(), reuse_verified_terminals=False):
+            plain_take_profit_oids=(), reuse_verified_terminals=False, verification_passes=2):
+    if type(verification_passes) is not int or verification_passes not in (1, 2):
+        raise SyncError('VERIFICATION_PASS_COUNT_INVALID')
     if type(reuse_verified_terminals) is not bool:
         raise SyncError('TERMINAL_CERTIFICATE_OPT_IN_INVALID')
     bindings,previous = deepcopy(evidence['bindings']),deepcopy(evidence['snapshot'])
@@ -513,11 +521,13 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
     if not 0 <= end-cursor <= MAX_CATCHUP_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
     plan=getattr(type(reader),'observation_batch',None)
     context=(reader.observation_batch(_planned_observation_reads(bindings,previous,cursor,end,
-                reuse_verified_terminals=reuse_verified_terminals))
+                reuse_verified_terminals=reuse_verified_terminals,
+                verification_passes=verification_passes))
              if callable(plan) else nullcontext())
     with context:
         return _collect_funded(bindings,previous,reader,cursor,end,started,clock,elapsed,
-            plain=plain,reuse_verified_terminals=reuse_verified_terminals)
+            plain=plain,reuse_verified_terminals=reuse_verified_terminals,
+            verification_passes=verification_passes)
 
 
 def retained_anchor(reader, account, fill):
@@ -608,7 +618,7 @@ def _collect_retained(evidence, reader, *, cursor_ms, anchor, clock=now_ms,
 
 
 def _collect_funded(bindings, previous, reader, cursor, end, started, clock, elapsed,
-                    *, plain, reuse_verified_terminals, inventory_guard=None):
+                    *, plain, reuse_verified_terminals, inventory_guard=None, verification_passes=2):
     account,symbol=life.validate_snapshot(previous)
     # Reconstruct a short missed interval before taking the current order and
     # position snapshot. Each bounded window is observed twice; nothing is
@@ -624,15 +634,18 @@ def _collect_funded(bindings, previous, reader, cursor, end, started, clock, ela
         previous['fills'] = first_fills
         cursor = stop
     start = max(1,cursor-OVERLAP_MS)
-    # Both passes use only the ORIGINAL durable certificates. A newly final
-    # order in pass one must still receive an independent status read in pass
-    # two before its complete checkpoint can ever be reused by a later cycle.
+    # A full audit compares two independent passes. The fast stream uses one
+    # cross-checked inventory/status/fill/position pass for immediate protection;
+    # it never accepts a transport acknowledgement as an observed execution.
+    # Each pass uses only certificates that existed before this collection.
     guard={} if inventory_guard is None else dict(inventory_guard=inventory_guard)
     first = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
                     reuse_verified_terminals=reuse_verified_terminals,**guard)
-    second = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
+    second = (observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
                      reuse_verified_terminals=reuse_verified_terminals,**guard)
+              if verification_passes == 2 else first)
     if first != second: raise SyncError('OBSERVATION_CHANGED_RETRY')
     if elapsed()-started>15: raise SyncError('OBSERVATION_TOO_SLOW')
     result = life.review(bindings,second,now_ms=clock(),plain_take_profit_oids=plain)
-    return dict(bindings=bindings,snapshot=second,report=result,cursor_ms=end)
+    return dict(bindings=bindings,snapshot=second,report=result,cursor_ms=end,
+                verification_passes=verification_passes)

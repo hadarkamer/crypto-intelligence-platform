@@ -371,6 +371,11 @@ def recent_normal_checkpoint(state, *, now_ms, fill_wakeups=None):
     An uncovered tranche also requires independent checking before its deadline,
     since a current price can already have crossed the original stop.
     """
+    from .simple_execution import quiet, waiting_entry
+    if quiet(state,now_ms=now_ms,feed=fill_wakeups):
+        return True
+    if waiting_entry(state,now_ms=now_ms,feed=fill_wakeups) is not None:
+        return True
     if (state.get('emergency') is not None or state['evidence'] is None
             or not state['bindings']):
         return False

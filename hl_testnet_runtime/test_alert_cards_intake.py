@@ -107,7 +107,7 @@ class MetadataTests(unittest.TestCase):
             ctor.return_value.read.return_value=fixtures.META
             with ThreadPoolExecutor(max_workers=8) as pool:
                 results=list(pool.map(lambda _:mod.metadata(),range(8)))
-        ctor.assert_called_once_with(priority='background')
+        ctor.assert_called_once_with(priority='background',reuse=True)
         ctor.return_value.read.assert_called_once_with('meta')
         self.assertEqual(results,[fixtures.META]*8)
         results[0]['universe'][0]['szDecimals']=6

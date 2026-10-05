@@ -1003,7 +1003,11 @@ class Controller:
             from .emergency_close import record_timing
             record_timing(s,request,raw,now)
             current=self.store.pending_record(conn,s)
-            if current is None or current['attempt_at_ms'] is None: return None
+            if current is None or current['attempt_at_ms'] is None:
+                if getattr(self.venue,'simple_execution',False) is True:
+                    from .simple_execution import checkpoint
+                    checkpoint(s,collected,now)
+                return None
             if snap['at_ms']<=current['attempt_at_ms']:
                 raise DispatchError('POST_ATTEMPT_OBSERVATION_REQUIRED')
             p=current['proposal']
@@ -1033,6 +1037,9 @@ class Controller:
                 current['terminal_state']=ending[0]['state']
                 current['cancellation_caused_terminal_state']=False
             current['phase']='OBSERVED';current['observed_at_ms']=snap['at_ms'];s['pending']=None
+            if getattr(self.venue,'simple_execution',False) is True:
+                from .simple_execution import checkpoint
+                checkpoint(s,collected,now)
             return current
         return self._checkpoint(bucket,state,'PUBLIC_RECONCILIATION',now,update)
 
@@ -1101,6 +1108,12 @@ class Controller:
         return result
 
     def _prepare_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id):
+        from .simple_execution import cycle_reads
+        with cycle_reads(getattr(self.venue,'simple_execution',False) is True):
+            return self._prepare_cached_cycle(bucket,send=send,allow_new_entries=allow_new_entries,
+                                              allowed_entry_card_id=allowed_entry_card_id)
+
+    def _prepare_cached_cycle(self,bucket,*,send,allow_new_entries,allowed_entry_card_id):
         # An already-latched emergency owns this bucket. Avoid competing full
         # public collections before discovering the same latch during planning.
         # A latch appearing after this read is still checked by planning/begin.
@@ -1385,7 +1398,50 @@ class TestnetVenue:
     """
     domain='testnet'
     parallel_preflight=True
-    def __init__(self,env): self.env=env;self.sent=0
+    def __init__(self,env):
+        from .simple_execution import enabled
+        self.env=env;self.sent=0
+        self.simple_execution=enabled(env)
+        self._waiting_polls={}
+
+    def waiting_entry_quiet(self,state):
+        from .simple_execution import waiting_entry
+        binding=waiting_entry(state,now_ms=self.now(),feed=vars(self).get('fill_wakeups'))
+        if binding is None:
+            self._waiting_polls.pop(state['bucket'],None)
+            return False
+        cid=binding['card_id']
+        if cid in state.get(half_cancel.FIELD,{}):
+            return False
+        poll=self._waiting_polls.get(state['bucket'])
+        if poll is not None and poll[0]==state['revision'] and self.now()<poll[1]:
+            return True
+        sample=self.sample(state['account'],state['symbol'])
+        threshold=life.number(half_cancel.threshold_for(state['originals'][cid]),positive=True)
+        direction=1 if binding['side']=='LONG' else -1
+        boundary=life.number(binding['prices']['entry'])*(1+direction*threshold/200)
+        mark=life.number(sample['mark_price'],positive=True)
+        crossed=mark>=boundary if binding['side']=='LONG' else mark<=boundary
+        if crossed:
+            return False
+        self._waiting_polls[state['bucket']]=(state['revision'],self.now()+10000)
+        return True
+
+    def warm_configuration(self, streams):
+        if not self.simple_execution:
+            return
+        reader=checks.InfoReader(budget=self.request_budget(),reuse=True)
+        reader.read('meta')
+        for role,route,*_ in streams:
+            roles.route_for(self.env,role,route['account'],route['agent'])
+            account_role,agent_role,mode=reader.read_many([
+                ('userRole',dict(user=route['account'])),
+                ('userRole',dict(user=route['agent'])),
+                ('userAbstraction',dict(user=route['account']))])
+            if (account_role!={'role':'user'} or agent_role.get('role')!='agent'
+                    or checks.address((agent_role.get('data') or {}).get('user'))!=route['account']
+                    or mode not in ('default','disabled','unifiedAccount')):
+                raise DispatchError('ACCOUNT_CONFIGURATION_NOT_VERIFIED')
     @staticmethod
     def now(): return time.time_ns()//1000000
     def request_budget(self):
@@ -1421,6 +1477,9 @@ class TestnetVenue:
         budget=self.request_budget()
         if budget is None:
             raise DispatchError('TESTNET_SHARED_REQUEST_BUDGET_REQUIRED')
+        if self.simple_execution:
+            from .simple_execution import missing_reads
+            bodies=missing_reads(bodies)
         return budget.reserve_info_plan(bodies,priority='background',host=HOST)
     def _clean_trial_feed_stamp(self,account):
         feed=vars(self).get('fill_wakeups')
@@ -1555,10 +1614,15 @@ class TestnetVenue:
             host=HOST,priority='background' if proposal['operation']=='ENTRY' else 'protection')
         return TransportAdmission(proposal,permit)
     def metadata(self):
-        return checks.InfoReader(budget=self.request_budget(),priority=self._public_priority()).read('meta')
+        return checks.InfoReader(budget=self.request_budget(),priority=self._public_priority(),
+                                 reuse=self.simple_execution).read('meta')
     def sample(self,account,symbol):
-        start=self.now();raw=checks.InfoReader(budget=self.request_budget(),priority=self._public_priority()).read('activeAssetData',user=account,coin=symbol)
+        start=self.now();raw=checks.InfoReader(budget=self.request_budget(),priority=self._public_priority(),
+            reuse=self.simple_execution).read('activeAssetData',user=account,coin=symbol)
         checks.capacity(raw,account,symbol)
+        if self.simple_execution:
+            from .simple_execution import cycle_age_ms
+            start-=cycle_age_ms(dict(type='activeAssetData',user=checks.address(account),coin=symbol))
         return dict(mark_price=raw['markPx'],at_ms=start)
     def lookup(self,account,cloid):
         import hyperliquid_testnet_executor as legacy
@@ -1602,12 +1666,22 @@ class TestnetVenue:
         # still verify live orders, fills, inventory and actual position.
         priority=('protection' if force_protection else _collection_priority(value,self.now(),
             fill_wakeups=vars(self).get('fill_wakeups'),pending_clear=pending_clear))
+        passes=2
+        if self.simple_execution:
+            from .simple_execution import audit_due
+            from .card_recovery_journal import RecoveryJournal
+            state=self.store.load(RecoveryJournal.bucket(value['snapshot']['account'],
+                                                        value['snapshot']['symbol']))
+            due=audit_due(state)
+            passes=2 if due is not None and self.now()>=due else 1
         return evidence.collect(value,evidence.PublicReader(parallel=True,
                                 budget=self.request_budget(),priority=priority),
-                                reuse_verified_terminals=True)
+                                reuse_verified_terminals=True,verification_passes=passes,
+                                **(dict(clock=self.now) if self.simple_execution else {}))
     def empty_snapshot(self,account,symbol,*,_observed_at_ms=None):
-        reader=evidence.PublicReader(budget=self.request_budget(),priority='background');start=self.now()
-        for _ in range(2):
+        reader=evidence.PublicReader(budget=self.request_budget(),priority='background',
+                                     reuse_cycle=self.simple_execution);start=self.now()
+        for _ in range(1 if self.simple_execution else 2):
             if _observed_at_ms is not None:
                 _observed_at_ms.append(self.now())
             if self.parallel_preflight is True:
@@ -1803,7 +1877,7 @@ class TestnetVenue:
             plan={k:source[k] for k in ('symbol','side','entry','stop','take_profit')}
             with self._entry_authorization_scope(route['account'],route['agent'],plan['symbol']) as admission:
                 reader=checks.InfoReader(parallel=self.parallel_preflight is True,
-                                         budget=admission,priority='background')
+                                         budget=admission,priority='background',reuse=self.simple_execution)
                 def budget():
                     return roles.budget_for_role(self.env,proposal['role'],route['account'],
                         route['agent'],plan,reader)

@@ -1757,7 +1757,7 @@ class EntryInfoAdmissionTests(NoExternal):
                 if kind=='userRateLimit':return dict(nRequestsCap=100,nRequestsUsed=0,nRequestsSurplus=0)
                 raise AssertionError('UNPLANNED_READ')
             class Info:
-                def __init__(self,*,budget,parallel=False,priority='background'):
+                def __init__(self,*,budget,parallel=False,priority='background',reuse=False):
                     self.budget,self.parallel,self.priority=budget,parallel,priority;self.calls=0
                 def read(self,kind,*,user=None,coin=None):
                     body=dict(type=kind)
@@ -1768,7 +1768,7 @@ class EntryInfoAdmissionTests(NoExternal):
                 def read_many(self,requests):
                     return [self.read(kind,**kw) for kind,kw in requests]
             class Public:
-                def __init__(self,*,budget,priority='background'):self.reader=Info(budget=budget,priority=priority)
+                def __init__(self,*,budget,priority='background',reuse_cycle=False):self.reader=Info(budget=budget,priority=priority)
                 def read(self,kind,account):return self.reader.read(kind,user=account)
             with patch.object(venue,'_fund_info_plan',side_effect=fund), \
                     patch.object(venue,'_gate',return_value=route), \

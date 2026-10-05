@@ -7,6 +7,7 @@ All output is a fixed, redacted report. A pass is not order acceptance.
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, localcontext
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import http.client
 import hashlib
 import importlib.metadata
@@ -65,7 +66,7 @@ def decode(raw):
 
 class InfoReader:
     """Fixed Testnet /info, fixed read types, no retries or redirects."""
-    def __init__(self, *, parallel=False, budget=None, priority='background'):
+    def __init__(self, *, parallel=False, budget=None, priority='background', reuse=False):
         self.calls = 0
         self.parallel = parallel is True
         self._calls_lock = threading.Lock()
@@ -73,6 +74,7 @@ class InfoReader:
         import os
         self.budget = budget if budget is not None else Budget.from_env(os.environ)
         self.priority = priority
+        self.reuse = reuse is True
 
     def read_many(self, requests):
         """Read an ordered independent group, joining every started read.
@@ -84,7 +86,7 @@ class InfoReader:
             return [self.read(kind, **kwargs) for kind, kwargs in requests]
         pool = ThreadPoolExecutor(max_workers=4)
         try:
-            futures = [pool.submit(self.read, kind, **kwargs)
+            futures = [pool.submit(copy_context().run, self.read, kind, **kwargs)
                        for kind, kwargs in requests]
             return [future.result() for future in futures]
         finally:
@@ -103,6 +105,10 @@ class InfoReader:
             body = {'type': kind, 'user': address(user), 'coin': coin}
         else:
             raise Blocked('READ_TYPE_NOT_ALLOWED')
+        from .simple_execution import read
+        return read(body, lambda:self._transport(body), static=self.reuse, cycle=self.reuse)
+
+    def _transport(self, body):
         permit = (self.budget.acquire('/info', body, priority=self.priority, host=HOST)
                   if self.budget is not None else None)
         connection = http.client.HTTPSConnection(HOST, timeout=4)

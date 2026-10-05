@@ -108,7 +108,7 @@ def metadata():
             from .checks import InfoReader
             from .request_budget import BudgetError
             try:
-                value=InfoReader(priority='background').read('meta')
+                value=InfoReader(priority='background', reuse=True).read('meta')
                 if (not isinstance(value,dict) or not isinstance(value.get('universe'),list)
                         or not 1<=len(value['universe'])<=10000):
                     raise IntakeUnavailable('METADATA_UNAVAILABLE')
@@ -118,7 +118,9 @@ def metadata():
                 _META_FAILURE=reason
                 _META_RETRY_AT=time.monotonic()+METADATA_RETRY_SECONDS
                 raise IntakeUnavailable(reason) from None
-            _META=value;_META_AT=time.monotonic()
+            from .simple_execution import STATIC_READS
+            cached_at=STATIC_READS.started(dict(type='meta'))
+            _META=value;_META_AT=cached_at if cached_at is not None else time.monotonic()
             _META_FAILURE=None;_META_RETRY_AT=0.0
         return deepcopy(_META)
 
