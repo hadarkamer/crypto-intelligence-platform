@@ -9,6 +9,7 @@ import sol_proximity_experimental_signal as signal
 
 VERSION = 'sol-proximity-notification-store-v1'
 MAX_BYTES = 768*1024
+LEGACY_SOL_CONFIG_SHA256 = '698fec7779c0b692d1c939f9541aad2c79c3781b24a140c26c9741c95e2d3941'
 
 
 def key_for(scope):
@@ -41,7 +42,42 @@ def _encode(state):
     return raw
 
 
-def transact(scope, now, config_sha256, action, *, database_url=None):
+def migrate_sol_state(state, now, config_sha256):
+    """Explicit one-way migration: keep old filled exits; no old pending entries."""
+    if state.get('version') != VERSION or state.get('config_sha256') != LEGACY_SOL_CONFIG_SHA256:
+        raise ValueError('Unsupported SOL predecessor configuration')
+    if len(config_sha256) != 64 or any(c not in '0123456789abcdef' for c in config_sha256):
+        raise ValueError('Invalid migration destination fingerprint')
+    _maintain(state, now)
+    if any(i['status'] == 'IN_FLIGHT' for i in state['intents']):
+        raise ValueError('SOL delivery in flight; wait for its terminal state before migration')
+    preserved = cancelled = 0
+    for p in list(state['active']):
+        p.setdefault('rule_id', 'SOL_MAXPAIN_PROXIMITY_GT15')
+        p['legacy_formula'] = True
+        if p['status'] == 'PENDING':
+            signal._finish(state, p, 'CANCELLED_FORMULA_REPLACED', now)
+            ep = state['episodes'].get(p['episode_key'])
+            if ep and ep['generation'] == p['episode_generation']:
+                ep.update(consumed=True, consume_reason='FORMULA_REPLACED')
+            cancelled += 1
+        else:
+            # OPEN/UNKNOWN levels and identity remain unchanged.
+            preserved += 1
+    for intent in state['intents']:
+        if intent['status'] == 'PENDING':
+            intent['status'] = 'CANCELLED_FORMULA_REPLACED'
+    state['legacy_counts'] = deepcopy(state['counts'])
+    state['counts'] = {}
+    state['formula_migration'] = {'from_config_sha256': LEGACY_SOL_CONFIG_SHA256,
+        'to_config_sha256': config_sha256, 'migrated_ms': now,
+        'cancelled_pending': cancelled, 'preserved_filled_or_unknown': preserved,
+        'from_rule_id': 'SOL_MAXPAIN_PROXIMITY_GT15', 'to_rule_id': signal.RULE_ID}
+    state['config_sha256'] = config_sha256
+    state['formula_activated_ms'] = now
+
+
+def transact(scope, now, config_sha256, action, *, database_url=None, migrate_legacy_sol=False):
     key = key_for(scope)
     with _connect(database_url) as conn:
         lock = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], 'big', signed=True)
@@ -54,6 +90,8 @@ def transact(scope, now, config_sha256, action, *, database_url=None):
             conn.execute('INSERT INTO bot_settings(key,value) VALUES(%s,%s)', (key, _encode(state)))
         else:
             state = json.loads(row['value'])
+            if migrate_legacy_sol and state.get('config_sha256') != config_sha256:
+                migrate_sol_state(state, now, config_sha256)
             _validate(state, config_sha256)
         _maintain(state, now)
         result = action(state) if action else deepcopy(state)
@@ -68,8 +106,8 @@ def snapshot(scope, *, database_url=None):
         return json.loads(row['value']) if row else None
 
 
-def initialize_scope(scope, now, *, config_sha256, database_url=None):
-    return transact(scope, now, config_sha256, None, database_url=database_url)
+def initialize_scope(scope, now, *, config_sha256, database_url=None, migrate_legacy_sol=False):
+    return transact(scope, now, config_sha256, None, database_url=database_url, migrate_legacy_sol=migrate_legacy_sol)
 
 
 def ingest(scope, decoded, bars, now, *, config_sha256, database_url=None):

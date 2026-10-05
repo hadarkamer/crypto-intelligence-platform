@@ -147,6 +147,14 @@ class ReferenceIntegrationTests(unittest.TestCase):
 
 
 class TransitionReferenceReplayTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Replay archived intents under explicit former fixture permissions.
+        # The current retired roster is independently verified by policy tests.
+        gate = patch.object(transitions.delivery_policy, 'other_experimental_alerts_enabled',
+                            side_effect=lambda: transitions.delivery_policy.profile() == 'ALL')
+        gate.start()
+        self.addCleanup(gate.stop)
+
     async def test_changed_display_quote_replays_frozen_intent_but_changed_signal_conflicts(self):
         when = datetime(2026, 9, 15, 12, 5, tzinfo=timezone.utc)
         item = opportunity()
