@@ -51,6 +51,9 @@ class ConfigurationTests(NoExternal):
         controller=Mock()
         controller.store.journal._transaction.return_value=nullcontext(Mock())
         settings={**env(),'HL_TESTNET_SHORT_ENTRY_ENABLED':'false'}
+        controller.venue.env=settings
+        controller.routes=ROUTES2
+        controller.store.for_account.return_value=[]
         with patch.dict(os.environ,settings,clear=True), \
              patch.object(stream,'configuration',return_value=({'account':A},datetime.now(timezone.utc))), \
              patch.object(stream,'short_configuration',return_value=({'account':B},datetime.now(timezone.utc))), \

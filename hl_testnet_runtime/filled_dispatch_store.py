@@ -134,6 +134,13 @@ class DispatchStore:
             result.append(state)
         return result
 
+    def entry_blocker(self):
+        """Database-only scheduling hint; the locked final fence remains mandatory."""
+        with self.journal._transaction() as conn:
+            self.ready(conn)
+            row=conn.execute(f"SELECT 1 FROM {SCHEMA}.buckets WHERE value->'emergency' IS NOT NULL AND value->'emergency'<>'null'::jsonb LIMIT 1").fetchone()
+        return 'EMERGENCY_CIRCUIT_LATCHED_NO_NEW_ENTRY' if row else None
+
     def action_allowed(self, proposal):
         from .emergency_close import fence
         bucket=RecoveryJournal.bucket(proposal['account'],proposal['symbol'])

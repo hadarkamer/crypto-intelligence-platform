@@ -212,6 +212,8 @@ def accept(raw,store,*,read_metadata=metadata):
                 record_only=True,card_state=card['state'])
     print(json.dumps({'testnet_cards_intake':dict(status=result['status'],family=value['family'],
         account_role=card['account_role'],card_id=card['card_id'],
+        symbol=spec['signal']['symbol'],side=spec['signal']['side'],
+        source_prices={key:spec['signal'][key] for key in ('entry','stop','take_profit')},
         card_state=card['state'],order_requests_sent=0,
         source_time_utc=spec['signal']['at'],observed_at_utc=datetime.now(timezone.utc).isoformat())}),flush=True)
     return result

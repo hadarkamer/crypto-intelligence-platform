@@ -87,7 +87,7 @@ def fence(conn, state, operation):
     if state.get('emergency') is not None:
         raise DispatchError('EMERGENCY_BUCKET_MANAGED_BY_SEPARATE_LANE')
     if operation == 'ENTRY' and conn.execute(
-            f"SELECT 1 FROM {SCHEMA}.buckets WHERE value->'emergency' IS NOT NULL LIMIT 1").fetchone():
+            f"SELECT 1 FROM {SCHEMA}.buckets WHERE value->'emergency' IS NOT NULL AND value->'emergency'<>'null'::jsonb LIMIT 1").fetchone():
         raise DispatchError('EMERGENCY_CIRCUIT_LATCHED_NO_NEW_ENTRY')
     if operation == 'ENTRY' and ('history_gap_recovery' in state or
             (state.get('account') and conn.execute(f'''SELECT 1 FROM {SCHEMA}.buckets
@@ -405,8 +405,8 @@ def recent_normal_checkpoint(state, *, now_ms, fill_wakeups=None):
             and fill_wakeups.entry_allowed(state['account']) is True)
 
 
-def _idle_flat_checkpoint(state, *, now_ms):
-    """Skip only a fresh complete flat observation with no unresolved request."""
+def _idle_flat_checkpoint(state, *, now_ms, fill_wakeups=None):
+    """Share fresh flat proof, or omit idle never-submitted work on a clean feed."""
     if (state.get('emergency') is not None or state.get('pending') is not None
             or state['evidence'] is None):
         return False
@@ -415,13 +415,25 @@ def _idle_flat_checkpoint(state, *, now_ms):
     if (evidence['bindings']!=state['bindings']
             or snapshot['account']!=state['account'] or snapshot['symbol']!=state['symbol']
             or snapshot['history_complete'] is not True or snapshot['orders_complete'] is not True
-            or not 0<=now_ms-snapshot['at_ms']<15000):
+            or now_ms<snapshot['at_ms']):
         return False
     # An empty ownership list cannot explain any past exchange activity.
     if not state['bindings'] and (snapshot['fills'] or snapshot['terminal_orders']):
         return False
     from .long_stream_runtime import idle_flat
-    return idle_flat(state)
+    if not idle_flat(state):
+        return False
+    if now_ms-snapshot['at_ms']<15000:
+        return True
+    # A never-submitted candidate has no owned exposure for this supervisor
+    # to protect. A clean, reconciled feed suppresses its duplicate idle reads;
+    # this does NOT refresh evidence or grant entry permission. The ordinary
+    # entry lane still obtains current account inventory and all final gates.
+    # Any attempt, notification, disconnection, or owned binding restores REST.
+    return (not state['bindings'] and state.get('last_request') is None
+            and fill_wakeups is not None
+            and fill_wakeups.entry_allowed(state['account']) is True
+            and fill_wakeups.dirty_symbols(state['account'])==())
 
 
 def fresh_stop_coverage(state, *, now_ms):
@@ -556,7 +568,7 @@ class Controller:
                                  self.venue.now(), update)
 
     def release_closed_incident(self, bucket, *, account, incident_id):
-        """Explicit audited Testnet release; never called by startup or trading.
+        """Explicit audited Testnet release; normal trading never calls this.
 
         Keep continuous entries disabled, preserve the complete incident, and
         revalidate two agreeing public account inventories before exact CAS.
@@ -1185,7 +1197,8 @@ def start(normal, streams, stop_event, *, only_bucket=None):
                             continue
                         if not _unfinished(state,datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)):
                             continue
-                        if _idle_flat_checkpoint(state,now_ms=controller.venue.now()):
+                        if _idle_flat_checkpoint(state,now_ms=controller.venue.now(),
+                                fill_wakeups=vars(controller.venue).get('fill_wakeups')):
                             continue
                         if recent_normal_checkpoint(state,now_ms=controller.venue.now(),
                                 fill_wakeups=vars(controller.venue).get('fill_wakeups')):

@@ -1234,6 +1234,18 @@ class EmergencyDatabaseTests(NoExternal):
     entry=fixtures.DispatchDatabaseTests.entry
     protect=fixtures.DispatchDatabaseTests.protect
 
+    def test_json_null_is_not_an_incident_in_hint_or_locked_final_fence(self):
+        self.assertIsNone(self.store.entry_blocker())
+        def empty(conn,current):current['emergency']=None
+        state=self.store.change(self.bucket,self.s['revision'],'TEST_NULL_INCIDENT',self.v.now(),empty)
+        self.assertIsNone(self.store.entry_blocker())
+        with self.j._transaction() as conn:
+            m.fence(conn,state,'ENTRY')
+
+    def test_closed_verified_incident_remains_blocked_until_audited_release(self):
+        self.closed_release_setup()
+        self.assertEqual(self.store.entry_blocker(),'EMERGENCY_CIRCUIT_LATCHED_NO_NEW_ENTRY')
+
     def setup_emergency(self,q='40'):
         self.entry(q)
         self.v.t+=1
@@ -1942,6 +1954,24 @@ class SupervisorEmptyCandidateTests(NoExternal):
             life.validate_snapshot(state['evidence']['snapshot'])
             self.assertEqual(state['bindings'],[]);self.assertIsNone(state['pending'])
             self.assertIsNone(state['emergency'])
+
+    def test_clean_feed_skips_aged_never_submitted_candidates_without_refreshing_proof(self):
+        states=[self.candidate(side) for side in ('LONG','SHORT')]
+        feed=unittest.mock.Mock()
+        feed.entry_allowed.return_value=True
+        feed.dirty_symbols.return_value=()
+        for state in states:
+            before=deepcopy(state)
+            self.assertTrue(m._idle_flat_checkpoint(state,now_ms=T+60000,fill_wakeups=feed))
+            self.assertEqual(state,before)
+            state['last_request']='a'*64
+            self.assertFalse(m._idle_flat_checkpoint(state,now_ms=T+60000,fill_wakeups=feed))
+        state=self.candidate()
+        feed.dirty_symbols.return_value=('DOGE',)
+        self.assertFalse(m._idle_flat_checkpoint(state,now_ms=T+60000,fill_wakeups=feed))
+        feed.dirty_symbols.return_value=()
+        feed.entry_allowed.return_value=False
+        self.assertFalse(m._idle_flat_checkpoint(state,now_ms=T+60000,fill_wakeups=feed))
 
     def test_idle_skip_needs_complete_fresh_flat_exact_proof_without_uncertainty(self):
         good=self.candidate()

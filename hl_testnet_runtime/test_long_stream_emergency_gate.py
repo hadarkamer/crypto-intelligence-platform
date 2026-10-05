@@ -118,7 +118,7 @@ class EntrySupervisorSchedulingTests(NoExternal):
                 controller.cycle.return_value=dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
                 with patch.object(emergency,'healthy',return_value=True), \
                         patch.object(stream.roles,'short_entry_scope',return_value=None), \
-                        patch.object(stream,'_maintain_bucket',return_value=iter([])), \
+                        patch.object(stream,'_maintain_bucket',side_effect=AssertionError('NO_DUPLICATE_EMPTY_MAINTENANCE')), \
                         patch.object(stream.selection,'page',return_value=([],None)), \
                         patch.object(stream,'_account_owned',return_value=True) as owned:
                     result=self.call(controller,side)
@@ -137,3 +137,23 @@ class EntrySupervisorSchedulingTests(NoExternal):
             result=self.call(controller)
         self.assertEqual(result['status'],'SWEEP_COMPLETE')
         controller.cycle.assert_not_called();controller.register.assert_not_called()
+
+    def test_latched_circuit_skips_fresh_entry_http_but_keeps_live_exit_maintenance(self):
+        for exposed in (False,True):
+            state=state_from_case(q='100',stop=None,take=None) if exposed else candidate('LONG')
+            controller=self.controller([state])
+            class Store:
+                def entry_blocker(self):return 'EMERGENCY_CIRCUIT_LATCHED_NO_NEW_ENTRY'
+                def for_account(self,account):return [state]
+                def load(self,bucket):return state
+            controller.store=Store()
+            with patch.object(stream,'_maintain_bucket',return_value=iter([
+                    dict(status='ACCEPTED_UNVERIFIED',order_requests_sent=1)])) as maintain, \
+                    patch.object(stream.selection,'page',side_effect=AssertionError('NO_ENTRY_SCAN')), \
+                    patch.object(stream,'_account_owned',side_effect=AssertionError('NO_PRE_ENTRY_HTTP')):
+                result=self.call(controller)
+            self.assertEqual(result['status'],'NEW_ENTRIES_WAITING_FOR_EMERGENCY_CIRCUIT')
+            self.assertEqual(result['failure_code'],'EMERGENCY_CIRCUIT_LATCHED_NO_NEW_ENTRY')
+            self.assertEqual(result['order_requests_sent'],int(exposed))
+            self.assertEqual(maintain.call_count,int(exposed))
+            controller.register.assert_not_called()

@@ -365,7 +365,8 @@ def load_diagnostics(env=None):
         if present[BUCKETS]:
             result['buckets'] = _counts(conn,BUCKETS)
             result['buckets']['emergency_latched_total'] = int(conn.execute(f'''SELECT count(*)
-                FROM {BUCKETS} WHERE value->'emergency' IS NOT NULL''').fetchone()[0])
+                FROM {BUCKETS} WHERE value->'emergency' IS NOT NULL
+                AND value->'emergency'<>'null'::jsonb''').fetchone()[0])
             rows = conn.execute(f'''SELECT value,digest,revision FROM {BUCKETS}
                 ORDER BY (value->'evidence'->'snapshot'->>'at_ms')::bigint DESC NULLS LAST,bucket
                 LIMIT 21''').fetchall()

@@ -425,6 +425,18 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
          reconciliation_started_ms=None):
     """One bounded sweep. Every old exposure is serviced before new cards."""
     now = datetime.fromtimestamp(controller.venue.now()/1000,timezone.utc)
+    circuit_blocker=None
+    circuit_failure=None
+    blocker=getattr(type(controller.store),'entry_blocker',None)
+    if new_entries and callable(blocker):
+        try:
+            circuit_blocker=controller.store.entry_blocker()
+        except Exception as exc:
+            # Failure of an ENTRY-only hint cannot skip existing exit work.
+            circuit_blocker='ENTRY_CIRCUIT_REVIEW_UNAVAILABLE'
+            circuit_failure=_safe_failure(exc)
+        if circuit_blocker is not None:
+            new_entries=False
     entry_health_blocked=new_entries and _entry_supervisor_blocked(controller.venue)
     states = sorted(controller.store.for_account(route['account']),
                     key=lambda state:_maintenance_priority(state,dirty_symbols))
@@ -457,6 +469,12 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
                 and 3600000 < int(now.timestamp()*1000)-state['evidence']['snapshot']['at_ms'])
             recover_history = gap.needed(state, now_ms=controller.venue.now())
             unfinished = _unfinished(state,now)
+            # A never-submitted flat candidate is setup work, not exit work.
+            # The entry pass below obtains its authoritative fresh checkpoint;
+            # do not collect the same empty account twice in this sweep.
+            if (not forced and not state['bindings'] and state.get('last_request') is None
+                    and idle_flat(state)):
+                unfinished=False
             # A locally registered, never-attempted candidate requires no
             # maintenance while entries are disabled or the supervisor blocks
             # entry. Preserve forced notification proof and aged SHORT
@@ -501,6 +519,11 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
                       order_requests_sent=sent,new_cards_registered=0)
         if first_failure is not None:
             result.update(first_failure)
+        elif circuit_blocker is not None:
+            result.update(status='NEW_ENTRIES_WAITING_FOR_EMERGENCY_CIRCUIT',
+                          failure_code=circuit_blocker)
+            if circuit_failure is not None:
+                result.update(circuit_failure)
         if history_recovery:
             recovered=_history_recovery_report(history_recovery)
             if errors:
@@ -1029,6 +1052,10 @@ def start():
         controller.store.for_account(short[0]['account'])
     from .request_budget import Budget
     Budget(controller.store.journal).initialize()
+    # Explicit operator recovery runs before either execution thread exists,
+    # and requires BOTH persistent entry settings to be disabled.
+    from .startup_recovery import run as startup_recovery
+    startup_recovery(controller)
     with _lock:
         if _thread is not None and _thread.is_alive():
             return False
