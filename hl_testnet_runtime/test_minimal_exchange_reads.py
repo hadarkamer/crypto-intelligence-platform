@@ -105,6 +105,30 @@ class MinimalReadsTests(NoExternal):
         self.assertEqual(result['new_cards_registered'],1)
         self.assertEqual(card,before)
 
+    def test_local_final_flat_candidate_has_one_entry_pass_and_no_exit_prepass(self):
+        state,card,record,controller=self.case()
+        state['evidence']['snapshot']=closed(state['bindings'][0])
+        state['originals'][card['card_id']]=record
+        controller.cycle.return_value=dict(status='NO_ACTION_NEEDED',order_requests_sent=0)
+        with patch.object(stream.selection,'page',return_value=([],None)), \
+             patch.object(stream,'_account_owned',return_value=True) as owned, \
+             patch.object(stream,'_maintain_bucket',side_effect=AssertionError('DUPLICATE_EXIT_PREPASS')):
+            self.tick(controller,'LONG')
+        owned.assert_called_once()
+        controller.cycle.assert_called_once_with(state['bucket'],send=True,allowed_entry_card_id=None)
+
+    def test_final_flat_notification_observation_needs_no_price_or_metadata_when_entries_off(self):
+        state=state_from_case(q='100',stop='100',take='100')
+        state['evidence']['snapshot']=closed(state['bindings'][0])
+        store=MemoryStore(state);venue=Venue()
+        controller=dispatch.Controller(store,venue,ROUTES2)
+        with patch.object(controller,'refresh',return_value=state) as refresh, \
+             patch.object(venue,'sample',side_effect=AssertionError('UNNECESSARY_PRICE_READ')), \
+             patch.object(venue,'metadata',side_effect=AssertionError('UNNECESSARY_META_READ')):
+            result=controller.cycle(state['bucket'],send=True,allow_new_entries=False)
+        refresh.assert_called_once()
+        self.assertEqual(result,dict(status='NO_ACTION_NEEDED',order_requests_sent=0))
+
     def test_old_final_idle_history_is_not_polled_but_dirty_feed_restores_recovery(self):
         for clean in (True,False):
             with self.subTest(clean=clean):
@@ -158,6 +182,8 @@ class MinimalReadsTests(NoExternal):
 
     def test_enabled_entry_cycle_with_full_coverage_omits_price_and_metadata(self):
         state=state_from_case(q='100',stop='100',take='100')
+        _,record=original(2,expiry_seconds=120)
+        state['originals'][record['card']['card_id']]=record
         store=MemoryStore(state);venue=Venue()
         controller=dispatch.Controller(store,venue,ROUTES2)
         with patch.object(controller,'refresh',return_value=state) as refresh, \

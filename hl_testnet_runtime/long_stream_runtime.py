@@ -493,14 +493,19 @@ def tick(controller, route, not_before, *, new_entries, role='long_account',
             # the hourly SHORT scan and idle old-history catch-up entirely.
             # Notifications, disconnects, staged gaps and new candidates restore
             # ordinary reconciliation; no timestamp or ENTRY fence is changed.
-            if (notification_continuity and not forced and not unfinished
+            if (notification_continuity and not forced
                     and _quiet_final_history(controller,state)):
-                continue
+                if not unfinished:
+                    continue
+                # A local fresh candidate will obtain its own current ENTRY
+                # checkpoint below; no separate hourly pre-pass is needed.
+                aged_closed_short=False
             recover_history = gap.needed(state, now_ms=controller.venue.now())
-            # A never-submitted flat candidate is setup work, not exit work.
+            # A flat candidate with no unresolved work is setup, not exit work.
             # The entry pass below obtains its authoritative fresh checkpoint;
             # do not collect the same empty account twice in this sweep.
-            if (not forced and not state['bindings'] and state.get('last_request') is None
+            if (not forced and not aged_closed_short
+                    and (state['bindings'] or state.get('last_request') is None)
                     and idle_flat(state)):
                 unfinished=False
             # A locally registered, never-attempted candidate requires no

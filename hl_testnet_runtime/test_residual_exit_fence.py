@@ -275,7 +275,7 @@ class ResidualDatabaseTests(NoExternal):
 
         The present selector correctly refuses the unsafe second entry. Build
         that exact old proposal only in this exchange-double fixture, preserving
-        actual journal ownership/reconciliation. Both fixture overrides end
+        actual journal ownership/reconciliation. All fixture overrides end
         before cleanup, reconciliation or adversarial operations are exercised.
         """
         self.protect();b,o=original(2);self.cards.record(o['card']);self.c.register(b['card_id'])
@@ -289,7 +289,11 @@ class ResidualDatabaseTests(NoExternal):
                 basis=life.digest(state['evidence']),
                 observed_at_ms=state['evidence']['snapshot']['at_ms'])
         with patch.object(fence,'validate_proposal',return_value=True):
-            with patch.object(dispatch,'choose',side_effect=historical_entry):
+            # The current early no-work gate also prevents this obsolete
+            # shared-market entry. Bypass it ONLY while building the unsafe
+            # exchange-double starting state; cleanup tests use the real gate.
+            with patch.object(dispatch,'choose',side_effect=historical_entry), \
+                 patch.object(dispatch,'_fully_protected_no_work',return_value=False):
                 self.cycle()
             self.v.fill('1003','100');self.cycle();self.cycle();self.cycle(False)
         view=life.review(self.store.load(self.bucket)['bindings'],

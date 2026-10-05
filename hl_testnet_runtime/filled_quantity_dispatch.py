@@ -1144,7 +1144,8 @@ class Controller:
             if pending['phase']!='PREPARED':
                 return dict(status=pending['phase'],order_requests_sent=0)
         else: pending=None
-        if (pending is None and _fully_protected_no_work(state,self.venue.now())):
+        if (pending is None and _fully_protected_no_work(state,self.venue.now(),
+                include_final_flat=not allow_new_entries)):
             # A complete current public checkpoint already proves all live
             # exits. An occupied shared market cannot accept another entry,
             # even when account entries are enabled. Omit price/metadata reads
@@ -1315,7 +1316,7 @@ def _historical_timing_candidate(state,env,card_id,now_ms,*,require_fresh=True):
         return False
 
 
-def _fully_protected_no_work(state, now_ms):
+def _fully_protected_no_work(state, now_ms, *, include_final_flat=False):
     """Only omit price/metadata for a freshly verified, fully covered position."""
     if not state['bindings'] or state['evidence'] is None or state['pending']:
         return False
@@ -1346,7 +1347,9 @@ def _fully_protected_no_work(state, now_ms):
             return False
         else:
             protected=True
-    return protected
+    # A disabled ENTRY lane also has no price-dependent action in a fully final
+    # flat bucket. Its complete current public observation has already run.
+    return protected or include_final_flat
 
 
 def _collection_priority(value, now_ms, *, fill_wakeups=None, pending_clear=False):

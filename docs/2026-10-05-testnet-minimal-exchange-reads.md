@@ -29,6 +29,10 @@ them just because a new local card awaits entry. Notifications, disconnected
 feeds, pending work, live exposure/orders and staged gaps restore normal work.
 Old evidence timestamps are never advanced and entry evidence is never granted
 from the idle history skip. New entries on old history still require recovery.
+Final-flat local candidates also omit a duplicate exit-maintenance pre-pass;
+their ordinary entry cycle still refreshes current evidence. A forced final-flat
+observation with entries disabled obtains full current public evidence and omits
+the unrelated price/metadata selection afterwards.
 
 Retained: both public verification passes, overlapping fill history, exact order
 identity/status verification, current position/order inventory, protection
@@ -43,3 +47,8 @@ dirty/disconnected/staged-gap/pending restoration, and protected versus
 uncovered/working-entry price/metadata paths. Run the complete runtime suite,
 executor/forwarder suite and required PostgreSQL CI before deployment. Report
 post-deployment trade/protection evidence separately from software test results.
+
+The legacy shared-position cleanup fixture intentionally bypasses the new early
+no-work gate only while constructing its obsolete unsafe exchange-double state,
+alongside its existing selector/fence overrides. All overrides end before the
+actual orphan cleanup, double-fill, restart and ownership tests run.
