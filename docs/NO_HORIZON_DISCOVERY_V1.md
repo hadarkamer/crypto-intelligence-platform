@@ -132,10 +132,12 @@ development increment.
 ## Remaining stages
 
 This completes bounded catalog-plan generation, existing-queue registration
-and single-window descriptive ranking. Candidate selection across multiple
-testing windows, version-aware prospective validation and result publication
-remain separate work. Adjacent windows can share BTC parents; their counts and
-probabilities are never pooled by this implementation.
+and single-window descriptive ranking. Frozen candidate selection across all declared windows is now implemented in
+[NO_HORIZON_SELECTION_V1.md](NO_HORIZON_SELECTION_V1.md), with explicit policy
+parameters, verified per-window evidence and matched-parent overlap disclosure.
+Version-aware prospective validation and result publication remain separate work.
+Adjacent windows can share BTC parents; their counts and probabilities are never
+pooled.
 
 All runtime, Telegram and trading authority remains false. No merge,
 deployment, production migration/configuration or provider call is implied.

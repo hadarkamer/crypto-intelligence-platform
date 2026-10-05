@@ -23,6 +23,7 @@ import research_no_horizon_cohort_postgres_selftest as fixtures
 import research_no_horizon_cohort_store as local
 import research_no_horizon_contract as contracts
 import research_no_horizon_postgres_store as executor
+import research_no_horizon_selection as selection
 import research_price_archive as prices
 import research_watch_scan_intake as intake
 from research_no_horizon_postgres_store_postgres_selftest import (
@@ -630,6 +631,115 @@ class AcquisitionPostgresTests(unittest.TestCase):
             self.store.register_request(declaration, require_before_start=True)
         self.assertEqual(self.count(PREFIX + 'requests'), 0)
 
+
+
+    def test_selection_registers_frozen_policy_before_source_and_reuses_exact_receipt(self):
+        original_versions = deepcopy(self.store.versions)
+        plan = selection.build_plan(self.calendar_declaration(),
+            base_directions=['SHORT'], thresholds_pct=[.25],
+            candidate_keys=['FUTURES_CVD_TOTAL_65', 'PRICE_OI_TOTAL_65'],
+            window_count=3, top_k=1, required_eligible_windows=2)
+        with self.connect() as conn:
+            before = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        first = selection.register_plan(self.store, plan)
+        with self.connect() as conn:
+            after = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        self.assertEqual(first['plan_sha256'], plan['plan_sha256'])
+        self.assertEqual(first['discovery_plan_sha256'], plan['discovery_plan']['plan_sha256'])
+        self.assertEqual(first['discovery_registration']['plan_sha256'],
+                         plan['discovery_plan']['plan_sha256'])
+        self.assertTrue(first['registration_complete'])
+        self.assertEqual(first['receipt_sha256'],
+                         contracts.digest({key: value for key, value in first.items() if key != 'receipt_sha256'}))
+        inner = first['discovery_registration']['calendar_registration']
+        calendar_plan = plan['discovery_plan']['calendar_plan']
+        self.assertEqual(inner['plan_sha256'], calendar_plan['plan_sha256'])
+        self.assertEqual(len(inner['registrations']), 3)
+        for entry, window in zip(inner['registrations'], calendar_plan['windows']):
+            self.assertEqual(entry, {'ordinal': window['ordinal'],
+                                    **self.store.registration_info(entry['request_id'])})
+            self.assertEqual(entry['declaration_sha256'], window['declaration_sha256'])
+            self.assertTrue(entry['registered_before_source_start'])
+            created = contracts.utc(entry['created_at_utc'])
+            self.assertLessEqual(before, created)
+            self.assertLessEqual(created, after)
+            self.assertLessEqual(created, contracts.utc(entry['source_start_utc']))
+            request = self.store.report(entry['request_id'])
+            self.assertEqual(request['declaration'], window['declaration'])
+            self.assertEqual(request['identity']['implementation'], original_versions)
+            self.assertEqual(entry['implementation_sha256'], self.store.implementation_sha256)
+            self.assertEqual(request['status'], 'WAITING')
+        self.reopen()
+        self.assertEqual(selection.register_plan(self.store, plan), first)
+        self.assertEqual(self.store.versions, original_versions)
+        self.assertEqual(acquisition.implementation(), original_versions)
+        self.assertEqual(self.count(PREFIX + 'requests'), 3)
+        factory = Mock(side_effect=AssertionError('selection registration opened source'))
+        self.assertIsNone(self.store.run_once('selection-not-due', source_connection_factory=factory))
+        factory.assert_not_called()
+        for table in (PREFIX + 'anchors', PREFIX + 'leaves', 'research_no_horizon_plans'):
+            self.assertEqual(self.count(table), 0, table)
+        for value in (plan, first, first['discovery_registration'], inner):
+            for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized',
+                        'is_prospective_formula_evidence', 'validated_discovery',
+                        'scope_pooling'):
+                self.assertIs(value[key], False)
+
+    def test_selection_policy_and_window_changes_bind_every_child_request(self):
+        template = self.calendar_declaration()
+        original = deepcopy(template)
+        versions = deepcopy(self.store.versions)
+        variants = [
+            {'window_count': 2, 'top_k': 1, 'required_eligible_windows': 1},
+            {'window_count': 2, 'top_k': 2, 'required_eligible_windows': 1},
+            {'window_count': 2, 'top_k': 1, 'required_eligible_windows': 2},
+            {'window_count': 3, 'top_k': 1, 'required_eligible_windows': 1},
+        ]
+        previous_ids, previous_keys, selection_hashes, total = set(), set(), set(), 0
+        first_windows = None
+        for configuration in variants:
+            with self.subTest(configuration=configuration):
+                plan = selection.build_plan(template, base_directions=['SHORT'],
+                    thresholds_pct=[.25],
+                    candidate_keys=['FUTURES_CVD_TOTAL_65', 'PRICE_OI_TOTAL_65'],
+                    **configuration)
+                self.assertEqual(template, original)
+                windows = plan['discovery_plan']['calendar_plan']['windows']
+                if first_windows is None:
+                    first_windows = deepcopy(windows)
+                else:
+                    # Policy-only changes retain dates/scopes but create fresh
+                    # immutable identities for every corresponding window.
+                    for earlier, current in zip(first_windows, windows):
+                        for key in ('source_start_utc', 'source_end_utc', 'cutoff_utc', 'scopes'):
+                            self.assertEqual(earlier['declaration'][key], current['declaration'][key])
+                        self.assertNotEqual(earlier['declaration_sha256'], current['declaration_sha256'])
+                receipt = selection.register_plan(self.store, plan)
+                registrations = receipt['discovery_registration']['calendar_registration']['registrations']
+                ids = {row['request_id'] for row in registrations}
+                keys = {window['declaration']['cohort_key'] for window in windows}
+                self.assertEqual(len(ids), configuration['window_count'])
+                self.assertEqual(len(keys), configuration['window_count'])
+                self.assertFalse(previous_ids & ids)
+                self.assertFalse(previous_keys & keys)
+                self.assertNotIn(plan['plan_sha256'], selection_hashes)
+                previous_ids.update(ids)
+                previous_keys.update(keys)
+                selection_hashes.add(plan['plan_sha256'])
+                total += configuration['window_count']
+                self.assertEqual(selection.register_plan(self.store, plan), receipt)
+                for entry, window in zip(registrations, windows):
+                    actual = self.store.report(entry['request_id'])
+                    self.assertEqual(actual['declaration'], window['declaration'])
+                    self.assertEqual(actual['identity']['declaration_sha256'], window['declaration_sha256'])
+                    self.assertEqual(actual['identity']['implementation'], versions)
+                    self.assertEqual(actual['status'], 'WAITING')
+        self.assertEqual(total, 9)
+        self.assertEqual(self.count(PREFIX + 'requests'), total)
+        self.assertEqual(self.store.versions, versions)
+        self.assertEqual(acquisition.implementation(), versions)
+        for table in (PREFIX + 'anchors', PREFIX + 'leaves', 'research_no_horizon_plans'):
+            self.assertEqual(self.count(table), 0, table)
 
 
 if __name__ == '__main__':

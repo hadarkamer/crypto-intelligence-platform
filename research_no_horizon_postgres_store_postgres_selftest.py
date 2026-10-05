@@ -18,6 +18,8 @@ import research_no_horizon_cohort_store as local
 import research_no_horizon_contract as contracts
 import research_no_horizon_discovery as discovery
 import research_no_horizon_ranking as ranking
+import research_no_horizon_selection as selection
+from research_no_horizon_selection_selftest import selection_fixture
 import research_no_horizon_postgres_store as postgres
 from research_no_horizon_cohort_coverage_selftest import cross_part_rows
 from research_no_horizon_cohort_outcomes_selftest import outcome_fixture, _entry_time, _seal_exports
@@ -454,6 +456,36 @@ class PostgresCohortStoreTests(unittest.TestCase):
         for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
             self.assertIs(postgres_rank[key], False)
 
+
+
+
+    def test_selection_two_windows_match_sqlite_without_new_work_or_parent_pooling(self):
+        plan, fixtures = selection_fixture()
+        ids = [self.submit(fixture=fixture) for fixture in fixtures]
+        pending = selection.select_reports(plan, [self.store.report(item) for item in ids])
+        self.assertFalse(pending['selection_complete'])
+        self.assertEqual(pending['selected_scope_ids'], [])
+        for item in ids:
+            self.finish(item)
+        local_reports = [self.local_report(fixture) for fixture in fixtures]
+        expected = selection.select_reports(plan, local_reports)
+        with self.conn.transaction():
+            self.conn.execute('SET default_transaction_read_only=on')
+        before = self.count('research_no_horizon_work_commits')
+        actual = selection.select_reports(plan, [self.store.report(item) for item in ids])
+        self.assertTrue(actual['selection_complete'])
+        self.assertEqual(actual['selected_scope_ids'], expected['selected_scope_ids'])
+        self.assertEqual(actual['selected_scopes'], expected['selected_scopes'])
+        self.assertEqual(actual['rows'], expected['rows'])
+        self.assertEqual(actual['denominator'], expected['denominator'])
+        self.assertEqual(actual['matched_parent_overlap'], expected['matched_parent_overlap'])
+        self.assertGreater(actual['matched_parent_overlap']['repeated_parent_count'], 0)
+        self.assertEqual(actual['denominator']['declared_windows'], 2)
+        self.assertTrue(actual['selected_scope_ids'])
+        self.assertEqual(before, self.count('research_no_horizon_work_commits'))
+        for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized',
+                    'policy_registration_verified', 'window_pooling', 'validated_discovery'):
+            self.assertIs(actual[key], False)
 
 
 if __name__ == '__main__':
