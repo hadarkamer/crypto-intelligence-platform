@@ -536,12 +536,36 @@ def retained_anchor(reader, account, fill):
         raise SyncError('HISTORY_RETENTION_ANCHOR_UNAVAILABLE')
 
 
+@contextmanager
+def retained_observation(reader, account, anchor, bodies):
+    """Fund each read-only retention phase without holding later worst cases.
+
+    The two history/inventory passes remain one fully funded atomic plan.
+    Each independent retention bracket is funded immediately before its HTTP.
+    No partial phase supplies evidence or a durable cursor: callers commit only
+    after both brackets, both passes, and their original time/CAS/feed guards.
+    Quota denial or a failed refund leaves the old proof and ENTRY fence intact.
+    """
+    stamp=life.moment(anchor['at_ms'])
+    body=dict(type='userFillsByTime',user=account,startTime=stamp,endTime=stamp,
+              aggregateByTime=False)
+    plan=getattr(type(reader),'observation_batch',None)
+    def phase(reads):
+        return reader.observation_batch(reads) if callable(plan) else nullcontext()
+    with phase([body]):
+        retained_anchor(reader,account,anchor)
+    with phase(bodies):
+        yield
+    with phase([body]):
+        retained_anchor(reader,account,anchor)
+
+
 def _collect_retained(evidence, reader, *, cursor_ms, anchor, clock=now_ms,
                      elapsed=time.monotonic, inventory_guard=None):
     """Final bounded two-pass collection bracketed by a retained old fill.
 
-    All known reads, including both retention checks, are funded before any
-    HTTP. This does not enlarge normal catch-up bounds or alter prior facts.
+    Both history/inventory passes are funded together, between independently
+    funded retention checks. Nothing is committed from a partial observation.
     The caller must have durably reviewed every interval before cursor_ms.
     """
     bindings,previous=deepcopy(evidence['bindings']),deepcopy(evidence['snapshot'])
@@ -557,21 +581,15 @@ def _collect_retained(evidence, reader, *, cursor_ms, anchor, clock=now_ms,
     stamp=life.moment(anchor['at_ms'])
     if stamp>previous['at_ms']:
         raise SyncError('HISTORY_RETENTION_ANCHOR_TOO_NEW')
-    body=dict(type='userFillsByTime',user=account,startTime=stamp,endTime=stamp,
-              aggregateByTime=False)
-    bodies=[body]+_planned_observation_reads(bindings,previous,cursor,end,
-                 reuse_verified_terminals=True)+[body]
-    plan=getattr(type(reader),'observation_batch',None)
-    context=reader.observation_batch(bodies) if callable(plan) else nullcontext()
-    with context:
-        retained_anchor(reader,account,anchor)
+    bodies=_planned_observation_reads(bindings,previous,cursor,end,
+                                     reuse_verified_terminals=True)
+    with retained_observation(reader,account,anchor,bodies):
         result=_collect_funded(bindings,previous,reader,cursor,end,started,clock,elapsed,
                               plain=(),reuse_verified_terminals=True,
                               inventory_guard=inventory_guard)
-        retained_anchor(reader,account,anchor)
-        if elapsed()-started>15:
-            raise SyncError('OBSERVATION_TOO_SLOW')
-        return result
+    if elapsed()-started>15:
+        raise SyncError('OBSERVATION_TOO_SLOW')
+    return result
 
 
 def _collect_funded(bindings, previous, reader, cursor, end, started, clock, elapsed,

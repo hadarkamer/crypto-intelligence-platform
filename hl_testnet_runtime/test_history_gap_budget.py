@@ -70,7 +70,7 @@ class HistoryGapPlanTests(unittest.TestCase):
                              for body in final), 2)
         self.assertEqual((budget.LIMIT, budget.BACKGROUND_LIMIT), (1200, 800))
 
-    def test_retention_bracket_and_final_collection_are_funded_before_any_http(self):
+    def test_denied_opening_retention_phase_starts_no_http(self):
         start, end = T - evidence.OVERLAP_MS, T + evidence.DAY_MS // 2
         bodies = retained_history_plan(start, end)
         self.assertEqual(sum(budget.request_weight('/info', body)
@@ -89,11 +89,10 @@ class HistoryGapPlanTests(unittest.TestCase):
                     anchor=old['snapshot']['fills'][0], clock=lambda:cursor + 60000)
         plan = owner.reserve_observation.call_args.args[0]
         self.assertEqual(sum(budget.request_weight('/info', body)
-                             for body in plan), 524)
+                             for body in plan), 120)
         self.assertEqual(owner.reserve_observation.call_args.kwargs['priority'],
                          'background')
-        self.assertEqual(sum(body['type'] == 'userFillsByTime' for body in plan), 4)
-        self.assertEqual(plan[0], plan[-1])
+        self.assertEqual(sum(body['type'] == 'userFillsByTime' for body in plan), 1)
         self.assertEqual(reader.calls, 0)
         owner.acquire.assert_not_called()
         connection.assert_not_called()

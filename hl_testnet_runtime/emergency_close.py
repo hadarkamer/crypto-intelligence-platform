@@ -699,6 +699,15 @@ class Controller:
             wait=reconciliation_wait_ms(state,now_ms=self.venue.now())
             return self.normal.refresh(state['bucket'],emergency=True,emergency_wait_ms=wait)
         except (DispatchError, life.LifecycleError) as exc:
+            if str(exc)=='CONCURRENT_DISPATCH_RELOAD_REQUIRED':
+                current=self.store.load(state['bucket'])
+                if (fresh_stop_coverage(current,now_ms=self.venue.now())
+                        and recent_normal_checkpoint(current,now_ms=self.venue.now(),
+                            fill_wakeups=vars(self.venue).get('fill_wakeups'))):
+                    # A peer committed complete current STOP proof while this
+                    # read was finishing. Reuse that exact durable proof, never
+                    # the losing read, and never retry a request or send here.
+                    return current
             if str(exc) not in {'OUTCOME_UNRESOLVED_NO_NEW_REQUEST', 'CONFLICT_REQUIRES_REVIEW',
                     'REJECTION_HISTORY_WINDOW_REQUIRES_REVIEW', 'REJECTION_FILL_FOUND_NO_RELEASE'}:
                 raise
@@ -1026,7 +1035,12 @@ class Controller:
         # Public observation never lends authority to a changed durable bucket.
         # Normal/emergency actions and checkpoint commits share this lane; the
         # exact recheck preserves the collected quantity/identity/nonce basis.
-        if self.store.load(bucket)!=state:
+        current=self.store.load(bucket)
+        if current!=state:
+            if (fresh_stop_coverage(current,now_ms=self.venue.now())
+                    and recent_normal_checkpoint(current,now_ms=self.venue.now(),
+                        fill_wakeups=vars(self.venue).get('fill_wakeups'))):
+                return dict(status='STOP_OBSERVED_OR_NO_EXPOSURE',order_requests_sent=0)
             raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
         sample=None;sample_basis=None
         if (state.get('emergency') or {}).get('provisional') is True:

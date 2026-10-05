@@ -4,7 +4,6 @@ Never changes an order, discovers ownership, fabricates an evidence clock, or
 increases request quotas. Each successful step stages one independently checked
 12-hour window. Only a final fresh two-pass lifecycle proof replaces evidence.
 """
-from contextlib import nullcontext
 from copy import deepcopy
 import time
 
@@ -226,11 +225,8 @@ def _step(controller, bucket, state, *, reader=None, clock=None, elapsed=time.mo
         new_cursor=now
     else:
         new_cursor=cursor+WINDOW_MS; start=max(1,cursor-evidence.OVERLAP_MS)
-        plan=getattr(type(reader),'observation_batch',None)
-        context=(reader.observation_batch(planned_chunk_reads(account,anchor,start,new_cursor))
-                 if callable(plan) else nullcontext())
-        with context:
-            evidence.retained_anchor(reader,account,anchor['fill'])
+        bodies=planned_chunk_reads(account,anchor,start,new_cursor)[1:-1]
+        with evidence.retained_observation(reader,account,anchor['fill'],bodies):
             first=evidence.merge_fills(stage['staged_fills'],
                 evidence.history(reader,account,start,new_cursor),account,symbol,start,new_cursor)
             second=evidence.merge_fills(stage['staged_fills'],
@@ -239,7 +235,6 @@ def _step(controller, bucket, state, *, reader=None, clock=None, elapsed=time.mo
                 raise RecoveryError('OBSERVATION_CHANGED_RETRY')
             if first!=sorted(stage['staged_fills'],key=lambda row:(row['at_ms'],row['fill_id'])):
                 raise RecoveryError('HISTORY_RECOVERY_NEW_OR_UNRESOLVED_ACTIVITY')
-            evidence.retained_anchor(reader,account,anchor['fill'])
     finished=life.moment(clock())
     if elapsed()-started>15 or not now<=finished<=now+15000:
         raise RecoveryError('OBSERVATION_TOO_SLOW_OR_CLOCK_REGRESSED')

@@ -111,7 +111,7 @@ class RecoveryPureTests(NoExternal):
                 self.assertEqual(state['history_gap_recovery_last']['chunks'],5)
                 self.assertFalse(gap.needed(state,venue.now()))
                 self.assertEqual(store.events,['HISTORY_GAP_RECOVERY_STARTED']+['HISTORY_GAP_RECOVERY_CHUNK']*5+['HISTORY_GAP_RECOVERY_COMPLETE'])
-                self.assertEqual([len(plan) for plan in reader.plans],[4]*5+[8])
+                self.assertEqual([len(plan) for plan in reader.plans],[1,2,1]*5+[1,6,1])
                 self.assertTrue(all(body['endTime']-body['startTime']<=gap.WINDOW_MS+evidence.OVERLAP_MS
                     for plan in reader.plans for body in plan if body['type']=='userFillsByTime'))
 
