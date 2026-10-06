@@ -18,6 +18,7 @@ import sol_proximity_experimental_signal as signal
 import sol_proximity_experimental_store as store
 from maxpain_experimental_specs import SOL_RANGE24, SPECS
 import experimental_hyperliquid_source as hyperliquid
+import maxpain_pending_restore_20261006 as pending_source_restore
 
 MINUTE = signal.MINUTE
 def config_hash(spec):
@@ -114,6 +115,7 @@ class SolProximityWorker:
         self.scopes, self.lock = set(), asyncio.Lock()
         self.retry_ms, self.last_poll, self.last_price_poll = 0, None, None
         self.last_legacy_price_poll = None
+        self.source_restore_task = None
         self.runtime = {'rule_id': self.spec.rule_id, 'research_id': self.spec.research_id, 'ready': False, 'state': 'NOT_STARTED',
                         'config_sha256': self.config_sha256, 'delivered': 0}
 
@@ -141,6 +143,12 @@ class SolProximityWorker:
             self.task = asyncio.create_task(self.run(), name=self.spec.rule_id.lower())
 
     async def stop(self):
+        if self.source_restore_task:
+            self.source_restore_task.cancel()
+            try:
+                await self.source_restore_task
+            except asyncio.CancelledError:
+                pass
         if self.task:
             self.task.cancel()
             try:
@@ -345,6 +353,7 @@ class SolProximityWorker:
                     if not await self.deliver(scope, chat_id):
                         break
                 self.last_poll = (scope, minute)
+                pending_source_restore.schedule(self, scope)
                 if self.clock() < self.retry_ms:
                     return
                 self.runtime.update(ready=True, state='MONITORING' if state['initialized_universe'] else 'WAITING_WATCH_BASELINE',
