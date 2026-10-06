@@ -1,0 +1,302 @@
+{
+  "schema": "experimental_source_and_handover_verification_v1",
+  "status": "ISOLATED_CODEX_AND_RENDER_PASSED_LIVE_ENTRY_DATA_BLOCKED",
+  "scope": "Frozen candidate, isolated Codex and isolated Render build; synthetic exchange only.",
+  "receiver_commit": "2f7b87cb7375314494b7143dab47d349467ec520",
+  "producer_commit": "c26f37ac08bafc3a746e3944ff1d18402a84f658",
+  "bundle_commit": "d5d300b54633100f94a74c516b3315e7e5fe60c4",
+  "bundle_tree": "b73d00677c78030540a9ef8dffdcb777a10128ef",
+  "bundle_branch": "codex/experimental-render-isolated-20261006",
+  "manifest_sha256": "41e367e45b1bc43d66d1d64e2065dc76ff58ed016bd77dd017a86f54b17a1763",
+  "candidate_sha256": {
+    "receiver": "202fa69f486b8f58a0eb807fbc17c1ed629540cdcfb8a0913b66041eb8143964",
+    "producer": "7a02d1f07729a369dc10effcaa63c11e2f6dd5ab39a895db5099e13d899fbfe1"
+  },
+  "codex": {
+    "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
+    "passed": 2532,
+    "skipped_postgresql": 567,
+    "failures": 0,
+    "errors": 0,
+    "network_attempts_blocked": 0,
+    "postgresql": "NOT_RUN_POSTGRES_REQUIRES_NONROOT",
+    "snapshot_unchanged_after_tests": true,
+    "workspace_unchanged_since_snapshot": true,
+    "stages": [
+      {
+        "duration_seconds": 21.752,
+        "errors": 0,
+        "exit_code": 0,
+        "failure_code": null,
+        "failure_details": [],
+        "failures": 0,
+        "network_attempts_blocked": 0,
+        "passed": 2187,
+        "postgresql_configured": false,
+        "report_sha256": "7bac6cb3759ada0e4c04fdb5924c4e438a6186ef2102a70dd6cf51460fefdad8",
+        "skipped": 563,
+        "successful": true,
+        "suite": "runtime",
+        "tests_run": 2750,
+        "unexpected_successes": 0
+      },
+      {
+        "duration_seconds": 1.403,
+        "errors": 0,
+        "exit_code": 0,
+        "failure_code": null,
+        "failure_details": [],
+        "failures": 0,
+        "network_attempts_blocked": 0,
+        "passed": 345,
+        "postgresql_configured": false,
+        "report_sha256": "a33c3134b3cdf137d681747d10fa617e3ec7a9fdb88b05cca1cf2fd28a484685",
+        "skipped": 4,
+        "successful": true,
+        "suite": "producer",
+        "tests_run": 349,
+        "unexpected_successes": 0
+      }
+    ]
+  },
+  "render": {
+    "status": "PASSED",
+    "service_id": "srv-db2jon7lot8c739eebrg",
+    "deploy_id": "dep-db2ksnk9v7es738g43i0",
+    "expected_tests": 3099,
+    "tests_passed": 3099,
+    "postgresql_tests_executed": 567,
+    "new_postgresql_tests_since_previous_connection": 32,
+    "prior_27_postgresql_tests_included": true,
+    "all_prior_postgresql_test_ids_preserved": true,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "postgresql_cleanup": "STOPPED",
+    "deploy": {
+      "commit": {
+        "createdAt": "2026-10-06T19:38:49Z",
+        "id": "d5d300b54633100f94a74c516b3315e7e5fe60c4",
+        "message": "Verify isolated Testnet price archive and ownership handover\n\nPin the Codex-tested source bundle for disposable PostgreSQL and synthetic exchange regression. Keep the bot service, strategy rules, account configuration and production branch unchanged."
+      },
+      "createdAt": "2026-10-06T19:39:10.091608Z",
+      "finishedAt": "2026-10-06T19:44:46.866912Z",
+      "id": "dep-db2ksnk9v7es738g43i0",
+      "startedAt": "2026-10-06T19:39:10.088999Z",
+      "status": "live",
+      "trigger": "api",
+      "updatedAt": "2026-10-06T19:44:46.867371Z"
+    },
+    "result": {
+      "candidate_sha256": {
+        "producer": "7a02d1f07729a369dc10effcaa63c11e2f6dd5ab39a895db5099e13d899fbfe1",
+        "receiver": "202fa69f486b8f58a0eb807fbc17c1ed629540cdcfb8a0913b66041eb8143964"
+      },
+      "manifest_sha256": "41e367e45b1bc43d66d1d64e2065dc76ff58ed016bd77dd017a86f54b17a1763",
+      "parity": {
+        "bars_per_comparison": 4,
+        "candidate_sha256": "f97df96e1d6dd30845a49904acd060d4c72de11f51e719b3ef2b3e6990235300",
+        "comparisons": 4000,
+        "network_attempts_blocked": 0,
+        "producer_decision_functions_sha256": "b784c3c2374f0d069be180b563b9641f5b8d9bee34912e208e724464e1c7391a",
+        "producer_file_sha256": "040538d896293a5b72125d73b2b5ffe0a26ce1343567b7ae97db2c1969acee72"
+      },
+      "postgresql_cleanup": "STOPPED",
+      "real_exchange_requests_sent": 0,
+      "schema": "experimental_render_verification_v1",
+      "stages": {
+        "producer": {
+          "errors": 0,
+          "failures": 0,
+          "network_attempts_blocked": 0,
+          "passed": 349,
+          "skipped": 0,
+          "tests_run": 349,
+          "unexpected_successes": 0
+        },
+        "runtime": {
+          "errors": 0,
+          "failures": 0,
+          "network_attempts_blocked": 0,
+          "passed": 2750,
+          "skipped": 0,
+          "tests_run": 2750,
+          "unexpected_successes": 0
+        }
+      },
+      "status": "PASSED",
+      "verification": {
+        "postgresql": "FRESH_LOOPBACK_POSTGRES18",
+        "postgresql_cleanup": "STOPPED",
+        "producer_postgresql": "FRESH_LOOPBACK_PRODUCER_DATABASE",
+        "stages": {
+          "producer": {
+            "errors": 0,
+            "exit_code": 0,
+            "failure_details": [],
+            "failures": 0,
+            "network_attempts_blocked": 0,
+            "passed": 349,
+            "postgresql_configured": true,
+            "skipped": 0,
+            "tests_run": 349,
+            "unexpected_successes": 0
+          },
+          "runtime": {
+            "errors": 0,
+            "exit_code": 0,
+            "failure_details": [],
+            "failures": 0,
+            "network_attempts_blocked": 0,
+            "passed": 2750,
+            "postgresql_configured": true,
+            "skipped": 0,
+            "tests_run": 2750,
+            "unexpected_successes": 0
+          }
+        }
+      }
+    }
+  },
+  "implemented": [
+    "Official metaAndAssetCtxs market snapshot supplies current MARK; activeAssetData supplies capacity only. One shared snapshot replaces per-symbol invented MARK reads.",
+    "Concrete read-only producer Hyperliquid 1m archive adapter with separate DSN, bounded cursor recovery, exact source timestamps and canonical immutability verification.",
+    "Freshly observed uncovered fills/missing stops suppress all source/admission work. Source I/O failure cannot abort a valid owned protection path; capacity uses existing background quota.",
+    "Default-off Gunicorn/WSGI integration; authenticated intake uses the native candidate inbox without exchange side effects.",
+    "Legacy protection retained until final owned journal and fresh complete flat inventories; verified worker joins; durable ownership receipt survives restarts with experimental exposure.",
+    "Session advisory ownership for cooperating candidate processes; known-never-held contention may retry; uncertain/lost prior ownership permanently fences that lease.",
+    "Per-release operator predecessor-retirement attestation is checked again before entry dispatch; its removal does not prevent existing exits.",
+    "Shutdown/partial-start/uncertain-commit races tested. No schema initialization in recurring source/entry processing."
+  ],
+  "remaining_before_live_activation": [
+    {
+      "code": "AUTHORITATIVE_TESTNET_MARK_HISTORY_UNAVAILABLE",
+      "detail": "Current MARK and compressed snapshot/delta messages do not prove every intermediate MARK from original source_at. No connected timestamp/sequence/replay/completeness authority. Entries remain blocked; sampled observations are never upgraded to history_complete."
+    },
+    {
+      "code": "INTRAMINUTE_SOURCE_EXTREMA_UNAVAILABLE",
+      "detail": "Containing TRADE minute candles cannot reconstruct exact MaxPain post-reference extrema when source_at is inside the minute."
+    },
+    {
+      "code": "SOURCE_ARCHIVE_CONNECTION_CONFIGURATION",
+      "detail": "The new read-only adapter requires the explicitly selected existing producer source archive URL. No live DB credentials, contents, recency or availability were probed in this isolated task."
+    },
+    {
+      "code": "PREDECESSOR_RETIREMENT_AT_APPROVED_ROLLOUT",
+      "detail": "The old deployed binary does not participate in the new process lease. First activation requires separately approved, independently verified retirement/drain of that generation. Release-bound attestation is an operator assertion, not automatic evidence."
+    },
+    {
+      "code": "BOUNDED_REAL_TESTNET_PROOF_AFTER_APPROVAL",
+      "detail": "Synthetic exchange tests cannot establish actual fills, triggers or end-to-end latency. No Mainnet authorization."
+    }
+  ],
+  "limits": [
+    "All 567 PostgreSQL test executions passed on this exact Render candidate, with zero skips and confirmed temporary database shutdown; no production database was used.",
+    "The guard is a Python I/O boundary, not an OS network sandbox.",
+    "Historical durable order lookups still grow with the retained journal; no claim of indefinite scalability.",
+    "The five-second unprotected-stop policy was tested as a decision rule; actual network/DB wall-clock response is not guaranteed.",
+    "Independent simultaneous exits for multiple trades in the same account/symbol remain fenced."
+  ],
+  "actions": {
+    "strategy_math_changed": false,
+    "alert_logic_changed": false,
+    "request_budget_policy_changed": false,
+    "production_branch_pushed": false,
+    "production_configuration_changed": false,
+    "production_deployed": false,
+    "live_exchange_requests_sent": 0,
+    "live_account_access": false,
+    "live_database_access": false,
+    "isolated_test_branch_pushed": true,
+    "isolated_render_build_started": true
+  },
+  "official_capability_sources": [
+    "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions",
+    "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals"
+  ],
+  "completed_at_utc": "2026-10-06T19:44:45.142103324Z",
+  "production_preservation": {
+    "service_id": "srv-dakptbh594qs7395460g",
+    "service_descriptor_unchanged": true,
+    "deploy_id_before": "dep-db2hbd49v7es73c64qu0",
+    "deploy_id_after": "dep-db2hbd49v7es73c64qu0",
+    "commit_before": "2ca9d375ed052834e76e01a5c3e11e9cb1d38b98",
+    "commit_after": "2ca9d375ed052834e76e01a5c3e11e9cb1d38b98",
+    "production_environment_mutations_performed": false
+  },
+  "tested_manifest": "EXPERIMENTAL_HANDOVER_TESTED_MANIFEST.json",
+  "source_formula_preservation": {
+    "hype_row71205_experimental_signal": true,
+    "maxpain_experimental_specs": true,
+    "sol_proximity_experimental_signal": true,
+    "xrp_r2732_experimental_signal": true,
+    "sol_g65_source_decision_parity": true
+  },
+  "g65_codex": {
+    "bars_per_comparison": 4,
+    "candidate_sha256": "f97df96e1d6dd30845a49904acd060d4c72de11f51e719b3ef2b3e6990235300",
+    "compared": [
+      "outcome",
+      "phase",
+      "lock_effective_time",
+      "exit_price"
+    ],
+    "comparisons": 4000,
+    "database": "IN_MEMORY_DOUBLE",
+    "decision_function_executed_unchanged": true,
+    "live_exchange_requests_sent": 0,
+    "network_attempts_blocked": 0,
+    "network_guard": "PYTHON_IO_BOUNDARY",
+    "notification_storage": "IN_MEMORY_DOUBLE",
+    "producer_decision_functions_sha256": "b784c3c2374f0d069be180b563b9641f5b8d9bee34912e208e724464e1c7391a",
+    "producer_file_sha256": "040538d896293a5b72125d73b2b5ffe0a26ce1343567b7ae97db2c1969acee72",
+    "schema": "g65_producer_differential_v1",
+    "seed": 65,
+    "source_files_modified": false,
+    "status": "PASSED"
+  },
+  "conclusions_he": [
+    "בוצעו פיתוח והרצות נפרדות על אותה גרסה קפואה ב-Codex וב-Render.",
+    "ב-Codex עברו 2532 בדיקות ללא כשל. 567 בדיקות PostgreSQL דולגו עקב מגבלת root.",
+    "ב-Render עברו כל 3099 הבדיקות ללא כשל או דילוג, כולל 567 בדיקות PostgreSQL. המסד הזמני נסגר.",
+    "בכל סביבה עברו גם 4000 השוואות G65 למקור. כל 27 בדיקות PostgreSQL מהשלב הקודם נשמרו ונבדקו, יחד עם 32 חדשות.",
+    "הושלם קוד קריאת הארכיון ומחיר MARK נוכחי, ותוקנו חסימות של הגנות עקב נתוני מקור או תזמון.",
+    "חיבור ההפעלה והעברת האחריות נבדקו בבידוד; פרישת תהליך Render הישן ואישור ההפעלה הם שלב תפעולי עתידי, לא עובדה שאומתה כאן.",
+    "לא הושלם החסם המהותי של נתוני מחירים: אין מקור מחובר המוכיח רצף MARK מלא, ונרות דקה אינם משחזרים גבולות מקור בתוך דקה. לכן המנגנון החדש עדיין אינו מוכן להפעלת כניסות.",
+    "הבוט הפעיל והגדרות השירות שנבדקו נשארו זהים. הנוסחאות וההתראות לא שונו. לא נעשו פעולות בחשבונות או במסדי נתונים חיים."
+  ],
+  "new_postgresql_test_ids": [
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_attestation_is_release_bound_and_removal_closes_entry_gate",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_candidate_partial_start_does_not_restore_legacy_until_join_confirmed",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_changed_inventory_after_stop_restores_legacy_before_candidate_start",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_flat_handover_persists_receipt_then_starts_one_new_owner",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_harmless_legacy_observation_revision_does_not_invalidate_receipt",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_lost_process_owner_cannot_report_enabled_runtime",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_missing_candidate_schema_or_price_configuration_retains_legacy",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_new_release_preserves_existing_protection_and_requires_its_own_attestation",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_owner_not_released_until_candidate_threads_are_confirmed_stopped",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_pending_legacy_keeps_old_protection_without_any_extra_public_read",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_process_owner_is_acquired_before_any_legacy_or_candidate_start",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_restart_resumes_open_candidate_without_flat_or_legacy_start",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_shutdown_during_composition_never_starts_legacy_or_candidate",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_shutdown_during_flat_check_never_commits_or_starts_new_owner",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_shutdown_timeout_latches_and_never_starts_or_restarts_owner",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_start_is_nonblocking_and_does_not_collect_on_gunicorn_thread",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_uncertain_handover_commit_never_starts_new_owner",
+    "hl_testnet_runtime.test_experimental_live_startup.HandoverPostgresTests.test_unknown_account_position_keeps_legacy_owner",
+    "hl_testnet_runtime.test_experimental_runtime_owner.OwnerPostgresTests.test_closed_backend_connection_fences_dispatch_proof",
+    "hl_testnet_runtime.test_experimental_runtime_owner.OwnerPostgresTests.test_concurrent_processes_are_fenced_and_clean_release_allows_successor",
+    "hl_testnet_runtime.test_experimental_runtime_owner.OwnerPostgresTests.test_external_unlock_is_detected_and_old_owner_never_reacquires",
+    "hl_testnet_runtime.test_experimental_runtime_owner.OwnerPostgresTests.test_parallel_acquisition_yields_exactly_one_owner",
+    "hl_testnet_runtime.test_experimental_runtime_owner.OwnerPostgresTests.test_two_connections_cannot_own_same_candidate_runtime",
+    "hl_testnet_runtime.test_experimental_runtime_owner.OwnerPostgresTests.test_verification_does_not_increment_postgres_reentrant_lock_count",
+    "hl_testnet_runtime.test_experimental_source_archive.ArchivePostgresTests.test_actual_reader_transaction_rejects_write",
+    "hl_testnet_runtime.test_experimental_source_archive.ArchivePostgresTests.test_distinct_wrong_market_rows_do_not_satisfy_source_query",
+    "hl_testnet_runtime.test_experimental_source_archive.ArchivePostgresTests.test_missing_immutable_trigger_cannot_be_treated_as_verified_cache",
+    "hl_testnet_runtime.test_experimental_source_archive.ArchivePostgresTests.test_same_name_trigger_with_false_condition_does_not_prove_immutability",
+    "hl_testnet_runtime.test_experimental_source_archive.ArchivePostgresTests.test_same_name_trigger_with_replaced_function_does_not_prove_immutability",
+    "hl_testnet_runtime.test_experimental_source_archive.ArchivePostgresTests.test_source_gap_blocks_entry_and_conditional_advance",
+    "hl_testnet_runtime.test_experimental_source_archive.ArchivePostgresTests.test_source_immutable_trigger_rejects_revision",
+    "hl_testnet_runtime.test_experimental_source_archive.ArchivePostgresTests.test_source_readback_and_new_provider_preserve_original_timestamps"
+  ]
+}
