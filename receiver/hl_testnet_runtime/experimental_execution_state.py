@@ -14,13 +14,18 @@ from pathlib import Path
 import sqlite3
 
 from . import card_lifecycle as life
+from .postgres_journal import JournalError
 
 VERSION = 'experimental-isolated-execution-state-v1'
 PG_SCHEMA = 'hl_experimental_isolated_worker_v1'
 
 
-class StateError(ValueError):
-    pass
+class StateError(JournalError):
+    """Preserve fixed domain rejections through the journal rollback boundary.
+
+    Unexpected SQL, connection and commit failures still use the journal's
+    generic persistence error and can never release an attempted request.
+    """
 
 
 def initial(routes, not_before_ms):
