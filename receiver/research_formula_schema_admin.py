@@ -1,0 +1,238 @@
+"""Explicit one-shot installer for all Formula Research migrations."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+try:
+    import psycopg
+except Exception:  # pragma: no cover
+    psycopg = None
+
+
+_TRUE = {"1", "true", "yes", "on"}
+MIGRATION_PATHS = (
+    Path(__file__).resolve().parent / "migrations" / "001_research_archive_v1.sql",
+    Path(__file__).resolve().parent / "migrations" / "002_formula_research_v1.sql",
+    Path(__file__).resolve().parent / "migrations" / "003_formula_autonomous_alerts_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "004_historical_opportunity_replay_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "005_formula_shadow_safety_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "006_no_dwell_first_touch_outcomes_v6.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "007_max_pain_watch_archive_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "008_prospective_neutral_anchors_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "009_formula_owner_live_approval_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "010_prospective_max_pain_freeze_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "011_formula_owner_live_engine_binding_v2.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "012_historical_replay_v2_streaming_index.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "013_prospective_decision_feature_freeze_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "014_outcome_rejection_audit_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "015_formula_evidence_snapshots_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "016_formula_relevance_hysteresis_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "017_formula_discovery_scheduler_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "018_prospective_shadow_view_indexed_union_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "019_outcome_worker_queue_indexes_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "020_ordered_first_touch_v7.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "021_btc_parent_movements_v1.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "022_ordered_formula_research.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "023_snapshot_sync_reconciliation.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "024_ordered_first_touch_repair_queue.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "025_ordered_first_touch_sync_claim_queue.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "026_research_sheet_fresh_delivery.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "027_ordered_formula_research_periods.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "028_telegram_archive_source_staging.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "029_common_window_metrics.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "030_ordered_question_search.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "031_ordered_prospective_validation.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "032_telegram_archive_reconstruction.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "033_ordered_inverse_analysis_requests.sql",
+    Path(__file__).resolve().parent
+    / "migrations"
+    / "034_past_price_features.sql",
+    Path(__file__).resolve().parent / "migrations" / "037_ordered_experimental_delivery.sql",
+    Path(__file__).resolve().parent / "migrations" / "038_runtime_event_scan_bounds.sql",
+    Path(__file__).resolve().parent / "migrations" / "039_ordered_first_touch_fresh_delivery.sql",
+    Path(__file__).resolve().parent / "migrations" / "040_formula_scope_fairness.sql",
+    Path(__file__).resolve().parent / "migrations" / "041_ordered_outcome_recovery_queue.sql",
+    Path(__file__).resolve().parent / "migrations" / "042_native_hype_mark_supplement.sql",
+    Path(__file__).resolve().parent / "migrations" / "043_native_hype_perp_supplement.sql",
+    Path(__file__).resolve().parent / "migrations" / "044_continuous_price_archive.sql",
+    Path(__file__).resolve().parent / "migrations" / "045_btc_wave_report_refresh.sql",
+    Path(__file__).resolve().parent / "migrations" / "046_watch_scan_research_intake.sql",
+    Path(__file__).resolve().parent / "migrations" / "047_watch_scan_measurements.sql",
+    Path(__file__).resolve().parent / "migrations" / "048_watch_scan_formulas.sql",
+    Path(__file__).resolve().parent / "migrations" / "049_watch_scan_maxpain_formulas.sql",
+    Path(__file__).resolve().parent / "migrations" / "050_watch_scan_btc_context_formulas.sql",
+    Path(__file__).resolve().parent / "migrations" / "051_watch_scan_asset_context_formulas.sql",
+    Path(__file__).resolve().parent / "migrations" / "052_watch_scan_score_change_formulas.sql",
+    Path(__file__).resolve().parent / "migrations" / "053_dual_cvd65_experimental_watch.sql",
+    Path(__file__).resolve().parent / "migrations" / "054_watch_scan_timeframe_formulas.sql",
+    Path(__file__).resolve().parent / "migrations" / "055_watch_scan_decision_captures.sql",
+)
+SCHEMA_LOCK_ID = 94837242
+
+
+def _migration_statement_timeout_ms(path: Path) -> int:
+    # Production evidence: the ordered index over the 220 MB delivery table
+    # and the source-time backfill/index migration over the existing queue
+    # each exceeded 15 seconds. Bound only those installation steps
+    # separately; retain the short lock wait and normal query timeouts.
+    bounded_backfills = {
+        "025_ordered_first_touch_sync_claim_queue.sql",
+        "026_research_sheet_fresh_delivery.sql",
+        "039_ordered_first_touch_fresh_delivery.sql",
+    }
+    return 60000 if path.name in bounded_backfills else 15000
+
+
+def _enabled() -> bool:
+    return os.getenv("FORMULA_SCHEMA_APPLY", "").strip().lower() in _TRUE
+
+
+def _database_url() -> tuple[str, str | None]:
+    dedicated = os.getenv("RESEARCH_DATABASE_URL", "").strip()
+    if dedicated:
+        return dedicated, "RESEARCH_DATABASE_URL"
+    use_primary = os.getenv("RESEARCH_USE_PRIMARY_DATABASE", "").strip().lower() in _TRUE
+    primary = os.getenv("DATABASE_URL", "").strip()
+    if use_primary and primary:
+        return primary, "DATABASE_URL_EXPLICIT_PRIMARY"
+    return "", None
+
+
+def _selected_migration_paths() -> tuple[Path, ...]:
+    """Resolve an optional exact-basename allowlist before opening the DB.
+
+    Omitting FORMULA_SCHEMA_APPLY_ONLY retains the existing full installer.
+    An explicit selection never follows arbitrary paths and always preserves
+    the declared migration order, even if its input order differs.
+    """
+    raw = os.getenv("FORMULA_SCHEMA_APPLY_ONLY", "").strip()
+    if not raw:
+        return MIGRATION_PATHS
+    names = [name.strip() for name in raw.split(",")]
+    allowed = {path.name for path in MIGRATION_PATHS}
+    unknown = [name for name in names if name not in allowed]
+    if unknown or len(names) != len(set(names)):
+        raise ValueError(
+            "FORMULA_SCHEMA_APPLY_ONLY must contain unique exact migration "
+            "filenames from MIGRATION_PATHS"
+        )
+    selected = set(names)
+    return tuple(path for path in MIGRATION_PATHS if path.name in selected)
+
+
+def status() -> dict:
+    database_url, source = _database_url()
+    return {
+        "schema_apply_enabled": _enabled(),
+        "database_configured": bool(database_url),
+        "database_source": source,
+        "migration_paths": [str(path) for path in MIGRATION_PATHS],
+        "migration_selection": os.getenv("FORMULA_SCHEMA_APPLY_ONLY", "").strip()
+        or "ALL",
+        "runtime_imported_by_watch": False,
+    }
+
+
+def apply_schema() -> None:
+    if not _enabled():
+        raise RuntimeError("Refusing schema mutation: set FORMULA_SCHEMA_APPLY=1 explicitly")
+    paths = _selected_migration_paths()
+    database_url, source = _database_url()
+    if not database_url:
+        raise RuntimeError(
+            "Refusing schema mutation: configure RESEARCH_DATABASE_URL or explicitly "
+            "set RESEARCH_USE_PRIMARY_DATABASE=1 with DATABASE_URL"
+        )
+    if psycopg is None:
+        raise RuntimeError("psycopg is unavailable")
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        raise RuntimeError(f"Migration files not found: {missing}")
+    options = {}
+    if os.getenv("FORMULA_SCHEMA_APPLY_ONLY", "").strip():
+        # Targeted live rollouts fail promptly instead of waiting on a busy
+        # research relation or rerunning unrelated historical migrations.
+        options["options"] = "-c statement_timeout=15000 -c lock_timeout=1000"
+    with psycopg.connect(database_url, connect_timeout=5, **options) as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_ID,))
+        for path in paths:
+            if options:
+                conn.execute("SELECT set_config('statement_timeout', %s, true)",
+                             (str(_migration_statement_timeout_ms(path)),))
+            print(f"[research-schema] applying migration={path.name}", flush=True)
+            conn.execute(path.read_text(encoding="utf-8"))
+            if options:
+                conn.execute("SELECT set_config('statement_timeout', '15000', true)")
+            print(f"[research-schema] completed migration={path.name}", flush=True)
+        conn.commit()
+    print(
+        f"Formula Research schema applied successfully via {source}; "
+        f"migrations={','.join(path.name for path in paths)}.",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    apply_schema()

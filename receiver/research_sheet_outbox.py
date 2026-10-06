@@ -1,0 +1,319 @@
+"""Durable generic Sheet upserts; source transactions stage, one sender drains."""
+from __future__ import annotations
+import hashlib
+import json
+import re
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Mapping
+import google_sheets_sync
+import research_sheet_publication as publication
+import research_outcome_publication as outcome_publication
+import research_current_publication as current_publication
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
+
+_LOCK_ID = 702094113543720211
+_SHEET_ROTATION = (
+    'Telegram_Events',
+    'MaxPain_Current',
+    'Snapshots_Current',
+    'Live_Current',
+    publication.SHEET,
+    outcome_publication.SHEET,
+)
+_WAVE_REPORT_SHEET = 'MaxPain_Wave_Live'
+_SOURCE_TIMESTAMP = re.compile(
+    r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$'
+)
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, default=str, allow_nan=False)
+
+
+def _source_time(value: Any) -> datetime | None:
+    """Only timezone-qualified source timestamps can prioritize fresh data."""
+    if isinstance(value, str):
+        if not _SOURCE_TIMESTAMP.fullmatch(value):
+            return None
+        try:
+            value = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        return None
+    try:
+        return value.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _row_source_time(item: Mapping[str, Any]) -> datetime | None:
+    field = {
+        'Snapshots': 'timestamp_utc',
+        'Telegram_Events': 'timestamp_utc',
+        'MaxPain_TF': 'timestamp_utc',
+        'MaxPain_Current': 'timestamp_utc',
+        'Snapshots_Current': 'timestamp_utc',
+        'Live_Current': 'timestamp_utc',
+        'Episodes': 'opened_at_utc',
+        'Formula_Results': 'last_evaluated_at',
+        publication.SHEET: 'last_evaluated_at',
+        outcome_publication.SHEET: 'measurement_start_utc',
+        'MaxPain_Wave_Live': 'last_evaluated_at',
+    }.get(str(item['sheet']))
+    return _source_time(item['row'].get(field)) if field else None
+
+
+def stage_upserts(conn: Any, upserts: list[Mapping[str, Any]]) -> int:
+    """Stage complete Sheet rows in the caller's transaction, idempotently."""
+    records = {}
+    current_outcomes = 0
+    snapshot_times = {
+        str(item['row'].get('snapshot_id')): _row_source_time(item)
+        for item in upserts if item['sheet'] == 'Snapshots'
+    }
+    for raw in upserts:
+        item = dict(raw)
+        sheet = str(item['sheet'])
+        if sheet in (*publication.LEGACY_SHEETS, 'Outcomes'):
+            continue
+        if sheet in current_publication.CONFIG or sheet in current_publication.BY_SHEET:
+            projected = current_publication.project(item,
+                snapshot_time=snapshot_times.get(str(item['row'].get('snapshot_id'))))
+            current_outcomes += current_publication.stage_projected(conn, projected)
+            continue
+        if sheet == outcome_publication.SHEET:
+            current_outcomes += outcome_publication.stage_projected(conn, item)
+            continue
+        if sheet == publication.SHEET:
+            projected = publication.project_formula_row(item['row'])
+            if projected is None or item.get('key') != publication.KEY:
+                continue
+            item = projected
+        columns = [name.strip() for name in str(item['key']).split(',')]
+        row = item['row']
+        if any(row.get(name) in (None, '') for name in columns):
+            raise ValueError('Sheet upsert has missing composite key value')
+        row_key = _json([str(row[name]) for name in columns])
+        if sheet == 'תצוגת לייב':
+            # The visible Israel date is never parsed or mistaken for UTC.
+            source_time = snapshot_times.get(str(row.get('snapshot_id')))
+            item['source_time_utc'] = source_time.isoformat() if source_time else None
+        payload = _json(item)
+        records[(sheet, row_key)] = (sheet, row_key, payload, hashlib.sha256(payload.encode()).hexdigest())
+    if not records:
+        return current_outcomes
+    with conn.cursor() as cur:
+        cur.executemany('''
+            INSERT INTO research_sheet_upsert_outbox(sheet_name,row_key,payload,payload_sha256)
+            VALUES (%s,%s,%s::jsonb,%s)
+            ON CONFLICT(sheet_name,row_key) DO UPDATE SET
+                payload=EXCLUDED.payload, payload_sha256=EXCLUDED.payload_sha256,
+                sync_status='PENDING',attempts=0,next_attempt_at_utc=NOW(),
+                claim_token=NULL,claimed_payload_sha256=NULL,lease_expires_at_utc=NULL,
+                synced_at_utc=NULL,last_error=NULL,updated_at_utc=NOW()
+            WHERE research_sheet_upsert_outbox.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256
+        ''', list(records.values()))
+    # Migration 026 predates this tab and its trigger yields NULL for it.
+    # Apply its frozen event timestamp through the existing indexed row key;
+    # no global backfill, implicit time inference, or DDL in the live worker.
+    source_times = [
+        (sheet, row_key, _row_source_time(json.loads(record[2])))
+        for (sheet, row_key), record in records.items()
+        if sheet in {'MaxPain_TF', 'MaxPain_Wave_Live', publication.SHEET}
+    ]
+    if source_times:
+        values_sql = ','.join(['(%s,%s,%s::timestamptz)'] * len(source_times))
+        conn.execute(f"""
+            UPDATE research_sheet_upsert_outbox AS queued
+            SET source_time_utc=source.source_time_utc
+            FROM (VALUES {values_sql}) AS source(sheet_name,row_key,source_time_utc)
+            WHERE queued.sheet_name=source.sheet_name AND queued.row_key=source.row_key
+              AND queued.source_time_utc IS DISTINCT FROM source.source_time_utc
+        """, tuple(value for row in source_times for value in row))
+    return len(records) + current_outcomes
+
+
+def _connect(url: str):
+    return psycopg.connect(url, row_factory=dict_row, connect_timeout=5,
+                           options='-c statement_timeout=15000 -c lock_timeout=1000')
+
+
+def _claim_lane(conn: Any, *, count: int, token: str, sheet: str,
+                recent: bool) -> list[Mapping[str, Any]]:
+    if count <= 0:
+        return []
+    # Every query uses a leading indexed sheet key. In particular, an empty
+    # live lane must never scan hundreds of thousands of held legacy rows.
+    if sheet not in (*_SHEET_ROTATION, _WAVE_REPORT_SHEET):
+        return []
+    if sheet == publication.SHEET and not publication.catalog_contract()['compatible']:
+        return []
+    source_filter = 'AND source_time_utc IS NOT NULL' if recent else ''
+    if sheet == 'Telegram_Events':
+        # Expired/undated rows stay in their original queue state. Never claim
+        # and acknowledge data outside the receiver's protected rolling window.
+        source_filter += " AND source_time_utc >= NOW() - INTERVAL '16 days'"
+    order = ('source_time_utc DESC, next_attempt_at_utc, created_at_utc, row_key'
+             if recent else 'next_attempt_at_utc, created_at_utc, row_key')
+    params = (sheet,count,token)
+    return conn.execute(f'''
+        WITH due AS (
+            SELECT sheet_name,row_key FROM research_sheet_upsert_outbox
+            WHERE sync_status IN ('PENDING','RETRY','IN_FLIGHT')
+              AND ((sync_status IN ('PENDING','RETRY') AND next_attempt_at_utc <= NOW())
+                OR (sync_status='IN_FLIGHT' AND lease_expires_at_utc < NOW()))
+              AND sheet_name=%s {source_filter}
+            ORDER BY {order}
+            FOR UPDATE SKIP LOCKED LIMIT %s
+        )
+        UPDATE research_sheet_upsert_outbox AS q SET
+            sync_status='IN_FLIGHT',attempts=q.attempts+1,
+            claim_token=%s::uuid,claimed_payload_sha256=q.payload_sha256,
+            lease_expires_at_utc=NOW()+INTERVAL '120 seconds',
+            synced_at_utc=NULL,last_error=NULL
+        FROM due WHERE q.sheet_name=due.sheet_name AND q.row_key=due.row_key
+        RETURNING q.sheet_name,q.row_key,q.payload,q.payload_sha256,q.attempts
+    ''', params).fetchall()
+
+
+def _claim_batch(conn: Any, count: int, token: str) -> list[Mapping[str, Any]]:
+    # Persist the turn so restarts and one-row HTTP batches retain both shares.
+    slot = conn.execute('''
+        UPDATE research_sheet_delivery_cursor SET next_slot=next_slot+1
+        WHERE singleton=TRUE RETURNING next_slot-1 AS slot
+    ''').fetchone()['slot']
+    # A finite 136-row report must finish before its next 15-minute generation.
+    # Three of four batch turns first serve that report; the fourth always
+    # rotates ordinary sheets. Once the report drains, all turns immediately
+    # return to ordinary work. The HTTP size and exact-generation ACK do not
+    # change. This cursor survives restarts, including single-row fallback.
+    preferred_sheet = _SHEET_ROTATION[(slot // 4) % len(_SHEET_ROTATION)]
+    recent_first = (slot // (4 * len(_SHEET_ROTATION))) % 2 == 0
+    rows = []
+    if slot % 4 < 3:
+        rows = _claim_lane(conn, count=count, token=token,
+                           sheet=_WAVE_REPORT_SHEET, recent=False)
+    first_count = (count-len(rows)+1) // 2
+    rows += _claim_lane(conn, count=first_count, token=token,
+                       sheet=preferred_sheet, recent=recent_first)
+    rows += _claim_lane(conn, count=count-len(rows), token=token,
+                        sheet=preferred_sheet, recent=not recent_first)
+    # A sheet with only undated/backlog rows must still use a recent turn.
+    if len(rows) < count:
+        rows += _claim_lane(conn, count=count-len(rows), token=token,
+                            sheet=preferred_sheet, recent=False)
+    # Bounded indexed fallbacks replace the former global pending-row scan.
+    # Ordinary turns preserve their guarantee before borrowing report work.
+    start = _SHEET_ROTATION.index(preferred_sheet)
+    fallback = _SHEET_ROTATION[start+1:] + _SHEET_ROTATION[:start]
+    for other_sheet in (*fallback, _WAVE_REPORT_SHEET):
+        if len(rows) >= count:
+            break
+        rows += _claim_lane(conn, count=count-len(rows), token=token,
+                            sheet=other_sheet, recent=False)
+    return rows
+
+
+def _validate_target_sheet(target_sheet: str | None) -> None:
+    if target_sheet is not None and target_sheet not in (*_SHEET_ROTATION, _WAVE_REPORT_SHEET):
+        raise ValueError('Target sheet must be an active allowed publication lane')
+
+
+def _validate_batch_size(target_sheet: str | None, batch_size: int) -> None:
+    if type(batch_size) is not int or not 1 <= batch_size <= 32:
+        raise ValueError('Batch size must be an integer between 1 and 32')
+    if batch_size > 8 and target_sheet != 'Telegram_Events':
+        raise ValueError('Batches above 8 require an explicit Telegram_Events target')
+
+
+def _request_batch_limit(batch_size: int) -> int:
+    compatible = google_sheets_sync.ordered_outcome_batch_limit()
+    if batch_size > 8:
+        # Operator-only catch-up uses the verified v3 receiver. Unknown/older
+        # receivers and the existing failure fallback retain one-row requests.
+        return (batch_size if compatible > 1 and
+                google_sheets_sync.status()['receiver_version'] == 'sheets-batch-v3' else 1)
+    return min(batch_size, compatible)
+
+
+def _drain_locked(database_url: str, *, max_rows: int = 32, max_seconds: float = 45,
+                  target_sheet: str | None = None, batch_size: int = 8) -> dict[str, Any]:
+    """Acknowledge only a claimed exact generation, never while holding a txn."""
+    _validate_target_sheet(target_sheet)
+    _validate_batch_size(target_sheet, batch_size)
+    summary = {'claimed': 0, 'synced': 0, 'failed': 0, 'locked': False,
+               'publication': publication.status(),
+               'outcome_publication': outcome_publication.status(),
+               'current_publication': current_publication.status()}
+    if not google_sheets_sync.enabled() or not database_url or psycopg is None:
+        return summary
+    deadline = time.monotonic() + max(1.0, float(max_seconds))
+    with _connect(database_url) as lock_conn:
+        acquired = lock_conn.execute('SELECT pg_try_advisory_lock(%s) AS acquired', (_LOCK_ID,)).fetchone()['acquired']
+        lock_conn.commit()
+        if not acquired:
+            summary['locked'] = True
+            return summary
+        try:
+            ready = lock_conn.execute('''
+                SELECT to_regclass('research_sheet_delivery_cursor') IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM pg_attribute
+                        WHERE attrelid=to_regclass('research_sheet_upsert_outbox')
+                          AND attname='source_time_utc' AND NOT attisdropped) AS ready
+            ''').fetchone()['ready']
+            lock_conn.commit()
+            if not ready:
+                return dict(summary, deferred=True,
+                            reason='MISSING_FRESH_DELIVERY_MIGRATION_026')
+            while summary['claimed'] < max(1, int(max_rows)) and time.monotonic() < deadline:
+                token = str(uuid.uuid4())
+                count = min(_request_batch_limit(batch_size), int(max_rows)-summary['claimed'])
+                with _connect(database_url) as conn:
+                    rows = (_claim_batch(conn, count, token) if target_sheet is None
+                            else _claim_lane(conn, count=count, token=token,
+                                             sheet=target_sheet, recent=False))
+                if not rows:
+                    break
+                summary['claimed'] += len(rows)
+                delivered = google_sheets_sync.deliver_now({'kind':'research_sheet_upserts','upserts':[row['payload'] for row in rows]}, attempts=1)
+                with _connect(database_url) as conn:
+                    for row in rows:
+                        retry_seconds = min(3600, 30 * 2 ** min(7, int(row['attempts'])-1))
+                        changed = conn.execute('''
+                            UPDATE research_sheet_upsert_outbox SET
+                                sync_status=%s,synced_at_utc=CASE WHEN %s THEN NOW() ELSE NULL END,
+                                next_attempt_at_utc=NOW()+(%s * INTERVAL '1 second'),
+                                last_error=%s,claim_token=NULL,claimed_payload_sha256=NULL,
+                                lease_expires_at_utc=NULL,updated_at_utc=NOW()
+                            WHERE sheet_name=%s AND row_key=%s AND claim_token=%s::uuid
+                              AND payload_sha256=%s AND claimed_payload_sha256=%s
+                        ''', ('SYNCED' if delivered else 'RETRY',delivered,retry_seconds,
+                              None if delivered else 'Google Sheets did not confirm delivery',
+                              row['sheet_name'],row['row_key'],token,row['payload_sha256'],row['payload_sha256']))
+                        summary['synced' if delivered else 'failed'] += changed.rowcount
+                if not delivered:
+                    break
+        finally:
+            lock_conn.execute('SELECT pg_advisory_unlock(%s)', (_LOCK_ID,))
+            lock_conn.commit()
+    return summary
+
+
+def drain(database_url:str,*,max_rows:int=32,max_seconds:float=45,
+          target_sheet:str|None=None,batch_size:int=8)->dict[str,Any]:
+    _validate_target_sheet(target_sheet)
+    _validate_batch_size(target_sheet, batch_size)
+    # Coordinate with the ordered-outcome sender BEFORE claiming a DB lease.
+    with google_sheets_sync.delivery_slot() as acquired:
+        if not acquired:
+            return {'claimed':0,'synced':0,'failed':0,'locked':False,'deferred':True}
+        return _drain_locked(database_url,max_rows=max_rows,max_seconds=max_seconds,
+                             target_sheet=target_sheet,batch_size=batch_size)
