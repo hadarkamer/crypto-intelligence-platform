@@ -8,8 +8,11 @@ publish alerts, or change the existing outcome or atomic gate contracts.
 ## Freeze the selection policy before collecting data
 
 `research_no_horizon_selection.build_plan` accepts the same original declaration,
-explicit directions, thresholds, optional supported catalog subset and finite
-window count as discovery. Two additional integers are mandatory:
+explicit directions, thresholds, supported catalog subset and finite window
+count as discovery. The current 82 supported definitions exceed the unchanged
+64-scope cap even with one direction and threshold; supply an explicit bounded
+subset. Omitted and unsupported definitions remain visible in the full catalog
+manifest. Two additional integers are mandatory:
 
 - `top_k`: maximum number of selected scopes, from 1 through the declared scope
   count. It is a ceiling, not a promise to fill the shortlist.
@@ -119,6 +122,9 @@ implemented by this selector.
 python research_no_horizon_selection_cli.py build \
   --declaration new-first-cohort.json \
   --base-direction SHORT --threshold-pct 0.25 \
+  --candidate-key FUTURES_CVD_TOTAL_65 \
+  --candidate-key captured-question-search-v3-experimental-binding:CONSENSUS_True \
+  --candidate-key captured-question-search-v3-experimental-binding:average_score_all_timeframes_GE55 \
   --windows 2 --top-k 3 --required-eligible-windows 1 \
   --output new-selection-plan.json
 
