@@ -1,0 +1,104 @@
+{
+  "service_id": "srv-db2dhnmk1f9s73a2m4k0",
+  "deploy_id": "dep-db2dmnui0phs73eackj0",
+  "commit": "333651bf78eb074e50d250b9f6a3705274878c87",
+  "execution_environment": "Render free web runtime; 0.15 CPU, 512 MiB; local cohosted PostgreSQL",
+  "status": "INCOMPLETE_NO_FINAL_REPORT",
+  "events": [
+    {
+      "at": "2026-10-06T11:32:05.08906179Z",
+      "result": {
+        "artifact_sha256": "122c3eb841604ecefbaadf665935f4ee3303a6d48a9fa383e8c3bffe6bb4df45",
+        "duration_seconds": 6.597,
+        "errors": 0,
+        "exit_code": 0,
+        "failure_code": null,
+        "failure_details": [],
+        "failures": 0,
+        "kind": "stage_completed",
+        "skipped": 0,
+        "successful": true,
+        "task": "timing_tests",
+        "tests_run": 28,
+        "unexpected_successes": 0
+      }
+    },
+    {
+      "at": "2026-10-06T11:32:15.188424861Z",
+      "result": {
+        "artifact_sha256": "4beb41c385b6889405efdd64c317b5658e17780e45e19474a0b10bcb35aed4bc",
+        "comparisons": [
+          {
+            "added_mean_ns": 16472.352213541668,
+            "payload": "notification",
+            "producers": 1
+          },
+          {
+            "added_mean_ns": 129902.2412109375,
+            "payload": "notification",
+            "producers": 2
+          },
+          {
+            "added_mean_ns": 314657.9921875,
+            "payload": "trade_projection",
+            "producers": 1
+          },
+          {
+            "added_mean_ns": 229260.12174479166,
+            "payload": "trade_projection",
+            "producers": 2
+          }
+        ],
+        "conditions": 14,
+        "duration_seconds": 10.096,
+        "exit_code": 0,
+        "failure_code": null,
+        "kind": "stage_completed",
+        "measured_calls": 27648,
+        "network_attempts_blocked": 0,
+        "task": "recorder"
+      }
+    },
+    {
+      "at": "2026-10-06T11:32:40.291945208Z",
+      "result": {
+        "artifact_sha256": "4f9a790522968cd239354bf70d59c9e258c811a2d4e50a7dde28a33fc55cb564",
+        "duration_seconds": 25.102,
+        "exact_feed_state_parity_pairs": 120,
+        "exit_code": 0,
+        "failure_code": null,
+        "kind": "stage_completed",
+        "network_attempts_blocked": 0,
+        "single_update_added_mean_ns": [
+          90685.08333333333,
+          71627.08333333333
+        ],
+        "task": "feed"
+      }
+    },
+    {
+      "at": "2026-10-06T11:45:43.491308303Z",
+      "result": {
+        "artifact_sha256": "002772ad9a9ef6e04713a0c6e0dd9a9558fb52f79ab767d2c44ab71345ff3b5a",
+        "duration_seconds": 777.897,
+        "exit_code": 0,
+        "failure_code": null,
+        "fill_to_projection_mean_ms": {
+          "disabled": 1366.1240131458333,
+          "enabled": 1436.94559575
+        },
+        "kind": "stage_completed",
+        "measured_scenarios": 80,
+        "rounds": 4,
+        "runtime_mean_ms": {
+          "disabled": 6341.33021,
+          "enabled": 6597.223207
+        },
+        "simulated_order_requests_per_scenario": 8,
+        "simulated_reader_calls_per_scenario": 174,
+        "task": "runtime",
+        "trace_equality_checks": 80
+      }
+    }
+  ]
+}

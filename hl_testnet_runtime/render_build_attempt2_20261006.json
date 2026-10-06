@@ -1,0 +1,140 @@
+{
+  "service_id": "srv-db2dv53ncjis73ec9lng",
+  "deploy_id": "dep-db2e3uflk1mc73b3ba30",
+  "commit": "905bd2e6a36ae6edf24e84c7cd37c970cc73bb71",
+  "execution_environment": "Render build container",
+  "observed_at": "2026-10-06T12:02:50.121685689Z",
+  "result": {
+    "candidate": {
+      "file_count": 446,
+      "sha256": "ec45e804a99001f74fa833470f9b882883320d623ab68bddd54bc5382b98c969",
+      "version_base": "3084c5c7cd53b70d0569086ba78a78f8fc53a9ac"
+    },
+    "current_stage": null,
+    "duration_seconds": 181.757,
+    "exchange": "SYNTHETIC_ONLY",
+    "failure_code": "CHILD_FAILED",
+    "isolated": true,
+    "kind": "finished",
+    "limits": [
+      "Free instance timing is not live-service latency or capacity evidence.",
+      "No live exchange, trading account or existing database is accessed.",
+      "Runtime benchmark uses four rounds; observed tails are not guarantees."
+    ],
+    "postgres": "FRESH_LOOPBACK_POSTGRES18",
+    "postgres_stopped": true,
+    "schema": "render_offline_preflight_v1",
+    "stages": [
+      {
+        "artifact_sha256": "122c3eb841604ecefbaadf665935f4ee3303a6d48a9fa383e8c3bffe6bb4df45",
+        "duration_seconds": 0.601,
+        "errors": 0,
+        "exit_code": 0,
+        "failure_code": null,
+        "failure_details": [],
+        "failures": 0,
+        "skipped": 0,
+        "successful": true,
+        "task": "timing_tests",
+        "tests_run": 28,
+        "unexpected_successes": 0
+      },
+      {
+        "artifact_sha256": "32707d87548f566a3a73296294211be47a2470ac8b84a63e211ca4d187a7c719",
+        "comparisons": [
+          {
+            "added_mean_ns": 11468.662109375,
+            "payload": "notification",
+            "producers": 1
+          },
+          {
+            "added_mean_ns": 11853.430013020834,
+            "payload": "notification",
+            "producers": 2
+          },
+          {
+            "added_mean_ns": 25698.150390625,
+            "payload": "trade_projection",
+            "producers": 1
+          },
+          {
+            "added_mean_ns": 25662.139322916668,
+            "payload": "trade_projection",
+            "producers": 2
+          }
+        ],
+        "conditions": 14,
+        "duration_seconds": 0.901,
+        "exit_code": 0,
+        "failure_code": null,
+        "measured_calls": 27648,
+        "network_attempts_blocked": 0,
+        "task": "recorder"
+      },
+      {
+        "artifact_sha256": "d0d6bcf976ca34e36c5f57524dfd599f40894cdf4f853cc5fbe5537aab24118f",
+        "duration_seconds": 2.403,
+        "exact_feed_state_parity_pairs": 120,
+        "exit_code": 0,
+        "failure_code": null,
+        "network_attempts_blocked": 0,
+        "single_update_added_mean_ns": [
+          39015.083333333336,
+          35196.916666666664
+        ],
+        "task": "feed"
+      },
+      {
+        "artifact_sha256": "436bbe9d489ac05f44ce584aad35d88790c87191995e67370f2d3c4199dcc94b",
+        "duration_seconds": 63.674,
+        "exit_code": 0,
+        "failure_code": null,
+        "fill_to_projection_mean_ms": {
+          "disabled": 116.12798164583333,
+          "enabled": 113.92899875
+        },
+        "measured_scenarios": 80,
+        "rounds": 4,
+        "runtime_mean_ms": {
+          "disabled": 529.9160950625001,
+          "enabled": 519.852104375
+        },
+        "simulated_order_requests_per_scenario": 8,
+        "simulated_reader_calls_per_scenario": 174,
+        "task": "runtime",
+        "trace_equality_checks": 80
+      },
+      {
+        "artifact_sha256": "828c959d5306d952069da8661aa715fb61c37796c3697b18e043c89d2fd7f550",
+        "duration_seconds": 112.839,
+        "errors": 2,
+        "exit_code": 1,
+        "failure_code": "CHILD_FAILED",
+        "failure_details": [
+          {
+            "code": "UNCLASSIFIED",
+            "exception_type": "AssertionError",
+            "test_id": "hl_testnet_runtime.render_preflight.test_harness.GuardTests.test_crypto_import_and_sdk_wire_hash_pass_under_real_guard"
+          },
+          {
+            "code": "UNCLASSIFIED",
+            "exception_type": "ImportError",
+            "test_id": "unittest.loader._FailedTest.hl_testnet_runtime.test_app_card_delivery"
+          },
+          {
+            "code": "PREFLIGHT_SUBPROCESS_REFUSED",
+            "exception_type": "RuntimeError",
+            "test_id": "hl_testnet_runtime.test_exit_amendment.ExitAmendmentPureTests.test_jsonb_key_sorting_produces_sdk_wire_order_and_hash"
+          }
+        ],
+        "failures": 1,
+        "skipped": 0,
+        "successful": false,
+        "task": "full_suite",
+        "tests_run": 2065,
+        "unexpected_successes": 0
+      }
+    ],
+    "status": "FAILED"
+  }
+}

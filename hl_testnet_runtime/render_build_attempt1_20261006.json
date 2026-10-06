@@ -1,0 +1,135 @@
+{
+  "service_id": "srv-db2dv53ncjis73ec9lng",
+  "deploy_id": "dep-db2dv5bncjis73ec9mr0",
+  "commit": "333651bf78eb074e50d250b9f6a3705274878c87",
+  "execution_environment": "Render build container",
+  "observed_at": "2026-10-06T11:52:33.586089408Z",
+  "result": {
+    "candidate": {
+      "file_count": 446,
+      "sha256": "9fe525cbb2dc74c9678507250acc75d9b8289f3a11d0f4947a4eb36473cd4bc4",
+      "version_base": "3084c5c7cd53b70d0569086ba78a78f8fc53a9ac"
+    },
+    "current_stage": null,
+    "duration_seconds": 176.937,
+    "exchange": "SYNTHETIC_ONLY",
+    "failure_code": "CHILD_FAILED",
+    "isolated": true,
+    "kind": "finished",
+    "limits": [
+      "Free instance timing is not live-service latency or capacity evidence.",
+      "No live exchange, trading account or existing database is accessed.",
+      "Runtime benchmark uses four rounds; observed tails are not guarantees."
+    ],
+    "postgres": "FRESH_LOOPBACK_POSTGRES18",
+    "postgres_stopped": true,
+    "schema": "render_offline_preflight_v1",
+    "stages": [
+      {
+        "artifact_sha256": "122c3eb841604ecefbaadf665935f4ee3303a6d48a9fa383e8c3bffe6bb4df45",
+        "duration_seconds": 0.601,
+        "errors": 0,
+        "exit_code": 0,
+        "failure_code": null,
+        "failure_details": [],
+        "failures": 0,
+        "skipped": 0,
+        "successful": true,
+        "task": "timing_tests",
+        "tests_run": 28,
+        "unexpected_successes": 0
+      },
+      {
+        "artifact_sha256": "f09c346c549d84239739e1d1d93d4450fba2529892a467472bb46bfcad19508b",
+        "comparisons": [
+          {
+            "added_mean_ns": 11603.995442708334,
+            "payload": "notification",
+            "producers": 1
+          },
+          {
+            "added_mean_ns": 11746.754557291666,
+            "payload": "notification",
+            "producers": 2
+          },
+          {
+            "added_mean_ns": 25201.804036458332,
+            "payload": "trade_projection",
+            "producers": 1
+          },
+          {
+            "added_mean_ns": 25896.196940104168,
+            "payload": "trade_projection",
+            "producers": 2
+          }
+        ],
+        "conditions": 14,
+        "duration_seconds": 0.901,
+        "exit_code": 0,
+        "failure_code": null,
+        "measured_calls": 27648,
+        "network_attempts_blocked": 0,
+        "task": "recorder"
+      },
+      {
+        "artifact_sha256": "5392b7fcf37208421398ebdeea94151ebd2da19815f2c1e1e39505528e50536c",
+        "duration_seconds": 2.403,
+        "exact_feed_state_parity_pairs": 120,
+        "exit_code": 0,
+        "failure_code": null,
+        "network_attempts_blocked": 0,
+        "single_update_added_mean_ns": [
+          35769.25,
+          36946.333333333336
+        ],
+        "task": "feed"
+      },
+      {
+        "artifact_sha256": "e6f90ac60ed7ce5baa4d141996fce31a2f4fe007c96d4592f914fa8eaec481e4",
+        "duration_seconds": 62.07,
+        "exit_code": 0,
+        "failure_code": null,
+        "fill_to_projection_mean_ms": {
+          "disabled": 112.79071733333333,
+          "enabled": 112.35369862499999
+        },
+        "measured_scenarios": 80,
+        "rounds": 4,
+        "runtime_mean_ms": {
+          "disabled": 511.97968975,
+          "enabled": 514.4967986875
+        },
+        "simulated_order_requests_per_scenario": 8,
+        "simulated_reader_calls_per_scenario": 174,
+        "task": "runtime",
+        "trace_equality_checks": 80
+      },
+      {
+        "artifact_sha256": "b5af0f397674068fb33bf98640377b909d2b30be6896b5144b745df466fbbe81",
+        "duration_seconds": 109.521,
+        "errors": 2,
+        "exit_code": 1,
+        "failure_code": "CHILD_FAILED",
+        "failure_details": [
+          {
+            "code": "UNCLASSIFIED",
+            "exception_type": "ImportError",
+            "test_id": "unittest.loader._FailedTest.hl_testnet_runtime.test_app_card_delivery"
+          },
+          {
+            "code": "PREFLIGHT_SUBPROCESS_REFUSED",
+            "exception_type": "RuntimeError",
+            "test_id": "hl_testnet_runtime.test_exit_amendment.ExitAmendmentPureTests.test_jsonb_key_sorting_produces_sdk_wire_order_and_hash"
+          }
+        ],
+        "failures": 0,
+        "skipped": 0,
+        "successful": false,
+        "task": "full_suite",
+        "tests_run": 2063,
+        "unexpected_successes": 0
+      }
+    ],
+    "status": "FAILED"
+  }
+}

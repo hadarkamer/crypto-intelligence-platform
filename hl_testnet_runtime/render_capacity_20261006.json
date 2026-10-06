@@ -1,0 +1,106 @@
+{
+  "service": {
+    "resourceId": "srv-dakptbh594qs7395460g",
+    "timeRange": {
+      "start": "2026-10-05T11:00:00Z",
+      "end": "2026-10-06T11:03:00Z"
+    },
+    "metrics": [
+      {
+        "type": "cpu_usage",
+        "n": 284,
+        "min": 0.13334164,
+        "max": 0.25749746,
+        "mean": 0.17596441619718312,
+        "unit": "cpu"
+      },
+      {
+        "type": "cpu_limit",
+        "n": 291,
+        "min": 1,
+        "max": 1,
+        "mean": 1,
+        "unit": "cpu"
+      },
+      {
+        "type": "memory_usage",
+        "n": 290,
+        "min": 96587780,
+        "max": 128032770,
+        "mean": 108358140.37931034,
+        "unit": "bytes"
+      },
+      {
+        "type": "memory_limit",
+        "n": 291,
+        "min": 2147483600,
+        "max": 2147483600,
+        "mean": 2147483600,
+        "unit": "bytes"
+      },
+      {
+        "type": "instance_count",
+        "n": 289,
+        "min": 1,
+        "max": 1,
+        "mean": 1,
+        "unit": "unitless"
+      }
+    ]
+  },
+  "database": {
+    "resourceId": "dpg-dab7rc2d0e5s73dkb9l0-a",
+    "timeRange": {
+      "start": "2026-10-05T11:00:00Z",
+      "end": "2026-10-06T11:03:00Z"
+    },
+    "metrics": [
+      {
+        "type": "cpu_usage",
+        "n": 289,
+        "min": 0.05364437,
+        "max": 0.08161711,
+        "mean": 0.06941391635986154,
+        "unit": "cpu"
+      },
+      {
+        "type": "cpu_limit",
+        "n": 289,
+        "min": 0.1,
+        "max": 0.1,
+        "mean": 0.10000000000000049,
+        "unit": "cpu"
+      },
+      {
+        "type": "memory_usage",
+        "n": 289,
+        "min": 70418430,
+        "max": 93364220,
+        "mean": 77113960.31141868,
+        "unit": "bytes"
+      },
+      {
+        "type": "memory_limit",
+        "n": 289,
+        "min": 268435460,
+        "max": 268435460,
+        "mean": 268435460,
+        "unit": "bytes"
+      },
+      {
+        "type": "active_connections",
+        "n": 289,
+        "min": 1,
+        "max": 4,
+        "mean": 1.57439446366782,
+        "unit": "unitless"
+      }
+    ]
+  },
+  "notes": [
+    "Service CPU query requested MAX over 300-second buckets; short spikes below sampling granularity are not bounded.",
+    "Database CPU AVG query returned same values as MAX query.",
+    "Shared database SQL blocked by empty external IP allowlist; no allowlist changes attempted.",
+    "No live service/plan/environment/deployment changes made."
+  ]
+}
