@@ -70,7 +70,7 @@ def install():
     class GuardedPopen(original_popen):
         def __init__(self, args, *positional, **kwargs):
             if kwargs.get("executable") is not None or (len(positional) >= 2 and positional[1] is not None):
-                raise RuntimeError("PREFLIGHT_SUBPROCESS_REFUSED")
+                raise PermissionError("PREFLIGHT_SUBPROCESS_REFUSED")
             if (not kwargs.get("shell") and isinstance(args, (list, tuple))
                     and list(args) == ["uname", "-p"]):
                 # Python platform.platform() uses exactly this local metadata probe.
@@ -86,7 +86,10 @@ def install():
                 return
             if (kwargs.get("shell") or not isinstance(args, (list, tuple)) or len(args) < 3
                     or str(args[0]) != sys.executable or args[1] != "-c" or not isinstance(args[2], str)):
-                raise RuntimeError("PREFLIGHT_SUBPROCESS_REFUSED")
+                # Match the OS process-denial contract. ctypes catches OSError
+                # when an optional native-library probe cannot execute; denial
+                # must not prevent a dependency's normal non-native fallback.
+                raise PermissionError("PREFLIGHT_SUBPROCESS_REFUSED")
             supplied = dict(os.environ if kwargs.get("env") is None else kwargs["env"])
             selected_url = supplied.get("HL_JOURNAL_CI_URL")
             if selected_url is not None and selected_url != ci_url:

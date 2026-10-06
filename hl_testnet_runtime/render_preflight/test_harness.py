@@ -197,10 +197,10 @@ class HarnessTests(unittest.TestCase):
 
     def test_benchmark_failure_report_uses_only_type_and_known_code(self):
         path = self.root / 'failure.json'
-        child.write_failure_report(path, RuntimeError('PREFLIGHT_SUBPROCESS_REFUSED'))
+        child.write_failure_report(path, PermissionError('PREFLIGHT_SUBPROCESS_REFUSED'))
         safe = core.summarize_report('runtime', path)
         self.assertFalse(safe['successful'])
-        self.assertEqual(safe['exception_type'], 'RuntimeError')
+        self.assertEqual(safe['exception_type'], 'PermissionError')
         self.assertEqual(safe['code'], 'PREFLIGHT_SUBPROCESS_REFUSED')
 
     def test_exception_message_is_never_stringified_or_exported(self):
@@ -334,7 +334,7 @@ print(result.testsRun)
 
     def test_ldconfig_only_print_cache_and_no_executable_override(self):
         script = """from hl_testnet_runtime.render_preflight.child import install_network_guard
-import subprocess
+import subprocess,sys
 install_network_guard()
 result=subprocess.run(['/sbin/ldconfig','-p'],capture_output=True,timeout=2)
 assert result.returncode==0
@@ -342,15 +342,60 @@ for argv,extra in ((['/sbin/ldconfig'],{}),
                    (['/sbin/ldconfig','-p','-C','/tmp/other'],{}),
                    (['/sbin/ldconfig','-X'],{}),
                    (['gcc','-x','c','-'],{}),
+                   (['ld','-t','-o','/dev/null','-lmissing'],{}),
+                   (['file','-b',sys.executable],{}),
                    (['/sbin/ldconfig','-p'],{'executable':'/bin/sh'}),
                    (['uname','-p'],{'executable':'/bin/sh'}),
                    (['/sbin/ldconfig','-p'],{'shell':True})):
     try: subprocess.run(argv,**extra)
-    except RuntimeError as exc: assert str(exc)=='PREFLIGHT_SUBPROCESS_REFUSED'
+    except PermissionError as exc: assert str(exc)=='PREFLIGHT_SUBPROCESS_REFUSED'
     else: raise AssertionError('UNSAFE_SUBPROCESS_ALLOWED')
 """
         result = self.child(script)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_library_returns_none_without_executing_compiler_or_linker(self):
+        script = """import subprocess,ctypes.util,sys
+from unittest.mock import patch
+executed=[]
+sys.addaudithook(lambda event,args: executed.append(args[0]) if event=='subprocess.Popen' else None)
+from hl_testnet_runtime.render_preflight.guard import install
+install()
+executed.clear()
+with patch.object(ctypes.util,'_findSoname_ldconfig',return_value=None), \\
+     patch.object(ctypes.util.shutil,'which',side_effect=lambda name: '/usr/bin/'+name):
+    assert ctypes.util.find_library('known_missing_preflight_library') is None
+assert executed==[],executed
+"""
+        result = self.child(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_crypto_falls_back_with_empty_native_cache_without_executing_probes(self):
+        for force_ctypes in (False, True):
+            with self.subTest(force_ctypes=force_ctypes):
+                script = """import subprocess,ctypes.util,sys,unittest,io
+from unittest.mock import patch
+executed=[]
+sys.addaudithook(lambda event,args: executed.append(args[0]) if event=='subprocess.Popen' else None)
+from hl_testnet_runtime.render_preflight.guard import install
+attempts=install()
+executed.clear()
+FORCE_CTYPES
+with patch.object(ctypes.util,'_findSoname_ldconfig',return_value=None), \\
+     patch.object(ctypes.util.shutil,'which',side_effect=lambda name: '/usr/bin/'+name):
+    suite=unittest.TestLoader().loadTestsFromNames([
+        'hl_testnet_runtime.test_app_card_delivery',
+        'hl_testnet_runtime.test_exit_amendment.ExitAmendmentPureTests.test_jsonb_key_sorting_produces_sdk_wire_order_and_hash'])
+    result=unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+    assert result.wasSuccessful(),[(test.id(),text) for test,text in result.errors+result.failures]
+    assert not result.skipped
+    from Crypto.Math.Numbers import _implementation
+    assert _implementation.get('library')!='gmp',_implementation
+    assert not attempts
+assert executed==[],executed
+""".replace('FORCE_CTYPES', "sys.modules['cffi']=None" if force_ctypes else 'pass')
+                result = self.child(script)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class ServerTests(unittest.TestCase):
