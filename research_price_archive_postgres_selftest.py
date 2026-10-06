@@ -35,12 +35,57 @@ class ArchivePostgresTests(unittest.TestCase):
         self.conn.execute(f'SET search_path TO "{self.schema}"')
         sql=(Path(__file__).parent/'migrations/044_continuous_price_archive.sql').read_text()
         self.conn.execute(sql); self.conn.execute(sql)
+        sql=(Path(__file__).parent/'migrations/056_hyperliquid_perpetual_archive.sql').read_text()
+        self.conn.execute(sql); self.conn.execute(sql)
 
     def tearDown(self):
         self.conn.execute('SET search_path TO public')
         self.conn.execute(f'DROP SCHEMA "{self.schema}" CASCADE')
 
     def scalar(self,sql): return next(iter(self.conn.execute(sql).fetchone().values()))
+
+    def test_hyperliquid_upgrade_preserves_old_rows_and_checks_new_contract(self):
+        old=bar(volume=None)
+        a.write_bars(self.conn,a.HYPERLIQUID_PERP,'HYPE',[old])
+        a.write_bars(self.conn,a.BINANCE_SPOT,'ETH',[bar()])
+        new=bar(volume=None);new['close']=100.25
+        a.write_bars(self.conn,a.HYPERLIQUID_PERP_GENERIC,'ETH',[new])
+        sql=(Path(__file__).parent/'migrations/056_hyperliquid_perpetual_archive.sql').read_text()
+        self.conn.execute(sql);self.conn.execute(sql)
+        self.assertEqual(self.scalar('SELECT count(*) FROM research_price_archive_bars'),3)
+        self.assertTrue(a.hyperliquid_schema_ready(self.conn))
+        result=a.read_path(a.HYPERLIQUID_PERP_GENERIC,'ETH',START,START+a.MINUTE,connection=self.conn)
+        self.assertEqual(result['candles'][0]['close'],100.25)
+        self.assertEqual(result['price_kind'],'TRADE')
+        for route,symbol,volume in ((a.HYPERLIQUID_PERP_GENERIC,'HYPE',None),
+                (a.HYPERLIQUID_PERP_GENERIC,'BNB',None),('INVALID','ETH',None),
+                (a.HYPERLIQUID_PERP_GENERIC,'SOL',3)):
+            with self.assertRaises(Exception):
+                self.conn.execute("""INSERT INTO research_price_archive_bars
+                    (route,symbol,open_time_utc,close_time_utc,open,high,low,close,volume)
+                    VALUES(%s,%s,%s,%s,100,102,99,101,%s)""",
+                    (route,symbol,START,START+a.MINUTE-a.MILLISECOND,volume))
+        revised=dict(new,close=100.5)
+        with self.assertRaisesRegex(Exception,'frozen source evidence'):
+            a.write_bars(self.conn,a.HYPERLIQUID_PERP_GENERIC,'ETH',[bar(1,volume=None),revised])
+        self.assertEqual(self.scalar('SELECT count(*) FROM research_price_archive_bars'),3)
+
+    def test_hyperliquid_callbacks_read_old_history_and_reject_revisions(self):
+        import psycopg
+        from psycopg.rows import dict_row
+        def connect():
+            return psycopg.connect(self.dsn,autocommit=True,row_factory=dict_row,
+                                  options=f'-c search_path={self.schema}')
+        start=int(START.timestamp()*1000)
+        with patch.object(a,'_experimental_archive_connection',side_effect=connect):
+            for symbol in ('ETH','HYPE'):
+                a.experimental_hyperliquid_write(symbol,[[start,100,102,99,101]])
+                self.assertEqual(a.experimental_hyperliquid_read(symbol,start,start+120000),
+                                 [[start,100,102,99,101]])
+                with self.assertRaisesRegex(Exception,'frozen source evidence'):
+                    a.experimental_hyperliquid_write(symbol,[[start,100,102,99,100.5]])
+        self.assertEqual(self.scalar('SELECT count(*) FROM research_price_archive_bars'),2)
+
 
     def test_immutable_conflict_rolls_back_whole_batch_and_delete_rejected(self):
         a.write_bars(self.conn,a.BINANCE_SPOT,'BTC',[bar()])

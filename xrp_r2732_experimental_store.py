@@ -20,6 +20,11 @@ import xrp_r2732_experimental_signal as signal
 
 STORE_VERSION = 'xrp-r2732-weekdays-lock-cap1-v1'
 CONFIG_VERSION = 'xrp-r2732-ny-weekdays-sl005-tp08-lock0025-at01-v1'
+SOURCE_CONTRACT_VERSION = 'all-hyperliquid-perpetual-trade1m-v2'
+LEGACY_MIXED_SOURCE_CONFIG_SHA256 = '2be95378a235fdb2cc4863dbf19d581af037700da889b2c6788a657fe4956910'
+PRICE_SOURCE = 'HYPERLIQUID_XRP_PERPETUAL_TRADE_1M'
+LEGACY_POSITION_PRICE_SOURCE = 'BINANCE_SPOT_1M'
+
 SIGNAL_TTL = timedelta(seconds=90)
 ORPHAN_TIMEOUT = timedelta(minutes=2)
 MINUTE = timedelta(minutes=1)
@@ -66,7 +71,8 @@ def _encode(state):
 
 def _initial(now, config_sha256=None):
     return {'version': STORE_VERSION, 'config_version': CONFIG_VERSION,
-            'config_sha256': config_sha256, 'activated_at': iso(now),
+            'config_sha256': config_sha256, 'source_contract_version': SOURCE_CONTRACT_VERSION,
+            'price_source': PRICE_SOURCE, 'activated_at': iso(now),
             'decision_cursor': None, 'last_exit_at': None, 'active': None,
             'history': [], 'intents': [], 'counts': {}}
 
@@ -76,6 +82,44 @@ def _validate(state, config_sha256=None):
         raise ValueError('XRP R2732 frozen state version mismatch; explicit migration required')
     if config_sha256 is not None and state.get('config_sha256') != config_sha256:
         raise ValueError('XRP R2732 frozen configuration hash mismatch; explicit migration required')
+
+
+def _migrate_all_prices(state, moment, config_sha256):
+    """One reviewed source migration; retain old open exposure and its venue.
+
+    New notifications are fenced at migration time. Frozen old-source opens
+    continue on their original source until closed; unfilled limits are
+    cancelled explicitly, and uncertain sends are never retried.
+    """
+    _validate(state, LEGACY_MIXED_SOURCE_CONFIG_SHA256)
+    if (not isinstance(config_sha256, str) or len(config_sha256) != 64 or
+            any(c not in '0123456789abcdef' for c in config_sha256) or
+            config_sha256 == LEGACY_MIXED_SOURCE_CONFIG_SHA256):
+        raise ValueError('Reviewed source migration needs a new SHA-256 destination')
+    if state.get('all_prices_source_migration'):
+        raise ValueError('All-price source migration already recorded')
+    _maintain(state, moment)
+    if any(i['status'] == 'IN_FLIGHT' for i in state['intents']):
+        raise ValueError('Source migration waits for in-flight delivery settlement')
+    active = state.get('active')
+    if active:
+        active.setdefault('price_source', LEGACY_POSITION_PRICE_SOURCE)
+        active.setdefault('config_sha256', LEGACY_MIXED_SOURCE_CONFIG_SHA256)
+        active.setdefault('source_contract_version', 'legacy-source-contract')
+    for intent in state['intents']:
+        if intent['status'] == 'PENDING':
+            intent.update(status='CANCELLED', acknowledged_at=iso(moment), error_type='SOURCE_CHANGED')
+            _count(state, 'source_change_cancelled_notifications')
+    original_activation = state['activated_at']
+    state.update(config_sha256=config_sha256, source_contract_version=SOURCE_CONTRACT_VERSION,
+                 price_source=PRICE_SOURCE, activated_at=iso(max(utc(original_activation), moment)))
+    state['all_prices_source_migration'] = {
+        'version': SOURCE_CONTRACT_VERSION, 'migrated_at': iso(moment),
+        'original_activated_at': original_activation,
+        'from_config_sha256': LEGACY_MIXED_SOURCE_CONFIG_SHA256,
+        'to_config_sha256': config_sha256, 'from_position_source': LEGACY_POSITION_PRICE_SOURCE,
+        'to_position_source': PRICE_SOURCE, 'legacy_open_preserved': bool(state.get('active'))}
+    _maintain(state, moment)
 
 
 def _lock(conn, key):
@@ -131,7 +175,7 @@ def _maintain(state, now):
         state['intents'] = [i for i in state['intents'] if i['intent_id'] not in identities]
 
 
-def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None):
+def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None, migrate_all_prices=False):
     """Persist activation once. Repeated deploys preserve all state/fences."""
     key = key_for(scope)
     with _connect(database_url) as conn:
@@ -141,6 +185,8 @@ def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None):
                      (key, _encode(_initial(moment, config_sha256))))
         row = conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()
         state = json.loads(row['value'])
+        if migrate_all_prices and state.get('config_sha256') != config_sha256:
+            _migrate_all_prices(state, moment, config_sha256)
         _validate(state, config_sha256)
         _maintain(state, moment)
         _save(conn, key, state)
@@ -232,6 +278,8 @@ def reserve_signal(scope, decision_at, entry_at, entryprice, features, now, *, t
             _save(conn, key, state)
             return {'status': status, 'position': deepcopy(state['active']), 'intent': None}
         position = {'position_id': uuid4().hex, 'rule_id': 'R2732_XRP_SHORT_NY_WEEKDAYS_LOCK', 'symbol': 'XRP', 'direction': 'SHORT',
+                'price_source': PRICE_SOURCE, 'source_contract_version': SOURCE_CONTRACT_VERSION,
+                'config_sha256': config_sha256,
                     'decision_at': iso(decision), 'entry_at': iso(entry), 'entry_price': float(price),
                     'stop_price': float(stop), 'take_price': float(take),
                     'entry_price_decimal': str(price), 'stop_price_decimal': str(stop),

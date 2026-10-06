@@ -21,10 +21,14 @@ except ImportError:  # dependency remains optional for standalone provider tests
 
 BINANCE_SPOT = 'BINANCE_SPOT_TRADE_1M'
 HYPERLIQUID_PERP = 'HYPERLIQUID_HYPE_PERP_TRADE_1M'
+HYPERLIQUID_PERP_GENERIC = 'HYPERLIQUID_PERP_TRADE_1M'
+HYPERLIQUID_PERP_SYMBOLS = ('BTC', 'ETH', 'SOL', 'XRP', 'DOGE')
 BINANCE_MARK = 'BINANCE_HYPE_FUTURES_MARK_1M'
 HYPERLIQUID_SPOT = 'HYPERLIQUID_HYPE_SPOT_TRADE_1M'
 SPOT_SYMBOLS = ('BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ZEC')
-ACTIVE_ROUTES = tuple((BINANCE_SPOT, s) for s in SPOT_SYMBOLS) + ((HYPERLIQUID_PERP, 'HYPE'),)
+ACTIVE_ROUTES = (tuple((BINANCE_SPOT, s) for s in SPOT_SYMBOLS)
+    + ((HYPERLIQUID_PERP, 'HYPE'),)
+    + tuple((HYPERLIQUID_PERP_GENERIC, s) for s in HYPERLIQUID_PERP_SYMBOLS))
 MINUTE = timedelta(minutes=1)
 MILLISECOND = timedelta(milliseconds=1)
 PAGE_MINUTES = 1000
@@ -68,6 +72,13 @@ def source_metadata(route, symbol):
     if route == BINANCE_SPOT and symbol in SPOT_SYMBOLS:
         return dict(symbol=symbol, pair=symbol+'USDT', exchange='binance', market='spot',
                     interval='1m', interval_seconds=60, multiplier=1.0)
+    if route == HYPERLIQUID_PERP_GENERIC and symbol in HYPERLIQUID_PERP_SYMBOLS:
+        from experimental_hyperliquid_source import METHOD_VERSION, SOURCE_URL
+        return dict(symbol=symbol, pair=symbol+'-PERP', exchange='hyperliquid',
+                    market='perpetual', price_kind='TRADE', instrument=symbol,
+                    margin_currency='USDC', interval='1m', interval_seconds=60,
+                    source_url=SOURCE_URL, method_version=METHOD_VERSION,
+                    provenance='OFFICIAL_HYPERLIQUID_PERPETUAL_TRADE_CANDLES_1M')
     if symbol != 'HYPE':
         raise ValueError('Unsupported archive route/symbol')
     if route == HYPERLIQUID_PERP:
@@ -90,6 +101,87 @@ def schema_ready(conn):
         AND to_regclass('research_price_archive_cursors') IS NOT NULL
         AND to_regclass('research_price_archive_gaps') IS NOT NULL AS ready""").fetchone()
     return bool(row and (row['ready'] if isinstance(row, Mapping) else row[0]))
+
+
+def hyperliquid_schema_ready(conn):
+    """New routes require the explicit startup migration, never recurring DDL."""
+    row = conn.execute("""SELECT EXISTS(SELECT 1 FROM pg_constraint
+        WHERE conrelid=to_regclass('research_price_archive_bars')
+        AND conname='research_price_archive_route_symbol_v2') AS ready""").fetchone()
+    return bool(row and (row['ready'] if isinstance(row, Mapping) else row[0]))
+
+
+def hyperliquid_route(symbol):
+    # Retain the old HYPE namespace and all its previously archived history.
+    if symbol == 'HYPE':
+        return HYPERLIQUID_PERP
+    if symbol in HYPERLIQUID_PERP_SYMBOLS:
+        return HYPERLIQUID_PERP_GENERIC
+    raise ValueError('Unsupported Hyperliquid perpetual archive symbol')
+
+
+def fetch_hyperliquid_closed_candles(symbol, start, end):
+    """Shared source cache, exact closed minutes; no additional provider route."""
+    from experimental_hyperliquid_source import fetch_rows
+    route = hyperliquid_route(symbol)
+    first, last, expected = bounds(start, end)
+    rows = fetch_rows(symbol, int(first.timestamp()*1000),
+                      int((last+MINUTE).timestamp()*1000)) if expected else []
+    candles = [dict(open_time_utc=datetime.fromtimestamp(r[0]/1000,timezone.utc),
+                    close_time_utc=datetime.fromtimestamp((r[0]+59999)/1000,timezone.utc),
+                    open=r[1], high=r[2], low=r[3], close=r[4]) for r in rows]
+    return dict(source_metadata(route,symbol), candles=candles,
+                expected_candles=expected, missing_candles=expected-len(rows),
+                duplicate_candles=0, request_count=0,
+                retention_candles=5000, complete=len(rows)==expected)
+
+
+def _experimental_archive_connection():
+    if not enabled() or not database_url():
+        return None
+    if psycopg is None:
+        raise RuntimeError('Configured Hyperliquid archive dependency is unavailable')
+    return psycopg.connect(database_url(), autocommit=True, row_factory=dict_row,
+        connect_timeout=5, options='-c statement_timeout=15000 -c lock_timeout=2000')
+
+
+def experimental_hyperliquid_read(symbol, start_ms, end_ms):
+    """Sparse exact source rows for the shared cache; no HTTP or schema changes."""
+    route = hyperliquid_route(symbol)
+    if start_ms % 60000 or end_ms % 60000 or not 0 <= end_ms-start_ms <= 1000*60000:
+        raise ValueError('Bounded minute-aligned archive read required')
+    conn = _experimental_archive_connection()
+    if conn is None:
+        return []
+    with conn:
+        if not schema_ready(conn) or not hyperliquid_schema_ready(conn):
+            raise RuntimeError('Apply 056_hyperliquid_perpetual_archive.sql before source migration')
+        first, last = (datetime.fromtimestamp(t/1000,timezone.utc) for t in (start_ms,end_ms-60000))
+        return [[int(r['open_time_utc'].timestamp()*1000),r['open'],r['high'],r['low'],r['close']]
+                for r in read_bars(conn,route,symbol,first,last)]
+
+
+def experimental_hyperliquid_write(symbol, rows):
+    """Persist only validated closed source rows; immutable conflicts propagate."""
+    route = hyperliquid_route(symbol)
+    if len(rows) > 1000:
+        raise ValueError('Bounded archive write required')
+    moment = datetime.now(timezone.utc)
+    bars = []
+    for row in rows:
+        if len(row) != 5 or type(row[0]) is not int:
+            raise ValueError('Canonical Hyperliquid archive row required')
+        opened = datetime.fromtimestamp(row[0]/1000,timezone.utc)
+        bars.append(normalize_bar(dict(open_time_utc=opened,
+            close_time_utc=opened+MINUTE-MILLISECOND, open=row[1],high=row[2],
+            low=row[3],close=row[4],volume=None),now=moment))
+    conn = _experimental_archive_connection()
+    if conn is None:
+        return
+    with conn:
+        if not schema_ready(conn) or not hyperliquid_schema_ready(conn):
+            raise RuntimeError('Apply 056_hyperliquid_perpetual_archive.sql before source migration')
+        write_bars(conn,route,symbol,bars)
 
 
 def normalize_bar(candle, *, now=None):
@@ -184,9 +276,9 @@ def _result(route, symbol, bars, first, last, expected, requests, cached):
     result = dict(meta, candles=candles, expected_candles=expected, complete=not missing,
                   archive_route=route, archive_cached_candles=cached,
                   archive_missing_ranges=[{'start_time_utc':a.isoformat(), 'end_time_utc':b.isoformat()} for a,b in missing])
-    if route in (HYPERLIQUID_PERP, BINANCE_MARK):
+    if route in (HYPERLIQUID_PERP, HYPERLIQUID_PERP_GENERIC, BINANCE_MARK):
         result.update(missing_candles=expected-len(bars), duplicate_candles=0, request_count=requests)
-    if route == HYPERLIQUID_PERP:
+    if route in (HYPERLIQUID_PERP, HYPERLIQUID_PERP_GENERIC):
         result['retention_candles'] = 5000
     return result
 

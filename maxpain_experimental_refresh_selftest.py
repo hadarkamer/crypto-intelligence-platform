@@ -73,11 +73,11 @@ class Definitions(unittest.TestCase):
         self.assertFalse(ETH_LONG.require_range24)
         self.assertTrue(ETH_LONG.liquidity_growth)
 
-    def test_eth_worker_uses_eth_spot_route_and_separate_scope(self):
+    def test_eth_legacy_spot_route_and_separate_scope(self):
         response = SimpleNamespace(status_code=200, content=b'[]', json=lambda: [
             [BASE, '2000', '2002', '1999', '2001', '1', BASE+M-1, '1', 1, '1', '1', '0']])
         with patch.object(worker.requests, 'get', return_value=response) as request:
-            rows = worker.fetch_rows('ETH', BASE, BASE+M)
+            rows = worker.legacy_fetch_rows('ETH', BASE, BASE+M)
         self.assertEqual(request.call_args.kwargs['params']['symbol'], 'ETHUSDT')
         self.assertEqual(rows[0][1:], [2000., 2002., 1999., 2001.])
         eth = worker.ADDITIONAL_WORKERS['ETH']

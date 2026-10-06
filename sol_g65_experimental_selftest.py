@@ -270,10 +270,12 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_source_contract_strict_coverage(self):
         with self.assertRaises(ValueError): worker.fetch_rows('HYPE',0,60000)
         with self.assertRaises(ValueError): worker.fetch_rows('SOL',0,1001*60000)
-        response=SimpleNamespace(status_code=200,content=b'[]',json=lambda:[])
-        with patch.object(worker.requests,'get',return_value=response) as get:
-            with self.assertRaisesRegex(ValueError,'Incomplete'): worker.fetch_rows('SOL',0,60000)
-            self.assertFalse(get.call_args.kwargs['allow_redirects'])
+        with patch.object(worker.hyperliquid, 'fetch_rows', return_value=[[0,100,101,99,100]]) as get, \
+                patch.object(worker.requests, 'get') as binance:
+            self.assertEqual(worker.fetch_rows('SOL',0,60000), [[0,100,101,99,100]])
+            get.assert_called_once_with('SOL',0,60000)
+            binance.assert_not_called()
+
 
 
 @unittest.skipUnless(os.environ.get('TEST_DATABASE_URL'), 'Explicit local/CI PostgreSQL required')
