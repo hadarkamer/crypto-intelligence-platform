@@ -235,4 +235,57 @@ class IntegrationSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(w.runtime['ready']);self.assertEqual(w.retry_ms,0)
 
 
+class RawDatabaseRepresentationRegression(unittest.TestCase):
+    @staticmethod
+    def cases():
+        import json
+        from pathlib import Path
+        return json.loads(Path(__file__).with_name('raw_exact_cancelled_13_fixture.json').read_text())
+
+    @staticmethod
+    def state_for(coin,plans):
+        approved=r.APPROVED[coin]
+        return {'config_sha256':approved['config_sha256'],
+                'source_migration':deepcopy(approved['source_migration']), 'history':plans}
+
+    def test_all_13_actual_raw_database_records_pass_exact_guard(self):
+        plans=self.cases();self.assertEqual(len(plans),13)
+        for coin in r.APPROVED:
+            subset=[p for p in plans if p['coin']==coin]
+            with self.subTest(coin=coin):
+                self.assertEqual(r.exact_candidates(self.state_for(coin,subset)),subset)
+
+    def test_jsonb_javascript_integer_normalization_reproduces_original_failure(self):
+        def lossy(value):
+            if isinstance(value,float) and value.is_integer():return int(value)
+            if isinstance(value,dict):return {k:lossy(v) for k,v in value.items()}
+            if isinstance(value,list):return [lossy(v) for v in value]
+            return value
+        for raw in self.cases():
+            exported=lossy(raw)
+            self.assertEqual(raw,exported) # numerically same but exact JSON serialization differs
+            self.assertNotEqual(r.digest(raw),r.digest(exported))
+            with self.subTest(position_id=raw['position_id']):
+                with self.assertRaisesRegex(ValueError,'Original cancelled plan changed'):
+                    r.exact_candidates(self.state_for(raw['coin'],[exported]))
+
+    def test_live_store_encode_decode_keeps_all_13_exact_numeric_representations(self):
+        import json
+        for raw in self.cases():
+            state=self.state_for(raw['coin'],[raw])
+            decoded=json.loads(store._encode(state))
+            self.assertEqual(r.digest(decoded['history'][0]),r.digest(raw))
+            self.assertEqual(len(r.exact_candidates(decoded)),1)
+
+    def test_one_float_step_in_entry_and_changed_boolean_remain_rejected(self):
+        import math
+        for raw in self.cases():
+            for field in ('entry_price','liquidity_growth'):
+                changed=deepcopy(raw)
+                changed[field]=math.nextafter(changed[field],math.inf) if field=='entry_price' else not changed[field]
+                with self.subTest(position_id=raw['position_id'],field=field):
+                    with self.assertRaisesRegex(ValueError,'Original cancelled plan changed'):
+                        r.exact_candidates(self.state_for(raw['coin'],[changed]))
+
+
 if __name__=='__main__':unittest.main(verbosity=2)
