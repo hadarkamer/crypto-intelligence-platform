@@ -58,10 +58,8 @@ class AcquisitionPostgresTests(unittest.TestCase):
         fixtures.CohortPostgresTests.setUp(self)
         root = Path(__file__).resolve().parent / 'migrations'
         with self.connect() as conn:
-            for number in ('056', '057'):
-                migrations = list(root.glob(number + '_*.sql'))
-                self.assertEqual(len(migrations), 1)
-                conn.execute(migrations[0].read_text(), prepare=False)
+            for name in ('056_no_horizon_runtime.sql', '057_no_horizon_acquisition.sql'):
+                conn.execute((root / name).read_text(), prepare=False)
         self.reopen()
 
     def reopen(self):
@@ -476,8 +474,8 @@ class AcquisitionPostgresTests(unittest.TestCase):
 
     def test_acquisition_migration_rollback_and_reapply_preserve_completed_evidence(self):
         root = Path(__file__).resolve().parent / 'migrations'
-        sql056 = next(root.glob('056_*.sql')).read_text()
-        sql057 = next(root.glob('057_*.sql')).read_text()
+        sql056 = (root / '056_no_horizon_runtime.sql').read_text()
+        sql057 = (root / '057_no_horizon_acquisition.sql').read_text()
         with self.connect() as conn:
             with self.assertRaisesRegex(RuntimeError, 'rollback new acquisition schema'):
                 with conn.transaction():

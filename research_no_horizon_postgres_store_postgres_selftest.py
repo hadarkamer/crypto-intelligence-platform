@@ -57,10 +57,8 @@ class PostgresCohortStoreTests(unittest.TestCase):
                         or info.get('dbname', '').endswith('_test'))):
             raise ValueError('Integration requires an explicit local/CI test database')
         cls.psycopg, cls.sql, cls.dict_row = psycopg, sql, staticmethod(dict_row)
-        migrations = list((Path(__file__).resolve().parent / 'migrations').glob('056_*.sql'))
-        if len(migrations) != 1:
-            raise ValueError('Exactly one no-horizon runtime migration 056 required')
-        cls.migration = migrations[0].read_text()
+        migration = Path(__file__).resolve().parent / 'migrations' / '056_no_horizon_runtime.sql'
+        cls.migration = migration.read_text()
         cls.original = outcome_fixture()
 
     def connect(self, *, schema=None):

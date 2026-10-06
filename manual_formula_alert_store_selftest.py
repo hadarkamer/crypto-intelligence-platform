@@ -17,6 +17,14 @@ from uuid import uuid4
 import manual_formula_alert_store as store
 from manual_formula_alert_selftest import fixture
 
+def setUpModule():
+    # Exercise archived delivery contracts under explicit former permissions.
+    # The production retirement roster is covered by alert_delivery_policy_selftest.
+    gate = patch.object(store.alert_delivery_policy, 'manual_rule_enabled',
+                        side_effect=lambda rule_id: store.alert_delivery_policy.profile() == 'ALL')
+    gate.start()
+    unittest.addModuleCleanup(gate.stop)
+
 BASE = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
 OBSERVATION_RULE = 'MAGNET_OBSERVATION_DOGE_SHORT'
 

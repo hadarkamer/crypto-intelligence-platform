@@ -720,7 +720,7 @@ for (const config of Object.values(liveConfigs)) {
   assert.equal(duplicate.writes, 0);
 }
 
-// At the real 32000-row cap, expire only old physical positions; a two-page
+// At the real 40000-row cap, expire only old physical positions; a two-page
 // frozen audit observes the same protected IDs even while inserts occur.
 vm.runInContext("Date.now = () => Date.parse('2026-09-13T12:00:00Z')", context);
 const ringHeaders = ["event_id","snapshot_id","telegram_message_id","timestamp_utc","symbol","direction",
@@ -730,7 +730,7 @@ const ringRow = (id, timestamp) => [id, id, "message", timestamp, "BTC", "LONG",
   "DELIVERED", "captured", "LONG", "LONG", "MAX_PAIN_ALERT", "MAX_PAIN_ALERT", "sheet-event-classification-v1"];
 const ring = sheet([ringHeaders, ringRow("expired-a","2026-08-27T00:00:00Z"),
   ringRow("expired-b","2026-08-28T11:59:59.999Z"),
-  ...Array.from({length:31998},(_, i) => ringRow("protected-"+i, "2026-09-12T12:00:00Z"))], 32001);
+  ...Array.from({length:39998},(_, i) => ringRow("protected-"+i, "2026-09-12T12:00:00Z"))], 40001);
 const ringArchive = sheet([ringHeaders]);
 const ringBook = {getSheetByName: name => ({Telegram_Events:ring,Telegram_Archive_20260913:ringArchive})[name],
   getSheets: () => [ring,ringArchive]};
@@ -739,11 +739,11 @@ const ringItem = (id,time="2026-09-13T11:59:00Z") => ({sheet:"Telegram_Events",k
 const firstRingPage = context.telegramAuditPage_(ringBook,{start_row:2,page_size:500});
 const protectedBefore = ring.rows.slice(3).map(row=>row[0]);
 context.upsertBatch_(ringBook,[ringItem("new-a"),ringItem("new-b"),ringItem("new-a")]);
-assert.equal(ring.rows.length,32001);
+assert.equal(ring.rows.length,40001);
 assert.equal(ring.rows[1][0],"new-a");
 assert.equal(ring.rows[2][0],"new-b");
 assert.deepEqual(ring.rows.slice(3).map(row=>row[0]),protectedBefore);
-const secondRingPage = context.telegramAuditPage_(ringBook,{start_row:502,last_row:32001,page_size:500});
+const secondRingPage = context.telegramAuditPage_(ringBook,{start_row:502,last_row:40001,page_size:500});
 assert.equal(firstRingPage.last_row,secondRingPage.last_row);
 assert.equal(secondRingPage.rows[0].event_id,"protected-498");
 const ringWrites = ring.writes;
@@ -754,4 +754,4 @@ assert.throws(() => context.upsertBatch_(ringBook,[ringItem("expired-a","2026-08
 const noArchiveBook = {...ringBook,getSheetByName:name=>name==="Telegram_Events"?ring:null};
 assert.throws(() => context.upsertBatch_(noArchiveBook,[ringItem("no-archive")]),/archive is required/);
 assert.equal(ringArchive.writes,0);
-console.log("google Apps Script latest slots/32000-row retention/frozen audit stability: PASS");
+console.log("google Apps Script latest slots/40000-row retention/frozen audit stability: PASS");

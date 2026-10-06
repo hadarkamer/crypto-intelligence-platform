@@ -47,6 +47,7 @@ class TransportTest(unittest.TestCase):
             patch.object(sync, "_LAST_HTTP_DIAGNOSTIC", None),
             patch.object(sync, "_DURABLE_SNAPSHOT_MODE", False),
             patch.object(sync, "_ACK_MODE", "json"),
+            patch.object(sync, "_TARGET_DEFERRALS", {}),
         ]
         for item in self.patches:
             item.start()
@@ -54,6 +55,9 @@ class TransportTest(unittest.TestCase):
         self.payload = {"kind": "research_sheet_upserts", "upserts": []}
 
     def send(self, response=None, error=None):
+        # Each boundary fixture is a fresh probe; dedicated backoff tests below
+        # preserve this state across calls to verify suppressed network work.
+        sync._TARGET_DEFERRALS.clear()
         output = io.StringIO()
         with patch.object(sync, "urlopen", return_value=response, side_effect=error) as http, contextlib.redirect_stdout(output):
             result = sync.deliver_now(self.payload)
@@ -117,6 +121,37 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(sync.ordered_outcome_batch_limit(), 1)
         self.assertTrue(self.send(Response(b'{"ok":true,"version":"sheets-batch-v3"}'))[0])
         self.assertEqual(sync.ordered_outcome_batch_limit(), 8)
+
+    def test_capacity_stops_immediate_retries_and_defers_only_failed_destination(self):
+        blocked=dict(secret='REQUEST_SECRET',spreadsheet_id='sheet',
+            payload=dict(kind='research_sheet_upserts',upserts=[dict(sheet='Telegram_Events')]))
+        healthy=dict(blocked,payload=dict(kind='research_sheet_upserts',upserts=[dict(sheet='Live_Current')]))
+        now=[100.0]
+        failure=Response(b'{"ok":false,"error_code":"SHEET_CAPACITY"}')
+        success=Response(b'{"ok":true,"version":"sheets-batch-v3"}')
+        with patch.object(sync.time,'monotonic',side_effect=lambda:now[0]),\
+             patch.object(sync,'urlopen',side_effect=[failure,success,success]) as http,\
+             patch.object(sync.time,'sleep') as sleep,contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(sync._deliver_envelope(blocked,attempts=5))
+            self.assertEqual(http.call_count,1)
+            self.assertFalse(sync._deliver_envelope(blocked,attempts=5))
+            self.assertEqual(http.call_count,1)
+            self.assertTrue(sync._deliver_envelope(healthy))
+            now[0]+=301
+            self.assertTrue(sync._deliver_envelope(blocked))
+            self.assertEqual(http.call_count,3)
+            sleep.assert_not_called()
+
+    def test_404_retries_wait_for_new_probe_and_never_claim_ack(self):
+        headers=Message();headers['Content-Type']='text/html'
+        missing=HTTPError('https://script.google.com/macros/s/private/exec',404,'PRIVATE',headers,io.BytesIO(b'PRIVATE'))
+        with patch.object(sync,'urlopen',side_effect=missing) as http,\
+             patch.object(sync.time,'sleep') as sleep,contextlib.redirect_stdout(io.StringIO()):
+            envelope=dict(secret='REQUEST_SECRET',spreadsheet_id='sheet',payload=self.payload)
+            self.assertFalse(sync._deliver_envelope(envelope,attempts=5))
+            self.assertFalse(sync._deliver_envelope(envelope,attempts=5))
+            self.assertEqual(http.call_count,1)
+            sleep.assert_not_called()
 
 
 class HTMLTransportTest(unittest.TestCase):

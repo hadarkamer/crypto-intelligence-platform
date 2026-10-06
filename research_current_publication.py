@@ -14,7 +14,7 @@ from research_outcome_publication import source_time, SYMBOLS, DIRECTIONS
 from research_maxpain_sheet_rows import TIMEFRAMES
 
 VERSION = 'bounded-live-publication-v1'
-TELEGRAM_MAX_ROWS = 32_000
+TELEGRAM_MAX_ROWS = 40_000
 TELEGRAM_RETENTION_DAYS = 16
 AUDIT_MAX_SECONDS = 24 * 60 * 60
 CONFIG = {

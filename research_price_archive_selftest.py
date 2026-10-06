@@ -23,6 +23,42 @@ def path(route=a.BINANCE_SPOT,symbol='BTC',indices=(0,1,2)):
 
 
 class PriceArchiveTests(unittest.TestCase):
+    def test_hyperliquid_routes_preserve_hype_and_separate_new_symbols(self):
+        self.assertEqual(a.hyperliquid_route('HYPE'),a.HYPERLIQUID_PERP)
+        self.assertEqual(len(a.ACTIVE_ROUTES),13)
+        for symbol in a.HYPERLIQUID_PERP_SYMBOLS:
+            self.assertEqual(a.hyperliquid_route(symbol),a.HYPERLIQUID_PERP_GENERIC)
+            meta=a.source_metadata(a.HYPERLIQUID_PERP_GENERIC,symbol)
+            self.assertEqual((meta['pair'],meta['market'],meta['price_kind']),
+                             (symbol+'-PERP','perpetual','TRADE'))
+            self.assertEqual(w.retention_floor(a.HYPERLIQUID_PERP_GENERIC,NOW),NOW-4999*a.MINUTE)
+            p=path(a.HYPERLIQUID_PERP_GENERIC,symbol,indices=(0,))
+            self.assertEqual(len(a.validate_path(a.HYPERLIQUID_PERP_GENERIC,symbol,p,
+                START,START+a.MINUTE,now=NOW)),1)
+        for symbol in ('HYPE','BNB','ZEC'):
+            with self.assertRaises(ValueError):
+                a.source_metadata(a.HYPERLIQUID_PERP_GENERIC,symbol)
+
+    def test_shared_hyperliquid_closed_adapter_has_exact_inclusive_cutoff(self):
+        start=int(START.timestamp()*1000)
+        with patch('experimental_hyperliquid_source.fetch_rows',
+                   return_value=[[start,100,102,99,101]]) as fetch:
+            result=a.fetch_hyperliquid_closed_candles('ETH',START,START+a.MINUTE-a.MILLISECOND)
+        fetch.assert_called_once_with('ETH',start,start+60000)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['candles'][0]['close_time_utc'],START+a.MINUTE-a.MILLISECOND)
+        self.assertEqual(result['market'],'perpetual')
+        self.assertEqual(result['price_kind'],'TRADE')
+
+    def test_experimental_archive_callbacks_disabled_and_closed_only(self):
+        start=int(START.timestamp()*1000)
+        with patch.dict(os.environ,{'RESEARCH_PRICE_ARCHIVE_ENABLED':'false'}):
+            self.assertEqual(a.experimental_hyperliquid_read('ETH',start,start+60000),[])
+            a.experimental_hyperliquid_write('ETH',[[start,100,102,99,101]])
+            future=int((datetime.now(timezone.utc)+timedelta(days=1)).timestamp()//60*60000)
+            with self.assertRaisesRegex(ValueError,'not yet closed'):
+                a.experimental_hyperliquid_write('ETH',[[future,100,102,99,101]])
+
     def test_precise_partial_boundary_and_full_minute(self):
         self.assertEqual(a.bounds(START+timedelta(seconds=1),START+2*a.MINUTE-a.MILLISECOND),
                          (START+a.MINUTE,START+a.MINUTE,1))

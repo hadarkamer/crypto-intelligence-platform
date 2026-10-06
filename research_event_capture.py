@@ -224,6 +224,19 @@ def compact_maxpain_timeframes(value: Any) -> List[Dict[str, Any]]:
         if timeframe not in _MAXPAIN_TIMEFRAMES or source_side not in {"LONG", "SHORT"} or key in entries:
             continue
         entry: Dict[str, Any] = {"timeframe": timeframe, "source_side": source_side}
+        # Additive provenance; never infer the new target-local regime for old
+        # snapshots that did not carry it at decision time.
+        if raw.get("cluster_scoring_scope") == "TARGET_EXACT_PRICE_V1":
+            entry["cluster_scoring_scope"] = raw["cluster_scoring_scope"]
+            if isinstance(raw.get("cluster_target_is_member"), bool):
+                entry["cluster_target_is_member"] = raw["cluster_target_is_member"]
+            targets = raw.get("cluster_member_targets")
+            if isinstance(targets, (list, tuple)):
+                entry["cluster_member_targets"] = [
+                    number for value in targets[:7]
+                    if not isinstance(value, bool) and (number := _float(value)) is not None
+                    and math.isfinite(number) and number > 0
+                ]
         for field in numeric_fields:
             number = _float(raw.get(field))
             if number is not None and not isinstance(raw.get(field), bool) and math.isfinite(number):
@@ -381,6 +394,9 @@ def build_maxpain_event(
         "cluster_candidate_count": item.get("cluster_candidate_count"),
         "cluster_members": _json_safe(item.get("cluster_members") or []),
         "cluster_count": item.get("cluster_count"),
+        "cluster_scoring_scope": item.get("cluster_scoring_scope"),
+        "cluster_target_is_member": item.get("cluster_target_is_member"),
+        "cluster_member_targets": _json_safe(item.get("cluster_member_targets") or []),
         "cluster_same_direction_count": item.get("cluster_same_direction_count"),
         "component_sum_check": item.get("component_sum_check"),
         "calculation_validation_errors": _json_safe(item.get("calculation_validation_errors") or []),

@@ -148,8 +148,13 @@ async def _check_delivery_policy(profile: str) -> None:
 
 def run() -> None:
     asyncio.run(_check())
-    for profile in ("SELECTED_EXPERIMENTAL_ONLY", "ORDINARY_AND_SELECTED_EXPERIMENTAL"):
-        asyncio.run(_check_delivery_policy(profile))
+    # Preserve historical profile/race contracts through an explicit test fixture.
+    # Current unconditional retirement is verified in the policy self-test.
+    with patch.object(research_formula_worker.delivery_policy,
+                      "other_experimental_alerts_enabled",
+                      side_effect=lambda: research_formula_worker.delivery_policy.profile() == "ALL"):
+        for profile in ("SELECTED_EXPERIMENTAL_ONLY", "ORDINARY_AND_SELECTED_EXPERIMENTAL"):
+            asyncio.run(_check_delivery_policy(profile))
     print("Formula worker ordered-first-touch quarantine self-test: PASS")
 
 

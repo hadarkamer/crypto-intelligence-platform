@@ -67,6 +67,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.db = MemoryBoundary()
         self.calls = []
         for target, name, value in (
+            # Simulate the archived permissions; retirement is tested separately.
+            (delivery.delivery_policy, 'other_experimental_alerts_enabled',
+             lambda: delivery.delivery_policy.profile() == 'ALL'),
             (delivery, '_READY', True), (delivery, '_NEXT_INIT', 0),
             (delivery, '_DRAIN_LOCK', asyncio.Lock()),
             (delivery, '_STATUS', deepcopy(delivery._STATUS)),

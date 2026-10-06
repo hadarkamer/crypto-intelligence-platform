@@ -23,7 +23,7 @@ _SAFE_FAILURE_CODES = frozenset({
     "SHEET_AUDIT_RECEIVER_V3_REQUIRED", "INVALID_SHEET_AUDIT_RESPONSE",
     "INVALID_OR_DISCONTINUOUS_SHEET_AUDIT_PAGE", "INVALID_SHEET_AUDIT_ROW",
     "INVALID_SHEET_AUDIT_NORMALIZED_COUNT", "AUDIT_POPULATION_NOT_STARTED",
-    "AUDIT_POPULATION_EXCEEDS_32000", "DUPLICATE_DATABASE_EVENT_FINGERPRINT",
+    "AUDIT_POPULATION_EXCEEDS_CAPACITY", "DUPLICATE_DATABASE_EVENT_FINGERPRINT",
     "SHEET_AUDIT_CYCLE_EXPIRED",
 }) | frozenset(
     "SHEET_AUDIT_HTTP_" + str(code) + "_" + stage
@@ -72,7 +72,7 @@ class SheetReconciler:
                 ORDER BY event_id LIMIT %s
             ''', (self.start, self.cutoff, MAX_EVENTS + 1)).fetchall()
         if len(rows) > MAX_EVENTS:
-            raise ValueError("AUDIT_POPULATION_EXCEEDS_32000")
+            raise ValueError("AUDIT_POPULATION_EXCEEDS_CAPACITY")
         self.expected = {str(row["event_fingerprint"]): dict(row) for row in rows}
         if len(self.expected) != len(rows):
             raise ValueError("DUPLICATE_DATABASE_EVENT_FINGERPRINT")

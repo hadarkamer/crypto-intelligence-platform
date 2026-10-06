@@ -23,7 +23,7 @@ def _config(name, default, minimum, maximum):
 
 
 def retention_floor(route, now):
-    if route in (archive.HYPERLIQUID_PERP, archive.HYPERLIQUID_SPOT):
+    if route in (archive.HYPERLIQUID_PERP, archive.HYPERLIQUID_PERP_GENERIC, archive.HYPERLIQUID_SPOT):
         # The current, not-yet-closed minute can occupy one of the 5,000 slots.
         return now.replace(second=0, microsecond=0)-4999*archive.MINUTE
     return None
@@ -49,9 +49,9 @@ def tail_window(latest, cutoff):
 
 def _raw_fetchers():
     import binance_spot_price_path
-    import hyperliquid_perp_price_path
     return {archive.BINANCE_SPOT: binance_spot_price_path.fetch_closed_candles,
-            archive.HYPERLIQUID_PERP: hyperliquid_perp_price_path.fetch_closed_candles}
+            archive.HYPERLIQUID_PERP: archive.fetch_hyperliquid_closed_candles,
+            archive.HYPERLIQUID_PERP_GENERIC: archive.fetch_hyperliquid_closed_candles}
 
 
 def _record_gaps(conn, route, symbol, start, end, path, now, *, error=None):
@@ -147,7 +147,7 @@ def _collect_page(conn, state, start, end, fetchers, now, *, lane):
 
 
 def snapshot(conn):
-    """Eight indexed edge lookups and a small gap queue; never scan all bars."""
+    """Indexed edge lookups and a small gap queue; never scan all bars."""
     return conn.execute("""SELECT c.*,b.open_time_utc AS stored_latest_open_utc,
         g.retry_ranges,g.unavailable_ranges FROM research_price_archive_cursors c
         LEFT JOIN LATERAL(SELECT open_time_utc FROM research_price_archive_bars b
@@ -176,7 +176,7 @@ class ResearchPriceArchiveWorker:
         with archive.psycopg.connect(archive.database_url(),autocommit=True,
                 row_factory=archive.dict_row,connect_timeout=5,
                 options='-c statement_timeout=5000 -c lock_timeout=1000') as conn:
-            self.metrics['schema_ready'] = archive.schema_ready(conn)
+            self.metrics['schema_ready'] = archive.schema_ready(conn) and archive.hyperliquid_schema_ready(conn)
             return self.metrics['schema_ready']
 
     async def start(self):
@@ -185,7 +185,7 @@ class ResearchPriceArchiveWorker:
         if not self._task or self._task.done():
             try:
                 if not await asyncio.to_thread(self._schema_ready):
-                    self.metrics['last_error'] = 'Apply 044_continuous_price_archive.sql'
+                    self.metrics['last_error'] = 'Apply 044_continuous_price_archive.sql and 056_hyperliquid_perpetual_archive.sql'
                     return False
             except Exception as exc:
                 self.metrics['last_error'] = type(exc).__name__
@@ -222,7 +222,7 @@ class ResearchPriceArchiveWorker:
             with archive.psycopg.connect(archive.database_url(),autocommit=True,
                     row_factory=archive.dict_row,connect_timeout=5,
                     options='-c statement_timeout=15000 -c lock_timeout=2000') as conn:
-                if not archive.schema_ready(conn):
+                if not archive.schema_ready(conn) or not archive.hyperliquid_schema_ready(conn):
                     return {'state':'SCHEMA_MISSING'}
                 return self.run_once(now=now,fetchers=fetchers,connection=conn)
         conn = connection

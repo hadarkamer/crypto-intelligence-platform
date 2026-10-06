@@ -247,7 +247,7 @@ def _score_explicit_side(
     allowed = _allowed_distance_pct(symbol, _get(row, "rank"))
     target_points = _target_proximity_points(distance, allowed)
     cluster_points = float(
-        clusters.get(symbol, {}).get(side, {}).get("points", 0.0) or 0.0
+        _cluster_for_target(row, side, list(all_rows or [])).get("points", 0.0) or 0.0
     )
     gap_points = _relative_gap_points_for_side(row, side)
     score = (
@@ -521,12 +521,19 @@ def _transition_growth_score(
     )
 
 
-def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
+def _cluster_for_side(
+    symbol_rows: List[Any], side: str, target_price: Optional[float] = None,
+) -> Dict[str, Any]:
     """Calculate the strongest independent cluster for one direction.
 
     Cluster membership no longer depends on a median. A valid cluster is the
     best contiguous group of at least two directional targets whose full
     low-to-high spread is no more than 1% of their average target.
+
+    When target_price is supplied, only windows containing that exact quoted
+    price are eligible. A matching price in another timeframe qualifies; being
+    merely nearby or between the cluster bounds does not. The unscoped form
+    remains available for directional diagnostics, never target scoring.
     """
     directional_entries: List[Dict[str, Any]] = []
     for row in symbol_rows:
@@ -564,19 +571,25 @@ def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
         "candidate_cluster_count": 0,
         "candidate_clusters": [],
         "points": 0.0,
+        "scoring_scope": "TARGET_EXACT_PRICE_V1" if target_price is not None else "DIRECTIONAL_DIAGNOSTIC",
+        "target_price": target_price,
+        "target_is_member": False,
+        "member_targets": [],
     }
     if same_direction_count < 2:
         return empty
 
     # Sort by price only for cluster discovery. Every contiguous price window is
     # evaluated, and the strongest valid window is selected deterministically:
-    # most members, then narrowest spread, then greatest represented liquidity.
+    # score, most members, narrowest spread, then represented liquidity.
     by_target = sorted(directional_entries, key=lambda item: item["target"])
     candidates: List[Dict[str, Any]] = []
     for left in range(len(by_target)):
         for right in range(left + 1, len(by_target)):
             group = by_target[left:right + 1]
             targets = [item["target"] for item in group]
+            if target_price is not None and float(target_price) not in targets:
+                continue
             average_target = sum(targets) / len(targets)
             if average_target <= 0:
                 continue
@@ -663,6 +676,7 @@ def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
         candidate_summaries.append({
             "count": len(candidate_entries),
             "members": [item["timeframe"] for item in candidate_entries],
+            "member_targets": candidate_targets,
             "min_target": min(candidate_targets) if candidate_targets else None,
             "max_target": max(candidate_targets) if candidate_targets else None,
             "spread_pct": float(candidate.get("spread_pct", 0.0) or 0.0),
@@ -715,7 +729,31 @@ def _cluster_for_side(symbol_rows: List[Any], side: str) -> Dict[str, Any]:
         "candidate_cluster_count": len(candidate_summaries),
         "candidate_clusters": candidate_summaries,
         "points": cluster_points,
+        "scoring_scope": empty["scoring_scope"],
+        "target_price": target_price,
+        "target_is_member": target_price is not None and float(target_price) in targets,
+        "member_targets": targets,
     }
+
+
+def _cluster_for_target(row: Any, side: str, all_rows: List[Any]) -> Dict[str, Any]:
+    """Select the strongest existing cluster containing this active target.
+
+    Candidate construction, nearest-side support, spread and growth rules stay
+    unchanged. Target scoring must never inherit the best unrelated cluster.
+    """
+    symbol = str(_get(row, "symbol", "") or "").upper()
+    try:
+        target = _target_for_side(row, side)
+    except (TypeError, ValueError):
+        target = None
+    symbol_rows = [other for other in all_rows
+                   if str(_get(other, "symbol", "") or "").upper() == symbol]
+    if target is None or not math.isfinite(target) or target <= 0:
+        # An empty universe gives zero components and cannot fall back to the
+        # unscoped directional winner when input evidence is unavailable.
+        return _cluster_for_side([], side, target_price=0.0)
+    return _cluster_for_side(symbol_rows, side, target_price=target)
 
 
 def _cluster_map(rows: List[Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
@@ -893,15 +931,7 @@ def _score_details_for_side(
     )
     allowed_distance = _allowed_distance_pct(symbol, rank)
     target_proximity = _target_proximity_points(distance, allowed_distance)
-    cluster = clusters.get(symbol, {}).get(side, {
-        "count": 0, "same_direction_count": 0, "members": [],
-        "spread_pct": None, "mean_deviation_pct": None,
-        "median_target": None, "density_points": 0.0,
-        "coverage_points": 0.0, "growth_points": 0.0,
-        "liquidity_multiplier": 0.0,
-        "growth_transition_scores": {}, "candidate_cluster_count": 0,
-        "candidate_clusters": [], "points": 0.0, "side": side,
-    })
+    cluster = _cluster_for_target(row, side, all_rows)
     cluster_points = float(cluster.get("points", 0.0) or 0.0)
 
     opposite = "SHORT" if side == "LONG" else "LONG"
@@ -1033,6 +1063,9 @@ def build_opportunities(
                         "distance_pct": details["distance"],
                         "consensus_hits": details["consensus_hits"],
                         "consensus_total": details["consensus_total"],
+                        "cluster_scoring_scope": details["cluster"]["scoring_scope"],
+                        "cluster_target_is_member": bool(details["cluster"].get("target_is_member")),
+                        "cluster_member_targets": list(details["cluster"].get("member_targets") or []),
                     }
                     near_key = "long_liquidation_amount" if side == "LONG" else "short_liquidation_amount"
                     far_key = "short_liquidation_amount" if side == "LONG" else "long_liquidation_amount"
@@ -1069,6 +1102,8 @@ def build_opportunities(
                     "gap_consensus_total": details["gap_consensus_total"],
                     "cluster_count": cluster.get("count"),
                     "cluster_members": list(cluster.get("members") or []),
+                    "cluster_member_targets": list(cluster.get("member_targets") or []),
+                    "cluster_target_is_member": bool(cluster.get("target_is_member")),
                     "cluster_spread_pct": cluster.get("spread_pct"),
                     "cluster_mean_deviation_pct": cluster.get("mean_deviation_pct"),
                     "cluster_growth_transition_scores": dict(cluster.get("growth_transition_scores") or {}),
@@ -1175,6 +1210,9 @@ def build_opportunities(
             "cluster_candidates": cluster.get("candidate_clusters", []),
             "cluster_side": cluster.get("side"),
             "cluster_members": cluster.get("members", []),
+            "cluster_member_targets": list(cluster.get("member_targets") or []),
+            "cluster_target_is_member": bool(cluster.get("target_is_member")),
+            "cluster_scoring_scope": cluster.get("scoring_scope"),
             "duplicate_rows_removed": int(duplicate_counts.get(symbol, 0) or 0),
             "calculation_validation_errors": validation_errors,
             "component_sum_check": component_sum,

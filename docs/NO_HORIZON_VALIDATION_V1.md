@@ -30,8 +30,11 @@ selected scopes, the complete known matched-parent inventory, validation policy,
 future declaration and current implementation versions. Its cohort key commits
 to these choices before registration. Validation reconstructs the plan from the
 same full training evidence; altered or stale plans cannot silently continue.
-Existing acquisition, executor, ranking, selection, label and gate files remain
-unchanged, preserving their frozen implementation identities.
+This layer does not rewrite acquisition, executor, ranking, selection, label or
+gate implementation files. Plans still bind their complete current dependency
+fingerprints: integrating upstream dependency changes can invalidate older plans.
+Such experiments must use their original pinned code, not silently resume under
+the new implementation.
 
 ## Verify database timing and the actual execution link
 
