@@ -11,6 +11,12 @@ preload_app = False
 def post_worker_init(worker):
     import os
     import json
+    # The handover coordinator retains legacy protections on candidate startup
+    # failure, and exclusively owns both phases. Do not start other workers.
+    if os.environ.get('HL_TESTNET_RUNTIME_MODE') == 'experimental_testnet_v1':
+        from hl_testnet_runtime.experimental_live_startup import start
+        start()
+        return
     # Fail before starting ANY legacy task if integrated review is misconfigured.
     if os.environ.get('HL_TESTNET_SAFETY_PIPELINE'):
         from hl_testnet_runtime.integrated_safety import config as safety_config
@@ -71,6 +77,8 @@ def post_worker_init(worker):
 
 
 def worker_exit(server, worker):
+    from hl_testnet_runtime.experimental_live_startup import stop as stop_experimental
+    stop_experimental()
     from hl_testnet_runtime.single_trial_controller import stop as stop_single_trial
     stop_single_trial()
     from hl_testnet_runtime.pending_cancel_monitor import stop

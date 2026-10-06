@@ -49,7 +49,8 @@ PRODUCER_MODULES = (
 ENVIRONMENT_NAMES = frozenset({"PATH", "LANG", "TZ", "PYTHONUNBUFFERED",
     "PYTHONDONTWRITEBYTECODE", "PYTHONHASHSEED", "PYTHONPATH", "LC_CTYPE", "HL_JOURNAL_CI_URL",
     "TEST_DATABASE_URL"})
-TEST_FIXTURES = ("raw_exact_cancelled_13_fixture.json",)
+TEST_FIXTURES = ("raw_exact_cancelled_13_fixture.json",
+    "migrations/044_continuous_price_archive.sql")
 
 
 def file_digest(files):
@@ -57,12 +58,12 @@ def file_digest(files):
 
 
 def candidate_files(root):
-    """Include only specifically named existing regression data, never arbitrary JSON."""
-    root = Path(root)
+    """Include only named regression/schema fixtures, never arbitrary data or SQL."""
+    root = Path(root).resolve()
     files = core.input_files(root)
     for name in TEST_FIXTURES:
         path = root / name
-        if path.is_symlink():
+        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent != root):
             raise core.PreflightError("MANIFEST_SYMLINK_REFUSED")
         if path.exists():
             if not path.is_file() or path.stat().st_size > 1024 * 1024:

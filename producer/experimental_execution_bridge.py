@@ -3,7 +3,8 @@
 The reader reuses durable producer state and never queries an exchange. MaxPain
 evidence is captured in the same existing source transaction as its new plan,
 before any touch. Legacy plans without this evidence cannot be backfilled into
-execution. This module is not started by the production forwarder.
+execution. Only the explicit, default-off experimental_execution_forwarder
+invokes this projection on its own schedule.
 """
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -332,8 +333,8 @@ def maxpain_messages(state, *, now_ms, fence_ms):
 def read_experimental(scopes, fence, *, now=None, env=None, connect=None, deadline_monotonic=None, clock=None):
     """Opt-in read-only API for a separately scheduled, reviewed bridge.
 
-    Disabled means no DB import/connection. No existing producer/forwarder task
-    invokes this entry point. Wiring a network sender remains a separate change.
+    Disabled means no DB import/connection. The separately configured
+    experimental_execution_forwarder uses the read-only source connection.
     """
     if not enabled(env):
         return []

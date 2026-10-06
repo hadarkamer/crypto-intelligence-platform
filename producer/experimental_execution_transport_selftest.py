@@ -246,6 +246,19 @@ class TransportTests(unittest.TestCase):
         self.assertEqual((result['attempted'], result['deferred']), (0, 1))
         post.assert_not_called()
 
+    def test_source_deadline_leaves_delivery_budget_for_retained_cancellation(self):
+        value = sol_g65_message(kind='CANCEL', cancel_reason='SOURCE_ENTRY_OBSERVED')
+        sender = transport.Sender(); sender._merge([value])
+        times = iter((0., 9.))
+        def slow_unavailable(*args, **kwargs):
+            self.assertEqual(kwargs['deadline_monotonic'], transport.MAX_SOURCE_SECONDS)
+            raise TimeoutError('source read exceeded soft deadline by one statement')
+        result = sender.tick({SCOPE}, config(), now_ms=ms(BASE)+70_000,
+            reader=slow_unavailable, post=lambda v, cfg, **kw: ack(v),
+            monotonic=lambda: next(times))
+        self.assertEqual((result['status'], result['recorded'], result['deferred']),
+                         ('SOURCE_UNAVAILABLE', 1, 0))
+
     def test_recipient_metadata_swaps_do_not_conflict_on_same_source_sequence(self):
         value = maxpain_message(); other = deepcopy(value)
         other['proof']['episode_generation'] += 1

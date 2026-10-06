@@ -31,6 +31,9 @@ _lock = threading.Lock()
 _thread = None
 _app_thread = None
 _fill_wakeups = None
+_controller = None
+_streams = None
+_handover_stopping = False
 _health = dict(configured=False, running=False, last_status='DISABLED',
                cycles=0, order_requests_sent=0, new_entries_enabled=False,
                short_entries_enabled=False, short_stream_configured=False,
@@ -1195,9 +1198,20 @@ def _short_pending_readiness(controller, route):
     print(json.dumps({'testnet_short_pending_readiness': report}, sort_keys=True), flush=True)
 
 
-def start():
-    global _thread,_app_thread,_fill_wakeups
-    env=dict(os.environ)
+def start(*, protection_env=None, owner_lease=None):
+    global _thread,_app_thread,_fill_wakeups,_controller,_streams
+    if _handover_stopping:
+        raise DispatchError('HANDOVER_LEGACY_SHUTDOWN_STILL_PENDING')
+    if owner_lease is not None:
+        owner_lease.verify()
+    # The experimental handover reuses this exact protection implementation.
+    # Its private copy may select the old adapter, but may never enable entry
+    # or introduce an approval absent from the supplied operator settings.
+    env=dict(os.environ if protection_env is None else protection_env)
+    if protection_env is not None and (
+            env.get('HL_TESTNET_LONG_ENTRY_ENABLED') != 'false'
+            or env.get('HL_TESTNET_SHORT_ENTRY_ENABLED') != 'false'):
+        raise DispatchError('HANDOVER_LEGACY_ENTRIES_MUST_BE_DISABLED')
     route,not_before=configuration(env)
     short=short_configuration(env)
     app_mode=env.get('HL_TESTNET_APP_DELIVERY','')
@@ -1207,6 +1221,8 @@ def start():
     if app_mode and not private_key:
         raise DispatchError('APP_DELIVERY_SIGNING_KEY_REQUIRED')
     controller=dispatch.controller_from_env(env)
+    if owner_lease is not None:
+        controller.venue.startup_owner=owner_lease
     with controller.store.journal._transaction() as conn:
         controller.store.ready(conn)
         CardStore(controller.store.journal).ready(conn)
@@ -1238,6 +1254,7 @@ def start():
         streams=[('long_account',route,not_before,'HL_TESTNET_LONG_ENTRY_ENABLED')]
         if short:
             streams.append(('short_account',short[0],short[1],'HL_TESTNET_SHORT_ENTRY_ENABLED'))
+        _controller,_streams=controller,streams
         from .fill_wakeups import FillWakeups
         _fill_wakeups=FillWakeups({role:route['account'] for role,route,*_ in streams},wake_event=_wake)
         controller.venue.fill_wakeups=_fill_wakeups
@@ -1263,6 +1280,40 @@ def stop():
     if _fill_wakeups is not None:
         _fill_wakeups.stop()
     passive_timing.stop()
+
+
+def protection_instance():
+    """Return the single owned worker to the internal handover coordinator."""
+    with _lock:
+        if (_thread is None or not _thread.is_alive() or _stop.is_set()
+                or _controller is None or _streams is None):
+            raise DispatchError('LEGACY_PROTECTION_WORKER_NOT_RUNNING')
+        if any(_controller.venue.env.get(key) != 'false'
+               for key in ('HL_TESTNET_LONG_ENTRY_ENABLED','HL_TESTNET_SHORT_ENTRY_ENABLED')):
+            raise DispatchError('HANDOVER_LEGACY_ENTRIES_MUST_BE_DISABLED')
+        return _controller,tuple(_streams)
+
+
+def stop_and_join(*, timeout=5):
+    """Internal handover only: timeout is failure, never proof of shutdown."""
+    global _handover_stopping
+    if type(timeout) not in (int,float) or not 0 <= timeout <= 30:
+        raise DispatchError('HANDOVER_SHUTDOWN_TIMEOUT_INVALID')
+    _handover_stopping = True
+    stop()
+    from .emergency_close import stop_supervisor
+    stopped=stop_supervisor(_stop,timeout=timeout)
+    for thread in (_thread,_app_thread):
+        if thread is not None:
+            if thread is threading.current_thread():
+                return False
+            thread.join(timeout)
+            stopped=not thread.is_alive() and stopped
+    if _fill_wakeups is not None:
+        stopped=all(not thread.is_alive() for thread in _fill_wakeups._threads) and stopped
+    if stopped:
+        _handover_stopping = False
+    return stopped
 
 
 def health():

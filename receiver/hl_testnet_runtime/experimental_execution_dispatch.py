@@ -258,9 +258,10 @@ def review(request, context, *, now_ms):
             o=wire.requested_order(action)
             old=prepared['execution']['stop']
             if p['operation']=='EMERGENCY_CLOSE':
-                from .emergency_close import close_price
+                from .emergency_close import close_price, trigger, DEADLINE_MS
                 sample=p['sample']
-                _fresh(sample['at_ms'],now_ms,15000,'EMERGENCY_MARK_EXPIRED')
+                _fresh(sample['at_ms'],now_ms,DEADLINE_MS,'EMERGENCY_MARK_EXPIRED')
+                _fresh(snap['at_ms'],now_ms,DEADLINE_MS,'EMERGENCY_OWNER_SNAPSHOT_EXPIRED')
                 _,decimals=wire.asset(context['metadata'],p['symbol'])
                 if life.number(o['p'])!=life.number(close_price(sample['mark_price'],decimals,buy=o['b'])):
                     raise BoundaryError('EXACT_EMERGENCY_MARK_LIMIT_REQUIRED')
@@ -277,7 +278,16 @@ def review(request, context, *, now_ms):
                 take=life.number(prepared['execution']['take_profit'])
                 crossed=(mark<=stop or mark>=take) if source['side']=='LONG' else (mark>=stop or mark<=take)
                 if not crossed:
-                    raise BoundaryError('EMERGENCY_REQUIRES_CROSSED_FROZEN_EXIT')
+                    # Reuse the established protection deadline exactly. Its
+                    # proof is derived from independently observed fills and
+                    # stop coverage, never from a proposal reason or boolean.
+                    # An uncertain STOP is not replayed; this independent
+                    # reduce-only IOC remains bound to the sole exact owner.
+                    deadline=trigger(dict(bindings=[owner],evidence=dict(snapshot=
+                        _owned_snapshot(owner,snap,source,context,now_ms))),now_ms=now_ms)
+                    if (deadline is None or deadline['card_id']!=p['card_id']
+                            or deadline['reason']!='STOP_VERIFICATION_DEADLINE'):
+                        raise BoundaryError('EMERGENCY_REQUIRES_CROSSED_FROZEN_EXIT_OR_UNCOVERED_DEADLINE')
             elif p['leg']=='STOP' and o['p']!=old:
                 _lock(source,context['lock_proof'],now_ms,current=True)
     return dict(**readiness(),reviewed=True,request_digest=DefinitelyUnsent.identity(request),

@@ -76,6 +76,30 @@ class ProducerGuardTests(unittest.TestCase):
     def test_missing_producer_configuration_keeps_positional_connections_blocked(self):
         self.assertFalse(guard.connection_allowed((self.producer_url,), {}, self.runtime, None))
 
+    def test_source_archive_connection_uses_exact_runtime_keywords_and_readonly_on(self):
+        from ..experimental_source_archive import ReadOnlySourceArchive
+        reader = ReadOnlySourceArchive.for_ci(self.runtime_url)
+        with patch.object(psycopg, 'connect') as native:
+            reader._connect()
+        args, kwargs = native.call_args
+        self.assertEqual(args, ())
+        self.assertTrue(guard.connection_allowed(args, kwargs, self.runtime, None))
+        self.assertIn('-c default_transaction_read_only=on', kwargs['options'])
+        for field, value in (('host', 'example.invalid'), ('port', 55433),
+                ('dbname', 'production'), ('user', 'owner'), ('password', 'different')):
+            self.assertFalse(guard.connection_allowed(args, {**kwargs, field: value}, self.runtime, None))
+        self.assertFalse(guard.connection_allowed((self.runtime_url,), kwargs, self.runtime, None))
+
+    def test_readonly_allowance_cannot_disable_readonly_or_add_other_options(self):
+        base = {**self.runtime, 'sslmode': 'disable'}
+        for options in ('-c default_transaction_read_only=off',
+                '-c default_transaction_read_only=true', '-c default_transaction_read_only=1',
+                '-c default_transaction_read_only=on -c default_transaction_read_only=off',
+                '-c default_transaction_read_only=on -c search_path=public',
+                '-c default_transaction_read_only=on -c session_preload_libraries=x',
+                '-c default_transaction_read_only=on;SELECT 1'):
+            self.assertFalse(guard.connection_allowed((), {**base, 'options': options}, self.runtime, None))
+
     def test_native_connect_delegates_only_validated_target(self):
         # Load a fresh guard module while mocking the native function and audit
         # hook; no global audit hooks or actual sockets escape this test.

@@ -15,6 +15,7 @@ from .experimental_plan_store import reduce_source
 from .risk_policy import budget, VERSION as RISK_VERSION
 
 VERSION = 'r2732-entry-admission-software-v1'
+TESTNET_VERSION = 'r2732-entry-admission-testnet-v1'
 FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL', 'REJECTED_FINAL'))
 PHASES = FINAL | frozenset(('PREPARED', 'OUTCOME_UNKNOWN', 'ACK_UNVERIFIED',
                            'OPEN', 'PARTIALLY_OPEN', 'PARTIALLY_CLOSED'))
@@ -38,10 +39,18 @@ def initial(routes, *, not_before_ms):
         latest_source_ms=0, revision=0, records={})
 
 
-def _copy(state):
+def initial_testnet(routes, *, not_before_ms):
+    """New Testnet view only; never converts an existing software record."""
+    result = initial(routes, not_before_ms=not_before_ms)
+    result['version'] = TESTNET_VERSION
+    return result
+
+
+def _copy(state, *, domain='software'):
     life.shape(state, 'version environment account account_role not_before_ms '
                'latest_source_ms revision records')
-    if (state['version'] != VERSION or state['environment'] != 'testnet'
+    if (domain not in ('software', 'testnet')
+            or state['version'] != (VERSION if domain == 'software' else TESTNET_VERSION) or state['environment'] != 'testnet'
             or state['account_role'] != 'short_account'
             or type(state['revision']) is not int or state['revision'] < 0
             or type(state['latest_source_ms']) is not int or state['latest_source_ms'] < 0
@@ -55,7 +64,7 @@ def _copy(state):
         source = record['source_record']
         message = contract_api.validate(source['source'])
         if (message['family'] != 'r2732' or message['occurrence_id'] != cid
-                or source['occurrence_id'] != cid or source['domain'] != 'software'
+                or source['occurrence_id'] != cid or source['domain'] != domain
                 or source['plan_digest'] != contract_api.plan_digest(message)
                 or source['source_sequence'] != message['source_sequence']):
             raise EntryError('R2732_SOURCE_STATE_CHANGED')
@@ -155,13 +164,23 @@ def _range(value, *, now_ms, reference, source, account=None):
 
 
 def entry_admission(state, cid, metadata, market, source_market, ownership, *, now_ms):
+    return _entry_admission(state, cid, metadata, market, source_market, ownership,
+                            now_ms=now_ms, domain='software')
+
+
+def testnet_entry_admission(state, cid, metadata, market, source_market, ownership, *, now_ms):
+    return _entry_admission(state, cid, metadata, market, source_market, ownership,
+                            now_ms=now_ms, domain='testnet')
+
+
+def _entry_admission(state, cid, metadata, market, source_market, ownership, *, now_ms, domain):
     """Prepare one unsigned entry at the frozen reference, under unchanged risk.
 
     Incomplete current source bars may veto stale entry. They never count as a
     completed formula candle or as a demo trade. The source and demo ranges are
     separately required and cannot be substituted for each other.
     """
-    state = _copy(state); life.moment(now_ms)
+    state = _copy(state, domain=domain); life.moment(now_ms)
     life.ident(cid, r'[0-9a-f]{64}')
     if cid not in state['records']:
         raise EntryError('R2732_KNOWN_FRESH_REFERENCE_REQUIRED')
@@ -219,7 +238,7 @@ def entry_admission(state, cid, metadata, market, source_market, ownership, *, n
         if quantity <= 0 or quantity*entry < 10:
             raise EntryError('R2732_VALID_MINIMUM_ENTRY_SIZE_REQUIRED')
         risk = quantity*abs(entry-stop)
-    proposal = dict(version=VERSION, kind='UNSIGNED_ENTRY', environment='testnet',
+    proposal = dict(version=state['version'], kind='UNSIGNED_ENTRY', environment='testnet',
         account=state['account'], account_role='short_account', occurrence_id=cid,
         source=deepcopy(value), execution=execution, quantity=life.text(quantity),
         planned_risk_usd=life.text(risk), risk_policy=RISK_VERSION,

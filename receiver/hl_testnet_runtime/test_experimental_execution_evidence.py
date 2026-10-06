@@ -34,7 +34,7 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError,'UNOWNED_OR_UNPROVEN'):self.convert()
     def test_live_mark_preserves_original_time_and_cannot_be_mainnet_trade(self):
         at=self.h.venue.t-100
-        raw=dict(user=self.trade['account'],coin=self.trade['symbol'],markPx='2.3')
+        raw=[dict(universe=[dict(name=self.trade['symbol'],szDecimals=2,maxLeverage=10)]),[dict(markPx='2.3')]]
         mark=evidence.mark_sample(raw,account=self.trade['account'],symbol=self.trade['symbol'],observed_at_ms=at,now_ms=self.h.venue.t)
         self.assertEqual(mark['at_ms'],at)
         with self.assertRaises(evidence.EvidenceError):evidence.mark_sample(raw,account=self.trade['account'],symbol=self.trade['symbol'],observed_at_ms=at-16000,now_ms=self.h.venue.t)

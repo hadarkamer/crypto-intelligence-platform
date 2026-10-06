@@ -99,13 +99,13 @@ def normalize_snapshot(state, snapshot, lookups, *, now_ms):
 
 
 def mark_sample(raw, *, account, symbol, observed_at_ms, now_ms):
-    """Preserve actual activeAssetData observation time; no fresh timestamp minting."""
-    life.address(account);life.ident(symbol,r'[A-Z][A-Z0-9]{0,19}')
-    if (not isinstance(raw,dict) or raw.get('user')!=account or raw.get('coin')!=symbol
-            or type(observed_at_ms) is not int or not 0<=now_ms-observed_at_ms<=15000):
-        raise EvidenceError('FRESH_EXACT_TESTNET_ACTIVE_ASSET_REQUIRED')
-    return dict(environment='testnet',account=account,symbol=symbol,at_ms=observed_at_ms,
-                mark_price=life.text(life.number(raw['markPx'],positive=True)))
+    """Read official metaAndAssetCtxs; preserve its original observation time."""
+    from .experimental_market_context import MarketSnapshot
+    try:
+        return MarketSnapshot(raw,observed_at_ms=observed_at_ms).mark(
+            account=account,symbol=symbol,now_ms=now_ms)
+    except ValueError as exc:
+        raise EvidenceError(str(exc)) from None
 
 
 def require_mark_window(window, *, account, symbol, reference_at_ms, now_ms):
@@ -113,7 +113,7 @@ def require_mark_window(window, *, account, symbol, reference_at_ms, now_ms):
 
     The production recorder must supply this explicit continuity contract from
     the reference boundary. No such proof can be reconstructed from an alert or
-    a current activeAssetData reply, and gaps permanently reject that occurrence.
+    a current metaAndAssetCtxs reply, and gaps permanently reject that occurrence.
     """
     life.shape(window,'environment account symbol price_kind reference_at_ms at_ms history_complete high low price')
     if (window['environment']!='testnet' or window['account']!=account or window['symbol']!=symbol

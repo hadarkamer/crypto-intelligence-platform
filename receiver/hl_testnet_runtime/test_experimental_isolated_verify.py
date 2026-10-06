@@ -47,6 +47,24 @@ class IsolatedVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(verify.core.PreflightError, "SYMLINK_REFUSED"):
             verify.candidate_files(self.root)
 
+    def test_exact_source_schema_fixture_is_copied_but_arbitrary_sql_is_not(self):
+        name = 'migrations/044_continuous_price_archive.sql'
+        (self.root / 'migrations').mkdir()
+        (self.root / name).write_text('SELECT 1;\n')
+        (self.root / 'migrations/private-export.sql').write_text('PRIVATE')
+        result = verify.snapshot_sources(self.root, self.root.parent / 'snapshot')
+        self.assertIn(name, result['files'])
+        self.assertNotIn('migrations/private-export.sql', result['files'])
+        self.assertEqual((self.root.parent / 'snapshot' / name).read_text(), 'SELECT 1;\n')
+
+    def test_source_schema_fixture_parent_symlink_is_refused(self):
+        directory = self.root.parent / 'outside'
+        directory.mkdir()
+        (directory / '044_continuous_price_archive.sql').write_text('SELECT 1;\n')
+        (self.root / 'migrations').symlink_to(directory, target_is_directory=True)
+        with self.assertRaisesRegex(verify.core.PreflightError, 'SYMLINK_REFUSED'):
+            verify.candidate_files(self.root)
+
     def test_snapshot_detects_edit_during_copy(self):
         actual = verify.core.input_files(self.root)
         changed = {**actual, "added.py": "0" * 64}

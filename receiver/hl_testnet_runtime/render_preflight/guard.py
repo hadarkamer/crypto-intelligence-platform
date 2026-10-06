@@ -52,8 +52,8 @@ def connection_allowed(args, kwargs, runtime_database, producer_database):
     options = kwargs.get("options")
     if options is not None and (not isinstance(options, str) or not re.fullmatch(
             r"-c (?:(?:statement_timeout|lock_timeout|idle_in_transaction_session_timeout)=[0-9]+|"
-            r"synchronous_commit=on)(?: -c (?:(?:statement_timeout|lock_timeout|"
-            r"idle_in_transaction_session_timeout)=[0-9]+|synchronous_commit=on))*", options)):
+            r"(?:synchronous_commit|default_transaction_read_only)=on)(?: -c (?:(?:statement_timeout|lock_timeout|"
+            r"idle_in_transaction_session_timeout)=[0-9]+|(?:synchronous_commit|default_transaction_read_only)=on))*", options)):
         return False
     if "sslmode" in kwargs and kwargs["sslmode"] != "disable":
         return False

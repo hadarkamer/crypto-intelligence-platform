@@ -101,6 +101,10 @@ class IsolatedExecutionRuntime:
         store.load()
 
     def receive(self, messages):
+        return self._receive(messages, domain='software', status=readiness())
+
+    def _receive(self, messages, *, domain, status):
+        """Shared transition; public workers choose a fixed persisted domain."""
         now = self.venue.now()
         values = [contract.validate(m) for m in messages]
         def transition(state):
@@ -108,7 +112,7 @@ class IsolatedExecutionRuntime:
             for msg in values:
                 cid = msg['occurrence_id']
                 source, changed = reduce_source(state['sources'].get(cid), msg,
-                    now=contract.iso_ms(now), not_before=contract.iso_ms(state['not_before_ms']), domain='software')
+                    now=contract.iso_ms(now), not_before=contract.iso_ms(state['not_before_ms']), domain=domain)
                 if changed:
                     state['sources'][cid] = source
                     if msg['family']=='sol_g65' and cid not in state.setdefault('formula_states',{}):
@@ -116,7 +120,7 @@ class IsolatedExecutionRuntime:
                         state['formula_states'][cid]=sol_g65_conditional_stop.initialize_from_contract(cid,msg)
                     state['events'].append(dict(at_ms=now, kind='SOURCE_'+msg['kind'], occurrence_id=cid))
                 receipts.append(dict(occurrence_id=cid,revision=source['revision'],status='RECORDED' if changed else 'DUPLICATE',record_only=True,entry_permission=source['entry_permission']))
-            return dict(recorded=len(values),receipts=receipts,**readiness())
+            return dict(recorded=len(values),receipts=receipts,**status)
         return self.store.mutate(transition)
 
     def _snapshot(self, state, snapshot, now):
@@ -322,7 +326,12 @@ class IsolatedExecutionRuntime:
                                     return self._cancel(state,trade,oid,now)
                             from .emergency_close import close_price, MAX_REQUESTS
                             closes=[r for r in state['requests'].values() if r['proposal']['card_id']==trade['cid'] and r['proposal']['operation']=='EMERGENCY_CLOSE']
-                            if len(closes)>=MAX_REQUESTS or any(r['phase']!='OBSERVED' or trade['orders'].get(r['observed_oid'],{}).get('status') not in TERMINAL for r in closes):
+                            # A certified unsent attempt or proven rejection has no
+                            # OID. It consumes the attempt cap, not a phantom order.
+                            wire_closes=[r for r in closes if not (r['phase']=='ABORTED_UNSENT'
+                                or r['phase']=='OBSERVED' and r.get('terminal_state')=='REJECTED_NO_ORDER'
+                                and r.get('observed_oid') is None)]
+                            if len(closes)>=MAX_REQUESTS or any(r['phase']!='OBSERVED' or trade['orders'].get(r['observed_oid'],{}).get('status') not in TERMINAL for r in wire_closes):
                                 trade['emergency_reason']='EMERGENCY_CLOSE_RECONCILIATION_OR_LIMIT_REQUIRED'
                                 continue
                             mark_sample=self._mark(trade,context,now,max_age=5000)
@@ -347,6 +356,9 @@ class IsolatedExecutionRuntime:
                 if (trade['order_legs'][oid]=='ENTRY' and retire) or (remaining==0 and trade['order_legs'][oid]!='ENTRY'):
                     return self._cancel(state,trade,oid,now)
         return None
+
+    _r2732_initial = staticmethod(r2732_entry.initial)
+    _r2732_admission = staticmethod(r2732_entry.entry_admission)
 
     def _admit(self, state, cid, context, now):
         source = state['sources'][cid]; msg = source['source']
@@ -378,14 +390,14 @@ class IsolatedExecutionRuntime:
         if not min(stop,take)<mark<max(stop,take):
             raise RuntimeError('TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS')
         if msg['family']=='r2732':
-            rs=r2732_entry.initial({k:dict(account=a) for k,a in state['routes'].items()},not_before_ms=state['not_before_ms'])
+            rs=self._r2732_initial({k:dict(account=a) for k,a in state['routes'].items()},not_before_ms=state['not_before_ms'])
             relevant={k:s for k,s in state['sources'].items() if s['source']['family']=='r2732'}
             rs['records']={k:dict(source_record=deepcopy(s),request=None) for k,s in relevant.items()}
             rs['latest_source_ms']=max(contract.moment_ms(s['source']['source_at']) for s in relevant.values())
             owned=dict(environment='testnet',account=account,account_role=role,at_ms=now,complete=True,unresolved_request=False,
                 occurrences=[dict(occurrence_id=t['cid'],request_id=t['entry_request'],family=t['source']['family'],symbol=t['symbol'],phase=t['phase'],
                     remaining_quantity=life.text(_remaining(t)),working_orders=any(o['status']=='OPEN' for o in t['orders'].values())) for t in peers])
-            rp=r2732_entry.entry_admission(rs,cid,metadata,paths['testnet'],paths['source'],owned,now_ms=now)
+            rp=self._r2732_admission(rs,cid,metadata,paths['testnet'],paths['source'],owned,now_ms=now)
             quantity=rp['quantity']
         else:
             # Both producer and testnet paths must still precede this occurrence's barriers.
@@ -456,38 +468,43 @@ class IsolatedExecutionRuntime:
         from .experimental_execution_reporting import project
         return project(self.store.load())
 
+    def _cycle_proposal(self, state, context, now, *, entries_enabled):
+        """Pure shared lifecycle transition; no database or network calls."""
+        if context.get('basis_revision')!=state['revision']:
+            raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
+        if (context.get('inventory_complete') is not True or context.get('inventory_accounts')!=sorted(state['routes'].values())
+                or type(context.get('inventory_at_ms')) is not int or not 0<=now-context['inventory_at_ms']<=15000):
+            raise RuntimeError('COMPLETE_FRESH_TWO_ACCOUNT_INVENTORY_REQUIRED')
+        for snapshot in context['snapshots']:
+            self._snapshot(state,snapshot,now)
+        needed={_lane(t['account'],t['symbol']) for t in state['trades'].values() if t['phase'] not in FINAL}
+        observed={_lane(s['account'],s['symbol']) for s in context['snapshots']}
+        if not needed<=observed:
+            raise RuntimeError('FULL_ACTIVE_INVENTORY_REQUIRED')
+        for cid,condition in state.get('formula_states',{}).items():
+            from . import sol_g65_conditional_stop
+            try:
+                condition=sol_g65_conditional_stop.advance(condition,context.get('bars',{}).get(cid,[]),now_ms=now,price_source=state['sources'][cid]['source']['policy']['source_price'])
+                state.setdefault('source_condition_errors',{}).pop(cid,None)
+            except (ValueError,KeyError,TypeError):
+                state.setdefault('source_condition_errors',{})[cid]='SOURCE_CANDLE_RECONCILIATION_REQUIRED'
+            state['formula_states'][cid]=condition
+            if cid in state['trades']:state['trades'][cid]['condition']=deepcopy(condition)
+        proposal=self._maintain(state,context,now)
+        unknown=any(r['phase'] not in ('OBSERVED','ABORTED_UNSENT') for r in state['requests'].values())
+        if proposal is None and entries_enabled and not unknown:
+            for cid in sorted(state['sources'],key=lambda k:(state['sources'][k]['source']['source_at'],k)):
+                proposal=self._admit(state,cid,context,now)
+                if proposal is not None:break
+        return proposal
+
     def run_once(self, *, entries_enabled=True):
         """One observed cycle; entry halt never disables existing protection."""
         before=self.store.load()
         context=self.venue.collect(deepcopy(before))
         now=self.venue.now(); life.moment(now)
         def transition(state):
-            if context.get('basis_revision')!=state['revision']:
-                raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
-            if (context.get('inventory_complete') is not True or context.get('inventory_accounts')!=sorted(state['routes'].values())
-                    or type(context.get('inventory_at_ms')) is not int or not 0<=now-context['inventory_at_ms']<=15000):
-                raise RuntimeError('COMPLETE_FRESH_TWO_ACCOUNT_INVENTORY_REQUIRED')
-            for snapshot in context['snapshots']:
-                self._snapshot(state,snapshot,now)
-            needed={_lane(t['account'],t['symbol']) for t in state['trades'].values() if t['phase'] not in FINAL}
-            observed={_lane(s['account'],s['symbol']) for s in context['snapshots']}
-            if not needed<=observed:
-                raise RuntimeError('FULL_ACTIVE_INVENTORY_REQUIRED')
-            for cid,condition in state.get('formula_states',{}).items():
-                from . import sol_g65_conditional_stop
-                try:
-                    condition=sol_g65_conditional_stop.advance(condition,context.get('bars',{}).get(cid,[]),now_ms=now,price_source=state['sources'][cid]['source']['policy']['source_price'])
-                    state.setdefault('source_condition_errors',{}).pop(cid,None)
-                except (ValueError,KeyError,TypeError):
-                    state.setdefault('source_condition_errors',{})[cid]='SOURCE_CANDLE_RECONCILIATION_REQUIRED'
-                state['formula_states'][cid]=condition
-                if cid in state['trades']:state['trades'][cid]['condition']=deepcopy(condition)
-            proposal=self._maintain(state,context,now)
-            unknown=any(r['phase'] not in ('OBSERVED','ABORTED_UNSENT') for r in state['requests'].values())
-            if proposal is None and entries_enabled and not unknown:
-                for cid in sorted(state['sources'],key=lambda k:(state['sources'][k]['source']['source_at'],k)):
-                    proposal=self._admit(state,cid,context,now)
-                    if proposal is not None:break
+            proposal=self._cycle_proposal(state,context,now,entries_enabled=entries_enabled)
             return self._reserve(state,proposal,now) if proposal else None
         request=self.store.mutate(transition)
         if request is None:

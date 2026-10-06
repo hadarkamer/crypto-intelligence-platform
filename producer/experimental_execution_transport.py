@@ -1,7 +1,8 @@
 """Explicit, default-off transport for experimental Testnet plan records.
 
-No production startup imports or schedules this module. Configuration is passed
-explicitly; nothing discovers live credentials or an endpoint from environment.
+The separate, default-off experimental_execution_forwarder schedules this
+module. Configuration is passed explicitly; this module never discovers live
+credentials or an endpoint from environment.
 This sends authenticated records, never exchange orders or source-state writes.
 Receiver idempotency and source leases make retry safe. In-memory cancellation
 retries survive source outages within a process; after restart source history is
@@ -26,6 +27,10 @@ MAX_RESPONSE_BYTES = 8192
 MAX_BUFFER = 8192
 MAX_PER_TICK = 16
 MAX_TICK_SECONDS = 12
+# Leave delivery time for retained cancellations when the source is slow.
+# Each source statement is independently limited to three seconds, so the
+# reader may return up to one statement after this soft deadline.
+MAX_SOURCE_SECONDS = 6
 MAX_SCOPES = 32
 
 
@@ -193,7 +198,7 @@ class Sender:
         try:
             values = (reader or bridge.read_experimental)(scopes, config.fence, now=now,
                 env={'EXPERIMENTAL_EXECUTION_BRIDGE_MODE': bridge.MODE},
-                deadline_monotonic=started+MAX_TICK_SECONDS, clock=monotonic)
+                deadline_monotonic=started+MAX_SOURCE_SECONDS, clock=monotonic)
             self._merge(values)
         except Exception:
             source_ok = False
