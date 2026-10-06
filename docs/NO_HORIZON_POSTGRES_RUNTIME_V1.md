@@ -23,9 +23,13 @@ never independent experiments.
   from starting. Disabled means no connection, task or schema mutation.
 
 The optional [frozen-cohort acquisition layer](NO_HORIZON_ACQUISITION_V1.md)
-now acquires and admits explicitly registered declarations. Calendar-based
-cohort creation, broad candidate search/ranking, no-horizon prospective
-validation registration and delivery binding remain separate development.
+now acquires and admits explicitly registered declarations. Separate implemented
+layers provide [finite calendars](NO_HORIZON_CALENDAR_V1.md),
+[bounded discovery/ranking](NO_HORIZON_DISCOVERY_V1.md),
+[frozen selection](NO_HORIZON_SELECTION_V1.md),
+[prospective validation](NO_HORIZON_VALIDATION_V1.md) and
+[verified read-only publication](NO_HORIZON_PUBLICATION_V1.md).
+External delivery and trading integration remain separate.
 The worker does not infer a new scope,
 cutoff or policy when the queue is empty. It does not implement continuously
 extended live entries by mutating frozen cohorts. Adding either intake mode

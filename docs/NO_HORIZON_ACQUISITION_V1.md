@@ -141,6 +141,8 @@ reinterpret or replace that experiment. New requests have their own identities.
 Finite repeated population generation and upfront registration are provided by
 [the calendar layer](NO_HORIZON_CALENDAR_V1.md). [Bounded catalog discovery and
 single-window ranking](NO_HORIZON_DISCOVERY_V1.md) use these existing paths.
-Version-aware prospective validation and result delivery remain separate work. The first-touch engine, probability policy and unavailable
+Separate implemented layers provide [version-aware prospective validation](NO_HORIZON_VALIDATION_V1.md)
+and [verified read-only research publication](NO_HORIZON_PUBLICATION_V1.md).
+External result delivery remains separate work. The first-touch engine, probability policy and unavailable
 asymmetry route are unchanged. No provider acquisition, production deployment,
 Telegram message or trade is performed by this implementation.
