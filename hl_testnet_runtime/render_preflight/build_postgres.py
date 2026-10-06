@@ -101,8 +101,7 @@ def ensure_flex(root):
 def postgres_commands(prefix):
     return [
         ['./configure', '--prefix=' + str(prefix), '--without-readline',
-         '--without-zlib', '--without-icu', '--without-lz4', '--without-zstd',
-         '--without-ssl'],
+         '--without-zlib', '--without-icu', '--without-lz4', '--without-zstd'],
         ['make', '-j2'],
         ['make', 'install'],
     ]

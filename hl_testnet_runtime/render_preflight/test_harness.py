@@ -2,6 +2,7 @@
 import hashlib
 from http.server import ThreadingHTTPServer
 import http.client
+import io
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 from . import core
+from . import child
 from .server import handler_for
 
 
@@ -126,6 +128,7 @@ class HarnessTests(unittest.TestCase):
             task = command[command.index("--task") + 1]
             tasks.append(task)
             self.assertNotIn("HL_JOURNAL_CI_URL", kwargs["env"])
+            Path(command[command.index("--output") + 1]).write_text('{}')
             return {"exit_code": 0, "duration_seconds": 0.01, "failure_code": None}
         def report(task, _path):
             if task == "timing_tests":
@@ -168,6 +171,80 @@ class HarnessTests(unittest.TestCase):
         summary = core.summarize_report("timing_tests", path)
         self.assertNotIn("DONT_RETURN", json.dumps(summary))
         self.assertEqual(summary["tests_run"], 28)
+
+    def test_failed_suite_counts_and_ids_reach_summary_but_remain_failed(self):
+        runner = core.Runner(self.root, self.manifest, self.pin, allow_postgres=False)
+        def process(command, **_kwargs):
+            output = Path(command[command.index('--output') + 1])
+            output.write_text(json.dumps({'tests_run': 28, 'failures': 1, 'errors': 0, 'skipped': 0,
+                'unexpected_successes': 0, 'successful': False, 'private': 'SECRET_DSN',
+                'failure_details': [{'test_id': 'hl_testnet_runtime.test_fixture.Case.test_one',
+                                     'exception_type': 'AssertionError', 'code': 'FILL_NOT_PROTECTED',
+                                     'message': 'SECRET_DSN'}]}))
+            return {'exit_code': 1, 'duration_seconds': 0.01, 'failure_code': 'CHILD_FAILED'}
+        with patch.dict(os.environ, {}, clear=True), patch.object(core, 'run_process', side_effect=process), \
+                patch.object(runner, '_log') as logs:
+            runner.start_once()
+            runner.join(5)
+        report = runner.snapshot()
+        self.assertEqual(report['status'], 'FAILED')
+        stage = report['stages'][0]
+        self.assertEqual(stage['failure_code'], 'CHILD_FAILED')
+        self.assertEqual((stage['tests_run'], stage['failures']), (28, 1))
+        self.assertEqual(stage['failure_details'][0]['code'], 'FILL_NOT_PROTECTED')
+        self.assertNotIn('SECRET_DSN', json.dumps(report))
+        self.assertNotIn('SECRET_DSN', str(logs.call_args_list))
+
+    def test_benchmark_failure_report_uses_only_type_and_known_code(self):
+        path = self.root / 'failure.json'
+        child.write_failure_report(path, RuntimeError('PREFLIGHT_SUBPROCESS_REFUSED'))
+        safe = core.summarize_report('runtime', path)
+        self.assertFalse(safe['successful'])
+        self.assertEqual(safe['exception_type'], 'RuntimeError')
+        self.assertEqual(safe['code'], 'PREFLIGHT_SUBPROCESS_REFUSED')
+
+    def test_exception_message_is_never_stringified_or_exported(self):
+        class SensitiveError(Exception):
+            def __str__(self):
+                raise AssertionError('MUST_NOT_STRINGIFY')
+        path = self.root / 'failure.json'
+        child.write_failure_report(path, SensitiveError('postgresql://user:SECRET@host/db'))
+        safe = core.summarize_report('runtime', path)
+        self.assertEqual(safe['exception_type'], 'OtherError')
+        self.assertEqual(safe['code'], 'UNCLASSIFIED')
+        self.assertNotIn('SECRET', path.read_text())
+
+    def test_failure_details_ids_codes_and_count_are_bounded(self):
+        path = self.root / 'report.json'
+        path.write_text(json.dumps({'tests_run': 100, 'failures': 100, 'errors': 0, 'skipped': 0,
+            'unexpected_successes': 0, 'successful': False,
+            'failure_details': [{'test_id': 'hl_testnet_runtime.Case.test_x(password=SECRET)',
+                'exception_type': 'SECRET_CLASS', 'code': 'SECRET_CODE', 'traceback': 'SECRET'}] * 40}))
+        safe = core.summarize_report('full_suite', path)
+        self.assertEqual(len(safe['failure_details']), 16)
+        self.assertEqual(safe['failure_details'][0], {'test_id': 'unidentified_test',
+            'exception_type': 'OtherError', 'code': 'UNCLASSIFIED'})
+        self.assertNotIn('SECRET', json.dumps(safe))
+
+    def test_unittest_result_captures_safe_id_and_class_without_message(self):
+        class FailingCase(unittest.TestCase):
+            def test_failure(self):
+                raise ValueError('SECRET_DSN')
+        case = FailingCase('test_failure')
+        case.id = lambda: 'hl_testnet_runtime.test_fixture.Case.test_failure'
+        result = unittest.TextTestRunner(stream=io.StringIO(), resultclass=child.DiagnosticTestResult).run(
+            unittest.TestSuite([case]))
+        self.assertEqual(len(result.errors), 1)
+        self.assertEqual(result.failure_details, [{'test_id': 'hl_testnet_runtime.test_fixture.Case.test_failure',
+            'exception_type': 'ValueError', 'code': 'UNCLASSIFIED'}])
+        self.assertNotIn('SECRET_DSN', json.dumps(result.failure_details))
+
+    def test_child_exception_creates_failure_report(self):
+        path = self.root / 'failure.json'
+        with patch.object(sys, 'argv', ['child', '--task', 'runtime', '--output', str(path)]), \
+                patch.object(child, 'run_task', side_effect=RuntimeError('FRESH_DATABASE_REQUIRED')):
+            self.assertEqual(child.main(), 1)
+        self.assertEqual(json.loads(path.read_text())['code'], 'FRESH_DATABASE_REQUIRED')
 
 
 class GuardTests(unittest.TestCase):

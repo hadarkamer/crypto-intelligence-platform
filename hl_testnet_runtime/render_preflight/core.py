@@ -147,10 +147,28 @@ def summarize_report(task, path):
     raw = path.read_bytes()
     data = json.loads(raw)
     result = {"artifact_sha256": hashlib.sha256(raw).hexdigest()}
+    # Shared literal allowlists contain no runtime settings or production imports.
+    from .child import ERROR_CODES, EXCEPTION_TYPES, MAX_FAILURE_DETAILS
+    def detail(row):
+        output = {"exception_type": row.get("exception_type")
+                  if row.get("exception_type") in EXCEPTION_TYPES else "OtherError",
+                  "code": row.get("code") if row.get("code") in ERROR_CODES else "UNCLASSIFIED"}
+        if "test_id" in row:
+            identifier = row["test_id"]
+            output["test_id"] = identifier if (type(identifier) is str and len(identifier) <= 256
+                and re.fullmatch(r"[A-Za-z0-9_.]+", identifier)
+                and identifier.startswith(("hl_testnet_runtime.", "hyperliquid_testnet_executor_selftest.",
+                                           "alert_cards_forwarder_selftest.", "unittest.loader."))) else "unidentified_test"
+        return output
+    if data.get("schema") == "render_preflight_failure_v1":
+        result.update(successful=False, **detail(data))
+        return result
     if task in ("timing_tests", "full_suite"):
         for key in ("tests_run", "failures", "errors", "skipped", "unexpected_successes"):
             result[key] = _numeric(data[key])
         result["successful"] = data["successful"] is True
+        result["failure_details"] = [detail(row) for row in data.get("failure_details", [])[:MAX_FAILURE_DETAILS]
+                                     if type(row) is dict]
     elif task == "recorder":
         result.update(conditions=len(data["results"]), measured_calls=sum(
             _numeric(row["caller_duration_ns"]["count"]) for row in data["results"]),
@@ -339,14 +357,25 @@ class Runner:
                     env=clean_environment(self.root, ci_url), log_path=directory / (task + ".log"),
                     timeout=min(STAGE_TIMEOUT, remaining))
                 row = {"task": task, **result}
-                if result["exit_code"] == 0:
-                    row.update(summarize_report(task, output))
+                if output.is_file():
+                    # A failed child still writes safe counts/details. Never expose its raw log.
+                    try:
+                        row.update(summarize_report(task, output))
+                    except Exception:
+                        row["report_status"] = "INVALID_REPORT"
+                        if result["exit_code"] == 0:
+                            row["failure_code"] = "INVALID_REPORT"
+                elif result["exit_code"] == 0:
+                    row["failure_code"] = "REPORT_MISSING_OR_TOO_LARGE"
+                if result["exit_code"] == 0 and not row["failure_code"]:
+                    if row.get("successful") is False:
+                        row["failure_code"] = "CHILD_FAILURE_REPORT"
                     if task in ("timing_tests", "full_suite") and (
-                            row["successful"] is not True or row["skipped"] or row["unexpected_successes"]):
+                            row.get("successful") is not True or row.get("skipped") or row.get("unexpected_successes")):
                         row["failure_code"] = "SUITE_NOT_COMPLETE"
-                    if task == "timing_tests" and row["tests_run"] != 28:
+                    if task == "timing_tests" and row.get("tests_run") != 28:
                         row["failure_code"] = "EXPECTED_28_TIMING_TESTS"
-                    if task == "full_suite" and row["tests_run"] < 2054:
+                    if task == "full_suite" and row.get("tests_run", 0) < 2054:
                         row["failure_code"] = "FULL_SUITE_DISCOVERY_INCOMPLETE"
                     if row.get("network_attempts_blocked", 0) != 0:
                         row["failure_code"] = "UNEXPECTED_NETWORK_ATTEMPT"
