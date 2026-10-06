@@ -55,6 +55,7 @@ ENUM_CONFIG = {
     'HL_TESTNET_FILLED_AUTOWAIT': ('approved_next_u21_once_v1',),
     'HL_TESTNET_APP_DELIVERY': ('ed25519_signed_v1',),
     'HL_TESTNET_SINGLE_TRIAL_CONTROLLER': ('approved_bounded_single_trial_v1',),
+    'HL_TESTNET_TIMING_TELEMETRY': ('passive_v1',),
 }
 CARD_COLUMNS = """card_id,manifest->>'event_id',manifest->>'account_role',
     manifest->>'state',manifest->'prepared'->'source',manifest->'prepared'->'execution',
@@ -435,7 +436,14 @@ def application(environ, start_response):
         status, body = '404 Not Found', b'Not found\n'
     else:
         try:
-            body = json.dumps(load_diagnostics(),separators=(',',':'),allow_nan=False).encode()
+            result = load_diagnostics()
+            # Detailed in-memory timings share this existing authentication
+            # boundary. Public health exposes counters only. No extra SQL/HTTP.
+            from .passive_timing import health as timing_health
+            timing = timing_health(include_recent=True)
+            if timing.get('enabled') or timing.get('recent_events'):
+                result['timing_telemetry'] = timing
+            body = json.dumps(result,separators=(',',':'),allow_nan=False).encode()
             if len(body)>MAX_BYTES:
                 raise ValueError('DIAGNOSTICS_TOO_LARGE')
             status = '200 OK'

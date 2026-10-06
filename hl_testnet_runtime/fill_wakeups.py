@@ -15,6 +15,8 @@ import re
 import threading
 import time
 
+from . import passive_timing
+
 
 TESTNET_WS = 'wss://api.hyperliquid-testnet.xyz/ws'
 CHANNELS = frozenset(('userFills', 'orderUpdates'))
@@ -152,10 +154,22 @@ observation is durably saved. Events concurrent with that observation prevent
 
     def _disconnected(self, account, generation, code='DISCONNECTED_RECONCILIATION_REQUIRED',
                       protocol_failure=None):
+        changed = False
         with self._lock:
             state = self._states[account]
             if state['generation'] == generation and state['connected']:
                 self._gap_locked(state, code, protocol_failure)
+                changed = True
+        if changed:
+            self._record_gap(account, generation, code)
+
+    def _record_gap(self, account, generation, code):
+        try:
+            passive_timing.record('connection_gap',
+                account_role=next(role for role, value in self._routes.items() if value == account),
+                generation=generation, reason=code)
+        except Exception:
+            pass  # Diagnostics cannot change notification continuity.
 
     def begin_reconciliation(self, account):
         account = self._account(account)
@@ -219,6 +233,37 @@ observation is durably saved. Events concurrent with that observation prevent
                 for role, account in self._routes.items()}
 
     def _receive(self, account, generation, raw):
+        # Stage bounded scalar identities only; the diagnostic sink is never
+        # called while holding the feed lock. Snapshots/duplicates are excluded.
+        received = passive_timing.stamp()
+        events = [] if received is not None else None
+        gaps = [] if received is not None else None
+        accepted = self._receive_message(account, generation, raw,
+                                         timing_events=events, timing_gaps=gaps)
+        try:
+            for reason in gaps or ():
+                self._record_gap(account, generation, reason)
+            if accepted and events:
+                role = next(role for role, value in self._routes.items() if value == account)
+                events = tuple(dict.fromkeys(events))
+                for identity, revision, batch_count in events:
+                    channel, symbol, *parts = identity
+                    if channel == 'userFills':
+                        exchange_at, fill_id, order_id = parts
+                        fields = dict(fill_id=str(fill_id), order_id=str(order_id))
+                    else:
+                        order_id, exchange_at, status = parts
+                        fields = dict(order_id=str(order_id), status=status)
+                    passive_timing.record('notification_received',
+                        at_ms=received[0], mono_ns=received[1], account_role=role,
+                        symbol=symbol, generation=generation, revision=revision,
+                        notification_type=channel, exchange_at_ms=exchange_at,
+                        batch_count=batch_count, captured_count=len(events), **fields)
+        except Exception:
+            pass
+        return accepted
+
+    def _receive_message(self, account, generation, raw, *, timing_events=None, timing_gaps=None):
         """Consume only notification identities/symbols; retain no wire evidence."""
         try:
             if not isinstance(raw, (str, bytes)) or len(raw) > MAX_FRAME_BYTES:
@@ -330,12 +375,22 @@ observation is durably saved. Events concurrent with that observation prevent
                     elif hints:
                         state['status'] = 'NOTIFICATION_RECONCILIATION_REQUIRED'
                         self._notify_locked(state, symbols=hints)
+                        if timing_events is not None:
+                            # Diagnostics may sample an oversized batch; trading
+                            # continues to process every validated identity.
+                            try:
+                                timing_events.extend((identity, state['revision'], len(identities))
+                                                     for identity in identities[:64])
+                            except Exception:
+                                pass
                 else:
                     raise ValueError()
                 state['last_receive'] = self._clock()
                 return True
             except (TypeError, ValueError, KeyError):
                 self._gap_locked(state, 'MALFORMED_NOTIFICATION_RECONCILIATION_REQUIRED',reason)
+                if timing_gaps is not None:
+                    timing_gaps.append('MALFORMED_NOTIFICATION_RECONCILIATION_REQUIRED')
                 return False
 
     def _heartbeat(self, account, generation):
@@ -350,12 +405,14 @@ observation is durably saved. Events concurrent with that observation prevent
                     or (state['ping_at'] is not None and now - state['ping_at'] >= PONG_TIMEOUT)
                     or (not self._ready_locked(state) and now - state['opened'] >= BOOTSTRAP_TIMEOUT)):
                 self._gap_locked(state, 'NOTIFICATION_GAP_RECONCILIATION_REQUIRED')
-                return 'CLOSE'
-            if state['ping_at'] is None and now - state['last_ping'] >= PING_INTERVAL:
+            elif state['ping_at'] is None and now - state['last_ping'] >= PING_INTERVAL:
                 state['ping_at'] = now
                 state['last_ping'] = now
                 return 'PING'
-            return 'WAIT'
+            else:
+                return 'WAIT'
+        self._record_gap(account, generation, 'NOTIFICATION_GAP_RECONCILIATION_REQUIRED')
+        return 'CLOSE'
 
     def _worker(self, account):
         delay = RECONNECT_MIN_SECONDS

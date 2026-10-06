@@ -55,6 +55,36 @@ class ReadOnlyFixture:
 
 
 class EndpointTests(unittest.TestCase):
+    def test_passive_trade_timings_are_private_and_auth_precedes_archive_access(self):
+        from . import passive_timing as timing
+        from . import long_stream_runtime as stream
+        recorder = timing.Recorder()
+        self.assertTrue(timing.set_recorder(recorder))
+        try:
+            recorder.record('trade_observed', card_id='private-card', symbol='DOGE',
+                            entry_quantity='40', bucket='private-bucket')
+            recorder.start()
+            self.assertTrue(recorder.stop(timeout=0.25))
+            with patch.dict('os.environ', ENV, clear=True), \
+                 patch.object(m, 'load_diagnostics', return_value={'status': 'READ_ONLY'}):
+                status, _, body = self.request()
+                self.assertEqual(status, '200 OK')
+                self.assertEqual(json.loads(body)['timing_telemetry']['recent_events'][0]['card_id'],
+                                 'private-card')
+                for path in ('/', '/healthz'):
+                    status, _, body = self.request(PATH_INFO=path)
+                    self.assertEqual(status, '200 OK')
+                    self.assertNotIn(b'private-card', body)
+                    self.assertNotIn(b'private-bucket', body)
+                    self.assertNotIn(b'recent_events', body)
+                with patch.object(timing, 'health', side_effect=AssertionError('NO_UNAUTHORIZED_READ')):
+                    self.assertEqual(self.request(HTTP_X_TESTNET_DIAGNOSTICS_TOKEN='')[0],
+                                     '404 Not Found')
+            self.assertNotIn('recent_events', stream.health()['timing_telemetry'])
+        finally:
+            recorder.stop(timeout=0.25)
+            timing.set_recorder(None)
+
     def test_unsent_reason_is_bounded_allowlisted_and_read_only(self):
         fixture=ReadOnlyFixture();original=fixture.execute
         def execute(sql,params=()):

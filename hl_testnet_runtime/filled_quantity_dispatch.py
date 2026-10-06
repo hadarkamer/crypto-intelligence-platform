@@ -797,6 +797,32 @@ class Controller:
                 return flight.done.is_set()
 
     def refresh(self,bucket,*,emergency=False,emergency_wait_ms=EMERGENCY_OBSERVATION_JOIN_MS):
+        from . import passive_timing
+        started = passive_timing.stamp()
+        result = None
+        failure = None
+        try:
+            result = self._refresh(bucket, emergency=emergency, emergency_wait_ms=emergency_wait_ms)
+            return result
+        except Exception as exc:
+            failure = type(exc).__name__
+            raise
+        finally:
+            try:
+                ended = passive_timing.stamp() if started is not None else None
+                if ended is not None:
+                    # All observation/market locks have been released. This
+                    # records a return, not a fresh proof: shared evidence
+                    # retains its original timestamp and may predate this call.
+                    snap = ((result or {}).get('evidence') or {}).get('snapshot') or {}
+                    passive_timing.record('refresh_completed', at_ms=ended[0], mono_ns=ended[1],
+                        bucket=bucket, status='ERROR' if failure else 'RETURNED',
+                        failure_code=failure, revision=(result or {}).get('revision'),
+                        evidence_at_ms=snap.get('at_ms'), duration_ns=ended[1]-started[1])
+            except Exception:
+                pass  # Preserve the original return or exception.
+
+    def _refresh(self,bucket,*,emergency=False,emergency_wait_ms=EMERGENCY_OBSERVATION_JOIN_MS):
         """Coalesce overlapping reads without putting HTTP inside a trade lane.
 
         Urgent safety work waits at most 250ms (or its shorter original deadline)
@@ -1071,13 +1097,35 @@ class Controller:
             raise DispatchError('CONCURRENT_DISPATCH_RELOAD_REQUIRED')
 
     def cycle(self,bucket,*,send=False,allow_new_entries=True,allowed_entry_card_id=None):
+        from . import passive_timing
         from .postgres_journal import PostgresJournal
+        started = passive_timing.stamp()
         journal=getattr(self.store,'journal',None)
         context=(journal.reuse_connection() if send is True and isinstance(journal,PostgresJournal)
                  else nullcontext())
-        with context:
-            return self._cycle(bucket,send=send,allow_new_entries=allow_new_entries,
-                               allowed_entry_card_id=allowed_entry_card_id)
+        result = None
+        failure = None
+        try:
+            with context:
+                result = self._cycle(bucket,send=send,allow_new_entries=allow_new_entries,
+                                     allowed_entry_card_id=allowed_entry_card_id)
+                return result
+        except Exception as exc:
+            failure = type(exc).__name__
+            raise
+        finally:
+            try:
+                ended = passive_timing.stamp() if started is not None else None
+                if ended is not None:
+                    # After durable outcome handling and connection context;
+                    # never in the short-lived admission-to-send gap.
+                    passive_timing.record('cycle_completed', at_ms=ended[0], mono_ns=ended[1],
+                        bucket=bucket, status=(result or {}).get('status', 'ERROR'),
+                        request_id=(result or {}).get('request_id'), failure_code=failure,
+                        order_requests_sent=(result or {}).get('order_requests_sent'),
+                        duration_ns=ended[1]-started[1])
+            except Exception:
+                pass
 
     def _cycle(self,bucket,*,send=False,allow_new_entries=True,allowed_entry_card_id=None):
         """A false send flag never reserves, signs, cancels or places an order."""

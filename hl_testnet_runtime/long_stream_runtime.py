@@ -20,6 +20,7 @@ from .filled_dispatch_store import DispatchError
 from .source_window import source_fresh, timestamp
 from .trade_card_store import CardStore
 from . import trade_cards
+from . import passive_timing
 
 MODE = 'long_stream_testnet_v1'
 RELEASE = 'approved_long_stream_v1'
@@ -715,6 +716,31 @@ def _trade_report_changed(reported, trade):
     return True
 
 
+def _record_trade_timing(trade, *, bucket=None, revision=None, entry_order_ids=()):
+    """Use an existing projection only; never refresh or mutate for telemetry.
+
+    The local timestamp is when the reporting path observed the saved proof.
+    It is an upper bound on verification latency, not exchange activation time.
+    evidence_at_ms remains the timestamp of the original saved observation.
+    """
+    stamp = passive_timing.stamp()
+    if stamp is None:
+        return
+    timing = trade.get('protection_timing') or {}
+    passive_timing.record('trade_observed', at_ms=stamp[0], mono_ns=stamp[1],
+        bucket=bucket, revision=revision, entry_order_ids=entry_order_ids,
+        **{key: trade.get(key) for key in (
+            'account_role', 'card_id', 'symbol', 'state', 'entry_quantity',
+            'exit_quantity', 'remaining_quantity', 'first_entry_at_ms',
+            'last_entry_at_ms', 'last_exit_at_ms', 'evidence_at_ms',
+            'protection_verified', 'closure_verified', 'verification_status',
+            'stop_quantity', 'take_profit_quantity')},
+        active_order_ids=tuple(trade.get('active_order_ids', ())),
+        issues=tuple(trade.get('issues', ())),
+        stop_public_status_at_ms=timing.get('stop_public_status_at_ms'),
+        stop_observed_at_ms=timing.get('stop_observed_at_ms'))
+
+
 def observed_trades(controller, route, *, role='long_account', historical=False):
     """Read owned fills and working exits for monitoring; never authorize an order."""
     result = []
@@ -800,7 +826,10 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
                 actual_entry_price=weighted_price(entries),
                 actual_exit_price=weighted_price(exits),
                 first_entry_at_ms=min(f['at_ms'] for f in entries),
+                last_entry_at_ms=max(f['at_ms'] for f in entries),
                 last_exit_at_ms=max((f['at_ms'] for f in exits),default=None),
+                stop_quantity=row['stop_quantity_observed'],
+                take_profit_quantity=row['take_profit_quantity_observed'],
                 active_order_ids=active,
                 issues=issues,verification_status=verification_status,
                 last_known_protection_verified=last_known_protected,
@@ -811,6 +840,9 @@ def observed_trades(controller, route, *, role='long_account', historical=False)
                 protection_timing=deepcopy(state.get('protection_timing',{}).get(row['card_id'])),
                 emergency_status=(state.get('emergency') or {}).get('phase'),
                 evidence_at_ms=snap['at_ms'],order_requests_sent=0))
+            if not historical:
+                _record_trade_timing(result[-1], bucket=state['bucket'],
+                    revision=state['revision'], entry_order_ids=tuple(sorted(entry_ids)))
     return result
 
 
@@ -944,6 +976,12 @@ def _loop(controller, streams):
                 entry_failures.pop(role, None)
                 entry_retry_at.pop(role, None)
             results.append(result)
+            passive_timing.record('stream_result', account_role=role,
+                status=result['status'], failure_code=result.get('failure_code'),
+                symbol=result.get('failure_symbol'),
+                retry_after_ms=result.get('fresh_entry_retry_after_ms'),
+                budget_stage=result.get('budget_stage'),
+                order_requests_sent=result.get('order_requests_sent'))
             with _lock:
                 _health['cycles'] += 1
                 _health['last_status']=result['status']
@@ -1188,6 +1226,9 @@ def start():
             return False
         _stop.clear()
         _wake.clear()
+        # Explicit opt-in diagnostic worker; it never queries the exchange or
+        # journal and starts before any execution or notification threads.
+        passive_timing.start(env)
         _health.update(configured=True,running=True,last_status='STARTING',cycles=0,
                        order_requests_sent=0,
                        new_entries_enabled=env['HL_TESTNET_LONG_ENTRY_ENABLED']=='true',
@@ -1221,6 +1262,7 @@ def stop():
     _wake.set()
     if _fill_wakeups is not None:
         _fill_wakeups.stop()
+    passive_timing.stop()
 
 
 def health():
@@ -1230,6 +1272,7 @@ def health():
     result['simple_execution']=bool(_fill_wakeups is not None
         and getattr(_fill_wakeups,'simple_execution',False) is True)
     result['full_audit_delay_seconds']=AUDIT_DELAY_MS//1000
+    result['timing_telemetry']=passive_timing.health()
     from .emergency_close import health as emergency_health
     result['emergency_close']=emergency_health()
     if _fill_wakeups is not None:
