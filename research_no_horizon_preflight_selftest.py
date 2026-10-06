@@ -1,6 +1,7 @@
 """Source feature preflight tests; no DB, jobs, or outcome computation."""
 from copy import deepcopy
 from contextlib import ExitStack
+from datetime import timedelta
 import json
 import unittest
 from unittest.mock import patch
@@ -8,7 +9,9 @@ from unittest.mock import patch
 import research_no_horizon_contract as contracts
 import research_no_horizon_preflight as preflight
 import research_no_horizon_source as source
-from research_no_horizon_source_selftest import fixture
+from research_no_horizon_source_selftest import (
+    BASE, MAXPAIN_KEY, fixture, maxpain_fixture, maxpain, refresh_capture,
+)
 
 
 def scope(direction='SHORT', candidate='FUTURES_CVD_TOTAL_65', threshold=1.5):
@@ -20,6 +23,8 @@ class FeaturePreflight(unittest.TestCase):
     def setUpClass(cls):
         cls.original = fixture()
         cls.unavailable = fixture(unavailable=True)
+        cls.maxpain = maxpain_fixture()
+        cls.asymmetric = maxpain_fixture(opposite_active=False)
 
     def setUp(self):
         self.data = deepcopy(self.original)
@@ -37,8 +42,10 @@ class FeaturePreflight(unittest.TestCase):
         self.assertEqual(rows['SHORT']['counts']['MATCH'],1)
         self.assertEqual(rows['LONG']['counts']['NO_MATCH'],1)
         available = result['feature_availability']['futures_cvd.aligned_score']
-        self.assertEqual(available['available_rows'],1)
-        self.assertEqual(available['unavailable_rows'],0)
+        self.assertEqual(set(available),{'LONG','SHORT'})
+        for direction in available.values():
+            self.assertEqual(direction['available_rows'],1)
+            self.assertEqual(direction['unavailable_rows'],0)
         self.assertEqual(rows['SHORT']['decision_ledger'][0]['ordinal'],0)
 
     def test_accepted_partial_capture_becomes_unknown_feature_not_unknown_source(self):
@@ -51,10 +58,10 @@ class FeaturePreflight(unittest.TestCase):
             self.assertEqual(row['counts'],{'MATCH':0,'NO_MATCH':0,'UNKNOWN':1,'UNKNOWN_SOURCE':0})
             self.assertEqual(row['decision_ledger'][0]['missing_feature_reasons'],
                 {'futures_cvd.aligned_score':['MODEL_UNAVAILABLE']})
-        feature = result['feature_availability']['futures_cvd.aligned_score']
-        self.assertEqual(feature['unavailable_rows'],1)
-        self.assertEqual(feature['reason_counts'],{'MODEL_UNAVAILABLE':1})
-        self.assertEqual(feature['unavailable_source_ordinals'],[0])
+        for feature in result['feature_availability']['futures_cvd.aligned_score'].values():
+            self.assertEqual(feature['unavailable_rows'],1)
+            self.assertEqual(feature['reason_counts'],{'MODEL_UNAVAILABLE':1})
+            self.assertEqual(feature['unavailable_source_ordinals'],[0])
 
     def test_known_false_conjunct_remains_decidable_despite_missing_features(self):
         result = self.report([scope('LONG','STRICT_TRIPLE_TOTAL_65')])
@@ -89,7 +96,8 @@ class FeaturePreflight(unittest.TestCase):
             self.assertEqual([item['snapshot_set_id'] for item in row['decision_ledger']],[1,1,None,None,'invalid'])
             self.assertEqual(row['counts']['UNKNOWN_SOURCE'],4)
             self.assertEqual(sum(row['counts'].values()),5)
-        self.assertEqual(result['feature_availability']['futures_cvd.aligned_score']['unknown_source_rows'],4)
+        for counts in result['feature_availability']['futures_cvd.aligned_score'].values():
+            self.assertEqual(counts['unknown_source_rows'],4)
         self.assertFalse(result['ready_for_outcome_research'])
 
     def test_tampered_capture_and_missing_raw_source_are_not_no_match(self):
@@ -112,7 +120,73 @@ class FeaturePreflight(unittest.TestCase):
             result = self.report(declarations)
         self.assertEqual(validate.call_count,1)
         self.assertEqual(len(result['scopes']),4)
-        self.assertEqual(result['feature_availability']['futures_cvd.aligned_score']['available_rows'],1)
+        for counts in result['feature_availability']['futures_cvd.aligned_score'].values():
+            self.assertEqual(counts['available_rows'],1)
+
+    def test_maxpain_availability_uses_requested_directions_without_scope_multiplication(self):
+        self.data = deepcopy(self.asymmetric)
+        key = MAXPAIN_KEY.replace('GE65','GE55')
+        long_only = self.report([scope('LONG',key),scope('LONG',MAXPAIN_KEY,2)])
+        short_only = self.report([scope('SHORT',key)])
+        both = self.report([scope('LONG',key),scope('SHORT',key),scope('LONG',MAXPAIN_KEY,2)])
+        self.assertEqual(both['preflight_version'],'no-horizon-source-feature-preflight-v2-directional')
+        self.assertTrue(long_only['ready_for_outcome_research'])
+        self.assertFalse(short_only['ready_for_outcome_research'])
+        self.assertFalse(both['ready_for_outcome_research'])
+        for feature in (maxpain.MAPPING,maxpain.AVERAGE):
+            self.assertEqual(set(long_only['feature_availability'][feature]),{'LONG'})
+            self.assertEqual(set(short_only['feature_availability'][feature]),{'SHORT'})
+            directions = both['feature_availability'][feature]
+            self.assertEqual(directions['LONG'],long_only['feature_availability'][feature]['LONG'])
+            self.assertEqual(directions['SHORT'],short_only['feature_availability'][feature]['SHORT'])
+            self.assertEqual(directions['LONG']['available_rows'],1)
+            self.assertEqual(directions['LONG']['unavailable_rows'],0)
+            self.assertEqual(directions['SHORT']['available_rows'],0)
+            self.assertEqual(directions['SHORT']['unavailable_rows'],1)
+            self.assertEqual(directions['SHORT']['reason_counts'],{'NO_ACTIVE_SOURCE_TARGET':1})
+            self.assertEqual(directions['SHORT']['unavailable_source_ordinals'],[0])
+        self.assertEqual(next(row['counts']['NO_MATCH'] for row in long_only['scopes']
+            if row['candidate_key']==key),1)
+        self.assertEqual(short_only['scopes'][0]['counts'],
+            {'MATCH':0,'NO_MATCH':0,'UNKNOWN':1,'UNKNOWN_SOURCE':0})
+        self.assertIn('NO_ACTIVE_SOURCE_TARGET',
+            short_only['scopes'][0]['decision_ledger'][0]['missing_feature_reasons'][maxpain.AVERAGE])
+
+    def test_maxpain_mixed_population_retains_unknown_feature_and_invalid_hash_rows(self):
+        self.data = deepcopy(self.maxpain)
+        future = deepcopy(self.maxpain)
+        future['source_rows'][0]['scores']['coins']['BTC']['sources']['maxpain_operational_rows'][0][
+            'price_fetched_at_utc'] = (BASE+timedelta(minutes=6)).isoformat()
+        refresh_capture(future)
+        future_row = future['source_rows'][0]
+        invalid_row = deepcopy(self.maxpain['source_rows'][0])
+        invalid_row['scores']['coins']['BTC']['maxpain'][1]['score'] = 0
+        for source_id,row in ((2,future_row),(3,invalid_row)):
+            row['intake']['snapshot_set_id'] = source_id
+            row['stored_source']['snapshot_set_id'] = source_id
+            self.data['source_rows'].append(row)
+        self.data['source_receipt']['expected_accepted_rows'] = 3
+        result = self.report([scope('LONG',MAXPAIN_KEY),scope('SHORT',MAXPAIN_KEY)])
+        self.assertEqual((result['accepted_source_rows'],result['validated_source_rows'],result['invalid_source_rows']),
+            (3,2,1))
+        self.assertFalse(result['ready_for_outcome_research'])
+        for row in result['scopes']:
+            ledger = row['decision_ledger']
+            self.assertEqual([item['ordinal'] for item in ledger],[0,1,2])
+            self.assertEqual([item['snapshot_set_id'] for item in ledger],[1,2,3])
+            self.assertEqual(ledger[1]['match_status'],'UNKNOWN')
+            self.assertEqual(ledger[2]['match_status'],'UNKNOWN_SOURCE')
+            self.assertIn('CAPTURE_HASH_MISMATCH',ledger[2]['source_error'])
+            self.assertIn('FUTURE_SOURCE_TIME:12h/price_fetched_at_utc',
+                ledger[1]['missing_feature_reasons'][maxpain.AVERAGE])
+            self.assertEqual(sum(row['counts'].values()),3)
+        long_counts = next(row['counts'] for row in result['scopes'] if row['base_direction']=='LONG')
+        short_counts = next(row['counts'] for row in result['scopes'] if row['base_direction']=='SHORT')
+        self.assertEqual(long_counts,{'MATCH':1,'NO_MATCH':0,'UNKNOWN':1,'UNKNOWN_SOURCE':1})
+        self.assertEqual(short_counts,{'MATCH':0,'NO_MATCH':1,'UNKNOWN':1,'UNKNOWN_SOURCE':1})
+        for counts in result['feature_availability'][maxpain.AVERAGE].values():
+            self.assertEqual((counts['available_rows'],counts['unavailable_rows'],counts['unknown_source_rows']),(1,1,1))
+            self.assertEqual(counts['unavailable_source_ordinals'],[1])
 
     def test_never_constructs_entries_assigns_parents_or_evaluates_outcomes(self):
         targets = ('research_no_horizon_source.build_snapshot', 'research_no_horizon_source._parent_evidence',

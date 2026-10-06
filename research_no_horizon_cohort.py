@@ -20,7 +20,7 @@ import research_no_horizon_parent_coverage as coverage
 import research_no_horizon_preflight as features
 import research_no_horizon_source as source
 import research_no_horizon_gate as gate
-import research_watch_scan_formula as formulas
+from research_no_horizon_source import formulas
 
 VERSION = "no-horizon-single-anchor-multipart-cohort-v1"
 ANCHOR_VERSION = "no-horizon-single-anchor-multipart-manifest-v1"

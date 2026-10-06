@@ -14,18 +14,22 @@ import research_no_horizon_source as adapter
 import research_no_horizon_replay as replay
 import research_watch_scan_intake as intake
 import research_watch_scan_formula as formulas
+import research_watch_scan_formula_maxpain as maxpain
+import research_watch_score_capture as capture
 from research_watch_scan_intake_selftest import source_fixture
-from research_watch_score_capture_selftest import BASE, bundle, derivatives
+from research_watch_score_capture_selftest import BASE, bundle, derivatives, inputs
+
+MAXPAIN_KEY = 'captured-question-search-v3-experimental-binding:average_score_all_timeframes_GE65'
 
 
-def fixture(*, unavailable=False):
+def fixture(*, unavailable=False, rows=None):
     market = derivatives()
     for item in market.values():
         for window in item['flow']['futures']['windows'].values():
             window['continuous_strength'] = 1.
         if unavailable:
             item['flow']['futures'].update(available=False,windows={},quality={'status':'NO_DATA'})
-    block,*_ = bundle(snapshot=market)
+    block,*_ = bundle(rows=rows,snapshot=market)
     raw = source_fixture(block)
     cutoff = BASE+timedelta(minutes=11)
     accepted = intake.validate_source(raw,now=cutoff,activated_at=BASE)
@@ -49,6 +53,28 @@ def fixture(*, unavailable=False):
             'transaction_mode':'REPEATABLE_READ_READ_ONLY'}}
 
 
+def maxpain_fixture(*, opposite_active=True):
+    """Freeze actual scorer outputs; no hand-written research model scores."""
+    rows = inputs()
+    for row in rows:
+        row.update(short_max_pain=101.,long_max_pain=90. if opposite_active else 100.,
+            distance_short_pct=1.,distance_long_pct=-10. if opposite_active else 0.,closest_side='SHORT')
+    return fixture(rows=rows)
+
+
+def refresh_capture(export):
+    """Keep valid source hashes/receipt while testing feature-level rejection."""
+    row = export['source_rows'][0]
+    block = row['scores']
+    block['payload_sha256'] = capture.digest({k:v for k,v in block.items() if k!='payload_sha256'})
+    raw = source_fixture(block)
+    accepted = intake.validate_source(raw,now=export['cutoff_utc'],activated_at=BASE)
+    if accepted['intake_status'] != 'ACCEPTED':
+        raise AssertionError(accepted['rejection_reason'])
+    accepted.update(consumer_version=intake.VERSION,ingested_at_utc=export['cutoff_utc'])
+    row.update(intake=accepted,stored_source={k:v for k,v in raw.items() if k!='bundle'})
+
+
 def build(export,**changes):
     return adapter.build_snapshot(export,**{'candidate_key':'FUTURES_CVD_TOTAL_65',
         'base_direction':'SHORT','symbol':'BTC','threshold_pct':1.5,**changes})
@@ -58,6 +84,7 @@ class SourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.original=fixture()
+        cls.maxpain=maxpain_fixture()
 
     def setUp(self):
         self.data=deepcopy(self.original)
@@ -103,6 +130,64 @@ class SourceTests(unittest.TestCase):
         self.assert_blocked(result)
         self.assertEqual(result['source_receipt']['counts']['UNKNOWN_SOURCE'],1)
         self.assertEqual(result['source_receipt']['validated_source_rows'],0)
+
+    def test_maxpain_capture_matches_exact_average_with_versioned_normal_and_inverse_outcomes(self):
+        self.data = deepcopy(self.maxpain)
+        before = deepcopy(self.data)
+        inverse = next(row['candidate_key'] for row in maxpain.catalog_records()
+            if row['definition'].get('base_candidate_key') == MAXPAIN_KEY)
+        with patch('research_watch_score_capture.prepare',side_effect=AssertionError('No score replay')), \
+                patch('alert_engine._score_details_for_side',side_effect=AssertionError('No rescoring')):
+            normal = build(self.data,candidate_key=MAXPAIN_KEY,base_direction='LONG')
+            flipped = build(self.data,candidate_key=inverse,base_direction='LONG')
+            opposite = build(self.data,candidate_key=MAXPAIN_KEY,base_direction='SHORT')
+        self.assertEqual(self.data,before)
+        for result,direction in ((normal,'LONG'),(flipped,'SHORT')):
+            self.assertTrue(result['source_coverage_complete'])
+            self.assertEqual(result['source_receipt']['counts']['MATCH'],1)
+            self.assertEqual(result['opportunities'][0]['contract']['direction'],direction)
+            selection = result['source_receipt']['selection']
+            self.assertEqual(selection['adapter_version'],'no-horizon-accepted-watch-source-v3-maxpain')
+            self.assertEqual(selection['feature_version'],maxpain.FEATURE_VERSION)
+            self.assertEqual(selection['catalog_sha256'],formulas.CATALOG_SHA256)
+        self.assertEqual(replay.replay_snapshot(normal)['status_counts']['FAILURE'],1)
+        self.assertEqual(replay.replay_snapshot(flipped)['status_counts']['SUCCESS'],1)
+        self.assertTrue(opposite['source_coverage_complete'])
+        self.assertEqual(opposite['source_receipt']['counts']['NO_MATCH'],1)
+
+    def test_maxpain_future_quote_with_valid_capture_hash_is_unknown_feature(self):
+        self.data = deepcopy(self.maxpain)
+        row = self.data['source_rows'][0]
+        row['scores']['coins']['BTC']['sources']['maxpain_operational_rows'][0][
+            'price_fetched_at_utc'] = (BASE+timedelta(minutes=6)).isoformat()
+        refresh_capture(self.data)
+        result = build(self.data,candidate_key=MAXPAIN_KEY,base_direction='LONG')
+        self.assert_blocked(result)
+        self.assertEqual(result['source_receipt']['validated_source_rows'],1)
+        self.assertEqual(result['source_receipt']['counts'],
+            {'MATCH':0,'NO_MATCH':0,'UNKNOWN':1,'UNKNOWN_SOURCE':0})
+        self.assertIn(maxpain.AVERAGE,result['source_receipt']['decision_ledger'][0]['missing_features'])
+
+    def test_maxpain_slot_hash_tampering_is_unknown_source(self):
+        self.data = deepcopy(self.maxpain)
+        self.data['source_rows'][0]['scores']['coins']['BTC']['maxpain'][1]['score'] = 0
+        result = build(self.data,candidate_key=MAXPAIN_KEY,base_direction='LONG')
+        self.assert_blocked(result)
+        self.assertEqual(result['source_receipt']['counts']['UNKNOWN_SOURCE'],1)
+        self.assertIn('CAPTURE_HASH_MISMATCH',result['source_receipt']['decision_ledger'][0]['blocker'])
+
+    def test_expanded_source_preserves_all_legacy_decisions_on_genuine_capture(self):
+        row = self.maxpain['source_rows'][0]
+        observation,expanded = adapter._validate_row(row,start=self.maxpain['source_start_utc'],
+            end=self.maxpain['source_end_utc'],cutoff=self.maxpain['cutoff_utc'],symbol='BTC')
+        old = formulas.evaluate_coin(observation)
+        old_keys = {item['candidate_key'] for item in old['evaluations']}
+        self.assertEqual(len(old_keys),34)
+        self.assertEqual(len(expanded['evaluations']),164)
+        self.assertEqual([item for item in expanded['evaluations'] if item['candidate_key'] in old_keys],
+            old['evaluations'])
+        proof = expanded['maxpain_provenance_by_direction']['LONG']
+        self.assertEqual((proof['source_side'],proof['denominator'],proof['rounded_average']),('SHORT',7,65.5))
 
     def test_missing_raw_source_preserved_in_ledger(self):
         self.data['source_rows'][0]['stored_source']=None

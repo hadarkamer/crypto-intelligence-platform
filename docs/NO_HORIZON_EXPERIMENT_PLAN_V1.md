@@ -41,6 +41,15 @@ source row is revalidated once using the existing captured-feature and
 three-valued predicate evaluator, then accounted for in every declared scope.
 Intake acceptance, feature availability and predicate decisibility are reported
 separately, including unavailable-feature reasons and original row identities.
+The current receipt version is
+`no-horizon-source-feature-preflight-v2-directional`.
+`feature_availability` has the shape
+`{feature_name: {requested_base_direction: counts}}`; each source row is counted
+once per required feature and requested base direction, regardless of how many
+candidates or thresholds share that feature. Its counters, unavailable source
+ordinals and reason counts describe that direction's captured evidence. A LONG
+feature can be unavailable while its SHORT counterpart is available, or vice
+versa; one direction's aggregate does not stand in for the other.
 The preflight does not build entries, assign parents, replay prices or evaluate
 the research gate. Passing it is permission to proceed with those checks, not
 evidence of a qualified formula.
@@ -71,6 +80,14 @@ The SQLite schema version is unchanged. Historical reports remain readable;
 the existing implementation hash fence still rejects resuming an old plan with
 different code. Previously frozen source exports and outcome receipts are not
 rewritten by preflight or by the new admission defaults.
+
+The source adapter now reuses the existing MaxPain v2 captured-feature evaluator,
+supporting 82 of the unchanged 298 catalog definitions. Source/feature bindings
+and implementation hashes change, so this expansion requires new plans and
+rejects resumption under older plan identities. The original October experiment
+remains pinned to `e8d25e57`. See
+[the feature coverage contract](NO_HORIZON_FEATURE_COVERAGE_V2.md) for the exact
+48 added definitions' input contract and remaining unsupported features.
 
 ## Optional matched-parent coverage before outcomes
 

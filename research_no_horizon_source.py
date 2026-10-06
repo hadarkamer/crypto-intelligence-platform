@@ -16,12 +16,12 @@ from typing import Any, Mapping
 
 import research_no_horizon_contract as contracts
 import research_no_horizon_first_touch as touch
-import research_watch_scan_formula as formulas
+import research_watch_scan_formula_maxpain as formulas
 import research_watch_scan_intake as intake
 import research_watch_scan_measurement as measurement
 import research_btc_parent_movement as btc
 
-VERSION = "no-horizon-accepted-watch-source-v2"
+VERSION = "no-horizon-accepted-watch-source-v3-maxpain"
 EXPORT_VERSION = "no-horizon-watch-source-export-v1"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_ROWS = 256
@@ -104,6 +104,7 @@ def _validate_row(row: Mapping[str, Any], *, start, end, cutoff, symbol) -> tupl
     coin = row["scores"]["coins"][symbol]
     observation = {**validated, "consumer_version": intake.VERSION,
         "population_version": intake.POPULATION, "symbol": symbol,
+        "maxpain_slots": coin["maxpain"],
         **{key: coin[key] for key in ("models", "sources", "source_time_errors")}}
     return observation, formulas.evaluate_coin(observation)
 

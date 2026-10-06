@@ -20,7 +20,7 @@ import research_no_horizon_contract as contracts
 import research_no_horizon_gate as gate
 import research_no_horizon_source as source
 import research_no_horizon_store as child
-import research_watch_scan_formula as formulas
+from research_no_horizon_source import formulas
 
 VERSION = "no-horizon-local-frozen-experiment-v1"
 MAX_SCOPES = 64

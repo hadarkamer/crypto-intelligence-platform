@@ -15,9 +15,9 @@ import research_no_horizon_cohort as cohort
 import research_no_horizon_contract as contracts
 import research_no_horizon_experiment as experiment
 import research_no_horizon_ranking as ranking
-import research_watch_scan_formula as formulas
+from research_no_horizon_source import formulas
 
-VERSION = "no-horizon-frozen-catalog-discovery-plan-v1"
+VERSION = "no-horizon-frozen-catalog-discovery-plan-v2-maxpain"
 _AUTHORITY = {"runtime_authorized": False, "telegram_authorized": False,
               "trading_authorized": False}
 _LIMITATIONS = {

@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import research_btc_parent_movement as btc_policy
 import research_no_horizon_export as exporter
+import research_no_horizon_preflight as preflight
 import research_no_horizon_source as source
 import research_no_horizon_replay as replay
 import research_price_archive as price_archive
@@ -133,7 +134,20 @@ class NoHorizonSourcePostgresTests(unittest.TestCase):
         return snapshot
 
     def test_complete_real_capture_export_snapshot_and_replay(self):
-        self.prepared()
+        ident = self.prepared()
+
+        def capture_state():
+            with self.connect() as conn:
+                counts = {table: conn.execute('SELECT count(*) AS n FROM ' + table).fetchone()['n']
+                    for table in ('research_max_pain_snapshot_sets', 'research_max_pain_snapshot_rows',
+                                  'research_max_pain_snapshot_symbols', 'research_watch_scan_intakes')}
+                parent = conn.execute('SELECT * FROM research_max_pain_snapshot_sets WHERE snapshot_set_id=%s',
+                                      (ident,)).fetchone()
+                admitted = conn.execute('SELECT * FROM research_watch_scan_intakes WHERE snapshot_set_id=%s',
+                                        (ident,)).fetchone()
+                return counts, parent, admitted
+
+        before = capture_state()
         exported = self.export()
         self.assertEqual(exported['export_version'], 'no-horizon-watch-source-export-v1')
         self.assertEqual(len(exported['source_rows']), 1)
@@ -151,6 +165,39 @@ class NoHorizonSourcePostgresTests(unittest.TestCase):
         self.assertEqual(receipt['outcomes'][0]['outcome']['processed_candles'], 2)
         self.assertIs(receipt['gate']['experimental_eligible'], False)  # One wave is below minimum five.
         self.assertIs(receipt['trading_authorized'], False)
+
+        # The new predicates must consume the original JSONB capture through
+        # native intake/export SQL, without an auxiliary formula result table.
+        self.assertEqual(exported['source_rows'][0]['scores'],
+                         before[1]['source_metadata']['capture_metadata']['operational_scores'])
+        prefix = 'captured-question-search-v3-experimental-binding:'
+        average = prefix + 'average_score_all_timeframes_GE55'
+        consensus = prefix + 'CONSENSUS_True'
+        scopes = [{'candidate_key': candidate, 'base_direction': 'SHORT', 'threshold_pct': 1.5}
+                  for candidate in (average, consensus)]
+        features = preflight.preflight_source_features(exported, scopes)
+        self.assertIs(features['ready_for_outcome_research'], True)
+        self.assertEqual(features['feature_availability']['max_pain.average_score_all_timeframes']['SHORT']['available_rows'], 1)
+        self.assertEqual(features['feature_availability']['max_pain.consensus_hits_full']['SHORT']['available_rows'], 1)
+        by_candidate = {row['candidate_key']: row for row in features['scopes']}
+        self.assertEqual(by_candidate[average]['counts'],
+                         {'MATCH': 0, 'NO_MATCH': 1, 'UNKNOWN': 0, 'UNKNOWN_SOURCE': 0})
+        self.assertEqual(by_candidate[consensus]['counts'],
+                         {'MATCH': 1, 'NO_MATCH': 0, 'UNKNOWN': 0, 'UNKNOWN_SOURCE': 0})
+        selected = source.build_snapshot(exported, candidate_key=consensus,
+            base_direction='SHORT', symbol='XRP', threshold_pct=1.5)
+        self.assertIs(selected['source_coverage_complete'], True)
+        self.assertEqual(selected['source_receipt']['selection']['adapter_version'],
+                         'no-horizon-accepted-watch-source-v3-maxpain')
+        self.assertEqual(selected['source_receipt']['selection']['feature_version'],
+                         'watch-captured-total-and-maxpain-features-v2')
+        self.assertEqual(selected['source_receipt']['decision_ledger'][0]['feature_sha256'],
+                         by_candidate[consensus]['decision_ledger'][0]['feature_sha256'])
+        result = replay.replay_snapshot(selected, batch_size=1)
+        self.assertIs(result['computation_complete'], True)
+        self.assertEqual(result['status_counts']['SUCCESS'], 1)
+        self.assertIs(result['trading_authorized'], False)
+        self.assertEqual(capture_state(), before)
 
     def test_export_owns_a_real_readonly_repeatable_read_transaction(self):
         self.prepared()

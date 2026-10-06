@@ -13,7 +13,7 @@ import research_no_horizon_contract as contracts
 import research_no_horizon_source as source
 import research_watch_scan_formula as formulas
 
-VERSION = "no-horizon-source-feature-preflight-v1"
+VERSION = "no-horizon-source-feature-preflight-v2-directional"
 _STATUSES = ("MATCH", "NO_MATCH", "UNKNOWN", "UNKNOWN_SOURCE")
 _AUTHORITY = {"runtime_authorized": False, "telegram_authorized": False, "trading_authorized": False}
 
@@ -37,9 +37,16 @@ def preflight_source_features(export: Mapping[str, Any], scopes) -> dict[str, An
     extraction_blockers = source._extraction_blockers(frozen, rows, frozen["source_receipt"])
     required = {scope["scope_id"]: sorted({condition["feature"] for condition in
         formulas.existing._conditions(scope["candidate"]["definition"])}) for scope in normalized}
-    feature_names = sorted({name for names in required.values() for name in names})
-    availability = {name: {"available_rows": 0, "unavailable_rows": 0, "unknown_source_rows": 0,
-        "reason_counts": Counter(), "unavailable_source_ordinals": []} for name in feature_names}
+    requested = {}
+    for scope in normalized:
+        for name in required[scope["scope_id"]]:
+            requested.setdefault(name, set()).add(scope["base_direction"])
+    # Availability is directional: an inactive source side can leave the other
+    # side's own average known. Multiple scopes never multiply these row counts.
+    availability = {name: {base: {"available_rows": 0, "unavailable_rows": 0,
+        "unknown_source_rows": 0, "reason_counts": Counter(),
+        "unavailable_source_ordinals": []} for base in sorted(bases)}
+        for name, bases in sorted(requested.items())}
     scope_rows = [{**scope, "required_features": required[scope["scope_id"]], "decision_ledger": []}
                   for scope in normalized]
     seen, validated, errors = set(), 0, Counter()
@@ -66,18 +73,19 @@ def preflight_source_features(export: Mapping[str, Any], scopes) -> dict[str, An
         except (ValueError, TypeError, KeyError, OverflowError, AttributeError, IndexError) as exc:
             result, source_error = None, str(exc)
             errors[source_error] += 1
-        for name, counts in availability.items():
-            if result is None:
-                counts["unknown_source_rows"] += 1
-                continue
-            features = result["features_by_direction"]["LONG"]
-            reasons = features["unavailable_features"].get(name)
-            if reasons is None and name in features["features"]:
-                counts["available_rows"] += 1
-            else:
-                counts["unavailable_rows"] += 1
-                counts["unavailable_source_ordinals"].append(ordinal)
-                counts["reason_counts"].update(set(reasons or ["MISSING_EXTRACTED_FEATURE"]))
+        for name, directions in availability.items():
+            for direction, counts in directions.items():
+                if result is None:
+                    counts["unknown_source_rows"] += 1
+                    continue
+                features = result["features_by_direction"][direction]
+                reasons = features["unavailable_features"].get(name)
+                if reasons is None and name in features["features"]:
+                    counts["available_rows"] += 1
+                else:
+                    counts["unavailable_rows"] += 1
+                    counts["unavailable_source_ordinals"].append(ordinal)
+                    counts["reason_counts"].update(set(reasons or ["MISSING_EXTRACTED_FEATURE"]))
         for scope in scope_rows:
             if result is None:
                 record = {**base, "match_status": "UNKNOWN_SOURCE", "missing_features": [],
@@ -89,8 +97,9 @@ def preflight_source_features(export: Mapping[str, Any], scopes) -> dict[str, An
                 record = {**base, "match_status": decision["match_status"], "missing_features": list(missing),
                     "missing_feature_reasons": {name: list(unavailable.get(name, ["MISSING_EXTRACTED_FEATURE"])) for name in missing}}
             scope["decision_ledger"].append(record)
-    for counts in availability.values():
-        counts["reason_counts"] = dict(sorted(counts["reason_counts"].items()))
+    for directions in availability.values():
+        for counts in directions.values():
+            counts["reason_counts"] = dict(sorted(counts["reason_counts"].items()))
     for scope in scope_rows:
         counts = Counter(row["match_status"] for row in scope["decision_ledger"])
         blockers = list(extraction_blockers)

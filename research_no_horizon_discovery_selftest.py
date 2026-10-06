@@ -12,7 +12,12 @@ import research_no_horizon_contract as contracts
 import research_no_horizon_discovery as discovery
 import research_no_horizon_manifest as manifest
 import research_no_horizon_ranking as ranking
-import research_watch_scan_formula as formulas
+import research_no_horizon_source as source
+import research_watch_scan_formula as legacy_formulas
+
+formulas = discovery.formulas
+LEGACY_KEYS = [row["candidate_key"] for row in legacy_formulas.catalog_records()
+               if row["supported"]]
 
 _FAKE_CALENDAR = {
     "planner_version": calendar.VERSION, "planner_sha256": "a" * 64,
@@ -74,17 +79,18 @@ class DiscoveryTests(unittest.TestCase):
         first = kwargs.pop("first_declaration", declaration())
         kwargs.setdefault("base_directions", ["LONG"])
         kwargs.setdefault("thresholds_pct", [.25])
+        kwargs.setdefault("candidate_keys", LEGACY_KEYS)
         return discovery.build_plan(first, **kwargs)
 
     def test_full_catalog_denominator_and_unsupported_definitions_are_visible(self):
         plan = self.plan()
         records = plan["catalog_manifest"]
         self.assertEqual(len(records), 298)
-        self.assertEqual(sum(row["supported"] for row in records), 34)
+        self.assertEqual(sum(row["supported"] for row in records), 82)
         self.assertEqual(sum(row["selected"] for row in records), 34)
-        self.assertEqual(plan["selection_mode"], "ALL_SUPPORTED")
-        self.assertEqual(plan["summary"]["unsupported_candidates"], 264)
-        self.assertEqual(plan["summary"]["omitted_supported_candidates"], 0)
+        self.assertEqual(plan["selection_mode"], "EXPLICIT_SUBSET")
+        self.assertEqual(plan["summary"]["unsupported_candidates"], 216)
+        self.assertEqual(plan["summary"]["omitted_supported_candidates"], 48)
         self.assertEqual(plan["summary"]["scopes_per_window"], 34)
         self.assertTrue(all(row["supported"] or
                             (row["unsupported_features"] and not row["selected"]) for row in records))
@@ -98,9 +104,14 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn(alias, chosen)
         self.assertNotEqual(chosen[original]["definition_sha256"], chosen[alias]["definition_sha256"])
         self.assertEqual(sum(row["orientation"] == "INVERSE" for row in chosen.values()), 17)
+        supported = [row for row in plan["catalog_manifest"] if row["supported"]]
+        self.assertEqual(sum(row["orientation"] == "NORMAL" for row in supported), 41)
+        self.assertEqual(sum(row["orientation"] == "INVERSE" for row in supported), 41)
         self.assertIs(plan["catalog_entries_are_independent_strategies"], False)
 
     def test_oversized_grid_rejects_instead_of_splitting_or_truncating(self):
+        with self.assertRaisesRegex(ValueError, "GRID_EXCEEDS"):
+            self.plan(candidate_keys=None)
         for directions, thresholds in ((["LONG", "SHORT"], [.25]), (["LONG"], [.25, .5])):
             with self.subTest(directions=directions, thresholds=thresholds):
                 with self.assertRaisesRegex(ValueError, "GRID_EXCEEDS"):
@@ -108,6 +119,7 @@ class DiscoveryTests(unittest.TestCase):
         supported = [row["candidate_key"] for row in formulas.catalog_records() if row["supported"]]
         plan = self.plan(candidate_keys=supported[:32], base_directions=["SHORT", "LONG"])
         self.assertEqual(plan["summary"]["scopes_per_window"], 64)
+        self.assertEqual(plan["summary"]["omitted_supported_candidates"], 50)
         self.assertEqual(len(plan["calendar_plan"]["windows"]), 1)
 
     def test_explicit_subset_retains_all_omitted_and_unsupported_entries(self):
@@ -116,7 +128,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(plan["selection_mode"], "EXPLICIT_SUBSET")
         self.assertEqual(len(plan["catalog_manifest"]), 298)
         self.assertEqual(plan["summary"]["selected_candidates"], 1)
-        self.assertEqual(plan["summary"]["omitted_supported_candidates"], 33)
+        self.assertEqual(plan["summary"]["omitted_supported_candidates"], 81)
         self.assertEqual(plan["summary"]["total_declared_scopes"], 8)
         self.assertEqual(plan["summary"]["scopes_per_window"], 4)
 
@@ -145,12 +157,62 @@ class DiscoveryTests(unittest.TestCase):
                          contracts.digest({key: value for key, value in first.items() if key != "plan_sha256"}))
         self.assertEqual(self.plan(thresholds_pct=[1]), self.plan(thresholds_pct=[1.0]))
 
-    def test_explicit_all_selection_is_distinct_from_implicit_all_policy(self):
-        automatic = self.plan()
-        explicit = self.plan(candidate_keys=automatic["candidate_keys"])
-        self.assertNotEqual(automatic["plan_sha256"], explicit["plan_sha256"])
-        self.assertEqual(automatic["candidate_keys"], explicit["candidate_keys"])
-        self.assertNotEqual(automatic["calendar_plan"]["plan_sha256"], explicit["calendar_plan"]["plan_sha256"])
+    def test_all_supported_requires_explicit_bounded_selection(self):
+        all_keys = [row["candidate_key"] for row in formulas.catalog_records() if row["supported"]]
+        for keys in (None, all_keys):
+            with self.subTest(keys=keys is None), self.assertRaisesRegex(ValueError, "GRID_EXCEEDS"):
+                self.plan(candidate_keys=keys)
+        explicit = self.plan()
+        self.assertEqual(explicit["candidate_keys"], sorted(LEGACY_KEYS))
+        self.assertEqual(explicit["selection_mode"], "EXPLICIT_SUBSET")
+
+    def test_maxpain_definitions_and_feature_versions_bind_same_source_semantics(self):
+        prefix = "captured-question-search-v3-experimental-binding:"
+        keys = [prefix + "average_score_all_timeframes_GE65",
+                prefix + "opposite_average_score_all_timeframes_55_60",
+                prefix + "CONSENSUS_True"]
+        plan = self.plan(candidate_keys=keys)
+        self.assertIs(formulas, source.formulas)
+        self.assertEqual(formulas.VERSION, "watch-scan-formulas-v2-maxpain")
+        self.assertEqual(formulas.FEATURE_VERSION, "watch-captured-total-and-maxpain-features-v2")
+        self.assertEqual(plan["version"], "no-horizon-frozen-catalog-discovery-plan-v2-maxpain")
+        self.assertEqual(plan["summary"]["scopes_per_window"], 3)
+        self.assertEqual(plan["summary"]["omitted_supported_candidates"], 79)
+        bindings = plan["calendar_plan"]["windows"][0]["declaration"]["version_bindings"]
+        self.assertEqual(bindings["source_adapter_version"], source.VERSION)
+        self.assertEqual(bindings["feature_version"], formulas.FEATURE_VERSION)
+        originals = {row["candidate_key"]: row for row in legacy_formulas.catalog_records()}
+        selected = [row for row in plan["catalog_manifest"] if row["selected"]]
+        self.assertTrue(all(row["supported"] and not row["unsupported_features"] for row in selected))
+        for row in selected:
+            self.assertFalse(originals[row["candidate_key"]]["supported"])
+            self.assertEqual(row["definition_sha256"], originals[row["candidate_key"]]["definition_sha256"])
+        self.assertEqual(discovery.validate_plan(plan), plan)
+
+    def test_old_frozen_version_and_support_manifest_reject_before_registration(self):
+        for mutation in ("planner_version", "support_manifest", "source_version", "feature_version"):
+            old = self.plan()
+            if mutation == "planner_version":
+                old["version"] = "no-horizon-frozen-catalog-discovery-plan-v1"
+            elif mutation == "support_manifest":
+                chosen = set(old["candidate_keys"])
+                old["catalog_manifest"] = [{**{field: row[field] for field in (
+                    "candidate_key", "definition_sha256", "orientation", "supported", "unsupported_features")},
+                    "selected": row["candidate_key"] in chosen}
+                    for row in sorted(legacy_formulas.catalog_records(), key=lambda row: row["candidate_key"])]
+                old["summary"].update(supported_candidates=34, unsupported_candidates=264,
+                                      omitted_supported_candidates=0)
+            else:
+                bindings = old["template_declaration"]["version_bindings"]
+                if mutation == "source_version":
+                    bindings["source_adapter_version"] = "no-horizon-accepted-watch-source-v2"
+                else:
+                    bindings["feature_version"] = legacy_formulas.FEATURE_VERSION
+            old["plan_sha256"] = contracts.digest({key: value for key, value in old.items() if key != "plan_sha256"})
+            backend = Backend()
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                discovery.register_plan(backend, old)
+            self.assertEqual(backend.calls, [])
 
     def test_original_template_unmodified_and_every_calendar_window_gets_new_identity(self):
         first = declaration()

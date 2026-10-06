@@ -9,14 +9,21 @@ engine or acceptance policy.
 
 `research_no_horizon_discovery.build_plan` takes a valid first-cohort template,
 explicit base directions, explicit symmetric thresholds, optional candidate keys
-and a finite window count. Omit candidate keys to select every supported catalog
-definition; supplying keys declares a bounded subset.
+and a finite window count. Omit candidate keys to request every supported catalog
+definition; supplying keys declares a bounded subset. The current supported
+catalog exceeds the unchanged scope cap, so a usable plan requires explicit
+candidate keys.
 
 The plan retains the full catalog manifest, including definition hashes,
 orientations, unsupported features and selected/unselected status. The current
-catalog has 298 definitions, of which 34 are supported by accepted Watch data.
-The supported fields are the three captured model totals and the original
-Israel-weekend feature. Unsupported fields are not inferred from missing data.
+catalog has 298 definitions, of which 82 are supported and 216 remain
+unsupported. The source adapter reuses the existing Watch MaxPain v2 evaluator,
+adding 48 unchanged normal/inverse definitions to the original 34. The supported
+fields are the three captured model totals, the original Israel-weekend feature,
+and four proven MaxPain mapping/aggregate/consensus fields. Support means the
+feature contract is implemented; each captured row can still have unavailable
+inputs. See [the versioned feature coverage contract](NO_HORIZON_FEATURE_COVERAGE_V2.md).
+Unsupported fields are not inferred from missing data.
 
 All candidate, direction and threshold combinations are declared before
 acquisition. Duplicate or invalid choices are rejected. Scope identity, derived
@@ -26,13 +33,18 @@ their separate version identities; their count is not a count of independent
 strategies.
 
 The exact grid must fit the existing 64-scope cap:
-- 34 supported definitions × one base direction × one threshold = 34 scopes.
-- The same catalog × two base directions = 68 scopes and is rejected.
+- All 82 supported definitions × one base direction × one threshold = 82 scopes
+  and is rejected. `ALL_SUPPORTED` is an explicit over-cap request, not a
+  top-64 selection.
+- An explicit subset of 32 definitions × two base directions × one threshold
+  = 64 scopes.
+- An explicit subset containing the original 34 definitions × one base
+  direction × one threshold = 34 scopes; two directions would give 68 and fail.
 - Explicit subsets can use multiple directions or thresholds within the cap.
 
 There is no top-64 truncation, outcome-based selection or automatic splitting
 into separately anchored populations. The existing 16,384 source-scope decision
-budget also applies: 34 scopes permit at most 481 actual source rows, and 64
+budget also applies: an explicit 34-scope subset permits at most 481 actual source rows, and 64
 scopes permit 256. The sum of the declared part row limits can lower the
 actual ceiling further; the plan exposes both ceilings. Overflow blocks the original complete population; it does
 not take the first rows or silently increase the budget. These are bounds,
@@ -43,6 +55,11 @@ implementation hashes. Plan validation regenerates the whole object before
 registration. Registration reuses the calendar's strict database-clock check
 and per-window idempotency. Newly late windows are rejected; partially committed
 registrations can be resumed without duplicates or date changes.
+
+The current planner version is `no-horizon-frozen-catalog-discovery-plan-v2-maxpain`.
+Changed source, feature and implementation bindings require a new plan; a
+previously frozen plan cannot be resumed or silently rebuilt with current code.
+Its original denominator and evidence remain bound to its pinned implementation.
 
 A file's declared time and content hash do not prove when it was created or
 that outcomes were unknown. The registration receipt provides actual database
@@ -97,6 +114,8 @@ loser or missing outcome.
 python research_no_horizon_discovery_cli.py build \
   --declaration new-first-cohort.json \
   --base-direction SHORT --threshold-pct 0.25 \
+  --candidate-key FUTURES_CVD_TOTAL_65 \
+  --candidate-key 'captured-question-search-v3-experimental-binding:average_score_all_timeframes_GE65' \
   --windows 4 --output new-discovery-plan.json
 
 python research_no_horizon_discovery_cli.py register \
@@ -113,6 +132,11 @@ opens that destination in a separate read-only session and calls the existing
 verified report API; it does not execute pending jobs or acquire source data.
 The executor plan ID is available in the acquisition report once admission
 finishes. No primary/source database fallback is used.
+
+Repeat `--candidate-key` to freeze the intended bounded subset. The example
+declares two definitions, one base direction and one threshold per window; it
+does not assert that either definition has complete inputs or passes its gate.
+Omitting the option currently fails the 64-scope check before acquisition.
 
 A request blocked by source/parent preflight before admission has no executor
 plan to rank. Its full population failure remains in the acquisition report;

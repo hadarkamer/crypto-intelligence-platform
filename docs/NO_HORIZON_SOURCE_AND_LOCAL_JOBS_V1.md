@@ -26,6 +26,17 @@ fixed-window labels do not decide membership in the new experiment. Unknown
 features remain distinct from a known non-match, and missing evidence blocks
 qualification rather than removing an inconvenient observation.
 
+The current adapter, `no-horizon-accepted-watch-source-v3-maxpain`, reuses
+`watch-scan-formulas-v2-maxpain` and
+`watch-captured-total-and-maxpain-features-v2`. In addition to the original
+three model totals and Israel-weekend feature, it passes the already validated
+coin's captured `maxpain_slots` to that existing evaluator. The unchanged catalog
+now has 82 supported definitions and 216 unsupported definitions. No source
+collector, score calculation, SQL query or migration is added. MaxPain proof and
+availability remain directional; incomplete proof is unknown, not a zero score.
+The exact fields, direction mapping and version boundaries are documented in
+[NO_HORIZON_FEATURE_COVERAGE_V2.md](NO_HORIZON_FEATURE_COVERAGE_V2.md).
+
 ### Upstream Flow read failures
 
 On a Flow cache miss, `market_confidence_engine._cached_flow` analyzes Futures
@@ -80,6 +91,13 @@ A snapshot is immutable, including its cutoff and dataset identity. A later
 cutoff or changed source creates a new job and receipt. This release does not
 silently transfer checkpoints across revised datasets. It supports restart
 within a frozen experiment, not a continuously mutating live portfolio.
+
+The export transport version remains `no-horizon-watch-source-export-v1`.
+Reusing the same captured export with a newer feature adapter creates new
+version-bound research inputs; it does not amend old results. Plans bind the
+source/feature versions and repository dependency closure. Old plans must use
+their pinned code and cannot resume under the expanded adapter. The original
+October experiment stays pinned to `e8d25e57` and is unchanged.
 
 Research eligibility remains separate from runtime authority. Runtime,
 Telegram and trading authorization fields remain false in the resulting
