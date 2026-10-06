@@ -240,34 +240,32 @@ class SourceTests(unittest.TestCase):
 
     def test_hype_uses_only_explicit_hyperliquid_adapter(self):
         with patch.object(worker.hype_source, 'fetch_rows', return_value=[[0,100,101,99,100]]) as request, \
-                patch.object(worker.requests, 'get') as binance:
+                patch('requests.get') as binance:
             self.assertEqual(worker.fetch_rows('HYPE',0,worker.MINUTE), [[0,100,101,99,100]])
             request.assert_called_once_with('HYPE',0,worker.MINUTE)
             binance.assert_not_called()
 
-    def test_btc_keeps_spot_route_and_no_redirects(self):
-        with patch.object(worker.requests, 'get', return_value=self.response()) as request:
+    def test_btc_also_uses_only_hyperliquid(self):
+        with patch.object(worker.hype_source, 'fetch_rows', return_value=[[0,100,101,99,100]]) as request, \
+                patch('requests.get') as binance:
             self.assertEqual(worker.fetch_rows('BTC',0,worker.MINUTE), [[0,100,101,99,100]])
-            self.assertEqual(request.call_args.args[0], worker.source.BINANCE_SPOT_BASE_URL+worker.source.BINANCE_SPOT_KLINES_ENDPOINT)
-            self.assertEqual(request.call_args.kwargs['params']['symbol'], 'BTCUSDT')
-            self.assertFalse(request.call_args.kwargs['allow_redirects'])
+            request.assert_called_once_with('BTC',0,worker.MINUTE)
+            binance.assert_not_called()
 
     def test_hyperliquid_failure_never_tries_another_route(self):
-        with patch.object(worker.hype_source, 'fetch_rows', side_effect=worker.hype_source.HyperliquidSourceError('HYPE_HYPERLIQUID_HTTP_451')) as request, \
-                patch.object(worker.requests, 'get') as binance:
+        with patch.object(worker.hype_source, 'fetch_rows', side_effect=worker.hype_source.HyperliquidSourceError('HTTP_451')) as request, \
+                patch('requests.get') as binance:
             with self.assertRaises(worker.PriceEvidenceError) as error:
                 worker.fetch_rows('HYPE',0,worker.MINUTE)
-            self.assertEqual(error.exception.code, 'HYPE_HYPERLIQUID_HTTP_451')
+            self.assertEqual(error.exception.code, 'EXPERIMENTAL_HYPERLIQUID_HTTP_451')
             request.assert_called_once()
             binance.assert_not_called()
 
-    def test_bad_ohlc_and_wrong_minute_fail_closed(self):
-        for row in [[60000,'100','101','99','100','4',119999],
-                    [0,'100','99','98','100','4',59999],
-                    [0,'NaN','101','99','100','4',59999]]:
-            with patch.object(worker.requests, 'get', return_value=self.response(rows=[row])):
-                with self.assertRaises(ValueError):
-                    worker.fetch_rows('BTC',0,worker.MINUTE)
+    def test_adapter_validation_failure_is_not_masked(self):
+        with patch.object(worker.hype_source, 'fetch_rows', side_effect=worker.hype_source.HyperliquidSourceError('INVALID_OHLC')):
+            with self.assertRaises(worker.PriceEvidenceError):
+                worker.fetch_rows('BTC',0,worker.MINUTE)
+
 
 
 if __name__ == '__main__':

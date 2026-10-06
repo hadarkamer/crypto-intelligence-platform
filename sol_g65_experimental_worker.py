@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
 import requests
+import experimental_hyperliquid_source as hyperliquid
 
 import alert_delivery_policy as policy
 import binance_spot_price_path as source
@@ -18,8 +19,9 @@ from hype_row71205_experimental_worker import PriceCache as BaseCache
 from watch_transition_delivery import subscription_scope
 
 MINUTE = 60000
+FORMULA_ID = signal.FORMULA_ID + "__HYPERLIQUID_V2"
 CONFIG_SHA256 = hashlib.sha256(Path(signal.__file__).read_bytes() +
-    store.CONFIG_VERSION.encode() + b'BTC_SOL_BINANCE_SPOT_TRADE_1M;NOTIFICATION_ONLY').hexdigest()
+    store.CONFIG_VERSION.encode() + store.SOURCE_CONTRACT_VERSION.encode() + b'BTC_SOL_HYPERLIQUID_PERPETUAL_TRADE_1M;NOTIFICATION_ONLY').hexdigest()
 
 
 def now_ms():
@@ -34,7 +36,7 @@ def ms(value):
     return int(store.utc(value).timestamp()*1000)
 
 
-def fetch_rows(symbol, start, end):
+def legacy_fetch_rows(symbol, start, end):
     """Strict single bounded source request; no redirect or exchange fallback."""
     if symbol not in {'BTC', 'SOL'} or start % MINUTE or end % MINUTE or not 0 < end-start <= 1000*MINUTE:
         raise ValueError('BTC/SOL minute request must be bounded to 1..1000 bars')
@@ -61,6 +63,12 @@ def fetch_rows(symbol, start, end):
     return rows
 
 
+def fetch_rows(symbol, start, end):
+    if symbol not in {'BTC', 'SOL'}:
+        raise ValueError('SOL g65 allows only BTC and SOL')
+    return hyperliquid.fetch_rows(symbol, start, end)
+
+
 class PriceCache(BaseCache):
     def __init__(self, fetch=fetch_rows):
         self.fetch, self.rows = fetch, {'SOL': {}, 'BTC': {}}
@@ -77,19 +85,20 @@ def render_alert(p):
         'התנאי: BTC ירד ב־1% לפחות ובפחות מ־2% ב־12 השעות הסגורות הקודמות. '
         'בדיקה כל חצי שעה; מחיר המקור הוא פתיחת הדקה הבאה. ממתינים לעליית SOL של 0.5% ממנו.\n'
         'מותרת ממתינה או פתוחה אחת בנוסחה זו, ללא מגבלת המתנה או החזקה. '
-        'מקור: Binance Spot, נרות עסקאות של דקה.\n'
+        'מקור SOL ו־BTC: Hyperliquid Perpetual, נרות עסקאות של דקה.\n'
         'התראה ומעקב בלבד; נגיעה היסטורית אינה אישור ביצוע או מחיר זמין כעת. אין הוראות מסחר או גודל פוזיציה.'
     )
 
 
 class SolG65Worker:
-    def __init__(self, *, cache=None, clock=now_ms):
+    def __init__(self, *, cache=None, legacy_cache=None, clock=now_ms):
         self.cache, self.clock = cache or PriceCache(), clock
+        self.legacy_cache = legacy_cache or PriceCache(legacy_fetch_rows)
         self.task = self.bot = self.subscription = None
         self.scopes = set()
         self.last_poll = None
         self.retry_ms = 0
-        self.runtime = {'rule_id': signal.RULE_ID, 'formula_id': signal.FORMULA_ID,
+        self.runtime = {'rule_id': signal.RULE_ID, 'formula_id': FORMULA_ID,
                         'config_sha256': CONFIG_SHA256, 'ready': False, 'state': 'NOT_STARTED',
                         'last_error_type': None, 'active_position': None, 'delivered': 0}
 
@@ -97,7 +106,10 @@ class SolG65Worker:
         return {**deepcopy(self.runtime), 'running': bool(self.task and not self.task.done()),
                 'delivery_allowed_by_profile': policy.sol_g65_experimental_enabled(),
                 'overlap_cap': 1, 'cap_includes_pending': True, 'pending_ttl_hours': None,
-                'holding_time_limit': None, 'price_source': 'BINANCE_SPOT_TRADE_1M',
+                'holding_time_limit': None, 'price_source': store.PRICE_SOURCE, 'btc_price_source': hyperliquid.price_source('BTC'),
+                'source_contract_version': store.SOURCE_CONTRACT_VERSION,
+                'research_parent_formula_id': signal.FORMULA_ID,
+                'evidence_status': 'PROSPECTIVE_SOURCE_VARIANT_NOT_HISTORICALLY_VALIDATED',
                 'notification_only': True, 'live_order_execution': False,
                 'position_notional_cap': None, 'profit_lock_trigger_take_fraction': .75,
                 'profit_lock_take_fraction': .25}
@@ -146,17 +158,26 @@ class SolG65Worker:
             raise ValueError('Closed cache cannot include unfinished minute')
         return await asyncio.to_thread(self.cache.fill, symbol, start, end)
 
+    def position_cache(self, active):
+        source = active.get('price_source')
+        if source == store.LEGACY_POSITION_PRICE_SOURCE:
+            return self.legacy_cache
+        if source == store.PRICE_SOURCE:
+            return self.cache
+        raise ValueError('Position source provenance is missing or unsupported')
+
     async def monitor(self, scope, state):
         active = state.get('active')
         if active and active.get('monitor_status') != 'AMBIGUOUS':
             start = ms(active['bar_cursor'])+MINUTE
             end = min(self.clock()//MINUTE*MINUTE, start+1000*MINUTE)
             if start < end:
-                rows = await self.prices('SOL',start,end)
+                cache = self.position_cache(active)
+                rows = await asyncio.to_thread(cache.fill, 'SOL', start, end)
                 bars = [dict(open_at=dt(r[0]),open=r[1],high=r[2],low=r[3],close=r[4]) for r in rows]
                 await self.db(store.advance_position,scope,bars,dt(self.clock()),position_id=active['position_id'])
                 state = await asyncio.to_thread(store.snapshot,scope)
-                self.cache.prune({'SOL': end-2*MINUTE})
+                cache.prune({'SOL': end-2*MINUTE})
         self.runtime.update(active_position=state.get('active'), counts=state.get('counts',{}),
                             activated_at=state['activated_at'],last_decision=state.get('last_decision'))
         return state
@@ -207,7 +228,8 @@ class SolG65Worker:
         if scope not in self.scopes:
             if not allowed:
                 return
-            state = await self.db(store.initialize_scope,scope,dt(self.clock()))
+            state = await self.db(store.initialize_scope,scope,dt(self.clock()),migrate_all_prices=True)
+            self.runtime["source_migration"] = state.get("all_prices_source_migration")
             self.scopes.add(scope)
         else:
             if self.last_poll == (scope,self.clock()//MINUTE):
@@ -238,6 +260,8 @@ class SolG65Worker:
             start = signal.required_history_start_ms(d)['BTC']
             rows = await self.prices('BTC',start,d)
             evaluation = signal.evaluate_signal(rows,d)
+            evaluation.update(formula_id=FORMULA_ID, price_source=store.PRICE_SOURCE, btc_price_source=hyperliquid.price_source("BTC"),
+                              source_contract_version=store.SOURCE_CONTRACT_VERSION)
             if not evaluation['valid'] or not evaluation['signal']:
                 result = await self.db(store.record_no_signal,scope,dt(d),dt(self.clock()),reason=evaluation['reason'])
             else:

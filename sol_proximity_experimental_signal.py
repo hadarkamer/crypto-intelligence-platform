@@ -286,11 +286,12 @@ def ingest(state, decoded, now, guard_bars):
         if previous_legs and (not spec.liquidity_growth or not all(growth_allows(row, p, decoded['rows']) for p in previous_legs)):
             count(state, 'EPISODE_ALREADY_FILLED')
             continue
-        nearby = [p for p in state['active'] if near(p['target_price'], row['target_price'])]
+        legacy_active = state.get('legacy_source_state', {}).get('active', [])
+        nearby = [p for p in state['active']+legacy_active if near(p['target_price'], row['target_price'])]
         if any(not (spec.liquidity_growth and growth_allows(row, p, decoded['rows'])) for p in nearby):
             count(state, 'NEAR_TARGET_BLOCKED')
             continue
-        if len(state['active']) >= MAX_ACTIVE:
+        if len(state['active'])+len(legacy_active) >= MAX_ACTIVE:
             count(state, 'CAPACITY_FAIL_CLOSED')
             continue
         arm = (now//MINUTE+1)*MINUTE
@@ -308,7 +309,7 @@ def ingest(state, decoded, now, guard_bars):
         count(state, 'PENDING_CREATED')
     # Forget only absent episodes with no active position. Complete absence is
     # sufficient to renew them; retained active positions still block prices.
-    livekeys = {p['episode_key'] for p in state['active']}
+    livekeys = {p['episode_key'] for p in state['active']+state.get('legacy_source_state', {}).get('active', [])}
     state['episodes'] = {k: ep for k, ep in state['episodes'].items() if ep['present'] or k in livekeys}
     if len(state['episodes']) > MAX_EPISODES:
         raise ValueError('Episode capacity exceeded')

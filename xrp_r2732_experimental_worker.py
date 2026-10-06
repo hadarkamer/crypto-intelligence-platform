@@ -14,12 +14,19 @@ import u21_experimental_signal as calendar
 import xrp_r2732_experimental_store as store
 from watch_transition_delivery import subscription_scope
 from zoneinfo import ZoneInfo
-from u21_experimental_worker import PriceCache
+from u21_experimental_worker import PriceCache as LegacyPriceCache
+import experimental_hyperliquid_source as hyperliquid
 
 MINUTE = 60000
+FORMULA_ID = signal.FORMULA_ID + "__HYPERLIQUID_V2"
 CONFIG_SHA256 = hashlib.sha256(
-    Path(signal.__file__).read_bytes() + Path(calendar.__file__).read_bytes() + store.CONFIG_VERSION.encode()
+    Path(signal.__file__).read_bytes() + Path(calendar.__file__).read_bytes() + store.CONFIG_VERSION.encode() + store.SOURCE_CONTRACT_VERSION.encode()
 ).hexdigest()
+
+
+class PriceCache(LegacyPriceCache):
+    def __init__(self, fetch=hyperliquid.fetch_rows):
+        super().__init__(fetch)
 
 
 def now_ms():
@@ -50,20 +57,22 @@ def render_alert(price, entry):
         "סשן NYSE הרגיל האחרון שהושלם.\n"
         "בדיקה כל 15 דקות; מחיר הייחוס הוא פתיחת הדקה שאחרי ההחלטה. "
         "לא תישלח כניסה נוספת בנוסחה זו עד לסיום המעקב, ללא הגבלת זמן החזקה.\n"
+        "מקור מחירי XRP ושיא הסשן: Hyperliquid Perpetual, נרות עסקאות של דקה.\n"
         "התראה ומעקב בלבד; מחיר הייחוס אינו אישור ביצוע עסקה."
     )
 
 
 class R2732Worker:
-    def __init__(self, *, cache=None, clock=now_ms):
+    def __init__(self, *, cache=None, legacy_cache=None, clock=now_ms):
         self.cache = cache or PriceCache()
+        self.legacy_cache = legacy_cache or LegacyPriceCache()
         self.clock = clock
         self.task = None
         self.bot = None
         self.subscription = None
         self.scopes = set()
         self.last_poll_minute = None
-        self.runtime = {"rule_id": "R2732_XRP_SHORT_NY_WEEKDAYS_LOCK", "formula_id": signal.FORMULA_ID,
+        self.runtime = {"rule_id": "R2732_XRP_SHORT_NY_WEEKDAYS_LOCK", "formula_id": FORMULA_ID,
                         "config_sha256": CONFIG_SHA256, "ready": False, "state": "NOT_STARTED",
                         "last_error_type": None, "active_position": None, "delivered": 0}
 
@@ -71,7 +80,10 @@ class R2732Worker:
         return {**deepcopy(self.runtime), "running": bool(self.task and not self.task.done()),
                 "delivery_allowed_by_profile": policy.xrp_r2732_experimental_enabled(),
                 "calendar_supported_through": "2026-12-31", "overlap_cap": 1,
-                "stop_pct": .5, "take_pct": 8, "price_source": "BINANCE_SPOT_1M",
+                "stop_pct": .5, "take_pct": 8, "price_source": store.PRICE_SOURCE,
+                "source_contract_version": store.SOURCE_CONTRACT_VERSION,
+                "research_parent_formula_id": signal.FORMULA_ID,
+                "evidence_status": "PROSPECTIVE_SOURCE_VARIANT_NOT_HISTORICALLY_VALIDATED",
                 "ny_weekdays_only": True, "lock_trigger_pct": 1.0, "lock_profit_pct": .25,
                 "notification_only": True, "live_order_execution": False}
 
@@ -107,6 +119,14 @@ class R2732Worker:
                 print(f"[r2732] evidence unavailable type={type(exc).__name__}", flush=True)
             await asyncio.sleep(10)
 
+    def position_cache(self, active):
+        source = active.get('price_source')
+        if source == store.LEGACY_POSITION_PRICE_SOURCE:
+            return self.legacy_cache
+        if source == store.PRICE_SOURCE:
+            return self.cache
+        raise ValueError('Position source provenance is missing or unsupported')
+
     async def monitor(self, scope, state, closed_end):
         active = state.get("active")
         # Bounded recovery after an outage; no new entry while recovery is incomplete.
@@ -114,7 +134,8 @@ class R2732Worker:
             start = ms(active["bar_cursor"]) + MINUTE
             end = min(closed_end, start + 2000 * MINUTE)
             if start < end:
-                rows = await asyncio.to_thread(self.cache.fill, "XRP", start, end)
+                cache = self.position_cache(active)
+                rows = await asyncio.to_thread(cache.fill, "XRP", start, end)
                 bars = [{"open_at": dt(r[0]), "open": r[1], "high": r[2],
                          "low": r[3], "close": r[4]} for r in rows]
                 await self.db(store.advance_position, scope, bars, dt(self.clock()),
@@ -175,6 +196,12 @@ class R2732Worker:
             self.runtime["last_delivery_at"] = dt(self.clock()).isoformat()
         print(f"[r2732] delivery status={terminal}", flush=True)
 
+    async def signal_rows(self, decision):
+        start, end = signal.previous_ny_regular_session(decision)
+        session = await asyncio.to_thread(self.cache.fill, "XRP", start, end)
+        last = await asyncio.to_thread(self.cache.fill, "XRP", decision-MINUTE, decision)
+        return sorted({row[0]: row for row in session+last}.values(), key=lambda row: row[0])
+
     async def tick(self):
         enabled, chat_id = self.subscription()
         if chat_id is None:
@@ -185,7 +212,8 @@ class R2732Worker:
         if scope not in self.scopes:
             if not allowed:
                 return
-            state = await self.db(store.initialize_scope, scope, dt(self.clock()))
+            state = await self.db(store.initialize_scope, scope, dt(self.clock()), migrate_all_prices=True)
+            self.runtime["source_migration"] = state.get("all_prices_source_migration")
             self.scopes.add(scope)
         else:
             # Cheap polling is minute-aligned. Delivery retries never resend IN_FLIGHT.
@@ -210,7 +238,7 @@ class R2732Worker:
         starts = signal.required_history_start_ms(decision)
         if not self.cache.rows["XRP"]:
             self.runtime.update(state="WARMING_HISTORY")
-            await asyncio.to_thread(self.cache.fill, "XRP", starts["XRP"], decision)
+            await self.signal_rows(decision)
         if decision <= ms(state["activated_at"]) or (
                 state.get("decision_cursor") and decision <= ms(state["decision_cursor"])):
             self.runtime.update(state="WAITING_NEXT_SLOT")
@@ -228,8 +256,9 @@ class R2732Worker:
         if reason:
             result = await self.db(store.record_no_signal, scope, dt(decision), dt(self.clock()), reason=reason)
         else:
-            rows = await asyncio.to_thread(self.cache.fill, "XRP", starts["XRP"], decision)
+            rows = await self.signal_rows(decision)
             evaluation = signal.evaluate_signal(rows, decision)
+            evaluation.update(formula_id=FORMULA_ID, price_source=store.PRICE_SOURCE, source_contract_version=store.SOURCE_CONTRACT_VERSION)
             if not evaluation.get("valid") or not evaluation.get("signal"):
                 result = await self.db(store.record_no_signal, scope, dt(decision), dt(self.clock()),
                                       reason=evaluation.get("reason", "NO_MATCH"))

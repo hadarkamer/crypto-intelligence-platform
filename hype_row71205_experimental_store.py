@@ -21,6 +21,11 @@ from watch_transition_store import _connect
 STORE_VERSION = 'hype-row71205-experimental-cap1-v1'
 CONFIG_VERSION = 'hype-row71205-short-sl005-tp02-corrected-closed1m-v1'
 LEGACY_BINANCE_CONFIG_SHA256 = '1ff204dc34cb97feddd91bbbf02818af29959237c15ea7ec689533c8f98d7e4d'
+SOURCE_CONTRACT_VERSION = 'all-hyperliquid-perpetual-trade1m-v2'
+LEGACY_MIXED_SOURCE_CONFIG_SHA256 = 'be8db42ae52f3567a599a68b14882209dce3dc019e300f58dba93118b217597b'
+PRICE_SOURCE = 'HYPERLIQUID_HYPE_PERPETUAL_TRADE_1M'
+LEGACY_POSITION_PRICE_SOURCE = 'HYPERLIQUID_PERPETUAL_TRADE_1M'
+
 SIGNAL_TTL = timedelta(seconds=90)
 ORPHAN_TIMEOUT = timedelta(minutes=2)
 MINUTE = timedelta(minutes=1)
@@ -67,7 +72,8 @@ def _encode(state):
 
 def _initial(now, config_sha256=None):
     return {'version': STORE_VERSION, 'config_version': CONFIG_VERSION,
-            'config_sha256': config_sha256, 'activated_at': iso(now),
+            'config_sha256': config_sha256, 'source_contract_version': SOURCE_CONTRACT_VERSION,
+            'price_source': PRICE_SOURCE, 'activated_at': iso(now),
             'decision_cursor': None, 'last_exit_at': None, 'active': None,
             'history': [], 'intents': [], 'counts': {}}
 
@@ -120,6 +126,44 @@ def _migrate_source_contract(state, moment, config_sha256, migrate_from_config_s
         'from_source': 'BINANCE_USDM_FUTURES_TRADE_1M',
         'to_source': 'HYPERLIQUID_PERPETUAL_TRADE_1M',
     }
+
+
+def _migrate_all_prices(state, moment, config_sha256):
+    """One reviewed source migration; retain old open exposure and its venue.
+
+    New notifications are fenced at migration time. Frozen old-source opens
+    continue on their original source until closed; unfilled limits are
+    cancelled explicitly, and uncertain sends are never retried.
+    """
+    _validate(state, LEGACY_MIXED_SOURCE_CONFIG_SHA256)
+    if (not isinstance(config_sha256, str) or len(config_sha256) != 64 or
+            any(c not in '0123456789abcdef' for c in config_sha256) or
+            config_sha256 == LEGACY_MIXED_SOURCE_CONFIG_SHA256):
+        raise ValueError('Reviewed source migration needs a new SHA-256 destination')
+    if state.get('all_prices_source_migration'):
+        raise ValueError('All-price source migration already recorded')
+    _maintain(state, moment)
+    if any(i['status'] == 'IN_FLIGHT' for i in state['intents']):
+        raise ValueError('Source migration waits for in-flight delivery settlement')
+    active = state.get('active')
+    if active:
+        active.setdefault('price_source', LEGACY_POSITION_PRICE_SOURCE)
+        active.setdefault('config_sha256', LEGACY_MIXED_SOURCE_CONFIG_SHA256)
+        active.setdefault('source_contract_version', 'legacy-source-contract')
+    for intent in state['intents']:
+        if intent['status'] == 'PENDING':
+            intent.update(status='CANCELLED', acknowledged_at=iso(moment), error_type='SOURCE_CHANGED')
+            _count(state, 'source_change_cancelled_notifications')
+    original_activation = state['activated_at']
+    state.update(config_sha256=config_sha256, source_contract_version=SOURCE_CONTRACT_VERSION,
+                 price_source=PRICE_SOURCE, activated_at=iso(max(utc(original_activation), moment)))
+    state['all_prices_source_migration'] = {
+        'version': SOURCE_CONTRACT_VERSION, 'migrated_at': iso(moment),
+        'original_activated_at': original_activation,
+        'from_config_sha256': LEGACY_MIXED_SOURCE_CONFIG_SHA256,
+        'to_config_sha256': config_sha256, 'from_position_source': LEGACY_POSITION_PRICE_SOURCE,
+        'to_position_source': PRICE_SOURCE, 'legacy_open_preserved': bool(state.get('active'))}
+    _maintain(state, moment)
 
 
 def _lock(conn, key):
@@ -176,7 +220,7 @@ def _maintain(state, now):
 
 
 def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None,
-                     migrate_from_config_sha256=None):
+                     migrate_from_config_sha256=None, migrate_all_prices=False):
     """Persist activation once, or atomically perform the reviewed source move.
 
     Normal restarts preserve activation and all monotonic fences. A requested
@@ -193,7 +237,9 @@ def initialize_scope(scope, now=None, *, config_sha256=None, database_url=None,
                      (key, _encode(_initial(moment, config_sha256))))
         row = conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()
         state = json.loads(row['value'])
-        if migrate_from_config_sha256 is not None and state.get('config_sha256') != config_sha256:
+        if migrate_all_prices and state.get('config_sha256') != config_sha256:
+            _migrate_all_prices(state, moment, config_sha256)
+        elif migrate_from_config_sha256 is not None and state.get('config_sha256') != config_sha256:
             _migrate_source_contract(state, moment, config_sha256, migrate_from_config_sha256)
         else:
             _validate(state, config_sha256)
@@ -286,6 +332,8 @@ def reserve_signal(scope, decision_at, entry_at, entryprice, features, now, *, t
             _save(conn, key, state)
             return {'status': status, 'position': deepcopy(state['active']), 'intent': None}
         position = {'position_id': uuid4().hex, 'rule_id': 'HYPE_ROW71205_SHORT', 'symbol': 'HYPE', 'direction': 'SHORT',
+                'price_source': PRICE_SOURCE, 'source_contract_version': SOURCE_CONTRACT_VERSION,
+                'config_sha256': config_sha256,
                     'decision_at': iso(decision), 'entry_at': iso(entry), 'entry_price': float(price),
                     'stop_price': float(stop), 'take_price': float(take),
                     'entry_price_decimal': str(price), 'stop_price_decimal': str(stop),
