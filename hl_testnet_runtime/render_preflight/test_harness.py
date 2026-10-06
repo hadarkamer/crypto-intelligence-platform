@@ -314,6 +314,44 @@ assert not attempts
         result = self.child(script)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_crypto_import_and_sdk_wire_hash_pass_under_real_guard(self):
+        script = """from hl_testnet_runtime.render_preflight.child import install_network_guard
+import unittest,io
+attempts=install_network_guard()
+suite=unittest.TestLoader().loadTestsFromNames([
+    'hl_testnet_runtime.test_app_card_delivery',
+    'hl_testnet_runtime.test_exit_amendment.ExitAmendmentPureTests.test_jsonb_key_sorting_produces_sdk_wire_order_and_hash'])
+result=unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+assert result.wasSuccessful(), [(test.id(),type(text).__name__) for test,text in result.errors+result.failures]
+assert not result.skipped
+assert result.testsRun >= 2
+assert not attempts
+print(result.testsRun)
+"""
+        result = self.child(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(int(result.stdout.strip()), 2)
+
+    def test_ldconfig_only_print_cache_and_no_executable_override(self):
+        script = """from hl_testnet_runtime.render_preflight.child import install_network_guard
+import subprocess
+install_network_guard()
+result=subprocess.run(['/sbin/ldconfig','-p'],capture_output=True,timeout=2)
+assert result.returncode==0
+for argv,extra in ((['/sbin/ldconfig'],{}),
+                   (['/sbin/ldconfig','-p','-C','/tmp/other'],{}),
+                   (['/sbin/ldconfig','-X'],{}),
+                   (['gcc','-x','c','-'],{}),
+                   (['/sbin/ldconfig','-p'],{'executable':'/bin/sh'}),
+                   (['uname','-p'],{'executable':'/bin/sh'}),
+                   (['/sbin/ldconfig','-p'],{'shell':True})):
+    try: subprocess.run(argv,**extra)
+    except RuntimeError as exc: assert str(exc)=='PREFLIGHT_SUBPROCESS_REFUSED'
+    else: raise AssertionError('UNSAFE_SUBPROCESS_ALLOWED')
+"""
+        result = self.child(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 class ServerTests(unittest.TestCase):
     def test_health_is_alive_on_failure_without_controls_or_file_serving(self):

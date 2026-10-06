@@ -69,11 +69,20 @@ def install():
     original_popen = subprocess.Popen
     class GuardedPopen(original_popen):
         def __init__(self, args, *positional, **kwargs):
+            if kwargs.get("executable") is not None or (len(positional) >= 2 and positional[1] is not None):
+                raise RuntimeError("PREFLIGHT_SUBPROCESS_REFUSED")
             if (not kwargs.get("shell") and isinstance(args, (list, tuple))
                     and list(args) == ["uname", "-p"]):
                 # Python platform.platform() uses exactly this local metadata probe.
                 kwargs["env"] = {"PATH": os.defpath, "LANG": "C.UTF-8"}
                 super().__init__(["/usr/bin/uname", "-p"], *positional, **kwargs)
+                return
+            if (not kwargs.get("shell") and isinstance(args, (list, tuple))
+                    and list(args) == ["/sbin/ldconfig", "-p"]):
+                # ctypes.find_library reads the existing cache for GMP/SDK imports.
+                # No cache updates, alternate caches, compilation or other flags.
+                kwargs["env"] = {"PATH": os.defpath, "LANG": "C"}
+                super().__init__(["/sbin/ldconfig", "-p"], *positional, **kwargs)
                 return
             if (kwargs.get("shell") or not isinstance(args, (list, tuple)) or len(args) < 3
                     or str(args[0]) != sys.executable or args[1] != "-c" or not isinstance(args[2], str)):
