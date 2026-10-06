@@ -136,8 +136,9 @@ and single-window descriptive ranking. Frozen candidate selection across all dec
 [NO_HORIZON_SELECTION_V1.md](NO_HORIZON_SELECTION_V1.md), with explicit policy
 parameters, verified per-window evidence and matched-parent overlap disclosure.
 Version-aware prospective validation is implemented in
-[NO_HORIZON_VALIDATION_V1.md](NO_HORIZON_VALIDATION_V1.md). Result publication remains
-separate work.
+[NO_HORIZON_VALIDATION_V1.md](NO_HORIZON_VALIDATION_V1.md). Verified research result
+publication is implemented in
+[NO_HORIZON_PUBLICATION_V1.md](NO_HORIZON_PUBLICATION_V1.md).
 Adjacent windows can share BTC parents; their counts and probabilities are never
 pooled.
 

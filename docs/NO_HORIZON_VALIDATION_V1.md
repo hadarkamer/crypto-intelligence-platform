@@ -143,6 +143,7 @@ truth. Synthetic tests validate implementation behavior, not real market results
 
 A fresh holdout gate pass is neither profitability proof nor a correction for
 multiple testing. BTC-parent grouping does not prove statistical independence.
-Runtime, Telegram and trading authority stays false. Result publication remains
-a separate development stage. The original October experiment stays pinned to
+Runtime, Telegram and trading authority stays false. Verified read-only result
+publication is implemented separately in
+[NO_HORIZON_PUBLICATION_V1.md](NO_HORIZON_PUBLICATION_V1.md). The original October experiment stays pinned to
 `e8d25e57`; this layer does not alter its declarations or scheduled evaluation.

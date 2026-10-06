@@ -23,9 +23,11 @@ import research_no_horizon_cohort_postgres_selftest as fixtures
 import research_no_horizon_cohort_store as local
 import research_no_horizon_contract as contracts
 import research_no_horizon_postgres_store as executor
+import research_no_horizon_publication as publication
 import research_no_horizon_selection as selection
 import research_no_horizon_validation as validation
 import research_no_horizon_validation_selftest as validation_fixtures
+import research_no_horizon_worker as worker
 import research_price_archive as prices
 import research_watch_scan_intake as intake
 from research_no_horizon_postgres_store_postgres_selftest import (
@@ -868,9 +870,10 @@ class AcquisitionPostgresTests(unittest.TestCase):
         self.assertEqual(raw['declared_scopes'], 3)
         result = validation.evaluate_plan(self.store, executor.PostgresCohortStore(self.conn),
                                           plan, **evidence)
+        acquired_report = self.store.report(plan['request_id'])
         reference = validation.evaluate_reports(plan, **evidence,
             registration_info=self.store.registration_info(plan['request_id']),
-            acquisition_report=self.store.report(plan['request_id']), executor_report=raw)
+            acquisition_report=acquired_report, executor_report=raw)
         for key in ('rows', 'qualified_scope_ids', 'denominator', 'original_verification'):
             self.assertEqual(result[key], reference[key], key)
         self.assertTrue(result['validation_complete'])
@@ -884,6 +887,52 @@ class AcquisitionPostgresTests(unittest.TestCase):
         self.assertEqual(self.count('research_no_horizon_plans'), 1)
         for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
             self.assertIs(result[key], False)
+
+        # Use the explicit TEST_DATABASE_URL fixture's disposable database and
+        # the native read-only connector; publication does not advance work.
+        tables = acquisition.TABLES + executor.TABLES
+        with worker._connect_source(self.dsn) as reader:
+            with reader.transaction():
+                self.assertEqual(reader.execute('SHOW default_transaction_read_only').fetchone()
+                                 ['default_transaction_read_only'], 'on')
+                before = {table: reader.execute('SELECT count(*) AS n FROM ' + table).fetchone()['n']
+                          for table in tables}
+            published = publication.publish_plan(acquisition.AcquisitionStore(reader),
+                executor.PostgresCohortStore(reader), plan, **evidence)
+            rendered = publication.render_markdown(published)
+            with reader.transaction():
+                self.assertEqual(reader.execute('SHOW default_transaction_read_only').fetchone()
+                                 ['default_transaction_read_only'], 'on')
+                after = {table: reader.execute('SELECT count(*) AS n FROM ' + table).fetchone()['n']
+                         for table in tables}
+        self.assertEqual(after, before)
+        self.assertEqual(published['validation_plan'], plan)
+        self.assertEqual(published['validation_result'], result)
+        self.assertEqual(published['state'], 'COMPLETE_NO_QUALIFICATION')
+        self.assertEqual(len(published['scope_summary']), 3)
+        self.assertEqual([row['scope_id'] for row in published['scope_summary']],
+                         [scope['scope_id'] for scope in plan['selected_scopes']])
+        self.assertTrue(all(row['global_qualified'] is False for row in published['scope_summary']))
+        self.assertEqual(published['source_hashes'], {
+            'validation_plan_sha256': plan['plan_sha256'],
+            'selection_plan_sha256': plan['selection_plan_sha256'],
+            'selection_report_sha256': plan['selection_report_sha256'],
+            'declaration_sha256': plan['declaration_sha256'],
+            'validation_result_sha256': result['report_sha256'],
+            'acquisition_report_sha256': acquired_report['report_sha256'],
+            'executor_report_sha256': raw['report_sha256'],
+            'executor_plan_id': acquired['executor_plan_id'],
+            'anchor_sha256': acquired['anchor_sha256']})
+        self.assertEqual(published['validation_result']['request_id'], plan['request_id'])
+        self.assertEqual(contracts.utc(published['validation_result']['timing_evidence']
+                                      ['registration_info']['created_at_utc']), created)
+        self.assertEqual(published['publication_sha256'], contracts.digest({
+            key: value for key, value in published.items() if key != 'publication_sha256'}))
+        self.assertIn('State: COMPLETE_NO_QUALIFICATION', rendered)
+        self.assertIn('Declared scopes: 3; processed scopes: 3; qualified scopes: 0.', rendered)
+        self.assertEqual(rendered.count('\n## Scope '), 3)
+        for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
+            self.assertIs(published[key], False)
 
 
 if __name__ == '__main__':

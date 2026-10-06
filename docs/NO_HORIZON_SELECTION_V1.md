@@ -151,5 +151,6 @@ pipeline; they are not market evidence. The original October experiment remains
 pinned to `e8d25e57`. Runtime, Telegram and trading authority stays false.
 Prospective validation of the exact selected scopes is implemented separately in
 [NO_HORIZON_VALIDATION_V1.md](NO_HORIZON_VALIDATION_V1.md), with trusted registration
-timing, linked executor evidence and fresh-parent exclusions. Result publication
-remains a separate development step.
+timing, linked executor evidence and fresh-parent exclusions. Verified read-only
+result publication is implemented in
+[NO_HORIZON_PUBLICATION_V1.md](NO_HORIZON_PUBLICATION_V1.md).
