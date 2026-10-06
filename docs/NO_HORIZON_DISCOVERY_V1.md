@@ -135,7 +135,9 @@ This completes bounded catalog-plan generation, existing-queue registration
 and single-window descriptive ranking. Frozen candidate selection across all declared windows is now implemented in
 [NO_HORIZON_SELECTION_V1.md](NO_HORIZON_SELECTION_V1.md), with explicit policy
 parameters, verified per-window evidence and matched-parent overlap disclosure.
-Version-aware prospective validation and result publication remain separate work.
+Version-aware prospective validation is implemented in
+[NO_HORIZON_VALIDATION_V1.md](NO_HORIZON_VALIDATION_V1.md). Result publication remains
+separate work.
 Adjacent windows can share BTC parents; their counts and probabilities are never
 pooled.
 

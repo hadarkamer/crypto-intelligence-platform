@@ -24,6 +24,8 @@ import research_no_horizon_cohort_store as local
 import research_no_horizon_contract as contracts
 import research_no_horizon_postgres_store as executor
 import research_no_horizon_selection as selection
+import research_no_horizon_validation as validation
+import research_no_horizon_validation_selftest as validation_fixtures
 import research_price_archive as prices
 import research_watch_scan_intake as intake
 from research_no_horizon_postgres_store_postgres_selftest import (
@@ -740,6 +742,150 @@ class AcquisitionPostgresTests(unittest.TestCase):
         self.assertEqual(acquisition.implementation(), versions)
         for table in (PREFIX + 'anchors', PREFIX + 'leaves', 'research_no_horizon_plans'):
             self.assertEqual(self.count(table), 0, table)
+
+
+    def validation_inputs(self, *, future_from_database_clock=False, training=None):
+        training = training or validation_fixtures.training_fixture()
+        selection_plan, selection_reports, _ = training
+        template, _ = validation_fixtures.future_template(training=training)
+        if future_from_database_clock:
+            with self.connect() as conn:
+                now = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+            delta = now + timedelta(days=1) - contracts.utc(template['source_start_utc'])
+            template['declared_at_utc'] = now.isoformat()
+            for key in ('source_start_utc', 'source_end_utc', 'cutoff_utc'):
+                template[key] = (contracts.utc(template[key]) + delta).isoformat()
+            for part in template['parts']:
+                for key in ('source_start_utc', 'source_end_utc'):
+                    part[key] = (contracts.utc(part[key]) + delta).isoformat()
+        plan = validation.build_plan(template, selection_plan=selection_plan,
+                                     selection_reports=selection_reports)
+        return plan, dict(selection_plan=selection_plan, selection_reports=selection_reports)
+
+    def test_validation_registration_uses_real_clock_exact_selected_tuples_and_restarts(self):
+        plan, evidence = self.validation_inputs(future_from_database_clock=True)
+        original_versions = deepcopy(self.store.versions)
+        selected = selection.select_reports(evidence['selection_plan'], evidence['selection_reports'])
+        wanted = [{key: row[key] for key in ('candidate_key', 'base_direction', 'threshold_pct')}
+                  for row in selected['selected_scopes']]
+        wanted.sort(key=lambda row: (row['candidate_key'], row['base_direction'], row['threshold_pct']))
+        self.assertEqual(plan['declaration']['scopes'], wanted)
+        self.assertEqual(len(wanted), 3)
+        # Three selected tuples from a four-cell Cartesian product must stay
+        # exactly three; validation must not reintroduce an unselected tuple.
+        self.assertEqual(len({row['candidate_key'] for row in wanted}) *
+                         len({row['base_direction'] for row in wanted}) *
+                         len({row['threshold_pct'] for row in wanted}), 4)
+        with self.connect() as conn:
+            before = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        receipt = validation.register_plan(self.store, plan, **evidence)
+        with self.connect() as conn:
+            after = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        self.assertEqual(receipt['plan_sha256'], plan['plan_sha256'])
+        self.assertEqual(receipt['request_id'], plan['request_id'])
+        self.assertTrue(receipt['registration_complete'])
+        self.assertEqual(receipt['receipt_sha256'], contracts.digest({
+            key: value for key, value in receipt.items() if key != 'receipt_sha256'}))
+        actual = self.store.registration_info(plan['request_id'])
+        self.assertEqual(receipt['registration_info'], actual)
+        created = contracts.utc(actual['created_at_utc'])
+        self.assertLessEqual(before, created)
+        self.assertLessEqual(created, after)
+        self.assertGreaterEqual(created, contracts.utc(plan['training_max_cutoff_utc']))
+        self.assertLessEqual(created, contracts.utc(plan['declaration']['source_start_utc']))
+        self.assertTrue(actual['registered_before_source_start'])
+        stored = self.store.report(plan['request_id'])
+        self.assertEqual(stored['declaration'], plan['declaration'])
+        self.assertEqual(stored['identity'], plan['request_identity'])
+        self.assertEqual(stored['identity']['implementation'], original_versions)
+        self.assertEqual(stored['status'], 'WAITING')
+        self.reopen()
+        self.assertEqual(validation.register_plan(self.store, plan, **evidence), receipt)
+        self.assertEqual(self.store.versions, original_versions)
+        self.assertEqual(acquisition.implementation(), original_versions)
+        self.assertEqual(self.count(PREFIX + 'requests'), 1)
+        forbidden = Mock(side_effect=AssertionError('validation registration opened source'))
+        self.assertIsNone(self.store.run_once('validation-not-due', source_connection_factory=forbidden))
+        forbidden.assert_not_called()
+        for table in (PREFIX + 'anchors', PREFIX + 'leaves', 'research_no_horizon_plans'):
+            self.assertEqual(self.count(table), 0, table)
+        for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
+            self.assertIs(receipt[key], False)
+
+    def test_validation_late_registration_and_rehashed_plan_reject_without_writes(self):
+        historical, evidence = self.validation_inputs()
+        with self.assertRaisesRegex(ValueError, 'REGISTRATION_AFTER_SOURCE_START'):
+            validation.register_plan(self.store, historical, **evidence)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+        future, evidence = self.validation_inputs(future_from_database_clock=True)
+        changed = deepcopy(future)
+        changed['declaration']['scopes'].pop()
+        changed['plan_sha256'] = contracts.digest({
+            key: value for key, value in changed.items() if key != 'plan_sha256'})
+        with self.assertRaises(ValueError):
+            validation.register_plan(self.store, changed, **evidence)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+
+    def test_validation_registration_rejects_training_beyond_actual_database_clock(self):
+        with self.connect() as conn:
+            now = conn.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+        # Genuine synthetic captures/outcomes are rebuilt at a future date.
+        # The database clock and runtime clock checks remain untouched.
+        training = validation_fixtures.training_fixture(
+            base=now.replace(second=0, microsecond=0) + timedelta(days=1))
+        plan, evidence = self.validation_inputs(training=training)
+        self.assertGreater(contracts.utc(plan['training_max_cutoff_utc']), now)
+        self.assertGreater(contracts.utc(plan['declaration']['source_start_utc']), now)
+        with self.assertRaises(ValueError):
+            validation.register_plan(self.store, plan, **evidence)
+        self.assertEqual(self.count(PREFIX + 'requests'), 0)
+        self.assertEqual(self.count(PREFIX + 'anchors'), 0)
+        self.assertEqual(self.count('research_no_horizon_plans'), 0)
+
+    def test_validation_reads_actual_admitted_postgres_link_for_empty_future_cohort(self):
+        plan, evidence = self.validation_inputs()
+        declaration = plan['declaration']
+        identity = plan['request_identity']
+        created = max(contracts.utc(plan['training_max_cutoff_utc']),
+                      contracts.utc(declaration['declared_at_utc'])) + timedelta(seconds=1)
+        self.assertLess(created, contracts.utc(declaration['source_start_utc']))
+        due = max(contracts.utc(declaration['declared_at_utc']),
+                  contracts.utc(declaration['cutoff_utc']))
+        # Initial synthetic historical registration fixture, matching the
+        # established calendar recovery test above. No existing timestamp,
+        # guard, request identity or evidence is modified.
+        with self.conn.transaction():
+            self.conn.execute('''INSERT INTO research_no_horizon_acquisition_requests
+                (request_id,identity_json,declaration_json,implementation_sha256,
+                 not_before_utc,created_at_utc) VALUES(%s,%s,%s,%s,%s,%s)''',
+                (plan['request_id'], contracts.canonical(identity), contracts.canonical(declaration),
+                 self.store.implementation_sha256, due, created))
+        registered = validation.register_plan(self.store, plan, **evidence)
+        self.assertEqual(contracts.utc(registered['registration_info']['created_at_utc']), created)
+        acquired = self.finish_acquisition(plan['request_id'], reopen=True)
+        self.assertEqual(acquired['status'], 'ADMITTED')
+        raw = self.finish_executor(acquired['executor_plan_id'])
+        self.assertTrue(raw['all_scopes_processed'])
+        self.assertEqual(raw['coverage_receipt']['accepted_source_rows'], 0)
+        self.assertEqual(raw['declared_scopes'], 3)
+        result = validation.evaluate_plan(self.store, executor.PostgresCohortStore(self.conn),
+                                          plan, **evidence)
+        reference = validation.evaluate_reports(plan, **evidence,
+            registration_info=self.store.registration_info(plan['request_id']),
+            acquisition_report=self.store.report(plan['request_id']), executor_report=raw)
+        for key in ('rows', 'qualified_scope_ids', 'denominator', 'original_verification'):
+            self.assertEqual(result[key], reference[key], key)
+        self.assertTrue(result['validation_complete'])
+        self.assertEqual(result['qualified_scope_ids'], [])
+        self.assertEqual(len(result['rows']), 3)
+        for row in result['rows']:
+            self.assertFalse(row['prospective_gate_passed'])
+            self.assertEqual(row['fresh_gate']['resolved_parents'], 0)
+        self.assertEqual(self.count(PREFIX + 'requests'), 1)
+        self.assertEqual(self.count(PREFIX + 'anchors'), 1)
+        self.assertEqual(self.count('research_no_horizon_plans'), 1)
+        for key in ('runtime_authorized', 'telegram_authorized', 'trading_authorized'):
+            self.assertIs(result[key], False)
 
 
 if __name__ == '__main__':

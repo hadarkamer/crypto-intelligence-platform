@@ -97,7 +97,8 @@ described as all market parents observed during research. The acquisition anchor
 proofs contain pinned parent payloads for all source rows if that broader
 inventory is needed later.
 
-Prospective validation remains the next implementation stage. It must:
+The separate prospective validation implementation follows these requirements
+(see [NO_HORIZON_VALIDATION_V1.md](NO_HORIZON_VALIDATION_V1.md)):
 
 - Bind exact selected candidate versions, scope tuples, policy and source reports.
 - Begin after the latest discovery outcome cutoff, with trusted database
@@ -148,4 +149,7 @@ complete result returns exit 0 even when it selects no candidate.
 Synthetic SQLite/PostgreSQL tests exercise the same outcome and causal-parent
 pipeline; they are not market evidence. The original October experiment remains
 pinned to `e8d25e57`. Runtime, Telegram and trading authority stays false.
-Prospective validation and result publication remain separate development steps.
+Prospective validation of the exact selected scopes is implemented separately in
+[NO_HORIZON_VALIDATION_V1.md](NO_HORIZON_VALIDATION_V1.md), with trusted registration
+timing, linked executor evidence and fresh-parent exclusions. Result publication
+remains a separate development step.
