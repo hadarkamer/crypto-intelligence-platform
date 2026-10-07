@@ -2,7 +2,8 @@
 
 Reading these settings never reads a key, constructs a client, or starts work.
 No code in this module grants approval or modifies an environment variable.
-The entry window bounds NEW entries; its expiry must not disable protection.
+Bounded or continuous policy controls NEW entries only. Entry halt or bounded
+expiry must not disable protection, and source deadlines remain independent.
 """
 from copy import deepcopy
 import re
@@ -14,6 +15,8 @@ from .experimental_execution_dispatch import BoundaryError
 MODE = 'experimental_testnet_v1'
 DISPATCH = 'approved_testnet_v1'
 HANDOVER = 'retain_legacy_until_flat_v1'
+BOUNDED_ENTRY = 'bounded_v1'
+CONTINUOUS_ENTRY = 'continuous_v1'
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
 
 
@@ -51,8 +54,16 @@ def configuration(env):
         if len(set(routes.values())) != 2:
             raise ValueError()
         start = contract.moment_ms(env['HL_TESTNET_EXPERIMENTAL_PLAN_NOT_BEFORE'])
-        end = contract.moment_ms(env['HL_TESTNET_EXPERIMENTAL_ENTRY_UNTIL'])
-        if end <= start:
+        policy = env.get('HL_TESTNET_EXPERIMENTAL_ENTRY_POLICY', BOUNDED_ENTRY)
+        if policy == CONTINUOUS_ENTRY:
+            if env.get('HL_TESTNET_EXPERIMENTAL_ENTRY_UNTIL') not in (None, ''):
+                raise ValueError()
+            end = None
+        elif policy == BOUNDED_ENTRY:
+            end = contract.moment_ms(env['HL_TESTNET_EXPERIMENTAL_ENTRY_UNTIL'])
+            if end <= start:
+                raise ValueError()
+        else:
             raise ValueError()
         if env.get('HL_TESTNET_EXPERIMENTAL_HANDOVER') not in (None, '', HANDOVER):
             raise ValueError()
@@ -61,14 +72,36 @@ def configuration(env):
         return dict(domain='testnet', release_id=env['HL_TESTNET_EXPERIMENTAL_RELEASE_ID'],
                     dispatch_enabled=True, protection_enabled=True,
                     entries_enabled=env['HL_TESTNET_EXPERIMENTAL_ENTRY_ENABLED'] == 'true' and attested,
-                    not_before_ms=start, entry_expires_at_ms=end, routes=routes)
+                    not_before_ms=start, entry_policy=policy,
+                    entry_expires_at_ms=end, routes=routes)
     except (ValueError, TypeError, KeyError):
         raise BoundaryError('EXPERIMENTAL_TESTNET_RELEASE_CONFIGURATION_REQUIRED') from None
 
 
+def entry_window_valid(release):
+    """An absent expiry is valid only with an explicit continuous policy.
+
+    Previously persisted/tested bounded release values may omit entry_policy.
+    That compatibility never interprets a missing deadline as continuous.
+    """
+    if not isinstance(release, dict) or type(release.get('not_before_ms')) is not int:
+        return False
+    policy = release.get('entry_policy', BOUNDED_ENTRY)
+    if 'entry_expires_at_ms' not in release:
+        return False
+    end = release['entry_expires_at_ms']
+    if policy == CONTINUOUS_ENTRY:
+        return end is None
+    return (policy == BOUNDED_ENTRY and type(end) is int
+            and end > release['not_before_ms'])
+
+
 def entry_enabled(release, now_ms):
-    return bool(release and release['entries_enabled']
-                and release['not_before_ms'] <= now_ms < release['entry_expires_at_ms'])
+    return bool(entry_window_valid(release) and type(now_ms) is int
+                and release.get('entries_enabled') is True
+                and release['not_before_ms'] <= now_ms
+                and (release['entry_expires_at_ms'] is None
+                     or now_ms < release['entry_expires_at_ms']))
 
 
 class ReleaseLoader:
@@ -81,7 +114,7 @@ class ReleaseLoader:
 
     def __call__(self):
         value = configuration(self.env)
-        pinned = ('domain', 'release_id', 'not_before_ms', 'routes')
+        pinned = ('domain', 'release_id', 'not_before_ms', 'routes', 'entry_policy')
         if value is None or any(value[k] != self.initial[k] for k in pinned):
             raise BoundaryError('EXPERIMENTAL_RELEASE_IDENTITY_CHANGED')
         return deepcopy(value)

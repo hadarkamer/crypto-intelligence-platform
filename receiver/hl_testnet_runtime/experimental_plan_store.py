@@ -1,7 +1,8 @@
-"""Durable prospective experimental plans, separate from executable legacy cards.
+"""Durable v1 prospective plans and v2 approved alerts, separate from old cards.
 
 This inbox has no exchange, signer, scheduler or implicit schema initialization.
 Source cancellation retires *entry permission*, never an owned filled position.
+Approved alerts have an initial admission deadline and no heartbeat lease.
 The software domain used by local tests cannot be reopened as a Testnet journal.
 """
 from copy import deepcopy
@@ -55,22 +56,77 @@ def immutable(message):
 
 
 def source_digest(message):
-    from experimental_execution_contract import immutable as contract_immutable
+    from approved_alert_contract import immutable as contract_immutable
     value = contract_immutable(message)
     value.update({key: message[key] for key in ('kind', 'source_sequence', 'source_as_of',
                  'source_state', 'valid_until', 'cancel_reason')})
     return digest(value)
 
 
+def _reduce_approved(previous, message, *, now, not_before, domain):
+    """One approved occurrence, with no renewable lease or pending-order TTL.
+
+    Expiry prevents first admission only. Recording a stale first receipt as a
+    tombstone prevents a later replay, recipient or restart from reviving it.
+    An explicit cancellation retires entry permission and preserves strategy
+    ownership, including any already filled quantity.
+    """
+    from approved_alert_contract import immutable as contract_immutable, plan_digest
+    immutable_digest = plan_digest(message)
+    if previous is None:
+        state = dict(version=VERSION, domain=domain,
+            occurrence_id=message['occurrence_id'], revision=1,
+            plan=contract_immutable(message), plan_digest=immutable_digest,
+            initial_source=deepcopy(message), cancellation=None,
+            source=deepcopy(message), source_digest=source_digest(message),
+            source_sequence=message['source_sequence'], entry_permission='WAITING',
+            terminal_reason=None, strategy=None, created_at=now.isoformat(),
+            updated_at=now.isoformat())
+        if message['kind'] == 'CANCEL':
+            state.update(entry_permission='RETIRED', terminal_reason=message['cancel_reason'],
+                         cancellation=deepcopy(message))
+        elif moment(message['approved_at']) < not_before:
+            state.update(entry_permission='RETIRED',
+                         terminal_reason='APPROVED_ALERT_PRECEDES_RELEASE')
+        elif now >= moment(message['expires_at']):
+            state.update(entry_permission='RETIRED',
+                         terminal_reason='APPROVED_ALERT_EXPIRED_BEFORE_ACCEPTANCE')
+        return state, True
+
+    state = deepcopy(previous)
+    if (state['version'] != VERSION or state['domain'] != domain
+            or state['occurrence_id'] != message['occurrence_id']
+            or state['plan_digest'] != immutable_digest):
+        raise PlanStoreError('EXPERIMENTAL_IMMUTABLE_PLAN_CHANGED')
+    if now < moment(state['updated_at']):
+        raise PlanStoreError('EXPERIMENTAL_CLOCK_REGRESSION')
+    if message['kind'] != 'CANCEL' or state.get('cancellation') is not None:
+        # Different recipients may observe/deliver the same approved alert at
+        # different times. Neither a later receipt nor its expiry refreshes or
+        # revokes the original permission; immutable fields were checked above.
+        return state, False
+    state.update(entry_permission='RETIRED', terminal_reason=message['cancel_reason'],
+                 cancellation=deepcopy(message))
+    if message['source_sequence'] > state['source_sequence']:
+        state.update(source=deepcopy(message), source_digest=source_digest(message),
+                     source_sequence=message['source_sequence'])
+    state['revision'] += 1
+    state['updated_at'] = now.isoformat()
+    return state, True
+
+
 def reduce_source(previous, message, *, now, not_before, domain):
     """Atomic input transition; retries do not reset clocks or resume a latch."""
-    from experimental_execution_contract import validate, plan_digest
+    from approved_alert_contract import validate, plan_digest, is_approved
     message = validate(message)
     if domain not in ('software', 'testnet'):
         raise PlanStoreError('EXPERIMENTAL_DOMAIN_INVALID')
     now, not_before = moment(now), moment(not_before)
     if not_before > now or moment(message['source_as_of']) > now:
         raise PlanStoreError('EXPERIMENTAL_FUTURE_SOURCE')
+    if is_approved(message):
+        return _reduce_approved(previous, message, now=now,
+                                not_before=not_before, domain=domain)
     immutable_digest = plan_digest(message)
     sequence = message['source_sequence']
     if previous is None:
@@ -209,7 +265,7 @@ class PlanStore:
             (state['occurrence_id'], state['revision'], event, now, digest(state)))
 
     def ingest(self, message, *, now, not_before):
-        from experimental_execution_contract import validate
+        from approved_alert_contract import validate
         message = validate(message)
         with self.journal._transaction() as conn:
             self.ready(conn)

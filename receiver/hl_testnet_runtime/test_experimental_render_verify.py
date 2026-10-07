@@ -150,6 +150,40 @@ class RenderVerifierTests(unittest.TestCase):
             self.assertNotIn(forbidden,text)
         self.assertEqual(json.loads(text)['failure_code'],'RENDER_VERIFICATION_FAILED')
 
+    def test_main_normal_success_retains_zero_exit_and_unmodified_report(self):
+        output=io.StringIO()
+        with patch.dict(os.environ,{render.PIN_ENV:self.pin,render.BUILD_ONLY_ENV:''}),redirect_stdout(output):
+            code=render.main(['--bundle-root',str(self.root)])
+        report=json.loads(output.getvalue())
+        self.assertEqual(code,0)
+        self.assertEqual(report['status'],'PASSED')
+        self.assertNotIn('build_only',report)
+        self.assertNotIn('publication_blocked',report)
+
+    def test_main_build_only_success_reports_pass_but_blocks_publication(self):
+        output=io.StringIO()
+        with patch.dict(os.environ,{render.PIN_ENV:self.pin,render.BUILD_ONLY_ENV:'1'}),redirect_stdout(output):
+            code=render.main(['--bundle-root',str(self.root)])
+        report=json.loads(output.getvalue())
+        self.assertEqual(code,42)
+        self.assertEqual(report['status'],'PASSED')
+        self.assertTrue(report['build_only'])
+        self.assertTrue(report['publication_blocked'])
+        self.verify.assert_called_once()
+        self.parity.assert_called_once()
+
+    def test_main_build_only_verification_failure_keeps_failure_status_and_exit(self):
+        output=io.StringIO()
+        self.verify.side_effect=RuntimeError('synthetic verification failure')
+        with patch.dict(os.environ,{render.PIN_ENV:self.pin,render.BUILD_ONLY_ENV:'1'}),redirect_stdout(output):
+            code=render.main(['--bundle-root',str(self.root)])
+        report=json.loads(output.getvalue())
+        self.assertEqual(code,1)
+        self.assertEqual(report['status'],'FAILED')
+        self.assertTrue(report['build_only'])
+        self.assertTrue(report['publication_blocked'])
+        self.parity.assert_not_called()
+
     def test_failed_suite_retains_safe_bounded_diagnostics_only(self):
         report=self.good_report();report['status']='FAILED';report['stages'][0].update(failures=1,passed=2,exit_code=1)
         report['stages'][0]['failure_details']=[dict(test_id='hl_testnet_runtime.test_case.Tests.test_pg',exception_type='AssertionError',message='SECRET')]*12

@@ -1,4 +1,4 @@
-"""Default-off authenticated prospective inbox. This endpoint cannot trade.
+"""Default-off authenticated plan/approved-alert inbox. This endpoint cannot trade.
 
 Separate path, key and domain-bound HMAC prevent replay as legacy alert cards.
 Schema creation remains an explicit future migration, never a request side effect.
@@ -71,7 +71,7 @@ def decoded(raw):
 
 
 def accept(raw, store, *, now, not_before):
-    from experimental_execution_contract import validate
+    from approved_alert_contract import validate
     message = validate(decoded(raw))
     return store.ingest(message, now=now, not_before=not_before)
 
@@ -98,7 +98,7 @@ def application(environ, start_response):
                         environ.get('HTTP_X_PLAN_TIMESTAMP'), environ.get('HTTP_X_PLAN_SIGNATURE'), raw, at):
                     code, result = '403 Forbidden', dict(status='AUTHENTICATION_REQUIRED')
                 else:
-                    from experimental_execution_contract import validate
+                    from approved_alert_contract import validate
                     validate(decoded(raw))
                     # No metadata requests, wallet lookup, card registration or
                     # order code is imported or invoked by this request path.

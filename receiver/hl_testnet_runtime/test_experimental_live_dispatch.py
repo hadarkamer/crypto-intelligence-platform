@@ -9,7 +9,7 @@ from unittest.mock import patch
 from . import experimental_live_dispatch as live
 from . import experimental_execution_dispatch as boundary
 from . import card_lifecycle as life, filled_quantity_dispatch as wire, request_budget, checks
-from .test_experimental_execution_dispatch import fixture, Permit
+from .test_experimental_execution_dispatch import fixture, approved_fixture, Permit
 from .test_two_account_execution import D
 
 
@@ -198,6 +198,48 @@ class LiveDispatchTests(unittest.TestCase):
         self.send()
         self.assertEqual(self.acquisitions[0][2]['priority'], 'protection')
         self.assertTrue(self.http[0][4]['action']['orders'][0]['r'])
+
+    def test_continuous_entry_release_has_no_calendar_expiry(self):
+        self.release.update(entry_policy='continuous_v1',entry_expires_at_ms=None)
+        self.send()
+        self.assertEqual(len(self.http),1)
+
+    def test_unbounded_entry_requires_explicit_continuous_policy(self):
+        for policy in (None,'bounded_v1','typo'):
+            with self.subTest(policy=policy):
+                self.release['entry_expires_at_ms']=None
+                if policy is None:self.release.pop('entry_policy',None)
+                else:self.release['entry_policy']=policy
+                with self.assertRaisesRegex(live.LiveDispatchError,'CURRENT_TESTNET_RELEASE'):
+                    self.send()
+        self.assertEqual(self.acquisitions,[])
+        self.key_loader.assert_not_called()
+
+    def test_continuous_entry_halt_does_not_disable_protection(self):
+        self.release.update(entry_policy='continuous_v1',entry_expires_at_ms=None,entries_enabled=False)
+        with self.assertRaisesRegex(live.LiveDispatchError,'ENTRY_RELEASE_CLOSED'):
+            self.send()
+        self.exit();self.send()
+        self.assertEqual(len(self.http),1)
+        self.assertTrue(self.http[0][4]['action']['orders'][0]['r'])
+
+    def test_continuous_sender_submits_approved_exact_quote_with_current_mark_at_entry(self):
+        self.request,self.context,self.t=approved_fixture(side='SHORT')
+        self.request['domain']='testnet';self.persisted=deepcopy(self.request)
+        self.release.update(entry_policy='continuous_v1',entry_expires_at_ms=None,
+            not_before_ms=self.context['safety']['not_before_ms'])
+        self.send()
+        order=self.http[0][4]['action']['orders'][0]
+        self.assertEqual(order['p'],'93.544')
+        self.assertEqual(order['t'],{'limit':{'tif':'Gtc'}})
+
+    def test_continuous_sender_refuses_pretouch_maxpain_before_signing(self):
+        from experimental_execution_fixtures import maxpain_message
+        self.release.update(entry_policy='continuous_v1',entry_expires_at_ms=None)
+        self.context['source']=maxpain_message()
+        with self.assertRaisesRegex(live.DefinitelyNotSubmitted,'APPROVED_ALERT_REQUIRED'):
+            self.send()
+        self.key_loader.assert_not_called();self.assertEqual(self.http,[])
 
     def test_exit_quantity_cannot_exceed_reconciled_owner(self):
         self.exit(); self.request['proposal']['quantity'] = '1000.1'

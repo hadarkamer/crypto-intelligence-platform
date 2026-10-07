@@ -12,13 +12,14 @@ independent per-formula OCO guarantees. Unknown submissions never get retried.
 from copy import deepcopy
 from decimal import Decimal, ROUND_DOWN
 
-import experimental_execution_contract as contract
+import approved_alert_contract as contract
 from . import card_lifecycle as life, checks, price_precision, request_budget
 from . import filled_quantity_dispatch as wire, r2732_entry, r2732_conditional_stop
 from . import maxpain_execution, experimental_allocations, two_account_execution as roles
 from .experimental_plan_store import reduce_source
 from .experimental_execution_state import ExecutionState, PostgresExecutionState, StateError
 from .risk_policy import budget, assert_new_entry_budget
+from .experimental_execution_prices import prepare as prepare_prices
 
 VERSION = 'experimental-isolated-worker-v1'
 MODE = 'explicit_software_exchange_only_v1'
@@ -54,10 +55,22 @@ def _remaining(trade):
 
 def _source_active(source, now):
     msg = source['source']
+    if contract.is_approved(msg):
+        return (source['entry_permission'] == 'WAITING' and source['cancellation'] is None
+            and msg['kind'] == 'ALERT' and msg['source_state'] == 'APPROVED'
+            and contract.moment_ms(msg['approved_at']) <= now < contract.moment_ms(msg['expires_at']))
     return (source['entry_permission'] == 'WAITING' and source['cancellation'] is None
         and msg['kind'] != 'CANCEL' and msg['source_state'] == 'PENDING'
         and contract.moment_ms(msg['arm_at']) <= now < contract.moment_ms(msg['valid_until'])
         and (msg['expires_at'] is None or now < contract.moment_ms(msg['expires_at'])))
+
+
+def _working_entry_active(source, now):
+    """Initial delivery freshness is not a lease on an accepted GTC order."""
+    if contract.is_approved(source['source']):
+        return (source['cancellation'] is None and source['source']['kind'] == 'ALERT'
+            and source['entry_permission'] == 'WAITING')
+    return _source_active(source, now)
 
 
 def _range(value, msg, now, *, account=None):
@@ -343,10 +356,12 @@ class IsolatedExecutionRuntime:
                             return result
                         return self._order(state,trade,leg,life.text(remaining),price,context['metadata'],now,old_oid=own[0][0] if own else None)
             source = state['sources'][trade['cid']]
-            retire = not _source_active(source,now) or bool(trade['exit_fills'])
+            retire = not _working_entry_active(source,now) or bool(trade['exit_fills'])
             if any(trade['order_legs'][oid]=='ENTRY' for oid,o in active):
                 mark=_number(self._mark(trade,context,now)['mark_price'])
                 msg=trade['source']
+                if contract.is_approved(msg) and not min(_number(trade['prices']['stop']), _number(trade['prices']['take_profit'])) < mark < max(_number(trade['prices']['stop']), _number(trade['prices']['take_profit'])):
+                    trade['entry_retired_reason']='APPROVED_ALERT_EXIT_ALREADY_REACHED'
                 if msg['family']=='maxpain' and (mark>=_number(msg['original_target']) if msg['side']=='LONG' else mark<=_number(msg['original_target'])):
                     trade['entry_retired_reason']='TESTNET_TARGET_SAFETY_CANCEL_REMAINDER'
                 if msg['family']=='sol_g65' and mark<=_number(msg['policy']['pending_cancel_price']):
@@ -379,17 +394,25 @@ class IsolatedExecutionRuntime:
         if (lane not in state['snapshots'] or not 0<=now-state['snapshots'][lane]['at_ms']<=15000
                 or life.number(state['snapshots'][lane]['position_quantity'],signed=True)!=0):
             raise RuntimeError('EMPTY_OWNED_MARKET_EVIDENCE_REQUIRED')
-        paths = context['ranges'][cid]
-        slo,shi,smark = _range(paths['source'],msg,now)
-        dlo,dhi,mark = _range(paths['testnet'],msg,now,account=account)
+        approved = contract.is_approved(msg)
+        if approved:
+            mark = _number(self._mark(dict(account=account,symbol=msg['symbol']),context,now)['mark_price'])
+        else:
+            paths = context['ranges'][cid]
+            slo,shi,smark = _range(paths['source'],msg,now)
+            dlo,dhi,mark = _range(paths['testnet'],msg,now,account=account)
         metadata=context['metadata']; index,decimals=wire.asset(metadata,msg['symbol'])
-        raw = dict(kind='SIGNAL',event_id=cid,symbol=msg['symbol'],side=msg['side'],entry=msg['entry'],stop=msg['stop'],take_profit=msg['take_profit'],at=msg['source_at'])
-        prepared=price_precision.prepare_signal(raw,metadata); p=prepared['execution']
+        prepared=prepare_prices(msg,metadata); p=prepared['execution']
         prices={k:p[k] for k in ('entry','stop','take_profit')}
         entry,stop,take=(_number(prices[k]) for k in ('entry','stop','take_profit'))
         if not min(stop,take)<mark<max(stop,take):
             raise RuntimeError('TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS')
-        if msg['family']=='r2732':
+        if approved:
+            # The producer's approved alert owns formula admission. Do not run
+            # another touch/overlap search, or request a pre-touch MARK history.
+            step=Decimal(1).scaleb(-decimals)
+            quantity=life.text((budget()/abs(entry-stop)/step).to_integral_value(rounding=ROUND_DOWN)*step)
+        elif msg['family']=='r2732':
             rs=self._r2732_initial({k:dict(account=a) for k,a in state['routes'].items()},not_before_ms=state['not_before_ms'])
             relevant={k:s for k,s in state['sources'].items() if s['source']['family']=='r2732'}
             rs['records']={k:dict(source_record=deepcopy(s),request=None) for k,s in relevant.items()}
@@ -435,6 +458,10 @@ class IsolatedExecutionRuntime:
         trade=dict(cid=cid,source=deepcopy(msg),account=account,role=role,symbol=msg['symbol'],side=msg['side'],
             quantity=quantity,prices=prices,asset=dict(index=index,decimals=decimals),phase='OUTCOME_UNKNOWN',
             orders={},order_legs={},entry_fills={},exit_fills={},entry_request=None,condition=None,desired_stop=prices['stop'])
+        if approved:
+            trade['execution_audit'] = dict(approved_at=msg['approved_at'],
+                received_at=source['created_at'], entry_decision_at_ms=now,
+                prices=deepcopy(prepared['audit']))
         # Reuse the independent current-risk defense with the same frozen terms.
         bracket=[]
         for leg,price in (('ENTRY',prices['entry']),('STOP',prices['stop']),('TAKE_PROFIT',prices['take_profit'])):

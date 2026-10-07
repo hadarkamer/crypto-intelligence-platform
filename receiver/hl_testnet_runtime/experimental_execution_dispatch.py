@@ -11,9 +11,10 @@ from copy import deepcopy
 from decimal import Decimal
 import json
 
-import experimental_execution_contract as contract
+import approved_alert_contract as contract
 from . import card_lifecycle as life, filled_quantity_dispatch as wire
 from . import price_precision, risk_policy, two_account_execution as roles
+from . import experimental_execution_prices as execution_prices
 from .filled_dispatch_store import DefinitelyUnsent
 from .long_stream_runtime import _validate_account_inventory
 
@@ -44,12 +45,14 @@ def _source(source, current, now, *, entry):
             or current['plan_digest'] != contract.plan_digest(source)):
         raise BoundaryError('FROZEN_PROSPECTIVE_SOURCE_CHANGED')
     if entry:
+        approved = contract.is_approved(latest)
         if (current['entry_permission'] != 'WAITING' or current.get('cancellation') is not None
-                or latest['kind'] == 'CANCEL' or latest['source_state'] != 'PENDING'):
+                or latest['kind'] == 'CANCEL'
+                or latest['source_state'] != ('APPROVED' if approved else 'PENDING')):
             raise BoundaryError('SOURCE_ENTRY_PERMISSION_RETIRED')
         if (not contract.moment_ms(latest['arm_at']) <= now
                 or contract.moment_ms(latest['source_as_of']) > now
-                or now >= contract.moment_ms(latest['valid_until'])
+                or latest['valid_until'] is not None and now >= contract.moment_ms(latest['valid_until'])
                 or latest['expires_at'] is not None and now >= contract.moment_ms(latest['expires_at'])):
             raise BoundaryError('ORIGINAL_SOURCE_WINDOW_EXPIRED')
     return source
@@ -61,10 +64,7 @@ def _terms(request, source, metadata):
     if (p['card_id'] != source['occurrence_id'] or p['symbol'] != source['symbol']
             or p['role'] != role or p['source_at'] != source['source_at']):
         raise BoundaryError('SOURCE_REQUEST_IDENTITY_MISMATCH')
-    signal=dict(kind='SIGNAL',event_id=source['occurrence_id'],symbol=source['symbol'],
-        side=source['side'],entry=source['entry'],stop=source['stop'],
-        take_profit=source['take_profit'],at=source['source_at'])
-    prepared=price_precision.prepare_signal(signal,metadata)
+    prepared=execution_prices.prepare(source,metadata)
     index,decimals=wire.asset(metadata,source['symbol'])
     action=wire.canonical_wire_action(p['action'])
     if action != p['action']:
@@ -189,7 +189,7 @@ def review(request, context, *, now_ms):
                 or safety['feed_reconciled'] is not True or safety['entry_circuit_clear'] is not True):
             raise BoundaryError('NEW_ENTRY_SAFETY_GATE_CLOSED')
         _fresh(safety['supervisor_at_ms'],now_ms,15000,'EMERGENCY_SUPERVISOR_STALE')
-        if contract.moment_ms(source['created_at'])<safety['not_before_ms']:
+        if contract.moment_ms(source['approved_at'] if contract.is_approved(source) else source['created_at'])<safety['not_before_ms']:
             raise BoundaryError('SOURCE_PRECEDES_RELEASE_WINDOW')
         # Unknown orders, foreign/manual position, opposite exposure and ANY
         # unresolved request close only the entry lane, preserving exit work.
@@ -209,7 +209,8 @@ def review(request, context, *, now_ms):
         levels=prepared['execution']
         if not min(Decimal(levels['stop']),Decimal(levels['take_profit']))<mark<max(Decimal(levels['stop']),Decimal(levels['take_profit'])):
             raise BoundaryError('TESTNET_MARK_OUTSIDE_FROZEN_EXITS')
-        if source['family'] in ('maxpain','sol_g65') and (mark<=Decimal(levels['entry']) if source['side']=='LONG' else mark>=Decimal(levels['entry'])):
+        if (not contract.is_approved(source) and source['family'] in ('maxpain','sol_g65')
+                and (mark<=Decimal(levels['entry']) if source['side']=='LONG' else mark>=Decimal(levels['entry']))):
             raise BoundaryError('PROSPECTIVE_TESTNET_ENTRY_ALREADY_REACHED')
         # This binds the *independent* actual-account budget calculation to the
         # same exact rounded plan, not merely a boolean checked by a caller.

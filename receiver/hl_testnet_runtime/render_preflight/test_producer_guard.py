@@ -25,7 +25,7 @@ class ProducerGuardTests(unittest.TestCase):
 
     def test_all_three_fixture_database_names_and_admin_match_fresh_target(self):
         for name in ("test_experimental_ci", *["test_" + family + "_" + "a" * 32
-                                            for family in ("r2732", "row71205", "sol_g65")]):
+                                            for family in ("r2732", "row71205", "sol_g65", "approved_alert")]):
             dsn = make_conninfo(self.producer_url, dbname=name)
             self.assertTrue(self.allowed((dsn,), {"connect_timeout": 5,
                 "options": "-c statement_timeout=8000 -c lock_timeout=3000"}))

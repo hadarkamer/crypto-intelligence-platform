@@ -7901,6 +7901,10 @@ async def main():
     WATCH_SUPERVISOR_TASK = asyncio.create_task(
         _watch_supervisor_loop(bot_app), name="persistent-watch-supervisor"
     )
+    # Explicit approved-alert mode only; background forwarding never runs on
+    # the formula/Telegram task and recovers its durable outbox after restart.
+    import experimental_execution_forwarder
+    experimental_execution_forwarder.maybe_start()
     u21_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
@@ -7931,6 +7935,7 @@ async def main():
         await sol_g65_experimental_worker.WORKER.stop()
         for worker in sol_proximity_experimental_worker.ADDITIONAL_WORKERS.values():
             await worker.stop()
+        await asyncio.to_thread(experimental_execution_forwarder.stop_background)
         if WATCH_SUPERVISOR_TASK is not None and not WATCH_SUPERVISOR_TASK.done():
             WATCH_SUPERVISOR_TASK.cancel()
             try:

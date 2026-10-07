@@ -27,6 +27,8 @@ from .render_preflight import core
 SCHEMA = 'experimental_render_verification_v1'
 BUNDLE_SCHEMA = 'experimental_render_bundle_v1'
 PIN_ENV = 'EXPERIMENTAL_BUNDLE_MANIFEST_SHA256'
+BUILD_ONLY_ENV = 'EXPERIMENTAL_RENDER_BUILD_ONLY'
+BUILD_ONLY_EXIT = 42
 MANIFEST_NAME = 'bundle-manifest.json'
 MAX_MANIFEST_BYTES = 2*1024*1024
 MAX_PARITY_BYTES = 16384
@@ -268,11 +270,22 @@ def main(argv=None):
     parser.add_argument('--bundle-root',type=Path,required=True)
     args=parser.parse_args(argv)
     report=run_bundle(args.bundle_root,os.environ.get(PIN_ENV))
+    build_only=os.environ.get(BUILD_ONLY_ENV)=='1'
+    if build_only:
+        # A successful Render build publishes its output. This opt-in reports
+        # verification success but deliberately fails the build so even the
+        # generic public status page is never published.
+        report.update(build_only=True,publication_blocked=True)
     raw=json.dumps(report,sort_keys=True,separators=(',',':'))
     if len(raw.encode())>MAX_SUMMARY_BYTES:
-        raw=json.dumps(dict(schema=SCHEMA,status='FAILED',failure_code='SUMMARY_TOO_LARGE'))
+        fallback=dict(schema=SCHEMA,status='FAILED',failure_code='SUMMARY_TOO_LARGE')
+        if build_only:
+            fallback.update(build_only=True,publication_blocked=True)
+        raw=json.dumps(fallback)
         report['status']='FAILED'
     print(raw)
+    if build_only and report['status']=='PASSED':
+        return BUILD_ONLY_EXIT
     return 0 if report['status']=='PASSED' else 1
 
 

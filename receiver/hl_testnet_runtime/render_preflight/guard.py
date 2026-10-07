@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 _attempts = None
 PRODUCER_ADMIN_DB = "test_experimental_ci"
-PRODUCER_DATABASE = re.compile(r"test_(?:r2732|row71205|sol_g65)_[0-9a-f]{32}")
+PRODUCER_DATABASE = re.compile(r"test_(?:r2732|row71205|sol_g65|approved_alert)_[0-9a-f]{32}")
 _CONNECTION_KEYS = frozenset({"host", "port", "dbname", "user", "password", "sslmode",
                             "connect_timeout", "options", "autocommit", "row_factory"})
 

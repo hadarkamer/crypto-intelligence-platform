@@ -39,10 +39,12 @@ class Configuration:
 
 def configuration(env):
     """No opt-in means no credential lookup, database import or HTTP activity."""
-    if env.get('EXPERIMENTAL_EXECUTION_FORWARD_MODE') != transport.MODE:
+    mode = env.get('EXPERIMENTAL_EXECUTION_FORWARD_MODE')
+    if mode not in (transport.MODE, transport.APPROVED_MODE):
         return None
     try:
-        if env.get('EXPERIMENTAL_EXECUTION_BRIDGE_MODE') != bridge.MODE:
+        required_bridge = bridge.APPROVED_MODE if mode == transport.APPROVED_MODE else bridge.MODE
+        if env.get('EXPERIMENTAL_EXECUTION_BRIDGE_MODE') != required_bridge:
             raise ValueError()
         scopes = json.loads(env.get('EXPERIMENTAL_EXECUTION_FORWARD_SCOPES', ''))
         hosts = json.loads(env.get('EXPERIMENTAL_EXECUTION_FORWARD_ALLOWED_HOSTS', ''))
@@ -56,7 +58,7 @@ def configuration(env):
             endpoint=env.get('EXPERIMENTAL_EXECUTION_FORWARD_ENDPOINT', ''),
             allowed_hosts=tuple(hosts),
             secret=env.get('EXPERIMENTAL_EXECUTION_FORWARD_SECRET', ''),
-            fence=fence, mode=transport.MODE).validate()
+            fence=fence, mode=mode).validate()
         return Configuration(cfg, tuple(sorted(scopes)))
     except (ValueError, TypeError, AttributeError, OverflowError):
         # Never include URLs, credentials, environment values or parsed input
@@ -73,6 +75,7 @@ class Forwarder:
         self.sender = transport.Sender()
         self.lock = threading.Lock()
         self.cycles = 0
+        self.wake = threading.Event()
 
     def run_once(self):
         if not self.lock.acquire(blocking=False):
@@ -91,12 +94,83 @@ class Forwarder:
     def run(self, stop, *, emit):
         """Fixed cadence after completion: no catch-up burst or parallel tick."""
         while not stop.is_set():
+            self.wake.clear()
             report = self.run_once()
             emit(report)
             if report['status'] == 'DISABLED':
                 return
-            if stop.wait(DELAY_SECONDS):
+            if self.config and self.config.transport.mode == transport.APPROVED_MODE:
+                # Clear before reading, so a commit during a slow sender cycle
+                # remains set and prompts another bounded, non-overlapping read.
+                self.wake.wait(DELAY_SECONDS)
+            elif stop.wait(DELAY_SECONDS):
                 return
+
+    def source_committed(self, source_key):
+        if (self.config and self.config.transport.mode == transport.APPROVED_MODE
+                and source_key in bridge.approved_source_keys(self.config.scopes)):
+            self.wake.set()
+
+
+_BACKGROUND_LOCK = threading.Lock()
+_BACKGROUND = None
+
+
+def maybe_start(*, env=None):
+    """Opt-in source-process lifecycle; no separate sender poll before wake.
+
+    This is called by main startup. The transaction hook only sets an Event;
+    it never reads a DB, posts HTTP, or starts a thread while holding a DB lock.
+    Standalone use still has the documented 30-second recovery cadence.
+    """
+    global _BACKGROUND
+    values = os.environ if env is None else env
+    if values.get('EXPERIMENTAL_EXECUTION_FORWARD_MODE') != transport.APPROVED_MODE:
+        return None
+    try:
+        cfg = configuration(values)
+        with _BACKGROUND_LOCK:
+            if _BACKGROUND is not None and _BACKGROUND[2].is_alive():
+                return _BACKGROUND[0]
+            worker, stop = Forwarder(cfg), threading.Event()
+            def run():
+                try:
+                    worker.run(stop, emit=_emit)
+                except Exception:
+                    _emit(dict(status='FORWARD_BACKGROUND_UNAVAILABLE', source_records_changed=0,
+                               exchange_requests_sent=0))
+            thread = threading.Thread(target=run, name='approved-alert-forwarder', daemon=True)
+            _BACKGROUND = worker, stop, thread
+            thread.start()
+            return worker
+    except Exception:
+        _emit(dict(status='FORWARD_CONFIGURATION_UNAVAILABLE', source_records_changed=0,
+                   exchange_requests_sent=0))
+        return None
+
+
+def notify_source_commit(source_key):
+    # Caller is already outside the source transaction. A nonblocking local
+    # notification cannot delay Telegram or roll back the committed decision.
+    current = _BACKGROUND
+    if current is not None:
+        current[0].source_committed(source_key)
+
+
+def stop_background(timeout=15):
+    global _BACKGROUND
+    with _BACKGROUND_LOCK:
+        current = _BACKGROUND
+        if current is None:
+            return True
+        current[1].set()
+        current[0].wake.set()
+    current[2].join(timeout)
+    with _BACKGROUND_LOCK:
+        stopped = not current[2].is_alive()
+        if stopped and _BACKGROUND is current:
+            _BACKGROUND = None
+        return stopped
 
 
 def _emit(report):
@@ -125,7 +199,7 @@ def main(argv=None, *, env=None):
         previous = {}
         try:
             for kind in (signal.SIGTERM, signal.SIGINT):
-                previous[kind] = signal.signal(kind, lambda *_: stop.set())
+                previous[kind] = signal.signal(kind, lambda *_: (stop.set(), worker.wake.set()))
             worker.run(stop, emit=_emit)
         finally:
             for kind, handler in previous.items():

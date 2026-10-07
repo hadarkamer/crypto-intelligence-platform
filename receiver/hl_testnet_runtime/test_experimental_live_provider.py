@@ -139,6 +139,17 @@ class ProviderTests(unittest.TestCase):
         self.state['sources'][msg['occurrence_id']]=record
         return msg
 
+    def approved(self):
+        from approved_alert_fixtures import maxpain_alert
+        from .experimental_plan_store import reduce_source
+        msg=maxpain_alert(approved_ms=T)
+        record,_=reduce_source(None,msg,now=runtime.contract.iso_ms(self.exchange.t),
+            not_before=runtime.contract.iso_ms(self.state['not_before_ms']),domain='testnet')
+        self.state['sources'][msg['occurrence_id']]=record
+        account=self.state['routes']['long_account']
+        self.exchange.mark[runtime._lane(account,msg['symbol'])]=msg['entry']
+        return msg
+
     def active(self,*,partial=False,steps=1):
         # Generate a consistent executed fixture using the already-tested
         # software engine, then independently reconstruct all raw HTTP facts.
@@ -172,6 +183,53 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(value['inventory_accounts'],sorted(x['account'] for x in ROUTES.values()))
         self.assertEqual(len(value['snapshots']),1)
         self.assertEqual(sum(c[0]=='frontendOpenOrders' for c in self.raw.calls),4)
+
+    def test_approved_entry_collects_actual_account_without_source_history(self):
+        msg=self.approved();self.provider.safety=object()
+        with patch.object(self.provider.prices,'source_range',side_effect=AssertionError('NO_SOURCE_PATH')) as source, \
+                patch.object(self.provider.prices,'mark_window',side_effect=AssertionError('NO_MARK_HISTORY')) as history:
+            context=self.provider.collect(self.state,entries_enabled=True)
+        source.assert_not_called();history.assert_not_called()
+        self.assertEqual(context['entry_blocked'],{})
+        self.assertEqual(context['ranges'],{})
+        self.assertIn(msg['occurrence_id'],context['capacity'])
+        self.assertTrue(context['inventory_complete'])
+        self.assertIn('activeAssetData',[c[0] for c in self.raw.calls])
+
+    def test_approved_entry_still_requires_supervisor_and_owned_inventory(self):
+        msg=self.approved()
+        context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(context['entry_blocked'][msg['occurrence_id']],
+            'VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
+        self.provider.safety=object();self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
+        context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertIn(msg['occurrence_id'],context['entry_blocked'])
+        self.assertNotIn(msg['occurrence_id'],context['capacity'])
+
+    def test_approved_dispatch_replays_real_admission_with_no_range_lookup(self):
+        from .experimental_live_runtime import TestnetExecutionRuntime
+        from .experimental_execution_dispatch import review
+        msg=self.approved();test=self
+        class FixtureSafety:
+            def verify_checkpoint(self,*,state,request,collected_at_ms,ownership_revision):
+                p=request['proposal']
+                return dict(account=p['account'],role=p['role'],at_ms=collected_at_ms,
+                    entry_enabled=True,emergency_healthy=True,feed_reconciled=True,
+                    entry_circuit_clear=True,supervisor_at_ms=collected_at_ms,
+                    not_before_ms=test.state['not_before_ms'])
+        self.provider.safety=FixtureSafety()
+        ctx=self.provider.collect(self.state,entries_enabled=True)
+        planner=object.__new__(TestnetExecutionRuntime)
+        proposal=planner._cycle_proposal(self.state,ctx,self.exchange.t,entries_enabled=True)
+        self.assertIsNotNone(proposal)
+        request=planner._reserve_live(self.state,proposal,self.exchange.t,self.exchange.t)
+        calls=len(self.raw.calls)
+        context=self.provider.dispatch_context(request)
+        self.assertNotIn('source_range',context);self.assertNotIn('testnet_range',context)
+        checked=review(request,context,now_ms=self.exchange.t)
+        self.assertEqual(checked['action']['orders'][0]['p'],msg['entry'])
+        self.assertEqual(checked['action']['orders'][0]['t'],{'limit':{'tif':'Gtc'}})
+        self.assertEqual(len(self.raw.calls),calls)
 
     def test_maintenance_uses_one_shared_market_context_and_no_entry_capacity_reads(self):
         self.active(steps=4);self.provider.collect(self.state)

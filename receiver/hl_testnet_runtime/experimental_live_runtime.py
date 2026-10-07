@@ -14,6 +14,8 @@ from .experimental_execution_runtime import (
 )
 from .experimental_live_state import TestnetExecutionState
 from . import r2732_entry
+from . import experimental_live_release as releases
+import approved_alert_contract as contract
 
 VERSION = 'experimental-testnet-worker-v1'
 MODE = 'explicit_approved_testnet_worker_v1'
@@ -56,9 +58,8 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                     or type(release.get('entries_enabled')) is not bool
                     or release.get('routes') != state['routes']
                     or release.get('not_before_ms') != state['not_before_ms']
-                    or type(release.get('entry_expires_at_ms')) is not int
                     or not state['not_before_ms'] <= now
-                    or release['entry_expires_at_ms'] <= state['not_before_ms']):
+                    or not releases.entry_window_valid(release)):
                 raise ValueError()
             life.ident(release['release_id'], r'[0-9a-f]{64}')
         except Exception:
@@ -78,6 +79,13 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
 
     def _admit(self, state, cid, context, now):
         msg = state['sources'][cid]['source']
+        # Provider replays the pure admission with an unconstructed planner;
+        # the actual worker and final sender independently enforce release.
+        release = self._release(state, now) if callable(getattr(self,'release_loader',None)) else {}
+        if (release.get('entry_policy') == releases.CONTINUOUS_ENTRY
+                and msg['family'] == 'maxpain' and not contract.is_approved(msg)):
+            state.setdefault('entry_blocked', {})[cid] = 'CONTINUOUS_MAXPAIN_REQUIRES_APPROVED_ALERT'
+            return None
         role = 'long_account' if msg['side'] == 'LONG' else 'short_account'
         account = state['routes'][role]
         reason = (context.get('entry_blocked', {}).get(cid)
@@ -293,14 +301,12 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             owner.verify()
         before = self.store.load()
         admission_release = self._release(before, self.venue.now())
-        collect_entries = (entries_enabled is True and admission_release['entries_enabled']
-            and self.venue.now() < admission_release['entry_expires_at_ms'])
+        collect_entries = (entries_enabled is True and releases.entry_enabled(admission_release,self.venue.now()))
         context = self.venue.collect(deepcopy(before), entries_enabled=collect_entries)
         now = self.venue.now()
         life.moment(now)
         release = self._release(before, now)
-        enabled = (collect_entries and release == admission_release and release['entries_enabled']
-            and now < release['entry_expires_at_ms'])
+        enabled = (collect_entries and release == admission_release and releases.entry_enabled(release,now))
         # No persistence or I/O in this simulation: the exact same pure
         # transition is checked again after budget admission under SQL lock.
         prepared_state = deepcopy(before)
@@ -333,8 +339,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             if current != request:
                 raise RuntimeError('EXACT_DURABLE_ATTEMPT_REQUIRED')
             if (request['proposal']['operation'] == 'ENTRY'
-                    and (not observation_verified or not latest_release['entries_enabled']
-                        or self.venue.now() >= latest_release['entry_expires_at_ms']
+                    and (not observation_verified or not releases.entry_enabled(latest_release,self.venue.now())
                         or latest_release != release
                         or not _source_active(state['sources'][request['proposal']['card_id']], self.venue.now()))):
                 current['phase'] = 'ABORTED_UNSENT'

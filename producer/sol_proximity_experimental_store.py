@@ -163,6 +163,7 @@ def migrate_price_source(state, now, config_sha256, coin):
 def transact(scope, now, config_sha256, action, *, database_url=None, migrate_legacy_sol=False,
              migrate_source_coin=None):
     key = key_for(scope)
+    execution_changed = False
     with _connect(database_url) as conn:
         lock = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], 'big', signed=True)
         conn.execute('SELECT pg_advisory_xact_lock(%s)', (lock,))
@@ -185,7 +186,29 @@ def transact(scope, now, config_sha256, action, *, database_url=None, migrate_le
         result = action(state) if action else deepcopy(state)
         _maintain(state, now)
         conn.execute('UPDATE bot_settings SET value=%s WHERE key=%s', (_encode(state), key))
-        return deepcopy(result)
+        # Additive transport only. Its explicit migration is never run here;
+        # failure must not roll back an otherwise valid source observation.
+        from experimental_execution_bridge import approved_enabled
+        if approved_enabled():
+            conn.execute('SAVEPOINT approved_execution_outbox')
+            try:
+                from approved_alert_outbox import synchronize
+                execution_changed = synchronize(conn, key, state, now)
+            except Exception:
+                conn.execute('ROLLBACK TO SAVEPOINT approved_execution_outbox')
+                print('[approved-execution] outbox unavailable; source decision preserved', flush=True)
+            finally:
+                conn.execute('RELEASE SAVEPOINT approved_execution_outbox')
+        result = deepcopy(result)
+    # The context manager has committed successfully before waking the sender.
+    # An exception/rollback above never produces a pre-commit execution wake.
+    if execution_changed:
+        try:
+            from experimental_execution_forwarder import notify_source_commit
+            notify_source_commit(key)
+        except Exception:
+            print('[approved-execution] wake unavailable; durable recovery pending', flush=True)
+    return result
 
 
 def snapshot(scope, *, database_url=None):

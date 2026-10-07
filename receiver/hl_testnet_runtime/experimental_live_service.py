@@ -8,8 +8,9 @@ recurring-work side effect. No deployment/activation settings are written here.
 """
 import json
 import threading
+import time
 
-import experimental_execution_contract as contract
+import approved_alert_contract as contract
 from . import experimental_plan_intake as intake
 from . import experimental_live_release as releases
 from .experimental_execution_dispatch import BoundaryError
@@ -25,11 +26,13 @@ class ConnectionService:
             raise BoundaryError('EXPLICIT_TESTNET_CONNECTION_SERVICE_REQUIRED')
         self.runtime, self.key, self.release_loader = runtime, key, release_loader
         self._run_lock = threading.Lock()
+        self._tick_lock = threading.Lock()
         self.last_status = 'NOT_STARTED'
         self.cycles = 0
         self.feed, self.supervisor = feed, supervisor
         self._thread = None
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._start_lock = threading.Lock()
         self.startup_entries_allowed = True
         self.startup_entry_gate = None
@@ -41,7 +44,19 @@ class ConnectionService:
         if (contract.moment_ms(not_before) != state['not_before_ms']
                 or contract.moment_ms(now) != self.runtime.venue.now()):
             raise BoundaryError('EXACT_SOURCE_INTAKE_FENCE_REQUIRED')
-        return self.runtime.receive([message])['receipts'][0]
+        return self._receive(message)
+
+    def _receive(self, message):
+        """Wake the single loop only after the durable inbox commit returns.
+
+        The event coalesces arrivals and confers no entry authority. The loop
+        still checks the current release, source, ownership and request budget.
+        Failed/uncertain commits and duplicate deliveries cannot cause wakeups.
+        """
+        receipt = self.runtime.receive([message])['receipts'][0]
+        if receipt['status'] == 'RECORDED':
+            self._wake.set()
+        return receipt
 
     def accept_authenticated(self, raw, headers, *, path=intake.PATH, method='POST'):
         if method != 'POST' or path != intake.PATH:
@@ -57,7 +72,7 @@ class ConnectionService:
         # Do not impose entry expiry on cancellations or existing protection.
         # receive applies the original source's freshness and immutable rules.
         message = contract.validate(intake.decoded(raw))
-        return self.runtime.receive([message])['receipts'][0]
+        return self._receive(message)
 
     def application(self, environ, start_response):
         status, value = '404 Not Found', dict(status='NOT_FOUND')
@@ -96,15 +111,22 @@ class ConnectionService:
         return [body]
 
     def tick(self):
-        release = self.release_loader()
-        startup_allowed = self.startup_entries_allowed
-        if self.startup_entry_gate is not None:
-            startup_allowed = self.startup_entry_gate() is True
-        result = self.runtime.run_once(entries_enabled=startup_allowed and
-            releases.entry_enabled(release, self.runtime.venue.now()))
-        self.cycles += 1
-        self.last_status = result['status']
-        return result
+        # Manual invocations and the background loop share this same gate.
+        # Durable runtime ownership remains the final cross-process boundary.
+        if not self._tick_lock.acquire(blocking=False):
+            raise BoundaryError('EXPERIMENTAL_CONNECTION_CYCLE_ALREADY_RUNNING')
+        try:
+            release = self.release_loader()
+            startup_allowed = self.startup_entries_allowed
+            if self.startup_entry_gate is not None:
+                startup_allowed = self.startup_entry_gate() is True
+            result = self.runtime.run_once(entries_enabled=startup_allowed and
+                releases.entry_enabled(release, self.runtime.venue.now()))
+            self.cycles += 1
+            self.last_status = result['status']
+            return result
+        finally:
+            self._tick_lock.release()
 
     def run(self, stop_event, *, interval_seconds=5):
         """Explicit, single caller scheduling; never retries an order itself."""
@@ -114,13 +136,26 @@ class ConnectionService:
             raise BoundaryError('EXPERIMENTAL_CONNECTION_LOOP_ALREADY_RUNNING')
         try:
             while not stop_event.is_set():
+                # Clear BEFORE reading the durable inbox. Arrivals during a
+                # cycle remain signaled and cause an immediate next pass.
+                self._wake.clear()
+                if stop_event.is_set():
+                    break
                 try:
                     self.tick()
                 except Exception:
                     # State/transport uncertainty stays in the durable runtime.
                     # No raw failure, key, request body or DB URL is logged here.
                     self.last_status = 'CONNECTION_CYCLE_RECONCILIATION_REQUIRED'
-                stop_event.wait(interval_seconds)
+                if stop_event.is_set():
+                    break
+                # Preserve run(external_stop_event) shutdown responsiveness;
+                # these waits never collect or dispatch and do not add ticks.
+                deadline = time.monotonic() + interval_seconds
+                while not stop_event.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or self._wake.wait(min(remaining, .25)):
+                        break
         finally:
             self._run_lock.release()
 
@@ -146,6 +181,7 @@ class ConnectionService:
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=5)
         if self.supervisor is not None:

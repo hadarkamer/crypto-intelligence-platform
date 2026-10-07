@@ -10,12 +10,13 @@ from decimal import Decimal
 import time
 import threading
 
-import experimental_execution_contract as contract
+import approved_alert_contract as contract
 from . import card_lifecycle as life, card_sync_evidence as sync, checks
 from . import experimental_execution_evidence as proof
 from . import experimental_execution_dispatch as boundary
 from . import experimental_execution_runtime as runtime
-from . import filled_quantity_dispatch as wire, price_precision
+from . import experimental_execution_prices as execution_prices
+from . import filled_quantity_dispatch as wire
 from . import two_account_execution as roles
 from .long_stream_runtime import _validate_account_inventory
 from .experimental_market_context import MarketSnapshot
@@ -251,10 +252,7 @@ class LiveEvidenceProvider:
 
     def _capacity(self, message, account, role, metadata, *, buckets, inventory, market):
         route=roles.route_for(self.env,role,account)
-        signal=dict(kind='SIGNAL',event_id=message['occurrence_id'],symbol=message['symbol'],
-            side=message['side'],entry=message['entry'],stop=message['stop'],
-            take_profit=message['take_profit'],at=message['source_at'])
-        prepared=price_precision.prepare_signal(signal,metadata)['execution']
+        prepared=execution_prices.prepare(message,metadata)['execution']
         plan={k:prepared[k] for k in ('symbol','side','entry','stop','take_profit')}
         at=self.now()
         # Reuse role-specific actual account identity, abstraction, budget and
@@ -410,11 +408,17 @@ class LiveEvidenceProvider:
             if account in result['account_entry_blocked'] or lane in result['blocked_lanes']:
                 result['entry_blocked'][cid]=result['account_entry_blocked'].get(account,result['blocked_lanes'].get(lane));continue
             try:
-                source=self.prices.source_range(msg,self.now())
-                testnet=self.prices.mark_window(account,msg['symbol'],contract.moment_ms(msg['source_at']),self.now())
-                runtime._range(source,msg,self.now())
-                proof.require_mark_window(testnet,account=account,symbol=msg['symbol'],reference_at_ms=contract.moment_ms(msg['source_at']),now_ms=self.now())
-                result['ranges'][cid]=dict(source=source,testnet=testnet)
+                # An authenticated approved alert already carries the formula's
+                # entry decision. Its sender must not reconstruct a second
+                # prospective strategy using historical source/Testnet paths.
+                # Current market metadata, account inventory, ownership and
+                # capacity remain mandatory and use the unchanged budget.
+                if not contract.is_approved(msg):
+                    source=self.prices.source_range(msg,self.now())
+                    testnet=self.prices.mark_window(account,msg['symbol'],contract.moment_ms(msg['source_at']),self.now())
+                    runtime._range(source,msg,self.now())
+                    proof.require_mark_window(testnet,account=account,symbol=msg['symbol'],reference_at_ms=contract.moment_ms(msg['source_at']),now_ms=self.now())
+                    result['ranges'][cid]=dict(source=source,testnet=testnet)
                 if self.safety is None:
                     raise ProviderError('VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
                 result['capacity'][cid],reports[cid]=self._capacity(msg,account,role,metadata,
@@ -518,7 +522,9 @@ class LiveEvidenceProvider:
         if entry:
             cap=ctx['capacity'][cid]
             result.update(budget_at_ms=cap['at_ms'],entry_action_headroom=cap['action_headroom'],
-                budget_report=cached['budget_reports'][cid],source_range=ctx['ranges'][cid]['source'],testnet_range=ctx['ranges'][cid]['testnet'])
+                budget_report=cached['budget_reports'][cid])
+            if not contract.is_approved(trade['source']):
+                result.update(source_range=ctx['ranges'][cid]['source'],testnet_range=ctx['ranges'][cid]['testnet'])
         else:
             owner=cached['owners'].get(cid)
             if owner is None: raise ProviderError('OBSERVED_EXIT_OWNER_REQUIRED')

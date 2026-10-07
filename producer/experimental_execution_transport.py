@@ -18,11 +18,12 @@ import re
 import time
 from urllib.parse import urlsplit
 
-import experimental_execution_contract as contract
+import approved_alert_contract as contract
 import experimental_execution_bridge as bridge
 
 PATH = '/internal/testnet-experimental-plans/v1'
 MODE = 'experimental_plan_record_transport_v1'
+APPROVED_MODE = 'experimental_approved_alert_transport_v2'
 MAX_RESPONSE_BYTES = 8192
 MAX_BUFFER = 8192
 MAX_PER_TICK = 16
@@ -69,7 +70,7 @@ class Config:
     mode: str = ''
 
     def validate(self):
-        _require(self.mode == MODE, 'TRANSPORT_DISABLED')
+        _require(self.mode in (MODE, APPROVED_MODE), 'TRANSPORT_DISABLED')
         endpoint_host(self.endpoint, self.allowed_hosts)
         _require(isinstance(self.secret, str) and contract.HEX.fullmatch(self.secret), 'TRANSPORT_SECRET_CONFIG')
         _require(isinstance(self.fence, datetime), 'TRANSPORT_FENCE_CONFIG')
@@ -109,6 +110,7 @@ def _decoded_ack(raw):
 def post_plan(message, config, *, now_ms, connection_factory=None):
     """One bounded TLS POST; injectable connection is solely for isolated tests."""
     config.validate()
+    _require(contract.is_approved(message) == (config.mode == APPROVED_MODE), 'TRANSPORT_PROTOCOL_MODE')
     _require(type(now_ms) is int and now_ms > 0, 'TRANSPORT_CLOCK_INVALID')
     host = endpoint_host(config.endpoint, config.allowed_hosts)
     raw = encoded(message)
@@ -180,10 +182,11 @@ class Sender:
             pending[identity] = value
         self.pending = pending
 
-    def tick(self, scopes, config=None, *, now_ms=None, reader=None, post=None, monotonic=None):
+    def tick(self, scopes, config=None, *, now_ms=None, reader=None, post=None, monotonic=None,
+             acknowledge=None):
         report = dict(status='DISABLED', attempted=0, recorded=0, duplicates=0, deferred=0,
                       source_records_changed=0, exchange_requests_sent=0)
-        if config is None or config.mode != MODE:
+        if config is None or config.mode not in (MODE, APPROVED_MODE):
             return report
         config.validate()
         _require(isinstance(scopes, (set, frozenset, tuple, list)) and len(scopes) <= MAX_SCOPES
@@ -194,16 +197,20 @@ class Sender:
         now = datetime.fromtimestamp(now_ms/1000, timezone.utc)
         monotonic = monotonic or time.monotonic
         started = monotonic()
+        approved_mode = config.mode == APPROVED_MODE
+        read = reader or (bridge.read_approved if approved_mode else bridge.read_experimental)
+        source_env = {'EXPERIMENTAL_EXECUTION_BRIDGE_MODE': bridge.APPROVED_MODE if approved_mode else bridge.MODE}
         source_ok = True
         try:
-            values = (reader or bridge.read_experimental)(scopes, config.fence, now=now,
-                env={'EXPERIMENTAL_EXECUTION_BRIDGE_MODE': bridge.MODE},
+            values = read(scopes, config.fence, now=now, env=source_env,
                 deadline_monotonic=started+MAX_SOURCE_SECONDS, clock=monotonic)
+            _require(all(contract.is_approved(v) == approved_mode for v in values), 'TRANSPORT_PROTOCOL_MODE')
             self._merge(values)
         except Exception:
             source_ok = False
         for identity, value in list(self.pending.items()):
-            if value['kind'] != 'CANCEL' and now_ms >= contract.moment_ms(value['valid_until']):
+            if (not contract.is_approved(value) and value['kind'] != 'CANCEL'
+                    and now_ms >= contract.moment_ms(value['valid_until'])):
                 self.pending.pop(identity)
                 self.last_attempt.pop(identity, None)
         ordered = sorted(self.pending, key=lambda identity: (
@@ -222,6 +229,10 @@ class Sender:
                 _require(isinstance(ack, dict) and ack.get('occurrence_id') == identity
                     and ack.get('record_only') is True and ack.get('status') in ('RECORDED', 'DUPLICATE'),
                     'TRANSPORT_ACK_INVALID')
+                if approved_mode:
+                    # A lost source acknowledgement only retries the same
+                    # occurrence. Receiver tombstones prevent another order.
+                    (acknowledge or bridge.acknowledge_approved)(scopes, value, env=source_env)
                 report['recorded' if ack['status']=='RECORDED' else 'duplicates'] += 1
                 self.acked[identity] = value
                 self.pending.pop(identity)

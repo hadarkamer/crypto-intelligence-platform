@@ -37,6 +37,7 @@ from .render_preflight import core
 
 SCHEMA = "experimental_isolated_verification_v1"
 PRODUCER_MODULES = (
+    "approved_alert_contract_selftest",
     "xrp_r2732_experimental_signal_selftest", "xrp_r2732_experimental_store_selftest",
     "xrp_r2732_experimental_worker_selftest", "xrp_r2732_hyperliquid_migration_selftest",
     "hype_row71205_experimental_signal_selftest", "hype_row71205_experimental_store_selftest",
@@ -50,7 +51,8 @@ ENVIRONMENT_NAMES = frozenset({"PATH", "LANG", "TZ", "PYTHONUNBUFFERED",
     "PYTHONDONTWRITEBYTECODE", "PYTHONHASHSEED", "PYTHONPATH", "LC_CTYPE", "HL_JOURNAL_CI_URL",
     "TEST_DATABASE_URL"})
 TEST_FIXTURES = ("raw_exact_cancelled_13_fixture.json",
-    "migrations/044_continuous_price_archive.sql")
+    "migrations/044_continuous_price_archive.sql",
+    "migrations/050_approved_alert_execution_outbox.sql")
 
 
 def file_digest(files):
@@ -103,6 +105,7 @@ def git_head(root):
 def producer_modules(root):
     names = set(PRODUCER_MODULES)
     names.update(path.stem for path in Path(root).glob("experimental_execution_*selftest.py"))
+    names.update(path.stem for path in Path(root).glob("approved_alert_*selftest.py"))
     # Explicit modules must exist; silently omitting missing tests loses evidence.
     return sorted(names)
 
@@ -149,7 +152,8 @@ def run_child(suite_name, root, output):
     if suite_name == "runtime":
         suite = loader.discover(str(root / "hl_testnet_runtime"), pattern="test_*.py", top_level_dir=str(root))
         suite.addTests(loader.loadTestsFromNames([
-            "hyperliquid_testnet_executor_selftest", "alert_cards_forwarder_selftest"]))
+            "hyperliquid_testnet_executor_selftest", "alert_cards_forwarder_selftest",
+            "approved_alert_contract_selftest"]))
     else:
         suite = loader.loadTestsFromNames(producer_modules(root))
     # Text traces remain in the private log; structured reports contain IDs/counts.

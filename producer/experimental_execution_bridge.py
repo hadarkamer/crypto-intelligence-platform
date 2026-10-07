@@ -16,12 +16,81 @@ import time
 import experimental_execution_contract as contract
 
 MODE = 'experimental_testnet_bridge_v1'
+APPROVED_MODE = 'experimental_approved_alert_bridge_v2'
 EVIDENCE_VERSION = 'prospective-maxpain-execution-evidence-v1'
 MAX_SOURCE_BYTES = 1024 * 1024
 
 
 def enabled(env=None):
     return (os.environ if env is None else env).get('EXPERIMENTAL_EXECUTION_BRIDGE_MODE') == MODE
+
+
+def approved_enabled(env=None):
+    return (os.environ if env is None else env).get('EXPERIMENTAL_EXECUTION_BRIDGE_MODE') == APPROVED_MODE
+
+
+def approved_source_keys(scopes):
+    keys = []
+    for scope in sorted(scopes):
+        if not isinstance(scope, str) or not contract.HEX.fullmatch(scope):
+            raise contract.ContractError('SOURCE_SCOPE_HASH')
+        subscription = 'general-watch:' + scope
+        for rule, spec in contract.SPECS.items():
+            source_scope = subscription if spec[0] == 'SOL' else subscription + ':' + rule
+            keys.append('sol-proximity-notification-store-v1:' + hashlib.sha256(source_scope.encode()).hexdigest())
+    return keys
+
+
+def _approved_connect(connect=None, *, read_only):
+    from alert_cards_forwarder import _source_dsn
+    if connect is None:
+        import psycopg
+        from psycopg.rows import dict_row
+        connect = lambda dsn, **kw: psycopg.connect(dsn, row_factory=dict_row, **kw)
+    options = '-c statement_timeout=3000 -c lock_timeout=1000'
+    if read_only:
+        options += ' -c default_transaction_read_only=on'
+    return connect(_source_dsn(), connect_timeout=3, options=options)
+
+
+def read_approved(scopes, fence, *, now=None, env=None, connect=None, deadline_monotonic=None, clock=None):
+    """Read the explicit-migration durable outbox; never reconstruct old plans."""
+    if not approved_enabled(env):
+        return []
+    import approved_alert_contract as approved
+    import approved_alert_outbox as outbox
+    clock = clock or time.monotonic
+    keys = approved_source_keys(scopes)
+    fence_ms = approved.moment_ms(fence.isoformat())
+    values = []
+    with _approved_connect(connect, read_only=True) as conn:
+        for key in keys:
+            if deadline_monotonic is not None and clock() >= deadline_monotonic:
+                raise approved.ContractError('SOURCE_READ_DEADLINE')
+            values.extend(outbox.read(conn, [key]))
+    by_id = {}
+    for value in values:
+        if approved.moment_ms(value['approved_at']) < fence_ms:
+            continue
+        previous = by_id.get(value['occurrence_id'])
+        if previous and approved.plan_digest(previous) != approved.plan_digest(value):
+            raise approved.ContractError('CONFLICTING_SOURCE_OCCURRENCE')
+        if (not previous or (value['kind'] == 'CANCEL' and previous['kind'] != 'CANCEL') or
+                (value['kind'] == previous['kind'] and value['source_sequence'] > previous['source_sequence']) or
+                (previous['kind'] != 'CANCEL' and value['source_sequence'] > previous['source_sequence'])):
+            by_id[value['occurrence_id']] = value
+    return list(by_id.values())
+
+
+def acknowledge_approved(scopes, value, *, env=None, connect=None):
+    if not approved_enabled(env):
+        return False
+    import approved_alert_contract as approved
+    import approved_alert_outbox as outbox
+    approved.validate(value)
+    with _approved_connect(connect, read_only=False) as conn:
+        outbox.acknowledge(conn, approved_source_keys(scopes), value)
+    return True
 
 
 def _maxpain_evidence(plan, state, decoded, considered, config_sha256):

@@ -17,6 +17,7 @@ import weakref
 
 from . import card_lifecycle as life, checks, request_budget
 from . import experimental_execution_dispatch as boundary
+from . import experimental_live_release as releases
 from . import filled_quantity_dispatch as wire, two_account_execution as roles
 
 HOST = 'api.hyperliquid-testnet.xyz'
@@ -93,8 +94,7 @@ class LiveDispatchPort:
                 and type(value.get('entries_enabled')) is bool
                 and value.get('routes') == expected
                 and type(value.get('not_before_ms')) is int
-                and type(value.get('entry_expires_at_ms')) is int
-                and value['not_before_ms'] < value['entry_expires_at_ms']
+                and releases.entry_window_valid(value)
                 and value['not_before_ms'] <= self.now())
             if not valid:
                 raise ValueError()
@@ -102,7 +102,7 @@ class LiveDispatchPort:
         except Exception:
             raise LiveDispatchError('EXACT_CURRENT_TESTNET_RELEASE_REQUIRED') from None
         if proposal is not None and proposal['operation'] == 'ENTRY':
-            if not value['entries_enabled'] or self.now() >= value['entry_expires_at_ms']:
+            if not releases.entry_enabled(value,self.now()):
                 raise LiveDispatchError('EXPERIMENTAL_ENTRY_RELEASE_CLOSED')
         return value
 
@@ -142,6 +142,11 @@ class LiveDispatchPort:
         if (value['safety']['not_before_ms'] != release['not_before_ms']
                 or request['prepared_at_ms'] < release['not_before_ms']):
             raise LiveDispatchError('RELEASE_FENCE_CHANGED')
+        if (request['proposal']['operation']=='ENTRY'
+                and release.get('entry_policy')==releases.CONTINUOUS_ENTRY
+                and value['source']['family']=='maxpain'
+                and not boundary.contract.is_approved(value['source'])):
+            raise LiveDispatchError('APPROVED_ALERT_REQUIRED_FOR_CONTINUOUS_MAXPAIN')
         return value
 
     def send(self, request, *, admission=None):

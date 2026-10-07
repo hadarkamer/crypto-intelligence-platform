@@ -81,3 +81,79 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(BoundaryError):
                 release.configuration(env)
             self.assertEqual(env, before)
+
+    def test_continuous_policy_has_no_global_expiry_but_retains_start_and_halt(self):
+        env = environment()
+        env.pop('HL_TESTNET_EXPERIMENTAL_ENTRY_UNTIL')
+        env.update(HL_TESTNET_EXPERIMENTAL_ENTRY_POLICY=release.CONTINUOUS_ENTRY,
+                   HL_TESTNET_EXPERIMENTAL_ENTRY_ENABLED='true')
+        value = release.configuration(env)
+        self.assertEqual(value['entry_policy'], release.CONTINUOUS_ENTRY)
+        self.assertIsNone(value['entry_expires_at_ms'])
+        self.assertFalse(release.entry_enabled(value, value['not_before_ms']-1))
+        self.assertTrue(release.entry_enabled(value, value['not_before_ms']))
+        self.assertTrue(release.entry_enabled(value, value['not_before_ms']+365*86400000))
+        env['HL_TESTNET_EXPERIMENTAL_ENTRY_ENABLED'] = 'false'
+        paused = release.configuration(env)
+        self.assertFalse(release.entry_enabled(paused, value['not_before_ms']+365*86400000))
+        self.assertTrue(paused['protection_enabled'])
+
+    def test_missing_deadline_never_silently_enables_continuous_entries(self):
+        for policy in (None, release.BOUNDED_ENTRY, '', 'continuous', 'true'):
+            with self.subTest(policy=policy):
+                env = environment()
+                env.pop('HL_TESTNET_EXPERIMENTAL_ENTRY_UNTIL')
+                if policy is not None:
+                    env['HL_TESTNET_EXPERIMENTAL_ENTRY_POLICY'] = policy
+                with self.assertRaises(BoundaryError):
+                    release.configuration(env)
+        env = environment()
+        env['HL_TESTNET_EXPERIMENTAL_ENTRY_POLICY'] = release.CONTINUOUS_ENTRY
+        with self.assertRaises(BoundaryError):
+            release.configuration(env)
+
+    def test_runtime_policy_shape_rejects_ambiguous_or_incomplete_release(self):
+        value = release.configuration(environment())
+        value['entries_enabled'] = True
+        value.pop('entry_policy')
+        self.assertTrue(release.entry_enabled(value, value['not_before_ms']))
+        self.assertFalse(release.entry_enabled(value, value['entry_expires_at_ms']))
+        for change in ({'entry_expires_at_ms': None}, {'entry_expires_at_ms': True},
+                       {'entry_policy': 'unknown'}, {'entry_policy': release.CONTINUOUS_ENTRY},
+                       {'not_before_ms': True}):
+            with self.subTest(change=change):
+                malformed = {**value, **change}
+                self.assertFalse(release.entry_window_valid(malformed))
+                self.assertFalse(release.entry_enabled(malformed, value['not_before_ms']))
+        value['entry_policy'] = release.CONTINUOUS_ENTRY
+        value.pop('entry_expires_at_ms')
+        self.assertFalse(release.entry_window_valid(value))
+
+    def test_entry_policy_is_pinned_for_existing_loader(self):
+        env = environment()
+        loader = release.ReleaseLoader(env)
+        original = loader()
+        env.pop('HL_TESTNET_EXPERIMENTAL_ENTRY_UNTIL')
+        env['HL_TESTNET_EXPERIMENTAL_ENTRY_POLICY'] = release.CONTINUOUS_ENTRY
+        with self.assertRaisesRegex(BoundaryError, 'IDENTITY_CHANGED'):
+            loader()
+        continuous = release.ReleaseLoader(env)
+        self.assertEqual(continuous(), release.ReleaseLoader(env)())
+        env.pop('HL_TESTNET_EXPERIMENTAL_ENTRY_POLICY')
+        env['HL_TESTNET_EXPERIMENTAL_ENTRY_UNTIL'] = '2026-10-08T18:00:00Z'
+        with self.assertRaisesRegex(BoundaryError, 'IDENTITY_CHANGED'):
+            continuous()
+        self.assertEqual(release.configuration(env), original)
+
+    def test_continuous_restart_still_requires_same_release_handover_attestation(self):
+        env = environment()
+        env.pop('HL_TESTNET_EXPERIMENTAL_ENTRY_UNTIL')
+        env.update(HL_TESTNET_EXPERIMENTAL_ENTRY_POLICY=release.CONTINUOUS_ENTRY,
+                   HL_TESTNET_EXPERIMENTAL_ENTRY_ENABLED='true',
+                   HL_TESTNET_EXPERIMENTAL_HANDOVER=release.HANDOVER)
+        start = release.configuration(env)['not_before_ms']
+        self.assertFalse(release.entry_enabled(release.ReleaseLoader(env)(), start))
+        env['HL_TESTNET_EXPERIMENTAL_PREDECESSOR_RETIRED_RELEASE'] = 'a'*64
+        self.assertTrue(release.entry_enabled(release.ReleaseLoader(env)(), start+365*86400000))
+        env['HL_TESTNET_EXPERIMENTAL_RELEASE_ID'] = 'b'*64
+        self.assertFalse(release.entry_enabled(release.ReleaseLoader(env)(), start))

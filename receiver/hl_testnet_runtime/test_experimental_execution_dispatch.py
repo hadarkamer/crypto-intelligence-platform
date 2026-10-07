@@ -46,6 +46,37 @@ def fixture():
         budget_report=dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True,budget_diagnostics=dict(plan_sha256=life.digest(plan),current_settings_passed=True)))
     return request,context,now
 
+
+def approved_fixture(*, side='LONG', entry='93.544', mark='93.544'):
+    """The approved alert's quoted limit, independent of any source history."""
+    import approved_alert_contract as approved
+    from approved_alert_fixtures import maxpain_alert
+    from .experimental_execution_prices import prepare
+    source=maxpain_alert(entry=entry)
+    if side=='SHORT':
+        source.update(side='SHORT',stop='96',take_profit='91.405',original_target='90')
+        source['proof']['episode_key']='90'
+        source['occurrence_id']=approved.occurrence_id(source)
+        source=approved.validate(source)
+    request,context,_=fixture();now=approved.moment_ms(source['approved_at'])+10000
+    role='long_account' if side=='LONG' else 'short_account'
+    route=boundary.roles.route_for(ENV,role)
+    meta={'universe':[dict(name='HYPE',szDecimals=2,maxLeverage=10)]}
+    levels=prepare(source,meta)['execution']
+    p=request['proposal'];p.update(card_id=source['occurrence_id'],account=route['account'],
+        role=role,symbol='HYPE',quantity='1',source_at=source['source_at'],
+        source_expires_at=source['expires_at'],observed_at_ms=now)
+    p['action']['orders'][0].update(b=side=='LONG',p=levels['entry'],s='1',t=dict(limit=dict(tif='Gtc')))
+    request.update(nonce=now,attempt_at_ms=now,prepared_at_ms=now)
+    plan={k:levels[k] for k in ('symbol','side','entry','stop','take_profit')}
+    context.update(source=source,current_source=dict(source=source,plan_digest=approved.plan_digest(source),
+        entry_permission='WAITING',cancellation=None),metadata=meta,agent=route['agent'],
+        market=dict(environment='testnet',symbol='HYPE',at_ms=now,mark_price=mark),budget_at_ms=now)
+    context['safety'].update(account=route['account'],role=role,at_ms=now,
+        supervisor_at_ms=now,not_before_ms=approved.moment_ms(source['created_at'])-1)
+    context['budget_report']['budget_diagnostics']['plan_sha256']=life.digest(plan)
+    return request,context,now
+
 class DispatchBoundaryTests(unittest.TestCase):
     def setUp(self):
         for target in ('http.client.HTTPSConnection','socket.create_connection','socket.socket.connect','hl_testnet_runtime.two_account_execution.wallet_for_role'):
@@ -124,5 +155,54 @@ class DispatchBoundaryTests(unittest.TestCase):
         reader=BudgetReader(); plan=dict(symbol='BTC',side='SHORT',entry='100',stop='102',take_profit='98')
         result=boundary.account_preflight(ENV,'short_account',C,D,plan,reader)
         self.assertEqual(result['budget_report']['budget_diagnostics']['plan_sha256'],life.digest(plan)); self.assertEqual(result['entry_action_headroom'],100); self.assertEqual(reader.mode_calls,2)
+
+    def test_approved_exact_limit_accepts_already_touched_current_mark(self):
+        for side,mark in (('LONG','93.544'),('LONG','93'),('SHORT','93.544'),('SHORT','94')):
+            with self.subTest(side=side,mark=mark):
+                request,context,now=approved_fixture(side=side,mark=mark)
+                result=boundary.review(request,context,now_ms=now)
+                self.assertEqual(result['action']['orders'][0]['p'],'93.544')
+                self.assertEqual(result['action']['orders'][0]['t'],{'limit':{'tif':'Gtc'}})
+                self.assertNotIn('source_range',context)
+
+    def test_approved_limit_waits_at_quote_without_chasing_market(self):
+        request,context,now=approved_fixture(mark='94')
+        result=boundary.review(request,context,now_ms=now)
+        self.assertEqual(result['action']['orders'][0]['p'],'93.544')
+        request['proposal']['action']['orders'][0]['p']='94'
+        with self.assertRaisesRegex(boundary.BoundaryError,'EXACT_FROZEN_ENTRY'):
+            boundary.review(request,context,now_ms=now)
+
+    def test_approved_rounding_never_accepts_worse_than_alert_limit(self):
+        for side,quoted,expected,worse in (('LONG','93.5446','93.544','93.545'),
+                                          ('SHORT','93.5444','93.545','93.544')):
+            with self.subTest(side=side):
+                request,context,now=approved_fixture(side=side,entry=quoted)
+                result=boundary.review(request,context,now_ms=now)
+                self.assertEqual(result['action']['orders'][0]['p'],expected)
+                self.assertEqual(context['source']['entry'],quoted)
+                request['proposal']['action']['orders'][0]['p']=worse
+                with self.assertRaisesRegex(boundary.BoundaryError,'EXACT_FROZEN_ENTRY'):
+                    boundary.review(request,context,now_ms=now)
+
+    def test_approved_alert_expiry_still_blocks_first_submission(self):
+        request,context,now=approved_fixture()
+        expires=boundary.contract.moment_ms(context['source']['expires_at'])
+        request.update(nonce=expires,attempt_at_ms=expires,prepared_at_ms=expires)
+        request['proposal']['observed_at_ms']=expires
+        with self.assertRaisesRegex(boundary.BoundaryError,'SOURCE_WINDOW_EXPIRED'):
+            boundary.review(request,context,now_ms=expires)
+
+    def test_approved_stale_mark_outside_exits_and_account_gates_still_apply(self):
+        for change,expected in (('mark','OUTSIDE_FROZEN_EXITS'),('stale','MARK_EXPIRED'),
+                                ('safety','SAFETY_GATE'),('budget','ACCOUNT_BUDGET')):
+            with self.subTest(change=change):
+                request,context,now=approved_fixture()
+                if change=='mark':context['market']['mark_price']='91'
+                elif change=='stale':context['market']['at_ms']=now-15001
+                elif change=='safety':context['safety']['feed_reconciled']=False
+                else:context['budget_report']['budget_diagnostics']['plan_sha256']='0'*64
+                with self.assertRaisesRegex(boundary.BoundaryError,expected):
+                    boundary.review(request,context,now_ms=now)
 
 if __name__=='__main__': unittest.main()

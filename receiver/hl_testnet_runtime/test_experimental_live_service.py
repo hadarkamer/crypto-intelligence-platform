@@ -8,6 +8,7 @@ from copy import deepcopy
 from decimal import Decimal
 import io
 import json
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -20,7 +21,7 @@ from . import request_budget
 from .experimental_live_service import ConnectionService, compose
 from .experimental_live_provider import LiveEvidenceProvider
 from .experimental_live_state import TestnetExecutionState
-from .postgres_journal import PostgresJournal
+from .postgres_journal import PostgresJournal, JournalError
 from .test_experimental_live_state import LIVE_ROUTES
 from .test_experimental_live_runtime import MemoryTransactions
 from .test_experimental_live_provider import RawTestnetFixture, LegacyFixture, ENV, UnavailablePrices
@@ -138,6 +139,142 @@ class FullConnectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'AUTHENTICATION'):
             self.service.accept_authenticated(json.dumps(msg).encode(), {})
         self.assertEqual(self.http, [])
+
+    def test_intake_wakes_only_after_commit_and_not_for_duplicate_or_failed_commit(self):
+        msg = r2732_message(entry=2.3, decision_ms=T-60000)
+        receive = self.worker.receive
+        observed = []
+        def commit(messages):
+            observed.append(self.service._wake.is_set())
+            result = receive(messages)
+            observed.append(self.service._wake.is_set())
+            return result
+        with patch.object(self.worker, 'receive', side_effect=commit):
+            self.ingest(msg)
+        self.assertEqual(observed, [False, False])
+        self.assertTrue(self.service._wake.is_set())
+        self.service._wake.clear()
+        self.assertEqual(self.ingest(msg)['status'], 'DUPLICATE')
+        self.assertFalse(self.service._wake.is_set())
+        with patch.object(self.worker, 'receive', side_effect=JournalError('COMMIT_UNKNOWN')):
+            with self.assertRaisesRegex(JournalError, 'COMMIT_UNKNOWN'):
+                self.ingest(msg)
+        self.assertFalse(self.service._wake.is_set())
+        self.assertEqual(self.http, []); self.assertEqual(self.raw.calls, [])
+
+    def test_authenticated_commit_wakes_sleeping_loop_without_polling_delay(self):
+        waiting = threading.Event(); completed = threading.Event(); calls = []
+        wait = self.service._wake.wait
+        def observe_wait(timeout):
+            waiting.set()
+            return wait(timeout)
+        def cycle():
+            calls.append(True)
+            if len(calls) == 2:
+                completed.set(); self.service._stop.set()
+        with patch.object(self.service._wake, 'wait', side_effect=observe_wait), \
+             patch.object(self.service, 'tick', side_effect=cycle):
+            self.service._thread = threading.Thread(target=self.service.run,
+                args=(self.service._stop,), kwargs={'interval_seconds': 30})
+            self.service._thread.start()
+            try:
+                self.assertTrue(waiting.wait(2))
+                self.ingest(r2732_message(entry=2.3, decision_ms=T-60000))
+                self.assertTrue(completed.wait(2))
+            finally:
+                self.assertTrue(self.service.stop())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.http, []); self.assertEqual(self.raw.calls, [])
+
+    def test_arrival_during_cycle_is_not_lost_when_loop_returns_to_wait(self):
+        active = threading.Event(); finish = threading.Event(); completed = threading.Event()
+        calls = []
+        def cycle():
+            calls.append(True)
+            if len(calls) == 1:
+                active.set()
+                if not finish.wait(2):
+                    raise AssertionError('TEST_CYCLE_NOT_RELEASED')
+            else:
+                completed.set(); self.service._stop.set()
+        with patch.object(self.service, 'tick', side_effect=cycle):
+            self.service._thread = threading.Thread(target=self.service.run,
+                args=(self.service._stop,), kwargs={'interval_seconds': 30})
+            self.service._thread.start()
+            try:
+                self.assertTrue(active.wait(2))
+                self.ingest(r2732_message(entry=2.3, decision_ms=T-60000))
+                finish.set()
+                self.assertTrue(completed.wait(2))
+            finally:
+                finish.set(); self.assertTrue(self.service.stop())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.http, []); self.assertEqual(self.raw.calls, [])
+
+    def test_manual_tick_and_second_loop_cannot_overlap_background_cycle(self):
+        active = threading.Event(); finish = threading.Event()
+        def run_once(**kwargs):
+            active.set()
+            if not finish.wait(2):
+                raise AssertionError('TEST_CYCLE_NOT_RELEASED')
+            self.service._stop.set()
+            return {'status': 'OBSERVED_NO_ACTION'}
+        with patch.object(self.worker, 'run_once', side_effect=run_once) as operation:
+            self.service._thread = threading.Thread(target=self.service.run, args=(self.service._stop,))
+            self.service._thread.start()
+            try:
+                self.assertTrue(active.wait(2))
+                with self.assertRaisesRegex(ValueError, 'CYCLE_ALREADY_RUNNING'):
+                    self.service.tick()
+                with self.assertRaisesRegex(ValueError, 'LOOP_ALREADY_RUNNING'):
+                    self.service.run(threading.Event())
+                self.assertEqual(operation.call_count, 1)
+            finally:
+                finish.set(); self.assertTrue(self.service.stop())
+        self.assertEqual(self.service.cycles, 1)
+
+    def test_stop_wakes_long_wait_and_restart_reads_durable_inbox(self):
+        waiting = threading.Event(); wait = self.service._wake.wait
+        def observe_wait(timeout):
+            waiting.set()
+            return wait(timeout)
+        with patch.object(self.service._wake, 'wait', side_effect=observe_wait), \
+             patch.object(self.service, 'tick') as tick:
+            self.service._thread = threading.Thread(target=self.service.run,
+                args=(self.service._stop,), kwargs={'interval_seconds': 30})
+            self.service._thread.start()
+            try:
+                self.assertTrue(waiting.wait(2))
+            finally:
+                self.assertTrue(self.service.stop())
+            self.assertEqual(tick.call_count, 1)
+        msg = r2732_message(entry=2.3, decision_ms=T-60000)
+        self.ingest(msg)
+        self.reconnect()
+        self.assertFalse(self.service._wake.is_set())
+        self.assertIn(msg['occurrence_id'], self.store.load()['sources'])
+        self.assertEqual(self.service.tick().get('operation'), 'ENTRY')
+        self.assertEqual(sum(r['proposal']['operation']=='ENTRY' for r in self.oracle.requests), 1)
+
+    def test_external_stop_event_remains_responsive_without_service_stop(self):
+        external_stop = threading.Event(); waiting = threading.Event()
+        wait = self.service._wake.wait
+        def observe_wait(timeout):
+            waiting.set()
+            return wait(timeout)
+        with patch.object(self.service._wake, 'wait', side_effect=observe_wait), \
+             patch.object(self.service, 'tick') as tick:
+            thread = threading.Thread(target=self.service.run,
+                args=(external_stop,), kwargs={'interval_seconds': 30})
+            thread.start()
+            try:
+                self.assertTrue(waiting.wait(2))
+                external_stop.set()
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+            finally:
+                external_stop.set(); self.service._wake.set(); thread.join(timeout=2)
+        self.assertEqual(tick.call_count, 1)
 
     def test_r2732_through_raw_provider_sender_partial_protection_and_close(self):
         self.oracle.instant_fraction = Decimal('.5')
