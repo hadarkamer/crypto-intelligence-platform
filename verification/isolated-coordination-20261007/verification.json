@@ -1,0 +1,495 @@
+{
+  "scope": "isolated_local_only",
+  "base_commit": "87069f7",
+  "branch": "codex/isolated-exit-coordination-20261007",
+  "verified_at_utc": "2026-10-07T17:55:17.748900+00:00",
+  "successful": true,
+  "tests_run": 397,
+  "passed": 290,
+  "skipped": 107,
+  "errors": 0,
+  "failures": 0,
+  "new_tests": 20,
+  "modules": [
+    "test_exit_amendment",
+    "test_experimental_live_provider",
+    "test_experimental_shared_market",
+    "test_experimental_live_dispatch",
+    "test_experimental_dispatch_integration",
+    "test_experimental_execution_runtime",
+    "test_filled_quantity_exits",
+    "test_residual_partial_close",
+    "test_r2732_stop_dispatch",
+    "test_sol_g65_conditional_stop",
+    "test_request_budget",
+    "test_experimental_entry_read_reuse",
+    "test_partial_exit_stop_lock",
+    "test_experimental_live_runtime"
+  ],
+  "skip_details": [
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_actionable_authorization_checkpoint_uses_winning_proof_and_one_frozen_send",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_atomic_concurrent_workers_return_only_one_sender_request",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_atomic_cross_process_checkpoint_cannot_observe_committed_prepared_gap",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_atomic_entry_commits_exact_request_without_postcommit_reload",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_atomic_lost_commit_ack_returns_no_sender_and_never_replays",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_atomic_rebase_never_begins_ambiguous_or_attempted_prepared_record",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_atomic_rebase_preserves_prepared_request_and_frozen_action",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_atomic_rebase_rejects_changed_quantity_or_wire_before_nonce",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_authorization_checkpoint_retains_another_workers_unknown_attempt",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_authorization_checkpoint_with_larger_partial_fill_does_not_send_old_stop",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_commit_ack_loss_never_reaches_sender",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_concurrent_reservation_allows_only_one_request",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_confirmed_rejection_retires_once_and_never_replays_original_card",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_default_real_gate_and_no_configuration_write",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_delayed_poll_records_nonzero_fill_to_protection_delay",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_domain_mismatch_blocks_real_adapter_using_ci_records",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_entry_stop_take_whole_chain_40_with_pending_60",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_expired_general_alert_cannot_register",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_explicit_candidate_policy_cancels_only_own_pending_entry",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_long_crossed_take_stop_modify_unknown_reply_is_reconciled_once_after_restart",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_lost_cancel_reply_requires_terminal_proof",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_lost_create_reply_reconciles_cloid_without_resending",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_modifying_display_copy_cannot_change_persistent_source",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_new_process_loads_unknown_request_without_second_attempt",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_old_observation_cannot_confirm_new_attempt",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_orphan_stop_cancellation_after_full_take",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_overlapping_workers_cannot_send_same_entry_twice",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_partial_exit_policy_not_silently_chosen",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_preview_records_no_requests_and_no_attempts",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_receipt_without_correct_order_terms_cannot_bind",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_rejected_reply_with_existing_order_is_a_conflict_not_success",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_resize_is_one_venue_action_and_recomputes_later_partial_fill",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_second_card_registration_does_not_bypass_pending",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_second_same_market_card_waits_without_creating_an_exit_race",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_short_crossed_take_stop_modify_unknown_reply_is_reconciled_once_after_restart",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_short_full_controller_chain",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_stale_before_begin_blocks_even_after_reservation",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_take_activates_before_first_binding_and_partial_fill_resizes_only_stop",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_dispatch.DispatchDatabaseTests.test_unknown_create_cannot_be_bypassed_by_changed_quantity",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_exit_amendment.ExitAmendmentDatabaseTests.test_lost_modify_reply_reopens_same_journal_without_resending",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_exit_amendment.ExitAmendmentDatabaseTests.test_never_sent_quantity_change_retires_stale_amendment",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_exit_amendment.ExitAmendmentDatabaseTests.test_partial_take_shrinks_stop_without_canceling_its_guard",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_exit_amendment.ExitAmendmentDatabaseTests.test_rejected_modify_keeps_prior_stop_and_blocks_new_work",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_exit_amendment.ExitAmendmentDatabaseTests.test_supervised_unchanged_size_probe_uses_same_durable_send_boundary",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_exit_amendment.ExitAmendmentDatabaseTests.test_unknown_modify_keeps_durable_barrier_even_after_another_entry_fill",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_exits.DurableFilledQuantityTests.test_partial_entry_through_existing_durable_stop_and_take_chain",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_filled_quantity_exits.DurableFilledQuantityTests.test_restart_unknown_does_not_create_second_attempt",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_residual_partial_close.PartialResidualDatabaseTests.test_fill_racing_partial_cleanup_is_counted_without_reattribution",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_residual_partial_close.PartialResidualDatabaseTests.test_legacy_shared_card_resize_preserves_every_working_guard_and_blocks",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_residual_partial_close.PartialResidualDatabaseTests.test_partial_cleanup_with_crossed_stop_preserves_existing_guard",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_residual_partial_close.PartialResidualDatabaseTests.test_partial_stop_cleanup_does_not_cancel_the_remaining_stop",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_residual_partial_close.PartialResidualDatabaseTests.test_stale_never_sent_resize_becomes_exact_orphan_cleanup",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_residual_partial_close.PartialResidualDatabaseTests.test_stale_resize_cannot_cancel_a_now_correct_stop",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_residual_partial_close.PartialResidualDatabaseTests.test_started_unknown_resize_is_not_retired_when_card_closes",
+      "reason": "Disposable loopback PostgreSQL required"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_abandoned_second_pass_releases_no_http_credits_but_keeps_every_started_read",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_accounting_snapshot_after_wait_sees_other_connections_committed_charge",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_background_cannot_consume_reserved_protection_capacity",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_batch_background_ceiling_and_other_process_share_all_reserved_children",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_bounded_lock_does_not_wait_for_quota_or_another_process",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_capacity_and_denial_preserve_ledger_and_report_cumulative_expiry",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_child_resets_inherited_connection_without_terminating_parent_session",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_claim_refreshes_live_ticket_and_close_releases_only_never_claimed_credits",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_close_racing_a_slow_claim_preserves_its_ticket_and_invalidates_local_permission",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_concurrent_whole_batches_never_partially_spend_protective_ceiling",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_concurrent_workers_never_overspend_and_busy_is_bounded",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_delayed_real_pg_four_parallel_admissions_have_one_connection_and_no_lock_failures",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_delayed_real_pg_race_preserves_background_and_protective_ceilings",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_dynamic_size_refund_commits_once_and_lost_refund_retains_full_charge",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_extension_atomicity_and_both_paginated_passes_preserve_shared_limit",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_failed_cleanup_keeps_conservative_charge_and_never_reopens_or_retries",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_four_parallel_read_admissions_have_no_spurious_denial_with_headroom",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_lost_batch_reservation_commit_leaves_all_credits_without_batch_permission",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_lost_claim_commit_burns_one_credit_without_deadline_restart_or_reissue",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_missing_or_changed_schema_is_not_repaired_by_admission",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_new_process_shares_old_admissions_without_reinitializing_or_reading_keys",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_partial_starvation_ledger_denies_whole_observation_without_partial_tickets",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_preflight_plan_funds_all_or_none_before_background_headroom_then_retains_claimed_reads",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_quiet_live_position_funds_both_passes_after_552_weight_without_background_starvation",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_rolling_window_keeps_60_seconds_plus_admission_tcp_and_tls_margin",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_slow_batch_commit_cannot_restart_initial_or_child_permission_clocks",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_slow_commit_does_not_restart_freshness_clock",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_sql_failure_discards_cached_connection_and_next_call_reconnects_once",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_uncertain_admission_commit_returns_no_permit",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_request_budget.PostgresTests.test_unknown_extension_commit_keeps_unknown_children_and_claimed_parent_after_close",
+      "reason": "Requires disposable PostgreSQL CI service"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_certified_unsent_emergency_does_not_create_phantom_order_fence",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_certified_unsent_initial_stop_recovers_without_blocking_filled_trade",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_checkpoint_and_ownership_revision_survive_observation_cycle",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_concurrent_workers_cannot_both_send_same_admission",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_durable_wire_claim_is_one_use_including_new_worker",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_eight_approved_formulas_share_entry_and_protection_lifecycle",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_entries_are_off_by_default_and_never_reserve_budget",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_exact_rejected_no_order_entry_retires_without_replay",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_full_fill_protection_close_cleanup_persists_testnet_domain",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_lost_reply_and_restart_never_replays_entry",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_missing_mark_history_blocks_entry_but_keeps_protection",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_missing_order_without_rejection_never_retires_unknown_request",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_original_software_worker_still_rejects_testnet_state_and_port",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_rejected_cancel_does_not_storm_or_invent_finality",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_rejected_initial_exit_reconciles_then_can_restore_protection",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_rejected_modify_retains_old_stop_and_waits_for_material_change",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_rejected_no_order_emergency_allows_fresh_owned_close",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_release_expiry_and_entry_halt_keep_partial_fill_protection",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_release_halt_between_reservation_and_send_aborts_never_sent_entry",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_shared_budget_denial_cannot_leave_trade_or_attempt",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_unknown_commit_reply_stops_before_transport_and_stays_fenced",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_unknown_emergency_transport_never_repeats_without_resolution",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    },
+    {
+      "test": "hl_testnet_runtime.test_experimental_live_runtime.RuntimePostgresTests.test_unproven_peer_lane_does_not_block_proven_filled_lane_protection",
+      "reason": "Requires disposable loopback PostgreSQL; memory transactions are unit evidence only"
+    }
+  ],
+  "failure_details": [],
+  "socket_transport_blocked": true,
+  "exchange_orders_sent": 0,
+  "deployment_performed": false,
+  "database_migration_performed": false,
+  "native_sibling_isolation_verified": false,
+  "shared_symbol_parallel_enabled": false,
+  "sdk_version": "0.24.0",
+  "read_count_measurement": {
+    "source": "deterministic_raw_response_fixture_not_live_measurement",
+    "two_different_symbol_candidates_one_account": {
+      "before": 25,
+      "after": 21
+    },
+    "two_same_symbol_candidates_one_account": {
+      "before": 25,
+      "after": 20
+    },
+    "two_empty_consecutive_collections": {
+      "before": [
+        9,
+        9
+      ],
+      "after": [
+        9,
+        9
+      ]
+    },
+    "ownership_inventory_reads_retained_per_collection": 8
+  },
+  "sha256": {
+    "receiver/hl_testnet_runtime/experimental_live_provider.py": "a05347e0e47b3c156f707e854f10e789f2c23384d3854268d5a487bd3586b662",
+    "receiver/hl_testnet_runtime/test_experimental_entry_read_reuse.py": "773edf96f0f3a05fae1c10350926faf2761f7123085be4e7796fa72c3b371921",
+    "receiver/hl_testnet_runtime/test_partial_exit_stop_lock.py": "28e8eb4f003e4357720aacaf0a81fa10eb3fc6495fa7ce889e9cd58e6de666eb"
+  },
+  "setup_note": "An initial signature test required the missing pinned SDK; SDK 0.24.0 was installed locally, then the full selected suite was rerun. No project dependency file changed."
+}

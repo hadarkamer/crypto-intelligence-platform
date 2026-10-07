@@ -436,7 +436,7 @@
       "hl_testnet_runtime/experimental_g65_source_parity.py": "bb93e1bc2b0ab08e4652e5b0e41321fe3c2a2d235f7ed65ebce6cf2f81171780",
       "hl_testnet_runtime/experimental_isolated_verify.py": "9efe1c31bc408d84a52d0a4b356babd188bf7ef9661404d3228aa2f9bc084313",
       "hl_testnet_runtime/experimental_live_dispatch.py": "e80317192140a0c4ca28c302611144d4d78495f2b2eaad4db081955e314e39d1",
-      "hl_testnet_runtime/experimental_live_provider.py": "f988f2ce950185916a59b02b712e24681834c1c213b1ad96d667c647f7816c22",
+      "hl_testnet_runtime/experimental_live_provider.py": "a05347e0e47b3c156f707e854f10e789f2c23384d3854268d5a487bd3586b662",
       "hl_testnet_runtime/experimental_live_release.py": "199a3f364a19747c2110d8f640e779cccf292483a8261956f1cd7b4359c3a5f0",
       "hl_testnet_runtime/experimental_live_runtime.py": "88074548254f323dba95575772e3bc0641e7559b8efe1bdb5cad6d25939a4846",
       "hl_testnet_runtime/experimental_live_safety.py": "9a9278d3b386d37619a1dcc131aa042863be62fe62a13c3e099b07fab2033c58",
@@ -540,6 +540,7 @@
       "hl_testnet_runtime/test_experimental_allocations.py": "68aadec6423949349be9041fc21c38e6a5ff19c1810a09851cec58a4f1c03628",
       "hl_testnet_runtime/test_experimental_bridge_audit.py": "2523ce674b5701de16748f46b958c30b5c56ad33b83989b693047ad67f08bb31",
       "hl_testnet_runtime/test_experimental_dispatch_integration.py": "30db1d4b535a2f21402df6953027b7d7f4a9c5fd92e727b5800761dabe0c84db",
+      "hl_testnet_runtime/test_experimental_entry_read_reuse.py": "773edf96f0f3a05fae1c10350926faf2761f7123085be4e7796fa72c3b371921",
       "hl_testnet_runtime/test_experimental_execution_dispatch.py": "4bba5ece01fe9c0123bc133414494b6517cde624f70edecb9c18e80a4f057719",
       "hl_testnet_runtime/test_experimental_execution_evidence.py": "17431fb3bad1879347b278c80d7d0a0e77675ef1db93c68105cff390ebb5584b",
       "hl_testnet_runtime/test_experimental_execution_reporting.py": "cff18c558ef6e0efa116b5b258538925d8adccddbdcfb5faa24a1db086fad7b3",
@@ -589,6 +590,7 @@
       "hl_testnet_runtime/test_minimal_exchange_reads.py": "fd821a2e0ead8e184f56b8585569e57e451afd8ccc47c5b02555e8e89aa54ba7",
       "hl_testnet_runtime/test_mixed_exits.py": "7a6339f5e7791812a883ba485f345480736b37ae0ef8a846a132459bf324cb84",
       "hl_testnet_runtime/test_parent_exit_handoff.py": "7e9edd06b6dbd1a7d7dfe865b9db0643b76c9997f95d28d95fd13bde8f5db8bf",
+      "hl_testnet_runtime/test_partial_exit_stop_lock.py": "28e8eb4f003e4357720aacaf0a81fa10eb3fc6495fa7ce889e9cd58e6de666eb",
       "hl_testnet_runtime/test_passive_timing.py": "4b15650672a948807e087aca88f451572d5f0f71d595287d6935e531e50b6092",
       "hl_testnet_runtime/test_passive_timing_durable.py": "a81657881b7a236c1929dff0e761bd39f3441007682ff197b6781332ac50a26c",
       "hl_testnet_runtime/test_passive_timing_hooks.py": "df4166d1610d50c387943a4587ed3499c5070bb2e54257d25f54cd1aad386a8d",
@@ -881,31 +883,17 @@
   },
   "code_baselines": {
     "producer": "8520a79fa319ac1beba73655348fabee7409b33e",
-    "receiver": "422e87d6c153e35fd2226572fa0810fd9c40caf3"
+    "receiver": "1aea0a498c66a47cbe1ffb40a9627cc336f9bc70"
   },
   "local_verification": {
-    "stages": {
-      "producer": {
-        "errors": 0,
-        "failures": 0,
-        "network_attempts_blocked": 0,
-        "passed": 364,
-        "skipped": 5,
-        "tests_run": 369,
-        "unexpected_successes": 0
-      },
-      "runtime": {
-        "errors": 0,
-        "failures": 0,
-        "network_attempts_blocked": 0,
-        "passed": 2306,
-        "skipped": 597,
-        "tests_run": 2903,
-        "unexpected_successes": 0
-      }
-    },
+    "errors": 0,
+    "failures": 0,
+    "passed": 290,
+    "report_sha256": "87b902e4a42a48e34f2f5e99149089312c45021ea6e257283eba292ba14e07f0",
+    "scope": "selected_regressions_including_twenty_new_tests",
+    "skipped": 107,
     "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
-    "summary_sha256": "d456834ac4abf8a0156ad51f62a98a06db48d90c4b56c10ba632775fb0257d5f"
+    "tests_run": 397
   },
   "schema": "experimental_render_bundle_v1"
 }

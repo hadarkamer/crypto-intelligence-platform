@@ -255,7 +255,8 @@ class LiveEvidenceProvider:
                     pending=old['pending'] if old else None,evidence=dict(snapshot=observed))
         return normalized,observed,bucket,legacy_active,exp,lookups
 
-    def _capacity(self, message, account, role, metadata, *, buckets, inventory, market):
+    def _capacity(self, message, account, role, metadata, *, buckets, inventory, market,
+                  entry_reads=None):
         route=roles.route_for(self.env,role,account)
         prepared=execution_prices.prepare(message,metadata)['execution']
         plan={k:prepared[k] for k in ('symbol','side','entry','stop','take_profit')}
@@ -263,11 +264,40 @@ class LiveEvidenceProvider:
         # Reuse role-specific actual account identity, abstraction, budget and
         # address allowance checks. The recording reader retains raw facts.
         recorded={};outer=self
+        # Shared ONLY by candidate cards in this one collection. Never wrap
+        # protection reads or the two independent account inventory passes.
+        # Account mode probes stay uncached, including the final default-mode
+        # recheck. Different account modes cannot share balance/capacity data.
+        entry_reads={} if entry_reads is None else entry_reads
+        sampled=entry_reads.setdefault('samples',{})
+        modes=entry_reads.setdefault('modes',{})
+        reusable={'userRole','clearinghouseState','spotClearinghouseState',
+                  'activeAssetData','userRateLimit'}
         class RecordingReader:
             parallel=False
             def read(self,kind,**kwargs):
+                nonlocal at
                 # Admission preflight cannot consume the protection reserve.
-                value=market.metadata if kind=='meta' else outer.entry_info.read(kind,**kwargs)
+                if kind=='meta':
+                    value=market.metadata
+                elif kind in reusable:
+                    key=(account,kind,kwargs.get('user'),kwargs.get('coin'))
+                    if key not in sampled:
+                        observed_at=outer.now()
+                        value=outer.entry_info.read(kind,**kwargs)
+                        sampled[key]=(observed_at,deepcopy(value))
+                    observed_at,value=sampled[key]
+                    at=min(at,observed_at)  # Reuse never refreshes evidence time.
+                    value=deepcopy(value)
+                else:
+                    value=outer.entry_info.read(kind,**kwargs)
+                    if kind=='userAbstraction':
+                        if account in modes and modes[account]!=value:
+                            # Includes A -> B -> A; old account/agent samples
+                            # never survive an observed mode transition.
+                            for key in list(sampled):
+                                if key[0]==account:del sampled[key]
+                        modes[account]=deepcopy(value)
                 if kind=='activeAssetData':
                     value=market.active_asset_data(value,account=account,
                         symbol=message['symbol'],now_ms=outer.now())
@@ -386,6 +416,9 @@ class LiveEvidenceProvider:
         source_io_allowed=source_io_allowed and not any(
             _original_stop_needed(price_state,trade) for trade in price_state['trades'].values())
         unresolved=any(r['phase'] not in ('OBSERVED','ABORTED_UNSENT') for r in state['requests'].values())
+        # No cross-cycle or cross-thread cache: changed state/feed checkpoints
+        # always collect independently and protection never waits for entry I/O.
+        entry_reads={}
         for cid,record in state['sources'].items():
             msg=contract.validate(record['source']);role='long_account' if msg['side']=='LONG' else 'short_account'
             account=state['routes'][role];lane=runtime._lane(account,msg['symbol'])
@@ -427,10 +460,16 @@ class LiveEvidenceProvider:
                 if self.safety is None:
                     raise ProviderError('VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
                 result['capacity'][cid],reports[cid]=self._capacity(msg,account,role,metadata,
-                    buckets=buckets[account],inventory=second[account],market=market)
+                    buckets=buckets[account],inventory=second[account],market=market,
+                    entry_reads=entry_reads)
             except Exception as exc:
                 # This entire block is entry-only evidence. A failed source
                 # cache or background allowance must not abort owned exits.
+                # A transport may return malformed raw data successfully;
+                # never retain it after later preflight validation rejects it.
+                samples=entry_reads.get('samples',{})
+                for key in list(samples):
+                    if key[0]==account:del samples[key]
                 result['entry_blocked'][cid]=_error(exc)
         if not 0<=self.now()-now<=15000:
             raise ProviderError('ACCOUNT_COLLECTION_EXPIRED')
