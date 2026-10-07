@@ -45,7 +45,26 @@ def _maintain(state, now):
 
 
 def _encode(state):
-    raw = json.dumps(state, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+    def encode():
+        return json.dumps(state, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+    raw = encode()
+    if len(raw.encode()) > MAX_BYTES:
+        # Optional execution proof must never exhaust the original notification
+        # lifecycle's state capacity (for example when OPEN duplicates a payload
+        # into the notification outbox). Dropped proof cannot create/revive an
+        # execution plan; its receiver lease expires without a new heartbeat.
+        candidates = []
+        for source_state in (state, state.get('legacy_source_state', {})):
+            candidates += list(source_state.get('history', []))
+            candidates += [i.get('payload', {}) for i in source_state.get('intents', [])]
+            candidates += list(source_state.get('active', []))
+        for plan in candidates:
+            removed = plan.pop('execution_evidence', None)
+            diagnostic = plan.pop('execution_evidence_error', None)
+            if removed is not None or diagnostic is not None:
+                raw = encode()
+                if len(raw.encode()) <= MAX_BYTES:
+                    break
     if len(raw.encode()) > MAX_BYTES:
         raise ValueError('SOL durable state capacity exceeded; transaction rolled back')
     return raw
@@ -144,6 +163,7 @@ def migrate_price_source(state, now, config_sha256, coin):
 def transact(scope, now, config_sha256, action, *, database_url=None, migrate_legacy_sol=False,
              migrate_source_coin=None):
     key = key_for(scope)
+    execution_changed = False
     with _connect(database_url) as conn:
         lock = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], 'big', signed=True)
         conn.execute('SELECT pg_advisory_xact_lock(%s)', (lock,))
@@ -166,7 +186,29 @@ def transact(scope, now, config_sha256, action, *, database_url=None, migrate_le
         result = action(state) if action else deepcopy(state)
         _maintain(state, now)
         conn.execute('UPDATE bot_settings SET value=%s WHERE key=%s', (_encode(state), key))
-        return deepcopy(result)
+        # Additive transport only. Its explicit migration is never run here;
+        # failure must not roll back an otherwise valid source observation.
+        from experimental_execution_bridge import approved_enabled
+        if approved_enabled():
+            conn.execute('SAVEPOINT approved_execution_outbox')
+            try:
+                from approved_alert_outbox import synchronize
+                execution_changed = synchronize(conn, key, state, now)
+            except Exception:
+                conn.execute('ROLLBACK TO SAVEPOINT approved_execution_outbox')
+                print('[approved-execution] outbox unavailable; source decision preserved', flush=True)
+            finally:
+                conn.execute('RELEASE SAVEPOINT approved_execution_outbox')
+        result = deepcopy(result)
+    # The context manager has committed successfully before waking the sender.
+    # An exception/rollback above never produces a pre-commit execution wake.
+    if execution_changed:
+        try:
+            from experimental_execution_forwarder import notify_source_commit
+            notify_source_commit(key)
+        except Exception:
+            print('[approved-execution] wake unavailable; durable recovery pending', flush=True)
+    return result
 
 
 def snapshot(scope, *, database_url=None):
@@ -181,8 +223,20 @@ def initialize_scope(scope, now, *, config_sha256, database_url=None, migrate_le
                     migrate_legacy_sol=migrate_legacy_sol, migrate_source_coin=migrate_source_coin)
 
 
-def ingest(scope, decoded, bars, now, *, config_sha256, database_url=None):
-    return transact(scope, now, config_sha256, lambda s: signal.ingest(s, decoded, now, bars), database_url=database_url)
+def ingest(scope, decoded, bars, now, *, config_sha256, database_url=None, execution_enabled=None):
+    # Optional evidence capture shares the existing transaction and never
+    # changes formula admission or schedules an additional database operation.
+    from experimental_execution_bridge import enabled, capture_maxpain_evidence
+    capture = enabled() if execution_enabled is None else execution_enabled
+    if type(capture) is not bool:
+        raise ValueError('Explicit boolean execution evidence mode required')
+    def action(state):
+        prior = deepcopy(state) if capture else None
+        result = signal.ingest(state, decoded, now, bars)
+        if capture:
+            capture_maxpain_evidence(state, decoded, prior, config_sha256=config_sha256, max_bytes=MAX_BYTES)
+        return result
+    return transact(scope, now, config_sha256, action, database_url=database_url)
 
 
 def advance(scope, bars, now, *, config_sha256, database_url=None):
