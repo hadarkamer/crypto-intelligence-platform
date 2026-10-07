@@ -215,6 +215,11 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             else:
                 proposal=super()._maintain(own,context,now)
             if proposal is None:continue
+            from .experimental_shared_market import proposal_reason
+            reason=proposal_reason(state,proposal)
+            if reason:
+                trade['shared_market_blocked_reason']=reason
+                continue
             if self._rejection_key(proposal) in trade.get('rejection_circuit',{}):
                 trade['rejected_action_requires_material_change']=True
                 continue
@@ -282,7 +287,12 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         return proposal
 
     def _reserve_live(self, state, proposal, now, nonce):
-        rid = life.digest([VERSION, proposal, len(state['requests']), now])
+        from .experimental_shared_market import proposal_reason
+        reason=proposal_reason(state,proposal)
+        if reason:
+            raise RuntimeError(reason)
+        rid = life.digest([VERSION, proposal,
+            state.get('archived_request_count', 0) + len(state['requests']), now])
         request = dict(request_id=rid, domain='testnet',
             bucket=_lane(proposal['account'], proposal['symbol']), proposal=proposal,
             nonce=nonce, attempt_at_ms=now, prepared_at_ms=now, attempts=1,
@@ -299,9 +309,11 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         owner=getattr(self,'startup_owner',None)
         if owner is not None:
             owner.verify()
+        history_ok=self._compact_history()
         before = self.store.load()
         admission_release = self._release(before, self.venue.now())
-        collect_entries = (entries_enabled is True and releases.entry_enabled(admission_release,self.venue.now()))
+        collect_entries = (entries_enabled is True and history_ok
+            and releases.entry_enabled(admission_release,self.venue.now()))
         context = self.venue.collect(deepcopy(before), entries_enabled=collect_entries)
         now = self.venue.now()
         life.moment(now)
@@ -379,8 +391,12 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
     def report(self):
         """Domain-correct operational status, never a software P/L projection."""
         state = self.store.load()
+        from .experimental_shared_market import assess
         return dict(domain='testnet', revision=state['revision'],
             sources=len(state['sources']), trades=len(state['trades']),
+            history=deepcopy(state.get('history', {})),
+            history_maintenance_error=getattr(self,'_history_maintenance_error',None),
+            shared_market=assess(state),
             unresolved_attempts=sum(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')
                 for r in state['requests'].values()),
             entry_blocked=deepcopy(state.get('entry_blocked', {})),

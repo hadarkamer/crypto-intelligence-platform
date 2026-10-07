@@ -33,6 +33,17 @@ def project(state):
     """Project the runtime's verified durable snapshot, without mutating it."""
     if state.get('version') != VERSION or state.get('domain') != 'software':
         raise ReportError('VERIFIED_ISOLATED_STATE_REQUIRED')
+    from .experimental_shared_market import assess
+    rows = _project_rows(state)
+    return dict(domain='software', real_exchange_activity=False, snapshot_revision=state['revision'],
+        history=dict(state.get('history', {})), shared_market=assess(state),
+        trades=rows, counts=dict(total=len(rows), closed=sum(r['status']=='CLOSED' for r in rows),
+            open=sum(Decimal(r['remaining_quantity'])>0 for r in rows),
+            unresolved_attempts=sum(r['unresolved_attempts'] for r in rows)))
+
+
+def _project_rows(state):
+    """Project already verified facts; domain checking belongs to the caller."""
     rows = []
     for cid, trade in sorted(state['trades'].items()):
         if trade['cid'] != cid:
@@ -69,7 +80,22 @@ def project(state):
             net_pnl_status='ACTUAL_FEES_AND_FUNDING_NOT_AVAILABLE',
             submitted_attempts=len(requests), unresolved_attempts=unresolved,
             owned_order_ids=sorted(trade['orders'])))
-    return dict(domain='software', real_exchange_activity=False, snapshot_revision=state['revision'],
-        trades=rows, counts=dict(total=len(rows), closed=sum(r['status']=='CLOSED' for r in rows),
-            open=sum(Decimal(r['remaining_quantity'])>0 for r in rows),
-            unresolved_attempts=sum(r['unresolved_attempts'] for r in rows)))
+    return rows
+
+
+def project_history(page, *, domain):
+    """Project one checksummed archive page, never all historical state."""
+    if domain not in ('software', 'testnet'):
+        raise ReportError('VERIFIED_HISTORY_DOMAIN_REQUIRED')
+    rows, occurrences = [], []
+    for record in page['records']:
+        if record['domain'] != domain:
+            raise ReportError('HISTORY_DOMAIN_MISMATCH')
+        cid=record['occurrence_id']
+        occurrences.append(cid)
+        if record['trade'] is None:
+            continue
+        rows.extend(_project_rows(dict(trades={cid:record['trade']},
+            requests=record['requests'], events=record['events'])))
+    return dict(domain=domain, trades=rows, archived_occurrences=occurrences,
+        archived_count=page['archived_count'], next_cursor=page['next_cursor'])

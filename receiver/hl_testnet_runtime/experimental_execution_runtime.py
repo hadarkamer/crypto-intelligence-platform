@@ -20,6 +20,7 @@ from .experimental_plan_store import reduce_source
 from .experimental_execution_state import ExecutionState, PostgresExecutionState, StateError
 from .risk_policy import budget, assert_new_entry_budget
 from .experimental_execution_prices import prepare as prepare_prices
+from . import experimental_shared_market as shared_market
 
 VERSION = 'experimental-isolated-worker-v1'
 MODE = 'explicit_software_exchange_only_v1'
@@ -134,7 +135,7 @@ class IsolatedExecutionRuntime:
                     state['events'].append(dict(at_ms=now, kind='SOURCE_'+msg['kind'], occurrence_id=cid))
                 receipts.append(dict(occurrence_id=cid,revision=source['revision'],status='RECORDED' if changed else 'DUPLICATE',record_only=True,entry_permission=source['entry_permission']))
             return dict(recorded=len(values),receipts=receipts,**status)
-        return self.store.mutate(transition)
+        return self.store.mutate_sources(transition, [m['occurrence_id'] for m in values])
 
     def _snapshot(self, state, snapshot, now):
         required = {'environment','account','symbol','at_ms','history_complete','orders_complete',
@@ -271,7 +272,11 @@ class IsolatedExecutionRuntime:
         if trade['asset'] != dict(index=index,decimals=decimals):
             raise RuntimeError('CONTRACT_METADATA_CHANGED')
         wire.precise(price,quantity,decimals)
-        c = '0x'+life.digest([VERSION,trade['cid'],leg,len(state['requests']),price,quantity])[:32]
+        # Archival must never reuse an earlier CLOID. Keeping the archived
+        # prefix also preserves the final-entry replay which removes one
+        # not-yet-sent request before reconstructing its exact proposal.
+        serial = state.get('archived_request_count', 0) + len(state['requests'])
+        c = '0x'+life.digest([VERSION,trade['cid'],leg,serial,price,quantity])[:32]
         order = dict(a=index,b=trade['side']=='LONG' if leg=='ENTRY' else trade['side']=='SHORT',p=price,s=quantity,
             r=leg!='ENTRY',t=dict(limit=dict(tif='Gtc' if trade['source']['family'] in ('maxpain','sol_g65') else 'Ioc'))
                 if leg=='ENTRY' else dict(trigger=dict(isMarket=leg=='STOP',triggerPx=price,tpsl='sl' if leg=='STOP' else 'tp')),c=c)
@@ -309,6 +314,23 @@ class IsolatedExecutionRuntime:
         return trade['desired_stop']
 
     def _maintain(self, state, context, now):
+        # Imported/recovered shared lanes need a capacity defense even though
+        # new shared entries remain disabled. Keep unrelated verified trades
+        # moving when one owner's independently executable exits are unsafe.
+        for trade in sorted(state['trades'].values(), key=lambda t: t['cid']):
+            own = {**state, 'trades': {trade['cid']: trade}}
+            proposal = self._maintain_candidate(own, context, now)
+            if proposal is None:
+                continue
+            reason = shared_market.proposal_reason(state, proposal)
+            if reason:
+                trade['shared_market_blocked_reason'] = reason
+                continue
+            trade.pop('shared_market_blocked_reason', None)
+            return proposal
+        return None
+
+    def _maintain_candidate(self, state, context, now):
         for trade in sorted(state['trades'].values(),key=lambda t:t['cid']):
             if trade['phase'] in FINAL:
                 continue
@@ -387,7 +409,10 @@ class IsolatedExecutionRuntime:
         role = 'long_account' if msg['side']=='LONG' else 'short_account'; account=state['routes'][role]
         peers = [t for t in state['trades'].values() if t['account']==account and t['phase'] not in FINAL]
         if any(t['symbol']==msg['symbol'] for t in peers):
+            state.setdefault('entry_blocked', {})[cid] = shared_market.ENTRY_BLOCK
             return None  # Net-position exchange cannot guarantee independent OCO.
+        if state.get('entry_blocked', {}).get(cid) == shared_market.ENTRY_BLOCK:
+            state['entry_blocked'].pop(cid)
         if msg['family'] in ('r2732','hype_row71205','sol_g65') and any(t['source']['family']==msg['family'] for t in peers):
             return None
         lane = _lane(account,msg['symbol'])
@@ -473,6 +498,10 @@ class IsolatedExecutionRuntime:
         return self._order(state,trade,'ENTRY',quantity,prices['entry'],metadata,now)
 
     def _reserve(self,state,proposal,now):
+        from .experimental_shared_market import proposal_reason
+        reason=proposal_reason(state,proposal)
+        if reason:
+            raise RuntimeError(reason)
         weight=request_budget.request_weight('/exchange',dict(action=proposal['action']))
         state['budget']=[x for x in state['budget'] if now-x['at_ms']<request_budget.WINDOW_MS]
         ceiling=request_budget.BACKGROUND_LIMIT if proposal['leg']=='ENTRY' and proposal['operation']=='ENTRY' else request_budget.LIMIT
@@ -482,7 +511,7 @@ class IsolatedExecutionRuntime:
         if nonce>now+1000:
             raise RuntimeError('DURABLE_NONCE_WINDOW_EXHAUSTED_DEFER')
         state['last_nonce']=nonce
-        rid=life.digest([VERSION,proposal,len(state['requests']),now])
+        rid=life.digest([VERSION,proposal,state.get('archived_request_count',0)+len(state['requests']),now])
         request=dict(request_id=rid,domain='software',bucket=_lane(proposal['account'],proposal['symbol']),proposal=proposal,
             nonce=nonce,attempt_at_ms=now,prepared_at_ms=now,attempts=1,phase='OUTCOME_UNKNOWN',reply=None,observed_oid=None)
         state['requests'][rid]=request
@@ -493,7 +522,33 @@ class IsolatedExecutionRuntime:
 
     def report(self):
         from .experimental_execution_reporting import project
-        return project(self.store.load())
+        report=project(self.store.load())
+        report['history_maintenance_error']=getattr(self,'_history_maintenance_error',None)
+        return report
+
+    def _compact_history(self):
+        """Optional maintenance must not stop supervision of owned positions.
+
+        A failed/uncertain transaction is followed by a fresh durable load.
+        Admit no new exposure until maintenance works again; active-state or
+        archived-evidence corruption still fails its normal verification.
+        """
+        try:
+            result=self.store.compact_history(now_ms=self.venue.now())
+        except Exception:
+            self._history_maintenance_error='HISTORY_MAINTENANCE_DEFERRED'
+            return False
+        if result.get('status')=='HISTORY_RECORD_CAPACITY_REVIEW_REQUIRED':
+            self._history_maintenance_error='HISTORY_RECORD_CAPACITY_REVIEW_REQUIRED'
+            return False
+        self._history_maintenance_error=None
+        return True
+
+    def history_report(self, *, after='', limit=100):
+        """Read one cold-history page without rehydrating execution state."""
+        from .experimental_execution_reporting import project_history
+        return project_history(self.store.history_page(after=after, limit=limit),
+                               domain=self.store.domain)
 
     def _cycle_proposal(self, state, context, now, *, entries_enabled):
         """Pure shared lifecycle transition; no database or network calls."""
@@ -527,11 +582,13 @@ class IsolatedExecutionRuntime:
 
     def run_once(self, *, entries_enabled=True):
         """One observed cycle; entry halt never disables existing protection."""
+        history_ok=self._compact_history()
         before=self.store.load()
         context=self.venue.collect(deepcopy(before))
+        context=self.store.strip_archived_orders(context)
         now=self.venue.now(); life.moment(now)
         def transition(state):
-            proposal=self._cycle_proposal(state,context,now,entries_enabled=entries_enabled)
+            proposal=self._cycle_proposal(state,context,now,entries_enabled=entries_enabled and history_ok)
             return self._reserve(state,proposal,now) if proposal else None
         request=self.store.mutate(transition)
         if request is None:

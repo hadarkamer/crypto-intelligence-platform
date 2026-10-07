@@ -15,6 +15,7 @@ import sqlite3
 
 from . import card_lifecycle as life
 from .postgres_journal import JournalError
+from .experimental_execution_archive import HistoryMixin
 
 VERSION = 'experimental-isolated-execution-state-v1'
 PG_SCHEMA = 'hl_experimental_isolated_worker_v1'
@@ -52,7 +53,7 @@ def encode(value):
     return result
 
 
-class ExecutionState:
+class ExecutionState(HistoryMixin):
     domain = 'software'
 
     def __init__(self, path):
@@ -110,7 +111,7 @@ class ExecutionState:
             conn.close()
 
 
-class PostgresExecutionState:
+class PostgresExecutionState(HistoryMixin):
     """Only disposable CI PostgreSQL on loopback; cannot use production DSNs."""
     domain = 'software'
 

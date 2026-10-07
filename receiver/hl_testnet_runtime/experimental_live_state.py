@@ -9,6 +9,7 @@ import json
 
 from . import card_lifecycle as life
 from .experimental_execution_state import StateError, encode
+from .experimental_execution_archive import HistoryMixin
 from .postgres_journal import PostgresJournal, STAGING_DB, STAGING_HOST
 from .filled_dispatch_store import DispatchStore, SCHEMA as DISPATCH_SCHEMA
 
@@ -42,7 +43,7 @@ def checked(raw, checksum):
         raise StateError('TESTNET_STATE_INTEGRITY_FAILURE') from None
 
 
-class TestnetExecutionState:
+class TestnetExecutionState(HistoryMixin):
     """Persist only into the selected Testnet journal's separate schema.
 
     for_ci is explicit loopback support for tests of the TESTNET data format;

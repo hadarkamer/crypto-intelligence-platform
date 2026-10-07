@@ -227,6 +227,11 @@ class LiveEvidenceProvider:
                            for p in inventory['positions']['assetPositions'])):
                 raise ProviderError('UNOWNED_MARKET_EXPOSURE_REQUIRES_RECONCILIATION')
             observed=_empty(account,symbol,self.now())
+        # A bounded overlap read may repeat fills from an already archived
+        # final trade. Only exact immutable archived facts may be excluded;
+        # changed facts and unknown activity remain reconciliation failures.
+        if state.get('history'):
+            observed=self.experimental_store.strip_archived_collector_snapshot(observed)
         all_ids={o for b in bindings for rows in b['orders'].values() for o in rows}
         if any(f['oid'] not in all_ids for f in observed['fills']):
             raise ProviderError('UNOWNED_ACCOUNT_FILL_REQUIRES_RECONCILIATION')

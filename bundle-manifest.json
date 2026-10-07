@@ -425,23 +425,24 @@
       "hl_testnet_runtime/exclusive_exit_protocol.py": "2086aa7e0fa6c08ceb847aa0079a4f003a42c253f143090eb7e6658d348fbc54",
       "hl_testnet_runtime/execution_occurrence.py": "b93d9395571f28bcbda719007cbdc2e08edc947cde9c9634d54b2317b2c456df",
       "hl_testnet_runtime/experimental_allocations.py": "2bf56390ab66f79e8a43cc06ee5adfdd56e78fa4c8fdc87755f35fdda838f9de",
+      "hl_testnet_runtime/experimental_execution_archive.py": "359eba6b46ae1ed126c85a42613ac03bcf6014cafe5dfd52ad62f094c281f752",
       "hl_testnet_runtime/experimental_execution_dispatch.py": "e40c36c9c6afb69a1e74431507be9a41e464035ddfa1298b827abe16c9ffca31",
       "hl_testnet_runtime/experimental_execution_evidence.py": "bdfa9a7b381e44171b2b911ff1626922aaadd00f4244d8329ce7156a3cd92de9",
       "hl_testnet_runtime/experimental_execution_gateway.py": "d92f6260c0e2c8c287680bd6bb8fb1070c6b9a149806b33edce4d898a89e4325",
       "hl_testnet_runtime/experimental_execution_prices.py": "e8c0e4badee61c0bc6c0b9c7e73ae0f4ea20ff57fbd835fbe8a34c84e06ff72f",
-      "hl_testnet_runtime/experimental_execution_reporting.py": "2ce9176cfd71ef4977edc45d0e8a4fbd9dce0a14d1a0f793dbe1c79dac08234b",
-      "hl_testnet_runtime/experimental_execution_runtime.py": "d3b5a94273f3d655484415d8f5f9dc8a1e0cee9a7fee96acd699d74a6f34d1e3",
-      "hl_testnet_runtime/experimental_execution_state.py": "45bd28bb75725f7c3910fc576ff5f7139fc05c9d0dea108f975a2ed6bf65ec25",
+      "hl_testnet_runtime/experimental_execution_reporting.py": "09922ae04d559941c40e01f3964e8ad6ee46db9214a2df845a2d4bb92b34a925",
+      "hl_testnet_runtime/experimental_execution_runtime.py": "b333dfd52cadb717d3a53ce1e23bcffc3a6c75354d74f52b1720b6fcc1ff030a",
+      "hl_testnet_runtime/experimental_execution_state.py": "47e515e349b87bb0c6ee2e98045284b85c9f7d3fa9e3475296c04db02fc5f741",
       "hl_testnet_runtime/experimental_g65_source_parity.py": "bb93e1bc2b0ab08e4652e5b0e41321fe3c2a2d235f7ed65ebce6cf2f81171780",
       "hl_testnet_runtime/experimental_isolated_verify.py": "9efe1c31bc408d84a52d0a4b356babd188bf7ef9661404d3228aa2f9bc084313",
       "hl_testnet_runtime/experimental_live_dispatch.py": "e80317192140a0c4ca28c302611144d4d78495f2b2eaad4db081955e314e39d1",
-      "hl_testnet_runtime/experimental_live_provider.py": "bfac59901a80bb0f55f3485d647ed1e087b00f4ab6a5bffc9e87896ac14d9ada",
+      "hl_testnet_runtime/experimental_live_provider.py": "f988f2ce950185916a59b02b712e24681834c1c213b1ad96d667c647f7816c22",
       "hl_testnet_runtime/experimental_live_release.py": "199a3f364a19747c2110d8f640e779cccf292483a8261956f1cd7b4359c3a5f0",
-      "hl_testnet_runtime/experimental_live_runtime.py": "9e13ab68d31dfced771b6576a5c05c62d53d43fd6bb5840fa0b7c8db2be1bc6b",
+      "hl_testnet_runtime/experimental_live_runtime.py": "88074548254f323dba95575772e3bc0641e7559b8efe1bdb5cad6d25939a4846",
       "hl_testnet_runtime/experimental_live_safety.py": "9a9278d3b386d37619a1dcc131aa042863be62fe62a13c3e099b07fab2033c58",
       "hl_testnet_runtime/experimental_live_service.py": "8d707995f19531f4fee4893912a921c5bcd22ef43229b3082f7f09f852cdabdb",
       "hl_testnet_runtime/experimental_live_startup.py": "b02129491c4066c0a036d3263a3318de3bda345a9508baa970d293382b501b34",
-      "hl_testnet_runtime/experimental_live_state.py": "b306e1b1c24759658d9d82765bcdfbeae775bdebf975b278a5c3553ae2e98f2a",
+      "hl_testnet_runtime/experimental_live_state.py": "f35de48196d41bac58cbfc03c1339fec201ba0712c9ae18fe9877b39bf8aa4a4",
       "hl_testnet_runtime/experimental_local_controller.py": "5a644390c1fd1095b7a3c0846144e44b82b733b81cbfc1aa65b41417467c29c7",
       "hl_testnet_runtime/experimental_market_context.py": "329ae985a00fbfc2a01b2cf80414e6b908e5ab0bf16a2e5ade8645c24c3a6d00",
       "hl_testnet_runtime/experimental_plan_intake.py": "8d6e802e54c8fb1287c192f39f20a69d287731ae9a774b3ca83baddedf03ca0b",
@@ -450,6 +451,7 @@
       "hl_testnet_runtime/experimental_price_evidence.py": "5002de2bb3ab502df2e0bd3ca0753fc1ae9c351cc561c0b7c3f53ee07b518f81",
       "hl_testnet_runtime/experimental_render_verify.py": "466403bba9a2ae733ad5d89cecddfd4873fa9372e03dfe2fbf7a1549e7c7afcf",
       "hl_testnet_runtime/experimental_runtime_owner.py": "980e701ec2c4f12fad94b3e44868bbae707b4a2f64f7a102b784ea37ae04df68",
+      "hl_testnet_runtime/experimental_shared_market.py": "c9e1e59e458ee97908f116014a3db7e58aaa6d2fd45a3846640b6a13915d0500",
       "hl_testnet_runtime/experimental_source_archive.py": "b4780a99200a4c1077f4dd67c9422f32b2e52665b4dd853b25c8555404f8c289",
       "hl_testnet_runtime/fill_wakeups.py": "c45c86ce6005d7c1c7f2c27ab4ac7cc580ac87c33e03201e82d75b1efff8bebf",
       "hl_testnet_runtime/filled_dispatch_store.py": "f77ae851db4fd78950810d1db8c8e9b5592e2ecb4c2120840f446fe286c5db39",
@@ -530,6 +532,9 @@
       "hl_testnet_runtime/test_emergency_peer_checkpoint.py": "ae4910c24815370f3f445e2093d008524c4a90d210df6401c89184729615bb2c",
       "hl_testnet_runtime/test_exclusive_exit_protocol.py": "380c1b54d7dd28f4ad9172b36c9967bd647751325aadc293ffb43c291f04db12",
       "hl_testnet_runtime/test_exclusive_raw_flow.py": "b96007cc441df470e09bc0f77904d9103ecafacf7eabe0b6a64c52568540bbb0",
+      "hl_testnet_runtime/test_execution_history_lifecycle.py": "180da089ec71e82af956a19756745d74d2c2070af105dc2fa9f6100ef69718c8",
+      "hl_testnet_runtime/test_execution_history_pg.py": "d138a09c56b43764f1feb26a5cbd1b1839ea5a515b167ce557ff57b19ef4c283",
+      "hl_testnet_runtime/test_execution_history_store.py": "43e3a0a1ec349c250f5653fe6760e70fa5759a63990a3e92b69596d1e7082b64",
       "hl_testnet_runtime/test_execution_occurrence.py": "f40d9ca5af69f73592c4c5dd88d7d44a1fb7d524262cf267609ae024afb0d782",
       "hl_testnet_runtime/test_exit_amendment.py": "144acf7920aa563574045c12c689034d8d83169b9d1da78687f4873045ae845a",
       "hl_testnet_runtime/test_experimental_allocations.py": "68aadec6423949349be9041fc21c38e6a5ff19c1810a09851cec58a4f1c03628",
@@ -558,6 +563,7 @@
       "hl_testnet_runtime/test_experimental_price_evidence.py": "0fc4aede4b375cf2a85c37655ff515c3537d7bb882a2a43a58c970bf8d688ac9",
       "hl_testnet_runtime/test_experimental_render_verify.py": "f6dc5a4358b05cdd5ab7bd8d1bdaad5d0898d6f223d55736ee88f5531230fc25",
       "hl_testnet_runtime/test_experimental_runtime_owner.py": "e4c528c4fd6fd546c923c5d9b876136ae34326a281d5bcbe31679c36fa92a7dc",
+      "hl_testnet_runtime/test_experimental_shared_market.py": "f06ae184544e79bf7edaa61aaa8b2a8ce07973eae53bcd2a8771afe6fa33ef81",
       "hl_testnet_runtime/test_experimental_source_archive.py": "900edb272fc8af013cc95f403182984bd145d68d70c3b719455d14c5950f0381",
       "hl_testnet_runtime/test_fill_wakeups.py": "37116bb7ba3188ab079308a3bca1ebaa3ac3fd3ed6a7b3209fc3b826ad5ca7b8",
       "hl_testnet_runtime/test_filled_dispatch_attempt_boundary.py": "e504d7089756a95c314ab84f2092907faa428dbe6bc019a9b8696d90d325a2b8",
@@ -875,7 +881,7 @@
   },
   "code_baselines": {
     "producer": "8520a79fa319ac1beba73655348fabee7409b33e",
-    "receiver": "a1521c535b5b435e87733eb86753058999ffef53"
+    "receiver": "422e87d6c153e35fd2226572fa0810fd9c40caf3"
   },
   "local_verification": {
     "stages": {
@@ -892,14 +898,14 @@
         "errors": 0,
         "failures": 0,
         "network_attempts_blocked": 0,
-        "passed": 2252,
-        "skipped": 563,
-        "tests_run": 2815,
+        "passed": 2304,
+        "skipped": 597,
+        "tests_run": 2901,
         "unexpected_successes": 0
       }
     },
     "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
-    "summary_sha256": "52eb5900f037d8f1b8d7fe2d615e08efd1ef4c3005ecb3de2ffab06bee0d8f27"
+    "summary_sha256": "be64ef5a6b0feaa4f826ed9283ecb33d574c00a692571fbc01cbb28c7d99c962"
   },
   "schema": "experimental_render_bundle_v1"
 }
