@@ -97,7 +97,7 @@ class InfoReader:
     def read(self, kind, *, user=None, coin=None):
         if HOST != 'api.hyperliquid-testnet.xyz':
             raise Blocked('TESTNET_ONLY')
-        if kind == 'meta' and user is None and coin is None:
+        if kind in ('meta', 'metaAndAssetCtxs') and user is None and coin is None:
             body = {'type': kind}
         elif kind in ('userRole', 'userAbstraction', 'spotClearinghouseState', 'clearinghouseState', 'userRateLimit') and coin is None:
             body = {'type': kind, 'user': address(user)}
