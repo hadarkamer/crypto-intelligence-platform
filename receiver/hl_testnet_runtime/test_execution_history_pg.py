@@ -216,20 +216,42 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.assertEqual(len(self.oracle.requests), prior_count)
         self.assertEqual(len(self.replayed_entries), 1)
 
-    def test_archived_fill_mutation_blocks_successor_before_dispatch(self):
+    def check_observed_archived_mutation(self):
         first, _ = self.close_first()
         self.compact(); self.reconnect()
         oid = self.oracle.oid('ENTRY')
-        self.oracle.orders[oid]['view']['fills'][0]['price'] = '92'
-        second = alert(cycle='must-reject-changed-history')
-        self.worker.receive([second])
+        # A flat lane intentionally does not rescan old fills. Establish and
+        # reconcile an unfilled owned request, whose normal overlap collection
+        # actually observes old facts; only then change one of those facts.
+        second = alert(cycle='active-unfilled-history-observer')
+        self.start(second)
+        self.cycle()
+        current = self.store.load()
+        self.assertFalse(current['trades'][second['occurrence_id']]['entry_fills'])
+        self.assertTrue(all(r['phase'] == 'OBSERVED' for r in current['requests'].values()))
+        third = alert(symbol='ETH', cycle='must-block-after-observed-history-change')
+        self.worker.receive([third])
+        old_fill = self.oracle.orders[oid]['view']['fills'][0]
+        original_price = old_fill['price']
+        old_fill['price'] = '92'
         before = len(self.oracle.requests)
         self.cycle(entries=True)
         self.assertEqual(len(self.oracle.requests), before)
-        self.assertEqual(len(self.replayed_entries), 1)
-        self.assertNotIn(second['occurrence_id'], self.store.load()['trades'])
+        self.assertEqual(len(self.replayed_entries), 2)
+        self.assertNotIn(third['occurrence_id'], self.store.load()['trades'])
         self.assertTrue(self.store.load()['blocked_lanes'])
+        self.assertIn('ARCHIVED_TERMINAL_FILL_CHANGED',
+                      self.provider._last['context']['blocked_lanes'].values())
         self.assertEqual(self.store.archive_record(first['occurrence_id'])['domain'], 'testnet')
+        # The immutable original is retained. A restored consistent observation
+        # can reconcile the lane again and admit unrelated ETH normally.
+        old_fill['price'] = original_price
+        self.assertEqual(self.cycle(entries=True).get('operation'), 'ENTRY')
+        self.assertIn(third['occurrence_id'], self.store.load()['trades'])
+        self.assertFalse(self.store.load()['blocked_lanes'])
+
+    def test_observed_archived_fill_mutation_blocks_further_dispatch(self):
+        self.check_observed_archived_mutation()
 
     def test_partial_fill_and_unsettled_exit_never_archive_during_protection(self):
         value = alert(cycle='partial-must-stay-hot')
@@ -250,15 +272,23 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
 
 
 class MemoryProviderClosureSmokeTests(unittest.TestCase):
-    """Exercise the shared closure fixture locally, without claiming SQL proof.
+    """Exercise shared provider scenarios locally, without claiming SQL proof.
 
-    This is deliberately only the pre-archive lifecycle: PostgreSQL archival
-    and its locking guarantees are covered exclusively by the gated tests.
+    The archive smoke uses real pure transitions with an in-memory oracle.
+    PostgreSQL persistence and locking are covered only by the gated tests.
     """
     oracle_state = ExecutionHistoryPostgresTests.oracle_state
     cycle = ExecutionHistoryPostgresTests.cycle
     start = ExecutionHistoryPostgresTests.start
     close_first = ExecutionHistoryPostgresTests.close_first
+    compact = ExecutionHistoryPostgresTests.compact
+    check_observed_archived_mutation = ExecutionHistoryPostgresTests.check_observed_archived_mutation
+
+    def reconnect(self):
+        fixture_dsn = 'postgresql://fixture:unused@127.0.0.1:5432/hl_journal_ci'
+        with patch.object(live_state.TestnetExecutionState, 'for_ci', return_value=self.store), \
+                patch(__name__ + '.CI', fixture_dsn):
+            ExecutionHistoryPostgresTests.reconnect(self)
 
     def setUp(self):
         from .test_experimental_live_runtime import MemoryTransactions
@@ -275,6 +305,7 @@ class MemoryProviderClosureSmokeTests(unittest.TestCase):
         store.load = memory.load
         store.mutate = memory.mutate
         store.commit_attempt = memory.commit_attempt
+        self.store, self.memory = store, memory
         self.oracle = CurrentOnlyExchange(BASE + 1000)
         self.oracle_requests, self.replayed_entries, self.dispatch_errors = {}, [], []
         self.release = dict(domain='testnet', release_id='a' * 64,
@@ -282,9 +313,7 @@ class MemoryProviderClosureSmokeTests(unittest.TestCase):
             entry_policy=releases.CONTINUOUS_ENTRY, entry_expires_at_ms=None,
             not_before_ms=BASE - 60000,
             routes={role: row['account'] for role, row in LIVE_ROUTES.items()})
-        with patch.object(live_state.TestnetExecutionState, 'for_ci', return_value=store), \
-                patch(__name__ + '.CI', fixture_dsn):
-            ExecutionHistoryPostgresTests.reconnect(self)
+        self.reconnect()
 
     def test_real_provider_closure_waits_for_cancel_settlement_and_final_snapshot(self):
         value, state = self.close_first()
@@ -295,6 +324,48 @@ class MemoryProviderClosureSmokeTests(unittest.TestCase):
         self.assertTrue(all(request['phase'] == 'OBSERVED'
                             for request in state['requests'].values()))
         self.assertNotIn('history', state)
+
+    def test_real_provider_rejects_changed_archived_fact_when_observed(self):
+        """Local transition/oracle test only: no SQL, locking, or durability claim."""
+        from . import experimental_execution_archive as archive
+        records = {}
+        store, memory = self.store, self.memory
+        # This scenario receives only fresh sources. Archive deduplication and
+        # concurrent receipts remain covered by the real PostgreSQL tests.
+        store.mutate_sources = lambda transition, ids: memory.mutate(transition)
+        def compact_history(**kwargs):
+            if not kwargs.get('force'):
+                return dict(archived=0)
+            def transition(state):
+                state.setdefault('history', dict(archived_count=0))
+                count = 0
+                for cid in list(state['sources']):
+                    if archive._eligible(state, cid, kwargs['now_ms']):
+                        record = archive._bundle(state, cid, kwargs['now_ms'])
+                        records[cid] = deepcopy(record)
+                        archive._prune(state, record)
+                        state['history']['archived_count'] += 1
+                        count += 1
+                return dict(archived=count)
+            return memory.mutate(transition)
+        def archived_evidence(account, symbol, order_ids):
+            result = {}
+            for record in records.values():
+                trade = record['trade']
+                if trade['account'] != account or trade['symbol'] != symbol:
+                    continue
+                checkpoint = record['snapshots'].get('collector_checkpoints', {})
+                for oid, row in trade['orders'].items():
+                    if oid in order_ids:
+                        result[oid] = dict(order=row,
+                            collector_terminal=next((item for item in checkpoint.get('terminal_orders', [])
+                                                     if item['oid'] == oid), None),
+                            collector_fills=[item for item in checkpoint.get('fills', []) if item['oid'] == oid])
+            return deepcopy(result)
+        store.compact_history = compact_history
+        store.archive_record = lambda cid: deepcopy(records.get(cid))
+        store.archived_order_evidence = archived_evidence
+        self.check_observed_archived_mutation()
 
 
 if __name__ == '__main__':
