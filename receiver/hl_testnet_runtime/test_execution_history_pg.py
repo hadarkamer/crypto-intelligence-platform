@@ -131,6 +131,15 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         self.oracle.fill(self.oracle.oid('TAKE_PROFIT'), quantity)
         self.assertEqual(self.cycle().get('operation'), 'CANCEL')
         self.cycle()
+        # The first post-cancel snapshot proves the original OID terminal and
+        # settles the cancel request. Finality is evaluated before that
+        # settlement, so it needs the next complete reconciled snapshot.
+        settled = self.store.load()
+        cancel_requests = [request for request in settled['requests'].values()
+                           if request['proposal']['operation'] == 'CANCEL']
+        self.assertEqual(len(cancel_requests), 1)
+        self.assertEqual(cancel_requests[0]['phase'], 'OBSERVED')
+        self.cycle()
         current = self.store.load()
         self.assertEqual(current['trades'][value['occurrence_id']]['phase'], 'CLOSED')
         self.assertEqual(core._remaining(current['trades'][value['occurrence_id']]), Decimal(0))
@@ -238,6 +247,54 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
             row = self.oracle.orders[self.oracle.oid(leg)]['view']
             self.assertEqual(row['status'], 'OPEN')
             self.assertEqual(row['wire_order']['s'], '1')
+
+
+class MemoryProviderClosureSmokeTests(unittest.TestCase):
+    """Exercise the shared closure fixture locally, without claiming SQL proof.
+
+    This is deliberately only the pre-archive lifecycle: PostgreSQL archival
+    and its locking guarantees are covered exclusively by the gated tests.
+    """
+    oracle_state = ExecutionHistoryPostgresTests.oracle_state
+    cycle = ExecutionHistoryPostgresTests.cycle
+    start = ExecutionHistoryPostgresTests.start
+    close_first = ExecutionHistoryPostgresTests.close_first
+
+    def setUp(self):
+        from .test_experimental_live_runtime import MemoryTransactions
+        fixture_dsn = 'postgresql://fixture:unused@127.0.0.1:5432/hl_journal_ci'
+        for target in ('socket.create_connection', 'socket.socket.connect',
+                       'http.client.HTTPSConnection',
+                       'hyperliquid_testnet_executor._wallet',
+                       'hyperliquid_testnet_executor._signed_body',
+                       'hl_testnet_runtime.two_account_execution.wallet_for_role'):
+            blocker = patch(target, side_effect=AssertionError('MEMORY_SMOKE_NO_IO_OR_KEYS'))
+            blocker.start(); self.addCleanup(blocker.stop)
+        memory = MemoryTransactions(LIVE_ROUTES, BASE - 60000)
+        store = live_state.TestnetExecutionState.for_ci(PostgresJournal.for_ci(fixture_dsn))
+        store.load = memory.load
+        store.mutate = memory.mutate
+        store.commit_attempt = memory.commit_attempt
+        self.oracle = CurrentOnlyExchange(BASE + 1000)
+        self.oracle_requests, self.replayed_entries, self.dispatch_errors = {}, [], []
+        self.release = dict(domain='testnet', release_id='a' * 64,
+            dispatch_enabled=True, protection_enabled=True, entries_enabled=True,
+            entry_policy=releases.CONTINUOUS_ENTRY, entry_expires_at_ms=None,
+            not_before_ms=BASE - 60000,
+            routes={role: row['account'] for role, row in LIVE_ROUTES.items()})
+        with patch.object(live_state.TestnetExecutionState, 'for_ci', return_value=store), \
+                patch(__name__ + '.CI', fixture_dsn):
+            ExecutionHistoryPostgresTests.reconnect(self)
+
+    def test_real_provider_closure_waits_for_cancel_settlement_and_final_snapshot(self):
+        value, state = self.close_first()
+        self.assertEqual(state['domain'], 'testnet')
+        self.assertEqual(state['trades'][value['occurrence_id']]['phase'], 'CLOSED')
+        self.assertEqual(len(state['requests']), 4)
+        self.assertEqual(len(self.replayed_entries), 1)
+        self.assertTrue(all(request['phase'] == 'OBSERVED'
+                            for request in state['requests'].values()))
+        self.assertNotIn('history', state)
 
 
 if __name__ == '__main__':

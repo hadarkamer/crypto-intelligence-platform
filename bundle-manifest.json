@@ -533,7 +533,7 @@
       "hl_testnet_runtime/test_exclusive_exit_protocol.py": "380c1b54d7dd28f4ad9172b36c9967bd647751325aadc293ffb43c291f04db12",
       "hl_testnet_runtime/test_exclusive_raw_flow.py": "b96007cc441df470e09bc0f77904d9103ecafacf7eabe0b6a64c52568540bbb0",
       "hl_testnet_runtime/test_execution_history_lifecycle.py": "180da089ec71e82af956a19756745d74d2c2070af105dc2fa9f6100ef69718c8",
-      "hl_testnet_runtime/test_execution_history_pg.py": "d138a09c56b43764f1feb26a5cbd1b1839ea5a515b167ce557ff57b19ef4c283",
+      "hl_testnet_runtime/test_execution_history_pg.py": "6787eb042737f15ced64630e8821afa989180fe11e9917d83bdd144193640f29",
       "hl_testnet_runtime/test_execution_history_store.py": "43e3a0a1ec349c250f5653fe6760e70fa5759a63990a3e92b69596d1e7082b64",
       "hl_testnet_runtime/test_execution_occurrence.py": "f40d9ca5af69f73592c4c5dd88d7d44a1fb7d524262cf267609ae024afb0d782",
       "hl_testnet_runtime/test_exit_amendment.py": "144acf7920aa563574045c12c689034d8d83169b9d1da78687f4873045ae845a",
@@ -898,14 +898,14 @@
         "errors": 0,
         "failures": 0,
         "network_attempts_blocked": 0,
-        "passed": 2304,
+        "passed": 2305,
         "skipped": 597,
-        "tests_run": 2901,
+        "tests_run": 2902,
         "unexpected_successes": 0
       }
     },
     "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
-    "summary_sha256": "be64ef5a6b0feaa4f826ed9283ecb33d574c00a692571fbc01cbb28c7d99c962"
+    "summary_sha256": "12e3da26d839cee4173de729fb922089ecfda965887c20d21b42de237fdb61e7"
   },
   "schema": "experimental_render_bundle_v1"
 }
