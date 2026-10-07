@@ -1,0 +1,60 @@
+{
+  "build_only": true,
+  "candidate_sha256": {
+    "producer": "6fbe2ea515c5afc6f296b58f3af17dbefb7b9637d895a10182880657639b9940",
+    "receiver": "6773a5aaaba507c1d36b0bf4e7b6ab2a9d4ffbb44aaffe0a323171a08d6ff0a6"
+  },
+  "failure_code": "VERIFICATION_DID_NOT_PASS",
+  "manifest_sha256": "5602225ea17a76ec398c66ce6917ced5608d708601de3d01ac3af441f0d3bd22",
+  "publication_blocked": true,
+  "real_exchange_requests_sent": 0,
+  "schema": "experimental_render_verification_v1",
+  "status": "FAILED",
+  "verification": {
+    "postgresql": "FRESH_LOOPBACK_POSTGRES18",
+    "postgresql_cleanup": "STOPPED",
+    "producer_postgresql": "FRESH_LOOPBACK_PRODUCER_DATABASE",
+    "stages": {
+      "producer": {
+        "errors": 0,
+        "exit_code": 0,
+        "failure_details": [],
+        "failures": 0,
+        "network_attempts_blocked": 0,
+        "passed": 369,
+        "postgresql_configured": true,
+        "skipped": 0,
+        "tests_run": 369,
+        "unexpected_successes": 0
+      },
+      "runtime": {
+        "errors": 0,
+        "exit_code": 1,
+        "failure_details": [
+          {
+            "exception_type": "AssertionError",
+            "test_id": "hl_testnet_runtime.test_execution_history_pg.ExecutionHistoryPostgresTests.test_archived_fill_mutation_blocks_successor_before_dispatch"
+          },
+          {
+            "exception_type": "AssertionError",
+            "test_id": "hl_testnet_runtime.test_execution_history_pg.ExecutionHistoryPostgresTests.test_closed_archive_reopen_same_symbol_final_dispatch_replay_and_domain"
+          },
+          {
+            "exception_type": "AssertionError",
+            "test_id": "hl_testnet_runtime.test_execution_history_pg.ExecutionHistoryPostgresTests.test_concurrent_archive_and_late_receipt_use_same_testnet_transaction_lock"
+          }
+        ],
+        "failures": 3,
+        "network_attempts_blocked": 0,
+        "passed": 2898,
+        "postgresql_configured": true,
+        "skipped": 0,
+        "tests_run": 2901,
+        "unexpected_successes": 0
+      }
+    }
+  },
+  "render_build_id": "dep-db32dv142hec738bq7j0",
+  "bundle_commit": "29a353feaa68290613fea5c37a766746e8ddcc1e",
+  "finished_log_at": "2026-10-07T11:07:47.041380999Z"
+}

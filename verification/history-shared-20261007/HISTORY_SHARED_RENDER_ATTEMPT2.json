@@ -1,0 +1,52 @@
+{
+  "build_only": true,
+  "candidate_sha256": {
+    "producer": "6fbe2ea515c5afc6f296b58f3af17dbefb7b9637d895a10182880657639b9940",
+    "receiver": "14dbd74fa1395ad05c1876a859649c64cd19495089491a1813629520c4f77024"
+  },
+  "failure_code": "VERIFICATION_DID_NOT_PASS",
+  "manifest_sha256": "587de605465e231680d7b4a76f1cc3c3baeabee7d0945871582785cb0491e06d",
+  "publication_blocked": true,
+  "real_exchange_requests_sent": 0,
+  "schema": "experimental_render_verification_v1",
+  "status": "FAILED",
+  "verification": {
+    "postgresql": "FRESH_LOOPBACK_POSTGRES18",
+    "postgresql_cleanup": "STOPPED",
+    "producer_postgresql": "FRESH_LOOPBACK_PRODUCER_DATABASE",
+    "stages": {
+      "producer": {
+        "errors": 0,
+        "exit_code": 0,
+        "failure_details": [],
+        "failures": 0,
+        "network_attempts_blocked": 0,
+        "passed": 369,
+        "postgresql_configured": true,
+        "skipped": 0,
+        "tests_run": 369,
+        "unexpected_successes": 0
+      },
+      "runtime": {
+        "errors": 0,
+        "exit_code": 1,
+        "failure_details": [
+          {
+            "exception_type": "AssertionError",
+            "test_id": "hl_testnet_runtime.test_execution_history_pg.ExecutionHistoryPostgresTests.test_archived_fill_mutation_blocks_successor_before_dispatch"
+          }
+        ],
+        "failures": 1,
+        "network_attempts_blocked": 0,
+        "passed": 2901,
+        "postgresql_configured": true,
+        "skipped": 0,
+        "tests_run": 2902,
+        "unexpected_successes": 0
+      }
+    }
+  },
+  "render_build_id": "dep-db32hsm0tbcc738g6jpg",
+  "bundle_commit": "79de21ee57e184458e546bfa81900fbcb9c77846",
+  "finished_log_at": "2026-10-07T11:16:07.123641939Z"
+}

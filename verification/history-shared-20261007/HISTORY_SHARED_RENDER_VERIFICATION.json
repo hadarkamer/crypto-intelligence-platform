@@ -1,0 +1,83 @@
+{
+  "build_only": true,
+  "candidate_sha256": {
+    "producer": "6fbe2ea515c5afc6f296b58f3af17dbefb7b9637d895a10182880657639b9940",
+    "receiver": "16f3b303aa4c74be152e4ff03fc8622e6d9382925527762061a81abe66bf1143"
+  },
+  "manifest_sha256": "e1cb042b2539c8fb58cba4caac59a8c08b026873f02896d29b43bb044734498c",
+  "parity": {
+    "bars_per_comparison": 4,
+    "candidate_sha256": "f97df96e1d6dd30845a49904acd060d4c72de11f51e719b3ef2b3e6990235300",
+    "comparisons": 4000,
+    "network_attempts_blocked": 0,
+    "producer_decision_functions_sha256": "b784c3c2374f0d069be180b563b9641f5b8d9bee34912e208e724464e1c7391a",
+    "producer_file_sha256": "040538d896293a5b72125d73b2b5ffe0a26ce1343567b7ae97db2c1969acee72"
+  },
+  "postgresql_cleanup": "STOPPED",
+  "publication_blocked": true,
+  "real_exchange_requests_sent": 0,
+  "schema": "experimental_render_verification_v1",
+  "stages": {
+    "producer": {
+      "errors": 0,
+      "failures": 0,
+      "network_attempts_blocked": 0,
+      "passed": 369,
+      "skipped": 0,
+      "tests_run": 369,
+      "unexpected_successes": 0
+    },
+    "runtime": {
+      "errors": 0,
+      "failures": 0,
+      "network_attempts_blocked": 0,
+      "passed": 2903,
+      "skipped": 0,
+      "tests_run": 2903,
+      "unexpected_successes": 0
+    }
+  },
+  "status": "PASSED",
+  "verification": {
+    "postgresql": "FRESH_LOOPBACK_POSTGRES18",
+    "postgresql_cleanup": "STOPPED",
+    "producer_postgresql": "FRESH_LOOPBACK_PRODUCER_DATABASE",
+    "stages": {
+      "producer": {
+        "errors": 0,
+        "exit_code": 0,
+        "failure_details": [],
+        "failures": 0,
+        "network_attempts_blocked": 0,
+        "passed": 369,
+        "postgresql_configured": true,
+        "skipped": 0,
+        "tests_run": 369,
+        "unexpected_successes": 0
+      },
+      "runtime": {
+        "errors": 0,
+        "exit_code": 0,
+        "failure_details": [],
+        "failures": 0,
+        "network_attempts_blocked": 0,
+        "passed": 2903,
+        "postgresql_configured": true,
+        "skipped": 0,
+        "tests_run": 2903,
+        "unexpected_successes": 0
+      }
+    }
+  },
+  "render_build_id": "dep-db32lj67bikc73bfhlug",
+  "bundle_commit": "c98d7944fc2480ee5b783d67ba125ee677830152",
+  "bundle_tree": "8645124689e44f3f448880c8d0a0aafd13a84038",
+  "finished_log_at": "2026-10-07T11:25:28.750048821Z",
+  "remote_candidate_files_verified": 875,
+  "live_service_unchanged": true,
+  "live_deploy_id": "dep-db2hbd49v7es73c64qu0",
+  "live_commit": "2ca9d375ed052834e76e01a5c3e11e9cb1d38b98",
+  "trading_enabled": false,
+  "database_migration_applied_to_live": false,
+  "shared_symbol_parallel_enabled": false
+}
