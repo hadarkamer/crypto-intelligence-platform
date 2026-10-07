@@ -1,0 +1,164 @@
+{
+  "schema": "approved_alert_render_verification_v1",
+  "status": "ISOLATED_RENDER_TESTS_PASSED_NO_DEPLOYMENT",
+  "scope": "Approved-alert exact-limit continuous Testnet candidate; isolated Render build; synthetic exchange and disposable local databases only.",
+  "receiver_candidate_base_commit": "a1521c535b5b435e87733eb86753058999ffef53",
+  "receiver_harness_commit": "9b0c72e",
+  "producer_commit": "8520a79fa319ac1beba73655348fabee7409b33e",
+  "bundle_commit": "0361c0f6067c75bd6c1caa5c93cad32287fc4774",
+  "bundle_tree": "e260950a3b2cb22cd884c37aa36e5bf6f82adfcd",
+  "bundle_branch": "codex/experimental-render-isolated-20261006",
+  "manifest_sha256": "fb8eabc2cf4175321fe0c0abc1ab40cf7b8496c21c539ffe9c7f64a56b0a0245",
+  "remote_source_files_verified": 869,
+  "render": {
+    "service_id": "srv-db2jon7lot8c739eebrg",
+    "build_id": "dep-db30shqjnfac738b24u0",
+    "build": {
+      "commit": {
+        "createdAt": "2026-10-07T09:17:34Z",
+        "id": "0361c0f6067c75bd6c1caa5c93cad32287fc4774",
+        "message": "Verify approved-alert exact-limit candidate in isolated Render build only\n\nPin the Codex-verified producer and receiver sources. Run disposable PostgreSQL and synthetic exchange regression, then exit 42 after the report to prevent any publication. No bot deployment, production branch change, strategy change, live account access or live database access."
+      },
+      "createdAt": "2026-10-07T09:18:00.004233Z",
+      "finishedAt": "2026-10-07T09:22:07.426391Z",
+      "id": "dep-db30shqjnfac738b24u0",
+      "startedAt": "2026-10-07T09:18:00.002643Z",
+      "status": "build_failed",
+      "trigger": "api",
+      "updatedAt": "2026-10-07T09:22:07.427085Z"
+    },
+    "result": {
+      "build_only": true,
+      "candidate_sha256": {
+        "producer": "6fbe2ea515c5afc6f296b58f3af17dbefb7b9637d895a10182880657639b9940",
+        "receiver": "71b757c7b8d9172279fb2e4be48476b7c3f0fc0734257d0fd23e68f5f1bb4227"
+      },
+      "manifest_sha256": "fb8eabc2cf4175321fe0c0abc1ab40cf7b8496c21c539ffe9c7f64a56b0a0245",
+      "parity": {
+        "bars_per_comparison": 4,
+        "candidate_sha256": "f97df96e1d6dd30845a49904acd060d4c72de11f51e719b3ef2b3e6990235300",
+        "comparisons": 4000,
+        "network_attempts_blocked": 0,
+        "producer_decision_functions_sha256": "b784c3c2374f0d069be180b563b9641f5b8d9bee34912e208e724464e1c7391a",
+        "producer_file_sha256": "040538d896293a5b72125d73b2b5ffe0a26ce1343567b7ae97db2c1969acee72"
+      },
+      "postgresql_cleanup": "STOPPED",
+      "publication_blocked": true,
+      "real_exchange_requests_sent": 0,
+      "schema": "experimental_render_verification_v1",
+      "stages": {
+        "producer": {
+          "errors": 0,
+          "failures": 0,
+          "network_attempts_blocked": 0,
+          "passed": 369,
+          "skipped": 0,
+          "tests_run": 369,
+          "unexpected_successes": 0
+        },
+        "runtime": {
+          "errors": 0,
+          "failures": 0,
+          "network_attempts_blocked": 0,
+          "passed": 2815,
+          "skipped": 0,
+          "tests_run": 2815,
+          "unexpected_successes": 0
+        }
+      },
+      "status": "PASSED",
+      "verification": {
+        "postgresql": "FRESH_LOOPBACK_POSTGRES18",
+        "postgresql_cleanup": "STOPPED",
+        "producer_postgresql": "FRESH_LOOPBACK_PRODUCER_DATABASE",
+        "stages": {
+          "producer": {
+            "errors": 0,
+            "exit_code": 0,
+            "failure_details": [],
+            "failures": 0,
+            "network_attempts_blocked": 0,
+            "passed": 369,
+            "postgresql_configured": true,
+            "skipped": 0,
+            "tests_run": 369,
+            "unexpected_successes": 0
+          },
+          "runtime": {
+            "errors": 0,
+            "exit_code": 0,
+            "failure_details": [],
+            "failures": 0,
+            "network_attempts_blocked": 0,
+            "passed": 2815,
+            "postgresql_configured": true,
+            "skipped": 0,
+            "tests_run": 2815,
+            "unexpected_successes": 0
+          }
+        }
+      }
+    },
+    "result_logged_at_utc": "2026-10-07T09:22:06.013325154Z",
+    "expected_wrapper_exit_code": 42,
+    "platform_build_failed_is_intentional_publication_stop": true
+  },
+  "totals": {
+    "tests_run": 3184,
+    "passed": 3184,
+    "skipped": 0,
+    "failures": 0,
+    "errors": 0,
+    "postgresql_previously_skipped_now_executed": 568,
+    "g65_parity_comparisons": 4000
+  },
+  "local_preflight": {
+    "passed": 2616,
+    "skipped_postgresql": 568,
+    "failures": 0,
+    "errors": 0,
+    "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
+    "summary_sha256": "52eb5900f037d8f1b8d7fe2d615e08efd1ef4c3005ecb3de2ffab06bee0d8f27",
+    "snapshot_unchanged_after_tests": true,
+    "workspace_unchanged_since_snapshot": true
+  },
+  "production_preservation": {
+    "service_id": "srv-dakptbh594qs7395460g",
+    "service_descriptor_unchanged": true,
+    "deploy_id_before": "dep-db2hbd49v7es73c64qu0",
+    "deploy_id_after": "dep-db2hbd49v7es73c64qu0",
+    "commit_before": "2ca9d375ed052834e76e01a5c3e11e9cb1d38b98",
+    "commit_after": "2ca9d375ed052834e76e01a5c3e11e9cb1d38b98",
+    "production_environment_mutations_performed": false
+  },
+  "actions": {
+    "production_branch_pushed": false,
+    "production_deployed": false,
+    "static_status_published": false,
+    "strategy_math_changed": false,
+    "risk_policy_changed": false,
+    "request_budget_changed": false,
+    "live_exchange_requests_sent": 0,
+    "live_database_access": false,
+    "live_account_access": false,
+    "isolated_test_branch_pushed": true,
+    "isolated_service_pin_and_build_only_flags_updated": true,
+    "isolated_build_started": true,
+    "temporary_database_shutdown_verified": true
+  },
+  "coverage": {
+    "approved_alert_lifecycle": "Real temporary SQLite plus synthetic exchange: limit 93.544, original stop and target, duplicate/lost-response/restart, partial fill, cancellation races, exits and cleanup, account separation, distinct-symbol concurrency.",
+    "five_maxpain_formulas": "Source approval through signed delivery to limit order; in-memory source database plus SQLite receiver and synthetic venue.",
+    "postgresql": "563 runtime infrastructure tests and 5 producer tests; includes real approved-alert outbox migration, concurrency, rollback, cancellation/ack race and compaction. Not a claim of an all-PostgreSQL end-to-end approved-alert trade.",
+    "continuous_operation": "Simulated clock advances by two days, not real multi-day running.",
+    "isolation": "Allowlisted source snapshots, clean child environment, test-only Python I/O/native psycopg/process guards. Not an operating-system network sandbox."
+  },
+  "remaining": [
+    "Independent simultaneous trades in the same account and symbol remain blocked.",
+    "Receiver history remains capped at 16MiB; safe archive is not implemented.",
+    "Real exchange fills and end-to-end latency require separately approved Testnet activation.",
+    "Approved-alert adapter covers five MaxPain formula families; other adapters are not silently converted.",
+    "Live migration, source/outbox configuration and verified predecessor handover are not performed."
+  ],
+  "tested_manifest": "APPROVED_ALERT_RENDER_TESTED_MANIFEST.json"
+}
