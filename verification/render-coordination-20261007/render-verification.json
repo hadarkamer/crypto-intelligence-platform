@@ -1,0 +1,140 @@
+{
+  "schema": "isolated_coordination_render_verification_v1",
+  "status": "PASSED_ISOLATED_RENDER_NO_LIVE_DEPLOYMENT",
+  "render": {
+    "service_id": "srv-db2jon7lot8c739eebrg",
+    "build_id": "dep-db38ltqjnfac7392fneg",
+    "build": {
+      "commit": {
+        "createdAt": "2026-10-07T18:09:39Z",
+        "id": "17569f141dc26f06102fed80bb61a142915e64a0",
+        "message": "Verify entry-read reuse and partial-exit coordination in isolated Render build\n\nExact source tree from local f19fb1453d842c065e528debed8d32f61b6cc222, including twenty new regressions. Run disposable loopback PostgreSQL and synthetic exchange tests, then exit 42 before publication. No bot deployment, live database access, account actions, strategy changes, or same-symbol release."
+      },
+      "createdAt": "2026-10-07T18:09:59.788008Z",
+      "finishedAt": "2026-10-07T18:14:36.315198Z",
+      "id": "dep-db38ltqjnfac7392fneg",
+      "startedAt": "2026-10-07T18:09:59.786379Z",
+      "status": "build_failed",
+      "trigger": "api",
+      "updatedAt": "2026-10-07T18:14:36.315953Z"
+    },
+    "result_logged_at": "2026-10-07T18:14:33.941158701Z",
+    "result": {
+      "build_only": true,
+      "candidate_sha256": {
+        "producer": "6fbe2ea515c5afc6f296b58f3af17dbefb7b9637d895a10182880657639b9940",
+        "receiver": "6cf6cceadd4ff16d7041f65592afa5b35960636059cf90793b7922f0a65447bb"
+      },
+      "manifest_sha256": "1cba6c5a9ffbe47c167d3bfccd770ce6341d5520c59a6eb73adc52be7e720aa4",
+      "parity": {
+        "bars_per_comparison": 4,
+        "candidate_sha256": "f97df96e1d6dd30845a49904acd060d4c72de11f51e719b3ef2b3e6990235300",
+        "comparisons": 4000,
+        "network_attempts_blocked": 0,
+        "producer_decision_functions_sha256": "b784c3c2374f0d069be180b563b9641f5b8d9bee34912e208e724464e1c7391a",
+        "producer_file_sha256": "040538d896293a5b72125d73b2b5ffe0a26ce1343567b7ae97db2c1969acee72"
+      },
+      "postgresql_cleanup": "STOPPED",
+      "publication_blocked": true,
+      "real_exchange_requests_sent": 0,
+      "schema": "experimental_render_verification_v1",
+      "stages": {
+        "producer": {
+          "errors": 0,
+          "failures": 0,
+          "network_attempts_blocked": 0,
+          "passed": 369,
+          "skipped": 0,
+          "tests_run": 369,
+          "unexpected_successes": 0
+        },
+        "runtime": {
+          "errors": 0,
+          "failures": 0,
+          "network_attempts_blocked": 0,
+          "passed": 2923,
+          "skipped": 0,
+          "tests_run": 2923,
+          "unexpected_successes": 0
+        }
+      },
+      "status": "PASSED",
+      "verification": {
+        "postgresql": "FRESH_LOOPBACK_POSTGRES18",
+        "postgresql_cleanup": "STOPPED",
+        "producer_postgresql": "FRESH_LOOPBACK_PRODUCER_DATABASE",
+        "stages": {
+          "producer": {
+            "errors": 0,
+            "exit_code": 0,
+            "failure_details": [],
+            "failures": 0,
+            "network_attempts_blocked": 0,
+            "passed": 369,
+            "postgresql_configured": true,
+            "skipped": 0,
+            "tests_run": 369,
+            "unexpected_successes": 0
+          },
+          "runtime": {
+            "errors": 0,
+            "exit_code": 0,
+            "failure_details": [],
+            "failures": 0,
+            "network_attempts_blocked": 0,
+            "passed": 2923,
+            "postgresql_configured": true,
+            "skipped": 0,
+            "tests_run": 2923,
+            "unexpected_successes": 0
+          }
+        }
+      }
+    },
+    "expected_wrapper_exit_code": 42,
+    "platform_build_failed_is_intentional_publication_stop": true
+  },
+  "bundle": {
+    "branch": "codex/experimental-render-isolated-20261006",
+    "commit": "17569f141dc26f06102fed80bb61a142915e64a0",
+    "tree": "127e338be36e6f5e540f9f220669df0f510b12b1",
+    "local_source_commit": "1aea0a498c66a47cbe1ffb40a9627cc336f9bc70",
+    "manifest_sha256": "1cba6c5a9ffbe47c167d3bfccd770ce6341d5520c59a6eb73adc52be7e720aa4",
+    "receiver_files": 529,
+    "producer_files": 347,
+    "exact_remote_tree_matches_local": true
+  },
+  "totals": {
+    "tests_run": 3292,
+    "passed": 3292,
+    "skipped": 0,
+    "failures": 0,
+    "errors": 0,
+    "new_tests": 20,
+    "g65_parity_comparisons": 4000
+  },
+  "production_preservation": {
+    "receiver_descriptor_unchanged": true,
+    "receiver_deploy_before": "dep-db2hbd49v7es73c64qu0",
+    "receiver_deploy_after": "dep-db2hbd49v7es73c64qu0",
+    "receiver_commit_before": "2ca9d375ed052834e76e01a5c3e11e9cb1d38b98",
+    "receiver_commit_after": "2ca9d375ed052834e76e01a5c3e11e9cb1d38b98",
+    "producer_descriptor_unchanged": true,
+    "live_environment_mutations": false,
+    "live_database_access": false,
+    "live_exchange_requests_sent": 0,
+    "live_deployment": false
+  },
+  "continuous_demo": {
+    "existing_policy": "continuous_v1",
+    "additional_bounded_trial_required": false,
+    "live_activation_performed": false,
+    "policy_confirmed_from_current_code": true,
+    "shared_symbol_parallel_enabled": false
+  },
+  "limitations": [
+    "Synthetic venue evidence does not establish actual exchange fills or linked partial-exit behavior.",
+    "Same account/symbol concurrent cards remain disabled; different-symbol trading is supported.",
+    "Live startup configuration, database initialization and ownership handover were not changed during isolated verification."
+  ]
+}
