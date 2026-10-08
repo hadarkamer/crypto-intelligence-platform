@@ -50,7 +50,7 @@ class FinalWorkingSetTests(unittest.TestCase):
         self.assertIn(cid,_retired_experimental(self.state,self.exchange.t))
         result=self.provider.collect(self.state)
         self.assertEqual(result['blocked_lanes'],{});self.assertEqual(result['account_entry_blocked'],{})
-        self.assertEqual(Counter(c[0] for c in self.raw.calls),Counter(frontendOpenOrders=4,clearinghouseState=4))
+        self.assertEqual(Counter(c[0] for c in self.raw.calls),Counter(frontendOpenOrders=2,clearinghouseState=2))
         self.assertEqual(self.state,before)
 
     def test_new_candidate_same_lane_keeps_exact_final_orders_and_uses_no_old_history(self):

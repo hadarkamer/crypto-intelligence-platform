@@ -1,8 +1,9 @@
 """Pure adapter from existing collector proofs to prospective worker evidence.
 
 No network/reader is created here. Caller must use existing budget-funded
-collectors for complete account snapshots and exact persisted-CLOID orderStatus
-lookups. The adapter never infers a fill from source candles, mark or ACK.
+collectors for complete account snapshots and exact persisted-order identity.
+Unknown submissions still require CLOID lookups. The adapter never infers a fill
+from source candles, mark or ACK.
 Historical MARK coverage is a separate prerequisite; trade candles or isolated
 current mark samples cannot substitute for a continuously observed mark window.
 """
@@ -16,12 +17,12 @@ class EvidenceError(ValueError):
     pass
 
 
-def normalize_snapshot(state, snapshot, lookups, *, now_ms):
-    """Convert existing complete life.snapshot plus independent exact lookups.
+def normalize_snapshot(state, snapshot, lookups, *, now_ms, reuse_verified_terminals=False):
+    """Convert complete life.snapshot with exact current or terminal identity.
 
-    Missing lookup/unknownOid retains uncertainty: no fabricated terminal state
-    is returned. Existing known OIDs can never disappear from complete history.
-    Exact exchange terms are proved by the unchanged legacy wire.identity gate.
+    Unknown submissions retain lookup uncertainty. The live collector may reuse
+    a verified terminal only when its current checkpoint, durable owner, terms
+    and fills still match. Current statuses pass the unchanged wire.identity gate.
     """
     life.validate_snapshot(snapshot)
     if (snapshot['history_complete'] is not True or snapshot['orders_complete'] is not True
@@ -49,6 +50,26 @@ def normalize_snapshot(state, snapshot, lookups, *, now_ms):
                 or p['action']['type']=='cancel' or request['phase']=='ABORTED_UNSENT'):
             continue
         order=wire.requested_order(p['action']);raw=lookups.get(order['c'])
+        if raw is None and reuse_verified_terminals and request['phase']=='OBSERVED':
+            oid=request.get('observed_oid')
+            prior=state['trades'][p['card_id']]['orders'].get(oid)
+            row=terminal.get(oid);own_fills=fills.get(oid,[])
+            normalized_fills=[{k:f[k] for k in ('fill_id','quantity','price','at_ms')} for f in own_fills]
+            if (prior is None or row is None or oid in observations or prior['oid']!=oid
+                    or prior['status'] not in ('FILLED','CANCELED','REJECTED')
+                    or prior['wire_order']!=order or prior['cloid']!=order['c']
+                    or row['state']!=prior['status'] or row['at_ms']!=prior['at_ms']
+                    or sorted(normalized_fills,key=lambda f:f['fill_id'])!=sorted(prior['fills'],key=lambda f:f['fill_id'])
+                    or any(f['side']!=('B' if order['b'] else 'A')
+                           or not request['attempt_at_ms']<=f['at_ms']<=row['at_ms'] for f in own_fills)):
+                raise EvidenceError('IMMUTABLE_TERMINAL_OWNERSHIP_CHANGED')
+            total=sum((life.number(f['quantity'],positive=True) for f in own_fills),Decimal(0))
+            if (life.number(row['filled_quantity'])!=total or total>life.number(order['s'])
+                    or row['state']=='FILLED' and total!=life.number(order['s'])
+                    or row['state']=='REJECTED' and total):
+                raise EvidenceError('TERMINAL_FILL_PROOF_INVALID')
+            observations[oid]=deepcopy(prior)
+            continue
         if raw is None or raw=={'status':'unknownOid'}:
             if request.get('observed_oid') is not None:
                 raise EvidenceError('PREVIOUSLY_OWNED_ORDER_LOOKUP_MISSING')

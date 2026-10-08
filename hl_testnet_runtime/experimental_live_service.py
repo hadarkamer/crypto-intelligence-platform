@@ -52,12 +52,15 @@ class ConnectionService:
         self.last_entry_decisions = dict(source_blocks=0, account_blocks=0, market_blocks=0, reasons={})
         self.cycles = 0
         self.feed, self.supervisor = feed, supervisor
+        if supervisor is not None:
+            supervisor.primary_service = self
         self._thread = None
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._start_lock = threading.Lock()
         self.startup_entries_allowed = True
         self.startup_entry_gate = None
+        self._next_entry_retry_ms = None
 
     def ingest(self, message, *, now, not_before):
         # intake.accept calls this after schema/authentication checks. This is
@@ -93,7 +96,8 @@ class ConnectionService:
             raise BoundaryError('EXACT_SOURCE_INTAKE_FENCE_REQUIRED')
         # Do not impose entry expiry on cancellations or existing protection.
         # receive applies the original source's freshness and immutable rules.
-        message = contract.validate(intake.decoded(raw))
+        # The durable runtime intake validates this exact decoded message.
+        message = intake.decoded(raw)
         return self._receive(message)
 
     def application(self, environ, start_response):
@@ -137,15 +141,14 @@ class ConnectionService:
         # Durable runtime ownership remains the final cross-process boundary.
         if not self._tick_lock.acquire(blocking=False):
             raise BoundaryError('EXPERIMENTAL_CONNECTION_CYCLE_ALREADY_RUNNING')
+        self._next_entry_retry_ms = None
         try:
             release = self.release_loader()
             startup_allowed = self.startup_entries_allowed
             if self.startup_entry_gate is not None:
                 startup_allowed = self.startup_entry_gate() is True
-            # No pending source, order, or exposure: a fresh durable receipt
-            # already checked by the independent protection capability needs
-            # no duplicate full REST scan. Feed changes revoke this reuse;
-            # at ten seconds the independent worker performs a new scan.
+            # Idle ticks reuse the committed observation until its next scan.
+            # Feed changes revoke reuse immediately.
             receipt = self.supervisor.idle_receipt() if self.supervisor is not None else None
             if receipt is not None:
                 result = dict(status='OBSERVED_IDLE_REUSED', safety_checkpoint_id=receipt)
@@ -159,6 +162,9 @@ class ConnectionService:
             cached = self.runtime.venue._last
             if cached is not None:
                 context = cached['context']
+                future = [at for at in context.get('entry_retry_after_ms', {}).values()
+                    if type(at) is int and at > self.runtime.venue.now()]
+                self._next_entry_retry_ms = min(future, default=None)
                 groups = [context.get(key, {}) for key in
                     ('entry_blocked', 'account_entry_blocked', 'blocked_lanes')]
                 # Provider errors are fixed domain identifiers. Diagnostics
@@ -176,6 +182,20 @@ class ConnectionService:
             raise
         finally:
             self._tick_lock.release()
+
+    def primary_available(self):
+        """The supervisor collects only when this normal loop cannot do so."""
+        return bool(self._thread is not None and self._thread.is_alive()
+            and not self._stop.is_set() and self.last_cycle_error_code is None
+            and self.last_status != 'OBSERVATION_CYCLE_ALREADY_RUNNING'
+            and type(self.last_cycle_at_ms) is int
+            and 0 <= self.runtime.venue.now() - self.last_cycle_at_ms < 10000)
+
+    def _next_wait_seconds(self, interval_seconds):
+        if self._next_entry_retry_ms is None:
+            return interval_seconds
+        delay = max(.05, (self._next_entry_retry_ms - self.runtime.venue.now()) / 1000)
+        return min(interval_seconds, delay)
 
     def run(self, stop_event, *, interval_seconds=5):
         """Explicit, single caller scheduling; never retries an order itself."""
@@ -200,7 +220,7 @@ class ConnectionService:
                     break
                 # Preserve run(external_stop_event) shutdown responsiveness;
                 # these waits never collect or dispatch and do not add ticks.
-                deadline = time.monotonic() + interval_seconds
+                deadline = time.monotonic() + self._next_wait_seconds(interval_seconds)
                 while not stop_event.is_set():
                     remaining = deadline - time.monotonic()
                     if remaining <= 0 or self._wake.wait(min(remaining, .25)):

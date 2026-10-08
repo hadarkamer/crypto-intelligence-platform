@@ -1,0 +1,3287 @@
+{
+  "counts": {
+    "empty_inventory": {
+      "reads": 4,
+      "weight": 44,
+      "by_kind": {
+        "frontendOpenOrders": 2,
+        "clearinghouseState": 2
+      }
+    },
+    "entry_collection": {
+      "reads": 8,
+      "weight": 222,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "metaAndAssetCtxs": 1,
+        "userAbstraction": 1,
+        "userRole": 2,
+        "activeAssetData": 1,
+        "userRateLimit": 1
+      }
+    }
+  },
+  "concurrent": {
+    "warm_weight": 44,
+    "entries": [
+      {
+        "side": "long_account",
+        "at_ms": 750
+      },
+      {
+        "side": "short_account",
+        "at_ms": 6401
+      }
+    ],
+    "closed_ms": 87155,
+    "phases": {
+      "long_account": "CLOSED",
+      "short_account": "CLOSED"
+    },
+    "samples": [
+      {
+        "at_ms": 751,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 469,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 751,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 469,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 6404,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 738,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN",
+          "short_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 6404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 738,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN",
+          "short_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 6905,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 851,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 11404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 851,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 12356,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 962,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 16404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 962,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 17858,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 1075,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 21404,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 1075,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 23258,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1145,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 26404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1145,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 28608,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 31404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 33608,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 36404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 38608,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 41404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 43608,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 46404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 48608,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 51404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 53608,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 56404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 58608,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 61404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 63608,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1195,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 66404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1151,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 68908,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1199,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 71404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 774,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 74459,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 888,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 76404,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 506,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 76705,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 574,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 81404,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 463,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 81955,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 528,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 86404,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 508,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 87155,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 478,
+        "phases": {
+          "long_account": "CLOSED",
+          "short_account": "CLOSED"
+        }
+      }
+    ],
+    "denials": [
+      {
+        "at_ms": 1791289103208,
+        "priority": "protection",
+        "used_weight": 1143,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 45792
+      },
+      {
+        "at_ms": 1791289103258,
+        "priority": "protection",
+        "used_weight": 1145,
+        "requested_weight": 122,
+        "ceiling": 1200,
+        "retry_after_ms": 45842
+      },
+      {
+        "at_ms": 1791289108458,
+        "priority": "protection",
+        "used_weight": 1189,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 35542
+      },
+      {
+        "at_ms": 1791289108558,
+        "priority": "protection",
+        "used_weight": 1193,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 40692
+      },
+      {
+        "at_ms": 1791289108608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 122,
+        "ceiling": 1200,
+        "retry_after_ms": 40642
+      },
+      {
+        "at_ms": 1791289113608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 30392
+      },
+      {
+        "at_ms": 1791289113608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 30392
+      },
+      {
+        "at_ms": 1791289113608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 30392
+      },
+      {
+        "at_ms": 1791289118608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 25392
+      },
+      {
+        "at_ms": 1791289118608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 25392
+      },
+      {
+        "at_ms": 1791289118608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 25392
+      },
+      {
+        "at_ms": 1791289123608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 20392
+      },
+      {
+        "at_ms": 1791289123608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 20392
+      },
+      {
+        "at_ms": 1791289123608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 20392
+      },
+      {
+        "at_ms": 1791289128608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 15392
+      },
+      {
+        "at_ms": 1791289128608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 15392
+      },
+      {
+        "at_ms": 1791289128608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 15392
+      },
+      {
+        "at_ms": 1791289133608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 10392
+      },
+      {
+        "at_ms": 1791289133608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 10392
+      },
+      {
+        "at_ms": 1791289133608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 10392
+      },
+      {
+        "at_ms": 1791289138608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 5392
+      },
+      {
+        "at_ms": 1791289138608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 5392
+      },
+      {
+        "at_ms": 1791289138608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 5392
+      },
+      {
+        "at_ms": 1791289143608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 392
+      },
+      {
+        "at_ms": 1791289143608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 392
+      },
+      {
+        "at_ms": 1791289143608,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 392
+      },
+      {
+        "at_ms": 1791289148808,
+        "priority": "protection",
+        "used_weight": 1195,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 192
+      },
+      {
+        "at_ms": 1791289148908,
+        "priority": "protection",
+        "used_weight": 1199,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 392
+      },
+      {
+        "at_ms": 1791289148908,
+        "priority": "protection",
+        "used_weight": 1199,
+        "requested_weight": 2,
+        "ceiling": 1200,
+        "retry_after_ms": 92
+      }
+    ],
+    "synthetic_actions": 6,
+    "entry_decisions": {
+      "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "long_account",
+        "symbol": "SOL",
+        "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289148908,
+        "retry_after_ms": null,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      },
+      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "short_account",
+        "symbol": "SOL",
+        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+        "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
+        "at_ms": 1791289167155,
+        "retry_after_ms": null,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      }
+    },
+    "wire_actions": [
+      "long_account:ENTRY:ENTRY",
+      "short_account:ENTRY:ENTRY",
+      "long_account:CREATE_EXIT:STOP",
+      "long_account:CREATE_EXIT:TAKE_PROFIT",
+      "short_account:EMERGENCY_CLOSE:STOP",
+      "long_account:CANCEL:STOP"
+    ],
+    "orders": {
+      "1": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "ENTRY",
+        "view": {
+          "oid": "1",
+          "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "93.544",
+            "s": "4.67",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289086403,
+          "fills": [
+            {
+              "fill_id": "fill1_0",
+              "quantity": "4.67",
+              "price": "93.544",
+              "at_ms": 1791289086403
+            }
+          ]
+        }
+      },
+      "2": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "ENTRY",
+        "view": {
+          "oid": "2",
+          "cloid": "0xe0977db3fa67b9cd59aed178d1a9e2d5",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "93.544",
+            "s": "5.6",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0xe0977db3fa67b9cd59aed178d1a9e2d5"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289086404,
+          "fills": [
+            {
+              "fill_id": "fill2_0",
+              "quantity": "5.60",
+              "price": "93.544",
+              "at_ms": 1791289086404
+            }
+          ]
+        }
+      },
+      "3": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "STOP",
+        "view": {
+          "oid": "3",
+          "cloid": "0x50922237d0722036b6df461ce773f79b",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "91.405",
+            "s": "4.67",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": true,
+                "triggerPx": "91.405",
+                "tpsl": "sl"
+              }
+            },
+            "c": "0x50922237d0722036b6df461ce773f79b"
+          },
+          "status": "CANCELED",
+          "at_ms": 1791289156705,
+          "fills": []
+        }
+      },
+      "4": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "TAKE_PROFIT",
+        "view": {
+          "oid": "4",
+          "cloid": "0x56e7adc1695db85a84574f4bec553c51",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "95.327",
+            "s": "4.67",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": false,
+                "triggerPx": "95.327",
+                "tpsl": "tp"
+              }
+            },
+            "c": "0x56e7adc1695db85a84574f4bec553c51"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289154459,
+          "fills": [
+            {
+              "fill_id": "fill4_0",
+              "quantity": "4.67",
+              "price": "95.327",
+              "at_ms": 1791289154459
+            }
+          ]
+        }
+      },
+      "5": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "STOP",
+        "view": {
+          "oid": "5",
+          "cloid": "0x0f9bd8684e9f1efd9ddecb679720eec8",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "94.479",
+            "s": "5.6",
+            "r": true,
+            "t": {
+              "limit": {
+                "tif": "Ioc"
+              }
+            },
+            "c": "0x0f9bd8684e9f1efd9ddecb679720eec8"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289097858,
+          "fills": [
+            {
+              "fill_id": "fill5_0",
+              "quantity": "5.6",
+              "price": "94.479",
+              "at_ms": 1791289097858
+            }
+          ]
+        }
+      }
+    },
+    "final_requests": [
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "1"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "2"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "3"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "4"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "5"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "3"
+      }
+    ],
+    "final_context": {
+      "entry_blocked": {},
+      "account_entry_blocked": {},
+      "blocked_lanes": {}
+    }
+  },
+  "concurrent_transient_immediate": {
+    "warm_weight": 616,
+    "entries": [
+      {
+        "side": "long_account",
+        "at_ms": 24500
+      }
+    ],
+    "closed_ms": null,
+    "phases": {
+      "long_account": "CLOSED"
+    },
+    "samples": [
+      {
+        "at_ms": 250,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 680,
+        "phases": {}
+      },
+      {
+        "at_ms": 250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 680,
+        "phases": {}
+      },
+      {
+        "at_ms": 4250,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 656,
+        "phases": {}
+      },
+      {
+        "at_ms": 5250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 656,
+        "phases": {}
+      },
+      {
+        "at_ms": 9250,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 656,
+        "phases": {}
+      },
+      {
+        "at_ms": 10250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 656,
+        "phases": {}
+      },
+      {
+        "at_ms": 14250,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 632,
+        "phases": {}
+      },
+      {
+        "at_ms": 15250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 632,
+        "phases": {}
+      },
+      {
+        "at_ms": 19250,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 632,
+        "phases": {}
+      },
+      {
+        "at_ms": 20250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 632,
+        "phases": {}
+      },
+      {
+        "at_ms": 24502,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 789,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 25250,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 789,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 25651,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 879,
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 30250,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 879,
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 31052,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 969,
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 35250,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 881,
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 36503,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 972,
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 40250,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 972,
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 40551,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 1040,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 45250,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 952,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 45801,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1017,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 50250,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 1017,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 51001,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1080,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 55250,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 948,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 56201,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 992,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 60250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 992,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 61201,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 992,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 65250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 948,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 66401,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 992,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 70250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 928,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 71401,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 928,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 73250,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 906,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 75250,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 906,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 78450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 950,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 80250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 950,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 83450,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 886,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 85250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 886,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 88650,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 930,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 90250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 930,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 93450,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 686,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 95250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 595,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 98650,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 639,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 100250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 549,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 103650,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 549,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 105250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 505,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 108850,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 502,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 110250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 113850,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 115250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 369,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 119050,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 413,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 120250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 350,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 124050,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 350,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 125250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 306,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 129250,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 350,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 130250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 350,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 134250,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 350,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 135250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 330,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 139450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 350,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 140250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 350,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 144450,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 145250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 149650,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 150250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 154650,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 155250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 159850,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 160250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 164850,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 165250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 170050,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 170250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 175050,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 175250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 180250,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 180250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 185250,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 185250,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 190450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 190450,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 195450,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 195450,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 200650,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 200650,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 205650,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 205650,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 308,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      }
+    ],
+    "denials": [],
+    "synthetic_actions": 4,
+    "entry_decisions": {
+      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "occurrence",
+        "account_role": "short_account",
+        "symbol": "SOL",
+        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289168650,
+        "retry_after_ms": 1791289173450,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      },
+      "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "long_account",
+        "symbol": "SOL",
+        "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
+        "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
+        "at_ms": 1791289153250,
+        "retry_after_ms": null,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      }
+    },
+    "wire_actions": [
+      "long_account:ENTRY:ENTRY",
+      "long_account:CREATE_EXIT:STOP",
+      "long_account:CREATE_EXIT:TAKE_PROFIT",
+      "long_account:CANCEL:STOP"
+    ],
+    "orders": {
+      "1": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "ENTRY",
+        "view": {
+          "oid": "1",
+          "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "93.544",
+            "s": "4.67",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289104502,
+          "fills": [
+            {
+              "fill_id": "fill1_0",
+              "quantity": "4.67",
+              "price": "93.544",
+              "at_ms": 1791289104502
+            }
+          ]
+        }
+      },
+      "2": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "STOP",
+        "view": {
+          "oid": "2",
+          "cloid": "0xc10c394798adf68f8f293d2b202583cf",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "91.405",
+            "s": "4.67",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": true,
+                "triggerPx": "91.405",
+                "tpsl": "sl"
+              }
+            },
+            "c": "0xc10c394798adf68f8f293d2b202583cf"
+          },
+          "status": "CANCELED",
+          "at_ms": 1791289120551,
+          "fills": []
+        }
+      },
+      "3": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "TAKE_PROFIT",
+        "view": {
+          "oid": "3",
+          "cloid": "0x36f6ffc2bb4db0da33e81f7e1bfbd462",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "95.327",
+            "s": "4.67",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": false,
+                "triggerPx": "95.327",
+                "tpsl": "tp"
+              }
+            },
+            "c": "0x36f6ffc2bb4db0da33e81f7e1bfbd462"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289116503,
+          "fills": [
+            {
+              "fill_id": "fill3_0",
+              "quantity": "4.67",
+              "price": "95.327",
+              "at_ms": 1791289116503
+            }
+          ]
+        }
+      }
+    },
+    "final_requests": [
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "1"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "2"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "3"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "2"
+      }
+    ],
+    "final_context": {
+      "entry_blocked": {},
+      "account_entry_blocked": {},
+      "blocked_lanes": {}
+    }
+  },
+  "concurrent_steady_unfilled": {
+    "warm_weight": 308,
+    "entries": [
+      {
+        "side": "long_account",
+        "at_ms": 750
+      }
+    ],
+    "closed_ms": null,
+    "phases": {
+      "long_account": "OUTCOME_UNKNOWN"
+    },
+    "samples": [
+      {
+        "at_ms": 751,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 733,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 751,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 733,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 6151,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 733,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 6151,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 733,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 11401,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 797,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 11401,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 797,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 16651,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 773,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 16651,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 773,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 21901,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 837,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 21901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 837,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 24350,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 835,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 26901,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 835,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 29600,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 899,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 31901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 899,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 34850,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 963,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 36901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 963,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 40100,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1027,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 41901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 1027,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 45350,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1091,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 46901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 1091,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 50550,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1135,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 51901,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1135,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 55750,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1179,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 56901,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1179,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 60800,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1199,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 61901,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1199,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 66000,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1199,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 66901,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1199,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 69700,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 861,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 71901,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 860,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 74950,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 880,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 76901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 836,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 80200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 880,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 81901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 836,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 85450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 880,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 86901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 836,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 90700,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 880,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 91901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 836,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 95950,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 96901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 101200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 101901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 106450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 106901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 111700,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 111901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 116950,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 116950,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 814,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 122200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 834,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 122200,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 834,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 127450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 854,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 127450,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 854,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 132700,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 898,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 132700,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 898,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 137950,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 918,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 137950,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 918,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 143200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 143200,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 148450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 148450,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 153700,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 153700,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 158950,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 158950,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 164200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 164200,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 169450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 169450,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 174700,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 174700,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 179950,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 179950,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 185200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 185200,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 190450,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 190450,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 195700,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 195700,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 200950,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 200950,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 206200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 206200,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 896,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      }
+    ],
+    "denials": [
+      {
+        "at_ms": 1791289130550,
+        "priority": "protection",
+        "used_weight": 1135,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 18450
+      },
+      {
+        "at_ms": 1791289135750,
+        "priority": "protection",
+        "used_weight": 1179,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 13450
+      },
+      {
+        "at_ms": 1791289140800,
+        "priority": "protection",
+        "used_weight": 1199,
+        "requested_weight": 2,
+        "ceiling": 1200,
+        "retry_after_ms": 3200
+      },
+      {
+        "at_ms": 1791289140800,
+        "priority": "protection",
+        "used_weight": 1199,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 3200
+      },
+      {
+        "at_ms": 1791289146000,
+        "priority": "protection",
+        "used_weight": 1199,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 3300
+      }
+    ],
+    "synthetic_actions": 1,
+    "entry_decisions": {
+      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "short_account",
+        "symbol": "SOL",
+        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289165450,
+        "retry_after_ms": 1791289170751,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      },
+      "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "long_account",
+        "symbol": "SOL",
+        "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289146000,
+        "retry_after_ms": null,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      }
+    },
+    "wire_actions": [
+      "long_account:ENTRY:ENTRY"
+    ],
+    "orders": {
+      "1": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "ENTRY",
+        "view": {
+          "oid": "1",
+          "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "93.544",
+            "s": "4.67",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+          },
+          "status": "OPEN",
+          "at_ms": 1791289080751,
+          "fills": []
+        }
+      }
+    },
+    "final_requests": [
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "1"
+      }
+    ],
+    "final_context": {
+      "entry_blocked": {},
+      "account_entry_blocked": {},
+      "blocked_lanes": {}
+    }
+  },
+  "long": {
+    "warm_weight": 616,
+    "latency_ms": 0,
+    "side": "LONG",
+    "burst": false,
+    "submitted_ms": 4001,
+    "synthetic_actions": 1,
+    "denials": [],
+    "samples": [
+      {
+        "at_ms": 0,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 658
+      },
+      {
+        "at_ms": 0,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 658
+      },
+      {
+        "at_ms": 4001,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 793
+      }
+    ],
+    "source_expiry_unchanged": true,
+    "final_entry_decisions": {},
+    "lifecycle": {
+      "protected_ms": 10003,
+      "filled_exit_ms": 10004,
+      "closed_ms": 20005,
+      "wire_actions": [
+        "ENTRY:ENTRY",
+        "CREATE_EXIT:STOP",
+        "CREATE_EXIT:TAKE_PROFIT",
+        "CANCEL:STOP"
+      ],
+      "wire_exit_times_ms": {
+        "STOP": 1,
+        "TAKE_PROFIT": 5002
+      },
+      "samples": [
+        {
+          "at_ms": 2,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [],
+          "weight": 861
+        },
+        {
+          "at_ms": 2,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [],
+          "weight": 861
+        },
+        {
+          "at_ms": 5003,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "STOP"
+          ],
+          "weight": 929
+        },
+        {
+          "at_ms": 5003,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "STOP"
+          ],
+          "weight": 929
+        },
+        {
+          "at_ms": 10003,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "STOP",
+            "TAKE_PROFIT"
+          ],
+          "weight": 910
+        },
+        {
+          "at_ms": 10005,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "STOP"
+          ],
+          "weight": 978
+        },
+        {
+          "at_ms": 10005,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "STOP"
+          ],
+          "weight": 978
+        },
+        {
+          "at_ms": 15005,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1043
+        },
+        {
+          "at_ms": 15005,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1043
+        },
+        {
+          "at_ms": 20005,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "CLOSED",
+          "legs": [],
+          "weight": 1018
+        }
+      ],
+      "request_results": [
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        }
+      ]
+    }
+  },
+  "short": {
+    "warm_weight": 616,
+    "latency_ms": 150,
+    "side": "SHORT",
+    "burst": false,
+    "submitted_ms": 5201,
+    "synthetic_actions": 1,
+    "denials": [],
+    "samples": [
+      {
+        "at_ms": 450,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 658
+      },
+      {
+        "at_ms": 450,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 658
+      },
+      {
+        "at_ms": 5201,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 793
+      }
+    ],
+    "source_expiry_unchanged": true,
+    "final_entry_decisions": {},
+    "lifecycle": {
+      "protected_ms": 12853,
+      "filled_exit_ms": 12854,
+      "closed_ms": 25105,
+      "wire_actions": [
+        "ENTRY:ENTRY",
+        "CREATE_EXIT:STOP",
+        "CREATE_EXIT:TAKE_PROFIT",
+        "CANCEL:STOP"
+      ],
+      "wire_exit_times_ms": {
+        "STOP": 901,
+        "TAKE_PROFIT": 6802
+      },
+      "samples": [
+        {
+          "at_ms": 902,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [],
+          "weight": 861
+        },
+        {
+          "at_ms": 902,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [],
+          "weight": 861
+        },
+        {
+          "at_ms": 6803,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "STOP"
+          ],
+          "weight": 929
+        },
+        {
+          "at_ms": 6803,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "STOP"
+          ],
+          "weight": 929
+        },
+        {
+          "at_ms": 12853,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "STOP",
+            "TAKE_PROFIT"
+          ],
+          "weight": 910
+        },
+        {
+          "at_ms": 13755,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "STOP"
+          ],
+          "weight": 978
+        },
+        {
+          "at_ms": 13755,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "STOP"
+          ],
+          "weight": 978
+        },
+        {
+          "at_ms": 19505,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 955
+        },
+        {
+          "at_ms": 19505,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 955
+        },
+        {
+          "at_ms": 25105,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "CLOSED",
+          "legs": [],
+          "weight": 1018
+        }
+      ],
+      "request_results": [
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        }
+      ]
+    }
+  },
+  "burst": {
+    "warm_weight": 616,
+    "latency_ms": 0,
+    "side": "LONG",
+    "burst": true,
+    "submitted_ms": 24001,
+    "synthetic_actions": 1,
+    "denials": [],
+    "samples": [
+      {
+        "at_ms": 0,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 680
+      },
+      {
+        "at_ms": 0,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 680
+      },
+      {
+        "at_ms": 4000,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 656
+      },
+      {
+        "at_ms": 5000,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 656
+      },
+      {
+        "at_ms": 9000,
+        "actor": "worker",
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 656
+      },
+      {
+        "at_ms": 10000,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 656
+      },
+      {
+        "at_ms": 14000,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 632
+      },
+      {
+        "at_ms": 15000,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 632
+      },
+      {
+        "at_ms": 19000,
+        "actor": "worker",
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 632
+      },
+      {
+        "at_ms": 20000,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 632
+      },
+      {
+        "at_ms": 24001,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 789
+      }
+    ],
+    "source_expiry_unchanged": true,
+    "final_entry_decisions": {
+      "6d1f766a0bc564f64869e39db0fe162d69a067a712a16a90e5d1655d5e4516c8": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "occurrence",
+        "account_role": "long_account",
+        "symbol": "SOL",
+        "occurrence_id": "6d1f766a0bc564f64869e39db0fe162d69a067a712a16a90e5d1655d5e4516c8",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289094000,
+        "retry_after_ms": 1791289104000,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      },
+      "ac28d739aff18ca47737cecc0ee8a650d1728fe58c04fa633a62be8a385386c5": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "occurrence",
+        "account_role": "short_account",
+        "symbol": "SOL",
+        "occurrence_id": "ac28d739aff18ca47737cecc0ee8a650d1728fe58c04fa633a62be8a385386c5",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289094000,
+        "retry_after_ms": 1791289104000,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      }
+    }
+  },
+  "unknown_partial_stop": {
+    "warm_weight": 616,
+    "latency_ms": 50,
+    "side": "LONG",
+    "burst": false,
+    "submitted_ms": 4401,
+    "synthetic_actions": 1,
+    "denials": [],
+    "samples": [
+      {
+        "at_ms": 150,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 658
+      },
+      {
+        "at_ms": 150,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 658
+      },
+      {
+        "at_ms": 4401,
+        "actor": "worker",
+        "status": "OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 793
+      }
+    ],
+    "source_expiry_unchanged": true,
+    "final_entry_decisions": {},
+    "lifecycle": {
+      "protected_ms": 11053,
+      "filled_exit_ms": 11054,
+      "closed_ms": 27156,
+      "wire_actions": [
+        "ENTRY:ENTRY",
+        "CREATE_EXIT:STOP",
+        "CREATE_EXIT:TAKE_PROFIT",
+        "CANCEL:ENTRY",
+        "CANCEL:TAKE_PROFIT"
+      ],
+      "wire_exit_times_ms": {
+        "STOP": 301,
+        "TAKE_PROFIT": 5652
+      },
+      "samples": [
+        {
+          "at_ms": 302,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "ENTRY"
+          ],
+          "weight": 861
+        },
+        {
+          "at_ms": 302,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "ENTRY"
+          ],
+          "weight": 861
+        },
+        {
+          "at_ms": 5653,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "ENTRY",
+            "STOP"
+          ],
+          "weight": 931
+        },
+        {
+          "at_ms": 5653,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "ENTRY",
+            "STOP"
+          ],
+          "weight": 931
+        },
+        {
+          "at_ms": 11053,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "OPEN",
+          "legs": [
+            "ENTRY",
+            "STOP",
+            "TAKE_PROFIT"
+          ],
+          "weight": 914
+        },
+        {
+          "at_ms": 11405,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "ENTRY",
+            "TAKE_PROFIT"
+          ],
+          "weight": 984
+        },
+        {
+          "at_ms": 11405,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "ENTRY",
+            "TAKE_PROFIT"
+          ],
+          "weight": 984
+        },
+        {
+          "at_ms": 16706,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1052
+        },
+        {
+          "at_ms": 16706,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1052
+        },
+        {
+          "at_ms": 21956,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1029
+        },
+        {
+          "at_ms": 21956,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1029
+        },
+        {
+          "at_ms": 27156,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "CLOSED",
+          "legs": [],
+          "weight": 1092
+        }
+      ],
+      "request_results": [
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        },
+        {
+          "phase": "OBSERVED"
+        }
+      ]
+    }
+  }
+}

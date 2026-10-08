@@ -53,11 +53,12 @@ class EntryReadReuseTests(unittest.TestCase):
         counts = Counter(call[0] for call in self.raw.calls)
         self.assertEqual(after, before)
         self.assertEqual(set(after['capacity']), {first, second})
-        self.assertEqual(sum(baseline.values()), 25)
-        self.assertEqual(sum(counts.values()), 21)
-        self.assertEqual(counts['frontendOpenOrders'], 4)
-        self.assertEqual(counts['clearinghouseState'], 5)  # Four inventory + one balance.
-        self.assertEqual(counts['userAbstraction'], baseline['userAbstraction'])
+        self.assertEqual(sum(baseline.values()), 13)
+        self.assertEqual(sum(counts.values()), 9)
+        self.assertEqual(counts['frontendOpenOrders'], 1)
+        self.assertEqual(counts['clearinghouseState'], 1)  # Inventory already carries the balance.
+        self.assertEqual(counts['userAbstraction'], 1)
+        self.assertEqual(baseline['userAbstraction'], 2)
         self.assertEqual(counts['activeAssetData'], 2)
         self.assertEqual(counts['userRateLimit'], 1)
 
@@ -65,7 +66,7 @@ class EntryReadReuseTests(unittest.TestCase):
         first = self.candidate()
         second = self.candidate(cycle='second')
         after = self.collect()
-        self.assertEqual(len(self.raw.calls), 20)
+        self.assertEqual(len(self.raw.calls), 8)
         self.assertEqual(sum(c[0] == 'activeAssetData' for c in self.raw.calls), 1)
         after['capacity'][first]['active']['availableToTrade'][0] = '0'
         self.assertEqual(after['capacity'][second]['active']['availableToTrade'][0], '50000')
@@ -93,7 +94,7 @@ class EntryReadReuseTests(unittest.TestCase):
         with patch.object(self.raw, 'read', side_effect=changed):
             result = self.collect()
         self.assertEqual(result['capacity'][first]['available'], '40000')
-        self.assertEqual(len(self.raw.calls), 20)
+        self.assertEqual(len(self.raw.calls), 8)
         self.state['revision'] += 1
         self.raw.extra_orders = [dict(coin='DOGE', oid=999)]
         changed = self.collect()
@@ -133,7 +134,7 @@ class EntryReadReuseTests(unittest.TestCase):
         first_at = result['capacity'][first]['at_ms']
         second_at = result['capacity'][second]['at_ms']
         self.assertLess(second_at, self.exchange.t)
-        self.assertEqual(second_at, next(at for kind,at in observed if kind == 'userRole'))
+        self.assertEqual(second_at, self.provider._last['inventories'][self.state['routes']['long_account']]['at_ms'])
         self.assertLess(first_at, self.exchange.t)
 
     def test_malformed_raw_response_does_not_poison_later_card_or_other_account(self):
@@ -163,12 +164,9 @@ class EntryReadReuseTests(unittest.TestCase):
     def test_slow_collection_is_still_expired_and_next_pass_has_no_stale_cache(self):
         self.candidate()
         self.candidate(cycle='second')
-        modes = []
         def expire(kind):
-            if kind == 'userAbstraction':
-                modes.append(kind)
-                if len(modes) == 4:
-                    self.exchange.t += 15001
+            if kind == 'activeAssetData':
+                self.exchange.t += 15001
         self.raw.mutate = expire
         expired=self.collect()
         self.assertEqual(expired['inventory_accounts'],[])
@@ -178,51 +176,53 @@ class EntryReadReuseTests(unittest.TestCase):
         self.raw.calls.clear()
         result = self.collect()
         self.assertEqual(len(result['capacity']), 2)
-        self.assertEqual(len(self.raw.calls), 20)
+        self.assertEqual(len(self.raw.calls), 8)
 
-    def test_account_mode_changes_do_not_reuse_prior_mode_capacity(self):
-        self.candidate()
+    def test_mode_balance_and_capacity_are_refreshed_in_the_next_collection(self):
+        first = self.candidate()
         self.candidate(cycle='second')
         original = self.raw.read
-        modes = []
-        def mode_change(kind, *args, **kwargs):
-            result = original(kind, *args, **kwargs)
+        mode = ['disabled']
+        observed_modes = []
+        def current_mode(kind, *args, **kwargs):
+            value = original(kind, *args, **kwargs)
             if kind == 'userAbstraction':
-                modes.append(kind)
-                return 'disabled' if len(modes) <= 3 else 'unifiedAccount'
+                observed_modes.append(mode[0])
+                return mode[0]
             if kind == 'spotClearinghouseState':
                 return dict(balances=[dict(coin='USDC', token=0, total='40000', hold='0')])
-            return result
-        with patch.object(self.raw, 'read', side_effect=mode_change):
-            result = self.collect()
-        self.assertEqual(result['entry_blocked'], {})
-        self.assertEqual(sum(c[0] == 'activeAssetData' for c in self.raw.calls), 2)
-        self.assertEqual(sum(c[0] == 'userRateLimit' for c in self.raw.calls), 2)
-
-    def test_mode_returning_to_original_discards_its_old_samples(self):
-        self.candidate()
-        self.candidate(cycle='second')
-        self.candidate(cycle='third')
-        original = self.raw.read
-        modes = []
-        def mode_change(kind, *args, **kwargs):
-            result = original(kind, *args, **kwargs)
-            if kind == 'userAbstraction':
-                modes.append(kind)
-                return 'unifiedAccount' if 4 <= len(modes) <= 6 else 'disabled'
-            if kind == 'spotClearinghouseState':
-                return dict(balances=[dict(coin='USDC', token=0, total='40000', hold='0')])
-            return result
-        with patch.object(self.raw, 'read', side_effect=mode_change):
-            result = self.collect()
-        self.assertEqual(result['entry_blocked'], {})
-        self.assertEqual(len(result['capacity']), 3)
+            return value
+        with patch.object(self.raw, 'read', side_effect=current_mode):
+            standard = self.collect()
+            mode[0] = 'unifiedAccount'
+            unified = self.collect()
+            mode[0] = 'disabled'
+            restored = self.collect()
+        self.assertEqual(observed_modes, ['disabled', 'unifiedAccount', 'disabled'])
+        self.assertEqual(standard['capacity'][first]['unheld'], '50000')
+        self.assertEqual(unified['capacity'][first]['unheld'], '40000')
+        self.assertEqual(restored['capacity'][first]['unheld'], '50000')
+        self.assertTrue(all(not result['entry_blocked'] for result in (standard, unified, restored)))
         counts = Counter(call[0] for call in self.raw.calls)
         self.assertEqual(counts['activeAssetData'], 3)
         self.assertEqual(counts['userRole'], 6)
         self.assertEqual(counts['userRateLimit'], 3)
 
-    def test_default_final_mode_probe_remains_uncached_after_reuse(self):
+    def test_inventory_balance_is_reused_and_insufficient_funds_still_block(self):
+        first = self.candidate()
+        original = self.raw.read
+        def low_balance(kind, *args, **kwargs):
+            value = original(kind, *args, **kwargs)
+            if kind == 'clearinghouseState':
+                value['withdrawable'] = '0'
+            return value
+        with patch.object(self.raw, 'read', side_effect=low_balance):
+            result = self.collect()
+        self.assertIn(first, result['entry_blocked'])
+        self.assertNotIn(first, result['capacity'])
+        self.assertEqual(sum(c[0] == 'clearinghouseState' for c in self.raw.calls), 1)
+
+    def test_default_snapshot_reads_account_mode_once_and_refreshes_next_collection(self):
         from experimental_execution_fixtures import r2732_message
         from . import two_account_execution as roles
         from .experimental_market_context import MarketSnapshot
@@ -230,11 +230,12 @@ class EntryReadReuseTests(unittest.TestCase):
         account = roles.PHANTOM
         self.provider.env['HL_TESTNET_SHORT_ACCOUNT_ADDRESS'] = account
         original = self.raw.read
+        mode = ['default']
         modes = []
-        def mode_change(kind, *args, **kwargs):
+        def current_mode(kind, *args, **kwargs):
             if kind == 'userAbstraction':
-                modes.append(kind)
-                return 'disabled' if len(modes) == 4 else 'default'
+                modes.append(mode[0])
+                return mode[0]
             if kind == 'userRole':
                 return dict(role='user') if kwargs['user'] == account else dict(role='agent', data=dict(user=account))
             return original(kind, *args, **kwargs)
@@ -242,11 +243,14 @@ class EntryReadReuseTests(unittest.TestCase):
         message = r2732_message(entry=2.3, decision_ms=T-60000)
         kwargs = dict(buckets=[], inventory=dict(orders=[], positions=dict(assetPositions=[])),
             market=market, entry_reads={})
-        with patch.object(self.raw, 'read', side_effect=mode_change):
+        with patch.object(self.raw, 'read', side_effect=current_mode):
             self.provider._capacity(message, account, 'short_account', META, **kwargs)
-            with self.assertRaisesRegex(ValueError, 'ACCOUNT_MODE_CHANGED_RECHECK'):
+            self.provider._capacity(message, account, 'short_account', META, **kwargs)
+            mode[0] = 'unsupported'
+            kwargs['entry_reads'] = {}
+            with self.assertRaisesRegex(ValueError, 'ACCOUNT_MODE_REQUIRES_REVIEW'):
                 self.provider._capacity(message, account, 'short_account', META, **kwargs)
-        self.assertEqual(len(modes), 4)
+        self.assertEqual(modes, ['default', 'unsupported'])
 
     def test_stalled_entry_collection_cannot_block_protection_collection(self):
         self.candidate()
@@ -282,11 +286,11 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(completed), 2)
 
-    def test_idle_collections_keep_two_inventory_passes_without_unused_market_read(self):
+    def test_idle_collections_read_each_account_once_without_unused_market_read(self):
+        self.provider.collect(self.state)
+        self.assertEqual(len(self.raw.calls), 4)
         self.provider.collect(self.state)
         self.assertEqual(len(self.raw.calls), 8)
-        self.provider.collect(self.state)
-        self.assertEqual(len(self.raw.calls), 16)
         self.assertNotIn('metaAndAssetCtxs',[c[0] for c in self.raw.calls])
 
 

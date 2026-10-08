@@ -104,6 +104,9 @@ class FullConnectionTests(unittest.TestCase):
             routes={role: row['account'] for role, row in LIVE_ROUTES.items()})
         self.budget = object.__new__(request_budget.Budget)
         self.budget.acquire = lambda *args, **kw: core._Permit(self.oracle.now, self.oracle.now())
+        self.budget.capacity = lambda **kw: dict(eligible=True,used_weight=0,
+            requested_weight=kw.get('requested_weight',1),ceiling=request_budget.BACKGROUND_LIMIT,
+            retry_after_ms=0)
         self.raw = RawTestnetFixture(self.oracle, self.store.load, self.budget)
         self.provider = LiveEvidenceProvider(self.env, legacy_store=LegacyFixture(), experimental_store=self.store,
             price_evidence=SyntheticPrices(self.oracle, self.store), budget=self.budget,
@@ -380,6 +383,31 @@ class FullConnectionTests(unittest.TestCase):
             for _ in range(3):self.service.tick()
         self.assertEqual(source.call_count,0);self.assertEqual(capacity.call_count,0)
         self.assertEqual({o['leg'] for o in self.oracle.orders.values()},{'ENTRY','STOP','TAKE_PROFIT'})
+
+    def test_entry_budget_wait_is_durable_and_wakes_at_budget_expiry(self):
+        msg = r2732_message(entry=2.3, decision_ms=T-60000)
+        self.seed(msg)
+        retry_at = self.oracle.now() + 750
+        original = self.provider.collect
+        def blocked(*args, **kwargs):
+            context = original(*args, **kwargs)
+            context['entry_blocked'][msg['occurrence_id']] = 'TESTNET_REQUEST_BUDGET_EXHAUSTED'
+            context['entry_retry_after_ms'] = {msg['occurrence_id']: retry_at}
+            self.provider._last['context'] = deepcopy(context)
+            return context
+        with patch.object(self.provider, 'collect', side_effect=blocked):
+            self.assertEqual(self.service.tick()['status'], 'OBSERVED_NO_ACTION')
+        decision = self.store.load()['entry_decisions'][msg['occurrence_id']]
+        self.assertEqual(decision['retry_after_ms'], retry_at)
+        self.assertAlmostEqual(self.service._next_wait_seconds(5), .75)
+        self.assertFalse(self.http)
+
+    def test_failed_tick_does_not_spin_on_an_expired_entry_retry(self):
+        self.service._next_entry_retry_ms = self.oracle.now() - 1
+        with patch.object(self.worker, 'run_once', side_effect=ValueError('TESTNET_REQUEST_BUDGET_BUSY')):
+            with self.assertRaises(ValueError):
+                self.service.tick()
+        self.assertEqual(self.service._next_wait_seconds(5), 5)
 
     def test_unresolved_entry_defers_other_candidate_source_before_initial_stop(self):
         self.oracle=SoftwareExchange(ARM+10000);self.build(CREATED-60000)

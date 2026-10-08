@@ -2,10 +2,12 @@
 from copy import deepcopy
 import json
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from experimental_execution_fixtures import r2732_message
+from approved_alert_fixtures import maxpain_alert
 from . import card_lifecycle as life
 from . import fill_wakeups as wake
 from . import experimental_live_safety as safety
@@ -245,13 +247,139 @@ class LiveSafetyTests(unittest.TestCase):
         self.fx.service.supervisor = self.supervisor
         reads = len(self.fx.raw.calls)
         self.fx.oracle.t += 10000
-        self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_IDLE_REUSED')
-        self.assertEqual(len(self.fx.raw.calls), reads)
-        self.supervisor.pass_once()
+        self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_NO_ACTION')
         after = len(self.fx.raw.calls)
         self.assertGreater(after, reads)
+        self.supervisor.pass_once()
+        self.assertEqual(len(self.fx.raw.calls), after)
         self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_IDLE_REUSED')
         self.assertEqual(len(self.fx.raw.calls), after)
+
+    def test_running_primary_receives_fill_wakeup_without_duplicate_supervisor_scan(self):
+        self.ready_feed(); self.observed()
+        primary = self.fx.service
+        self.supervisor.primary_service = primary
+        primary._thread = SimpleNamespace(is_alive=lambda: True)
+        primary.last_cycle_at_ms = self.fx.oracle.now()
+        primary.last_status = 'OBSERVED_NO_ACTION'
+        account = self.fx.release['routes']['short_account']
+        generation = self.feed.begin_reconciliation(account).generation
+        self.feed._receive(account, generation, json.dumps(dict(channel='orderUpdates',
+            data=[dict(order=dict(coin='XRP', oid=5), status='filled',
+                statusTimestamp=self.fx.oracle.now())])))
+        reads = len(self.fx.raw.calls)
+        self.supervisor.pass_once()
+        self.assertTrue(primary._wake.is_set())
+        self.assertEqual(len(self.fx.raw.calls), reads)
+        self.assertFalse(self.feed.entry_allowed(account))
+        # A failed primary relinquishes scanning immediately.
+        primary.last_cycle_error_code = 'TESTNET_REQUEST_BUDGET_EXHAUSTED'
+        self.supervisor.pass_once()
+        self.assertGreater(len(self.fx.raw.calls), reads)
+        self.assertTrue(self.feed.entry_allowed(account))
+
+    def test_recent_primary_pending_work_does_not_trigger_duplicate_wakeup(self):
+        self.ready_feed(); self.observed()
+        primary = self.fx.service
+        self.supervisor.primary_service = primary
+        primary._thread = SimpleNamespace(is_alive=lambda: True)
+        primary.last_cycle_at_ms = self.fx.oracle.now()
+        primary.last_status = 'OBSERVED_NO_ACTION'
+        with patch.object(self.supervisor, '_can_reuse', return_value=False), \
+                patch.object(self.fx.worker, 'run_once') as collect:
+            self.supervisor.pass_once()
+        self.assertFalse(primary._wake.is_set())
+        collect.assert_not_called()
+
+    def test_settled_static_protection_reuses_receipt_until_fill_notification(self):
+        self.ready_feed(); self.observed(); self.supervisor.pass_once()
+        self.supervisor._thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout: None)
+        msg = maxpain_alert(approved_ms=T)
+        account = self.fx.release['routes']['long_account']
+        self.fx.oracle.mark[safety._lane(account, msg['symbol'])] = msg['entry']
+        self.fx.worker.receive([msg])
+        self.assertEqual(self.fx.worker.run_once(entries_enabled=True).get('operation'), 'ENTRY')
+        trade = self.fx.store.load()['trades'][msg['occurrence_id']]
+        self.fx.oracle.fill(self.fx.oracle.oid('ENTRY'), trade['quantity'])
+        for _ in range(3):
+            self.observed()
+        self.assertIsNotNone(self.supervisor.idle_receipt())
+        self.fx.service.supervisor = self.supervisor
+        reads = len(self.fx.raw.calls)
+        self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_IDLE_REUSED')
+        self.assertEqual(len(self.fx.raw.calls), reads)
+        token = self.feed.begin_reconciliation(account)
+        self.feed._receive(account, token.generation, json.dumps(dict(channel='orderUpdates',
+            data=[dict(order=dict(coin=msg['symbol'], oid=int(self.fx.oracle.oid('TAKE_PROFIT'))),
+                status='filled', statusTimestamp=self.fx.oracle.now())])))
+        self.assertIsNone(self.supervisor.idle_receipt())
+
+    def test_stale_primary_does_not_suppress_supervisor_fallback(self):
+        self.ready_feed(); self.observed()
+        primary = self.fx.service
+        self.supervisor.primary_service = primary
+        primary._thread = SimpleNamespace(is_alive=lambda: True)
+        primary.last_cycle_at_ms = self.fx.oracle.now()
+        primary.last_status = 'OBSERVED_NO_ACTION'
+        reads = len(self.fx.raw.calls)
+        self.fx.oracle.t += 10000
+        self.supervisor.pass_once()
+        self.assertGreater(len(self.fx.raw.calls), reads)
+
+    def test_fresh_entry_on_previously_idle_account_needs_no_extra_supervisor_pass(self):
+        self.ready_feed(); self.observed(); self.supervisor.pass_once()
+        self.supervisor._thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout: None)
+        self.fx.oracle.t += 16000
+        account = self.fx.release['routes']['short_account']
+        self.assertFalse(self.supervisor.health(account=account)['healthy'])
+        self.fx.worker.receive([r2732_message(entry=2.3, decision_ms=T-60000)])
+        result = self.fx.worker.run_once(entries_enabled=True)
+        self.assertEqual(result.get('operation'), 'ENTRY', result)
+        self.assertEqual(self.fx.provider._last['context']['inventory_accounts'], [account])
+        self.assertTrue(self.supervisor.health(account=account)['healthy'])
+        self.assertEqual(len(self.fx.http), 1)
+
+    def test_budget_wait_reuses_idle_receipt_only_before_retry_due(self):
+        self.ready_feed(); self.observed()
+        msg = r2732_message(entry=2.3, decision_ms=T-60000)
+        self.fx.worker.receive([msg])
+        self.assertIsNone(self.supervisor.idle_receipt())
+        retry_at = self.fx.oracle.now() + 1000
+        def defer(state):
+            state.setdefault('entry_decisions', {})[msg['occurrence_id']] = dict(
+                reason='TESTNET_REQUEST_BUDGET_EXHAUSTED', retry_after_ms=retry_at)
+        self.fx.store.mutate(defer)
+        self.assertIsNotNone(self.supervisor.idle_receipt())
+        self.fx.oracle.t = retry_at
+        self.assertIsNone(self.supervisor.idle_receipt())
+
+    def test_worker_and_supervisor_share_nonblocking_cycle_lock(self):
+        self.ready_feed()
+        started = threading.Event(); finish = threading.Event(); errors = []
+        original = self.fx.provider.collect
+        def collect(*args, **kwargs):
+            started.set()
+            if not finish.wait(2):
+                raise AssertionError('FIXTURE_WAIT_EXPIRED')
+            return original(*args, **kwargs)
+        def worker():
+            try:
+                self.observed()
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(self.fx.provider, 'collect', side_effect=collect) as collected:
+            thread = threading.Thread(target=worker)
+            thread.start()
+            try:
+                self.assertTrue(started.wait(1))
+                self.assertEqual(self.observed()['status'], 'OBSERVATION_CYCLE_ALREADY_RUNNING')
+                self.supervisor.pass_once(force_collect=True)
+                self.assertEqual(collected.call_count, 1)
+            finally:
+                finish.set(); thread.join(2)
+        self.assertFalse(errors)
+        self.supervisor.pass_once()
+        self.assertEqual(self.supervisor.health()['status'], 'SUPERVISOR_OBSERVATION_VERIFIED')
 
     def test_stalled_source_worker_does_not_prevent_independent_exit_cleanup(self):
         self.ready_feed(); self.start_supervisor()

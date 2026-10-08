@@ -176,13 +176,13 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError,'NO_SOFTWARE_RELABELING'):self.provider.collect(self.state)
         self.assertEqual(self.raw.calls,[])
 
-    def test_missing_mark_history_blocks_entry_with_fresh_both_account_inventory(self):
+    def test_missing_mark_history_blocks_entry_with_fresh_own_account_inventory(self):
         msg=self.pending();value=self.provider.collect(self.state,entries_enabled=True)
         self.assertTrue(value['inventory_complete'])
         self.assertEqual(value['entry_blocked'][msg['occurrence_id']],'CONTINUOUS_REFERENCE_MARK_HISTORY_UNAVAILABLE')
-        self.assertEqual(value['inventory_accounts'],sorted(x['account'] for x in ROUTES.values()))
+        self.assertEqual(value['inventory_accounts'],[ROUTES['short_account']['account']])
         self.assertEqual(len(value['snapshots']),1)
-        self.assertEqual(sum(c[0]=='frontendOpenOrders' for c in self.raw.calls),4)
+        self.assertEqual(sum(c[0]=='frontendOpenOrders' for c in self.raw.calls),1)
 
     def test_approved_entry_collects_actual_account_without_source_history(self):
         msg=self.approved();self.provider.safety=object()
@@ -245,18 +245,14 @@ class ProviderTests(unittest.TestCase):
         self.assertIn(ROUTES['short_account']['account'],value['account_entry_blocked'])
         self.assertIn(msg['occurrence_id'],value['entry_blocked'])
 
-    def test_changed_inventory_between_passes_fences_affected_accounts(self):
-        self.pending();count=[0]
-        def change(kind):
-            if kind=='frontendOpenOrders':
-                count[0]+=1
-                if count[0]==3:self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
-        self.raw.mutate=change
-        value=self.provider.collect(self.state)
-        self.assertEqual(value['inventory_accounts'],[])
-        self.assertEqual(set(value['inventory_account_errors']),set(self.state['routes'].values()))
-        self.assertEqual(set(value['inventory_account_errors'].values()),{'ACCOUNT_OBSERVATION_OR_JOURNAL_CHANGED_RETRY'})
-        self.assertEqual(value['snapshots'],[])
+    def test_next_collection_reads_current_inventory_and_blocks_unknown_exposure(self):
+        self.pending()
+        first=self.provider.collect(self.state)
+        self.assertEqual(first['account_entry_blocked'],{})
+        self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
+        second=self.provider.collect(self.state)
+        self.assertEqual(set(second['account_entry_blocked']),set(self.state['routes'].values()))
+        self.assertEqual(sum(c[0]=='frontendOpenOrders' for c in self.raw.calls),4)
 
     def test_real_collectors_reconstruct_exact_fill_without_source_history(self):
         msg=self.active();value=self.provider.collect(self.state)
@@ -288,7 +284,7 @@ class ProviderTests(unittest.TestCase):
         value=self.provider.collect(self.state)
         self.assertEqual(len(value['snapshots']),1)
         self.assertEqual(value['snapshots'][0]['orders'][0]['status'],'FILLED')
-        self.assertEqual(set(value['account_entry_blocked']),set(self.state['routes'].values()))
+        self.assertEqual(set(value['account_entry_blocked']),{self.state['routes']['short_account']})
 
     def test_dispatch_requires_prior_collection_and_native_durable_request(self):
         self.active();request=next(iter(self.state['requests'].values()))
@@ -396,8 +392,83 @@ class ProviderTests(unittest.TestCase):
             for _ in range(26):p.collect(self.state)
         self.assertEqual(len(public),27);self.assertEqual(len(info),54)
         self.assertEqual(priorities,['protection','background']*27)
-        self.assertGreater(sum(len(r.calls) for r in public),200)
-        self.assertTrue(all(len(r.calls)<=8 for r in public))
+        self.assertEqual(sum(len(r.calls) for r in public),104)
+        self.assertTrue(all(len(r.calls)<=4 for r in public))
+
+    def test_ineligible_source_alone_does_not_fetch_market_or_source_prices(self):
+        self.approved()
+        value=self.provider.collect(self.state,entries_enabled=False)
+        self.assertEqual(value['marks'],{})
+        self.assertEqual([c[0] for c in self.raw.calls],
+            ['frontendOpenOrders','clearinghouseState']*2)
+
+    def test_budget_retry_skips_entry_reads_until_original_retry_time(self):
+        from .request_budget import BudgetError
+        msg=self.approved();cid=msg['occurrence_id'];self.provider.safety=object()
+        failure=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',retry_after_ms=17000)
+        with patch.object(self.provider,'_capacity',side_effect=failure) as capacity:
+            context=self.provider.collect(self.state,entries_enabled=True)
+        retry=self.exchange.t+17000
+        self.assertEqual(context['entry_retry_after_ms'][cid],retry)
+        self.state['entry_decisions']={cid:dict(reason=context['entry_blocked'][cid],retry_after_ms=retry)}
+        self.raw.calls.clear()
+        with patch.object(self.provider,'_capacity',side_effect=AssertionError('NO_CAPACITY_UNTIL_DUE')):
+            context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(context['entry_retry_after_ms'][cid],retry)
+        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in self.raw.calls])
+        self.assertEqual(context['capacity'],{})
+
+    def test_insufficient_whole_preflight_budget_stops_before_optional_reads(self):
+        from types import SimpleNamespace
+        msg=self.approved();self.provider.safety=object();requested=[]
+        def capacity(*,requested_weight,priority):
+            requested.append((requested_weight,priority))
+            return dict(eligible=False,used_weight=658,requested_weight=requested_weight,
+                        ceiling=800,retry_after_ms=9000)
+        self.provider.budget=SimpleNamespace(capacity=capacity)
+        context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(requested,[(183,'background')])
+        self.assertEqual([c[0] for c in self.raw.calls],
+                         ['frontendOpenOrders','clearinghouseState','metaAndAssetCtxs'])
+        self.assertEqual(context['entry_retry_after_ms'][msg['occurrence_id']],self.exchange.t+9000)
+
+    def test_nested_preflight_keeps_budget_delay_and_stops_remaining_reads(self):
+        from .request_budget import BudgetError
+        msg=self.approved();self.provider.safety=object();original=self.raw.read
+        def deny_role(kind,*args,**kwargs):
+            if kind=='userRole':
+                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',retry_after_ms=9000)
+            return original(kind,*args,**kwargs)
+        with patch.object(self.raw,'read',side_effect=deny_role):
+            context=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(context['entry_blocked'][msg['occurrence_id']],'TESTNET_REQUEST_BUDGET_EXHAUSTED')
+        self.assertEqual(context['entry_retry_after_ms'][msg['occurrence_id']],self.exchange.t+9000)
+        self.assertNotIn('userRateLimit',[c[0] for c in self.raw.calls])
+
+    def test_known_order_identity_and_terminal_status_are_reused_only_with_checkpoint(self):
+        msg=self.active(steps=4);cid=msg['occurrence_id']
+        first=self.provider.collect(self.state)
+        self.assertEqual(first['blocked_lanes'],{})
+        self.assertNotIn('lookup',[c[0] for c in self.raw.calls])
+        lane=runtime._lane(self.state['trades'][cid]['account'],msg['symbol'])
+        snapshot=first['snapshots'][0]
+        # Install the exact normalized raw exchange proof as a durable fixture.
+        self.state['snapshots'][lane]=deepcopy(snapshot)
+        self.state['trades'][cid]['orders']={o['oid']:deepcopy(o) for o in snapshot['orders']}
+        self.state['collector_checkpoints']=deepcopy(first['collector_checkpoints'])
+        self.raw.calls.clear()
+        result=self.provider.collect(self.state)
+        self.assertEqual(result['blocked_lanes'],{})
+        terminal=[o for o in snapshot['orders'] if o['status']!='OPEN']
+        self.assertTrue(terminal)
+        self.assertEqual(sum(c[0]=='orderStatus' for c in self.raw.calls),
+                         sum(o['status']=='OPEN' for o in snapshot['orders']))
+        self.assertNotIn('lookup',[c[0] for c in self.raw.calls])
+        self.assertEqual(sum(c[0]=='userFillsByTime' for c in self.raw.calls),1)
+        terminal[0]['wire_order']['s']='1'
+        self.state['trades'][cid]['orders'][terminal[0]['oid']]=terminal[0]
+        result=self.provider.collect(self.state)
+        self.assertIn('PREVIOUSLY_OWNED_ORDER_TERMS_CHANGED',result['blocked_lanes'].values())
 
     def legacy_active(self,*,pending=None):
         from .experimental_live_provider import _empty

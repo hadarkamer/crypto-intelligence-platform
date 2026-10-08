@@ -20,6 +20,7 @@ from . import filled_quantity_dispatch as wire
 from . import two_account_execution as roles
 from .long_stream_runtime import _validate_account_inventory
 from .experimental_market_context import MarketSnapshot
+from .request_budget import BudgetError, fresh_entry_retry_ms, request_weight
 
 
 class ProviderError(ValueError):
@@ -216,6 +217,7 @@ class LiveEvidenceProvider:
 
     def _inventory(self, account, reader=None):
         reader=self.public if reader is None else reader
+        at_ms=self.now()
         orders=reader.read('frontendOpenOrders',account)
         positions=reader.read('clearinghouseState',account)
         if (not isinstance(orders,list) or len(orders)>10000 or not isinstance(positions,dict)
@@ -235,9 +237,10 @@ class LiveEvidenceProvider:
             life.number(p.get('szi'),signed=True);symbols.add(p['coin'])
         # Margin totals change with marks; ownership comparison uses positions.
         return dict(orders=deepcopy(sorted(orders,key=lambda x:x['oid'])),
-            positions=dict(assetPositions=deepcopy(sorted(positions['assetPositions'],key=lambda x:x['position']['coin']))))
+            positions=dict(assetPositions=deepcopy(sorted(positions['assetPositions'],key=lambda x:x['position']['coin']))),
+            account_state=deepcopy(positions),at_ms=at_ms)
 
-    def _experimental_bindings(self, state, account, symbol):
+    def _experimental_bindings(self, state, account, symbol, *, observation_cache=None):
         lookups={};ids={};seen=set()
         for request in state['requests'].values():
             p=request['proposal']
@@ -245,12 +248,30 @@ class LiveEvidenceProvider:
                     or request['phase']=='ABORTED_UNSENT'):
                 continue
             order=wire.requested_order(p['action']);cloid=order['c']
-            raw=self._lookup(account,cloid);lookups[cloid]=raw
+            oid=request.get('observed_oid')
+            prior=state['trades'][p['card_id']]['orders'].get(oid)
+            if oid is not None and request['phase']=='OBSERVED':
+                if prior is None or prior['oid']!=oid or prior['wire_order']!=order or prior['cloid']!=cloid:
+                    raise ProviderError('PREVIOUSLY_OWNED_ORDER_TERMS_CHANGED')
+                checkpoint=state.get('collector_checkpoints',{}).get(runtime._lane(account,symbol),{})
+                certified=any(row['oid']==oid for row in checkpoint.get('terminal_orders',[]))
+                if prior['status']!='OPEN' and certified:
+                    raw=None  # Immutable terminal proof is checked by the collector.
+                else:
+                    reader=observation_cache.pass_reader(0) if observation_cache is not None else self.public
+                    raw=reader.read('orderStatus',account,oid=oid)
+            else:
+                raw=self._lookup(account,cloid)
+            if raw is not None:lookups[cloid]=raw
             if raw=={'status':'unknownOid'}:
                 if request.get('observed_oid') is not None:
                     raise ProviderError('PREVIOUSLY_OWNED_ORDER_LOOKUP_MISSING')
                 continue
-            oid=wire.identity(raw,request,self.now())
+            if raw is not None:
+                observed=wire.identity(raw,request,self.now())
+                if oid is not None and oid!=observed:
+                    raise ProviderError('PREVIOUSLY_OWNED_ORDER_ID_CHANGED')
+                oid=observed
             if oid in seen:
                 raise ProviderError('EXCHANGE_ORDER_HAS_MULTIPLE_DURABLE_OWNERS')
             seen.add(oid)
@@ -265,7 +286,7 @@ class LiveEvidenceProvider:
 
     def _lane(self, state, account, symbol, legacy, inventory, *, observation_cache=None, observation_end_ms=None, historical=None):
         lane=runtime._lane(account,symbol)
-        exp,lookups=self._experimental_bindings(state,account,symbol)
+        exp,lookups=self._experimental_bindings(state,account,symbol,observation_cache=observation_cache)
         old=next((s for s in legacy if s['symbol']==symbol),None)
         old_bindings=[] if old is None else old['bindings']
         bindings=old_bindings+exp
@@ -283,11 +304,11 @@ class LiveEvidenceProvider:
             raise ProviderError('COLLECTOR_CHECKPOINT_SCOPE_CHANGED')
         if bindings:
             observed=sync.collect(dict(bindings=bindings,snapshot=previous),self.public,
-                clock=self.now,reuse_verified_terminals=True,verification_passes=2,
+                clock=self.now,reuse_verified_terminals=True,verification_passes=1,
                 observation_cache=observation_cache,observation_end_ms=observation_end_ms)['snapshot']
         else:
-            # No owned request exists: prove CURRENT flatness from the two
-            # account inventories, and never infer absence from an alert.
+            # No owned request exists: prove current flatness from the complete
+            # account inventory, and never infer absence from an alert.
             if (any(o['coin']==symbol for o in inventory['orders'])
                     or any(p['position']['coin']==symbol and life.number(p['position']['szi'],signed=True)
                            for p in inventory['positions']['assetPositions'])):
@@ -323,7 +344,8 @@ class LiveEvidenceProvider:
             raise ProviderError('LEGACY_FINALITY_POSITION_MISMATCH')
         if legacy_active and exp:
             raise ProviderError('SHARED_MARKET_LEGACY_EXPOSURE_CONFLICT')
-        normalized=None if legacy_active else proof.normalize_snapshot(state,experimental,lookups,now_ms=self.now())
+        normalized=None if legacy_active else proof.normalize_snapshot(state,experimental,lookups,now_ms=self.now(),
+            reuse_verified_terminals=True)
         bucket=dict(account=account,symbol=symbol,bindings=bindings,
                     pending=old['pending'] if old else None,evidence=dict(snapshot=observed))
         return normalized,observed,bucket,legacy_active,exp,lookups
@@ -337,19 +359,39 @@ class LiveEvidenceProvider:
         # Reuse role-specific actual account identity, abstraction, budget and
         # address allowance checks. The recording reader retains raw facts.
         recorded={};outer=self
-        # Shared ONLY by candidate cards in this one collection. Never wrap
-        # protection reads or the two independent account inventory passes.
-        # Account mode probes stay uncached, including the final default-mode
-        # recheck. Different account modes cannot share balance/capacity data.
+        # One current snapshot per account in this collection. Nested preflight
+        # helpers inspect these same facts instead of repeating their reads.
+        # Nothing is retained for the next collection or across a submission.
         entry_reads={} if entry_reads is None else entry_reads
         sampled=entry_reads.setdefault('samples',{})
-        modes=entry_reads.setdefault('modes',{})
-        reusable={'userRole','clearinghouseState','spotClearinghouseState',
+        if 'account_state' in inventory:
+            sampled.setdefault((account,'clearinghouseState',account,None),
+                (inventory['at_ms'],deepcopy(inventory['account_state'])))
+        reusable={'userRole','userAbstraction','clearinghouseState','spotClearinghouseState',
                   'activeAssetData','userRateLimit'}
+        # Do not start another partial preflight when the remaining reads and
+        # one entry send already exceed the unchanged background allowance.
+        available=getattr(self.budget,'capacity',None)
+        if callable(available):
+            planned=[('userAbstraction',account,None),('userRole',account,None),
+                ('userRole',route['agent'],None),('clearinghouseState',account,None),
+                ('activeAssetData',account,message['symbol']),('userRateLimit',account,None)]
+            mode_sample=sampled.get((account,'userAbstraction',account,None))
+            if mode_sample is None or mode_sample[1] in ('default','unifiedAccount'):
+                planned.append(('spotClearinghouseState',account,None))
+            weight=request_weight('/exchange',dict(action=dict(type='order',orders=[{}])))
+            weight+=sum(request_weight('/info',dict(type=kind)) for kind,user,coin in planned
+                        if (account,kind,user,coin) not in sampled)
+            capacity=available(requested_weight=weight,priority='background')
+            if not capacity['eligible']:
+                raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+                    **{key:capacity[key] for key in ('used_weight','requested_weight','ceiling','retry_after_ms')})
+        read_failure=None
         class RecordingReader:
             parallel=False
             def read(self,kind,**kwargs):
-                nonlocal at
+                nonlocal at,read_failure
+                if read_failure is not None:raise read_failure
                 # Admission preflight cannot consume the protection reserve.
                 if kind=='meta':
                     value=market.metadata
@@ -357,20 +399,15 @@ class LiveEvidenceProvider:
                     key=(account,kind,kwargs.get('user'),kwargs.get('coin'))
                     if key not in sampled:
                         observed_at=outer.now()
-                        value=outer.entry_info.read(kind,**kwargs)
+                        try:value=outer.entry_info.read(kind,**kwargs)
+                        except BudgetError as exc:
+                            read_failure=exc;raise
                         sampled[key]=(observed_at,deepcopy(value))
                     observed_at,value=sampled[key]
                     at=min(at,observed_at)  # Reuse never refreshes evidence time.
                     value=deepcopy(value)
                 else:
                     value=outer.entry_info.read(kind,**kwargs)
-                    if kind=='userAbstraction':
-                        if account in modes and modes[account]!=value:
-                            # Includes A -> B -> A; old account/agent samples
-                            # never survive an observed mode transition.
-                            for key in list(sampled):
-                                if key[0]==account:del sampled[key]
-                        modes[account]=deepcopy(value)
                 if kind=='activeAssetData':
                     value=market.active_asset_data(value,account=account,
                         symbol=message['symbol'],now_ms=outer.now())
@@ -418,19 +455,19 @@ class LiveEvidenceProvider:
         now=self.now()
         legacy=self._legacy(state);ownership=self._revision(legacy)
         result=dict(basis_revision=state['revision'],metadata={},snapshots=[],marks={},
-            ranges={},bars={},capacity={},entry_blocked={},account_entry_blocked={},blocked_lanes={},
+            ranges={},bars={},capacity={},entry_blocked={},entry_retry_after_ms={},account_entry_blocked={},blocked_lanes={},
             collector_checkpoints={},ownership_revision=ownership,rejected_requests=[],
             inventory_account_errors={},account_inventory_at_ms={},
             legacy_account_revisions={a:self._revision({a:rows}) for a,rows in legacy.items()})
         cache=sync.ObservationReadCache(self.public)
-        first={};second={}
-        for account in state['routes'].values():
-            result['account_inventory_at_ms'][account]=now
-            try:
-                first[account]=self._inventory(account,cache.pass_reader(0))
-            except Exception as exc:
-                result['inventory_account_errors'][account]=_error(exc)
-                result['account_entry_blocked'][account]=_error(exc)
+        inventories={};account_retries={}
+        def remember_retry(exc, accounts):
+            if not isinstance(exc,BudgetError):return
+            try:delay=fresh_entry_retry_ms(exc)
+            except BudgetError:return
+            if delay is not None:
+                for account in accounts:account_retries[account]=self.now()+delay
+
         from .experimental_live_startup import retired_legacy_rows
         cold_legacy=retired_legacy_rows(state,legacy)
         legacy_live={a:[] if a in cold_legacy else rows for a,rows in legacy.items()}
@@ -475,24 +512,48 @@ class LiveEvidenceProvider:
         lanes={(s['account'],s['symbol']) for rows in legacy_live.values() for s in rows
                if s['bindings'] or s.get('pending') is not None or s.get('emergency') is not None}
         lanes|={(t['account'],t['symbol']) for t in working['trades'].values()}
-        lanes|={(state['routes']['long_account' if s['source']['side']=='LONG' else 'short_account'],s['source']['symbol'])
-                for cid,s in state['sources'].items() if cid not in retired and runtime._source_active(s,self.now())}
+        from .experimental_live_runtime import entry_retry_ready
+        deferred={cid:decision['retry_after_ms'] for cid,decision in state.get('entry_decisions',{}).items()
+                  if decision.get('reason') in ('TESTNET_REQUEST_BUDGET_EXHAUSTED','TESTNET_REQUEST_BUDGET_BUSY',
+                      'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED','TESTNET_OBSERVATION_BATCH_EXPIRED')
+                  and type(decision.get('retry_after_ms')) is int and decision['retry_after_ms']>now}
+        unresolved_accounts={r['proposal']['account'] for r in state['requests'].values()
+                             if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
+        protection_accounts={t['account'] for t in state['trades'].values() if _original_stop_needed(state,t)}
+        source_lanes={(state['routes']['long_account' if s['source']['side']=='LONG' else 'short_account'],s['source']['symbol'])
+                for cid,s in state['sources'].items() if entries_enabled is True and cid not in retired
+                and cid not in deferred and (cid not in state['trades'] or entry_retry_ready(state,cid,now))
+                and runtime._source_active(s,now)
+                and state['routes']['long_account' if s['source']['side']=='LONG' else 'short_account']
+                    not in unresolved_accounts|protection_accounts}
+        lanes|=source_lanes
+        market_lanes=source_lanes|{(t['account'],t['symbol']) for t in working['trades'].values()
+                                  if t['phase'] not in runtime.FINAL}
+        for account in sorted({account for account,_ in lanes} or set(state['routes'].values())):
+            result['account_inventory_at_ms'][account]=now
+            try:
+                inventories[account]=self._inventory(account,cache.pass_reader(0))
+            except Exception as exc:
+                result['inventory_account_errors'][account]=_error(exc)
+                result['account_entry_blocked'][account]=_error(exc)
+                remember_retry(exc,[account])
         market=None;market_error=None
-        if lanes:
+        if market_lanes:
             market_at=self.now()
             try:
                 market=MarketSnapshot(self.info.read('metaAndAssetCtxs'),observed_at_ms=market_at)
                 result['metadata']=market.metadata
-            except Exception as exc:market_error=_error(exc)
+            except Exception as exc:
+                market_error=_error(exc);remember_retry(exc,[account for account,_ in market_lanes])
         metadata=result['metadata']
         for account,symbol in sorted(lanes):
             lane=runtime._lane(account,symbol)
-            if account not in first:
+            if account not in inventories:
                 result['blocked_lanes'][lane]=result['account_entry_blocked'][account]
                 continue
             try:
                 normalized,raw,bucket,occupied,bindings,lookups=self._lane(
-                    working,account,symbol,legacy_live[account],first[account],
+                    working,account,symbol,legacy_live[account],inventories[account],
                     observation_cache=cache,observation_end_ms=now,historical=cold[account].get(symbol))
                 historical=cold[account].get(symbol)
                 if historical:
@@ -519,7 +580,9 @@ class LiveEvidenceProvider:
             except (ValueError,KeyError,TypeError) as exc:
                 result['blocked_lanes'][lane]=_error(exc)
                 result['account_entry_blocked'].setdefault(account,_error(exc))
+                remember_retry(exc,[account])
                 continue
+            if (account,symbol) not in market_lanes:continue
             # Tradability is a market gate, distinct from complete account
             # ownership. A missing candidate-only asset never poisons its peers.
             try:
@@ -529,18 +592,16 @@ class LiveEvidenceProvider:
                 result['blocked_lanes'][lane]=_error(exc)
         current_legacy=self._legacy(state)
         for role,account in state['routes'].items():
-            if account not in first:continue
+            if account not in inventories:continue
             try:
-                second[account]=self._inventory(account,cache.pass_reader(1))
-                if (first[account]!=second[account]
-                        or self._revision({account:current_legacy[account]})!=self._revision({account:legacy[account]})):
+                if self._revision({account:current_legacy[account]})!=self._revision({account:legacy[account]}):
                     raise ProviderError('ACCOUNT_OBSERVATION_OR_JOURNAL_CHANGED_RETRY')
                 if not 0<=self.now()-result['account_inventory_at_ms'][account]<=15000:
                     raise ProviderError('ACCOUNT_COLLECTION_EXPIRED')
             except Exception as exc:
                 result['inventory_account_errors'][account]=_error(exc)
                 result['account_entry_blocked'].setdefault(account,_error(exc))
-                second.pop(account,None)
+                inventories.pop(account,None)
                 result['snapshots']=[s for s in result['snapshots'] if s['account']!=account]
                 for lane in [k for k,v in result['collector_checkpoints'].items() if v['account']==account]:
                     result['collector_checkpoints'].pop(lane)
@@ -548,7 +609,7 @@ class LiveEvidenceProvider:
                     if a==account:result['blocked_lanes'][runtime._lane(account,symbol)]=_error(exc)
                 continue
             try:
-                _validate_account_inventory(account,buckets[account],second[account]['orders'],second[account]['positions'],role=role)
+                _validate_account_inventory(account,buckets[account],inventories[account]['orders'],inventories[account]['positions'],role=role)
             except ValueError as exc:result['account_entry_blocked'].setdefault(account,_error(exc))
         for rid,request in state['requests'].items():
             p=request['proposal'];lane=runtime._lane(p['account'],p['symbol'])
@@ -589,16 +650,19 @@ class LiveEvidenceProvider:
             if _original_stop_needed(price_state,trade):source_io_allowed[trade['account']]=False
         unresolved={r['proposal']['account'] for r in state['requests'].values()
                     if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
-        # No cross-cycle or cross-thread cache: changed state/feed checkpoints
-        # always collect independently and protection never waits for entry I/O.
+        # Reuse only this collection; existing exposure is still collected
+        # while a source-only entry waits for its recorded budget retry.
         entry_reads={}
         for cid,record in state['sources'].items():
             msg=contract.validate(record['source']);role='long_account' if msg['side']=='LONG' else 'short_account'
             account=state['routes'][role];lane=runtime._lane(account,msg['symbol'])
             trade=price_state['trades'].get(cid)
             active_trade=trade is not None and trade['phase'] not in runtime.FINAL
-            from .experimental_live_runtime import entry_retry_ready
             candidate=(trade is None or entry_retry_ready(state,cid,self.now())) and entries_enabled is True and runtime._source_active(record,self.now())
+            if candidate and cid in deferred:
+                result['entry_blocked'][cid]=state['entry_decisions'][cid]['reason']
+                result['entry_retry_after_ms'][cid]=deferred[cid]
+                candidate=False
             if candidate and (account in unresolved or not source_io_allowed[account]):
                 result['entry_blocked'][cid]='ENTRY_DEFERRED_FOR_OWNED_PROTECTION_AND_RECONCILIATION'
                 candidate=False
@@ -618,7 +682,9 @@ class LiveEvidenceProvider:
                     result['bars'][cid]=[]
             if not candidate: continue
             if account in result['account_entry_blocked'] or lane in result['blocked_lanes']:
-                result['entry_blocked'][cid]=result['account_entry_blocked'].get(account,result['blocked_lanes'].get(lane));continue
+                result['entry_blocked'][cid]=result['account_entry_blocked'].get(account,result['blocked_lanes'].get(lane))
+                if account in account_retries:result['entry_retry_after_ms'][cid]=account_retries[account]
+                continue
             try:
                 # An authenticated approved alert already carries the formula's
                 # entry decision. Its sender must not reconstruct a second
@@ -634,7 +700,7 @@ class LiveEvidenceProvider:
                 if self.safety is None:
                     raise ProviderError('VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
                 result['capacity'][cid],reports[cid]=self._capacity(msg,account,role,metadata,
-                    buckets=buckets[account],inventory=second[account],market=market,
+                    buckets=buckets[account],inventory=inventories[account],market=market,
                     entry_reads=entry_reads)
             except Exception as exc:
                 # This entire block is entry-only evidence. A failed source
@@ -645,25 +711,27 @@ class LiveEvidenceProvider:
                 for key in list(samples):
                     if key[0]==account:del samples[key]
                 result['entry_blocked'][cid]=_error(exc)
+                remember_retry(exc,[account])
+                if account in account_retries:result['entry_retry_after_ms'][cid]=account_retries[account]
         # Expired evidence closes only its account; no later optional read
         # refreshes the original observation clock.
-        for account in list(second):
+        for account in list(inventories):
             if not 0<=self.now()-result['account_inventory_at_ms'][account]<=15000:
                 result['inventory_account_errors'][account]='ACCOUNT_COLLECTION_EXPIRED'
                 result['account_entry_blocked'][account]='ACCOUNT_COLLECTION_EXPIRED'
-                second.pop(account)
+                inventories.pop(account)
                 result['snapshots']=[s for s in result['snapshots'] if s['account']!=account]
                 for lane in [k for k,v in result['collector_checkpoints'].items() if v['account']==account]:
                     result['collector_checkpoints'].pop(lane)
                 for a,symbol in lanes:
                     if a==account:result['blocked_lanes'][runtime._lane(account,symbol)]='ACCOUNT_COLLECTION_EXPIRED'
-        result['account_inventory_at_ms']={a:result['account_inventory_at_ms'][a] for a in second}
-        result.update(inventory_complete=True,inventory_accounts=sorted(second),inventory_at_ms=now)
+        result['account_inventory_at_ms']={a:result['account_inventory_at_ms'][a] for a in inventories}
+        result.update(inventory_complete=True,inventory_accounts=sorted(inventories),inventory_at_ms=now)
         stage=getattr(self.safety,'stage_observation',None)
         if callable(stage):
             result['safety_checkpoint_id']=stage(safety_token,state=state,context=deepcopy(result))
         self._last=dict(context=deepcopy(result),state=deepcopy(state),legacy_revision=ownership,
-            inventories=second,buckets=buckets,raw_snapshots=raw_snapshots,owners=owners,budget_reports=reports,
+            inventories=inventories,buckets=buckets,raw_snapshots=raw_snapshots,owners=owners,budget_reports=reports,
             legacy_account_revisions={a:self._revision({a:rows}) for a,rows in legacy.items()})
         return deepcopy(result)
 

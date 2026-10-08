@@ -1,0 +1,55 @@
+{
+  "scope": "Isolated simplification of Testnet execution; no deployment or live exchange access",
+  "base_receiver_commit": "919ba37c3cff917e7d7c0c4c2ffc33a9d6ae8a20",
+  "base_producer_commit": "039d0ed5f2308e59dc8fdc6cd5f516a8a2390995",
+  "tests": {
+    "passed": 2825,
+    "skipped": 603,
+    "failures": 0,
+    "errors": 0,
+    "network_attempts_blocked": 0
+  },
+  "postgresql": "NOT_VERIFIED_IN_THIS_RUN",
+  "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
+  "measured_reads": {
+    "idle_before": 8,
+    "idle_after": 4,
+    "pre_entry_before": 17,
+    "pre_entry_after": 8,
+    "pre_entry_weight_before": 330,
+    "pre_entry_weight_after": 222
+  },
+  "changes": [
+    "One routine inventory and reconciliation pass",
+    "Collect participating accounts only while work exists",
+    "Reuse same-collection account mode and balance",
+    "Reuse known order identity and verified terminal facts",
+    "One shared collection owner; supervisor fallback",
+    "Skip partial entry preflight while insufficient budget; retain existing quota and 90-second source expiry",
+    "Reuse unchanged fully protected static observations for at most 10 seconds",
+    "Remove duplicate intake validation and unnecessary archive transactions"
+  ],
+  "limitations": [
+    "Synthetic exchange evidence does not establish live Testnet behavior",
+    "603 PostgreSQL-dependent checks skipped; no database schema changes",
+    "Under historical 616-weight load, a second simultaneous alert still expired before entry",
+    "Two-account cold replay closed both positions; one used existing emergency close"
+  ],
+  "tested_file_sha256": {
+    "producer/experimental_execution_transport.py": "4c9e7670d7eaf9405b9d5111299dae987fdacb54f3826d414193149c69da2902",
+    "receiver/hl_testnet_runtime/experimental_execution_archive.py": "576f5bf9e9601fbd7077052beaa9a33b13b8cb8b5d827275ac8a883f843df0f4",
+    "receiver/hl_testnet_runtime/experimental_execution_evidence.py": "4a52bc6a5de738dc8491ac5ba374c950a4d1ddf9b9afc1cdf7e70076f6d74ddd",
+    "receiver/hl_testnet_runtime/experimental_live_provider.py": "3bd9dccc1e5aad18af5966a53ace46131057ff1b595c9c39df558d0cd03dd815",
+    "receiver/hl_testnet_runtime/experimental_live_runtime.py": "9924705a4d17c047f5674e09c47cc3c9670e10fe6048f23bdda4347844333a16",
+    "receiver/hl_testnet_runtime/experimental_live_safety.py": "38f7ad7835fa010f0f54c340e17885c998e3b189f80b451eb62344f4c9dfdda1",
+    "receiver/hl_testnet_runtime/experimental_live_service.py": "8a7626de284975b31b3033601a5d87d45470a099a69ad04c9abe3d0d8eac3a6b",
+    "receiver/hl_testnet_runtime/test_execution_history_store.py": "78b56249fd3bf2111c186a352839a6b535fa7701d6ed01e50db9e6e504364b2f",
+    "receiver/hl_testnet_runtime/test_experimental_entry_read_reuse.py": "76cf42a1e82dbaf70733e25add765e7ae70c0289990c6f5f3c67f395db67cc49",
+    "receiver/hl_testnet_runtime/test_experimental_final_working_set.py": "500d733445893a6bbad55de5351dff54b754edff62c54fd534e2f43e164af693",
+    "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "3ab1f8f4b4051c8a7c391270d6a612ab4e0624af6d4914b77c018a888078ec6c",
+    "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "77aae0f695601e58cff9026110638c055674dea9e12b9adb6b064e8e0da7b7ed",
+    "receiver/hl_testnet_runtime/test_experimental_live_service.py": "3d587744c10189bb81392e99658219526c046160b8e982bb009fa8b6b28b55fb",
+    "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "69421bdf41001e1c33c11e4d17090bfda3030c5bfa8797da0d87b294f0ec5dba"
+  },
+  "deployment": "Requires explicit approval of this tested change per repository AGENTS.md"
+}

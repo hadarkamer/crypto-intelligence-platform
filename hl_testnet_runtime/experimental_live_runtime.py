@@ -7,6 +7,7 @@ state revision lock. The shared IP request budget is acquired before commit;
 nonces use the existing per-agent dispatch allocator in that same transaction.
 """
 from copy import deepcopy
+import threading
 
 from . import card_lifecycle as life, filled_quantity_dispatch as wire
 from .experimental_execution_runtime import (
@@ -73,6 +74,8 @@ def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after
     source = state['sources'][cid]['source']
     role = 'long_account' if source['side'] == 'LONG' else 'short_account'
     account = state['routes'][role]
+    if retry_after_ms is None:
+        retry_after_ms = context.get('entry_retry_after_ms', {}).get(cid)
     if scope is None:
         scope = ('account' if account in context.get('account_entry_blocked', {})
             else 'market' if _lane(account, source['symbol']) in context.get('blocked_lanes', {})
@@ -110,6 +113,9 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 or not callable(release_loader)):
             raise RuntimeError('EXPLICIT_TESTNET_WORKER_REQUIRED')
         self.store, self.venue, self.dispatch = store, provider, dispatch
+        # Source worker and supervisor share one collector/dispatch capability.
+        # The supervisor is a fallback, never a second concurrent REST scan.
+        self._cycle_lock = threading.Lock()
         self.release_loader = release_loader
         state = store.load()
         if state['domain'] != 'testnet':
@@ -354,13 +360,15 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         if (context.get('inventory_complete') is not True or not isinstance(accounts, list)
                 or accounts != sorted(set(accounts)) or not set(accounts) <= set(state['routes'].values())
                 or not isinstance(account_errors, dict)
-                or set(accounts) | set(account_errors) != set(state['routes'].values())
+                or not (set(accounts) | set(account_errors)) <= set(state['routes'].values())
                 or set(accounts) & set(account_errors)
                 or type(context.get('inventory_at_ms')) is not int
                 or not 0 <= now-context['inventory_at_ms'] <= 15000):
             raise RuntimeError('COMPLETE_FRESH_TWO_ACCOUNT_INVENTORY_REQUIRED')
         scoped = deepcopy(context)
         scoped.setdefault('account_entry_blocked', {}).update(account_errors)
+        for account in set(state['routes'].values()) - set(accounts) - set(account_errors):
+            scoped['account_entry_blocked'][account] = 'ACCOUNT_INVENTORY_NOT_COLLECTED'
         blocked = scoped.setdefault('blocked_lanes', {})
         observed = set()
         for snapshot in context['snapshots']:
@@ -448,6 +456,14 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
 
     def run_once(self, *, entries_enabled=False):
         """New entries default off; valid release is independently required."""
+        if not self._cycle_lock.acquire(blocking=False):
+            return dict(status='OBSERVATION_CYCLE_ALREADY_RUNNING', **readiness())
+        try:
+            return self._run_once(entries_enabled=entries_enabled)
+        finally:
+            self._cycle_lock.release()
+
+    def _run_once(self, *, entries_enabled):
         owner=getattr(self,'startup_owner',None)
         if owner is not None:
             owner.verify()

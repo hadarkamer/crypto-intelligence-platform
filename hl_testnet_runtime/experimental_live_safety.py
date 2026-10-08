@@ -262,6 +262,11 @@ class LiveSafetyProvider:
                     account_ownership_revision=receipt['context'].get('legacy_account_revisions', {}).get(account))
                 and self._peers_protected(state, request_id=request['request_id'], account=account))
             if self.supervisor is not None:
+                # This exact committed observation is already current. Validate
+                # it locally instead of demanding another supervisor scan/pass
+                # merely because this account was previously idle and omitted.
+                verified = self.supervisor._verified_accounts(state, receipt, request_id=request['request_id'])
+                self.supervisor._record_observation(state, verified)
                 health = self.supervisor.health(account=account)
                 result['emergency_healthy'] = health['healthy']
                 result['supervisor_at_ms'] = health['observed_at_ms'] or 0
@@ -288,6 +293,7 @@ class IndependentProtectionSupervisor:
                 or safety.supervisor is not None):
             raise SafetyError('INDEPENDENT_CONCRETE_PROTECTION_SUPERVISOR_REQUIRED')
         self.runtime, self.safety, self.interval = runtime, safety, interval_seconds
+        self.primary_service = None
         self._lock = threading.RLock()
         self._pass_lock = threading.Lock()
         self._stop = threading.Event()
@@ -297,13 +303,13 @@ class IndependentProtectionSupervisor:
         self._status = 'SUPERVISOR_NOT_STARTED'
         safety.supervisor = self
 
-    def _verified_accounts(self, state, receipt):
+    def _verified_accounts(self, state, receipt, *, request_id=None):
         if receipt is None:
             return {}
         verified = {}
-        for account in state['routes'].values():
+        for account in receipt['context']['inventory_accounts']:
             if (self.safety._continuous(receipt, account)
-                    and self.safety._peers_protected(state, account=account)
+                    and self.safety._peers_protected(state, account=account, request_id=request_id)
                     and self.safety._legacy_clear(state, receipt['context']['ownership_revision'], account,
                         account_ownership_revision=receipt['context'].get('legacy_account_revisions', {}).get(account))):
                 # Preserve the actual read's time, including when a later
@@ -315,6 +321,16 @@ class IndependentProtectionSupervisor:
                         token=deepcopy(next(t for t in receipt['tokens'].values() if t.account == account)))
         return verified
 
+    def _record_observation(self, state, verified):
+        with self._lock:
+            # Replace, never merge: missing or failed account proof does not
+            # inherit authority from a previously healthy observation.
+            self._account_proofs = verified
+            complete = set(verified) == set(state['routes'].values())
+            self._observed_at_ms = min((p['at_ms'] for p in verified.values()), default=None)
+            self._status = ('SUPERVISOR_OBSERVATION_VERIFIED' if complete else
+                'SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED' if verified else 'SUPERVISOR_RECONCILIATION_REQUIRED')
+
     def _can_reuse(self, state, receipt, verified, *, max_age_ms=COALESCE_MS):
         if receipt is None or not verified:
             return False
@@ -322,33 +338,47 @@ class IndependentProtectionSupervisor:
         # outstanding live request/protection must still get immediate work.
         if not self.safety._peers_protected(state):
             return False
-        if any(t['phase'] not in FINAL and (t['phase'] != 'OPEN' or _remaining(t) <= 0)
+        if any(t['phase'] not in FINAL and (t['phase'] != 'OPEN' or _remaining(t) <= 0
+                or t['source']['family'] in ('r2732', 'sol_g65')
+                or any(o['status'] == 'OPEN' and t['order_legs'][oid] == 'ENTRY'
+                    for oid, o in t['orders'].items()))
                for t in state['trades'].values()):
             # Even a flat/protected intermediate state still needs the next
             # lifecycle commit (entry settlement, partial exit, final cleanup).
             return False
+        return (not self._feed_changed(receipt)
+            and 0 <= self.safety.clock() - receipt['context']['inventory_at_ms'] < max_age_ms)
+
+    def _feed_changed(self, receipt):
         health = self.safety.feed.health()
-        if any((health.get(role, {}).get('generation'), health.get(role, {}).get('revision'))
-               != (token.generation, token.revision) for role, token in receipt['tokens'].items()):
-            return False
-        return 0 <= self.safety.clock() - receipt['context']['inventory_at_ms'] < max_age_ms
+        return any((health.get(role, {}).get('generation'), health.get(role, {}).get('revision'))
+               != (token.generation, token.revision) for role, token in receipt['tokens'].items()
+               if token.account in receipt['context']['inventory_accounts'])
 
     def idle_receipt(self):
-        """Local-only idle coalescing; never skip an active source or exposure."""
+        """Reuse idle or settled protected inventory until work or feed changes."""
         from .experimental_execution_runtime import _source_active
         state = self.safety.store.load()
         now = self.safety.clock()
-        if (any(t['phase'] not in FINAL for t in state['trades'].values())
-                or any(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT') for r in state['requests'].values())
-                or any(_source_active(row, now) for row in state['sources'].values())):
+        waits = state.get('entry_decisions', {})
+        def ready(cid, row):
+            if cid in state['trades'] and state['trades'][cid]['phase'] != 'RETRY_WAIT_UNSENT':
+                return False
+            decision = waits.get(cid, {})
+            deferred = (decision.get('reason') in ('TESTNET_REQUEST_BUDGET_EXHAUSTED',
+                'TESTNET_REQUEST_BUDGET_BUSY', 'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED',
+                'TESTNET_OBSERVATION_BATCH_EXPIRED')
+                and type(decision.get('retry_after_ms')) is int and now < decision['retry_after_ms'])
+            return _source_active(row, now) and not deferred
+        if (any(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT') for r in state['requests'].values())
+                or any(ready(cid, row) for cid, row in state['sources'].items())):
             return None
         receipt = self.safety._receipt(state)
         verified = self._verified_accounts(state, receipt)
-        if (set(verified) != set(state['routes'].values())
-                # Give the independent collector first responsibility at 10s;
-                # idle source ticks do not race it for the same full read.
-                # If it stalls, the source worker falls back by 15s.
-                or not self._can_reuse(state, receipt, verified, max_age_ms=FRESH_MS)):
+        required = ({t['account'] for t in state['trades'].values() if t['phase'] not in FINAL}
+            or set(state['routes'].values()))
+        if (not required <= set(verified)
+                or not self._can_reuse(state, receipt, verified)):
             return None
         return receipt['checkpoint_id']
 
@@ -361,18 +391,19 @@ class IndependentProtectionSupervisor:
             receipt = self.safety._receipt(state)
             verified = self._verified_accounts(state, receipt)
             if force_collect or not self._can_reuse(state, receipt, verified):
-                self.runtime.run_once(entries_enabled=False)
-                state = self.safety.store.load()
-                receipt = self.safety._receipt(state)
-                verified = self._verified_accounts(state, receipt)
-            with self._lock:
-                # Replace, never merge: a failed newer account proof revokes
-                # a formerly healthy account immediately.
-                self._account_proofs = verified
-                complete = set(verified) == set(state['routes'].values())
-                self._observed_at_ms = min((p['at_ms'] for p in verified.values()), default=None)
-                self._status = ('SUPERVISOR_OBSERVATION_VERIFIED' if complete else
-                    'SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED' if verified else 'SUPERVISOR_RECONCILIATION_REQUIRED')
+                primary = self.primary_service
+                if not force_collect and primary is not None and primary.primary_available():
+                    # Only a new feed event wakes the normal loop. Pending
+                    # lifecycle work already has its next scheduled tick;
+                    # waking it again would repeat the just-completed scan.
+                    if receipt is not None and self._feed_changed(receipt):
+                        primary._wake.set()
+                else:
+                    self.runtime.run_once(entries_enabled=False)
+                    state = self.safety.store.load()
+                    receipt = self.safety._receipt(state)
+                    verified = self._verified_accounts(state, receipt)
+            self._record_observation(state, verified)
         except Exception:
             with self._lock:
                 self._observed_at_ms = None

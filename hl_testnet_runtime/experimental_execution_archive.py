@@ -315,8 +315,14 @@ class HistoryMixin:
         life.moment(now_ms)
         if type(batch_size) is not int or not 1 <= batch_size <= MAX_BATCH or type(scan_limit) is not int or not 1 <= scan_limit <= MAX_SCAN:
             raise _error('BOUNDED_HISTORY_BATCH_REQUIRED')
-        if not self.load().get('history'):
+        history = self.load().get('history')
+        if not history:
             return dict(status='EXPLICIT_HISTORY_INITIALIZATION_REQUIRED', archived=0)
+        prior = history['last_maintenance_ms']
+        if prior is not None and now_ms < prior:
+            raise _error('HISTORY_CLOCK_REGRESSION')
+        if not force and prior is not None and now_ms-prior < INTERVAL_MS:
+            return dict(status='HISTORY_INTERVAL_NOT_DUE', archived=0)
         with self._history_transaction() as (db, state, save):
             history = state.get('history')
             if not history:

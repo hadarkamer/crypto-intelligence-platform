@@ -90,7 +90,8 @@ class HistoryCases:
         self.seed(70)
         first=self.store.compact_history(now_ms=BASE+100000)
         self.assertEqual(first['archived'],32)
-        self.assertEqual(self.store.compact_history(now_ms=BASE+100001)['status'],'HISTORY_INTERVAL_NOT_DUE')
+        with patch.object(self.store, '_history_transaction', side_effect=AssertionError('Unneeded archive transaction')):
+            self.assertEqual(self.store.compact_history(now_ms=BASE+100001)['status'],'HISTORY_INTERVAL_NOT_DUE')
         self.assertEqual(self.compact()['archived'],32)
         self.assertEqual(self.compact()['archived'],6)
         page=self.store.history_page(limit=30);ids={r['occurrence_id'] for r in page['records']}
