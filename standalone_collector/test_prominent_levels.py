@@ -81,8 +81,18 @@ class ProminentTests(unittest.TestCase):
         for key,value in [('weak_gap_present',True),('continuous',False)]:
             raw=sample();raw['scans'][0]['prominent_levels']=[{**green(),key:value}]
             self.reject(raw)
-    def test_yellow_range_and_medium_yellow_are_rejected(self):
-        for changes in ({'shape':'range','prices':[]},{'intensity':'normal'}):
+    def test_continuous_yellow_band_is_a_many_range_with_explicit_colour(self):
+        raw=sample();raw['scans'][0]['prominent_levels']=[{
+            **green(),'row_colour':'yellow','intensity':'many'}]
+        z=normalized(raw)['zones'][0]
+        self.assertEqual((z['intensity'],z['shape'],z['prices']),('many','range',[]))
+        self.assertEqual((z['price_low'],z['price_high']),(112,114))
+        self.assertEqual((z['row_colour'],z['continuous'],z['weak_gap_present']),('yellow',True,False))
+        self.assertEqual(z['price_precision'],'axis_estimate')
+        self.assertGreater(z['uncertainty_usd'],0)
+    def test_gapped_yellow_range_and_medium_yellow_are_rejected(self):
+        for changes in ({'shape':'range','prices':[],'continuous':False},
+            {'shape':'range','prices':[],'weak_gap_present':True},{'intensity':'normal'}):
             raw=sample();raw['scans'][0]['prominent_levels'][0].update(changes);self.reject(raw)
     def test_strength_first_inside_each_side_not_price_sort(self):
         raw=sample();raw['scans'][0]['prominent_levels']=[level(104,score=.7),green(),

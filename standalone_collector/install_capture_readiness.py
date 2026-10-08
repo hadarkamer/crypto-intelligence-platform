@@ -6,6 +6,10 @@ from pathlib import Path
 def expand_capture_readiness(text):
     tree=ast.parse(text)
     capture=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='capture_heatmaps')
+    dismiss=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_dismiss_capture_blockers')
+    # Observe the source's actual data gate before a normal overlay dismissal
+    # can remove the explanatory dialog and leave a blurred/loading chart.
+    dismiss.body[:0]=ast.parse("require_unblocked_source(page, HEATMAP_MODEL, phase='overlay_dismissal')").body
     inserted={'page':0,'shot':0}
     class Gate(ast.NodeTransformer):
         def visit_Assign(self,node):
@@ -19,7 +23,7 @@ def expand_capture_readiness(text):
                 and isinstance(node.body[0].value,ast.Call)
                 and ast.unparse(node.body[0].value.func)=='page.screenshot'):
                 inserted['shot']+=1
-                before=ast.parse("with capture_operation('render_readiness'):\n    render_state = wait_for_render(page, timeframe, HEATMAP_MODEL)").body
+                before=ast.parse("with capture_operation('render_readiness'):\n    render_state = wait_for_render(page, timeframe, HEATMAP_MODEL)\n    require_unblocked_source(page, HEATMAP_MODEL, phase='render_readiness')").body
                 after=ast.parse("with capture_operation('render_readiness'):\n    verify_saved_render(page, timeframe, HEATMAP_MODEL, render_state, path, source_diagnostics)").body
                 return [*before,node,*after]
             return node
@@ -27,7 +31,7 @@ def expand_capture_readiness(text):
     if inserted!={'page':1,'shot':1}:raise RuntimeError('Capture readiness insertion points changed')
     index=next(i+1 for i,n in enumerate(tree.body) if isinstance(n,ast.ImportFrom) and n.module=='__future__')
     tree.body.insert(index,ast.ImportFrom(module='capture_readiness',names=[ast.alias(name=n)
-        for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render')],level=0))
+        for n in ('CaptureNetworkDiagnostics','wait_for_render','verify_saved_render','require_unblocked_source')],level=0))
     return ast.unparse(ast.fix_missing_locations(tree))+'\n'
 
 

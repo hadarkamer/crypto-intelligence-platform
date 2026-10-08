@@ -180,5 +180,35 @@ class RenderDOMTests(unittest.TestCase):
         s=self.check('<canvas width="800" height="500"></canvas><span role="progressbar" style="position:absolute;top:650px;width:30px;height:30px"></span>')
         self.assertTrue(s['ready']);self.assertEqual(s['label'],'48 hour');self.assertTrue(s['login_link_visible'])
 
+    def test_explicit_unlock_data_modal_has_precedence_over_blur(self):
+        s=self.check('<div style="filter:blur(4px)"><canvas width="800" height="500"></canvas></div><div role="dialog" style="position:absolute;top:200px;width:400px;height:100px">Log in to unlock full data</div>')
+        self.assertFalse(s['ready']);self.assertEqual(s['reason'],'login-required')
+
+    def test_hidden_gate_or_header_login_is_not_data_gate(self):
+        s=self.check('<canvas width="800" height="500"></canvas><div role="dialog" style="display:none">Log in to unlock full data</div>')
+        self.assertTrue(s['ready'])
+
+    def test_modal_does_not_need_canvas_before_identifying_explicit_gate(self):
+        s=self.check('<div class="MuiModal-root" role="presentation"><div role="dialog">Log in to unlock full data</div></div>')
+        self.assertEqual(s['reason'],'login-required')
+
+    def test_adjacent_dialog_children_do_not_hide_unlock_data_gate(self):
+        page=self.browser.new_page(viewport={'width':1000,'height':800})
+        try:
+            page.set_content('<button role="combobox">12 hour</button><a href="/login">Login</a>'
+                '<canvas width="800" height="500"></canvas>'
+                '<div class="MuiModal-root" style="position:absolute;inset:0">'
+                '<div role="dialog" style="position:absolute;top:200px;width:400px;height:100px">'
+                '<div>Log in to unlock full data</div><button>Login</button>'
+                '<button>Continue with Google</button></div></div>')
+            # Real CoinGlass children concatenate without a separator in
+            # textContent; the rendered heading has a newline in innerText.
+            text=page.locator('[role="dialog"]').text_content()
+            self.assertEqual(text,'Log in to unlock full dataLoginContinue with Google')
+            self.assertIn('data\n',page.locator('[role="dialog"]').inner_text())
+            self.assertTrue(page.evaluate(readiness.LOGIN_GATE_SCRIPT))
+            self.assertEqual(page.evaluate(readiness.STATE_SCRIPT)['reason'],'login-required')
+        finally:page.close()
+
 
 if __name__=='__main__':unittest.main()
