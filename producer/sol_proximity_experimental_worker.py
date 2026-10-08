@@ -107,8 +107,10 @@ def render_alert(p):
 
 
 class SolProximityWorker:
-    def __init__(self, *, spec=SOL_RANGE24, cache=None, legacy_cache=None, clock=now_ms):
-        self.spec, self.config_sha256 = spec, config_hash(spec)
+    def __init__(self, *, spec=SOL_RANGE24, cache=None, legacy_cache=None, clock=now_ms,
+                 signal_api=signal, store_api=store, renderer=render_alert, config_digest=None):
+        self.signal, self.store, self.renderer = signal_api, store_api, renderer
+        self.spec, self.config_sha256 = spec, config_digest or config_hash(spec)
         self.cache, self.clock = cache or SolPriceCache(symbol=spec.coin), clock
         self.legacy_cache = legacy_cache or SolPriceCache(fetch=legacy_fetch_rows, symbol=spec.coin)
         self.task = self.bot = self.subscription = None
@@ -134,7 +136,7 @@ class SolProximityWorker:
                 'growth_exception': self.spec.liquidity_growth,
                 'growth_evidence': 'CONSERVATIVE_CURRENT_TIERS_FULL_ADJACENT_CHAIN; all targets within 0.2%; exact old target at its timeframe; upstream research proof producer unavailable',
                 'overlap_rule': 'distinct targets >0.2%; exact causal growth proof required for exception' if self.spec.liquidity_growth else 'distinct targets >0.2%; no liquidity-growth exception',
-                'operational_state_capacity': signal.MAX_ACTIVE,
+                'operational_state_capacity': self.signal.MAX_ACTIVE,
                 'pending_ttl_hours': 24, 'holding_time_limit': None,
                 'bootstrap_policy': 'existing targets unverified until complete absence then return'}
 
@@ -175,9 +177,9 @@ class SolProximityWorker:
 
     async def initialize(self, scope):
         if scope not in self.scopes:
-            await self.db(store.initialize_scope, scope, self.clock(), migrate_source_coin=self.spec.coin)
+            await self.db(self.store.initialize_scope, scope, self.clock(), migrate_source_coin=self.spec.coin)
             self.scopes.add(scope)
-        return await asyncio.to_thread(store.snapshot, scope)
+        return await asyncio.to_thread(self.store.snapshot, scope)
 
     def evidence_error(self, exc):
         code = getattr(exc, 'code', '')
@@ -212,9 +214,9 @@ class SolProximityWorker:
             old_slot = (scope, self.clock()//MINUTE)
             if old_start < old_end and self.last_legacy_price_poll != old_slot:
                 rows = await asyncio.to_thread(self.legacy_cache.fill, self.spec.coin, old_start, old_end)
-                await self.db(store.advance_legacy_source, scope, rows, self.clock())
+                await self.db(self.store.advance_legacy_source, scope, rows, self.clock())
                 self.last_legacy_price_poll = old_slot
-                state = await asyncio.to_thread(store.snapshot, scope)
+                state = await asyncio.to_thread(self.store.snapshot, scope)
         start = state['bar_cursor_ms']+MINUTE
         end = min(self.clock()//MINUTE*MINUTE, start+1000*MINUTE)
         if start < end:
@@ -223,12 +225,12 @@ class SolProximityWorker:
                 return state
             if state['episodes'] or state['active']:
                 rows = await asyncio.to_thread(self.cache.fill, self.spec.coin, start, end)
-                await self.db(store.advance, scope, rows, self.clock())
+                await self.db(self.store.advance, scope, rows, self.clock())
                 self.last_price_poll = slot
             else:
                 # With no source baseline there is no historical exposure.
-                await self.db(store.transact, scope, self.clock(), action=lambda s: s.update(bar_cursor_ms=end-MINUTE))
-        state = await asyncio.to_thread(store.snapshot, scope)
+                await self.db(self.store.transact, scope, self.clock(), action=lambda s: s.update(bar_cursor_ms=end-MINUTE))
+        state = await asyncio.to_thread(self.store.snapshot, scope)
         old = state.get('legacy_source_state', {})
         old_active = old.get('active', [])
         self.runtime.update(active_pending=sum(p['status'] == 'PENDING' for p in state['active']),
@@ -255,7 +257,7 @@ class SolProximityWorker:
 
     async def reprice_bundle(self, bundle, now):
         """Change only the local experiment's reference quote, never Watch data."""
-        computed = signal.milliseconds(bundle['computed_at_utc'])
+        computed = self.signal.milliseconds(bundle['computed_at_utc'])
         quote = await asyncio.to_thread(hyperliquid.closed_quote, self.spec.coin, computed,
                                         now_ms=now, fetch=self.cache.fill)
         copied = deepcopy(bundle)
@@ -277,14 +279,14 @@ class SolProximityWorker:
                 experimental_bundle = await self.reprice_bundle(bundle, now)
                 range_bars = None
                 if self.spec.require_range24:
-                    computed = signal.milliseconds(bundle['computed_at_utc'])
+                    computed = self.signal.milliseconds(bundle['computed_at_utc'])
                     if computed > now or now-computed > 5*MINUTE:
                         raise ValueError('Stale or future Watch generation')
                     range_end = computed//MINUTE*MINUTE
                     if range_end > now//MINUTE*MINUTE:
                         raise ValueError('Future range requested')
                     range_bars = await asyncio.to_thread(self.cache.fill, self.spec.coin, range_end-1440*MINUTE, range_end)
-                decoded = signal.decode_bundle(experimental_bundle, now, self.spec, range_bars)
+                decoded = self.signal.decode_bundle(experimental_bundle, now, self.spec, range_bars)
                 scope = self.scope_for(chat_id)
                 state = await self.initialize(scope)
                 state = await self.monitor(scope, state)
@@ -298,7 +300,7 @@ class SolProximityWorker:
                 guards = await asyncio.to_thread(self.cache.fetch, self.spec.coin, start, end) if decoded['rows'] else []
                 if not self.allowed(chat_id):
                     return
-                outcome = await self.db(store.ingest, scope, decoded, guards, self.clock())
+                outcome = await self.db(self.store.ingest, scope, decoded, guards, self.clock())
                 self.transient_failures = 0
                 self.retry_ms = 0
                 self.runtime.update(ready=True, state=outcome, last_error_type=None, next_retry_at=None)
@@ -311,7 +313,7 @@ class SolProximityWorker:
     async def deliver(self, scope, chat_id):
         if not self.allowed(chat_id):
             return False
-        intent = await self.db(store.claim_pending, scope, self.clock())
+        intent = await self.db(self.store.claim_pending, scope, self.clock())
         if not intent:
             return False
         outcome, message_id, send_attempted, source_failed = 'UNKNOWN', None, False, False
@@ -319,15 +321,16 @@ class SolProximityWorker:
             p = intent['payload']
             end = self.clock()//MINUTE*MINUTE+MINUTE
             rows = await asyncio.to_thread(self.cache.fetch, self.spec.coin, p['fill_ms'], end)
-            hit_barrier = any((l <= p['stop_price'] or h >= p['take_price']) if p['direction'] == 1
-                              else (h >= p['stop_price'] or l <= p['take_price']) for t, o, h, l, c in rows)
+            first_take = p.get('partial_take_price', p['take_price'])
+            hit_barrier = any((l <= p['stop_price'] or h >= first_take) if p['direction'] == 1
+                              else (h >= p['stop_price'] or l <= first_take) for t, o, h, l, c in rows)
             if hit_barrier:
                 outcome = 'CANCELLED_STALE_PRICE'
             elif not self.allowed(chat_id) or self.clock() >= intent['expires_ms']:
                 outcome = 'FAILED'
             else:
                 send_attempted = True
-                msg = await asyncio.wait_for(self.bot.send_message(chat_id=chat_id, text=render_alert(p), parse_mode='HTML'), timeout=20)
+                msg = await asyncio.wait_for(self.bot.send_message(chat_id=chat_id, text=self.renderer(p), parse_mode='HTML'), timeout=20)
                 message_id = getattr(msg, 'message_id', None)
                 outcome = 'DELIVERED' if type(message_id) is int and message_id > 0 else 'UNKNOWN'
         except asyncio.CancelledError:
@@ -339,7 +342,7 @@ class SolProximityWorker:
                 outcome = 'FAILED'
             else:
                 outcome = 'FAILED' if type(exc).__name__ in ('BadRequest', 'Forbidden') else 'UNKNOWN'
-        saved = await self.db(store.finish_attempt, scope, intent['intent_id'], intent['attempt_token'], outcome,
+        saved = await self.db(self.store.finish_attempt, scope, intent['intent_id'], intent['attempt_token'], outcome,
                               self.clock(), message_id=message_id)
         if not saved:
             raise RuntimeError('SOL delivery acknowledgement not persisted')
@@ -376,7 +379,8 @@ class SolProximityWorker:
                     if not await self.deliver(scope, chat_id):
                         break
                 self.last_poll = (scope, minute)
-                pending_source_restore.schedule(self, scope)
+                if self.spec.rule_id in {s.rule_id for s in SPECS.values()}:
+                    pending_source_restore.schedule(self, scope)
                 if self.clock() < self.retry_ms:
                     return
                 self.transient_failures = 0

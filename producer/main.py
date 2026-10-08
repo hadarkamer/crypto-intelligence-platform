@@ -46,6 +46,7 @@ import xrp_r2732_experimental_worker
 import hype_row71205_experimental_worker
 import sol_proximity_experimental_worker
 import sol_g65_experimental_worker
+import doge_partial_experimental_worker
 import ai_agent
 import ai_telegram
 import trade_telegram
@@ -4226,6 +4227,25 @@ async def alert_check_min_liquidity(update: Update, context: ContextTypes.DEFAUL
                 WATCH_RUNTIME["scan_owner"] = None
 
 
+def _prepare_manual_alert_items(rows, symbol: str, requested_side=None):
+    """Preserve whole-market Max-Pain scoring; enrich only the requested coin.
+
+    Run in a worker thread: OI/CVD database reads and analysis must not block
+    the Telegram/Watch event loop. Keep every source row in the score engine
+    so market context and target-cluster calculations remain unchanged.
+    """
+    kwargs = {"limit": 500}
+    if requested_side:
+        kwargs.update(forced_symbol=symbol, forced_side=requested_side)
+    raw_items = alert_engine.build_opportunities(rows, **kwargs)
+    selected = [
+        item for item in raw_items
+        if str(item.get("symbol") or "").upper() == symbol
+    ]
+    selected = coinglass_oi_regime_service.attach_to_opportunities(selected)
+    return market_confidence_engine.attach_to_opportunities(selected)
+
+
 async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run one live scan and send a separate alert card for each timeframe."""
     if not context.args or len(context.args) > 2:
@@ -4270,14 +4290,9 @@ async def alert_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 rows, _live_result = await collect_live_rows_for_watch()
 
-            if requested_side:
-                raw_items = alert_engine.build_opportunities(
-                    rows, limit=500, forced_symbol=symbol, forced_side=requested_side
-                )
-                raw_items = coinglass_oi_regime_service.attach_to_opportunities(raw_items)
-                all_items = market_confidence_engine.attach_to_opportunities(raw_items)
-            else:
-                all_items = _build_opportunities_with_regime(rows, limit=500)
+            all_items = await asyncio.to_thread(
+                _prepare_manual_alert_items, rows, symbol, requested_side
+            )
             symbol_items = [
                 item for item in all_items
                 if str(item.get("symbol") or "").upper() == symbol
@@ -4881,6 +4896,7 @@ async def run_watch_cycle(
                 worker.observe(dual_cvd_bundle, chat_id)
                 for worker in sol_proximity_experimental_worker.ADDITIONAL_WORKERS.values()
             ))
+            await doge_partial_experimental_worker.WORKER.observe(dual_cvd_bundle, chat_id)
         # Freeze source-clock references before any experimental intent. This is
         # a display-only contract; native outcome entry prices remain unchanged.
         try:
@@ -6583,6 +6599,7 @@ async def health(request):
             for symbol, worker in sol_proximity_experimental_worker.ADDITIONAL_WORKERS.items()
         },
         "sol_g65_experimental": sol_g65_experimental_worker.WORKER.status(),
+        "doge_partial_experimental": doge_partial_experimental_worker.WORKER.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
@@ -7916,6 +7933,9 @@ async def main():
     sol_g65_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
+    doge_partial_experimental_worker.WORKER.start(
+        bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
+    )
     hype_row71205_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
@@ -7933,6 +7953,7 @@ async def main():
         await hype_row71205_experimental_worker.WORKER.stop()
         await sol_proximity_experimental_worker.WORKER.stop()
         await sol_g65_experimental_worker.WORKER.stop()
+        await doge_partial_experimental_worker.WORKER.stop()
         for worker in sol_proximity_experimental_worker.ADDITIONAL_WORKERS.values():
             await worker.stop()
         await asyncio.to_thread(experimental_execution_forwarder.stop_background)
@@ -7993,3 +8014,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+

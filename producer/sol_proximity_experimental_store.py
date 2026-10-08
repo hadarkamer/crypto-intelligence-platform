@@ -161,10 +161,20 @@ def migrate_price_source(state, now, config_sha256, coin):
 
 
 def transact(scope, now, config_sha256, action, *, database_url=None, migrate_legacy_sol=False,
-             migrate_source_coin=None):
+             migrate_source_coin=None, admission_coin=None):
     key = key_for(scope)
     execution_changed = False
     with _connect(database_url) as conn:
+        peer_keys = []
+        if admission_coin == 'DOGE':
+            rules = ('DOGE_MAXPAIN_DIST15_25_LONG_TF', 'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24')
+            matched = next((r for r in rules if scope.endswith(':'+r)), None)
+            if matched is None:
+                raise ValueError('DOGE admission requires a formula-qualified scope')
+            root_scope = scope[:-(len(matched)+1)]
+            guard = int.from_bytes(hashlib.sha256(('doge-target-admission:'+root_scope).encode()).digest()[:8], 'big', signed=True)
+            conn.execute('SELECT pg_advisory_xact_lock(%s)', (guard,))
+            peer_keys = [key_for(root_scope+':'+r) for r in rules if r != matched]
         lock = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], 'big', signed=True)
         conn.execute('SELECT pg_advisory_xact_lock(%s)', (lock,))
         row = conn.execute('SELECT value FROM bot_settings WHERE key=%s FOR UPDATE', (key,)).fetchone()
@@ -183,13 +193,24 @@ def transact(scope, now, config_sha256, action, *, database_url=None, migrate_le
                 migrate_sol_state(state, now, config_sha256)
             _validate(state, config_sha256)
         _maintain(state, now)
-        result = action(state) if action else deepcopy(state)
+        peers = []
+        for peer_key in peer_keys:
+            peer_row = conn.execute('SELECT value FROM bot_settings WHERE key=%s', (peer_key,)).fetchone()
+            if peer_row:
+                peer = json.loads(peer_row['value'])
+                peers += peer.get('active', []) + peer.get('legacy_source_state', {}).get('active', [])
+        if peer_keys:
+            state['_admission_peers'] = [p for p in peers if p.get('coin') == 'DOGE']
+        try:
+            result = action(state) if action else deepcopy(state)
+        finally:
+            state.pop('_admission_peers', None)
         _maintain(state, now)
         conn.execute('UPDATE bot_settings SET value=%s WHERE key=%s', (_encode(state), key))
         # Additive transport only. Its explicit migration is never run here;
         # failure must not roll back an otherwise valid source observation.
         from experimental_execution_bridge import approved_enabled
-        if approved_enabled():
+        if approved_enabled() and not state.get('notification_only', False):
             conn.execute('SAVEPOINT approved_execution_outbox')
             try:
                 from approved_alert_outbox import synchronize
@@ -232,11 +253,18 @@ def ingest(scope, decoded, bars, now, *, config_sha256, database_url=None, execu
         raise ValueError('Explicit boolean execution evidence mode required')
     def action(state):
         prior = deepcopy(state) if capture else None
-        result = signal.ingest(state, decoded, now, bars)
+        admitted = deepcopy(decoded)
+        peers = state.get('_admission_peers', [])
+        for row in admitted['rows']:
+            if row['eligible'] and any(signal.near(row['target_price'], p['target_price']) for p in peers):
+                row['eligible'] = False
+                signal.count(state, 'CROSS_FORMULA_NEAR_TARGET_BLOCKED')
+        result = signal.ingest(state, admitted, now, bars)
         if capture:
             capture_maxpain_evidence(state, decoded, prior, config_sha256=config_sha256, max_bytes=MAX_BYTES)
         return result
-    return transact(scope, now, config_sha256, action, database_url=database_url)
+    return transact(scope, now, config_sha256, action, database_url=database_url,
+                    admission_coin=decoded['spec'].coin if decoded['spec'].coin == 'DOGE' else None)
 
 
 def advance(scope, bars, now, *, config_sha256, database_url=None):
@@ -270,3 +298,4 @@ def finish_attempt(scope, intent_id, token, outcome, now, *, message_id=None, co
                 return True
         return False
     return transact(scope, now, config_sha256, finish, database_url=database_url)
+

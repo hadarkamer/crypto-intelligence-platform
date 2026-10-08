@@ -13,8 +13,8 @@
       "alert_cards_pipeline_selftest.py": "46b0b5d85c56e3b3bdbcdf0c3946b1cb4a1d18675d5bbc148b4c4d4cd37414b6",
       "alert_cards_u21_selftest.py": "9875bf97a4b1e39e166f2e0b2b6c5bf5fbd305fced4d8be183281c571c8440bf",
       "alert_cards_wire.py": "eac856a35a7e896bcc4db20b2a97348660823cea28fd978470579252bfc177d5",
-      "alert_delivery_policy.py": "99bb9cb9fdd8d8f8bb619433d23dbb2e9b8e643c38803b128b062ddb75fab675",
-      "alert_delivery_policy_selftest.py": "64e67bf84f61f0be35c5037a25a84278890540a6905b56ba5e8913ee32cc2af0",
+      "alert_delivery_policy.py": "dee67e65aa678c247f3f34417de58c15ad09b7bd831664f10e8ee370c4584d36",
+      "alert_delivery_policy_selftest.py": "0d481e1ed936e610ed3356a43d320a2e98d58523253d4043799e0ea3385e0cb4",
       "alert_engine.py": "433e2386f3e37191da5329a7955d9cc7ce6800d4f4960fa049b438a452bf8a93",
       "alert_summary.py": "2ffa4ce9e5a0a3171d939c8de00054721ae90b474a4609b00287cd1dfbb6d2e1",
       "analysis.py": "55757bb7612233f3c2618cbf4278592128168991fe7237e1f1cc4d5a1c1b0d88",
@@ -39,6 +39,9 @@
       "coinglass_history_backfill.py": "5aec213c3941e6397ff74d18671b6c2d51fb806328dafaa2778e6b4b9163e3a6",
       "coinglass_oi_regime_service.py": "83639a4bb72a3e28c0461c75cc38f986957f739fd35fc55ff6893e71862f93bc",
       "counter_score.py": "4b6c7bd0bd025ade922bfa0a35bc78d1728d5e643b1f1ba2f6ff574b8814feae",
+      "doge_partial_experimental_selftest.py": "cd8cb90087aace026e744af52f2bf0a05a64082522d5ba87f5f72ddded36e81f",
+      "doge_partial_experimental_signal.py": "07c35d4b404a8f5db15cf5cec44618712d108444de39e2148dc62325d0727a72",
+      "doge_partial_experimental_worker.py": "97bf6e831f428dda3644482683fad9a94b87280ee66a627e68b0f2c589b11a9f",
       "dual_cvd65_alert.py": "d97371b5ffd980ab3d840dd5c637bc2f76360cdcb7777ebdaf7700c7778b9ec5",
       "dual_cvd65_alert_selftest.py": "0e045910ff514ffef127e679f4e25250f4fe7e68e81b6854f2ee39554a370cd7",
       "dual_cvd65_delivery.py": "b131d5533c582dec55859da9ea2307fba64ce80201d2aaf6e4613d74fadfa7fe",
@@ -85,7 +88,7 @@
       "live_price_provider.py": "c279b6f7ee9de8a253180222840e90e009b19188d2077f8f198cfb545edcda94",
       "live_price_provider_research_selftest.py": "67fde36b307425cca6d544046a42f0ecf93d4f38b2eea56114831411f94ece24",
       "magnet_v1.py": "ef43436e60a4b2535e7ec5166c0670d4f406e8d2f1f11eb72da1b9eb7a2af177",
-      "main.py": "0dd9bb9caa71521ef9143588c6276900d41f0cfb325ae26265683f44777b449c",
+      "main.py": "cb715f5810cd27ce8a0cbd0741d3a027d0e6cb524e57343a019fa921f2f8e2eb",
       "manual_formula_alert.py": "360ba68c87a6b8449ae86429144a27767e5adcb8b109ff3125343d3a1501b0d9",
       "manual_formula_alert_delivery.py": "cd42c71d64c79222d5222295ef7986e1eac8267c70ff314f35dd82edd27a153f",
       "manual_formula_alert_delivery_selftest.py": "0a27083cea5b9e91371d8746a8be0ea0ae81570cef8a6f7dbb31f744ebce6fa2",
@@ -324,8 +327,8 @@
       "sol_g65_experimental_worker.py": "744870a11e6c3253cad43ee0d91c49cc7428b820ca65e91da1f792942a07a12a",
       "sol_proximity_experimental_selftest.py": "5b4a1e7a12944ae7353c4f201d7ca2ea51f2b3cc883debf4e1065957d5bcfa06",
       "sol_proximity_experimental_signal.py": "e6000e548e296818337a5238f7ee7e5fe40b289fb697716bbb3bb88e0a2b5ddf",
-      "sol_proximity_experimental_store.py": "cfb4e6c49b010da751a1d62de12d792b12b3cff3c7d12aa19b1e7486186b2ead",
-      "sol_proximity_experimental_worker.py": "71131de43c953561de98bfe6488662b69f1599055d846915956707eac53302c0",
+      "sol_proximity_experimental_store.py": "92e1d31110b219d53c370c54c814ecfcf352b1066ce06cbf07c4b5988455fb1b",
+      "sol_proximity_experimental_worker.py": "0f4d8150f40bfb9710e3c36279eb8d21167d7f48448971dd593a72c4697d79e0",
       "target_cluster_score_selftest.py": "f4ffaf8077a5ea05ec5a17a2e709c4bd50d8060536a1236b6268bd67495e554b",
       "technical_signal_store.py": "6560ca5c9ee82c7ae035e3652a2927d1cd33e1a12cee6072e9a7310f3d9a2a1e",
       "time_family_engine.py": "7904ca33620d09fb679c5c64986fed5bdc4a4ab3016793df31184fc5d69efae7",
@@ -892,7 +895,9 @@
   "code_baselines": {
     "isolated_fix_commit": "92b513e",
     "producer_audited_live": "5e860ffde0ca3e6ca382df8429209962db9bc338",
-    "receiver_audited_live": "b3c066967ab3d27c93b7bbaaeb20a75cd5ab1be9"
+    "producer_current": "11e4ea433bc09178c5c5758115645dabb040ee23",
+    "receiver_audited_live": "b3c066967ab3d27c93b7bbaaeb20a75cd5ab1be9",
+    "tested_fix": "cbe04da60f1aebce999d51c8d924d3805ac5eb86"
   },
   "local_verification": {
     "errors": 0,
@@ -904,5 +909,6 @@
     "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
     "tests_run": 3410
   },
+  "rollout_merge": "Preserve newer DOGE notification-only source and combine shared worker fixes",
   "schema": "experimental_render_bundle_v1"
 }

@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import os
 
-ROSTER_VERSION = "owner-r2732-and-later-20261005-v2-eth"
+ROSTER_VERSION = "owner-r2732-and-later-20261008-v3-doge-partial"
 SELECTED_MANUAL_RULES = frozenset()
 MAXPAIN_COMPONENT_RULES = frozenset((
     'HYPE_MAXPAIN_DIST05_15_LONG_TF',
     'DOGE_MAXPAIN_DIST15_25_LONG_TF',
+    'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24',
     'XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF',
     'ETH_MAXPAIN_LONG_DIST1_3',
 ))
@@ -95,3 +96,4 @@ def status():
                                                if current in _PROFILES else []),
             'retired_experimental_rule_ids': sorted(RETIRED_EXPERIMENTAL_RULES),
             'manual_rule_allowlist': []}
+
