@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from . import card_lifecycle as life, experimental_execution_dispatch as boundary
-from . import experimental_execution_runtime as runtime, checks
+from . import experimental_execution_runtime as runtime
 from .experimental_execution_state import ExecutionState
 from .test_experimental_execution_runtime import SoftwareExchange, ROUTES, META, T
 from .test_experimental_execution_dispatch import Signer
@@ -41,13 +41,11 @@ class BoundaryExchange(SoftwareExchange):
         env=dict(HL_TESTNET_LONG_ACCOUNT_ADDRESS=ROUTES['long_account']['account'],HL_TESTNET_LONG_AGENT_ADDRESS='0x'+'3'*40,
             HL_TESTNET_SHORT_ACCOUNT_ADDRESS=ROUTES['short_account']['account'],HL_TESTNET_SHORT_AGENT_ADDRESS='0x'+'4'*40)
         agent=env['HL_TESTNET_LONG_AGENT_ADDRESS' if p['role']=='long_account' else 'HL_TESTNET_SHORT_AGENT_ADDRESS']
-        cap=context['capacity'][p['card_id']];diagnostics={};plan=dict(symbol=p['symbol'],side=trade['side'],**trade['prices'])
-        checks.plan_check(plan,p['symbol'],trade['asset']['decimals'],Decimal(cap['unheld']),Decimal(cap['available']),Decimal(cap['max_size']),active=cap['active'],metadata_max_leverage=cap['max_leverage'],diagnostics=diagnostics)
         result=dict(source=trade['source'],current_source=state['sources'][p['card_id']],env=env,agent=agent,host=boundary.HOST,metadata=META,
             safety=dict(account=p['account'],role=p['role'],at_ms=self.t,entry_enabled=True,emergency_healthy=True,feed_reconciled=True,
                 entry_circuit_clear=True,supervisor_at_ms=self.t,not_before_ms=state['not_before_ms']),buckets=[],open_orders=[],positions={'assetPositions':[]},
             market={k:v for k,v in context['marks'][runtime._lane(p['account'],p['symbol'])].items() if k!='account'},
-            budget_at_ms=self.t,entry_action_headroom=cap['action_headroom'],budget_report=dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True,budget_diagnostics=diagnostics))
+            entry_account=deepcopy(context['entry_accounts'][p['card_id']]))
         if trade['orders']:
             result['owner'],result['owner_snapshot']=legacy_view(trade,snapshot)
             result['lock_proof']=trade['condition']

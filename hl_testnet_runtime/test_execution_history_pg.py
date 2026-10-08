@@ -242,12 +242,16 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
         # reconcile an unfilled owned request, whose normal overlap collection
         # actually observes old facts; only then change one of those facts.
         second = alert(cycle='active-unfilled-history-observer')
+        third = alert(symbol='ETH', cycle='must-block-after-observed-history-change')
+        # The market snapshot includes every listed asset and can be reused by
+        # the next immediate step. Seed ETH before that snapshot so this test
+        # isolates changed archive facts from an unrelated changed-market gate.
+        self.oracle.mark[core._lane(self.release['routes']['long_account'], 'ETH')] = third['entry']
         self.start(second)
         self.cycle()
         current = self.store.load()
         self.assertFalse(current['trades'][second['occurrence_id']]['entry_fills'])
         self.assertTrue(all(r['phase'] == 'OBSERVED' for r in current['requests'].values()))
-        third = alert(symbol='ETH', cycle='must-block-after-observed-history-change')
         self.worker.receive([third])
         old_fill = self.oracle.orders[oid]['view']['fills'][0]
         original_price = old_fill['price']

@@ -6,7 +6,7 @@ import experimental_execution_contract as contract
 from experimental_execution_fixtures import r2732_message
 from . import experimental_execution_dispatch as boundary
 from . import card_lifecycle as life, filled_quantity_dispatch as wire
-from .test_two_account_execution import ENV, Reader, C, D
+from .test_two_account_execution import ENV, C, D
 
 class Permit:
     def __init__(self): self.used=False
@@ -42,8 +42,8 @@ def fixture():
     plan=dict(symbol='XRP',side='SHORT',entry='2',stop='2.01',take_profit='1.84')
     context=dict(source=source,current_source=dict(source=source,plan_digest=contract.plan_digest(source),entry_permission='WAITING',cancellation=None),env=deepcopy(ENV),agent=D,host=boundary.HOST,metadata=meta,
         safety=dict(account=C,role='short_account',at_ms=now,entry_enabled=True,emergency_healthy=True,feed_reconciled=True,entry_circuit_clear=True,supervisor_at_ms=now,not_before_ms=now-60001),
-        buckets=[],open_orders=[],positions={'assetPositions':[]},market=dict(environment='testnet',symbol='XRP',at_ms=now,mark_price='2'),budget_at_ms=now,entry_action_headroom=5,
-        budget_report=dict(status='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION',test_plan_checked=True,budget_diagnostics=dict(plan_sha256=life.digest(plan),current_settings_passed=True)))
+        buckets=[],open_orders=[],positions={'assetPositions':[]},market=dict(environment='testnet',symbol='XRP',at_ms=now,mark_price='2'),
+        entry_account=dict(account=C,agent=D,at_ms=now,action_headroom=5))
     return request,context,now
 
 
@@ -71,10 +71,10 @@ def approved_fixture(*, side='LONG', entry='93.544', mark='93.544'):
     plan={k:levels[k] for k in ('symbol','side','entry','stop','take_profit')}
     context.update(source=source,current_source=dict(source=source,plan_digest=approved.plan_digest(source),
         entry_permission='WAITING',cancellation=None),metadata=meta,agent=route['agent'],
-        market=dict(environment='testnet',symbol='HYPE',at_ms=now,mark_price=mark),budget_at_ms=now)
+        market=dict(environment='testnet',symbol='HYPE',at_ms=now,mark_price=mark),
+        entry_account=dict(account=route['account'],agent=route['agent'],at_ms=now,action_headroom=5))
     context['safety'].update(account=route['account'],role=role,at_ms=now,
         supervisor_at_ms=now,not_before_ms=approved.moment_ms(source['created_at'])-1)
-    context['budget_report']['budget_diagnostics']['plan_sha256']=life.digest(plan)
     return request,context,now
 
 class DispatchBoundaryTests(unittest.TestCase):
@@ -132,9 +132,16 @@ class DispatchBoundaryTests(unittest.TestCase):
         self.signer.address=D; self.transport.domain='testnet'
         with self.assertRaisesRegex(boundary.BoundaryError,'ISOLATED_SIGNER_AND_TRANSPORT_REQUIRED'): self.send()
         self.assertEqual(self.signer.calls,[])
-    def test_account_budget_must_bind_exact_frozen_rounded_plan(self):
-        self.context['budget_report']['budget_diagnostics']['plan_sha256']='0'*64
-        with self.assertRaisesRegex(boundary.BoundaryError,'EXACT_CURRENT_ACCOUNT_BUDGET_REQUIRED'): self.send()
+    def test_entry_account_must_bind_signer_and_preserve_exit_headroom(self):
+        original=deepcopy(self.context['entry_account'])
+        for change in (dict(account=D),dict(agent=C),dict(action_headroom=0),dict(action_headroom=True)):
+            with self.subTest(change=change):
+                self.context['entry_account']={**original,**change}
+                with self.assertRaisesRegex(boundary.BoundaryError,'EXACT_CURRENT_ENTRY_ACCOUNT_REQUIRED'): self.send()
+        self.context['entry_account']=original
+        self.context['entry_account']['at_ms']=self.now-15001
+        with self.assertRaisesRegex(boundary.BoundaryError,'ENTRY_ACCOUNT_SAMPLE_EXPIRED'): self.send()
+        self.assertEqual(self.signer.calls,[])
     def test_final_after_signing_source_recheck(self):
         self.signer.hook=lambda _:self.context['current_source'].update(entry_permission='RETIRED')
         with self.assertRaisesRegex(boundary.BoundaryError,'SOURCE_ENTRY_PERMISSION_RETIRED'): self.send()
@@ -147,15 +154,6 @@ class DispatchBoundaryTests(unittest.TestCase):
         self.signer.hook=lambda _:setattr(self,'now',self.now+5001)
         with self.assertRaisesRegex(boundary.BoundaryError,'DURABLE_ATTEMPT_EXPIRED'): self.send()
         self.assertEqual(self.transport.calls,[])
-    def test_real_budget_preflight_is_reused_with_fake_reader(self):
-        class BudgetReader(Reader):
-            def read(self,kind,**kwargs):
-                if kind=='userRateLimit': return dict(nRequestsCap=100,nRequestsUsed=0,nRequestsSurplus=0)
-                return super().read(kind,**kwargs)
-        reader=BudgetReader(); plan=dict(symbol='BTC',side='SHORT',entry='100',stop='102',take_profit='98')
-        result=boundary.account_preflight(ENV,'short_account',C,D,plan,reader)
-        self.assertEqual(result['budget_report']['budget_diagnostics']['plan_sha256'],life.digest(plan)); self.assertEqual(result['entry_action_headroom'],100); self.assertEqual(reader.mode_calls,2)
-
     def test_approved_exact_limit_accepts_already_touched_current_mark(self):
         for side,mark in (('LONG','93.544'),('LONG','93'),('SHORT','93.544'),('SHORT','94')):
             with self.subTest(side=side,mark=mark):
@@ -195,13 +193,13 @@ class DispatchBoundaryTests(unittest.TestCase):
 
     def test_approved_stale_mark_outside_exits_and_account_gates_still_apply(self):
         for change,expected in (('mark','OUTSIDE_FROZEN_EXITS'),('stale','MARK_EXPIRED'),
-                                ('safety','SAFETY_GATE'),('budget','ACCOUNT_BUDGET')):
+                                ('safety','SAFETY_GATE'),('account','ENTRY_ACCOUNT')):
             with self.subTest(change=change):
                 request,context,now=approved_fixture()
                 if change=='mark':context['market']['mark_price']='91'
                 elif change=='stale':context['market']['at_ms']=now-15001
                 elif change=='safety':context['safety']['feed_reconciled']=False
-                else:context['budget_report']['budget_diagnostics']['plan_sha256']='0'*64
+                else:context['entry_account']['account']=D
                 with self.assertRaisesRegex(boundary.BoundaryError,expected):
                     boundary.review(request,context,now_ms=now)
 

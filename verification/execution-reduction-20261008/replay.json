@@ -9,15 +9,13 @@
       }
     },
     "entry_collection": {
-      "reads": 8,
-      "weight": 222,
+      "reads": 5,
+      "weight": 122,
       "by_kind": {
         "frontendOpenOrders": 1,
         "clearinghouseState": 1,
         "metaAndAssetCtxs": 1,
-        "userAbstraction": 1,
-        "userRole": 2,
-        "activeAssetData": 1,
+        "userRole": 1,
         "userRateLimit": 1
       }
     },
@@ -50,25 +48,23 @@
       "synthetic_actions": 0
     },
     "stable_protected_collection": {
-      "reads": 3,
-      "weight": 43,
+      "reads": 2,
+      "weight": 22,
       "by_kind": {
         "frontendOpenOrders": 1,
-        "clearinghouseState": 1,
-        "userFillsByTime": 1
+        "clearinghouseState": 1
       },
-      "entry_capacity_count": 0,
+      "entry_preparation_count": 0,
       "entry_blocked": {}
     },
     "blocked_peer_collection": {
-      "reads": 3,
-      "weight": 43,
+      "reads": 2,
+      "weight": 22,
       "by_kind": {
         "frontendOpenOrders": 1,
-        "clearinghouseState": 1,
-        "userFillsByTime": 1
+        "clearinghouseState": 1
       },
-      "entry_capacity_count": 0,
+      "entry_preparation_count": 0,
       "entry_blocked": {
         "bf1845754975c7c948ef20eed09870943fdd9cb8700dbb4e40831a23493b2538": "SHARED_MARKET_INDEPENDENT_EXITS_NOT_ISOLATED"
       }
@@ -79,14 +75,14 @@
     "entries": [
       {
         "side": "long_account",
-        "at_ms": 500
+        "at_ms": 350
       },
       {
         "side": "short_account",
-        "at_ms": 1151
+        "at_ms": 801
       }
     ],
-    "closed_ms": 77853,
+    "closed_ms": 11703,
     "phases": {
       "long_account": "CLOSED",
       "short_account": "CLOSED"
@@ -96,618 +92,260 @@
       "long_account": 0,
       "short_account": 0
     },
-    "source_to_finish_reads": 108,
-    "source_to_finish_weight": 1566,
+    "source_to_finish_reads": 73,
+    "source_to_finish_reads_by_kind": {
+      "frontendOpenOrders": 21,
+      "clearinghouseState": 21,
+      "metaAndAssetCtxs": 2,
+      "userRole": 2,
+      "userRateLimit": 2,
+      "lookup": 6,
+      "userFillsByTime": 14,
+      "orderStatus": 5
+    },
+    "source_to_finish_weight": 985,
     "samples": [
       {
-        "at_ms": 501,
+        "at_ms": 351,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 289,
+        "weight": 189,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "metaAndAssetCtxs": 1,
+          "userRole": 1,
+          "userRateLimit": 1
+        },
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 501,
+        "at_ms": 351,
+        "actor": "supervisor",
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 289,
+        "weight": 189,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 1154,
+        "at_ms": 804,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 556,
+        "weight": 336,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1,
+          "userRole": 1,
+          "userRateLimit": 1
+        },
         "phases": {
           "long_account": "OUTCOME_UNKNOWN",
           "short_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 1653,
+        "at_ms": 1253,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 667,
+        "weight": 427,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "userFillsByTime": 2,
+          "lookup": 1
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 2104,
+        "at_ms": 1654,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 776,
+        "weight": 516,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 2
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 2555,
+        "at_ms": 2005,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 885,
+        "weight": 584,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 3006,
+        "at_ms": 2356,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 994,
+        "weight": 652,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 3458,
+        "at_ms": 2708,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 1102,
+        "weight": 719,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 5501,
+        "at_ms": 5351,
+        "actor": "supervisor",
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 1102,
+        "weight": 719,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 5801,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1150,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 10501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1150,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 11101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 15501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 16101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 20501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 21101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 25501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 26101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 30501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 31101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 35501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 36101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 40501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 41101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 45501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 46101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 50501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 51101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 55501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 56101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 60501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 61101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 65501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1154,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 66351,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 70501,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 621,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 71802,
+        "at_ms": 5752,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 426,
+        "weight": 810,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 2,
+          "userFillsByTime": 2
+        },
         "phases": {
           "long_account": "PARTIALLY_CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 72253,
+        "at_ms": 6153,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 424,
+        "weight": 898,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "userFillsByTime": 1,
+          "metaAndAssetCtxs": 1
+        },
         "phases": {
           "long_account": "PARTIALLY_CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 72703,
+        "at_ms": 6553,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 466,
+        "weight": 986,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "userFillsByTime": 2,
+          "orderStatus": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 75501,
+        "at_ms": 10351,
+        "actor": "supervisor",
         "status": "SUPERVISOR_OBSERVATION_VERIFIED",
         "error": null,
-        "weight": 418,
+        "weight": 986,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 77853,
+        "at_ms": 11703,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 460,
+        "weight": 1029,
+        "reads": 3,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "CLOSED"
         }
       }
     ],
-    "denials": [
-      {
-        "at_ms": 1791289085751,
-        "priority": "protection",
-        "used_weight": 1148,
-        "requested_weight": 120,
-        "ceiling": 1200,
-        "retry_after_ms": 63349
-      },
-      {
-        "at_ms": 1791289085801,
-        "priority": "protection",
-        "used_weight": 1150,
-        "requested_weight": 120,
-        "ceiling": 1200,
-        "retry_after_ms": 63299
-      },
-      {
-        "at_ms": 1791289091051,
-        "priority": "protection",
-        "used_weight": 1196,
-        "requested_weight": 120,
-        "ceiling": 1200,
-        "retry_after_ms": 58199
-      },
-      {
-        "at_ms": 1791289091101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 120,
-        "ceiling": 1200,
-        "retry_after_ms": 58149
-      },
-      {
-        "at_ms": 1791289096101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 47899
-      },
-      {
-        "at_ms": 1791289096101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 47899
-      },
-      {
-        "at_ms": 1791289101101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 42899
-      },
-      {
-        "at_ms": 1791289101101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 42899
-      },
-      {
-        "at_ms": 1791289106101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 37899
-      },
-      {
-        "at_ms": 1791289106101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 37899
-      },
-      {
-        "at_ms": 1791289111101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 32899
-      },
-      {
-        "at_ms": 1791289111101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 32899
-      },
-      {
-        "at_ms": 1791289116101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 27899
-      },
-      {
-        "at_ms": 1791289116101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 27899
-      },
-      {
-        "at_ms": 1791289121101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 22899
-      },
-      {
-        "at_ms": 1791289121101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 22899
-      },
-      {
-        "at_ms": 1791289126101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 17899
-      },
-      {
-        "at_ms": 1791289126101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 17899
-      },
-      {
-        "at_ms": 1791289131101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 12899
-      },
-      {
-        "at_ms": 1791289131101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 12899
-      },
-      {
-        "at_ms": 1791289136101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 7899
-      },
-      {
-        "at_ms": 1791289136101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 7899
-      },
-      {
-        "at_ms": 1791289141101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 2899
-      },
-      {
-        "at_ms": 1791289141101,
-        "priority": "protection",
-        "used_weight": 1198,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 2899
-      },
-      {
-        "at_ms": 1791289146351,
-        "priority": "protection",
-        "used_weight": 1200,
-        "requested_weight": 120,
-        "ceiling": 1200,
-        "retry_after_ms": 2949
-      },
-      {
-        "at_ms": 1791289146351,
-        "priority": "protection",
-        "used_weight": 1200,
-        "requested_weight": 2,
-        "ceiling": 1200,
-        "retry_after_ms": 2649
-      }
-    ],
+    "denials": [],
     "synthetic_actions": 8,
     "entry_decisions": {
       "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
@@ -717,18 +355,7 @@
         "symbol": "SOL",
         "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
         "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
-        "at_ms": 1791289157853,
-        "retry_after_ms": null,
-        "deadline": "2026-10-06T12:19:30+00:00"
-      },
-      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
-        "stage": "ENTRY_ADMISSION",
-        "scope": "account",
-        "account_role": "short_account",
-        "symbol": "SOL",
-        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
-        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
-        "at_ms": 1791289146351,
+        "at_ms": 1791289091703,
         "retry_after_ms": null,
         "deadline": "2026-10-06T12:19:30+00:00"
       }
@@ -765,13 +392,13 @@
             "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
           },
           "status": "FILLED",
-          "at_ms": 1791289081153,
+          "at_ms": 1791289080803,
           "fills": [
             {
               "fill_id": "fill1_0",
               "quantity": "4.67",
               "price": "93.544",
-              "at_ms": 1791289081153
+              "at_ms": 1791289080803
             }
           ]
         }
@@ -797,13 +424,13 @@
             "c": "0xe0977db3fa67b9cd59aed178d1a9e2d5"
           },
           "status": "FILLED",
-          "at_ms": 1791289081154,
+          "at_ms": 1791289080804,
           "fills": [
             {
               "fill_id": "fill2_0",
               "quantity": "5.60",
               "price": "93.544",
-              "at_ms": 1791289081154
+              "at_ms": 1791289080804
             }
           ]
         }
@@ -831,7 +458,7 @@
             "c": "0x50922237d0722036b6df461ce773f79b"
           },
           "status": "CANCELED",
-          "at_ms": 1791289151802,
+          "at_ms": 1791289085752,
           "fills": []
         }
       },
@@ -858,7 +485,7 @@
             "c": "0xe74a64202d8566254aee9d615a57dc1b"
           },
           "status": "CANCELED",
-          "at_ms": 1791289152253,
+          "at_ms": 1791289086153,
           "fills": []
         }
       },
@@ -885,13 +512,13 @@
             "c": "0x45dc3bbe2293d7b34fdc89ea4c147d9c"
           },
           "status": "FILLED",
-          "at_ms": 1791289083457,
+          "at_ms": 1791289082707,
           "fills": [
             {
               "fill_id": "fill5_0",
               "quantity": "4.67",
               "price": "95.327",
-              "at_ms": 1791289083457
+              "at_ms": 1791289082707
             }
           ]
         }
@@ -919,13 +546,13 @@
             "c": "0xf78efd3f518e5e97748b98e2ea5bfd12"
           },
           "status": "FILLED",
-          "at_ms": 1791289083458,
+          "at_ms": 1791289082708,
           "fills": [
             {
               "fill_id": "fill6_0",
               "quantity": "5.60",
               "price": "91.405",
-              "at_ms": 1791289083458
+              "at_ms": 1791289082708
             }
           ]
         }
@@ -976,14 +603,14 @@
     "entries": [
       {
         "side": "long_account",
-        "at_ms": 4500
+        "at_ms": 350
       },
       {
         "side": "short_account",
-        "at_ms": 73500
+        "at_ms": 44250
       }
     ],
-    "closed_ms": 80804,
+    "closed_ms": 50953,
     "phases": {
       "long_account": "CLOSED",
       "short_account": "CLOSED"
@@ -993,396 +620,466 @@
       "long_account": 0,
       "short_account": 0
     },
-    "source_to_finish_reads": 74,
-    "source_to_finish_weight": 1210,
+    "source_to_finish_reads": 59,
+    "source_to_finish_reads_by_kind": {
+      "frontendOpenOrders": 15,
+      "clearinghouseState": 15,
+      "metaAndAssetCtxs": 3,
+      "userRole": 2,
+      "userRateLimit": 2,
+      "lookup": 6,
+      "userFillsByTime": 12,
+      "orderStatus": 4
+    },
+    "source_to_finish_weight": 830,
     "samples": [
       {
-        "at_ms": 0,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 616,
-        "phases": {}
-      },
-      {
-        "at_ms": 0,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 616,
-        "phases": {}
-      },
-      {
-        "at_ms": 4502,
+        "at_ms": 352,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 773,
+        "weight": 761,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "metaAndAssetCtxs": 1,
+          "userRole": 1,
+          "userRateLimit": 1
+        },
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 4802,
-        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
-        "error": null,
-        "weight": 839,
-        "phases": {
-          "long_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 5103,
-        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
-        "error": null,
-        "weight": 905,
-        "phases": {
-          "long_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 5103,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 905,
-        "phases": {
-          "long_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 5404,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 970,
-        "phases": {
-          "long_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 10103,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 970,
-        "phases": {
-          "long_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 10354,
-        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
-        "error": null,
-        "weight": 1036,
-        "phases": {
-          "long_account": "PARTIALLY_CLOSED"
-        }
-      },
-      {
-        "at_ms": 10654,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1101,
-        "phases": {
-          "long_account": "PARTIALLY_CLOSED"
-        }
-      },
-      {
-        "at_ms": 15103,
+        "at_ms": 352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 1013,
+        "weight": 761,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 553,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 807,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 804,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 853,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 1055,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 898,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 5352,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 810,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 5553,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 856,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "orderStatus": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 15804,
+        "at_ms": 5853,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 1056,
+        "weight": 921,
+        "reads": 5,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "orderStatus": 1,
+          "userFillsByTime": 1,
+          "metaAndAssetCtxs": 1
+        },
         "phases": {
-          "long_account": "CLOSED"
+          "long_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 20103,
+        "at_ms": 10352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 1056,
+        "weight": 921,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
-          "long_account": "CLOSED"
+          "long_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 20804,
+        "at_ms": 11003,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 1056,
+        "weight": 964,
+        "reads": 3,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 25103,
+        "at_ms": 15352,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 876,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 16003,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 876,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 20352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 968,
+        "weight": 876,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 25804,
+        "at_ms": 21003,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 968,
+        "weight": 876,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 30103,
+        "at_ms": 24000,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 788,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 25352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 968,
+        "weight": 788,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 30804,
+        "at_ms": 29000,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 968,
+        "weight": 788,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 35103,
+        "at_ms": 30352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 880,
+        "weight": 788,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 35804,
+        "at_ms": 34000,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 880,
+        "weight": 700,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 40103,
+        "at_ms": 35352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 880,
+        "weight": 700,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 40804,
+        "at_ms": 39000,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 880,
+        "weight": 700,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 45103,
+        "at_ms": 40352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 792,
+        "weight": 700,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 45804,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 792,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 50103,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 792,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 50804,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 792,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 54000,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 660,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 55103,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 660,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 59000,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 660,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 60103,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 660,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 64000,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 640,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 65103,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 616,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 69000,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 616,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 70103,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 616,
-        "phases": {
-          "long_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 73502,
+        "at_ms": 44252,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 594,
+        "weight": 735,
+        "reads": 5,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "metaAndAssetCtxs": 1,
+          "userRole": 1,
+          "userRateLimit": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 73802,
+        "at_ms": 44502,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 594,
+        "weight": 781,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 74103,
+        "at_ms": 44753,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 594,
+        "weight": 827,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 74404,
+        "at_ms": 45004,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 594,
+        "weight": 872,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 75103,
+        "at_ms": 45352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 594,
+        "weight": 872,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 75354,
+        "at_ms": 45553,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 660,
+        "weight": 918,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "orderStatus": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 75654,
+        "at_ms": 45803,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 725,
+        "weight": 963,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "orderStatus": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 80103,
+        "at_ms": 50352,
+        "actor": "supervisor",
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 594,
+        "weight": 963,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 80804,
+        "at_ms": 50953,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 637,
+        "weight": 1006,
+        "reads": 3,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "CLOSED"
@@ -1399,7 +1096,7 @@
         "symbol": "SOL",
         "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
         "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
-        "at_ms": 1791289160804,
+        "at_ms": 1791289130953,
         "retry_after_ms": null,
         "deadline": "2026-10-06T12:19:30+00:00"
       }
@@ -1436,13 +1133,13 @@
             "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
           },
           "status": "FILLED",
-          "at_ms": 1791289084502,
+          "at_ms": 1791289080352,
           "fills": [
             {
               "fill_id": "fill1_0",
               "quantity": "4.67",
               "price": "93.544",
-              "at_ms": 1791289084502
+              "at_ms": 1791289080352
             }
           ]
         }
@@ -1470,7 +1167,7 @@
             "c": "0xc10c394798adf68f8f293d2b202583cf"
           },
           "status": "CANCELED",
-          "at_ms": 1791289090354,
+          "at_ms": 1791289085553,
           "fills": []
         }
       },
@@ -1497,13 +1194,13 @@
             "c": "0x36f6ffc2bb4db0da33e81f7e1bfbd462"
           },
           "status": "FILLED",
-          "at_ms": 1791289085404,
+          "at_ms": 1791289081055,
           "fills": [
             {
               "fill_id": "fill3_0",
               "quantity": "4.67",
               "price": "95.327",
-              "at_ms": 1791289085404
+              "at_ms": 1791289081055
             }
           ]
         }
@@ -1529,13 +1226,13 @@
             "c": "0x89fe6111ac9406a5578c07d5a9c39ed9"
           },
           "status": "FILLED",
-          "at_ms": 1791289153502,
+          "at_ms": 1791289124252,
           "fills": [
             {
               "fill_id": "fill4_0",
               "quantity": "5.60",
               "price": "93.544",
-              "at_ms": 1791289153502
+              "at_ms": 1791289124252
             }
           ]
         }
@@ -1563,7 +1260,7 @@
             "c": "0x3ff3dd7abbdaf004b15ff58c48bd3a28"
           },
           "status": "CANCELED",
-          "at_ms": 1791289155354,
+          "at_ms": 1791289125553,
           "fills": []
         }
       },
@@ -1590,13 +1287,13 @@
             "c": "0x29007245d1c5bb9b622145bfbeac26d2"
           },
           "status": "FILLED",
-          "at_ms": 1791289154404,
+          "at_ms": 1791289125004,
           "fills": [
             {
               "fill_id": "fill6_0",
               "quantity": "5.60",
               "price": "91.405",
-              "at_ms": 1791289154404
+              "at_ms": 1791289125004
             }
           ]
         }
@@ -1647,14 +1344,14 @@
     "entries": [
       {
         "side": "long_account",
-        "at_ms": 500
+        "at_ms": 350
       },
       {
         "side": "short_account",
-        "at_ms": 4550
+        "at_ms": 801
       }
     ],
-    "closed_ms": 82005,
+    "closed_ms": 78353,
     "phases": {
       "long_account": "CLOSED",
       "short_account": "CLOSED"
@@ -1664,421 +1361,621 @@
       "long_account": 0,
       "short_account": 0
     },
-    "source_to_finish_reads": 128,
-    "source_to_finish_weight": 1788,
+    "source_to_finish_reads": 106,
+    "source_to_finish_reads_by_kind": {
+      "frontendOpenOrders": 33,
+      "clearinghouseState": 33,
+      "metaAndAssetCtxs": 6,
+      "userRole": 2,
+      "userRateLimit": 2,
+      "lookup": 6,
+      "userFillsByTime": 14,
+      "orderStatus": 10
+    },
+    "source_to_finish_weight": 1339,
     "samples": [
       {
-        "at_ms": 501,
+        "at_ms": 351,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 553,
+        "weight": 453,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "metaAndAssetCtxs": 1,
+          "userRole": 1,
+          "userRateLimit": 1
+        },
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 501,
+        "at_ms": 351,
+        "actor": "supervisor",
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 553,
+        "weight": 453,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 801,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 617,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 4553,
+        "at_ms": 804,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 794,
+        "weight": 600,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1,
+          "userRole": 1,
+          "userRateLimit": 1
+        },
         "phases": {
           "long_account": "OUTCOME_UNKNOWN",
           "short_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 5052,
+        "at_ms": 1253,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 905,
+        "weight": 691,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "userFillsByTime": 2,
+          "lookup": 1
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 5503,
+        "at_ms": 1654,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 1014,
+        "weight": 780,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 2
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 5503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1014,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 5904,
+        "at_ms": 2005,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 1102,
+        "weight": 848,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 6304,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1170,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 10503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1170,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 11454,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1194,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 15503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1106,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 16804,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1174,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 20503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1174,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 21954,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1198,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 25503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1110,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 27304,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1178,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 30503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1178,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 32404,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 35503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 37404,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 40503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 42404,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 45503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 47404,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 50503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 52404,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 55503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 57404,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 60503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 62404,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 65503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1156,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 67604,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1200,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 70503,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 891,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 73055,
+        "at_ms": 2356,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 980,
+        "weight": 916,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 73507,
+        "at_ms": 2708,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 844,
+        "weight": 983,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 75503,
+        "at_ms": 5351,
+        "actor": "supervisor",
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 467,
+        "weight": 895,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 75954,
+        "at_ms": 5752,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 578,
+        "weight": 986,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 2,
+          "userFillsByTime": 2
+        },
         "phases": {
           "long_account": "PARTIALLY_CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 76405,
+        "at_ms": 6153,
+        "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 687,
+        "weight": 1074,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "userFillsByTime": 1,
+          "metaAndAssetCtxs": 1
+        },
         "phases": {
           "long_account": "PARTIALLY_CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 76855,
+        "at_ms": 6453,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 795,
+        "weight": 1120,
+        "reads": 5,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 10351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1120,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 11753,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 15351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1098,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 17053,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1164,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 20351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1164,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 22153,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 2,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 25351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1098,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 27453,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1164,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 30351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1164,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 32553,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 2,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 35351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 37553,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 40351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 42553,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 45351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 47553,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 50351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 52553,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 55351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 57553,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 60351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 62553,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1186,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 65351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1142,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 67803,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1188,
+        "reads": 5,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 70351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 785,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 73203,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 621,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "userFillsByTime": 2,
+          "orderStatus": 1,
+          "metaAndAssetCtxs": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 80503,
+        "at_ms": 75351,
+        "actor": "supervisor",
         "status": "SUPERVISOR_OBSERVATION_VERIFIED",
         "error": null,
-        "weight": 771,
+        "weight": 400,
+        "reads": 0,
+        "read_kinds": {},
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 82005,
+        "at_ms": 78353,
+        "actor": "worker",
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 814,
+        "weight": 439,
+        "reads": 3,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "userFillsByTime": 1
+        },
         "phases": {
           "long_account": "CLOSED",
           "short_account": "CLOSED"
@@ -2087,300 +1984,356 @@
     ],
     "denials": [
       {
-        "at_ms": 1791289085853,
+        "at_ms": 1791289086403,
         "priority": "protection",
-        "used_weight": 1081,
+        "used_weight": 1118,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 8147
+        "retry_after_ms": 7597
       },
       {
-        "at_ms": 1791289086204,
+        "at_ms": 1791289086453,
         "priority": "protection",
-        "used_weight": 1148,
+        "used_weight": 1120,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 7796
+        "retry_after_ms": 7547
       },
       {
-        "at_ms": 1791289086254,
+        "at_ms": 1791289091653,
         "priority": "protection",
-        "used_weight": 1150,
+        "used_weight": 1164,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 7746
+        "retry_after_ms": 2347
       },
       {
-        "at_ms": 1791289091404,
+        "at_ms": 1791289091703,
         "priority": "protection",
-        "used_weight": 1192,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 2596
-      },
-      {
-        "at_ms": 1791289091454,
-        "priority": "protection",
-        "used_weight": 1194,
+        "used_weight": 1166,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 12546
+        "retry_after_ms": 2297
       },
       {
-        "at_ms": 1791289091454,
+        "at_ms": 1791289096953,
         "priority": "protection",
-        "used_weight": 1194,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 2546
-      },
-      {
-        "at_ms": 1791289096704,
-        "priority": "protection",
-        "used_weight": 1152,
+        "used_weight": 1142,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 7296
+        "retry_after_ms": 7047
       },
       {
-        "at_ms": 1791289096754,
+        "at_ms": 1791289097003,
         "priority": "protection",
-        "used_weight": 1154,
+        "used_weight": 1144,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 7246
+        "retry_after_ms": 6997
       },
       {
-        "at_ms": 1791289101904,
+        "at_ms": 1791289102153,
         "priority": "protection",
-        "used_weight": 1196,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 2096
+        "retry_after_ms": 1847
       },
       {
-        "at_ms": 1791289101954,
+        "at_ms": 1791289102153,
         "priority": "protection",
-        "used_weight": 1198,
+        "used_weight": 1186,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 42146
+        "retry_after_ms": 41847
       },
       {
-        "at_ms": 1791289101954,
+        "at_ms": 1791289102153,
         "priority": "protection",
-        "used_weight": 1198,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 2046
+        "retry_after_ms": 1847
       },
       {
-        "at_ms": 1791289107204,
+        "at_ms": 1791289102153,
         "priority": "protection",
-        "used_weight": 1156,
+        "used_weight": 1186,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1847
+      },
+      {
+        "at_ms": 1791289107353,
+        "priority": "protection",
+        "used_weight": 1142,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 41896
+        "retry_after_ms": 41647
       },
       {
-        "at_ms": 1791289107254,
+        "at_ms": 1791289107403,
         "priority": "protection",
-        "used_weight": 1158,
+        "used_weight": 1144,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 41846
+        "retry_after_ms": 41597
       },
       {
-        "at_ms": 1791289112404,
+        "at_ms": 1791289112553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 31596
+        "retry_after_ms": 31447
       },
       {
-        "at_ms": 1791289112404,
+        "at_ms": 1791289112553,
         "priority": "protection",
-        "used_weight": 1200,
-        "requested_weight": 2,
+        "used_weight": 1186,
+        "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 31596
+        "retry_after_ms": 36647
       },
       {
-        "at_ms": 1791289112404,
+        "at_ms": 1791289112553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 31596
+        "retry_after_ms": 31447
       },
       {
-        "at_ms": 1791289117404,
+        "at_ms": 1791289112553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 26596
+        "retry_after_ms": 31447
       },
       {
-        "at_ms": 1791289117404,
+        "at_ms": 1791289117553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 26596
+        "retry_after_ms": 26447
       },
       {
-        "at_ms": 1791289117404,
+        "at_ms": 1791289117553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 26596
+        "retry_after_ms": 26447
       },
       {
-        "at_ms": 1791289122404,
+        "at_ms": 1791289117553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 21596
+        "retry_after_ms": 26447
       },
       {
-        "at_ms": 1791289122404,
+        "at_ms": 1791289117553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 21596
+        "retry_after_ms": 26447
       },
       {
-        "at_ms": 1791289122404,
+        "at_ms": 1791289122553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 21596
+        "retry_after_ms": 21447
       },
       {
-        "at_ms": 1791289127404,
+        "at_ms": 1791289122553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 16596
+        "retry_after_ms": 21447
       },
       {
-        "at_ms": 1791289127404,
+        "at_ms": 1791289122553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 16596
+        "retry_after_ms": 21447
       },
       {
-        "at_ms": 1791289127404,
+        "at_ms": 1791289122553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 16596
+        "retry_after_ms": 21447
       },
       {
-        "at_ms": 1791289132404,
+        "at_ms": 1791289127553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 11596
+        "retry_after_ms": 16447
       },
       {
-        "at_ms": 1791289132404,
+        "at_ms": 1791289127553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 11596
+        "retry_after_ms": 16447
       },
       {
-        "at_ms": 1791289132404,
+        "at_ms": 1791289127553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 11596
+        "retry_after_ms": 16447
       },
       {
-        "at_ms": 1791289137404,
+        "at_ms": 1791289127553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 6596
+        "retry_after_ms": 16447
       },
       {
-        "at_ms": 1791289137404,
+        "at_ms": 1791289132553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 6596
+        "retry_after_ms": 11447
       },
       {
-        "at_ms": 1791289137404,
+        "at_ms": 1791289132553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 6596
+        "retry_after_ms": 11447
       },
       {
-        "at_ms": 1791289142404,
+        "at_ms": 1791289132553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 1596
+        "retry_after_ms": 11447
       },
       {
-        "at_ms": 1791289142404,
+        "at_ms": 1791289132553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 1596
+        "retry_after_ms": 11447
       },
       {
-        "at_ms": 1791289142404,
+        "at_ms": 1791289137553,
         "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 1596
+        "retry_after_ms": 6447
       },
       {
-        "at_ms": 1791289147604,
+        "at_ms": 1791289137553,
         "priority": "protection",
-        "used_weight": 1200,
-        "requested_weight": 2,
-        "ceiling": 1200,
-        "retry_after_ms": 1396
-      },
-      {
-        "at_ms": 1791289147604,
-        "priority": "protection",
-        "used_weight": 1200,
-        "requested_weight": 2,
-        "ceiling": 1200,
-        "retry_after_ms": 1396
-      },
-      {
-        "at_ms": 1791289147604,
-        "priority": "protection",
-        "used_weight": 1200,
+        "used_weight": 1186,
         "requested_weight": 20,
         "ceiling": 1200,
-        "retry_after_ms": 1396
+        "retry_after_ms": 6447
+      },
+      {
+        "at_ms": 1791289137553,
+        "priority": "protection",
+        "used_weight": 1186,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 6447
+      },
+      {
+        "at_ms": 1791289137553,
+        "priority": "protection",
+        "used_weight": 1186,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 6447
+      },
+      {
+        "at_ms": 1791289142553,
+        "priority": "protection",
+        "used_weight": 1186,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1447
+      },
+      {
+        "at_ms": 1791289142553,
+        "priority": "protection",
+        "used_weight": 1186,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1447
+      },
+      {
+        "at_ms": 1791289142553,
+        "priority": "protection",
+        "used_weight": 1186,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1447
+      },
+      {
+        "at_ms": 1791289142553,
+        "priority": "protection",
+        "used_weight": 1186,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1447
+      },
+      {
+        "at_ms": 1791289147753,
+        "priority": "protection",
+        "used_weight": 1186,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 1497
+      },
+      {
+        "at_ms": 1791289147803,
+        "priority": "protection",
+        "used_weight": 1188,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 1447
+      },
+      {
+        "at_ms": 1791289147803,
+        "priority": "protection",
+        "used_weight": 1188,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1197
+      },
+      {
+        "at_ms": 1791289147803,
+        "priority": "protection",
+        "used_weight": 1188,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1197
       }
     ],
     "synthetic_actions": 8,
@@ -2392,7 +2345,7 @@
         "symbol": "SOL",
         "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
         "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
-        "at_ms": 1791289162005,
+        "at_ms": 1791289158353,
         "retry_after_ms": null,
         "deadline": "2026-10-06T12:19:30+00:00"
       },
@@ -2403,7 +2356,7 @@
         "symbol": "SOL",
         "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
         "reason": "ACCOUNT_OUTCOME_UNKNOWN",
-        "at_ms": 1791289147604,
+        "at_ms": 1791289147803,
         "retry_after_ms": null,
         "deadline": "2026-10-06T12:19:30+00:00"
       }
@@ -2440,13 +2393,13 @@
             "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
           },
           "status": "FILLED",
-          "at_ms": 1791289084552,
+          "at_ms": 1791289080803,
           "fills": [
             {
               "fill_id": "fill1_0",
               "quantity": "4.67",
               "price": "93.544",
-              "at_ms": 1791289084552
+              "at_ms": 1791289080803
             }
           ]
         }
@@ -2472,13 +2425,13 @@
             "c": "0xe0977db3fa67b9cd59aed178d1a9e2d5"
           },
           "status": "FILLED",
-          "at_ms": 1791289084553,
+          "at_ms": 1791289080804,
           "fills": [
             {
               "fill_id": "fill2_0",
               "quantity": "5.60",
               "price": "93.544",
-              "at_ms": 1791289084553
+              "at_ms": 1791289080804
             }
           ]
         }
@@ -2506,7 +2459,7 @@
             "c": "0x50922237d0722036b6df461ce773f79b"
           },
           "status": "CANCELED",
-          "at_ms": 1791289155954,
+          "at_ms": 1791289085752,
           "fills": []
         }
       },
@@ -2533,7 +2486,7 @@
             "c": "0xe74a64202d8566254aee9d615a57dc1b"
           },
           "status": "CANCELED",
-          "at_ms": 1791289156405,
+          "at_ms": 1791289086153,
           "fills": []
         }
       },
@@ -2560,13 +2513,13 @@
             "c": "0x45dc3bbe2293d7b34fdc89ea4c147d9c"
           },
           "status": "FILLED",
-          "at_ms": 1791289153506,
+          "at_ms": 1791289082707,
           "fills": [
             {
               "fill_id": "fill5_0",
               "quantity": "4.67",
               "price": "95.327",
-              "at_ms": 1791289153506
+              "at_ms": 1791289082707
             }
           ]
         }
@@ -2594,13 +2547,1298 @@
             "c": "0xf78efd3f518e5e97748b98e2ea5bfd12"
           },
           "status": "FILLED",
-          "at_ms": 1791289153507,
+          "at_ms": 1791289082708,
           "fills": [
             {
               "fill_id": "fill6_0",
               "quantity": "5.60",
               "price": "91.405",
-              "at_ms": 1791289153507
+              "at_ms": 1791289082708
+            }
+          ]
+        }
+      }
+    },
+    "final_requests": [
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "1"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "2"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "3"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "4"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "5"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "6"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "3"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "4"
+      }
+    ],
+    "final_context": {
+      "entry_blocked": {},
+      "account_entry_blocked": {},
+      "blocked_lanes": {}
+    }
+  },
+  "concurrent_heavy_unfilled": {
+    "warm_weight": 616,
+    "entries": [
+      {
+        "side": "long_account",
+        "at_ms": 350
+      },
+      {
+        "side": "short_account",
+        "at_ms": 24350
+      }
+    ],
+    "closed_ms": 102806,
+    "phases": {
+      "long_account": "CLOSED",
+      "short_account": "CLOSED"
+    },
+    "pending_outcomes": [],
+    "observed_working_entries": {
+      "long_account": 0,
+      "short_account": 0
+    },
+    "source_to_finish_reads": 146,
+    "source_to_finish_reads_by_kind": {
+      "frontendOpenOrders": 47,
+      "clearinghouseState": 47,
+      "metaAndAssetCtxs": 10,
+      "userRole": 2,
+      "userRateLimit": 2,
+      "lookup": 12,
+      "userFillsByTime": 15,
+      "orderStatus": 11
+    },
+    "source_to_finish_weight": 1762,
+    "samples": [
+      {
+        "at_ms": 351,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 761,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "metaAndAssetCtxs": 1,
+          "userRole": 1,
+          "userRateLimit": 1
+        },
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 761,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 601,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 805,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 5351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 717,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 5601,
+        "actor": "worker",
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 717,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 10351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 717,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 10751,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 759,
+        "reads": 3,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 14100,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 693,
+        "reads": 2,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1
+        },
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 15351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 693,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 19100,
+        "actor": "worker",
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 693,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 20351,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 693,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 24353,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 750,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "metaAndAssetCtxs": 1,
+          "userRole": 1,
+          "userRateLimit": 1
+        },
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN",
+          "short_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 24802,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 841,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "userFillsByTime": 2,
+          "lookup": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 25203,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 930,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 2
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 25554,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 998,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 25554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 998,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 25905,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 1066,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "userFillsByTime": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 26205,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1112,
+        "reads": 5,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 30554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 1112,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 31505,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1178,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 35554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1090,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 36805,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1156,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 40554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1156,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 42005,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1200,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 45554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1112,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 47305,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1178,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 50554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1178,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 52405,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1200,
+        "reads": 2,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 55554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1068,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 57705,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1134,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 60554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1134,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 63005,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1200,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "lookup": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 65554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1156,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 68205,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1200,
+        "reads": 4,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 70554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1011,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 73607,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1119,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "userFillsByTime": 2,
+          "lookup": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 75554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1119,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 75854,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1167,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 2
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 80554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1125,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 81154,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1173,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 2
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 85554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1151,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 86454,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1199,
+        "reads": 6,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 2
+        },
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 90554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1199,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 91454,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1199,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 95554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 692,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 96855,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 783,
+        "reads": 8,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 2,
+          "userFillsByTime": 2
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 97256,
+        "actor": "worker",
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 871,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "orderStatus": 1,
+          "userFillsByTime": 1,
+          "metaAndAssetCtxs": 1
+        },
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 97656,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 959,
+        "reads": 7,
+        "read_kinds": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2,
+          "userFillsByTime": 2,
+          "orderStatus": 1
+        },
+        "phases": {
+          "long_account": "CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 100554,
+        "actor": "supervisor",
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 893,
+        "reads": 0,
+        "read_kinds": {},
+        "phases": {
+          "long_account": "CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 102806,
+        "actor": "worker",
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 936,
+        "reads": 3,
+        "read_kinds": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "userFillsByTime": 1
+        },
+        "phases": {
+          "long_account": "CLOSED",
+          "short_account": "CLOSED"
+        }
+      }
+    ],
+    "denials": [
+      {
+        "at_ms": 1791289106205,
+        "priority": "protection",
+        "used_weight": 1112,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 7795
+      },
+      {
+        "at_ms": 1791289111405,
+        "priority": "protection",
+        "used_weight": 1156,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 2595
+      },
+      {
+        "at_ms": 1791289111455,
+        "priority": "protection",
+        "used_weight": 1158,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 2545
+      },
+      {
+        "at_ms": 1791289116705,
+        "priority": "protection",
+        "used_weight": 1134,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 7295
+      },
+      {
+        "at_ms": 1791289116755,
+        "priority": "protection",
+        "used_weight": 1136,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 7245
+      },
+      {
+        "at_ms": 1791289122005,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 11995
+      },
+      {
+        "at_ms": 1791289122005,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 2,
+        "ceiling": 1200,
+        "retry_after_ms": 1995
+      },
+      {
+        "at_ms": 1791289122005,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1995
+      },
+      {
+        "at_ms": 1791289127205,
+        "priority": "protection",
+        "used_weight": 1156,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 6795
+      },
+      {
+        "at_ms": 1791289127255,
+        "priority": "protection",
+        "used_weight": 1158,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 6745
+      },
+      {
+        "at_ms": 1791289132405,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1595
+      },
+      {
+        "at_ms": 1791289132405,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 1595
+      },
+      {
+        "at_ms": 1791289132405,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1595
+      },
+      {
+        "at_ms": 1791289137605,
+        "priority": "protection",
+        "used_weight": 1112,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 6495
+      },
+      {
+        "at_ms": 1791289137655,
+        "priority": "protection",
+        "used_weight": 1114,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 6445
+      },
+      {
+        "at_ms": 1791289142905,
+        "priority": "protection",
+        "used_weight": 1178,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 6295
+      },
+      {
+        "at_ms": 1791289142955,
+        "priority": "protection",
+        "used_weight": 1180,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 6245
+      },
+      {
+        "at_ms": 1791289148205,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 1045
+      },
+      {
+        "at_ms": 1791289148205,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 2,
+        "ceiling": 1200,
+        "retry_after_ms": 795
+      },
+      {
+        "at_ms": 1791289148205,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 795
+      },
+      {
+        "at_ms": 1791289155804,
+        "priority": "protection",
+        "used_weight": 1165,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 17246
+      },
+      {
+        "at_ms": 1791289155854,
+        "priority": "protection",
+        "used_weight": 1167,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 17246
+      },
+      {
+        "at_ms": 1791289161104,
+        "priority": "protection",
+        "used_weight": 1171,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 12146
+      },
+      {
+        "at_ms": 1791289161154,
+        "priority": "protection",
+        "used_weight": 1173,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 12096
+      },
+      {
+        "at_ms": 1791289166404,
+        "priority": "protection",
+        "used_weight": 1197,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 6846
+      },
+      {
+        "at_ms": 1791289166454,
+        "priority": "protection",
+        "used_weight": 1199,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 6796
+      },
+      {
+        "at_ms": 1791289171454,
+        "priority": "protection",
+        "used_weight": 1199,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1546
+      },
+      {
+        "at_ms": 1791289171454,
+        "priority": "protection",
+        "used_weight": 1199,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1546
+      }
+    ],
+    "synthetic_actions": 8,
+    "entry_decisions": {
+      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "short_account",
+        "symbol": "SOL",
+        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289166454,
+        "retry_after_ms": null,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      },
+      "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "long_account",
+        "symbol": "SOL",
+        "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289166454,
+        "retry_after_ms": null,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      }
+    },
+    "wire_actions": [
+      "long_account:ENTRY:ENTRY",
+      "short_account:ENTRY:ENTRY",
+      "long_account:CREATE_EXIT:STOP",
+      "short_account:CREATE_EXIT:STOP",
+      "long_account:CREATE_EXIT:TAKE_PROFIT",
+      "short_account:CREATE_EXIT:TAKE_PROFIT",
+      "long_account:CANCEL:STOP",
+      "short_account:CANCEL:STOP"
+    ],
+    "orders": {
+      "1": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "ENTRY",
+        "view": {
+          "oid": "1",
+          "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "93.544",
+            "s": "4.67",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289104352,
+          "fills": [
+            {
+              "fill_id": "fill1_0",
+              "quantity": "4.67",
+              "price": "93.544",
+              "at_ms": 1791289104352
+            }
+          ]
+        }
+      },
+      "2": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "ENTRY",
+        "view": {
+          "oid": "2",
+          "cloid": "0xe0977db3fa67b9cd59aed178d1a9e2d5",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "93.544",
+            "s": "5.6",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0xe0977db3fa67b9cd59aed178d1a9e2d5"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289104353,
+          "fills": [
+            {
+              "fill_id": "fill2_0",
+              "quantity": "5.60",
+              "price": "93.544",
+              "at_ms": 1791289104353
+            }
+          ]
+        }
+      },
+      "3": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "STOP",
+        "view": {
+          "oid": "3",
+          "cloid": "0x50922237d0722036b6df461ce773f79b",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "91.405",
+            "s": "4.67",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": true,
+                "triggerPx": "91.405",
+                "tpsl": "sl"
+              }
+            },
+            "c": "0x50922237d0722036b6df461ce773f79b"
+          },
+          "status": "CANCELED",
+          "at_ms": 1791289176855,
+          "fills": []
+        }
+      },
+      "4": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "STOP",
+        "view": {
+          "oid": "4",
+          "cloid": "0xe74a64202d8566254aee9d615a57dc1b",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "95.327",
+            "s": "5.6",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": true,
+                "triggerPx": "95.327",
+                "tpsl": "sl"
+              }
+            },
+            "c": "0xe74a64202d8566254aee9d615a57dc1b"
+          },
+          "status": "CANCELED",
+          "at_ms": 1791289177256,
+          "fills": []
+        }
+      },
+      "5": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "TAKE_PROFIT",
+        "view": {
+          "oid": "5",
+          "cloid": "0x45dc3bbe2293d7b34fdc89ea4c147d9c",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "95.327",
+            "s": "4.67",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": false,
+                "triggerPx": "95.327",
+                "tpsl": "tp"
+              }
+            },
+            "c": "0x45dc3bbe2293d7b34fdc89ea4c147d9c"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289153606,
+          "fills": [
+            {
+              "fill_id": "fill5_0",
+              "quantity": "4.67",
+              "price": "95.327",
+              "at_ms": 1791289153606
+            }
+          ]
+        }
+      },
+      "6": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "TAKE_PROFIT",
+        "view": {
+          "oid": "6",
+          "cloid": "0xf78efd3f518e5e97748b98e2ea5bfd12",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "91.405",
+            "s": "5.6",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": false,
+                "triggerPx": "91.405",
+                "tpsl": "tp"
+              }
+            },
+            "c": "0xf78efd3f518e5e97748b98e2ea5bfd12"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289153607,
+          "fills": [
+            {
+              "fill_id": "fill6_0",
+              "quantity": "5.60",
+              "price": "91.405",
+              "at_ms": 1791289153607
             }
           ]
         }
@@ -2651,30 +3889,16 @@
     "latency_ms": 0,
     "side": "LONG",
     "burst": false,
-    "submitted_ms": 4001,
+    "submitted_ms": 1,
     "synthetic_actions": 1,
     "denials": [],
     "samples": [
       {
-        "at_ms": 0,
-        "actor": "worker",
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 616
-      },
-      {
-        "at_ms": 0,
-        "actor": "supervisor",
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 616
-      },
-      {
-        "at_ms": 4001,
+        "at_ms": 1,
         "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 751
+        "weight": 739
       }
     ],
     "source_expiry_unchanged": true,
@@ -2682,7 +3906,7 @@
     "lifecycle": {
       "protected_ms": 103,
       "filled_exit_ms": 104,
-      "closed_ms": 10155,
+      "closed_ms": 5155,
       "wire_actions": [
         "ENTRY:ENTRY",
         "CREATE_EXIT:STOP",
@@ -2701,7 +3925,7 @@
           "error": null,
           "phase": "OPEN",
           "legs": [],
-          "weight": 817
+          "weight": 785
         },
         {
           "at_ms": 2,
@@ -2710,7 +3934,7 @@
           "error": null,
           "phase": "OPEN",
           "legs": [],
-          "weight": 817
+          "weight": 785
         },
         {
           "at_ms": 53,
@@ -2721,7 +3945,7 @@
           "legs": [
             "STOP"
           ],
-          "weight": 883
+          "weight": 831
         },
         {
           "at_ms": 103,
@@ -2733,7 +3957,7 @@
             "STOP",
             "TAKE_PROFIT"
           ],
-          "weight": 948
+          "weight": 876
         },
         {
           "at_ms": 105,
@@ -2744,7 +3968,7 @@
           "legs": [
             "STOP"
           ],
-          "weight": 1014
+          "weight": 922
         },
         {
           "at_ms": 105,
@@ -2755,7 +3979,7 @@
           "legs": [
             "STOP"
           ],
-          "weight": 1014
+          "weight": 922
         },
         {
           "at_ms": 155,
@@ -2764,7 +3988,7 @@
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 1079
+          "weight": 967
         },
         {
           "at_ms": 5105,
@@ -2773,34 +3997,16 @@
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 1079
+          "weight": 879
         },
         {
           "at_ms": 5155,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [],
-          "weight": 1121
-        },
-        {
-          "at_ms": 10105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [],
-          "weight": 1033
-        },
-        {
-          "at_ms": 10155,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
           "phase": "CLOSED",
           "legs": [],
-          "weight": 1076
+          "weight": 922
         }
       ],
       "request_results": [
@@ -2824,38 +4030,24 @@
     "latency_ms": 150,
     "side": "SHORT",
     "burst": false,
-    "submitted_ms": 5201,
+    "submitted_ms": 751,
     "synthetic_actions": 1,
     "denials": [],
     "samples": [
       {
-        "at_ms": 0,
-        "actor": "worker",
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 616
-      },
-      {
-        "at_ms": 0,
-        "actor": "supervisor",
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 616
-      },
-      {
-        "at_ms": 5201,
+        "at_ms": 751,
         "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 751
+        "weight": 739
       }
     ],
     "source_expiry_unchanged": true,
     "final_entry_decisions": {},
     "lifecycle": {
-      "protected_ms": 2353,
-      "filled_exit_ms": 2354,
-      "closed_ms": 9355,
+      "protected_ms": 1903,
+      "filled_exit_ms": 1904,
+      "closed_ms": 8605,
       "wire_actions": [
         "ENTRY:ENTRY",
         "CREATE_EXIT:STOP",
@@ -2863,30 +4055,30 @@
         "CANCEL:STOP"
       ],
       "wire_exit_times_ms": {
-        "STOP": 751,
-        "TAKE_PROFIT": 1552
+        "STOP": 601,
+        "TAKE_PROFIT": 1252
       },
       "samples": [
         {
-          "at_ms": 752,
+          "at_ms": 602,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
           "phase": "OPEN",
           "legs": [],
-          "weight": 817
+          "weight": 785
         },
         {
-          "at_ms": 752,
+          "at_ms": 602,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
           "phase": "OPEN",
           "legs": [],
-          "weight": 817
+          "weight": 785
         },
         {
-          "at_ms": 1553,
+          "at_ms": 1253,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2894,10 +4086,10 @@
           "legs": [
             "STOP"
           ],
-          "weight": 883
+          "weight": 831
         },
         {
-          "at_ms": 2353,
+          "at_ms": 1903,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
@@ -2906,10 +4098,10 @@
             "STOP",
             "TAKE_PROFIT"
           ],
-          "weight": 948
+          "weight": 876
         },
         {
-          "at_ms": 3105,
+          "at_ms": 2505,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2917,10 +4109,10 @@
           "legs": [
             "STOP"
           ],
-          "weight": 1014
+          "weight": 922
         },
         {
-          "at_ms": 3105,
+          "at_ms": 2505,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
@@ -2928,34 +4120,34 @@
           "legs": [
             "STOP"
           ],
-          "weight": 1014
+          "weight": 922
         },
         {
-          "at_ms": 3905,
+          "at_ms": 3155,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 1079
+          "weight": 967
         },
         {
-          "at_ms": 8105,
+          "at_ms": 7505,
           "actor": "supervisor",
           "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 1079
+          "weight": 879
         },
         {
-          "at_ms": 9355,
+          "at_ms": 8605,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "CLOSED",
           "legs": [],
-          "weight": 1034
+          "weight": 922
         }
       ],
       "request_results": [
@@ -2979,95 +4171,44 @@
     "latency_ms": 0,
     "side": "LONG",
     "burst": true,
-    "submitted_ms": 4001,
+    "submitted_ms": 1,
     "synthetic_actions": 1,
     "denials": [],
     "samples": [
       {
-        "at_ms": 0,
-        "actor": "worker",
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 616
-      },
-      {
-        "at_ms": 0,
-        "actor": "supervisor",
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 616
-      },
-      {
-        "at_ms": 4001,
+        "at_ms": 1,
         "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 773
+        "weight": 761
       }
     ],
     "source_expiry_unchanged": true,
-    "final_entry_decisions": {
-      "6d1f766a0bc564f64869e39db0fe162d69a067a712a16a90e5d1655d5e4516c8": {
-        "stage": "ENTRY_ADMISSION",
-        "scope": "account",
-        "account_role": "long_account",
-        "symbol": "SOL",
-        "occurrence_id": "6d1f766a0bc564f64869e39db0fe162d69a067a712a16a90e5d1655d5e4516c8",
-        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
-        "at_ms": 1791289080000,
-        "retry_after_ms": 1791289084000,
-        "deadline": "2026-10-06T12:19:30+00:00"
-      },
-      "ac28d739aff18ca47737cecc0ee8a650d1728fe58c04fa633a62be8a385386c5": {
-        "stage": "ENTRY_ADMISSION",
-        "scope": "account",
-        "account_role": "short_account",
-        "symbol": "SOL",
-        "occurrence_id": "ac28d739aff18ca47737cecc0ee8a650d1728fe58c04fa633a62be8a385386c5",
-        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
-        "at_ms": 1791289080000,
-        "retry_after_ms": 1791289084000,
-        "deadline": "2026-10-06T12:19:30+00:00"
-      }
-    }
+    "final_entry_decisions": {}
   },
   "unknown_partial_stop": {
     "warm_weight": 616,
     "latency_ms": 50,
     "side": "LONG",
     "burst": false,
-    "submitted_ms": 4401,
+    "submitted_ms": 251,
     "synthetic_actions": 1,
     "denials": [],
     "samples": [
       {
-        "at_ms": 0,
-        "actor": "worker",
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 616
-      },
-      {
-        "at_ms": 0,
-        "actor": "supervisor",
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 616
-      },
-      {
-        "at_ms": 4401,
+        "at_ms": 251,
         "actor": "worker",
         "status": "OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 751
+        "weight": 739
       }
     ],
     "source_expiry_unchanged": true,
     "final_entry_decisions": {},
     "lifecycle": {
-      "protected_ms": 853,
-      "filled_exit_ms": 854,
-      "closed_ms": 69156,
+      "protected_ms": 703,
+      "filled_exit_ms": 704,
+      "closed_ms": 6556,
       "wire_actions": [
         "ENTRY:ENTRY",
         "CREATE_EXIT:STOP",
@@ -3076,12 +4217,12 @@
         "CANCEL:TAKE_PROFIT"
       ],
       "wire_exit_times_ms": {
-        "STOP": 251,
-        "TAKE_PROFIT": 552
+        "STOP": 201,
+        "TAKE_PROFIT": 452
       },
       "samples": [
         {
-          "at_ms": 252,
+          "at_ms": 202,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -3089,10 +4230,10 @@
           "legs": [
             "ENTRY"
           ],
-          "weight": 817
+          "weight": 785
         },
         {
-          "at_ms": 252,
+          "at_ms": 202,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
@@ -3100,10 +4241,10 @@
           "legs": [
             "ENTRY"
           ],
-          "weight": 817
+          "weight": 785
         },
         {
-          "at_ms": 553,
+          "at_ms": 453,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -3112,10 +4253,10 @@
             "ENTRY",
             "STOP"
           ],
-          "weight": 883
+          "weight": 831
         },
         {
-          "at_ms": 853,
+          "at_ms": 703,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
@@ -3125,10 +4266,10 @@
             "STOP",
             "TAKE_PROFIT"
           ],
-          "weight": 948
+          "weight": 876
         },
         {
-          "at_ms": 1105,
+          "at_ms": 905,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -3137,10 +4278,10 @@
             "ENTRY",
             "TAKE_PROFIT"
           ],
-          "weight": 1014
+          "weight": 922
         },
         {
-          "at_ms": 1105,
+          "at_ms": 905,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
@@ -3149,301 +4290,45 @@
             "ENTRY",
             "TAKE_PROFIT"
           ],
-          "weight": 1014
+          "weight": 922
+        },
+        {
+          "at_ms": 1156,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 968
         },
         {
           "at_ms": 1406,
-          "actor": "worker",
-          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1080
-        },
-        {
-          "at_ms": 1656,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 6105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 6856,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1168
-        },
-        {
-          "at_ms": 11105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1080
-        },
-        {
-          "at_ms": 12056,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 16105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 17256,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1168
-        },
-        {
-          "at_ms": 21105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1080
-        },
-        {
-          "at_ms": 22456,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 26105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 27656,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1168
-        },
-        {
-          "at_ms": 31105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1080
-        },
-        {
-          "at_ms": 32856,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 36105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 38056,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1168
-        },
-        {
-          "at_ms": 41105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1080
-        },
-        {
-          "at_ms": 43256,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 46105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1124
-        },
-        {
-          "at_ms": 48456,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1168
-        },
-        {
-          "at_ms": 51105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [
-            "TAKE_PROFIT"
-          ],
-          "weight": 1036
-        },
-        {
-          "at_ms": 53706,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 1101
+          "weight": 1013
         },
         {
-          "at_ms": 56105,
+          "at_ms": 5905,
           "actor": "supervisor",
           "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 1101
+          "weight": 925
         },
         {
-          "at_ms": 58856,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [],
-          "weight": 1143
-        },
-        {
-          "at_ms": 61105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [],
-          "weight": 1099
-        },
-        {
-          "at_ms": 64006,
-          "actor": "worker",
-          "status": "OBSERVED_NO_ACTION",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [],
-          "weight": 1141
-        },
-        {
-          "at_ms": 66105,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "PARTIALLY_CLOSED",
-          "legs": [],
-          "weight": 1141
-        },
-        {
-          "at_ms": 69156,
+          "at_ms": 6556,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "CLOSED",
           "legs": [],
-          "weight": 916
+          "weight": 968
         }
       ],
       "request_results": [
@@ -3464,871 +4349,5 @@
         }
       ]
     }
-  },
-  "concurrent_heavy_unfilled": {
-    "warm_weight": 616,
-    "entries": [
-      {
-        "side": "long_account",
-        "at_ms": 4500
-      }
-    ],
-    "closed_ms": null,
-    "phases": {
-      "long_account": "OUTCOME_UNKNOWN"
-    },
-    "pending_outcomes": [],
-    "observed_working_entries": {
-      "long_account": 1
-    },
-    "source_to_finish_reads": 107,
-    "source_to_finish_weight": 1735,
-    "samples": [
-      {
-        "at_ms": 0,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 616,
-        "phases": {}
-      },
-      {
-        "at_ms": 0,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 616,
-        "phases": {}
-      },
-      {
-        "at_ms": 4501,
-        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
-        "error": null,
-        "weight": 773,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 4801,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 837,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 5000,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 837,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 9801,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 837,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 10000,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 837,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 15001,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 811,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 15001,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 811,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 20001,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 811,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 20001,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 811,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 25201,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 785,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 25201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 785,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 30201,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 785,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 30201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 785,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 34200,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 759,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 35201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 759,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 39200,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 759,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 40201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 759,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 44400,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 733,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 45201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 733,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 49400,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 733,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 50201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 733,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 54200,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 663,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 55201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 663,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 59200,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 663,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 60201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 663,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 64400,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 681,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 65201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 681,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 69400,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 681,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 70201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 681,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 73300,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 599,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 73550,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 560,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 73800,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 558,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 74050,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 75201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 79050,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 80201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 84101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 85201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 89101,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 90201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 94301,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 95201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 99301,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 100201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 104501,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 105201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 109501,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 110201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 114701,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 115201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 119701,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 120201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 124901,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 125201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 129901,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 130201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 135101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 135201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 140101,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 140201,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 620,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 145301,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 145301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 150301,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 150301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 155501,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 155501,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 160501,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 160501,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 165701,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 165701,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 170701,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 170701,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 175901,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 175901,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 180901,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 180901,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 186101,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 186101,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 191101,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 191101,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 196301,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 196301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 201301,
-        "status": "OBSERVED_IDLE_REUSED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 201301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 206501,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 206501,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 434,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      }
-    ],
-    "denials": [],
-    "synthetic_actions": 1,
-    "entry_decisions": {
-      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
-        "stage": "ENTRY_ADMISSION",
-        "scope": "account",
-        "account_role": "short_account",
-        "symbol": "SOL",
-        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
-        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
-        "at_ms": 1791289164101,
-        "retry_after_ms": 1791289174101,
-        "deadline": "2026-10-06T12:19:30+00:00"
-      }
-    },
-    "wire_actions": [
-      "long_account:ENTRY:ENTRY"
-    ],
-    "orders": {
-      "1": {
-        "account": "0x1111111111111111111111111111111111111111",
-        "symbol": "SOL",
-        "leg": "ENTRY",
-        "view": {
-          "oid": "1",
-          "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
-          "wire_order": {
-            "a": 2,
-            "b": true,
-            "p": "93.544",
-            "s": "4.67",
-            "r": false,
-            "t": {
-              "limit": {
-                "tif": "Gtc"
-              }
-            },
-            "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
-          },
-          "status": "OPEN",
-          "at_ms": 1791289084501,
-          "fills": []
-        }
-      }
-    },
-    "final_requests": [
-      {
-        "phase": "OBSERVED",
-        "observed_oid": "1"
-      }
-    ],
-    "final_context": {
-      "entry_blocked": {},
-      "account_entry_blocked": {},
-      "blocked_lanes": {}
-    }
-  },
-  "network_attempts_blocked": 0
+  }
 }

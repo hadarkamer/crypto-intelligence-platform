@@ -1,7 +1,7 @@
 """Complete candidate worker against actual SQLite and a deterministic venue.
 
 Only the exchange is simulated; requests, transactions, nonce fences, source
-contracts, capacity checks, rounding, allocation and reconciliation are real.
+contracts, account binding, rounding, allocation and reconciliation are real.
 Network and signer constructors are blocked for the entire test case.
 """
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +29,7 @@ class SoftwareExchange:
 
     def __init__(self,at_ms):
         self.t=at_ms; self.orders={}; self.requests=[]; self.mark={}; self.paths={}; self.bars={}
-        self.lose_reply=False; self.before_send=None; self.capacity_override={}; self.omit_order=None
+        self.lose_reply=False; self.before_send=None; self.entry_account_override={}; self.omit_order=None
         self.instant_fraction=Decimal(1)
 
     def now(self):return self.t
@@ -37,7 +37,7 @@ class SoftwareExchange:
     def _key(self,account,symbol):return runtime._lane(account,symbol)
 
     def collect(self,state):
-        snapshots=[];ranges={};capacity={};marks={}
+        snapshots=[];ranges={};entry_accounts={};marks={}
         lanes={(state['routes']['long_account' if s['source']['side']=='LONG' else 'short_account'],s['source']['symbol']) for s in state['sources'].values()}
         lanes|={(t['account'],t['symbol']) for t in state['trades'].values()}
         lanes|={(o['account'],o['symbol']) for o in self.orders.values()}
@@ -59,11 +59,12 @@ class SoftwareExchange:
                 history_complete=True,account=account,price_kind='MARK',**values)
             ranges[cid]=deepcopy(self.paths.get(cid,dict(source=src,testnet=demo)))
             for v in ranges[cid].values():v['at_ms']=self.t
-            capacity[cid]=dict(account=account,at_ms=self.t,account_mode_verified=True,action_headroom=1000,
-                unheld='100000',available='100000',max_size='1000000',active=dict(markPx=price,leverage=dict(type='cross',value=10)),max_leverage=10)
-            capacity[cid].update(self.capacity_override.get(cid,{}))
+            role='long_account' if msg['side']=='LONG' else 'short_account'
+            agent=state.get('agents',{}).get(role,'0x'+('3' if role=='long_account' else '4')*40)
+            entry_accounts[cid]=dict(account=account,agent=agent,at_ms=self.t,action_headroom=1000)
+            entry_accounts[cid].update(self.entry_account_override.get(cid,{}))
         return dict(basis_revision=state['revision'],inventory_complete=True,inventory_accounts=sorted(state['routes'].values()),inventory_at_ms=self.t,metadata=deepcopy(META),snapshots=snapshots,ranges=ranges,
-                    capacity=capacity,bars=deepcopy(self.bars),marks=marks)
+                    entry_accounts=entry_accounts,bars=deepcopy(self.bars),marks=marks)
 
     def send(self,request,*,admission):
         admission.consume(request)
@@ -182,9 +183,9 @@ class RuntimeTests(unittest.TestCase):
             self.worker.run_once()
         self.assertEqual(len(self.venue.requests),before)
 
-    def test_account_capacity_and_source_path_are_real_admission_gates(self):
-        msg=self.r2732();self.worker.receive([msg]);self.venue.capacity_override[msg['occurrence_id']]={'action_headroom':0}
-        with self.assertRaisesRegex(runtime.RuntimeError,'CAPACITY'):
+    def test_account_action_headroom_is_a_real_admission_gate(self):
+        msg=self.r2732();self.worker.receive([msg]);self.venue.entry_account_override[msg['occurrence_id']]={'action_headroom':0}
+        with self.assertRaisesRegex(runtime.RuntimeError,'ENTRY_ACCOUNT'):
             self.worker.run_once()
         self.assertFalse(self.store.load()['trades']);self.assertFalse(self.venue.requests)
 

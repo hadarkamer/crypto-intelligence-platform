@@ -57,7 +57,7 @@ class FinalWorkingSetTests(unittest.TestCase):
         cid,trade,lane=self.final_trade();new=self.candidate_same_lane(trade)
         old_orders=deepcopy(trade['orders']);old_raw=deepcopy(self.state['collector_checkpoints'][lane])
         result=self.provider.collect(self.state,entries_enabled=True)
-        self.assertEqual(result['entry_blocked'],{});self.assertIn(new,result['capacity'])
+        self.assertEqual(result['entry_blocked'],{});self.assertIn(new,result['entry_accounts'])
         snapshot=next(s for s in result['snapshots'] if s['account']==trade['account'])
         self.assertEqual({o['oid']:o for o in snapshot['orders']},old_orders)
         self.assertEqual(self.state['collector_checkpoints'][lane],old_raw)
@@ -72,10 +72,10 @@ class FinalWorkingSetTests(unittest.TestCase):
         self.raw.extra_orders=[dict(coin=trade['symbol'],oid=int(next(iter(trade['orders']))))]
         result=self.provider.collect(self.state,entries_enabled=True)
         self.assertIn(trade['account'],result['account_entry_blocked'])
-        self.assertNotIn(new,result['capacity'])
+        self.assertNotIn(new,result['entry_accounts'])
         self.raw.extra_orders=[];self.raw.extra_positions=[dict(position=dict(coin=trade['symbol'],szi='-1'))]
         result=self.provider.collect(self.state,entries_enabled=True)
-        self.assertIn(trade['account'],result['account_entry_blocked']);self.assertNotIn(new,result['capacity'])
+        self.assertIn(trade['account'],result['account_entry_blocked']);self.assertNotIn(new,result['entry_accounts'])
 
     def test_prior_terminal_contradiction_cannot_be_hidden_by_later_flat_inventory(self):
         cid,trade,lane=self.final_trade()

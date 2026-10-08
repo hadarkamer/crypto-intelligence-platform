@@ -394,7 +394,7 @@ def triggered_take_profit(binding, leg, oid, order, inventory, fills, original,
 
 
 def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=(),
-            reuse_verified_terminals=False, inventory_guard=None):
+            reuse_verified_terminals=False, inventory_guard=None, read_fills=True):
     account,symbol = life.validate_snapshot(previous)
     plain = life.plain_tp_ids(bindings,account,symbol,plain_take_profit_oids)
     links = {oid:(b,leg) for b in bindings for leg in life.order_legs(b) for oid in b['orders'][leg]}
@@ -402,12 +402,18 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
     certificates=terminal_certificates(bindings,previous) if reuse_verified_terminals else {}
     current_oids={oid:link for oid,link in links.items() if oid not in certificates}
     read_inputs = getattr(reader, 'observation_inputs', None)
-    responses, raw_fills, raw_inventory, position = (
-        read_inputs(account, current_oids, start, end) if callable(read_inputs)
-        else observation_inputs(reader, account, current_oids, start, end))
+    if read_fills:
+        responses, raw_fills, raw_inventory, position = (
+            read_inputs(account, current_oids, start, end) if callable(read_inputs)
+            else observation_inputs(reader, account, current_oids, start, end))
+        fills = merge_fills(previous['fills'],raw_fills,account,symbol,start,end)
+    else:
+        responses = {oid: reader.read('orderStatus', account, oid=oid) for oid in current_oids}
+        raw_inventory = reader.read('frontendOpenOrders', account)
+        position = reader.read('clearinghouseState', account)
+        fills = deepcopy(previous['fills'])
     if inventory_guard is not None:
         inventory_guard(raw_inventory,position)
-    fills = merge_fills(previous['fills'],raw_fills,account,symbol,start,end)
     old_facts=_fill_facts_by_oid(previous['fills']) if certificates else {}
     new_facts=_fill_facts_by_oid(fills) if certificates else {}
     totals = {}; last_fill = {}
@@ -554,7 +560,7 @@ def observe(bindings, previous, reader, start, end, *, plain_take_profit_oids=()
 
 
 def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verified_terminals,
-                               verification_passes=2):
+                               verification_passes=2, read_fills=True):
     """Exact initial request multiset; unknown split history pages are excluded."""
     account,_=life.validate_snapshot(previous)
     certificates=(terminal_certificates(bindings,previous) if reuse_verified_terminals else {})
@@ -569,7 +575,7 @@ def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verifie
         bodies.extend([fills(max(1,cursor-OVERLAP_MS),stop)]*2)
         cursor=stop
     start=max(1,cursor-OVERLAP_MS)
-    one_pass=[fills(start,end),dict(type='frontendOpenOrders',user=account),
+    one_pass=([fills(start,end)] if read_fills else [])+[dict(type='frontendOpenOrders',user=account),
               dict(type='clearinghouseState',user=account)]
     one_pass.extend(dict(type='orderStatus',user=account,oid=int(oid)) for oid in oids)
     bodies.extend(one_pass*verification_passes)
@@ -578,7 +584,7 @@ def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verifie
 
 def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.monotonic,
             plain_take_profit_oids=(), reuse_verified_terminals=False, verification_passes=2,
-            observation_cache=None, observation_end_ms=None):
+            observation_cache=None, observation_end_ms=None, reuse_unchanged_fills=False):
     if type(verification_passes) is not int or verification_passes not in (1, 2):
         raise SyncError('VERIFICATION_PASS_COUNT_INVALID')
     if type(reuse_verified_terminals) is not bool:
@@ -598,18 +604,62 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
     end,started = clock() if observation_end_ms is None else life.moment(observation_end_ms),elapsed()
     if end > clock(): raise SyncError('OBSERVATION_TIME_IN_FUTURE')
     if not 0 <= end-cursor <= MAX_CATCHUP_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
-    plan=getattr(type(reader),'observation_batch',None)
-    bodies=_planned_observation_reads(bindings,previous,cursor,end,
-        reuse_verified_terminals=reuse_verified_terminals,verification_passes=verification_passes)
     if observation_cache is not None:
         if type(observation_cache) is not ObservationReadCache or observation_cache.reader is not reader:
             raise SyncError('EXACT_OBSERVATION_CACHE_OWNER_REQUIRED')
+    read_fills=True
+    if (reuse_unchanged_fills is True and reuse_verified_terminals and verification_passes==1
+            and observation_cache is not None and cursor==previous['at_ms']
+            and end//30000==cursor//30000 and previous['open_orders']):
+        # Filled quantity can only increase. Exact unchanged remaining sizes,
+        # owned identities and position prove there are no new owned fills.
+        # The opt-in caller additionally proves uninterrupted feed continuity
+        # and no unresolved sends. A full 60-second overlap still runs at each
+        # 30-second boundary, so delayed history never falls behind the cursor.
+        samples=observation_cache.samples[0]
+        inventory=samples.get(observation_cache._key('frontendOpenOrders',account))
+        positions=samples.get(observation_cache._key('clearinghouseState',account))
+        known={r['oid']:r for r in previous['open_orders']}
+        links={oid for b in bindings for leg in life.order_legs(b) for oid in b['orders'][leg]}
+        try:
+            current=[r for r in inventory if r['coin']==symbol]
+            position=[r['position']['szi'] for r in positions['assetPositions']
+                      if r['position']['coin']==symbol]
+            unchanged=(len(current)==len(known) and {str(r['oid']) for r in current}==set(known)
+                and links==set(known)|set(terminal_certificates(bindings,previous))
+                and not any(f['oid'] in known for f in previous['fills'])
+                and len(position)<=1 and life.number(position[0] if position else '0',signed=True)
+                    ==life.number(previous['position_quantity'],signed=True))
+            for row in current:
+                old=known[str(row['oid'])]
+                kind={'LIMIT':'Limit','TP_LIMIT':'Take Profit Limit','SL_MARKET':'Stop Market',
+                      'TRIGGERED_TP_LIMIT':'Take Profit Limit'}[old['order_type']]
+                unchanged=unchanged and (old['state']=='ACTIVE' and row['side']==old['side']
+                    and row['reduceOnly'] is old['reduce_only'] and row['orderType']==kind
+                    and row['isTrigger'] is (old['trigger_price'] is not None)
+                    and life.number(row['sz'],positive=True)==life.number(old['quantity'],positive=True)
+                    and life.number(row['limitPx'],positive=True)==life.number(old['price'],positive=True)
+                    and life.number(row.get('triggerPx','0'))==life.number(old['trigger_price'] or '0'))
+            read_fills=not unchanged
+        except (KeyError,TypeError,ValueError):
+            pass  # Malformed or changed inventory still takes the full validated path.
+    # Quiet inventory checks advance the observation clock, not the last full
+    # history query. Anchor this one-pass stream's overlap to its fixed audit
+    # boundary, including after a notification or restart disables reuse.
+    # Otherwise a delayed fill could age out during the skipped history polls.
+    history_cursor=(cursor//30000*30000 if verification_passes==1
+        and reuse_verified_terminals and observation_cache is not None else cursor)
+    plan=getattr(type(reader),'observation_batch',None)
+    bodies=_planned_observation_reads(bindings,previous,history_cursor,end,
+        reuse_verified_terminals=reuse_verified_terminals,verification_passes=verification_passes,
+        read_fills=read_fills)
+    if observation_cache is not None:
         bodies=observation_cache.missing_plan(bodies)
     context=(reader.observation_batch(bodies) if callable(plan) and bodies else nullcontext())
     with context:
-        return _collect_funded(bindings,previous,reader,cursor,end,started,clock,elapsed,
+        return _collect_funded(bindings,previous,reader,history_cursor,end,started,clock,elapsed,
             plain=plain,reuse_verified_terminals=reuse_verified_terminals,
-            verification_passes=verification_passes,observation_cache=observation_cache)
+            verification_passes=verification_passes,observation_cache=observation_cache,read_fills=read_fills)
 
 
 def retained_anchor(reader, account, fill):
@@ -700,7 +750,8 @@ def _collect_retained(evidence, reader, *, cursor_ms, anchor, clock=now_ms,
 
 
 def _collect_funded(bindings, previous, reader, cursor, end, started, clock, elapsed,
-                    *, plain, reuse_verified_terminals, inventory_guard=None, verification_passes=2, observation_cache=None):
+                    *, plain, reuse_verified_terminals, inventory_guard=None, verification_passes=2,
+                    observation_cache=None, read_fills=True):
     account,symbol=life.validate_snapshot(previous)
     pass_readers=([observation_cache.pass_reader(i) for i in (0,1)]
                   if observation_cache is not None else [reader,reader])
@@ -724,7 +775,7 @@ def _collect_funded(bindings, previous, reader, cursor, end, started, clock, ela
     # Each pass uses only certificates that existed before this collection.
     guard={} if inventory_guard is None else dict(inventory_guard=inventory_guard)
     first = observe(bindings,previous,pass_readers[0],start,end,plain_take_profit_oids=plain,
-                    reuse_verified_terminals=reuse_verified_terminals,**guard)
+                    reuse_verified_terminals=reuse_verified_terminals,read_fills=read_fills,**guard)
     second = (observe(bindings,previous,pass_readers[1],start,end,plain_take_profit_oids=plain,
                      reuse_verified_terminals=reuse_verified_terminals,**guard)
               if verification_passes == 2 else first)

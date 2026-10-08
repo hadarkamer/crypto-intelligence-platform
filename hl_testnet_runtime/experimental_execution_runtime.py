@@ -13,7 +13,7 @@ from copy import deepcopy
 from decimal import Decimal, ROUND_DOWN
 
 import approved_alert_contract as contract
-from . import card_lifecycle as life, checks, price_precision, request_budget
+from . import card_lifecycle as life, price_precision, request_budget
 from . import filled_quantity_dispatch as wire, r2732_entry, r2732_conditional_stop
 from . import maxpain_execution, experimental_allocations, two_account_execution as roles
 from .experimental_plan_store import reduce_source
@@ -474,12 +474,20 @@ class IsolatedExecutionRuntime:
             quantity=life.text((budget()/abs(entry-stop)/step).to_integral_value(rounding=ROUND_DOWN)*step)
         if _number(quantity)*abs(entry-stop)>budget():
             raise RuntimeError('CURRENT_RISK_BUDGET_EXCEEDED')
-        cap=context['capacity'][cid]
-        if (cap.get('account')!=account or type(cap.get('at_ms')) is not int or not 0<=now-cap['at_ms']<=15000 or cap.get('action_headroom',0)<roles.ENTRY_ACTION_HEADROOM
-                or cap.get('account_mode_verified') is not True):
-            raise RuntimeError('FRESH_EXACT_ACCOUNT_CAPACITY_REQUIRED')
-        checks.plan_check(dict(symbol=msg['symbol'],side=msg['side'],**prices),msg['symbol'],decimals,
-            _number(cap['unheld']),_number(cap['available']),_number(cap['max_size']),active=cap['active'],metadata_max_leverage=cap['max_leverage'])
+        account_check=context['entry_accounts'][cid]
+        if (account_check.get('account')!=account or type(account_check.get('at_ms')) is not int
+                or not 0<=now-account_check['at_ms']<=15000
+                or type(account_check.get('action_headroom')) is not int
+                or account_check['action_headroom']<roles.ENTRY_ACTION_HEADROOM):
+            raise RuntimeError('FRESH_EXACT_ENTRY_ACCOUNT_REQUIRED')
+        life.address(account_check.get('agent'))
+        # Size comes only from the alert's entry/stop distance and the existing
+        # risk policy. The exchange checks margin when it accepts the order;
+        # no second buying-power/leverage model is required to send it.
+        if not Decimal(10)<=_number(quantity)*entry<=Decimal(5000):
+            raise RuntimeError('OUTSIDE_LAB_SIZE_BOUNDS')
+        if _number(quantity)*mark>Decimal(5000):
+            raise RuntimeError('MARK_NOTIONAL_EXCEEDS_LAB_CAP')
         trade=dict(cid=cid,source=deepcopy(msg),account=account,role=role,symbol=msg['symbol'],side=msg['side'],
             quantity=quantity,prices=prices,asset=dict(index=index,decimals=decimals),phase='OUTCOME_UNKNOWN',
             orders={},order_legs={},entry_fills={},exit_fills={},entry_request=None,condition=None,desired_stop=prices['stop'])

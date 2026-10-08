@@ -212,17 +212,21 @@ def review(request, context, *, now_ms):
         if (not contract.is_approved(source) and source['family'] in ('maxpain','sol_g65')
                 and (mark<=Decimal(levels['entry']) if source['side']=='LONG' else mark>=Decimal(levels['entry']))):
             raise BoundaryError('PROSPECTIVE_TESTNET_ENTRY_ALREADY_REACHED')
-        # This binds the *independent* actual-account budget calculation to the
-        # same exact rounded plan, not merely a boolean checked by a caller.
-        plan={k:levels[k] for k in ('symbol','side','entry','stop','take_profit')}
-        report=context['budget_report']; diagnostic=report.get('budget_diagnostics') or {}
-        if (report.get('status')!='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION'
-                or report.get('test_plan_checked') is not True
-                or diagnostic.get('plan_sha256')!=life.digest(plan)
-                or diagnostic.get('current_settings_passed') is not True
-                or context['entry_action_headroom']<roles.ENTRY_ACTION_HEADROOM):
-            raise BoundaryError('EXACT_CURRENT_ACCOUNT_BUDGET_REQUIRED')
-        _fresh(context['budget_at_ms'],now_ms,15000,'ACCOUNT_BUDGET_SAMPLE_EXPIRED')
+        # The configured signer must belong to this actual exchange account,
+        # with room left for the exits. Margin acceptance belongs to the venue;
+        # local order limits remain independent of its available balance.
+        account_check=context['entry_account']
+        if (account_check.get('account')!=route['account']
+                or account_check.get('agent')!=route['agent']
+                or type(account_check.get('action_headroom')) is not int
+                or account_check['action_headroom']<roles.ENTRY_ACTION_HEADROOM):
+            raise BoundaryError('EXACT_CURRENT_ENTRY_ACCOUNT_REQUIRED')
+        _fresh(account_check.get('at_ms'),now_ms,15000,'ENTRY_ACCOUNT_SAMPLE_EXPIRED')
+        quantity=life.number(p['quantity'],positive=True)
+        if not Decimal(10)<=quantity*Decimal(levels['entry'])<=Decimal(5000):
+            raise BoundaryError('OUTSIDE_LAB_SIZE_BOUNDS')
+        if quantity*mark>Decimal(5000):
+            raise BoundaryError('MARK_NOTIONAL_EXCEEDS_LAB_CAP')
     else:
         owner=context['owner']
         life.validate_bindings([owner])
@@ -293,17 +297,6 @@ def review(request, context, *, now_ms):
                 _lock(source,context['lock_proof'],now_ms,current=True)
     return dict(**readiness(),reviewed=True,request_digest=DefinitelyUnsent.identity(request),
                 context_digest=life.digest(context),action=action,agent=route['agent'])
-
-
-def account_preflight(env, role, account, agent, plan, reader):
-    """Reuse actual existing read-only risk/account/capacity gates unchanged.
-
-    Caller funds reader through the existing shared request-budget coordinator;
-    this function does not create readers, contact a server or read credentials.
-    """
-    result=roles.budget_for_role(env,role,account,agent,plan,reader)
-    headroom=roles.entry_action_headroom(account,reader)
-    return dict(budget_report=result,entry_action_headroom=headroom)
 
 
 class DisabledDispatchPort:

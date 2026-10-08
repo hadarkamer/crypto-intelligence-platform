@@ -41,63 +41,33 @@ class EntryReadReuseTests(unittest.TestCase):
     def collect(self):
         return self.provider.collect(self.state, entries_enabled=True)
 
-    def test_two_candidates_reuse_reads_without_changing_capacity_or_inventory(self):
-        first = self.candidate()
-        second = self.candidate(symbol='SOL', cycle='second')
-        third = self.candidate(cycle='third')
-        # Refused first admission still lets the next candidate use the same
-        # account facts; each plan remains independently checked.
+    def test_multiple_candidates_share_only_fresh_account_binding_and_allowance(self):
+        first=self.candidate();second=self.candidate(symbol='SOL',cycle='second')
+        third=self.candidate(cycle='third')
         self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'HYPE')]='99'
-        original = self.provider._capacity
-        def separate(*args, **kwargs):
-            kwargs['entry_reads'] = {}
-            return original(*args, **kwargs)
-        with patch.object(self.provider, '_capacity', side_effect=separate):
-            before = self.collect()
-        baseline = Counter(call[0] for call in self.raw.calls)
-        self.raw.calls.clear()
-        after = self.collect()
-        counts = Counter(call[0] for call in self.raw.calls)
-        self.assertEqual(after, before)
-        self.assertEqual(set(after['capacity']), {first, second})
-        self.assertEqual(after['entry_blocked'],{third:'ENTRY_DEFERRED_TO_NEXT_CYCLE'})
-        self.assertEqual(sum(baseline.values()), 13)
-        self.assertEqual(sum(counts.values()), 9)
-        self.assertEqual(counts['frontendOpenOrders'], 1)
-        self.assertEqual(counts['clearinghouseState'], 1)  # Inventory already carries the balance.
-        self.assertEqual(counts['userAbstraction'], 1)
-        self.assertEqual(baseline['userAbstraction'], 2)
-        self.assertEqual(counts['activeAssetData'], 2)
-        self.assertEqual(counts['userRateLimit'], 1)
-
-    def test_same_asset_raw_capacity_reused_but_plans_and_returns_independent(self):
-        first = self.candidate()
-        second = self.candidate(cycle='second')
-        self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'HYPE')]='99'
-        after = self.collect()
-        self.assertEqual(len(self.raw.calls), 8)
-        self.assertEqual(sum(c[0] == 'activeAssetData' for c in self.raw.calls), 1)
-        after['capacity'][first]['active']['availableToTrade'][0] = '0'
-        self.assertEqual(after['capacity'][second]['active']['availableToTrade'][0], '50000')
-
-    def test_only_first_admissible_account_capacity_is_prepared(self):
-        first=self.candidate()
-        second=self.candidate(side='SHORT', cycle='second')
         result=self.collect()
-        self.assertEqual(set(result['capacity']),{first})
+        self.assertEqual(set(result['entry_accounts']),{first,second})
+        self.assertEqual(result['entry_blocked'],{third:'ENTRY_DEFERRED_TO_NEXT_CYCLE'})
+        self.assertEqual(Counter(c[0] for c in self.raw.calls),Counter(
+            ['frontendOpenOrders','clearinghouseState','metaAndAssetCtxs','userRole','userRateLimit']))
+        result['entry_accounts'][first]['action_headroom']=0
+        self.assertEqual(result['entry_accounts'][second]['action_headroom'],1000)
+
+    def test_only_first_admissible_account_is_prepared(self):
+        first=self.candidate();second=self.candidate(side='SHORT',cycle='second')
+        result=self.collect()
+        self.assertEqual(set(result['entry_accounts']),{first})
         self.assertEqual(result['entry_blocked'],{second:'ENTRY_DEFERRED_TO_NEXT_CYCLE'})
-        counts = Counter(call[0] for call in self.raw.calls)
-        self.assertEqual(counts['userRole'], 2)
-        self.assertEqual(counts['userRateLimit'], 1)
-        self.assertEqual(counts['activeAssetData'], 1)
-        self.assertEqual(sum(counts.values()),10)
-        # Once that source is consumed, the other account receives its own
-        # fresh identity, balance and capacity reads in the following cycle.
+        self.assertEqual(Counter(c[0] for c in self.raw.calls),Counter(
+            ['frontendOpenOrders','clearinghouseState']*2+
+            ['metaAndAssetCtxs','userRole','userRateLimit']))
         self.state['sources'].pop(first);self.raw.calls.clear()
         result=self.collect()
-        self.assertEqual(set(result['capacity']),{second})
+        self.assertEqual(set(result['entry_accounts']),{second})
         self.assertEqual(result['entry_blocked'],{})
-        self.assertEqual(len(self.raw.calls),8)
+        self.assertEqual(len(self.raw.calls),4)
+        self.assertEqual(result['entry_accounts'][second]['agent'],
+            self.provider.env['HL_TESTNET_SHORT_AGENT_ADDRESS'])
 
     def test_continuous_release_unapproved_source_cannot_defer_later_approved_alert(self):
         from experimental_execution_fixtures import maxpain_message
@@ -124,190 +94,116 @@ class EntryReadReuseTests(unittest.TestCase):
             entry_expires_at_ms=None)
         self.provider.safety=SimpleNamespace(release_loader=lambda:release)
         result=self.collect()
-        self.assertIn(cid,result['capacity'])  # It reached the unchanged policy gate.
-        self.assertIn(approved,result['capacity'])
+        self.assertIn(cid,result['entry_accounts'])  # It reached the unchanged source-policy gate.
+        self.assertIn(approved,result['entry_accounts'])
         self.assertNotIn(approved,result['entry_blocked'])
 
-    def test_next_collection_rereads_even_unchanged_revision_and_sees_changed_data(self):
-        first = self.candidate()
-        self.candidate(cycle='second')
-        self.collect()
-        self.raw.calls.clear()
-        original = self.raw.read
-        def changed(kind, *args, **kwargs):
-            result = original(kind, *args, **kwargs)
-            if kind == 'activeAssetData':
-                result['availableToTrade'] = ['40000', '40000']
+    def test_each_collection_refreshes_identity_allowance_and_account_inventory(self):
+        first=self.candidate();self.collect();self.raw.calls.clear()
+        original=self.raw.read
+        def changed(kind,*args,**kwargs):
+            result=original(kind,*args,**kwargs)
+            if kind=='userRateLimit':result['nRequestsUsed']=100
             return result
-        with patch.object(self.raw, 'read', side_effect=changed):
-            result = self.collect()
-        self.assertEqual(result['capacity'][first]['available'], '40000')
-        self.assertEqual(len(self.raw.calls), 8)
-        self.state['revision'] += 1
-        self.raw.extra_orders = [dict(coin='DOGE', oid=999)]
-        changed = self.collect()
-        self.assertEqual(changed['basis_revision'], self.state['revision'])
-        self.assertIn(first, changed['entry_blocked'])
-        self.assertNotIn(first, changed['capacity'])
+        with patch.object(self.raw,'read',side_effect=changed):result=self.collect()
+        self.assertEqual(result['entry_accounts'][first]['action_headroom'],900)
+        self.assertEqual(len(self.raw.calls),4)
+        self.state['revision']+=1;self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
+        changed=self.collect()
+        self.assertIn(first,changed['entry_blocked'])
+        self.assertNotIn(first,changed['entry_accounts'])
 
-    def test_failure_is_not_cached_and_later_card_and_cycle_recover(self):
-        first = self.candidate()
-        second = self.candidate(cycle='second')
-        original = self.raw.read
-        attempts = []
-        def fail_once(kind, *args, **kwargs):
-            if kind == 'activeAssetData':
+    def test_failed_or_wrong_account_binding_is_not_reused(self):
+        first=self.candidate();second=self.candidate(cycle='second')
+        original=self.raw.read;attempts=[]
+        def fail_once(kind,*args,**kwargs):
+            result=original(kind,*args,**kwargs)
+            if kind=='userRole':
                 attempts.append(kind)
-                if len(attempts) == 1:
-                    raise ValueError('ISOLATED_CAPACITY_READ_FAILED')
-            return original(kind, *args, **kwargs)
-        with patch.object(self.raw, 'read', side_effect=fail_once):
-            result = self.collect()
-        self.assertIn(first, result['entry_blocked'])
-        self.assertIn(second, result['capacity'])
-        self.assertEqual(len(attempts), 2)
-        recovered = self.collect()
-        self.assertEqual(recovered['entry_blocked'], {second:'ENTRY_DEFERRED_TO_NEXT_CYCLE'})
-        self.assertEqual(set(recovered['capacity']), {first})
+                if len(attempts)==1:result['data']['user']=self.state['routes']['short_account']
+            return result
+        with patch.object(self.raw,'read',side_effect=fail_once):result=self.collect()
+        self.assertEqual(result['entry_blocked'][first],'AGENT_ACCOUNT_MISMATCH')
+        self.assertIn(second,result['entry_accounts'])
+        self.assertEqual(len(attempts),2)
+        recovered=self.collect()
+        self.assertEqual(set(recovered['entry_accounts']),{first})
 
-    def test_cached_capacity_preserves_earliest_read_time(self):
-        first = self.candidate()
-        second = self.candidate(cycle='second')
+    def test_cached_binding_preserves_original_observation_time(self):
+        first=self.candidate();second=self.candidate(cycle='second')
         self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'HYPE')]='99'
-        observed = []
+        observed=[]
         def tick(kind):
-            observed.append((kind, self.exchange.t))
-            self.exchange.t += 10
-        self.raw.mutate = tick
-        result = self.collect()
-        first_at = result['capacity'][first]['at_ms']
-        second_at = result['capacity'][second]['at_ms']
-        self.assertLess(second_at, self.exchange.t)
-        self.assertEqual(second_at, self.provider._last['inventories'][self.state['routes']['long_account']]['at_ms'])
-        self.assertLess(first_at, self.exchange.t)
+            observed.append((kind,self.exchange.t));self.exchange.t+=10
+        self.raw.mutate=tick;result=self.collect()
+        first_at=result['entry_accounts'][first]['at_ms']
+        self.assertEqual(first_at,result['entry_accounts'][second]['at_ms'])
+        self.assertEqual(first_at,next(at for kind,at in observed if kind=='userRole'))
+        self.assertLess(first_at,self.exchange.t)
 
-    def test_malformed_raw_response_does_not_poison_later_card_or_other_account(self):
-        first_long = self.candidate(symbol='SOL')
-        failed_short = self.candidate(side='SHORT', cycle='short-first')
-        second_long = self.candidate(symbol='SOL',cycle='long-second')
-        recovered_short = self.candidate(side='SHORT', cycle='short-second')
-        short_account = self.state['routes']['short_account']
-        long_account = self.state['routes']['long_account']
-        self.exchange.mark[runtime._lane(long_account,'SOL')]='99'
-        original = self.raw.read
-        short_reads = []
-        def malformed_once(kind, *args, **kwargs):
-            value = original(kind, *args, **kwargs)
-            if kind == 'activeAssetData' and kwargs['user'] == short_account:
-                short_reads.append(kind)
-                if len(short_reads) == 1:
-                    value['coin'] = 'UNEXPECTED'
+    def test_bad_short_binding_does_not_poison_other_account_or_later_candidate(self):
+        first_long=self.candidate(symbol='SOL')
+        failed_short=self.candidate(side='SHORT',cycle='short-first')
+        second_long=self.candidate(symbol='SOL',cycle='long-second')
+        recovered_short=self.candidate(side='SHORT',cycle='short-second')
+        self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'SOL')]='99'
+        original=self.raw.read;attempts=[]
+        def malformed_once(kind,*args,**kwargs):
+            value=original(kind,*args,**kwargs)
+            if kind=='userRole' and kwargs['user']==self.provider.env['HL_TESTNET_SHORT_AGENT_ADDRESS']:
+                attempts.append(kind)
+                if len(attempts)==1:value['data']={}
             return value
-        with patch.object(self.raw, 'read', side_effect=malformed_once):
-            result = self.collect()
-        self.assertEqual(set(result['entry_blocked']), {failed_short})
-        self.assertEqual(set(result['capacity']), {first_long, second_long, recovered_short})
-        counts = Counter(c[1] for c in self.raw.calls if c[0] == 'activeAssetData')
-        self.assertEqual(counts[long_account], 1)
-        self.assertEqual(counts[short_account], 2)
+        with patch.object(self.raw,'read',side_effect=malformed_once):result=self.collect()
+        self.assertEqual(set(result['entry_blocked']),{failed_short})
+        self.assertEqual(set(result['entry_accounts']),{first_long,second_long,recovered_short})
+        self.assertEqual(len(attempts),2)
+        self.assertEqual(sum(c[0]=='userRole' for c in self.raw.calls),3)
 
-    def test_slow_collection_is_still_expired_and_next_pass_has_no_stale_cache(self):
-        self.candidate()
-        self.candidate(cycle='second')
+    def test_slow_collection_still_expires_and_does_not_reuse_next_pass(self):
+        self.candidate();self.candidate(cycle='second')
         def expire(kind):
-            if kind == 'activeAssetData':
-                self.exchange.t += 15001
-        self.raw.mutate = expire
-        expired=self.collect()
+            if kind=='userRateLimit':self.exchange.t+=15001
+        self.raw.mutate=expire;expired=self.collect()
         self.assertEqual(expired['inventory_accounts'],[])
         self.assertEqual(set(expired['account_entry_blocked'].values()),{'ACCOUNT_COLLECTION_EXPIRED'})
         self.assertEqual(expired['snapshots'],[])
-        self.raw.mutate = None
-        self.raw.calls.clear()
-        result = self.collect()
-        self.assertEqual(len(result['capacity']), 1)
-        self.assertEqual(len(self.raw.calls), 8)
+        self.raw.mutate=None;self.raw.calls.clear();result=self.collect()
+        self.assertEqual(len(result['entry_accounts']),1)
+        self.assertEqual(len(self.raw.calls),5)
 
-    def test_mode_balance_and_capacity_are_refreshed_in_the_next_collection(self):
-        first = self.candidate()
-        self.candidate(cycle='second')
-        original = self.raw.read
-        mode = ['disabled']
-        observed_modes = []
-        def current_mode(kind, *args, **kwargs):
-            value = original(kind, *args, **kwargs)
-            if kind == 'userAbstraction':
-                observed_modes.append(mode[0])
-                return mode[0]
-            if kind == 'spotClearinghouseState':
-                return dict(balances=[dict(coin='USDC', token=0, total='40000', hold='0')])
+    def test_entry_keeps_order_allowance_for_protection_without_balance_queries(self):
+        first=self.candidate();original=self.raw.read
+        def low_allowance(kind,*args,**kwargs):
+            if kind in ('activeAssetData','spotClearinghouseState','userAbstraction'):
+                raise AssertionError('NO_FINANCIAL_PREFLIGHT')
+            value=original(kind,*args,**kwargs)
+            if kind=='clearinghouseState':value['withdrawable']='0'
+            if kind=='userRateLimit':value['nRequestsUsed']=999
             return value
-        with patch.object(self.raw, 'read', side_effect=current_mode):
-            standard = self.collect()
-            mode[0] = 'unifiedAccount'
-            unified = self.collect()
-            mode[0] = 'disabled'
-            restored = self.collect()
-        self.assertEqual(observed_modes, ['disabled', 'unifiedAccount', 'disabled'])
-        self.assertEqual(standard['capacity'][first]['unheld'], '50000')
-        self.assertEqual(unified['capacity'][first]['unheld'], '40000')
-        self.assertEqual(restored['capacity'][first]['unheld'], '50000')
-        self.assertTrue(all(set(result['capacity'])=={first} for result in (standard, unified, restored)))
-        counts = Counter(call[0] for call in self.raw.calls)
-        self.assertEqual(counts['activeAssetData'], 3)
-        self.assertEqual(counts['userRole'], 6)
-        self.assertEqual(counts['userRateLimit'], 3)
+        with patch.object(self.raw,'read',side_effect=low_allowance):result=self.collect()
+        self.assertEqual(result['entry_blocked'][first],'ENTRY_ACTION_HEADROOM_INSUFFICIENT')
+        self.assertNotIn(first,result['entry_accounts'])
 
-    def test_inventory_balance_is_reused_and_insufficient_funds_still_block(self):
-        first = self.candidate()
-        original = self.raw.read
-        def low_balance(kind, *args, **kwargs):
-            value = original(kind, *args, **kwargs)
-            if kind == 'clearinghouseState':
-                value['withdrawable'] = '0'
+    def test_available_margin_is_decided_by_exchange_not_an_extra_lab_model(self):
+        first=self.candidate();original=self.raw.read
+        def no_local_funds(kind,*args,**kwargs):
+            if kind in ('activeAssetData','spotClearinghouseState','userAbstraction'):
+                raise AssertionError('NO_FINANCIAL_PREFLIGHT')
+            value=original(kind,*args,**kwargs)
+            if kind=='clearinghouseState':value['withdrawable']='0'
             return value
-        with patch.object(self.raw, 'read', side_effect=low_balance):
-            result = self.collect()
-        self.assertIn(first, result['entry_blocked'])
-        self.assertNotIn(first, result['capacity'])
-        self.assertEqual(sum(c[0] == 'clearinghouseState' for c in self.raw.calls), 1)
-
-    def test_default_snapshot_reads_account_mode_once_and_refreshes_next_collection(self):
-        from experimental_execution_fixtures import r2732_message
-        from . import two_account_execution as roles
-        from .experimental_market_context import MarketSnapshot
-        from .test_experimental_execution_runtime import META
-        account = roles.PHANTOM
-        self.provider.env['HL_TESTNET_SHORT_ACCOUNT_ADDRESS'] = account
-        original = self.raw.read
-        mode = ['default']
-        modes = []
-        def current_mode(kind, *args, **kwargs):
-            if kind == 'userAbstraction':
-                modes.append(mode[0])
-                return mode[0]
-            if kind == 'userRole':
-                return dict(role='user') if kwargs['user'] == account else dict(role='agent', data=dict(user=account))
-            return original(kind, *args, **kwargs)
-        market = MarketSnapshot(self.raw.read('metaAndAssetCtxs'), observed_at_ms=self.exchange.t)
-        message = r2732_message(entry=2.3, decision_ms=T-60000)
-        kwargs = dict(buckets=[], inventory=dict(orders=[], positions=dict(assetPositions=[])),
-            market=market, entry_reads={})
-        with patch.object(self.raw, 'read', side_effect=current_mode):
-            self.provider._capacity(message, account, 'short_account', META, **kwargs)
-            self.provider._capacity(message, account, 'short_account', META, **kwargs)
-            mode[0] = 'unsupported'
-            kwargs['entry_reads'] = {}
-            with self.assertRaisesRegex(ValueError, 'ACCOUNT_MODE_REQUIRES_REVIEW'):
-                self.provider._capacity(message, account, 'short_account', META, **kwargs)
-        self.assertEqual(modes, ['default', 'unsupported'])
+        with patch.object(self.raw,'read',side_effect=no_local_funds):result=self.collect()
+        self.assertEqual(set(result['entry_accounts']),{first})
+        self.assertEqual(result['entry_blocked'],{})
+        self.assertEqual(len(self.raw.calls),5)
 
     def test_stalled_entry_collection_cannot_block_protection_collection(self):
         self.candidate()
         entered, release = threading.Event(), threading.Event()
         completed, errors = [], []
         def stall(kind):
-            if kind == 'activeAssetData' and threading.current_thread().name == 'entry-fixture':
+            if kind == 'userRole' and threading.current_thread().name == 'entry-fixture':
                 entered.set()
                 if not release.wait(3):
                     raise AssertionError('FIXTURE_WAIT_TIMED_OUT')

@@ -15,7 +15,6 @@ from . import card_lifecycle as life, card_sync_evidence as sync, checks
 from . import experimental_execution_evidence as proof
 from . import experimental_execution_dispatch as boundary
 from . import experimental_execution_runtime as runtime
-from . import experimental_execution_prices as execution_prices
 from . import filled_quantity_dispatch as wire
 from . import two_account_execution as roles
 from .long_stream_runtime import _validate_account_inventory
@@ -156,6 +155,7 @@ class LiveEvidenceProvider:
         if any(reader.budget is not budget for reader in (self.info,self.public,self.entry_info)):
             raise ProviderError('ONE_SHARED_TESTNET_REQUEST_BUDGET_REQUIRED')
         self._lookup_reader=lookup_reader
+        self._market=None
 
     @property
     def info(self):
@@ -336,9 +336,16 @@ class LiveEvidenceProvider:
                 or previous['at_ms']>self.now()):
             raise ProviderError('COLLECTOR_CHECKPOINT_SCOPE_CHANGED')
         if bindings:
+            receipt=(self.safety._receipt(state)
+                if callable(getattr(type(self.safety),'_receipt',None)) else None)
+            unchanged=(receipt is not None and self.safety._continuous(receipt,account)
+                and not any(r['proposal']['account']==account
+                    and r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
+                    for r in state['requests'].values()))
             observed=sync.collect(dict(bindings=bindings,snapshot=previous),self.public,
                 clock=self.now,reuse_verified_terminals=True,verification_passes=1,
-                observation_cache=observation_cache,observation_end_ms=observation_end_ms)['snapshot']
+                observation_cache=observation_cache,observation_end_ms=observation_end_ms,
+                reuse_unchanged_fills=unchanged)['snapshot']
         else:
             # No owned request exists: prove current flatness from the complete
             # account inventory, and never infer absence from an alert.
@@ -383,79 +390,30 @@ class LiveEvidenceProvider:
                     pending=old['pending'] if old else None,evidence=dict(snapshot=observed))
         return normalized,observed,bucket,legacy_active,exp,lookups
 
-    def _capacity(self, message, account, role, metadata, *, buckets, inventory, market,
-                  entry_reads=None):
+    def _entry_account(self, account, role, *, entry_reads=None):
+        """Bind the signer to the routed account and leave allowance for exits.
+
+        Alert prices and local risk determine the order. Margin, leverage and
+        account-mode suitability are enforced by the exchange when it accepts
+        or rejects that order; they do not require another read-only trading
+        model before sending. Only successful account facts are reused within
+        this collection, never across submissions or later collections.
+        """
         route=roles.route_for(self.env,role,account)
-        prepared=execution_prices.prepare(message,metadata)['execution']
-        plan={k:prepared[k] for k in ('symbol','side','entry','stop','take_profit')}
-        at=self.now()
-        # Reuse role-specific actual account identity, abstraction, budget and
-        # address allowance checks. The recording reader retains raw facts.
-        recorded={};outer=self
-        # One current snapshot per account in this collection. Nested preflight
-        # helpers inspect these same facts instead of repeating their reads.
-        # Nothing is retained for the next collection or across a submission.
         entry_reads={} if entry_reads is None else entry_reads
-        sampled=entry_reads.setdefault('samples',{})
-        if 'account_state' in inventory:
-            sampled.setdefault((account,'clearinghouseState',account,None),
-                (inventory['at_ms'],deepcopy(inventory['account_state'])))
-        reusable={'userRole','userAbstraction','clearinghouseState','spotClearinghouseState',
-                  'activeAssetData','userRateLimit'}
-        read_failure=None
-        class RecordingReader:
-            parallel=False
-            def read(self,kind,**kwargs):
-                nonlocal at,read_failure
-                if read_failure is not None:raise read_failure
-                # Admission preflight cannot consume the protection reserve.
-                if kind=='meta':
-                    value=market.metadata
-                elif kind in reusable:
-                    key=(account,kind,kwargs.get('user'),kwargs.get('coin'))
-                    if key not in sampled:
-                        observed_at=outer.now()
-                        try:value=outer.entry_info.read(kind,**kwargs)
-                        except BudgetError as exc:
-                            read_failure=exc;raise
-                        sampled[key]=(observed_at,deepcopy(value))
-                    observed_at,value=sampled[key]
-                    at=min(at,observed_at)  # Reuse never refreshes evidence time.
-                    value=deepcopy(value)
-                else:
-                    value=outer.entry_info.read(kind,**kwargs)
-                if kind=='activeAssetData':
-                    value=market.active_asset_data(value,account=account,
-                        symbol=message['symbol'],now_ms=outer.now())
-                recorded[(kind,kwargs.get('user'),kwargs.get('coin'))]=deepcopy(value)
-                return value
-        reader=RecordingReader();started=time.monotonic()
-        mode=reader.read('userAbstraction',user=account)
-        if mode=='default':
-            # The old helper's owned-exposure flag was tied to the legacy
-            # scheduler name. Here its actual prerequisite is independently
-            # proved from BOTH journals and current exchange inventory.
-            _validate_account_inventory(account,buckets,inventory['orders'],inventory['positions'],role=role)
-            checked=dict(budget_report=roles._default_native_snapshot(route,reader,message['symbol'],mode,started,
-                plan=plan,allow_owned_exposure=True),entry_action_headroom=roles.entry_action_headroom(account,reader))
-        else:
-            checked=boundary.account_preflight(self.env,role,account,route['agent'],plan,reader)
-        report=checked['budget_report']
-        if (report.get('status')!='PRECHECK_PASSED_NOT_ORDER_AUTHORIZATION'
-                or report.get('test_plan_checked') is not True):
-            raise ProviderError('CURRENT_ACCOUNT_BUDGET_PRECHECK_FAILED')
-        mode=recorded[('userAbstraction',account,None)]
-        if mode=='unifiedAccount':
-            _,unheld=checks.unified_usdc(recorded[('spotClearinghouseState',account,None)])
-        elif mode in ('disabled','default'):
-            unheld=checks.number(recorded[('clearinghouseState',account,None)]['withdrawable'])
-        else: raise ProviderError('ACCOUNT_MODE_NOT_VERIFIED')
-        active=recorded[('activeAssetData',account,message['symbol'])]
-        available,size=checks.capacity(active,account,message['symbol'])
-        asset=next(x for x in metadata['universe'] if x['name']==message['symbol'])
-        return dict(account=account,at_ms=at,unheld=life.text(unheld),available=life.text(available),
-            max_size=life.text(size),active=active,max_leverage=asset['maxLeverage'],
-            action_headroom=checked['entry_action_headroom'],account_mode_verified=True),report
+        if account in entry_reads:
+            return deepcopy(entry_reads[account])
+        at=self.now()
+        link=self.entry_info.read('userRole',user=route['agent'])
+        if (not isinstance(link,dict) or link.get('role')!='agent'
+                or not isinstance(link.get('data'),dict)
+                or checks.address(link['data'].get('user'))!=account):
+            raise ProviderError('AGENT_ACCOUNT_MISMATCH')
+        headroom=roles.entry_action_headroom(account,self.entry_info)
+        value=dict(account=account,agent=route['agent'],at_ms=at,
+                   action_headroom=headroom)
+        entry_reads[account]=value
+        return deepcopy(value)
 
     def collect(self, state, *, entries_enabled=False):
         if state.get('domain')!='testnet':
@@ -471,7 +429,7 @@ class LiveEvidenceProvider:
         now=self.now()
         legacy=self._legacy(state);ownership=self._revision(legacy)
         result=dict(basis_revision=state['revision'],metadata={},snapshots=[],marks={},
-            ranges={},bars={},capacity={},entry_blocked={},entry_retry_after_ms={},account_entry_blocked={},blocked_lanes={},
+            ranges={},bars={},entry_accounts={},entry_blocked={},entry_retry_after_ms={},account_entry_blocked={},blocked_lanes={},
             collector_checkpoints={},ownership_revision=ownership,rejected_requests=[],
             inventory_account_errors={},account_inventory_at_ms={},
             legacy_account_revisions={a:self._revision({a:rows}) for a,rows in legacy.items()})
@@ -524,7 +482,7 @@ class LiveEvidenceProvider:
                     clean['at_ms']=max(clean['at_ms'],min(attempts))
                 working.setdefault('collector_checkpoints',{})[lane]=clean
         buckets={a:list(rows.values()) for a,rows in cold.items()}
-        raw_snapshots={};owners={};reports={};lookup_facts={}
+        raw_snapshots={};owners={};lookup_facts={}
         lanes={(s['account'],s['symbol']) for rows in legacy_live.values() for s in rows
                if s['bindings'] or s.get('pending') is not None or s.get('emergency') is not None}
         lanes|={(t['account'],t['symbol']) for t in working['trades'].values()}
@@ -538,7 +496,7 @@ class LiveEvidenceProvider:
                              if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')}
         protection_accounts={t['account'] for t in state['trades'].values() if _original_stop_needed(state,t)}
         # Reject locally impossible admissions before reading their market or
-        # account capacity. These are the same unchanged gates as _admit.
+        # order allowance. These are the same unchanged gates as _admit.
         candidates=set()
         for cid,source in state['sources'].items():
             msg=source['source'];role='long_account' if msg['side']=='LONG' else 'short_account'
@@ -568,11 +526,11 @@ class LiveEvidenceProvider:
             # each transport still acquires its ordinary unchanged permit.
             if callable(available):
                 try:
-                    planned=['metaAndAssetCtxs',
-                        'userAbstraction','userRole','userRole','activeAssetData',
-                        'userRateLimit','spotClearinghouseState']
+                    planned=['userRole','userRateLimit']
+                    if self._market is None or not 0<=now-self._market[0]<5000:
+                        planned.append('metaAndAssetCtxs')
                     planned+=['frontendOpenOrders','clearinghouseState']*len(participating)
-                    # Existing lanes are collected before capacity. Estimate
+                    # Existing lanes are collected before entry. Estimate
                     # their settled recent fill pages and possible status
                     # reads. The transport still reserves the full 120 per
                     # page; this local estimate grants no read permission.
@@ -712,12 +670,17 @@ class LiveEvidenceProvider:
         # Stable fixed-exit trades consume no live mark: use the CURRENT
         # reconciled fill/order facts, so newly missing or undersized exits
         # still request a fresh market before the runtime repairs them.
-        market_lanes=set(source_lanes)
+        market_lanes=set(source_lanes);cancellation_lanes=set()
         for trade in price_state['trades'].values():
             if trade['phase'] in runtime.FINAL:continue
             active=[(trade['order_legs'][oid],order) for oid,order in trade['orders'].items()
                     if order['status']=='OPEN']
             remaining=runtime._remaining(trade)
+            if remaining==0 and active and not any(leg=='ENTRY' for leg,order in active):
+                # Closing has already been observed. Cancel the leftover owned
+                # exit by ID; a price quote cannot change that decision.
+                cancellation_lanes.add((trade['account'],trade['symbol']))
+                continue
             stable=(trade['source']['family'] not in ('r2732','sol_g65') and remaining>0
                 and not any(leg=='ENTRY' for leg,order in active)
                 and trade['account'] not in unresolved
@@ -734,11 +697,27 @@ class LiveEvidenceProvider:
         if market_lanes:
             market_at=self.now()
             try:
-                market=MarketSnapshot(self.info.read('metaAndAssetCtxs'),observed_at_ms=market_at)
+                cached=self._market
+                if cached is not None and 0<=market_at-cached[0]<5000:
+                    market_at,market=cached
+                else:
+                    self._market=None
+                    market=MarketSnapshot(self.info.read('metaAndAssetCtxs'),observed_at_ms=market_at)
                 result['metadata']=market.metadata
             except Exception as exc:
+                self._market=None
                 market_error=_error(exc);remember_retry(exc,[account for account,_ in market_lanes])
-        metadata=result['metadata']
+        if cancellation_lanes and not result['metadata']:
+            try:
+                # Cancellation needs the owned asset index, not a live mark.
+                # Normally the accepted entry supplied this metadata already.
+                result['metadata']=(self._market[1].metadata if self._market is not None
+                    else self.info.read('meta'))
+                for account,symbol in cancellation_lanes:
+                    wire.asset(result['metadata'],symbol)
+            except (ValueError,KeyError,TypeError) as exc:
+                for account,symbol in cancellation_lanes:
+                    result['blocked_lanes'][runtime._lane(account,symbol)]=_error(exc)
         for account,symbol in sorted(market_lanes):
             lane=runtime._lane(account,symbol)
             if account not in inventories or lane in result['blocked_lanes']:continue
@@ -747,6 +726,12 @@ class LiveEvidenceProvider:
                 result['marks'][lane]=market.mark(account=account,symbol=symbol,now_ms=self.now())
             except (ValueError,KeyError,TypeError) as exc:
                 result['blocked_lanes'][lane]=_error(exc)
+                market_error=_error(exc)
+        if market is not None:
+            # Share one actual mark across the immediate entry/exit steps.
+            # Preserve its original clock and refresh within the strictest
+            # existing emergency-price window; do not cache malformed prices.
+            self._market=(market_at,market) if market_error is None else None
         # Reuse only this collection; existing exposure is still collected
         # while a source-only entry waits for its recorded budget retry.
         entry_reads={};entry_selected=False
@@ -772,7 +757,7 @@ class LiveEvidenceProvider:
                 result['entry_blocked'][cid]='ENTRY_DEFERRED_TO_NEXT_CYCLE'
                 candidate=False
             # Keep formula stop updates and pending-order cancellation alive
-            # during an entry halt. Entry ranges/capacity have no maintenance
+            # during an entry halt. Entry ranges/allowance have no maintenance
             # authority and must never delay protection of an existing fill.
             if msg['family'] in ('r2732','sol_g65') and (active_trade or candidate) and source_io_allowed[account]:
                 try:
@@ -794,8 +779,8 @@ class LiveEvidenceProvider:
                 # An authenticated approved alert already carries the formula's
                 # entry decision. Its sender must not reconstruct a second
                 # prospective strategy using historical source/Testnet paths.
-                # Current market metadata, account inventory, ownership and
-                # capacity remain mandatory and use the unchanged budget.
+                # Current market, account ownership and order allowance remain
+                # checked using the unchanged request budget.
                 if not contract.is_approved(msg):
                     source=self.prices.source_range(msg,self.now())
                     testnet=self.prices.mark_window(account,msg['symbol'],contract.moment_ms(msg['source_at']),self.now())
@@ -804,22 +789,16 @@ class LiveEvidenceProvider:
                     result['ranges'][cid]=dict(source=source,testnet=testnet)
                 if self.safety is None:
                     raise ProviderError('VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
-                result['capacity'][cid],reports[cid]=self._capacity(msg,account,role,metadata,
-                    buckets=buckets[account],inventory=inventories[account],market=market,
-                    entry_reads=entry_reads)
+                result['entry_accounts'][cid]=self._entry_account(account,role,entry_reads=entry_reads)
                 # The worker sends at most one proposal per cycle. Reuse its
-                # unchanged pure admission to stop preparing capacities that
+                # unchanged pure admission to stop preparing accounts that
                 # cannot be used. A refused first candidate leaves the next
                 # candidate eligible; the projection never writes the journal.
                 entry_selected=entry_planner._admit(deepcopy(price_state),cid,result,self.now()) is not None
             except Exception as exc:
                 # This entire block is entry-only evidence. A failed source
                 # cache or background allowance must not abort owned exits.
-                # A transport may return malformed raw data successfully;
-                # never retain it after later preflight validation rejects it.
-                samples=entry_reads.get('samples',{})
-                for key in list(samples):
-                    if key[0]==account:del samples[key]
+                entry_reads.pop(account,None)
                 result['entry_blocked'][cid]=_error(exc)
                 remember_retry(exc,[account])
                 if account in account_retries:result['entry_retry_after_ms'][cid]=account_retries[account]
@@ -841,7 +820,7 @@ class LiveEvidenceProvider:
         if callable(stage):
             result['safety_checkpoint_id']=stage(safety_token,state=state,context=deepcopy(result))
         self._last=dict(context=deepcopy(result),state=deepcopy(state),legacy_revision=ownership,
-            inventories=inventories,buckets=buckets,raw_snapshots=raw_snapshots,owners=owners,budget_reports=reports,
+            inventories=inventories,buckets=buckets,raw_snapshots=raw_snapshots,owners=owners,
             legacy_account_revisions={a:self._revision({a:rows}) for a,rows in legacy.items()})
         return deepcopy(result)
 
@@ -929,11 +908,11 @@ class LiveEvidenceProvider:
         result=dict(source=deepcopy(trade['source']),current_source=deepcopy(state['sources'][cid]),
             env=self.env,agent=route['agent'],host=boundary.HOST,metadata=ctx['metadata'],safety=safety,
             buckets=cached['buckets'][account],open_orders=cached['inventories'][account]['orders'],
-            positions=cached['inventories'][account]['positions'],market={k:v for k,v in ctx['marks'][lane].items() if k!='account'})
+            positions=cached['inventories'][account]['positions'])
+        if p['action']['type']!='cancel':
+            result['market']={k:v for k,v in ctx['marks'][lane].items() if k!='account'}
         if entry:
-            cap=ctx['capacity'][cid]
-            result.update(budget_at_ms=cap['at_ms'],entry_action_headroom=cap['action_headroom'],
-                budget_report=cached['budget_reports'][cid])
+            result['entry_account']=deepcopy(ctx['entry_accounts'][cid])
             if not contract.is_approved(trade['source']):
                 result.update(source_range=ctx['ranges'][cid]['source'],testnet_range=ctx['ranges'][cid]['testnet'])
         else:

@@ -330,20 +330,20 @@ class ColdLegacyAcceptanceTests(unittest.TestCase):
         context = self.fx.provider.collect(self.fx.state, entries_enabled=True)
         self.assertEqual(context['account_entry_blocked'][self.routes['long_account']],
                          'FINAL_ACCOUNT_ORDER_REAPPEARED_RECONCILE_FIRST')
-        self.assertNotIn(self.msg['occurrence_id'], context['capacity'])
+        self.assertNotIn(self.msg['occurrence_id'], context['entry_accounts'])
 
     def test_changed_pending_invalidates_retirement_receipt_and_fences_account(self):
         self.row['pending'] = 'f' * 64
         context = self.fx.provider.collect(self.fx.state, entries_enabled=True)
         self.assertIn(self.routes['long_account'], context['account_entry_blocked'])
-        self.assertNotIn(self.msg['occurrence_id'], context['capacity'])
+        self.assertNotIn(self.msg['occurrence_id'], context['entry_accounts'])
 
     def test_unowned_current_position_fences_account_with_empty_historical_work(self):
         self.fx.raw.extra_positions = [dict(position=dict(coin='DOGE', szi='1'))]
         context = self.fx.provider.collect(self.fx.state, entries_enabled=True)
         self.assertEqual(context['account_entry_blocked'][self.routes['long_account']],
                          'UNOWNED_ACCOUNT_POSITION_NO_NEW_ENTRY')
-        self.assertNotIn(self.msg['occurrence_id'], context['capacity'])
+        self.assertNotIn(self.msg['occurrence_id'], context['entry_accounts'])
 
 
 class PaginatedBudgetAcceptanceTests(unittest.TestCase):

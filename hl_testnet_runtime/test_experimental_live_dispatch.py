@@ -424,6 +424,7 @@ class ActualSDKSigningTests(unittest.TestCase):
             'HL_TESTNET_SHORT_AGENT_ADDRESS': agent, 'HL_TESTNET_SHORT_AGENT_KEY': fixture_key}
         context['env'] = {k:v for k,v in env.items() if not k.endswith('_KEY')}
         context['agent'] = agent
+        context['entry_account']['agent'] = agent
         release = dict(domain='testnet', release_id='d'*64, dispatch_enabled=True,
             protection_enabled=True, entries_enabled=True,
             not_before_ms=context['safety']['not_before_ms'], entry_expires_at_ms=now+60000,

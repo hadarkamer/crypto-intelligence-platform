@@ -192,9 +192,46 @@ class ProviderTests(unittest.TestCase):
         source.assert_not_called();history.assert_not_called()
         self.assertEqual(context['entry_blocked'],{})
         self.assertEqual(context['ranges'],{})
-        self.assertIn(msg['occurrence_id'],context['capacity'])
+        self.assertIn(msg['occurrence_id'],context['entry_accounts'])
         self.assertTrue(context['inventory_complete'])
-        self.assertIn('activeAssetData',[c[0] for c in self.raw.calls])
+        self.assertEqual([c[0] for c in self.raw.calls],
+            ['frontendOpenOrders','clearinghouseState','metaAndAssetCtxs','userRole','userRateLimit'])
+        self.assertEqual(context['entry_accounts'][msg['occurrence_id']]['agent'],ENV['HL_TESTNET_LONG_AGENT_ADDRESS'])
+
+    def test_actual_market_is_shared_without_refreshing_its_time_and_expires_after_five_seconds(self):
+        msg=self.approved();self.provider.safety=object()
+        lane=runtime._lane(self.state['routes']['long_account'],msg['symbol'])
+        first=self.provider.collect(self.state,entries_enabled=True)
+        original=deepcopy(first['marks'][lane]);start=self.exchange.t
+        self.exchange.mark[lane]='99';self.exchange.t+=4999;self.raw.calls.clear()
+        reused=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(reused['marks'][lane],original)
+        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in self.raw.calls])
+        self.exchange.t=start+5000;self.raw.calls.clear()
+        refreshed=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(refreshed['marks'][lane]['mark_price'],'99')
+        self.assertEqual(refreshed['marks'][lane]['at_ms'],start+5000)
+        self.assertEqual([c[0] for c in self.raw.calls].count('metaAndAssetCtxs'),1)
+        # Clock reversal must never renew or reuse a future-dated observation.
+        self.exchange.t=start+4999;self.exchange.mark[lane]='100';self.raw.calls.clear()
+        reversed_clock=self.provider.collect(self.state,entries_enabled=True)
+        self.assertEqual(reversed_clock['marks'][lane]['mark_price'],'100')
+        self.assertEqual([c[0] for c in self.raw.calls].count('metaAndAssetCtxs'),1)
+
+    def test_invalid_market_response_is_not_cached(self):
+        msg=self.approved();self.provider.safety=object();original=self.raw.read
+        def invalid(kind,*args,**kwargs):
+            value=original(kind,*args,**kwargs)
+            if kind=='metaAndAssetCtxs':
+                index=next(i for i,a in enumerate(value[0]['universe']) if a['name']==msg['symbol'])
+                value[1][index]['markPx']='invalid'
+            return value
+        with patch.object(self.raw,'read',side_effect=invalid):
+            self.provider.collect(self.state,entries_enabled=True)
+        self.assertIsNone(self.provider._market)
+        self.raw.calls.clear();result=self.provider.collect(self.state,entries_enabled=True)
+        self.assertIn(msg['occurrence_id'],result['entry_accounts'])
+        self.assertEqual([c[0] for c in self.raw.calls].count('metaAndAssetCtxs'),1)
 
     def test_approved_entry_still_requires_supervisor_and_owned_inventory(self):
         msg=self.approved()
@@ -204,7 +241,7 @@ class ProviderTests(unittest.TestCase):
         self.provider.safety=object();self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         context=self.provider.collect(self.state,entries_enabled=True)
         self.assertIn(msg['occurrence_id'],context['entry_blocked'])
-        self.assertNotIn(msg['occurrence_id'],context['capacity'])
+        self.assertNotIn(msg['occurrence_id'],context['entry_accounts'])
 
     def test_approved_dispatch_replays_real_admission_with_no_range_lookup(self):
         from .experimental_live_runtime import TestnetExecutionRuntime
@@ -417,18 +454,18 @@ class ProviderTests(unittest.TestCase):
         from .request_budget import BudgetError
         msg=self.approved();cid=msg['occurrence_id'];self.provider.safety=object()
         failure=BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',retry_after_ms=17000)
-        with patch.object(self.provider,'_capacity',side_effect=failure) as capacity:
+        with patch.object(self.provider,'_entry_account',side_effect=failure) as capacity:
             context=self.provider.collect(self.state,entries_enabled=True)
         retry=self.exchange.t+17000
         self.assertEqual(context['entry_retry_after_ms'][cid],retry)
         self.state['entry_decisions']={cid:dict(reason=context['entry_blocked'][cid],retry_after_ms=retry)}
         self.raw.calls.clear()
-        with patch.object(self.provider,'_capacity',side_effect=AssertionError('NO_CAPACITY_UNTIL_DUE')):
+        with patch.object(self.provider,'_entry_account',side_effect=AssertionError('NO_CAPACITY_UNTIL_DUE')):
             context=self.provider.collect(self.state,entries_enabled=True)
         self.assertEqual(context['entry_retry_after_ms'][cid],retry)
         self.assertEqual(self.raw.calls,[])
         self.assertEqual(context['inventory_accounts'],[])
-        self.assertEqual(context['capacity'],{})
+        self.assertEqual(context['entry_accounts'],{})
 
     def test_insufficient_whole_preflight_budget_stops_before_optional_reads(self):
         from types import SimpleNamespace
@@ -439,7 +476,7 @@ class ProviderTests(unittest.TestCase):
                         ceiling=800,retry_after_ms=9000)
         self.provider.budget=SimpleNamespace(capacity=capacity)
         context=self.provider.collect(self.state,entries_enabled=True)
-        self.assertEqual(requested,[(225,'background')])
+        self.assertEqual(requested,[(123,'background')])
         self.assertEqual(self.raw.calls,[])
         self.assertEqual(context['inventory_accounts'],[])
         self.assertEqual(context['account_inventory_at_ms'],{})
@@ -483,7 +520,7 @@ class ProviderTests(unittest.TestCase):
         fx.worker.receive([peer]);fx.raw.calls.clear()
         context=fx.provider.collect(fx.store.load(),entries_enabled=True)
         self.assertEqual(context['entry_blocked'][peer['occurrence_id']],runtime.shared_market.ENTRY_BLOCK)
-        self.assertEqual(context['capacity'],{})
+        self.assertEqual(context['entry_accounts'],{})
         self.assertNotIn('metaAndAssetCtxs',[c[0] for c in fx.raw.calls])
         self.assertNotIn('userAbstraction',[c[0] for c in fx.raw.calls])
         stop=fx.oracle.orders[fx.oracle.oid('STOP')]['view']
@@ -491,7 +528,7 @@ class ProviderTests(unittest.TestCase):
         fx.raw.calls.clear()
         context=fx.provider.collect(fx.store.load(),entries_enabled=False)
         self.assertIn(runtime._lane(account,msg['symbol']),context['marks'])
-        self.assertEqual([c[0] for c in fx.raw.calls].count('metaAndAssetCtxs'),1)
+        self.assertEqual([c[0] for c in fx.raw.calls].count('metaAndAssetCtxs'),0)
         repaired=fx.worker.run_once(entries_enabled=False)
         self.assertEqual(repaired.get('operation'),'CREATE_EXIT',repaired)
         self.assertEqual(sum(r['proposal']['leg']=='STOP' and r['proposal']['operation']=='CREATE_EXIT'
@@ -614,33 +651,21 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(value['snapshots'],[])
         self.assertTrue(set(value['blocked_lanes'].values()) & {'DUPLICATE_CARD_ID','ORDER_ID_ALREADY_BOUND'})
 
-    def test_default_account_capacity_allows_only_proven_owned_other_market(self):
-        from . import two_account_execution as roles
-        account=roles.PHANTOM;provider=self.provider
-        provider.env={**ENV,'HL_TESTNET_SHORT_ACCOUNT_ADDRESS':account,
-            'HL_TESTNET_RUNTIME_MODE':'experimental_connection_disabled_by_default'}
-        pos=dict(assetPositions=[dict(position=dict(coin='DOGE',szi='-1'))])
-        old=self.raw.read
-        def read(kind,account_arg=None,*,user=None,coin=None,**kw):
-            if kind=='userAbstraction':return 'default'
-            if kind=='userRole':return dict(role='user') if user==account else dict(role='agent',data=dict(user=account))
-            if kind=='clearinghouseState':
-                return dict(**pos,withdrawable='50000',marginSummary=dict(accountValue='50000',totalRawUsd='50000',totalMarginUsed='1',totalNtlPos='1'))
-            return old(kind,account_arg,user=user,coin=coin,**kw)
-        self.raw.read=read
-        msg=r2732_message(entry=2.3,decision_ms=T-60000)
-        bucket=dict(account=account,symbol='DOGE',pending=None,bindings=[],
-            evidence=dict(snapshot=dict(position_quantity='-1',terminal_orders=[])))
-        from .experimental_market_context import MarketSnapshot
-        market=MarketSnapshot(self.raw.read('metaAndAssetCtxs'),observed_at_ms=self.exchange.t)
-        capacity,report=provider._capacity(msg,account,'short_account',META,
-            buckets=[bucket],inventory=dict(orders=[],positions=pos),market=market)
-        self.assertEqual(capacity['account'],account)
-        self.assertEqual(report['account_mode'],'default')
-        self.assertFalse(report['mode_was_renamed'])
-        with self.assertRaisesRegex(ValueError,'UNOWNED_ACCOUNT_POSITION'):
-            provider._capacity(msg,account,'short_account',META,
-                buckets=[],inventory=dict(orders=[],positions=pos),market=market)
+    def test_entry_binds_actual_agent_to_configured_account_without_account_mode(self):
+        account=self.state['routes']['short_account'];original=self.raw.read
+        def read(kind,*args,**kwargs):
+            if kind in ('userAbstraction','activeAssetData','spotClearinghouseState'):
+                raise AssertionError('NO_FINANCIAL_PREFLIGHT')
+            return original(kind,*args,**kwargs)
+        with patch.object(self.raw,'read',side_effect=read):
+            observed=self.provider._entry_account(account,'short_account')
+        self.assertEqual(observed['account'],account)
+        self.assertEqual(observed['agent'],ENV['HL_TESTNET_SHORT_AGENT_ADDRESS'])
+        self.assertEqual(observed['action_headroom'],1000)
+        wrong=dict(role='agent',data=dict(user=self.state['routes']['long_account']))
+        with patch.object(self.raw,'read',return_value=wrong):
+            with self.assertRaisesRegex(ValueError,'AGENT_ACCOUNT_MISMATCH'):
+                self.provider._entry_account(account,'short_account')
 
 
 if __name__=='__main__':unittest.main()

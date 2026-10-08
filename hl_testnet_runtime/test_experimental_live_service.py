@@ -60,7 +60,7 @@ class FullConnectionTests(unittest.TestCase):
         self.key = '9' * 64
         self.oracle = SoftwareExchange(T + 10000)
         self.env = {**ENV, 'HL_TESTNET_EXPERIMENTAL_DISPATCH': dispatch.APPROVAL}
-        self.http = []; self.fail_reply = False; self.drop_stop = False
+        self.http = []; self.fail_reply = False; self.drop_stop = False; self.reject_next_entry = False
         self.build(T - 60000)
         def wallet(_env, role, account, agent): return SimpleNamespace(address=agent)
         p = patch.object(dispatch.roles, 'wallet_for_role', wallet); p.start(); self.addCleanup(p.stop)
@@ -75,6 +75,11 @@ class FullConnectionTests(unittest.TestCase):
                 data = json.loads(body); test.http.append(data)
                 request = next(r for r in test.store.load()['requests'].values()
                     if r['nonce'] == data['nonce'] and r['proposal']['action'] == data['action'])
+                if test.reject_next_entry and request['proposal']['operation']=='ENTRY':
+                    test.reject_next_entry = False
+                    self.reply = dict(status='ok', response=dict(type='order', data=dict(
+                        statuses=[dict(error='Insufficient margin to place order.')])))
+                    return
                 if test.drop_stop and request['proposal']['operation']=='CREATE_EXIT' and request['proposal']['leg']=='STOP':
                     test.drop_stop = False
                     # The external outcome is unknown to the production sender.
@@ -142,6 +147,41 @@ class FullConnectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'AUTHENTICATION'):
             self.service.accept_authenticated(json.dumps(msg).encode(), {})
         self.assertEqual(self.http, [])
+
+    def test_margin_rejection_is_recorded_without_retry_and_next_alert_can_trade(self):
+        rejected = r2732_message(entry=2.3, decision_ms=T-60000)
+        self.seed(rejected); self.reject_next_entry = True
+        self.assertEqual(self.service.tick().get('operation'), 'ENTRY')
+        request = next(iter(self.store.load()['requests'].values()))
+        self.assertEqual(request['reply']['state'], 'REJECTED')
+        self.assertEqual(request['reply']['code'], 'INSUFFICIENT_MARGIN')
+        self.assertFalse(self.oracle.orders)
+        self.service.tick(); self.reconnect()
+        self.assertEqual(self.ingest(rejected)['status'], 'DUPLICATE')
+        self.service.tick(); self.service.tick()
+        card = self.worker.report()['cards'][0]
+        self.assertEqual(card['status'], 'CANCELED_WITHOUT_FILL')
+        self.assertEqual(len(card['attempts']), 1)
+        self.assertEqual(card['attempts'][0]['terminal_state'], 'REJECTED_NO_ORDER')
+        self.assertEqual(card['attempts'][0]['exchange_reply']['code'], 'INSUFFICIENT_MARGIN')
+        self.assertFalse(card['entry_fills']); self.assertFalse(card['exit_fills'])
+        self.assertFalse(card['protections']); self.assertFalse(card['observed_orders'])
+        self.assertEqual(len(self.http), 1); self.assertFalse(self.oracle.requests)
+        self.assertTrue({'userAbstraction','spotClearinghouseState','activeAssetData'}.isdisjoint(
+            call[0] for call in self.raw.calls))
+
+        self.oracle.t = T+900000+10000
+        later = r2732_message(entry=2.3, decision_ms=T+900000-60000)
+        self.seed(later)
+        self.assertEqual(self.service.tick().get('operation'), 'ENTRY')
+        for _ in range(3): self.service.tick()
+        cards = {row['card_id']: row for row in self.worker.report()['cards']}
+        self.assertEqual(cards[rejected['occurrence_id']]['status'], 'CANCELED_WITHOUT_FILL')
+        self.assertEqual(cards[later['occurrence_id']]['status'], 'OPEN')
+        self.assertEqual({row['leg'] for row in cards[later['occurrence_id']]['protections']},
+                         {'STOP','TAKE_PROFIT'})
+        self.assertEqual(len(self.http), 4)
+        self.assertEqual(sum(row['proposal']['operation']=='ENTRY' for row in self.oracle.requests), 1)
 
     def test_intake_wakes_only_after_commit_and_not_for_duplicate_or_failed_commit(self):
         msg = r2732_message(entry=2.3, decision_ms=T-60000)
@@ -304,6 +344,25 @@ class FullConnectionTests(unittest.TestCase):
         self.assertEqual(sum(r['proposal']['operation']=='ENTRY' for r in self.oracle.requests), 1)
         self.assertEqual(len(self.http), 3)
 
+    def test_closed_position_cleanup_does_not_require_market_prices(self):
+        msg=r2732_message(entry=2.3,decision_ms=T-60000);self.seed(msg)
+        for _ in range(4):self.service.tick()
+        trade=self.store.load()['trades'][msg['occurrence_id']]
+        self.oracle.fill(self.oracle.oid('TAKE_PROFIT'),trade['quantity'])
+        self.oracle.t+=5001
+        self.provider._market=None  # Cold process: only asset metadata is needed.
+        original=self.raw.read
+        def without_prices(kind,*args,**kwargs):
+            if kind=='metaAndAssetCtxs':raise AssertionError('UNNECESSARY_MARKET_READ')
+            return original(kind,*args,**kwargs)
+        self.raw.calls.clear()
+        with patch.object(self.raw,'read',side_effect=without_prices):
+            for _ in range(3):self.service.tick()
+        self.assertEqual(self.store.load()['trades'][msg['occurrence_id']]['phase'],'CLOSED')
+        self.assertIn('meta',[row[0] for row in self.raw.calls])
+        self.assertNotIn('metaAndAssetCtxs',[row[0] for row in self.raw.calls])
+        self.assertEqual(len(self.http),4)
+
     def test_all_eight_formulas_through_real_provider_and_wire_adapters(self):
         messages = [report_plan(spec, (spec[2]+spec[3])/2) for spec in REPORT_FORMULAS]
         messages += [r2732_message(entry=2.3, decision_ms=ARM-60000),
@@ -365,7 +424,7 @@ class FullConnectionTests(unittest.TestCase):
         with patch.object(self.provider.prices,'source_range',side_effect=TimeoutError('SOURCE_TIMEOUT')) as source, \
              patch.object(self.provider.prices,'mark_window',side_effect=TimeoutError('MARK_HISTORY_TIMEOUT')) as history, \
              patch.object(self.provider.prices,'closed_bars',side_effect=OSError('SOURCE_DB_UNAVAILABLE')), \
-             patch.object(self.provider,'_capacity',side_effect=AssertionError('NO_ADMISSION_DURING_HALT')):
+             patch.object(self.provider,'_entry_account',side_effect=AssertionError('NO_ADMISSION_DURING_HALT')):
             for _ in range(3):self.service.tick()
         self.assertEqual(source.call_count,0);self.assertEqual(history.call_count,0)
         trade=self.store.load()['trades'][msg['occurrence_id']]
@@ -379,9 +438,9 @@ class FullConnectionTests(unittest.TestCase):
         msg=r2732_message(entry=2.3,decision_ms=T-60000);self.seed(msg)
         self.assertEqual(self.service.tick().get('operation'),'ENTRY')
         with patch.object(self.provider.prices,'source_range',side_effect=AssertionError('NO_RANGE_FOR_ADMITTED_TRADE')) as source, \
-             patch.object(self.provider,'_capacity',side_effect=AssertionError('NO_CAPACITY_FOR_ADMITTED_TRADE')) as capacity:
+             patch.object(self.provider,'_entry_account',side_effect=AssertionError('NO_ENTRY_ACCOUNT_FOR_ADMITTED_TRADE')) as entry_account:
             for _ in range(3):self.service.tick()
-        self.assertEqual(source.call_count,0);self.assertEqual(capacity.call_count,0)
+        self.assertEqual(source.call_count,0);self.assertEqual(entry_account.call_count,0)
         self.assertEqual({o['leg'] for o in self.oracle.orders.values()},{'ENTRY','STOP','TAKE_PROFIT'})
 
     def test_entry_budget_wait_is_durable_and_wakes_at_budget_expiry(self):
@@ -438,9 +497,10 @@ class FullConnectionTests(unittest.TestCase):
         msg=plan();self.seed(msg);self.oracle.t=ARM
         self.assertEqual(self.service.tick().get('operation'),'ENTRY')
         self.release['entries_enabled']=False
+        self.oracle.t += 5000  # Refresh the shared market sample on the next normal scan.
         self.oracle.mark[core._lane(self.release['routes']['long_account'],'HYPE')]=msg['original_target']
         with patch.object(self.provider.prices,'source_range',side_effect=TimeoutError('SOURCE_TIMEOUT')) as source, \
-             patch.object(self.provider,'_capacity',side_effect=AssertionError('NO_ADMISSION_DURING_HALT')):
+             patch.object(self.provider,'_entry_account',side_effect=AssertionError('NO_ADMISSION_DURING_HALT')):
             result=self.service.tick()
         self.assertEqual(result.get('operation'),'CANCEL');self.assertEqual(source.call_count,0)
         self.service.tick();self.service.tick()
@@ -472,10 +532,10 @@ class FullConnectionTests(unittest.TestCase):
         with patch.object(self.provider.prices,'source_range',side_effect=slow_source) as source, \
              patch.object(self.provider.prices,'mark_window',side_effect=slow_source) as history, \
              patch.object(self.provider.prices,'closed_bars',side_effect=slow_source) as bars, \
-             patch.object(self.provider,'_capacity',side_effect=slow_source) as capacity:
+             patch.object(self.provider,'_entry_account',side_effect=slow_source) as entry_account:
             result=self.service.tick()
         self.assertEqual(self.oracle.t,started+1)  # The synthetic wire advances 1 ms.
-        self.assertEqual([p.call_count for p in (source,history,bars,capacity)],[0,0,0,0])
+        self.assertEqual([p.call_count for p in (source,history,bars,entry_account)],[0,0,0,0])
         self.assertEqual(result.get('operation'),'CREATE_EXIT')
         self.assertEqual(self.oracle.requests[-1]['proposal']['leg'],'STOP')
         self.assertEqual(self.oracle.requests[-1]['proposal']['card_id'],msg['occurrence_id'])

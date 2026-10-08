@@ -3,6 +3,7 @@ Actual collectors, source expiry, runtime, signing boundary, and lifecycle run u
 Synthetic results never establish live Testnet success.
 """
 from copy import deepcopy
+from collections import Counter
 import json
 from types import SimpleNamespace
 import unittest
@@ -268,8 +269,19 @@ class ReductionReplay(unittest.TestCase):
             result['blocked_peer_collection' if blocked else 'stable_protected_collection']=dict(
                 reads=len(stable_fx.raw.calls)-first,weight=charged.used()-used,
                 by_kind=dict(Counter(row[0] for row in stable_fx.raw.calls[first:])),
-                entry_capacity_count=len(collected['capacity']),entry_blocked=collected['entry_blocked'])
+                entry_preparation_count=len(collected['entry_accounts']),entry_blocked=collected['entry_blocked'])
         return result
+
+    def test_entry_does_not_repeat_account_capacity_survey(self):
+        result=self.counts()
+        entry=result['entry_collection']
+        self.assertLessEqual(entry['reads'],5,entry)
+        self.assertLessEqual(entry['weight'],122,entry)
+        self.assertFalse({'userAbstraction','activeAssetData','spotClearinghouseState'}
+                         & set(entry['by_kind']),entry)
+        self.assertEqual(entry['by_kind'].get('userRole'),1,entry)
+        for name in ('stable_protected_collection','blocked_peer_collection'):
+            self.assertEqual(result[name]['entry_preparation_count'],0,result[name])
 
     def replay(self, *, latency_ms=0, warm_weight=616, cadence_ms=5000,
                burst=False, side='LONG', lifecycle=False, partial=False,
@@ -416,13 +428,16 @@ class ReductionReplay(unittest.TestCase):
                 channel='orderUpdates',data=[dict(order=dict(coin=trade['symbol'],oid=int(oid)),
                     status='filled',statusTimestamp=fx.oracle.now())]))))
         while min(worker_at,supervisor_at)<base+3*quota.WINDOW_MS:
+            read_start=len(fx.raw.calls)
             if worker_at<=supervisor_at:
+                actor='worker'
                 fx.oracle.t=max(fx.oracle.t,worker_at)
                 fx.service._wake.clear()
                 try:answer=fx.service.tick()
                 except Exception as exc:answer=dict(status=type(exc).__name__,error=str(exc))
                 worker_at=fx.oracle.now()+round(fx.service._next_wait_seconds(5)*1000) if hasattr(fx.service,'_next_wait_seconds') else fx.oracle.now()+5000
             else:
+                actor='supervisor'
                 fx.oracle.t=max(fx.oracle.t,supervisor_at)
                 answer=fixture.supervisor.pass_once();supervisor_at=fx.oracle.now()+5000
             if fx.service._wake.is_set():worker_at=min(worker_at,fx.oracle.now())
@@ -437,7 +452,9 @@ class ReductionReplay(unittest.TestCase):
                 all_protected=len(trades)==2 and all(t['phase']=='CLOSED' or {'STOP','TAKE_PROFIT'}<={t['order_legs'][o] for o,r in t['orders'].items() if r['status']=='OPEN'} for t in trades.values())
                 if cid not in exit_fills and {'STOP','TAKE_PROFIT'}<=set(orders) and (all_protected or not simultaneous_fills):
                     fill(trade,orders['TAKE_PROFIT'][0],core._remaining(trade));exit_fills.add(cid)
-            samples.append(dict(at_ms=fx.oracle.now()-base,status=answer['status'],error=answer.get('error'),weight=ledger.used(),
+            samples.append(dict(at_ms=fx.oracle.now()-base,actor=actor,status=answer['status'],error=answer.get('error'),weight=ledger.used(),
+                reads=len(fx.raw.calls)-read_start,
+                read_kinds=dict(Counter(row[0] for row in fx.raw.calls[read_start:])),
                 phases={r['role']:r['phase'] for r in trades.values()}))
             if len(trades)==2 and all(t['phase']=='CLOSED' for t in trades.values()):closed=fx.oracle.now()-base;break
         state=fx.store.load()
@@ -457,6 +474,7 @@ class ReductionReplay(unittest.TestCase):
             closed_ms=closed,phases={t['role']:t['phase'] for t in state['trades'].values()},
             pending_outcomes=pending_outcomes,observed_working_entries=observed_working_entries,
             source_to_finish_reads=len(fx.raw.calls)-source_read_start,
+            source_to_finish_reads_by_kind=dict(Counter(row[0] for row in fx.raw.calls[source_read_start:])),
             source_to_finish_weight=sum(row['weight'] for row in ledger.tickets.values())-warm_weight,
             samples=samples,denials=ledger.denials,synthetic_actions=len(fx.http),entry_decisions=state.get('entry_decisions',{}),wire_actions=[r['proposal']['role']+':'+r['proposal']['operation']+':'+r['proposal']['leg'] for r in fx.oracle.requests],orders=fx.oracle.orders,final_requests=[{k:v for k,v in r.items() if k in ('phase','observed_oid','result','outcome')} for r in state['requests'].values()],final_context={k:v for k,v in fx.provider._last['context'].items() if k in ('entry_blocked','account_entry_blocked','blocked_lanes')})
 

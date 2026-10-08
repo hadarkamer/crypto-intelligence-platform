@@ -312,6 +312,10 @@ class LiveSafetyTests(unittest.TestCase):
         self.fx.oracle.fill(self.fx.oracle.oid('ENTRY'), trade['quantity'])
         for _ in range(3):
             self.observed()
+        reads = len(self.fx.raw.calls)
+        self.observed()
+        self.assertEqual([row[0] for row in self.fx.raw.calls[reads:]],
+                         ['frontendOpenOrders','clearinghouseState'])
         self.assertIsNotNone(self.supervisor.idle_receipt())
         self.fx.service.supervisor = self.supervisor
         reads = len(self.fx.raw.calls)
@@ -322,6 +326,17 @@ class LiveSafetyTests(unittest.TestCase):
             data=[dict(order=dict(coin=msg['symbol'], oid=int(self.fx.oracle.oid('TAKE_PROFIT'))),
                 status='filled', statusTimestamp=self.fx.oracle.now())])))
         self.assertIsNone(self.supervisor.idle_receipt())
+        reads = len(self.fx.raw.calls)
+        self.observed()
+        self.assertIn('userFillsByTime',[row[0] for row in self.fx.raw.calls[reads:]])
+        # A restarted process has no committed in-memory receipt and must
+        # fetch history even if the saved order sizes and position still match.
+        self.fx.provider.safety = safety.LiveSafetyProvider(feed=self.feed,
+            legacy_store=self.legacy,experimental_store=self.fx.store,
+            release_loader=lambda:deepcopy(self.fx.release),clock=self.fx.oracle.now)
+        reads = len(self.fx.raw.calls)
+        self.fx.provider.collect(self.fx.store.load())
+        self.assertIn('userFillsByTime',[row[0] for row in self.fx.raw.calls[reads:]])
 
     def test_known_unfilled_gtc_coalesces_until_ten_seconds_or_actionable_change(self):
         self.ready_feed(); self.observed(); self.supervisor.pass_once()
