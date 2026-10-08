@@ -6,8 +6,21 @@ from urllib.parse import parse_qs, urlsplit
 
 LABELS={'12h':'12 hour','24h':'24 hour','48h':'48 hour'}
 REASONS=frozenset({'render-checks-passed','loading-indicator','blur','no-chart',
-    'visible-dialog','wrong-label','invalid-source','unverified'})
+    'visible-dialog','login-required','wrong-label','invalid-source','unverified'})
 NETWORK_KINDS=frozenset({'timeout','connection','cancelled','blocked','other'})
+LOGIN_GATE_SCRIPT=r'''() => {
+  const visible = el => {
+    const r=el.getBoundingClientRect();
+    if(r.width<=0 || r.height<=0) return false;
+    for(let n=el;n;n=n.parentElement) {
+      const s=getComputedStyle(n);
+      if(s.display==='none' || s.visibility==='hidden' || Number(s.opacity||1)===0) return false;
+    }
+    return true;
+  };
+  return [...document.querySelectorAll('[role="dialog"], .MuiModal-root')].some(e =>
+    visible(e) && /\blog\s*in\s+to\s+unlock\s+full\s+data\b/i.test(e.textContent||''));
+}'''
 STATE_SCRIPT=r'''() => {
   const visible = el => {
     const r=el.getBoundingClientRect();
@@ -24,6 +37,9 @@ STATE_SCRIPT=r'''() => {
   const ui={login_link_visible:[...document.querySelectorAll('a[href="/login"]')].some(visible),
     account_link_present:!!document.querySelector('a[href="/account"]')};
   const state=(ready,reason)=>({ready,reason,label,...ui});
+  if([...document.querySelectorAll('[role="dialog"], .MuiModal-root')].some(e =>
+      visible(e) && /\blog\s*in\s+to\s+unlock\s+full\s+data\b/i.test(e.textContent||'')))
+    return state(false,'login-required');
   const canvases=[...document.querySelectorAll('canvas')].filter(e=> {
     const r=e.getBoundingClientRect(); return visible(e) && r.width>=400 && r.height>=200;
   });
@@ -57,6 +73,7 @@ STATE_SCRIPT=r'''() => {
 
 def valid_source(url,heatmap_model):
     from heatmap_models import source_url
+    if not isinstance(url,str):return False
     try:
         value=urlsplit(url); expected=urlsplit(source_url(heatmap_model))
         query=parse_qs(value.query,keep_blank_values=True)
@@ -84,16 +101,31 @@ def current_state(page,timeframe,heatmap_model):
         return {'ready':False,'reason':'invalid-source'}
     try:state=safe_readiness(page.evaluate(STATE_SCRIPT))
     except Exception:return {'ready':False,'reason':'unverified'}
-    if state.get('label')!=LABELS[timeframe]:state.update(ready=False,reason='wrong-label')
+    if state['reason']!='login-required' and state.get('label')!=LABELS[timeframe]:
+        state.update(ready=False,reason='wrong-label')
     return state
+
+
+def require_unblocked_source(page,heatmap_model,*,phase):
+    """An explicit visible source-data modal is a gate; a header Login is not."""
+    from model1_execution import StageFailure
+    try:
+        if not valid_source(page.url,heatmap_model):return
+        blocked=page.evaluate(LOGIN_GATE_SCRIPT) is True
+    except Exception:return
+    if not blocked:return
+    error=StageFailure('source_login_required')
+    error._model1_capture_phase=phase
+    error._model1_source_readiness={'ready':False,'reason':'login-required'}
+    raise error
 
 
 def wait_for_render(page,timeframe,heatmap_model,timeout_ms=60_000):
     """Poll only existing DOM; no navigation, refresh, requests, clicks or styling."""
     state=current_state(page,timeframe,heatmap_model)
-    if state['ready'] or state['reason']=='invalid-source':return state
+    if state['ready'] or state['reason'] in ('invalid-source','login-required'):return state
     timeout=max(1,min(int(timeout_ms),60_000))
-    predicate='expected => { const s=('+STATE_SCRIPT+')(); return s.ready === true && s.label === expected; }'
+    predicate='expected => { const s=('+STATE_SCRIPT+')(); return s.reason === "login-required" || (s.ready === true && s.label === expected); }'
     try:
         page.wait_for_function(predicate,arg=LABELS[timeframe],timeout=timeout,polling=1000)
         page.wait_for_timeout(1000)
@@ -174,7 +206,7 @@ def verify_saved_render(page,timeframe,heatmap_model,state,image_path,diagnostic
     target=Path(image_path).with_suffix('.render.json')
     target.write_text(json.dumps(payload,allow_nan=False),encoding='utf-8');target.chmod(0o600)
     if verdict['ready'] is not True:
-        error=StageFailure('source_not_readable')
+        error=StageFailure('source_login_required' if verdict['reason']=='login-required' else 'source_not_readable')
         error._model1_capture_phase='render_readiness'
         error._model1_source_readiness=verdict
         error._model1_source_network=network

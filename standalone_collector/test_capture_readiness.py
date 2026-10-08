@@ -180,5 +180,17 @@ class RenderDOMTests(unittest.TestCase):
         s=self.check('<canvas width="800" height="500"></canvas><span role="progressbar" style="position:absolute;top:650px;width:30px;height:30px"></span>')
         self.assertTrue(s['ready']);self.assertEqual(s['label'],'48 hour');self.assertTrue(s['login_link_visible'])
 
+    def test_explicit_unlock_data_modal_has_precedence_over_blur(self):
+        s=self.check('<div style="filter:blur(4px)"><canvas width="800" height="500"></canvas></div><div role="dialog" style="position:absolute;top:200px;width:400px;height:100px">Log in to unlock full data</div>')
+        self.assertFalse(s['ready']);self.assertEqual(s['reason'],'login-required')
+
+    def test_hidden_gate_or_header_login_is_not_data_gate(self):
+        s=self.check('<canvas width="800" height="500"></canvas><div role="dialog" style="display:none">Log in to unlock full data</div>')
+        self.assertTrue(s['ready'])
+
+    def test_modal_does_not_need_canvas_before_identifying_explicit_gate(self):
+        s=self.check('<div class="MuiModal-root" role="presentation"><div role="dialog">Log in to unlock full data</div></div>')
+        self.assertEqual(s['reason'],'login-required')
+
 
 if __name__=='__main__':unittest.main()

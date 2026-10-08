@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import time
 
-CODES=frozenset({'source_capture_failed','source_timeout','source_not_readable',
+CODES=frozenset({'source_capture_failed','source_timeout','source_not_readable','source_login_required',
     'screenshot_identity_mismatch','image_evidence_invalid','analysis_timeout',
     'analysis_incomplete','analysis_response_invalid','analysis_unauthorized',
     'analysis_rate_limited','analysis_quota_exceeded','analysis_http_error',
@@ -61,11 +61,23 @@ def control(function,page,*args):
            '_wait_for_heatmap':'wait_for_chart'}.get(function.__name__,'capture')
     if function.__name__=='_select_timeframe' and args and args[0] in ('12h','24h','48h'):
         phase='select_'+args[0]
+    check_access=function.__name__=='_select_timeframe'
+    def guard():
+        if check_access:
+            from capture_readiness import require_unblocked_source
+            from heatmap_models import HEATMAP_MODEL
+            require_unblocked_source(page,HEATMAP_MODEL,phase=phase)
+    guard()
     try:
-        return function(page,*args)
+        result=function(page,*args)
     except Exception as exc:
+        # CoinGlass can open the data-login dialog during a selector action.
+        # Preserve other timeouts; never infer an access gate from header Login.
+        guard()
         exc._model1_capture_phase=phase
         raise
+    guard()
+    return result
 
 def stage(value):
     global _current_stage
@@ -124,7 +136,7 @@ def failure_detail(exc):
         detail['source_readiness']=safe_readiness(readiness)
         detail['source_network']=safe_network(getattr(exc,'_model1_source_network',None))
         detail['readable']=False
-        detail['blocking_condition']={'loading-indicator':'loading','blur':'blur'}.get(
+        detail['blocking_condition']={'loading-indicator':'loading','blur':'blur','login-required':'login'}.get(
             detail['source_readiness']['reason'],'unknown')
     # Only recognize fixed strings from our own selector; don't retain any text.
     text=str(exc)

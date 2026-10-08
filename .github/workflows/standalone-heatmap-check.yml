@@ -1,0 +1,58 @@
+name: Check standalone heatmap collector
+
+on:
+  pull_request:
+    branches:
+      - app/model1-standalone-20260915
+    paths:
+      - standalone_collector/**
+      - collection_bridge.py
+      - collection_model1_task.py
+      - market_vision/coinglass_heatmap_capture.py
+      - market_vision/openai_heatmap_scanner.py
+      - .github/workflows/standalone-heatmap-check.yml
+  push:
+    branches:
+      - app/model1-standalone-20260915
+    paths:
+      - standalone_collector/**
+      - collection_bridge.py
+      - collection_model1_task.py
+      - market_vision/coinglass_heatmap_capture.py
+      - market_vision/openai_heatmap_scanner.py
+      - .github/workflows/standalone-heatmap-check.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPENAI_API_KEY: ""
+      DATABASE_URL: ""
+      COINGLASS_STORAGE_STATE_JSON: ""
+      COINGLASS_COOKIE_HEADER: ""
+      COLLECTION_BRIDGE_ENABLED: "false"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install collector test dependencies
+        run: >-
+          python -m pip install
+          'aiohttp==3.11.11' 'requests==2.32.5' 'psycopg[binary]==3.2.3'
+          'playwright==1.55.0' 'Pillow==12.3.0'
+      - name: Install synthetic DOM test browser
+        run: python -m playwright install --with-deps chromium
+      - name: Prepare actual runtime and run collector contracts
+        run: python standalone_collector/prepare.py
+      - name: Verify read-only startup and source configuration checks
+        working-directory: standalone_collector
+        run: python -m unittest test_readiness test_configuration_check test_authenticated_probe -v
+      - name: Check whitespace
+        run: git diff --check
