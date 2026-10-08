@@ -76,7 +76,7 @@ class OutboxDatabase(MemoryDatabase):
                             source_position_id=position, payload_json=raw, source_sequence=sequence,
                             canceled=canceled, acknowledged_sequence=old['acknowledged_sequence'] if old else 0)
                         return Rows([{'occurrence_id': identity}])
-                    if sql.startswith('SELECT payload_json FROM approved_alert_execution_outbox'):
+                    if sql.startswith('SELECT payload_json,occurrence_id FROM approved_alert_execution_outbox'):
                         found = [v for (key, _), v in db.outbox.items() if key == params[0]
                                  and v['acknowledged_sequence'] < v['source_sequence']]
                         return Rows(sorted(found, key=lambda v: (not v['canceled'], v['source_sequence']))[:params[1]])

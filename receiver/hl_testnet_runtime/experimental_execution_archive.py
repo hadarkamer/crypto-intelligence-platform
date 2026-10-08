@@ -9,6 +9,7 @@ from contextlib import contextmanager, closing
 from copy import deepcopy
 from decimal import Decimal
 import json
+import sqlite3
 
 import approved_alert_contract as contract
 from . import card_lifecycle as life
@@ -21,7 +22,35 @@ MAX_BATCH_BYTES = 2*1024*1024
 MAX_RECORD_BYTES = 16*1024*1024
 FINAL = frozenset(('CLOSED', 'CANCELED_WITHOUT_FILL'))
 TERMINAL = frozenset(('FILLED', 'CANCELED', 'REJECTED'))
-EXTRAS = ('formula_states', 'source_condition_errors', 'entry_blocked')
+EXTRAS = ('formula_states', 'source_condition_errors', 'entry_blocked', 'entry_decisions')
+
+
+def maintenance_readiness(store, failure):
+    """Allow deferred *storage availability* maintenance after a durable reload.
+
+    Domain/integrity/capacity failures and unrecognized programming errors never
+    become permission to enter. Even allowed transient failures need a fresh,
+    checksummed state and 1 MiB of headroom (1/16 of the existing hard limit).
+    Subsequent order preparation must still commit before any exchange send.
+    This helper creates no tables, writes no journal, and performs no network I/O.
+    """
+    from .experimental_execution_state import StateError, encode, MAX_STATE_BYTES
+    from .postgres_journal import JournalError
+    transient = (isinstance(failure, OSError)
+        or isinstance(failure, sqlite3.OperationalError)
+        or type(failure) is JournalError and str(failure) == 'PERSISTENCE_UNAVAILABLE_NO_SEND')
+    if isinstance(failure, StateError) or not transient:
+        return dict(entries_allowed=False, status='HISTORY_MAINTENANCE_REVIEW_REQUIRED')
+    # load verifies the existing checksum/domain; an unavailable/corrupt live
+    # journal escapes and cannot be hidden by the maintenance fallback.
+    state = store.load()
+    size = len(encode(state).encode())
+    reserve = MAX_STATE_BYTES // 16
+    if size > MAX_STATE_BYTES-reserve:
+        return dict(entries_allowed=False, status='HISTORY_ACTIVE_CAPACITY_REVIEW_REQUIRED',
+                    state_bytes=size, reserved_bytes=reserve)
+    return dict(entries_allowed=True, status='HISTORY_MAINTENANCE_DEFERRED',
+                state_bytes=size, reserved_bytes=reserve)
 
 
 def _error(code):
@@ -329,6 +358,37 @@ class HistoryMixin:
         if not self.load().get('history'): return None
         with self._history_transaction() as (db, state, _save):
             return db.get(cid) if state.get('history') else None
+
+    def trade_card(self, occurrence_id, *, after_update_revision=0, update_limit=100):
+        """Read one durable card atomically across archival; never revive it.
+
+        The card is the exact pre-archive projection. Later source cancellations
+        remain separately visible in current_source and paged source_updates.
+        A source-only occurrence returns None: it has not become a trade.
+        """
+        from .experimental_execution_cards import _card, card_from_record
+        cid = _ids([occurrence_id])[0]
+        if (type(after_update_revision) is not int or after_update_revision < 0
+                or type(update_limit) is not int or not 1 <= update_limit <= 100):
+            raise _error('BOUNDED_HISTORY_PAGE_REQUIRED')
+        with self._history_transaction() as (db, state, _save):
+            if cid in state['trades']:
+                return dict(card=_card(state, cid), location='active',
+                    snapshot_revision=state['revision'],
+                    current_source=deepcopy(state['sources'].get(cid)),
+                    source_updates=[], next_update_revision=None, archived_at_ms=None)
+            if not state.get('history'):
+                return None
+            record = db.get(cid)
+            if record is None or record['trade'] is None:
+                return None
+            rows = db.execute(f'SELECT revision,value,checksum FROM {db.table("history_updates")} WHERE occurrence_id=? AND revision>? ORDER BY revision LIMIT ?',
+                (cid, after_update_revision, update_limit+1)).fetchall()
+            return dict(card=card_from_record(record, domain=self.domain), location='archived',
+                snapshot_revision=state['revision'], current_source=record['current_source'],
+                source_updates=[_checked(raw, checksum) for _revision,raw,checksum in rows[:update_limit]],
+                next_update_revision=rows[update_limit-1][0] if len(rows)>update_limit else None,
+                archived_at_ms=record['archived_at_ms'])
 
     def history_page(self, *, after='', limit=100):
         if after: _ids([after])

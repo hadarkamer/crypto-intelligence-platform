@@ -529,15 +529,17 @@ class IsolatedExecutionRuntime:
     def _compact_history(self):
         """Optional maintenance must not stop supervision of owned positions.
 
-        A failed/uncertain transaction is followed by a fresh durable load.
-        Admit no new exposure until maintenance works again; active-state or
-        archived-evidence corruption still fails its normal verification.
+        A classified maintenance-only outage may defer compaction while a
+        fresh verified live journal has room for new work. Corruption, unknown
+        failures and capacity pressure still close admissions.
         """
         try:
             result=self.store.compact_history(now_ms=self.venue.now())
-        except Exception:
-            self._history_maintenance_error='HISTORY_MAINTENANCE_DEFERRED'
-            return False
+        except Exception as exc:
+            from .experimental_execution_archive import maintenance_readiness
+            status = maintenance_readiness(self.store, exc)
+            self._history_maintenance_error=status['status']
+            return status['entries_allowed']
         if result.get('status')=='HISTORY_RECORD_CAPACITY_REVIEW_REQUIRED':
             self._history_maintenance_error='HISTORY_RECORD_CAPACITY_REVIEW_REQUIRED'
             return False
@@ -549,6 +551,11 @@ class IsolatedExecutionRuntime:
         from .experimental_execution_reporting import project_history
         return project_history(self.store.history_page(after=after, limit=limit),
                                domain=self.store.domain)
+
+    def trade_card(self, occurrence_id, *, after_update_revision=0, update_limit=100):
+        """One durable card, whether active or archived; no exchange reads."""
+        return self.store.trade_card(occurrence_id,
+            after_update_revision=after_update_revision, update_limit=update_limit)
 
     def _cycle_proposal(self, state, context, now, *, entries_enabled):
         """Pure shared lifecycle transition; no database or network calls."""

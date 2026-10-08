@@ -19,6 +19,7 @@ from .experimental_execution_archive import HistoryMixin
 
 VERSION = 'experimental-isolated-execution-state-v1'
 PG_SCHEMA = 'hl_experimental_isolated_worker_v1'
+MAX_STATE_BYTES = 16*1024*1024
 
 
 class StateError(JournalError):
@@ -48,7 +49,7 @@ def checked(raw, checksum):
 
 def encode(value):
     result = life.encoded(value)
-    if len(result.encode()) > 16*1024*1024:
+    if len(result.encode()) > MAX_STATE_BYTES:
         raise StateError('ISOLATED_STATE_CAPACITY_REVIEW_REQUIRED')
     return result
 

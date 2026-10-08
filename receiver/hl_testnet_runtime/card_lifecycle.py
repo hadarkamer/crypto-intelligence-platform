@@ -246,6 +246,7 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
             local = set(); quantities = {leg: Decimal(0) for leg in LEGS + ('MANUAL_EXIT',)}
             cash = {leg: Decimal(0) for leg in quantities}; fees = {}; filled_by_oid = {}
             own = {oid: leg for leg in order_legs(b) for oid in b['orders'][leg]}
+            changes = {}
             entry_side = 'B' if b['side'] == 'LONG' else 'A'
             for f in fills:
                 if f['oid'] not in own: continue
@@ -253,14 +254,25 @@ def review(bindings, snapshot, *, now_ms, max_age_ms=15000, plain_take_profit_oi
                 if f['side'] != (entry_side if leg == 'ENTRY' else ('A' if entry_side == 'B' else 'B')):
                     local.add('FILL_SIDE_MISMATCH')
                 quantities[leg] += q; cash[leg] += q * px
+                changes[f['at_ms']] = changes.get(f['at_ms'], Decimal(0)) + (q if leg == 'ENTRY' else -q)
+                if f['oid'] in terminal and f['at_ms'] > terminal[f['oid']]['at_ms']:
+                    local.add('FILL_AFTER_ORDER_FINALITY')
                 fees[f['fee_token']] = fees.get(f['fee_token'], Decimal(0)) + number(f['fee'], signed=True)
                 filled_by_oid[f['oid']] = filled_by_oid.get(f['oid'], Decimal(0)) + q
             entered = quantities['ENTRY']; exited = quantities['TAKE_PROFIT'] + quantities['STOP'] + quantities['MANUAL_EXIT']
             remaining = entered - exited
             if entered > number(b['planned_quantity']): local.add('ENTRY_EXCEEDS_PLAN')
             if remaining < 0: local.add('EXIT_EXCEEDS_CARD_QUANTITY')
+            # TP and STOP can legitimately fill different parts of one card.
+            # Prove conservation at every observed time, not merely at the end:
+            # a later entry must never hide an earlier exit of unowned size.
+            # Exchange timestamps have millisecond resolution; facts at the
+            # same timestamp are one group, independent of API delivery order.
+            observed_remaining = Decimal(0)
+            for at in sorted(changes):
+                observed_remaining += changes[at]
+                if observed_remaining < 0: local.add('EXIT_EXCEEDS_CARD_QUANTITY')
             total_remaining += remaining * (1 if b['side'] == 'LONG' else -1)
-            if quantities['TAKE_PROFIT'] > 0 and quantities['STOP'] > 0 and not emergency.intersection(b['orders']['STOP']): local.add('BOTH_EXIT_LEGS_FILLED_REVIEW')
             for oid, t in terminal.items():
                 if oid in own and number(t['filled_quantity']) != filled_by_oid.get(oid, Decimal(0)):
                     local.add('TERMINAL_FILL_TOTAL_MISMATCH')

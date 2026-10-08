@@ -160,6 +160,7 @@ class Sender:
         self.acked = {}
         self.last_attempt = {}
         self.serial = 0
+        self.source_offset = 0
 
     def _merge(self, values):
         _require(isinstance(values, list) and len(values) <= MAX_BUFFER, 'TRANSPORT_SOURCE_OVERFLOW')
@@ -200,12 +201,42 @@ class Sender:
         approved_mode = config.mode == APPROVED_MODE
         read = reader or (bridge.read_approved if approved_mode else bridge.read_experimental)
         source_env = {'EXPERIMENTAL_EXECUTION_BRIDGE_MODE': bridge.APPROVED_MODE if approved_mode else bridge.MODE}
-        source_ok = True
+        source_ok, source_errors, refreshed, blocked = True, 0, set(), set()
         try:
-            values = read(scopes, config.fence, now=now, env=source_env,
+            kwargs = dict(now=now, env=source_env,
                 deadline_monotonic=started+MAX_SOURCE_SECONDS, clock=monotonic)
-            _require(all(contract.is_approved(v) == approved_mode for v in values), 'TRANSPORT_PROTOCOL_MODE')
-            self._merge(values)
+            if approved_mode:
+                kwargs['source_offset'] = self.source_offset
+            values = read(scopes, config.fence, **kwargs)
+            _require(isinstance(values, list) and len(values) <= MAX_BUFFER, 'TRANSPORT_SOURCE_OVERFLOW')
+            if approved_mode:
+                self.source_offset = getattr(values, 'next_source_offset', self.source_offset)
+                blocked.update(getattr(values, 'blocked_occurrences', ()))
+                source_errors += getattr(values, 'source_errors', 0)
+                # Group first: a conflicting later copy must not allow the
+                # earlier copy to be sent from this same read.
+                groups = {}
+                for value in values:
+                    try:
+                        _require(contract.is_approved(value), 'TRANSPORT_PROTOCOL_MODE')
+                        valid = contract.validate(value)
+                        groups.setdefault(valid['occurrence_id'], []).append(valid)
+                    except (ValueError, TypeError, KeyError, ArithmeticError):
+                        source_errors += 1
+                        if isinstance(value, dict) and isinstance(value.get('occurrence_id'), str):
+                            blocked.add(value['occurrence_id'])
+                for identity, group in groups.items():
+                    if identity in blocked:
+                        continue
+                    try:
+                        self._merge(group)
+                        refreshed.add(identity)
+                    except (ValueError, TypeError, KeyError, ArithmeticError):
+                        blocked.add(identity)
+                        source_errors += 1
+            else:
+                _require(all(not contract.is_approved(v) for v in values), 'TRANSPORT_PROTOCOL_MODE')
+                self._merge(values)
         except Exception:
             source_ok = False
         for identity, value in list(self.pending.items()):
@@ -219,7 +250,8 @@ class Sender:
             value = self.pending[identity]
             if report['attempted'] >= MAX_PER_TICK or monotonic()-started >= MAX_TICK_SECONDS:
                 break
-            if not source_ok and value['kind'] != 'CANCEL':
+            if value['kind'] != 'CANCEL' and (not source_ok or
+                    (approved_mode and (identity not in refreshed or identity in blocked))):
                 continue
             report['attempted'] += 1
             self.serial += 1
@@ -243,7 +275,8 @@ class Sender:
             # This bounded memo is an optimization. Receiver tombstones remain
             # durable; re-sending an evicted record cannot authorize a new entry.
             self.acked = dict(list(self.acked.items())[-MAX_BUFFER:])
+        report['source_errors'] = source_errors
         report['deferred'] = len(self.pending)
         report['status'] = ('SOURCE_UNAVAILABLE' if not source_ok else
-                            'PENDING_RETRY' if self.pending else 'COMPLETED')
+                            'SOURCE_PARTIAL' if source_errors else 'PENDING_RETRY' if self.pending else 'COMPLETED')
         return report

@@ -245,14 +245,18 @@ class ProviderTests(unittest.TestCase):
         self.assertIn(ROUTES['short_account']['account'],value['account_entry_blocked'])
         self.assertIn(msg['occurrence_id'],value['entry_blocked'])
 
-    def test_changed_inventory_between_passes_refuses_whole_observation(self):
+    def test_changed_inventory_between_passes_fences_affected_accounts(self):
         self.pending();count=[0]
         def change(kind):
             if kind=='frontendOpenOrders':
                 count[0]+=1
                 if count[0]==3:self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         self.raw.mutate=change
-        with self.assertRaisesRegex(ProviderError,'CHANGED_RETRY'):self.provider.collect(self.state)
+        value=self.provider.collect(self.state)
+        self.assertEqual(value['inventory_accounts'],[])
+        self.assertEqual(set(value['inventory_account_errors']),set(self.state['routes'].values()))
+        self.assertEqual(set(value['inventory_account_errors'].values()),{'ACCOUNT_OBSERVATION_OR_JOURNAL_CHANGED_RETRY'})
+        self.assertEqual(value['snapshots'],[])
 
     def test_real_collectors_reconstruct_exact_fill_without_source_history(self):
         msg=self.active();value=self.provider.collect(self.state)

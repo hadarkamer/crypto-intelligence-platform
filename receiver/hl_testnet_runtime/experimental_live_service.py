@@ -7,6 +7,7 @@ Schema initialization remains a separate operator migration, never an HTTP or
 recurring-work side effect. No deployment/activation settings are written here.
 """
 import json
+from collections import Counter
 import threading
 import time
 
@@ -15,6 +16,24 @@ from . import experimental_plan_intake as intake
 from . import experimental_live_release as releases
 from .experimental_execution_dispatch import BoundaryError
 from .postgres_journal import JournalError
+
+# Explicit redacted operational codes; an unexpected exception never echoes
+# its message, URL, credentials, or response body through service health.
+_CYCLE_CODES = frozenset({
+    'CONCURRENT_OBSERVATION_RELOAD_REQUIRED', 'CONCURRENT_PROPOSAL_RELOAD_REQUIRED',
+    'EXACT_CURRENT_TESTNET_RELEASE_REQUIRED', 'COMPLETE_FRESH_TWO_ACCOUNT_INVENTORY_REQUIRED',
+    'SNAPSHOT_OUTSIDE_VERIFIED_ACCOUNT_INVENTORY', 'COMPLETE_CURRENT_ACCOUNT_OBSERVATION_REQUIRED',
+    'EXACT_ACCOUNT_OBSERVATION_TIMES_REQUIRED', 'DURABLE_FEED_CHECKPOINT_NOT_RECONCILED',
+    'TESTNET_REQUEST_BUDGET_EXHAUSTED', 'TESTNET_REQUEST_BUDGET_BUSY',
+    'TESTNET_SHARED_REQUEST_BUDGET_UNAVAILABLE', 'TESTNET_SHARED_REQUEST_BUDGET_REQUIRED',
+    'EXPERIMENTAL_ACTIVE_HISTORY_CAPACITY_EXHAUSTED', 'PROCESS_OWNERSHIP_UNAVAILABLE',
+    'EXPERIMENTAL_CONNECTION_CYCLE_ALREADY_RUNNING',
+})
+
+
+def _cycle_error(exc):
+    code = str(exc)
+    return code if code in _CYCLE_CODES else 'CONNECTION_CYCLE_RECONCILIATION_REQUIRED'
 
 
 class ConnectionService:
@@ -28,6 +47,9 @@ class ConnectionService:
         self._run_lock = threading.Lock()
         self._tick_lock = threading.Lock()
         self.last_status = 'NOT_STARTED'
+        self.last_cycle_error_code = None
+        self.last_cycle_at_ms = None
+        self.last_entry_decisions = dict(source_blocks=0, account_blocks=0, market_blocks=0, reasons={})
         self.cycles = 0
         self.feed, self.supervisor = feed, supervisor
         self._thread = None
@@ -120,11 +142,38 @@ class ConnectionService:
             startup_allowed = self.startup_entries_allowed
             if self.startup_entry_gate is not None:
                 startup_allowed = self.startup_entry_gate() is True
-            result = self.runtime.run_once(entries_enabled=startup_allowed and
-                releases.entry_enabled(release, self.runtime.venue.now()))
+            # No pending source, order, or exposure: a fresh durable receipt
+            # already checked by the independent protection capability needs
+            # no duplicate full REST scan. Feed changes revoke this reuse;
+            # at ten seconds the independent worker performs a new scan.
+            receipt = self.supervisor.idle_receipt() if self.supervisor is not None else None
+            if receipt is not None:
+                result = dict(status='OBSERVED_IDLE_REUSED', safety_checkpoint_id=receipt)
+            else:
+                result = self.runtime.run_once(entries_enabled=startup_allowed and
+                    releases.entry_enabled(release, self.runtime.venue.now()))
             self.cycles += 1
             self.last_status = result['status']
+            self.last_cycle_error_code = None
+            self.last_cycle_at_ms = self.runtime.venue.now()
+            cached = self.runtime.venue._last
+            if cached is not None:
+                context = cached['context']
+                groups = [context.get(key, {}) for key in
+                    ('entry_blocked', 'account_entry_blocked', 'blocked_lanes')]
+                # Provider errors are fixed domain identifiers. Diagnostics
+                # contain counts only, with no source or account payloads.
+                reasons = Counter(code for rows in groups for code in rows.values()
+                    if isinstance(code, str) and code and len(code) < 140
+                    and all(c.isupper() or c.isdigit() or c == '_' for c in code))
+                self.last_entry_decisions = dict(source_blocks=len(groups[0]),
+                    account_blocks=len(groups[1]), market_blocks=len(groups[2]), reasons=dict(reasons))
             return result
+        except Exception as exc:
+            self.last_cycle_error_code = _cycle_error(exc)
+            self.last_cycle_at_ms = self.runtime.venue.now()
+            self.last_status = 'CONNECTION_CYCLE_RECONCILIATION_REQUIRED'
+            raise
         finally:
             self._tick_lock.release()
 

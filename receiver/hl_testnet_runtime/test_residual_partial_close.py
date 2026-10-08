@@ -232,7 +232,7 @@ class PartialResidualDatabaseTests(NoExternal):
         report=life.review(s['bindings'],s['evidence']['snapshot'],now_ms=self.v.now())
         a=next(c for c in report['cards'] if c['card_id']==self.b['card_id'])
         self.assertEqual(a['remaining_quantity'],'70')
-        self.assertIn('BOTH_EXIT_LEGS_FILLED_REVIEW',a['issues'])
+        self.assertNotIn('BOTH_EXIT_LEGS_FILLED_REVIEW',a['issues'])
         req=self.store.request(s['last_request'])
         self.assertEqual(req['phase'],'OBSERVED')
         self.assertEqual(req['proposal']['card_id'],self.b['card_id'])
