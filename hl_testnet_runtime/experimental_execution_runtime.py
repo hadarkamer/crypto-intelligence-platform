@@ -477,6 +477,9 @@ class IsolatedExecutionRuntime:
         account_check=context['entry_accounts'][cid]
         if (account_check.get('account')!=account or type(account_check.get('at_ms')) is not int
                 or not 0<=now-account_check['at_ms']<=15000
+                or any(type(account_check.get(field,account_check['at_ms'])) is not int
+                    or not 0<=now-account_check.get(field,account_check['at_ms'])<limit
+                    for field,limit in (('signer_at_ms',300000),('allowance_at_ms',60000)))
                 or type(account_check.get('action_headroom')) is not int
                 or account_check['action_headroom']<roles.ENTRY_ACTION_HEADROOM):
             raise RuntimeError('FRESH_EXACT_ENTRY_ACCOUNT_REQUIRED')

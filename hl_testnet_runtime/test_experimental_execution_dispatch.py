@@ -141,7 +141,16 @@ class DispatchBoundaryTests(unittest.TestCase):
         self.context['entry_account']=original
         self.context['entry_account']['at_ms']=self.now-15001
         with self.assertRaisesRegex(boundary.BoundaryError,'ENTRY_ACCOUNT_SAMPLE_EXPIRED'): self.send()
+        for field,limit in (('signer_at_ms',300000),('allowance_at_ms',60000)):
+            for value in (self.now-limit,self.now+1,True,None,'invalid'):
+                self.context['entry_account']={**original,'at_ms':self.now,field:value}
+                with self.subTest(field=field,value=value), self.assertRaisesRegex(
+                        boundary.BoundaryError,'ENTRY_ACCOUNT_SAMPLE_EXPIRED'):
+                    self.send()
         self.assertEqual(self.signer.calls,[])
+        self.context['entry_account']={**original,'at_ms':self.now,
+            'signer_at_ms':self.now-299999,'allowance_at_ms':self.now-59999}
+        self.assertEqual(self.send()['simulated_transport_requests'],1)
     def test_final_after_signing_source_recheck(self):
         self.signer.hook=lambda _:self.context['current_source'].update(entry_permission='RETIRED')
         with self.assertRaisesRegex(boundary.BoundaryError,'SOURCE_ENTRY_PERMISSION_RETIRED'): self.send()

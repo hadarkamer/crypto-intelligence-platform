@@ -226,6 +226,22 @@ class ReductionReplay(unittest.TestCase):
         entry=dict(reads=len(fx.raw.calls)-before,weight=ledger.used()-weight,
                    by_kind=dict(Counter(row[0] for row in fx.raw.calls[before:])))
         result=dict(empty_inventory=empty,entry_collection=entry)
+        for elapsed in (0,5000):
+            fx.oracle.t+=elapsed
+            before=len(fx.raw.calls);weight=ledger.used()
+            context=fx.provider.collect(fx.store.load(),entries_enabled=True)
+            self.assertIn(message['occurrence_id'],context['entry_accounts'])
+            result['reused_entry_'+str(elapsed)]=dict(reads=len(fx.raw.calls)-before,
+                weight=ledger.used()-weight,
+                by_kind=dict(Counter(row[0] for row in fx.raw.calls[before:])))
+        # Leave enough for the actual warm reads plus entry, but not for the
+        # removed 80 units. Admission must price only the reads it will send.
+        ledger.seed(fx.oracle.now(),quota.BACKGROUND_LIMIT-ledger.used()-43)
+        before=len(fx.raw.calls);weight=ledger.used();fx.oracle.t+=5000
+        context=fx.provider.collect(fx.store.load(),entries_enabled=True)
+        self.assertIn(message['occurrence_id'],context['entry_accounts'])
+        self.assertEqual(ledger.used()-weight,42)
+        self.assertEqual(ledger.capacity_queries[-1]['requested_weight'],43)
         # Measure complete, unchanged HTTP boundaries. Setup calls are excluded
         # from each named scenario, but the real weighted limiter stays active.
         for waiting in (False,True):
@@ -280,6 +296,10 @@ class ReductionReplay(unittest.TestCase):
         self.assertFalse({'userAbstraction','activeAssetData','spotClearinghouseState'}
                          & set(entry['by_kind']),entry)
         self.assertEqual(entry['by_kind'].get('userRole'),1,entry)
+        self.assertEqual(result['reused_entry_0'],dict(reads=2,weight=22,
+            by_kind=dict(frontendOpenOrders=1,clearinghouseState=1)))
+        self.assertEqual(result['reused_entry_5000'],dict(reads=3,weight=42,
+            by_kind=dict(frontendOpenOrders=1,clearinghouseState=1,metaAndAssetCtxs=1)))
         for name in ('stable_protected_collection','blocked_peer_collection'):
             self.assertEqual(result[name]['entry_preparation_count'],0,result[name])
 

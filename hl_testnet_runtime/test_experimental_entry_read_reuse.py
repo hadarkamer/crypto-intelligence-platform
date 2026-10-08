@@ -1,16 +1,17 @@
-"""Collection-local admission reuse; every transport and signer is isolated."""
+"""Bounded admission reuse; every transport and signer is isolated."""
 from collections import Counter
 from copy import deepcopy
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import approved_alert_contract as contract
 from approved_alert_fixtures import maxpain_alert
 from . import experimental_execution_runtime as runtime
 from .experimental_live_provider import ProviderError
 from .experimental_plan_store import reduce_source
+from .request_budget import request_weight
 from . import test_experimental_live_provider as provider_fixtures
 from .test_experimental_execution_runtime import T
 
@@ -99,19 +100,71 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertNotIn(approved,result['entry_blocked'])
 
     def test_each_collection_refreshes_identity_allowance_and_account_inventory(self):
-        first=self.candidate();self.collect();self.raw.calls.clear()
+        self.provider.budget=self.raw.budget=self.budget=SimpleNamespace(
+            capacity=Mock(return_value=dict(eligible=True)))
+        first=self.candidate();initial=self.collect();started=self.exchange.t
+        account=self.state['routes']['long_account'];revision=initial['legacy_account_revisions'][account]
+        self.assertEqual(sum(request_weight('/info',dict(type=c[0])) for c in self.raw.calls),122)
+        self.budget.capacity.assert_called_with(requested_weight=123,priority='background')
+        self.raw.calls.clear()
         original=self.raw.read
         def changed(kind,*args,**kwargs):
             result=original(kind,*args,**kwargs)
             if kind=='userRateLimit':result['nRequestsUsed']=100
             return result
         with patch.object(self.raw,'read',side_effect=changed):result=self.collect()
-        self.assertEqual(result['entry_accounts'][first]['action_headroom'],900)
-        self.assertEqual(len(self.raw.calls),4)
+        self.assertEqual(result['entry_accounts'][first]['action_headroom'],1000)
+        self.assertEqual([c[0] for c in self.raw.calls],['frontendOpenOrders','clearinghouseState'])
+        self.assertEqual(sum(request_weight('/info',dict(type=c[0])) for c in self.raw.calls),22)
+        self.budget.capacity.assert_called_with(requested_weight=23,priority='background')
+        self.exchange.t=started+5000;self.raw.calls.clear();result=self.collect()
+        self.assertEqual([c[0] for c in self.raw.calls],
+            ['frontendOpenOrders','clearinghouseState','metaAndAssetCtxs'])
+        self.assertEqual(sum(request_weight('/info',dict(type=c[0])) for c in self.raw.calls),42)
+        self.budget.capacity.assert_called_with(requested_weight=43,priority='background')
+        self.assertEqual(result['entry_accounts'][first]['signer_at_ms'],started)
+        self.assertEqual(result['entry_accounts'][first]['allowance_at_ms'],started)
+        self.assertEqual(result['entry_accounts'][first]['at_ms'],started+5000)
+        self.exchange.t=started+59999;self.raw.calls.clear()
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=self.state,
+            legacy_revision=revision,plan_only=True),[])
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=self.state,
+            legacy_revision=revision)['action_headroom'],1000)
+        self.assertEqual(self.raw.calls,[])
+        self.exchange.t=started+60000
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=self.state,
+            legacy_revision=revision,plan_only=True),['userRateLimit'])
+        with patch.object(self.raw,'read',side_effect=changed):
+            renewed=self.provider._entry_account(account,'long_account',state=self.state,
+                legacy_revision=revision)
+        self.assertEqual(renewed['action_headroom'],900)
+        self.assertEqual(renewed['signer_at_ms'],started)
+        self.assertEqual(renewed['allowance_at_ms'],started+60000)
+        self.assertEqual([c[0] for c in self.raw.calls],['userRateLimit'])
+        self.exchange.t=started+299999;self.raw.calls.clear()
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=self.state,
+            legacy_revision=revision,plan_only=True),['userRateLimit'])
+        self.provider._entry_account(account,'long_account',state=self.state,legacy_revision=revision)
+        self.assertEqual([c[0] for c in self.raw.calls],['userRateLimit'])
+        self.exchange.t=started+300000;self.raw.calls.clear()
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=self.state,
+            legacy_revision=revision,plan_only=True),['userRole','userRateLimit'])
+        renewed=self.provider._entry_account(account,'long_account',state=self.state,legacy_revision=revision)
+        self.assertEqual(renewed['signer_at_ms'],started+300000)
+        self.assertEqual([c[0] for c in self.raw.calls],['userRole','userRateLimit'])
+        self.exchange.t=started;self.raw.calls.clear()
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=self.state,
+            legacy_revision=revision,plan_only=True),['userRole','userRateLimit'])
+        self.provider._entry_account(account,'long_account',state=self.state,legacy_revision=revision)
         self.state['revision']+=1;self.raw.extra_orders=[dict(coin='DOGE',oid=999)]
         changed=self.collect()
         self.assertIn(first,changed['entry_blocked'])
         self.assertNotIn(first,changed['entry_accounts'])
+        restarted=provider_fixtures.LiveEvidenceProvider(self.provider.env,legacy_store=self.legacy,
+            experimental_store=self.store,price_evidence=self.provider.prices,budget=self.budget,
+            clock=self.exchange.now,info_reader=self.raw,public_reader=self.raw,lookup_reader=self.raw.lookup)
+        self.assertEqual(restarted._entry_account(account,'long_account',state=self.state,
+            legacy_revision=revision,plan_only=True),['userRole','userRateLimit'])
 
     def test_failed_or_wrong_account_binding_is_not_reused(self):
         first=self.candidate();second=self.candidate(cycle='second')
@@ -128,6 +181,33 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertEqual(len(attempts),2)
         recovered=self.collect()
         self.assertEqual(set(recovered['entry_accounts']),{first})
+        account=self.state['routes']['long_account'];revision=recovered['legacy_account_revisions'][account]
+        old_agent=self.provider.env['HL_TESTNET_LONG_AGENT_ADDRESS'];new_agent='0x'+'9'*40
+        with patch.dict(self.provider.env,HL_TESTNET_LONG_AGENT_ADDRESS=new_agent):
+            self.assertEqual(self.provider._entry_account(account,'long_account',state=self.state,
+                legacy_revision=revision,plan_only=True),['userRole','userRateLimit'])
+            with patch.object(self.raw,'read',side_effect=[dict(role='agent',data=dict(user=account)),
+                    dict(nRequestsCap=1000,nRequestsUsed=100,nRequestsSurplus=0)]) as reader:
+                renewed=self.provider._entry_account(account,'long_account',state=self.state,
+                    legacy_revision=revision)
+            self.assertEqual(renewed['agent'],new_agent)
+            self.assertEqual(renewed['action_headroom'],900)
+            self.assertEqual(reader.call_count,2)
+        self.assertEqual(self.provider.env['HL_TESTNET_LONG_AGENT_ADDRESS'],old_agent)
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=self.state,
+            legacy_revision=revision,plan_only=True),['userRole','userRateLimit'])
+        for invalid in (None,{},dict(role='user'),dict(role='agent',data=dict(user=account))):
+            self.provider._entry_checks.clear()
+            with patch.object(self.raw,'read',side_effect=[invalid,dict(nRequestsCap='1000',
+                    nRequestsUsed=0,nRequestsSurplus=0)]):
+                with self.assertRaises(ValueError):
+                    self.provider._entry_account(account,'long_account',state=self.state,
+                        legacy_revision=revision)
+            self.assertNotIn('allowance_at_ms',self.provider._entry_checks.get(account,{}))
+            value=self.provider._entry_account(account,'long_account',state=self.state,
+                legacy_revision=revision)
+            self.assertEqual(value['agent'],old_agent)
+            self.assertEqual(value['action_headroom'],1000)
 
     def test_cached_binding_preserves_original_observation_time(self):
         first=self.candidate();second=self.candidate(cycle='second')
@@ -140,6 +220,16 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertEqual(first_at,result['entry_accounts'][second]['at_ms'])
         self.assertEqual(first_at,next(at for kind,at in observed if kind=='userRole'))
         self.assertLess(first_at,self.exchange.t)
+        first_value=deepcopy(result['entry_accounts'][first])
+        self.assertEqual(first_value['signer_at_ms'],first_at)
+        self.assertEqual(first_value['allowance_at_ms'],next(at for kind,at in observed if kind=='userRateLimit'))
+        self.raw.calls.clear();observed.clear();self.exchange.t+=1000
+        reused=self.collect()['entry_accounts'][first]
+        self.assertGreater(reused['at_ms'],first_value['at_ms'])
+        self.assertEqual(reused['signer_at_ms'],first_value['signer_at_ms'])
+        self.assertEqual(reused['allowance_at_ms'],first_value['allowance_at_ms'])
+        self.assertNotIn('userRole',[c[0] for c in self.raw.calls])
+        self.assertNotIn('userRateLimit',[c[0] for c in self.raw.calls])
 
     def test_bad_short_binding_does_not_poison_other_account_or_later_candidate(self):
         first_long=self.candidate(symbol='SOL')
@@ -159,6 +249,16 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertEqual(set(result['entry_accounts']),{first_long,second_long,recovered_short})
         self.assertEqual(len(attempts),2)
         self.assertEqual(sum(c[0]=='userRole' for c in self.raw.calls),3)
+        long=self.state['routes']['long_account'];short=self.state['routes']['short_account']
+        revisions=result['legacy_account_revisions'];self.raw.calls.clear()
+        direct=deepcopy(self.state)
+        direct['requests']['long-only']=dict(proposal=dict(account=long,action=dict(type='order',orders=[{}])),
+            phase='OUTCOME_UNKNOWN')
+        long_value=self.provider._entry_account(long,'long_account',state=direct,legacy_revision=revisions[long])
+        short_value=self.provider._entry_account(short,'short_account',state=direct,legacy_revision=revisions[short])
+        self.assertEqual(long_value['action_headroom'],995)
+        self.assertEqual(short_value['action_headroom'],1000)
+        self.assertEqual(self.raw.calls,[])
 
     def test_slow_collection_still_expires_and_does_not_reuse_next_pass(self):
         self.candidate();self.candidate(cycle='second')
@@ -170,7 +270,17 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertEqual(expired['snapshots'],[])
         self.raw.mutate=None;self.raw.calls.clear();result=self.collect()
         self.assertEqual(len(result['entry_accounts']),1)
-        self.assertEqual(len(self.raw.calls),5)
+        self.assertEqual([c[0] for c in self.raw.calls],
+            ['frontendOpenOrders','clearinghouseState','metaAndAssetCtxs'])
+        self.assertLess(next(iter(result['entry_accounts'].values()))['allowance_at_ms'],self.exchange.t)
+        self.provider._entry_checks.clear();self.exchange.t+=1
+        self.raw.mutate=expire
+        account=self.state['routes']['long_account'];revision=result['legacy_account_revisions'][account]
+        self.provider._entry_account(account,'long_account',state=self.state,legacy_revision=revision)
+        allowance_at=self.provider._entry_checks[account]['allowance_at_ms']
+        self.exchange.t=allowance_at+60000;self.raw.mutate=None;self.raw.calls.clear()
+        self.provider._entry_account(account,'long_account',state=self.state,legacy_revision=revision)
+        self.assertEqual([c[0] for c in self.raw.calls],['userRateLimit'])
 
     def test_entry_keeps_order_allowance_for_protection_without_balance_queries(self):
         first=self.candidate();original=self.raw.read
@@ -184,6 +294,48 @@ class EntryReadReuseTests(unittest.TestCase):
         with patch.object(self.raw,'read',side_effect=low_allowance):result=self.collect()
         self.assertEqual(result['entry_blocked'][first],'ENTRY_ACTION_HEADROOM_INSUFFICIENT')
         self.assertNotIn(first,result['entry_accounts'])
+        account=self.state['routes']['long_account'];revision=result['legacy_account_revisions'][account]
+        self.assertNotIn('allowance_at_ms',self.provider._entry_checks[account])
+        with patch.object(self.raw,'read',return_value=dict(nRequestsCap=1000,nRequestsUsed=990,nRequestsSurplus=0)):
+            initial=self.provider._entry_account(account,'long_account',state=self.state,legacy_revision=revision)
+        self.assertEqual(initial['action_headroom'],10)
+        direct=deepcopy(self.state);self.raw.calls.clear()
+        direct['requests']['unknown']=dict(proposal=dict(account=account,action=dict(type='order',orders=[{}])),
+            phase='OUTCOME_UNKNOWN')
+        edge=self.provider._entry_account(account,'long_account',state=direct,legacy_revision=revision)
+        self.assertEqual(edge['action_headroom'],5)
+        self.assertEqual(self.raw.calls,[])
+        direct['requests']['unsent']=dict(proposal=dict(account=account,action=dict(type='cancel',cancels=[{}])),
+            phase='ABORTED_UNSENT')
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=direct,
+            legacy_revision=revision,plan_only=True),['userRateLimit'])
+        with patch.object(self.raw,'read',side_effect=low_allowance):
+            with self.assertRaisesRegex(ValueError,'ENTRY_ACTION_HEADROOM_INSUFFICIENT'):
+                self.provider._entry_account(account,'long_account',state=direct,legacy_revision=revision)
+        self.assertNotIn('allowance_at_ms',self.provider._entry_checks[account])
+        renewed=self.provider._entry_account(account,'long_account',state=direct,legacy_revision=revision)
+        self.assertEqual(renewed['action_headroom'],1000)
+        direct['requests']['batch']=dict(proposal=dict(account=account,
+            action=dict(type='batchModify',modifies=[{},{}])),phase='OBSERVED')
+        direct['requests']['rejected']=dict(proposal=dict(account=account,
+            action=dict(type='order',orders=[{},{}])),phase='OBSERVED',reply=dict(state='REJECTED'))
+        self.raw.calls.clear()
+        spent=self.provider._entry_account(account,'long_account',state=direct,legacy_revision=revision)
+        self.assertEqual(spent['action_headroom'],980)
+        repeated=self.provider._entry_account(account,'long_account',state=direct,legacy_revision=revision)
+        self.assertEqual(repeated['action_headroom'],980)
+        self.assertEqual(self.raw.calls,[])
+        direct['requests'].pop('unknown');direct['archived_request_count']=1
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=direct,
+            legacy_revision=revision,plan_only=True),['userRateLimit'])
+        refreshed=self.provider._entry_account(account,'long_account',state=direct,legacy_revision=revision)
+        self.assertEqual(refreshed['action_headroom'],1000)
+        self.assertEqual([c[0] for c in self.raw.calls],['userRateLimit'])
+        self.raw.calls.clear()
+        self.assertEqual(self.provider._entry_account(account,'long_account',state=direct,
+            legacy_revision='changed-legacy',plan_only=True),['userRateLimit'])
+        self.provider._entry_account(account,'long_account',state=direct,legacy_revision='changed-legacy')
+        self.assertEqual([c[0] for c in self.raw.calls],['userRateLimit'])
 
     def test_available_margin_is_decided_by_exchange_not_an_extra_lab_model(self):
         first=self.candidate();original=self.raw.read
@@ -214,10 +366,16 @@ class EntryReadReuseTests(unittest.TestCase):
             except BaseException as exc:
                 errors.append(exc)
         entry = threading.Thread(target=run, args=(True,), name='entry-fixture', daemon=True)
+        second_entry = threading.Thread(target=run, args=(True,), name='second-entry-fixture', daemon=True)
         protection = threading.Thread(target=run, args=(False,), name='protection-fixture', daemon=True)
         entry.start()
         try:
             self.assertTrue(entered.wait(2))
+            self.assertEqual(self.provider._entry_account(self.state['routes']['long_account'],
+                'long_account',state=self.state,legacy_revision='planning',plan_only=True),
+                ['userRole','userRateLimit'])
+            self.assertTrue(entry.is_alive())
+            second_entry.start()
             protection.start()
             protection.join(timeout=2)
             self.assertFalse(protection.is_alive())
@@ -226,11 +384,16 @@ class EntryReadReuseTests(unittest.TestCase):
         finally:
             release.set()
             entry.join(timeout=3)
+            if second_entry.ident is not None:
+                second_entry.join(timeout=3)
             if protection.ident is not None:
                 protection.join(timeout=3)
         self.assertFalse(entry.is_alive())
+        self.assertFalse(second_entry.is_alive())
         self.assertEqual(errors, [])
-        self.assertEqual(len(completed), 2)
+        self.assertEqual(len(completed), 3)
+        self.assertEqual(sum(c[0]=='userRole' for c in self.raw.calls),1)
+        self.assertEqual(sum(c[0]=='userRateLimit' for c in self.raw.calls),1)
 
     def test_idle_collections_read_each_account_once_without_unused_market_read(self):
         self.provider.collect(self.state)

@@ -525,8 +525,10 @@ class FullConnectionTests(unittest.TestCase):
         self.oracle.t+=1
         self.oracle.orders[stop]['view'].update(status='CANCELED',at_ms=self.oracle.t)
         self.seed(hype_row71205_message(entry=100,decision_ms=ARM-60000))
-        started=self.oracle.t
-        def slow_source(*args):
+        started=self.oracle.t;raw_start=len(self.raw.calls)
+        original_entry=self.provider._entry_account
+        def slow_source(*args,**kwargs):
+            if kwargs.get('plan_only') is True:return original_entry(*args,**kwargs)
             self.oracle.t+=20000
             raise TimeoutError('SOURCE_DATABASE_TIMEOUT')
         with patch.object(self.provider.prices,'source_range',side_effect=slow_source) as source, \
@@ -535,7 +537,9 @@ class FullConnectionTests(unittest.TestCase):
              patch.object(self.provider,'_entry_account',side_effect=slow_source) as entry_account:
             result=self.service.tick()
         self.assertEqual(self.oracle.t,started+1)  # The synthetic wire advances 1 ms.
-        self.assertEqual([p.call_count for p in (source,history,bars,entry_account)],[0,0,0,0])
+        self.assertEqual([p.call_count for p in (source,history,bars)],[0,0,0])
+        self.assertTrue(all(call.kwargs.get('plan_only') is True for call in entry_account.call_args_list))
+        self.assertFalse({'userRole','userRateLimit'} & {c[0] for c in self.raw.calls[raw_start:]})
         self.assertEqual(result.get('operation'),'CREATE_EXIT')
         self.assertEqual(self.oracle.requests[-1]['proposal']['leg'],'STOP')
         self.assertEqual(self.oracle.requests[-1]['proposal']['card_id'],msg['occurrence_id'])

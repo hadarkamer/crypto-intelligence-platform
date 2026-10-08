@@ -222,6 +222,8 @@ def review(request, context, *, now_ms):
                 or account_check['action_headroom']<roles.ENTRY_ACTION_HEADROOM):
             raise BoundaryError('EXACT_CURRENT_ENTRY_ACCOUNT_REQUIRED')
         _fresh(account_check.get('at_ms'),now_ms,15000,'ENTRY_ACCOUNT_SAMPLE_EXPIRED')
+        for field,limit in (('signer_at_ms',299999),('allowance_at_ms',59999)):
+            _fresh(account_check.get(field,account_check['at_ms']),now_ms,limit,'ENTRY_ACCOUNT_SAMPLE_EXPIRED')
         quantity=life.number(p['quantity'],positive=True)
         if not Decimal(10)<=quantity*Decimal(levels['entry'])<=Decimal(5000):
             raise BoundaryError('OUTSIDE_LAB_SIZE_BOUNDS')

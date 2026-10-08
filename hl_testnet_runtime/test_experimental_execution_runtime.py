@@ -187,7 +187,17 @@ class RuntimeTests(unittest.TestCase):
         msg=self.r2732();self.worker.receive([msg]);self.venue.entry_account_override[msg['occurrence_id']]={'action_headroom':0}
         with self.assertRaisesRegex(runtime.RuntimeError,'ENTRY_ACCOUNT'):
             self.worker.run_once()
+        for field,limit in (('signer_at_ms',300000),('allowance_at_ms',60000)):
+            for value in (self.venue.t-limit,self.venue.t+1,True,None,'invalid'):
+                self.venue.entry_account_override[msg['occurrence_id']]={field:value}
+                with self.subTest(field=field,value=value), self.assertRaisesRegex(
+                        runtime.RuntimeError,'ENTRY_ACCOUNT'):
+                    self.worker.run_once()
         self.assertFalse(self.store.load()['trades']);self.assertFalse(self.venue.requests)
+        self.venue.entry_account_override[msg['occurrence_id']]={
+            'signer_at_ms':self.venue.t-299999,'allowance_at_ms':self.venue.t-59999}
+        self.worker.run_once()
+        self.assertEqual(len(self.venue.requests),1)
 
     def test_local_workers_cannot_both_claim_different_same_formula_occurrences(self):
         msg=self.r2732();self.worker.receive([msg]);worker2=runtime.IsolatedExecutionRuntime(ExecutionState(self.path),self.venue,mode=runtime.MODE)

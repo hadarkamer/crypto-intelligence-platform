@@ -658,14 +658,15 @@ class ProviderTests(unittest.TestCase):
                 raise AssertionError('NO_FINANCIAL_PREFLIGHT')
             return original(kind,*args,**kwargs)
         with patch.object(self.raw,'read',side_effect=read):
-            observed=self.provider._entry_account(account,'short_account')
+            observed=self.provider._entry_account(account,'short_account',state=self.state,legacy_revision='fixture')
         self.assertEqual(observed['account'],account)
         self.assertEqual(observed['agent'],ENV['HL_TESTNET_SHORT_AGENT_ADDRESS'])
         self.assertEqual(observed['action_headroom'],1000)
+        self.exchange.t+=300000
         wrong=dict(role='agent',data=dict(user=self.state['routes']['long_account']))
         with patch.object(self.raw,'read',return_value=wrong):
             with self.assertRaisesRegex(ValueError,'AGENT_ACCOUNT_MISMATCH'):
-                self.provider._entry_account(account,'short_account')
+                self.provider._entry_account(account,'short_account',state=self.state,legacy_revision='fixture')
 
 
 if __name__=='__main__':unittest.main()

@@ -5,6 +5,7 @@ schedule ``collect``; startup registration and release remain separate gates.
 Account ownership is derived from the two journals and exact exchange CLOIDs,
 never from an alert, acknowledgement, or caller supplied completeness flag.
 """
+from contextlib import nullcontext
 from copy import deepcopy
 from decimal import Decimal
 import time
@@ -156,6 +157,8 @@ class LiveEvidenceProvider:
             raise ProviderError('ONE_SHARED_TESTNET_REQUEST_BUDGET_REQUIRED')
         self._lookup_reader=lookup_reader
         self._market=None
+        self._entry_checks={}
+        self._entry_lock=threading.RLock()
 
     @property
     def info(self):
@@ -390,30 +393,63 @@ class LiveEvidenceProvider:
                     pending=old['pending'] if old else None,evidence=dict(snapshot=observed))
         return normalized,observed,bucket,legacy_active,exp,lookups
 
-    def _entry_account(self, account, role, *, entry_reads=None):
-        """Bind the signer to the routed account and leave allowance for exits.
+    def _entry_account(self, account, role, *, state, legacy_revision,
+                       entry_reads=None, plan_only=False):
+        """Reuse validated signer/allowance facts; always recheck local usage.
 
-        Alert prices and local risk determine the order. Margin, leverage and
-        account-mode suitability are enforced by the exchange when it accepts
-        or rejects that order; they do not require another read-only trading
-        model before sending. Only successful account facts are reused within
-        this collection, never across submissions or later collections.
+        Remote clocks are preserved separately from this collection's local
+        check. Every new durable action is charged at the conservative expired
+        request cost, including rejected/unknown/unsent attempts. Lost history
+        or a changed legacy journal requires a new allowance sample.
         """
         route=roles.route_for(self.env,role,account)
         entry_reads={} if entry_reads is None else entry_reads
-        if account in entry_reads:
+        if account in entry_reads and not plan_only:
             return deepcopy(entry_reads[account])
-        at=self.now()
-        link=self.entry_info.read('userRole',user=route['agent'])
-        if (not isinstance(link,dict) or link.get('role')!='agent'
-                or not isinstance(link.get('data'),dict)
-                or checks.address(link['data'].get('user'))!=account):
-            raise ProviderError('AGENT_ACCOUNT_MISMATCH')
-        headroom=roles.entry_action_headroom(account,self.entry_info)
-        value=dict(account=account,agent=route['agent'],at_ms=at,
-                   action_headroom=headroom)
-        entry_reads[account]=value
-        return deepcopy(value)
+        requests={rid:5*max(1,len(r['proposal']['action'].get('orders',
+            r['proposal']['action'].get('cancels',r['proposal']['action'].get('modifies',[])))))
+            for rid,r in state['requests'].items() if r['proposal']['account']==account}
+        # Planning cannot wait behind an entry HTTP call: this collection may
+        # still discover a missing stop. Actual reads keep the serialized lock.
+        with nullcontext() if plan_only else self._entry_lock:
+            at=self.now()
+            saved=self._entry_checks.get(account,{})
+            if plan_only:saved=dict(saved)
+            if (saved.get('agent'),saved.get('role'))!=(route['agent'],role):
+                saved={}
+            signer_fresh=(type(saved.get('signer_at_ms')) is int
+                and 0<=at-saved['signer_at_ms']<300000)
+            baseline=saved.get('requests',{})
+            headroom=saved.get('action_headroom',0)-sum(
+                cost for rid,cost in requests.items() if rid not in baseline)
+            allowance_fresh=(signer_fresh and type(saved.get('allowance_at_ms')) is int
+                and 0<=at-saved['allowance_at_ms']<60000
+                and saved.get('legacy_revision')==legacy_revision
+                and all(requests.get(rid)==cost for rid,cost in baseline.items())
+                and headroom>=roles.ENTRY_ACTION_HEADROOM)
+            if plan_only:
+                return ([] if signer_fresh else ['userRole'])+(
+                    [] if allowance_fresh else ['userRateLimit'])
+            if not signer_fresh:
+                self._entry_checks.pop(account,None)
+                link=self.entry_info.read('userRole',user=route['agent'])
+                if (not isinstance(link,dict) or link.get('role')!='agent'
+                        or not isinstance(link.get('data'),dict)
+                        or checks.address(link['data'].get('user'))!=account):
+                    raise ProviderError('AGENT_ACCOUNT_MISMATCH')
+                saved=dict(agent=route['agent'],role=role,signer_at_ms=at)
+                self._entry_checks[account]=saved
+            if not allowance_fresh:
+                saved.pop('allowance_at_ms',None)
+                allowance_at=self.now()
+                headroom=roles.entry_action_headroom(account,self.entry_info)
+                saved.update(allowance_at_ms=allowance_at,action_headroom=headroom,
+                    requests=requests,legacy_revision=legacy_revision)
+            value=dict(account=account,agent=route['agent'],at_ms=at,
+                signer_at_ms=saved['signer_at_ms'],allowance_at_ms=saved['allowance_at_ms'],
+                action_headroom=headroom)
+            entry_reads[account]=value
+            return deepcopy(value)
 
     def collect(self, state, *, entries_enabled=False):
         if state.get('domain')!='testnet':
@@ -526,7 +562,9 @@ class LiveEvidenceProvider:
             # each transport still acquires its ordinary unchanged permit.
             if callable(available):
                 try:
-                    planned=['userRole','userRateLimit']
+                    role='long_account' if msg['side']=='LONG' else 'short_account'
+                    planned=self._entry_account(account,role,state=state,
+                        legacy_revision=result['legacy_account_revisions'][account],plan_only=True)
                     if self._market is None or not 0<=now-self._market[0]<5000:
                         planned.append('metaAndAssetCtxs')
                     planned+=['frontendOpenOrders','clearinghouseState']*len(participating)
@@ -732,7 +770,8 @@ class LiveEvidenceProvider:
             # Preserve its original clock and refresh within the strictest
             # existing emergency-price window; do not cache malformed prices.
             self._market=(market_at,market) if market_error is None else None
-        # Reuse only this collection; existing exposure is still collected
+        # Local admission results share a collection clock; remote facts retain
+        # their own bounded lifetimes. Existing exposure is still collected
         # while a source-only entry waits for its recorded budget retry.
         entry_reads={};entry_selected=False
         entry_planner=object.__new__(TestnetExecutionRuntime)
@@ -789,7 +828,8 @@ class LiveEvidenceProvider:
                     result['ranges'][cid]=dict(source=source,testnet=testnet)
                 if self.safety is None:
                     raise ProviderError('VERIFIED_SUPERVISOR_AND_FEED_CAPABILITY_REQUIRED')
-                result['entry_accounts'][cid]=self._entry_account(account,role,entry_reads=entry_reads)
+                result['entry_accounts'][cid]=self._entry_account(account,role,state=state,
+                    legacy_revision=result['legacy_account_revisions'][account],entry_reads=entry_reads)
                 # The worker sends at most one proposal per cycle. Reuse its
                 # unchanged pure admission to stop preparing accounts that
                 # cannot be used. A refused first candidate leaves the next
