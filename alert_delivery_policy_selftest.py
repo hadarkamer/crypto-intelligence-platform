@@ -17,11 +17,12 @@ _EXPECTED = {
     'HYPE_MAXPAIN_DIST05_15_LONG_TF', 'DOGE_MAXPAIN_DIST15_25_LONG_TF',
     'XRP_MAXPAIN_LONG_DIST2_4_SHORT_TF',
     'ETH_MAXPAIN_LONG_DIST1_3',
+    'DOGE_MAXPAIN_ADVERSE_HALF_PART75_H24',
 }
 
 
 class PolicyTests(unittest.TestCase):
-    def test_all_profiles_preserve_exact_eight_rule_roster(self):
+    def test_all_profiles_preserve_exact_nine_rule_roster(self):
         for profile in ('ALL', 'SELECTED_EXPERIMENTAL_ONLY', 'ORDINARY_AND_SELECTED_EXPERIMENTAL'):
             with self.subTest(profile=profile), patch.dict(os.environ, {'ALERT_DELIVERY_PROFILE': profile}):
                 self.assertEqual(policy.ordinary_alerts_enabled(), profile != 'SELECTED_EXPERIMENTAL_ONLY')
@@ -50,7 +51,7 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse(policy.u21_experimental_enabled())
             self.assertFalse(policy.other_experimental_alerts_enabled())
             self.assertFalse(any(policy.manual_rule_enabled(rule) for rule in store.rules.RULE_IDS))
-            self.assertEqual(policy.status()['roster_version'], 'owner-r2732-and-later-20261005-v2-eth')
+            self.assertEqual(policy.status()['roster_version'], 'owner-r2732-and-later-20261008-v3-doge-partial')
             self.assertTrue(policy.ordinary_alerts_enabled())
 
     def test_unknown_profile_fails_closed(self):
@@ -143,3 +144,4 @@ class RetiredDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

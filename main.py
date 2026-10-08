@@ -46,6 +46,7 @@ import xrp_r2732_experimental_worker
 import hype_row71205_experimental_worker
 import sol_proximity_experimental_worker
 import sol_g65_experimental_worker
+import doge_partial_experimental_worker
 import ai_agent
 import ai_telegram
 import trade_telegram
@@ -4895,6 +4896,7 @@ async def run_watch_cycle(
                 worker.observe(dual_cvd_bundle, chat_id)
                 for worker in sol_proximity_experimental_worker.ADDITIONAL_WORKERS.values()
             ))
+            await doge_partial_experimental_worker.WORKER.observe(dual_cvd_bundle, chat_id)
         # Freeze source-clock references before any experimental intent. This is
         # a display-only contract; native outcome entry prices remain unchanged.
         try:
@@ -6597,6 +6599,7 @@ async def health(request):
             for symbol, worker in sol_proximity_experimental_worker.ADDITIONAL_WORKERS.items()
         },
         "sol_g65_experimental": sol_g65_experimental_worker.WORKER.status(),
+        "doge_partial_experimental": doge_partial_experimental_worker.WORKER.status(),
         "research_outcomes": research_outcome_worker.WORKER.status(),
         "watch_scan_intake": research_watch_scan_intake.WORKER.status(),
         "watch_scan_measurement": research_watch_scan_measurement_worker.WORKER.status(),
@@ -7930,6 +7933,9 @@ async def main():
     sol_g65_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
+    doge_partial_experimental_worker.WORKER.start(
+        bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
+    )
     hype_row71205_experimental_worker.WORKER.start(
         bot_app.bot, lambda: (WATCH_GENERAL_ENABLED, WATCH_RUNTIME.get("chat_id"))
     )
@@ -7947,6 +7953,7 @@ async def main():
         await hype_row71205_experimental_worker.WORKER.stop()
         await sol_proximity_experimental_worker.WORKER.stop()
         await sol_g65_experimental_worker.WORKER.stop()
+        await doge_partial_experimental_worker.WORKER.stop()
         for worker in sol_proximity_experimental_worker.ADDITIONAL_WORKERS.values():
             await worker.stop()
         await asyncio.to_thread(experimental_execution_forwarder.stop_background)
@@ -8007,4 +8014,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
