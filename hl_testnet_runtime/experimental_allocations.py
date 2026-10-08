@@ -202,15 +202,3 @@ def _assess(bindings, snapshot, *, now_ms, previous):
         raise AllocationError('POSITION_DOES_NOT_EQUAL_OWNED_ALLOCATIONS')
     return dict(status='RECONCILED', allocations=allocations, diagnostics=[],
         signed_expected_position=format(expected,'f'), evidence=deepcopy(snapshot), bindings=deepcopy(bindings))
-
-
-def unsigned_reduction(assessment, occurrence_id, quantity):
-    """Return a capped rehearsal reduction; never permit a pooled venue send."""
-    if assessment.get('status') != 'RECONCILED' or assessment.get('version') != VERSION:
-        raise AllocationError('RECONCILED_ALLOCATION_REQUIRED')
-    amount = _number(quantity, positive=True)
-    card = assessment['allocations'].get(occurrence_id)
-    if card is None or amount > _number(card['remaining']):
-        raise AllocationError('REDUCTION_EXCEEDS_OWN_REMAINING')
-    return dict(occurrence_id=occurrence_id, quantity=quantity, reduce_only=True,
-                dispatch_enabled=False, shared_market_dispatch_enabled=False)

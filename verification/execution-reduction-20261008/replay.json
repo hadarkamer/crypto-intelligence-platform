@@ -50,24 +50,22 @@
       "synthetic_actions": 0
     },
     "stable_protected_collection": {
-      "reads": 5,
-      "weight": 47,
+      "reads": 3,
+      "weight": 43,
       "by_kind": {
         "frontendOpenOrders": 1,
         "clearinghouseState": 1,
-        "orderStatus": 2,
         "userFillsByTime": 1
       },
       "entry_capacity_count": 0,
       "entry_blocked": {}
     },
     "blocked_peer_collection": {
-      "reads": 5,
-      "weight": 47,
+      "reads": 3,
+      "weight": 43,
       "by_kind": {
         "frontendOpenOrders": 1,
         "clearinghouseState": 1,
-        "orderStatus": 2,
         "userFillsByTime": 1
       },
       "entry_capacity_count": 0,
@@ -81,382 +79,419 @@
     "entries": [
       {
         "side": "long_account",
-        "at_ms": 750
+        "at_ms": 500
       },
       {
         "side": "short_account",
-        "at_ms": 6401
+        "at_ms": 1151
       }
     ],
-    "closed_ms": 87105,
+    "closed_ms": 77853,
     "phases": {
       "long_account": "CLOSED",
       "short_account": "CLOSED"
     },
+    "pending_outcomes": [],
+    "observed_working_entries": {
+      "long_account": 0,
+      "short_account": 0
+    },
+    "source_to_finish_reads": 108,
+    "source_to_finish_weight": 1566,
     "samples": [
       {
-        "at_ms": 751,
+        "at_ms": 501,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 469,
+        "weight": 289,
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 751,
+        "at_ms": 501,
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 469,
+        "weight": 289,
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 6404,
+        "at_ms": 1154,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 738,
+        "weight": 556,
         "phases": {
           "long_account": "OUTCOME_UNKNOWN",
           "short_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 6404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 738,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN",
-          "short_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 6905,
+        "at_ms": 1653,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 851,
+        "weight": 667,
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 11404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 851,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 12356,
+        "at_ms": 2104,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 962,
+        "weight": 776,
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 16404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 962,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 17858,
+        "at_ms": 2555,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 1075,
+        "weight": 885,
         "phases": {
           "long_account": "OPEN",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 21404,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 1075,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 23258,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1145,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 26404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1145,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 28608,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 31404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 33608,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 36404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 38608,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 41404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 43608,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 46404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 48608,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 51404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 53608,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 56404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 58608,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 61404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 63608,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1195,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 66404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 1151,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 68908,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1199,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 71404,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 774,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 74409,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 868,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 76404,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 486,
-        "phases": {
-          "long_account": "OPEN",
-          "short_account": "CLOSED"
-        }
-      },
-      {
-        "at_ms": 76705,
+        "at_ms": 3006,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 554,
+        "weight": 994,
         "phases": {
-          "long_account": "PARTIALLY_CLOSED",
-          "short_account": "CLOSED"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 81404,
+        "at_ms": 3458,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1102,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 5501,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 443,
+        "weight": 1102,
         "phases": {
-          "long_account": "PARTIALLY_CLOSED",
-          "short_account": "CLOSED"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 81955,
+        "at_ms": 5801,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 508,
+        "weight": 1150,
         "phases": {
-          "long_account": "PARTIALLY_CLOSED",
-          "short_account": "CLOSED"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 86404,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 10501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 488,
+        "weight": 1150,
         "phases": {
-          "long_account": "PARTIALLY_CLOSED",
-          "short_account": "CLOSED"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 87105,
+        "at_ms": 11101,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 438,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 15501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 16101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 20501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 21101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 25501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 26101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 30501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 31101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 35501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 36101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 40501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 41101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 45501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 46101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 50501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 51101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 55501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 56101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 60501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 61101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1198,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 65501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 1154,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 66351,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 1200,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 70501,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 621,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 71802,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 426,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 72253,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 424,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 72703,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 466,
+        "phases": {
+          "long_account": "CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 75501,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+        "error": null,
+        "weight": 418,
+        "phases": {
+          "long_account": "CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 77853,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 460,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "CLOSED"
@@ -465,239 +500,215 @@
     ],
     "denials": [
       {
-        "at_ms": 1791289103158,
+        "at_ms": 1791289085751,
         "priority": "protection",
-        "used_weight": 1123,
+        "used_weight": 1148,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 40992
+        "retry_after_ms": 63349
       },
       {
-        "at_ms": 1791289103208,
+        "at_ms": 1791289085801,
         "priority": "protection",
-        "used_weight": 1125,
-        "requested_weight": 122,
-        "ceiling": 1200,
-        "retry_after_ms": 45792
-      },
-      {
-        "at_ms": 1791289108558,
-        "priority": "protection",
-        "used_weight": 1193,
+        "used_weight": 1150,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 40692
+        "retry_after_ms": 63299
       },
       {
-        "at_ms": 1791289108608,
+        "at_ms": 1791289091051,
         "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 122,
-        "ceiling": 1200,
-        "retry_after_ms": 40642
-      },
-      {
-        "at_ms": 1791289108608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 35392
-      },
-      {
-        "at_ms": 1791289113608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 30392
-      },
-      {
-        "at_ms": 1791289113608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 30392
-      },
-      {
-        "at_ms": 1791289113608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 30392
-      },
-      {
-        "at_ms": 1791289118608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 25392
-      },
-      {
-        "at_ms": 1791289118608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 25392
-      },
-      {
-        "at_ms": 1791289118608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 25392
-      },
-      {
-        "at_ms": 1791289123608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 20392
-      },
-      {
-        "at_ms": 1791289123608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 20392
-      },
-      {
-        "at_ms": 1791289123608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 20392
-      },
-      {
-        "at_ms": 1791289128608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 15392
-      },
-      {
-        "at_ms": 1791289128608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 15392
-      },
-      {
-        "at_ms": 1791289128608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 15392
-      },
-      {
-        "at_ms": 1791289133608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 10392
-      },
-      {
-        "at_ms": 1791289133608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 10392
-      },
-      {
-        "at_ms": 1791289133608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 10392
-      },
-      {
-        "at_ms": 1791289138608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 5392
-      },
-      {
-        "at_ms": 1791289138608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 5392
-      },
-      {
-        "at_ms": 1791289138608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 5392
-      },
-      {
-        "at_ms": 1791289143608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 392
-      },
-      {
-        "at_ms": 1791289143608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 392
-      },
-      {
-        "at_ms": 1791289143608,
-        "priority": "protection",
-        "used_weight": 1195,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 392
-      },
-      {
-        "at_ms": 1791289148908,
-        "priority": "protection",
-        "used_weight": 1199,
+        "used_weight": 1196,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 392
+        "retry_after_ms": 58199
       },
       {
-        "at_ms": 1791289148908,
+        "at_ms": 1791289091101,
         "priority": "protection",
-        "used_weight": 1199,
+        "used_weight": 1198,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 58149
+      },
+      {
+        "at_ms": 1791289096101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 47899
+      },
+      {
+        "at_ms": 1791289096101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 47899
+      },
+      {
+        "at_ms": 1791289101101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 42899
+      },
+      {
+        "at_ms": 1791289101101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 42899
+      },
+      {
+        "at_ms": 1791289106101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 37899
+      },
+      {
+        "at_ms": 1791289106101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 37899
+      },
+      {
+        "at_ms": 1791289111101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 32899
+      },
+      {
+        "at_ms": 1791289111101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 32899
+      },
+      {
+        "at_ms": 1791289116101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 27899
+      },
+      {
+        "at_ms": 1791289116101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 27899
+      },
+      {
+        "at_ms": 1791289121101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 22899
+      },
+      {
+        "at_ms": 1791289121101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 22899
+      },
+      {
+        "at_ms": 1791289126101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 17899
+      },
+      {
+        "at_ms": 1791289126101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 17899
+      },
+      {
+        "at_ms": 1791289131101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 12899
+      },
+      {
+        "at_ms": 1791289131101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 12899
+      },
+      {
+        "at_ms": 1791289136101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 7899
+      },
+      {
+        "at_ms": 1791289136101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 7899
+      },
+      {
+        "at_ms": 1791289141101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 2899
+      },
+      {
+        "at_ms": 1791289141101,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 2899
+      },
+      {
+        "at_ms": 1791289146351,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 2949
+      },
+      {
+        "at_ms": 1791289146351,
+        "priority": "protection",
+        "used_weight": 1200,
         "requested_weight": 2,
         "ceiling": 1200,
-        "retry_after_ms": 92
-      },
-      {
-        "at_ms": 1791289148908,
-        "priority": "protection",
-        "used_weight": 1199,
-        "requested_weight": 20,
-        "ceiling": 1200,
-        "retry_after_ms": 92
+        "retry_after_ms": 2649
       }
     ],
-    "synthetic_actions": 6,
+    "synthetic_actions": 8,
     "entry_decisions": {
       "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
         "stage": "ENTRY_ADMISSION",
@@ -705,8 +716,8 @@
         "account_role": "long_account",
         "symbol": "SOL",
         "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
-        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
-        "at_ms": 1791289148908,
+        "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
+        "at_ms": 1791289157853,
         "retry_after_ms": null,
         "deadline": "2026-10-06T12:19:30+00:00"
       },
@@ -716,8 +727,8 @@
         "account_role": "short_account",
         "symbol": "SOL",
         "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
-        "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
-        "at_ms": 1791289167105,
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289146351,
         "retry_after_ms": null,
         "deadline": "2026-10-06T12:19:30+00:00"
       }
@@ -726,9 +737,11 @@
       "long_account:ENTRY:ENTRY",
       "short_account:ENTRY:ENTRY",
       "long_account:CREATE_EXIT:STOP",
+      "short_account:CREATE_EXIT:STOP",
       "long_account:CREATE_EXIT:TAKE_PROFIT",
-      "short_account:EMERGENCY_CLOSE:STOP",
-      "long_account:CANCEL:STOP"
+      "short_account:CREATE_EXIT:TAKE_PROFIT",
+      "long_account:CANCEL:STOP",
+      "short_account:CANCEL:STOP"
     ],
     "orders": {
       "1": {
@@ -752,13 +765,13 @@
             "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
           },
           "status": "FILLED",
-          "at_ms": 1791289086403,
+          "at_ms": 1791289081153,
           "fills": [
             {
               "fill_id": "fill1_0",
               "quantity": "4.67",
               "price": "93.544",
-              "at_ms": 1791289086403
+              "at_ms": 1791289081153
             }
           ]
         }
@@ -784,13 +797,13 @@
             "c": "0xe0977db3fa67b9cd59aed178d1a9e2d5"
           },
           "status": "FILLED",
-          "at_ms": 1791289086404,
+          "at_ms": 1791289081154,
           "fills": [
             {
               "fill_id": "fill2_0",
               "quantity": "5.60",
               "price": "93.544",
-              "at_ms": 1791289086404
+              "at_ms": 1791289081154
             }
           ]
         }
@@ -818,17 +831,44 @@
             "c": "0x50922237d0722036b6df461ce773f79b"
           },
           "status": "CANCELED",
-          "at_ms": 1791289156705,
+          "at_ms": 1791289151802,
           "fills": []
         }
       },
       "4": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "STOP",
+        "view": {
+          "oid": "4",
+          "cloid": "0xe74a64202d8566254aee9d615a57dc1b",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "95.327",
+            "s": "5.6",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": true,
+                "triggerPx": "95.327",
+                "tpsl": "sl"
+              }
+            },
+            "c": "0xe74a64202d8566254aee9d615a57dc1b"
+          },
+          "status": "CANCELED",
+          "at_ms": 1791289152253,
+          "fills": []
+        }
+      },
+      "5": {
         "account": "0x1111111111111111111111111111111111111111",
         "symbol": "SOL",
         "leg": "TAKE_PROFIT",
         "view": {
-          "oid": "4",
-          "cloid": "0x56e7adc1695db85a84574f4bec553c51",
+          "oid": "5",
+          "cloid": "0x45dc3bbe2293d7b34fdc89ea4c147d9c",
           "wire_order": {
             "a": 2,
             "b": false,
@@ -842,48 +882,50 @@
                 "tpsl": "tp"
               }
             },
-            "c": "0x56e7adc1695db85a84574f4bec553c51"
+            "c": "0x45dc3bbe2293d7b34fdc89ea4c147d9c"
           },
           "status": "FILLED",
-          "at_ms": 1791289154409,
+          "at_ms": 1791289083457,
           "fills": [
             {
-              "fill_id": "fill4_0",
+              "fill_id": "fill5_0",
               "quantity": "4.67",
               "price": "95.327",
-              "at_ms": 1791289154409
+              "at_ms": 1791289083457
             }
           ]
         }
       },
-      "5": {
+      "6": {
         "account": "0x2222222222222222222222222222222222222222",
         "symbol": "SOL",
-        "leg": "STOP",
+        "leg": "TAKE_PROFIT",
         "view": {
-          "oid": "5",
-          "cloid": "0x0f9bd8684e9f1efd9ddecb679720eec8",
+          "oid": "6",
+          "cloid": "0xf78efd3f518e5e97748b98e2ea5bfd12",
           "wire_order": {
             "a": 2,
             "b": true,
-            "p": "94.479",
+            "p": "91.405",
             "s": "5.6",
             "r": true,
             "t": {
-              "limit": {
-                "tif": "Ioc"
+              "trigger": {
+                "isMarket": false,
+                "triggerPx": "91.405",
+                "tpsl": "tp"
               }
             },
-            "c": "0x0f9bd8684e9f1efd9ddecb679720eec8"
+            "c": "0xf78efd3f518e5e97748b98e2ea5bfd12"
           },
           "status": "FILLED",
-          "at_ms": 1791289097858,
+          "at_ms": 1791289083458,
           "fills": [
             {
-              "fill_id": "fill5_0",
-              "quantity": "5.6",
-              "price": "94.479",
-              "at_ms": 1791289097858
+              "fill_id": "fill6_0",
+              "quantity": "5.60",
+              "price": "91.405",
+              "at_ms": 1791289083458
             }
           ]
         }
@@ -912,7 +954,15 @@
       },
       {
         "phase": "OBSERVED",
+        "observed_oid": "6"
+      },
+      {
+        "phase": "OBSERVED",
         "observed_oid": "3"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "4"
       }
     ],
     "final_context": {
@@ -926,18 +976,25 @@
     "entries": [
       {
         "side": "long_account",
-        "at_ms": 4550
+        "at_ms": 4500
       },
       {
         "side": "short_account",
-        "at_ms": 73650
+        "at_ms": 73500
       }
     ],
-    "closed_ms": 100701,
+    "closed_ms": 80804,
     "phases": {
       "long_account": "CLOSED",
       "short_account": "CLOSED"
     },
+    "pending_outcomes": [],
+    "observed_working_entries": {
+      "long_account": 0,
+      "short_account": 0
+    },
+    "source_to_finish_reads": 74,
+    "source_to_finish_weight": 1210,
     "samples": [
       {
         "at_ms": 0,
@@ -954,190 +1011,217 @@
         "phases": {}
       },
       {
-        "at_ms": 4552,
+        "at_ms": 4502,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 793,
+        "weight": 773,
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 5000,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 793,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 5301,
+        "at_ms": 4802,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 861,
+        "weight": 839,
         "phases": {
           "long_account": "OPEN"
         }
       },
       {
-        "at_ms": 10000,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 861,
-        "phases": {
-          "long_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 10602,
+        "at_ms": 5103,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 929,
+        "weight": 905,
         "phases": {
           "long_account": "OPEN"
         }
       },
       {
-        "at_ms": 15000,
+        "at_ms": 5103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 841,
+        "weight": 905,
         "phases": {
           "long_account": "OPEN"
         }
       },
       {
-        "at_ms": 15953,
+        "at_ms": 5404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 910,
+        "weight": 970,
         "phases": {
           "long_account": "OPEN"
         }
       },
       {
-        "at_ms": 20000,
+        "at_ms": 10103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 910,
+        "weight": 970,
         "phases": {
           "long_account": "OPEN"
         }
       },
       {
-        "at_ms": 20301,
+        "at_ms": 10354,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 978,
+        "weight": 1036,
         "phases": {
           "long_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 25000,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 890,
-        "phases": {
-          "long_account": "PARTIALLY_CLOSED"
-        }
-      },
-      {
-        "at_ms": 25551,
+        "at_ms": 10654,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 955,
+        "weight": 1101,
         "phases": {
           "long_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 30000,
+        "at_ms": 15103,
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 955,
+        "weight": 1013,
         "phases": {
           "long_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 30701,
+        "at_ms": 15804,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 998,
+        "weight": 1056,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 35000,
+        "at_ms": 20103,
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 910,
+        "weight": 1056,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 35701,
+        "at_ms": 20804,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 910,
+        "weight": 1056,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 40000,
+        "at_ms": 25103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 910,
+        "weight": 968,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 40701,
+        "at_ms": 25804,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 910,
+        "weight": 968,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 45000,
+        "at_ms": 30103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 822,
+        "weight": 968,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 45701,
+        "at_ms": 30804,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 822,
+        "weight": 968,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 50000,
+        "at_ms": 35103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 822,
+        "weight": 880,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 50701,
+        "at_ms": 35804,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 822,
+        "weight": 880,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 40103,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 880,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 40804,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 880,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 45103,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 792,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 45804,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 792,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 50103,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 792,
+        "phases": {
+          "long_account": "CLOSED"
+        }
+      },
+      {
+        "at_ms": 50804,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 792,
         "phases": {
           "long_account": "CLOSED"
         }
@@ -1146,16 +1230,16 @@
         "at_ms": 54000,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 690,
+        "weight": 660,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 55000,
+        "at_ms": 55103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 690,
+        "weight": 660,
         "phases": {
           "long_account": "CLOSED"
         }
@@ -1164,16 +1248,16 @@
         "at_ms": 59000,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 690,
+        "weight": 660,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 60000,
+        "at_ms": 60103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 690,
+        "weight": 660,
         "phases": {
           "long_account": "CLOSED"
         }
@@ -1182,16 +1266,16 @@
         "at_ms": 64000,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 670,
+        "weight": 640,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 65000,
+        "at_ms": 65103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 646,
+        "weight": 616,
         "phases": {
           "long_account": "CLOSED"
         }
@@ -1200,161 +1284,112 @@
         "at_ms": 69000,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 646,
+        "weight": 616,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 70000,
+        "at_ms": 70103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 646,
+        "weight": 616,
         "phases": {
           "long_account": "CLOSED"
         }
       },
       {
-        "at_ms": 73652,
+        "at_ms": 73502,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 604,
+        "weight": 594,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 75000,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 536,
-        "phases": {
-          "long_account": "CLOSED",
-          "short_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 75301,
+        "at_ms": 73802,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 604,
+        "weight": 594,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 80000,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 536,
-        "phases": {
-          "long_account": "CLOSED",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 80602,
+        "at_ms": 74103,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 604,
+        "weight": 594,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 85000,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 535,
-        "phases": {
-          "long_account": "CLOSED",
-          "short_account": "OPEN"
-        }
-      },
-      {
-        "at_ms": 85953,
+        "at_ms": 74404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 604,
+        "weight": 594,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 90000,
+        "at_ms": 75103,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 536,
+        "weight": 594,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 90301,
+        "at_ms": 75354,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 604,
+        "weight": 660,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 95000,
-        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-        "error": null,
-        "weight": 539,
-        "phases": {
-          "long_account": "CLOSED",
-          "short_account": "PARTIALLY_CLOSED"
-        }
-      },
-      {
-        "at_ms": 95551,
+        "at_ms": 75654,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 604,
+        "weight": 725,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 100000,
+        "at_ms": 80103,
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 561,
+        "weight": 594,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 100701,
+        "at_ms": 80804,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 604,
+        "weight": 637,
         "phases": {
           "long_account": "CLOSED",
           "short_account": "CLOSED"
         }
       }
     ],
-    "denials": [
-      {
-        "at_ms": 1791289084550,
-        "priority": "background",
-        "used_weight": 792,
-        "requested_weight": 60,
-        "ceiling": 800,
-        "retry_after_ms": 9450
-      }
-    ],
+    "denials": [],
     "synthetic_actions": 8,
     "entry_decisions": {
       "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
@@ -1364,7 +1399,7 @@
         "symbol": "SOL",
         "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
         "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
-        "at_ms": 1791289165952,
+        "at_ms": 1791289160804,
         "retry_after_ms": null,
         "deadline": "2026-10-06T12:19:30+00:00"
       }
@@ -1401,13 +1436,13 @@
             "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
           },
           "status": "FILLED",
-          "at_ms": 1791289084552,
+          "at_ms": 1791289084502,
           "fills": [
             {
               "fill_id": "fill1_0",
               "quantity": "4.67",
               "price": "93.544",
-              "at_ms": 1791289084552
+              "at_ms": 1791289084502
             }
           ]
         }
@@ -1435,7 +1470,7 @@
             "c": "0xc10c394798adf68f8f293d2b202583cf"
           },
           "status": "CANCELED",
-          "at_ms": 1791289100301,
+          "at_ms": 1791289090354,
           "fills": []
         }
       },
@@ -1462,13 +1497,13 @@
             "c": "0x36f6ffc2bb4db0da33e81f7e1bfbd462"
           },
           "status": "FILLED",
-          "at_ms": 1791289095953,
+          "at_ms": 1791289085404,
           "fills": [
             {
               "fill_id": "fill3_0",
               "quantity": "4.67",
               "price": "95.327",
-              "at_ms": 1791289095953
+              "at_ms": 1791289085404
             }
           ]
         }
@@ -1494,13 +1529,13 @@
             "c": "0x89fe6111ac9406a5578c07d5a9c39ed9"
           },
           "status": "FILLED",
-          "at_ms": 1791289153652,
+          "at_ms": 1791289153502,
           "fills": [
             {
               "fill_id": "fill4_0",
               "quantity": "5.60",
               "price": "93.544",
-              "at_ms": 1791289153652
+              "at_ms": 1791289153502
             }
           ]
         }
@@ -1528,7 +1563,7 @@
             "c": "0x3ff3dd7abbdaf004b15ff58c48bd3a28"
           },
           "status": "CANCELED",
-          "at_ms": 1791289170301,
+          "at_ms": 1791289155354,
           "fills": []
         }
       },
@@ -1555,13 +1590,13 @@
             "c": "0x29007245d1c5bb9b622145bfbeac26d2"
           },
           "status": "FILLED",
-          "at_ms": 1791289165953,
+          "at_ms": 1791289154404,
           "fills": [
             {
               "fill_id": "fill6_0",
               "quantity": "5.60",
               "price": "91.405",
-              "at_ms": 1791289165953
+              "at_ms": 1791289154404
             }
           ]
         }
@@ -1612,806 +1647,776 @@
     "entries": [
       {
         "side": "long_account",
-        "at_ms": 750
+        "at_ms": 500
+      },
+      {
+        "side": "short_account",
+        "at_ms": 4550
       }
     ],
-    "closed_ms": null,
+    "closed_ms": 82005,
     "phases": {
-      "long_account": "OUTCOME_UNKNOWN"
+      "long_account": "CLOSED",
+      "short_account": "CLOSED"
     },
+    "pending_outcomes": [],
+    "observed_working_entries": {
+      "long_account": 0,
+      "short_account": 0
+    },
+    "source_to_finish_reads": 128,
+    "source_to_finish_weight": 1788,
     "samples": [
       {
-        "at_ms": 751,
+        "at_ms": 501,
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 733,
+        "weight": 553,
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 751,
+        "at_ms": 501,
         "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
         "error": null,
-        "weight": 733,
+        "weight": 553,
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 6051,
+        "at_ms": 801,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 711,
+        "weight": 617,
         "phases": {
           "long_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 6051,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 4553,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 711,
+        "weight": 794,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OUTCOME_UNKNOWN",
+          "short_account": "OUTCOME_UNKNOWN"
         }
       },
       {
-        "at_ms": 11301,
-        "status": "OBSERVED_NO_ACTION",
+        "at_ms": 5052,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 775,
+        "weight": 905,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 11301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 5503,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 775,
+        "weight": 1014,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 14250,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 751,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 16301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 751,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 19500,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 815,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 21301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 815,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 24750,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 791,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 26301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 791,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 30000,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 855,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 31301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 855,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 35250,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 919,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 36301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 919,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 40500,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 983,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 41301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 983,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 45750,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1047,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 46301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 1047,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 51000,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1111,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 51301,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 1111,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 56200,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 1155,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 56301,
+        "at_ms": 5503,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 1155,
+        "weight": 1014,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 61400,
+        "at_ms": 5904,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 1102,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 6304,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 1199,
+        "weight": 1170,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 61400,
+        "at_ms": 10503,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 1199,
+        "weight": 1170,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 64300,
+        "at_ms": 11454,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 1199,
+        "weight": 1194,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 66400,
+        "at_ms": 15503,
         "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 1199,
+        "weight": 1106,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 69550,
+        "at_ms": 16804,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 939,
+        "weight": 1174,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 71400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 20503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 838,
+        "weight": 1174,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 74800,
+        "at_ms": 21954,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 882,
+        "weight": 1198,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 76400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 25503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1110,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 80050,
+        "at_ms": 27304,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 900,
+        "weight": 1178,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 81400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 30503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1178,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 83400,
+        "at_ms": 32404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 86400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 35503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 88650,
+        "at_ms": 37404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 91400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 40503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 93900,
+        "at_ms": 42404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 96400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 45503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 99150,
+        "at_ms": 47404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 101400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 50503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 104400,
+        "at_ms": 52404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 106400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 55503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 109650,
+        "at_ms": 57404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 111400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 60503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 114900,
+        "at_ms": 62404,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 116400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 65503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 1156,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 120150,
+        "at_ms": 67604,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 836,
+        "weight": 1200,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 121400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 70503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 836,
+        "weight": 891,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 125400,
+        "at_ms": 73055,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 980,
+        "phases": {
+          "long_account": "OPEN",
+          "short_account": "OPEN"
+        }
+      },
+      {
+        "at_ms": 73507,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 856,
+        "weight": 844,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 126400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 75503,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
         "error": null,
-        "weight": 856,
+        "weight": 467,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "OPEN",
+          "short_account": "OPEN"
         }
       },
       {
-        "at_ms": 130650,
+        "at_ms": 75954,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 578,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 76405,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 687,
+        "phases": {
+          "long_account": "PARTIALLY_CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
+        }
+      },
+      {
+        "at_ms": 76855,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 876,
+        "weight": 795,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 131400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "at_ms": 80503,
+        "status": "SUPERVISOR_OBSERVATION_VERIFIED",
         "error": null,
-        "weight": 876,
+        "weight": 771,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "CLOSED",
+          "short_account": "PARTIALLY_CLOSED"
         }
       },
       {
-        "at_ms": 135900,
+        "at_ms": 82005,
         "status": "OBSERVED_NO_ACTION",
         "error": null,
-        "weight": 896,
+        "weight": 814,
         "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 136400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 141150,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 141400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 146400,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 146400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 151650,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 151650,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 156900,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 156900,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 162150,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 162150,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 167400,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 167400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 172650,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 172650,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 177900,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 177900,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 183150,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 183150,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 188400,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 188400,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 193650,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 193650,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 198900,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 198900,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 204150,
-        "status": "OBSERVED_NO_ACTION",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
-        }
-      },
-      {
-        "at_ms": 204150,
-        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
-        "error": null,
-        "weight": 896,
-        "phases": {
-          "long_account": "OUTCOME_UNKNOWN"
+          "long_account": "CLOSED",
+          "short_account": "CLOSED"
         }
       }
     ],
     "denials": [
       {
-        "at_ms": 1791289136150,
+        "at_ms": 1791289085853,
         "priority": "protection",
-        "used_weight": 1135,
+        "used_weight": 1081,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 12850
+        "retry_after_ms": 8147
       },
       {
-        "at_ms": 1791289141350,
+        "at_ms": 1791289086204,
         "priority": "protection",
-        "used_weight": 1179,
+        "used_weight": 1148,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 7850
+        "retry_after_ms": 7796
       },
       {
-        "at_ms": 1791289144250,
+        "at_ms": 1791289086254,
         "priority": "protection",
-        "used_weight": 1179,
+        "used_weight": 1150,
         "requested_weight": 120,
         "ceiling": 1200,
-        "retry_after_ms": 5050
+        "retry_after_ms": 7746
+      },
+      {
+        "at_ms": 1791289091404,
+        "priority": "protection",
+        "used_weight": 1192,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 2596
+      },
+      {
+        "at_ms": 1791289091454,
+        "priority": "protection",
+        "used_weight": 1194,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 12546
+      },
+      {
+        "at_ms": 1791289091454,
+        "priority": "protection",
+        "used_weight": 1194,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 2546
+      },
+      {
+        "at_ms": 1791289096704,
+        "priority": "protection",
+        "used_weight": 1152,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 7296
+      },
+      {
+        "at_ms": 1791289096754,
+        "priority": "protection",
+        "used_weight": 1154,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 7246
+      },
+      {
+        "at_ms": 1791289101904,
+        "priority": "protection",
+        "used_weight": 1196,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 2096
+      },
+      {
+        "at_ms": 1791289101954,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 42146
+      },
+      {
+        "at_ms": 1791289101954,
+        "priority": "protection",
+        "used_weight": 1198,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 2046
+      },
+      {
+        "at_ms": 1791289107204,
+        "priority": "protection",
+        "used_weight": 1156,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 41896
+      },
+      {
+        "at_ms": 1791289107254,
+        "priority": "protection",
+        "used_weight": 1158,
+        "requested_weight": 120,
+        "ceiling": 1200,
+        "retry_after_ms": 41846
+      },
+      {
+        "at_ms": 1791289112404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 31596
+      },
+      {
+        "at_ms": 1791289112404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 2,
+        "ceiling": 1200,
+        "retry_after_ms": 31596
+      },
+      {
+        "at_ms": 1791289112404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 31596
+      },
+      {
+        "at_ms": 1791289117404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 26596
+      },
+      {
+        "at_ms": 1791289117404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 26596
+      },
+      {
+        "at_ms": 1791289117404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 26596
+      },
+      {
+        "at_ms": 1791289122404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 21596
+      },
+      {
+        "at_ms": 1791289122404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 21596
+      },
+      {
+        "at_ms": 1791289122404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 21596
+      },
+      {
+        "at_ms": 1791289127404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 16596
+      },
+      {
+        "at_ms": 1791289127404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 16596
+      },
+      {
+        "at_ms": 1791289127404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 16596
+      },
+      {
+        "at_ms": 1791289132404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 11596
+      },
+      {
+        "at_ms": 1791289132404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 11596
+      },
+      {
+        "at_ms": 1791289132404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 11596
+      },
+      {
+        "at_ms": 1791289137404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 6596
+      },
+      {
+        "at_ms": 1791289137404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 6596
+      },
+      {
+        "at_ms": 1791289137404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 6596
+      },
+      {
+        "at_ms": 1791289142404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1596
+      },
+      {
+        "at_ms": 1791289142404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1596
+      },
+      {
+        "at_ms": 1791289142404,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1596
+      },
+      {
+        "at_ms": 1791289147604,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 2,
+        "ceiling": 1200,
+        "retry_after_ms": 1396
+      },
+      {
+        "at_ms": 1791289147604,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 2,
+        "ceiling": 1200,
+        "retry_after_ms": 1396
+      },
+      {
+        "at_ms": 1791289147604,
+        "priority": "protection",
+        "used_weight": 1200,
+        "requested_weight": 20,
+        "ceiling": 1200,
+        "retry_after_ms": 1396
       }
     ],
-    "synthetic_actions": 1,
+    "synthetic_actions": 8,
     "entry_decisions": {
-      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
-        "stage": "ENTRY_ADMISSION",
-        "scope": "account",
-        "account_role": "short_account",
-        "symbol": "SOL",
-        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
-        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
-        "at_ms": 1791289168650,
-        "retry_after_ms": 1791289184000,
-        "deadline": "2026-10-06T12:19:30+00:00"
-      },
       "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
         "stage": "ENTRY_ADMISSION",
         "scope": "account",
         "account_role": "long_account",
         "symbol": "SOL",
         "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
-        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
-        "at_ms": 1791289144300,
+        "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
+        "at_ms": 1791289162005,
+        "retry_after_ms": null,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      },
+      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "short_account",
+        "symbol": "SOL",
+        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+        "reason": "ACCOUNT_OUTCOME_UNKNOWN",
+        "at_ms": 1791289147604,
         "retry_after_ms": null,
         "deadline": "2026-10-06T12:19:30+00:00"
       }
     },
     "wire_actions": [
-      "long_account:ENTRY:ENTRY"
+      "long_account:ENTRY:ENTRY",
+      "short_account:ENTRY:ENTRY",
+      "long_account:CREATE_EXIT:STOP",
+      "short_account:CREATE_EXIT:STOP",
+      "long_account:CREATE_EXIT:TAKE_PROFIT",
+      "short_account:CREATE_EXIT:TAKE_PROFIT",
+      "long_account:CANCEL:STOP",
+      "short_account:CANCEL:STOP"
     ],
     "orders": {
       "1": {
@@ -2434,9 +2439,170 @@
             },
             "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
           },
-          "status": "OPEN",
-          "at_ms": 1791289080751,
+          "status": "FILLED",
+          "at_ms": 1791289084552,
+          "fills": [
+            {
+              "fill_id": "fill1_0",
+              "quantity": "4.67",
+              "price": "93.544",
+              "at_ms": 1791289084552
+            }
+          ]
+        }
+      },
+      "2": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "ENTRY",
+        "view": {
+          "oid": "2",
+          "cloid": "0xe0977db3fa67b9cd59aed178d1a9e2d5",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "93.544",
+            "s": "5.6",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0xe0977db3fa67b9cd59aed178d1a9e2d5"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289084553,
+          "fills": [
+            {
+              "fill_id": "fill2_0",
+              "quantity": "5.60",
+              "price": "93.544",
+              "at_ms": 1791289084553
+            }
+          ]
+        }
+      },
+      "3": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "STOP",
+        "view": {
+          "oid": "3",
+          "cloid": "0x50922237d0722036b6df461ce773f79b",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "91.405",
+            "s": "4.67",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": true,
+                "triggerPx": "91.405",
+                "tpsl": "sl"
+              }
+            },
+            "c": "0x50922237d0722036b6df461ce773f79b"
+          },
+          "status": "CANCELED",
+          "at_ms": 1791289155954,
           "fills": []
+        }
+      },
+      "4": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "STOP",
+        "view": {
+          "oid": "4",
+          "cloid": "0xe74a64202d8566254aee9d615a57dc1b",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "95.327",
+            "s": "5.6",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": true,
+                "triggerPx": "95.327",
+                "tpsl": "sl"
+              }
+            },
+            "c": "0xe74a64202d8566254aee9d615a57dc1b"
+          },
+          "status": "CANCELED",
+          "at_ms": 1791289156405,
+          "fills": []
+        }
+      },
+      "5": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "TAKE_PROFIT",
+        "view": {
+          "oid": "5",
+          "cloid": "0x45dc3bbe2293d7b34fdc89ea4c147d9c",
+          "wire_order": {
+            "a": 2,
+            "b": false,
+            "p": "95.327",
+            "s": "4.67",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": false,
+                "triggerPx": "95.327",
+                "tpsl": "tp"
+              }
+            },
+            "c": "0x45dc3bbe2293d7b34fdc89ea4c147d9c"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289153506,
+          "fills": [
+            {
+              "fill_id": "fill5_0",
+              "quantity": "4.67",
+              "price": "95.327",
+              "at_ms": 1791289153506
+            }
+          ]
+        }
+      },
+      "6": {
+        "account": "0x2222222222222222222222222222222222222222",
+        "symbol": "SOL",
+        "leg": "TAKE_PROFIT",
+        "view": {
+          "oid": "6",
+          "cloid": "0xf78efd3f518e5e97748b98e2ea5bfd12",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "91.405",
+            "s": "5.6",
+            "r": true,
+            "t": {
+              "trigger": {
+                "isMarket": false,
+                "triggerPx": "91.405",
+                "tpsl": "tp"
+              }
+            },
+            "c": "0xf78efd3f518e5e97748b98e2ea5bfd12"
+          },
+          "status": "FILLED",
+          "at_ms": 1791289153507,
+          "fills": [
+            {
+              "fill_id": "fill6_0",
+              "quantity": "5.60",
+              "price": "91.405",
+              "at_ms": 1791289153507
+            }
+          ]
         }
       }
     },
@@ -2444,6 +2610,34 @@
       {
         "phase": "OBSERVED",
         "observed_oid": "1"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "2"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "3"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "4"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "5"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "6"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "3"
+      },
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "4"
       }
     ],
     "final_context": {
@@ -2486,9 +2680,9 @@
     "source_expiry_unchanged": true,
     "final_entry_decisions": {},
     "lifecycle": {
-      "protected_ms": 10003,
-      "filled_exit_ms": 10004,
-      "closed_ms": 20005,
+      "protected_ms": 103,
+      "filled_exit_ms": 104,
+      "closed_ms": 10155,
       "wire_actions": [
         "ENTRY:ENTRY",
         "CREATE_EXIT:STOP",
@@ -2497,7 +2691,7 @@
       ],
       "wire_exit_times_ms": {
         "STOP": 1,
-        "TAKE_PROFIT": 5002
+        "TAKE_PROFIT": 52
       },
       "samples": [
         {
@@ -2507,7 +2701,7 @@
           "error": null,
           "phase": "OPEN",
           "legs": [],
-          "weight": 819
+          "weight": 817
         },
         {
           "at_ms": 2,
@@ -2516,10 +2710,10 @@
           "error": null,
           "phase": "OPEN",
           "legs": [],
-          "weight": 819
+          "weight": 817
         },
         {
-          "at_ms": 5003,
+          "at_ms": 53,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2527,21 +2721,10 @@
           "legs": [
             "STOP"
           ],
-          "weight": 887
+          "weight": 883
         },
         {
-          "at_ms": 5003,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "OPEN",
-          "legs": [
-            "STOP"
-          ],
-          "weight": 887
-        },
-        {
-          "at_ms": 10003,
+          "at_ms": 103,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
@@ -2550,10 +2733,10 @@
             "STOP",
             "TAKE_PROFIT"
           ],
-          "weight": 868
+          "weight": 948
         },
         {
-          "at_ms": 10005,
+          "at_ms": 105,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2561,10 +2744,10 @@
           "legs": [
             "STOP"
           ],
-          "weight": 936
+          "weight": 1014
         },
         {
-          "at_ms": 10005,
+          "at_ms": 105,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
@@ -2572,34 +2755,52 @@
           "legs": [
             "STOP"
           ],
-          "weight": 936
+          "weight": 1014
         },
         {
-          "at_ms": 15005,
+          "at_ms": 155,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 1001
+          "weight": 1079
         },
         {
-          "at_ms": 15005,
+          "at_ms": 5105,
           "actor": "supervisor",
           "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 1001
+          "weight": 1079
         },
         {
-          "at_ms": 20005,
+          "at_ms": 5155,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1121
+        },
+        {
+          "at_ms": 10105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1033
+        },
+        {
+          "at_ms": 10155,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "CLOSED",
           "legs": [],
-          "weight": 956
+          "weight": 1076
         }
       ],
       "request_results": [
@@ -2652,9 +2853,9 @@
     "source_expiry_unchanged": true,
     "final_entry_decisions": {},
     "lifecycle": {
-      "protected_ms": 12853,
-      "filled_exit_ms": 12854,
-      "closed_ms": 24955,
+      "protected_ms": 2353,
+      "filled_exit_ms": 2354,
+      "closed_ms": 9355,
       "wire_actions": [
         "ENTRY:ENTRY",
         "CREATE_EXIT:STOP",
@@ -2662,30 +2863,30 @@
         "CANCEL:STOP"
       ],
       "wire_exit_times_ms": {
-        "STOP": 901,
-        "TAKE_PROFIT": 6802
+        "STOP": 751,
+        "TAKE_PROFIT": 1552
       },
       "samples": [
         {
-          "at_ms": 902,
+          "at_ms": 752,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
           "phase": "OPEN",
           "legs": [],
-          "weight": 819
+          "weight": 817
         },
         {
-          "at_ms": 902,
+          "at_ms": 752,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
           "phase": "OPEN",
           "legs": [],
-          "weight": 819
+          "weight": 817
         },
         {
-          "at_ms": 6803,
+          "at_ms": 1553,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2693,21 +2894,10 @@
           "legs": [
             "STOP"
           ],
-          "weight": 887
+          "weight": 883
         },
         {
-          "at_ms": 6803,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "OPEN",
-          "legs": [
-            "STOP"
-          ],
-          "weight": 887
-        },
-        {
-          "at_ms": 12853,
+          "at_ms": 2353,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
@@ -2716,10 +2906,10 @@
             "STOP",
             "TAKE_PROFIT"
           ],
-          "weight": 868
+          "weight": 948
         },
         {
-          "at_ms": 13755,
+          "at_ms": 3105,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2727,10 +2917,10 @@
           "legs": [
             "STOP"
           ],
-          "weight": 936
+          "weight": 1014
         },
         {
-          "at_ms": 13755,
+          "at_ms": 3105,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
@@ -2738,34 +2928,34 @@
           "legs": [
             "STOP"
           ],
-          "weight": 936
+          "weight": 1014
         },
         {
-          "at_ms": 19505,
+          "at_ms": 3905,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 913
+          "weight": 1079
         },
         {
-          "at_ms": 19505,
+          "at_ms": 8105,
           "actor": "supervisor",
           "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 913
+          "weight": 1079
         },
         {
-          "at_ms": 24955,
+          "at_ms": 9355,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "CLOSED",
           "legs": [],
-          "weight": 956
+          "weight": 1034
         }
       ],
       "request_results": [
@@ -2791,16 +2981,7 @@
     "burst": true,
     "submitted_ms": 4001,
     "synthetic_actions": 1,
-    "denials": [
-      {
-        "at_ms": 1791289084000,
-        "priority": "background",
-        "used_weight": 792,
-        "requested_weight": 60,
-        "ceiling": 800,
-        "retry_after_ms": 10000
-      }
-    ],
+    "denials": [],
     "samples": [
       {
         "at_ms": 0,
@@ -2821,7 +3002,7 @@
         "actor": "worker",
         "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
         "error": null,
-        "weight": 793
+        "weight": 773
       }
     ],
     "source_expiry_unchanged": true,
@@ -2884,9 +3065,9 @@
     "source_expiry_unchanged": true,
     "final_entry_decisions": {},
     "lifecycle": {
-      "protected_ms": 11053,
-      "filled_exit_ms": 11054,
-      "closed_ms": 27106,
+      "protected_ms": 853,
+      "filled_exit_ms": 854,
+      "closed_ms": 69156,
       "wire_actions": [
         "ENTRY:ENTRY",
         "CREATE_EXIT:STOP",
@@ -2895,12 +3076,12 @@
         "CANCEL:TAKE_PROFIT"
       ],
       "wire_exit_times_ms": {
-        "STOP": 301,
-        "TAKE_PROFIT": 5652
+        "STOP": 251,
+        "TAKE_PROFIT": 552
       },
       "samples": [
         {
-          "at_ms": 302,
+          "at_ms": 252,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2908,10 +3089,10 @@
           "legs": [
             "ENTRY"
           ],
-          "weight": 819
+          "weight": 817
         },
         {
-          "at_ms": 302,
+          "at_ms": 252,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
@@ -2919,10 +3100,10 @@
           "legs": [
             "ENTRY"
           ],
-          "weight": 819
+          "weight": 817
         },
         {
-          "at_ms": 5653,
+          "at_ms": 553,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2931,22 +3112,10 @@
             "ENTRY",
             "STOP"
           ],
-          "weight": 889
+          "weight": 883
         },
         {
-          "at_ms": 5653,
-          "actor": "supervisor",
-          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
-          "error": null,
-          "phase": "OPEN",
-          "legs": [
-            "ENTRY",
-            "STOP"
-          ],
-          "weight": 889
-        },
-        {
-          "at_ms": 11053,
+          "at_ms": 853,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
@@ -2956,10 +3125,10 @@
             "STOP",
             "TAKE_PROFIT"
           ],
-          "weight": 872
+          "weight": 948
         },
         {
-          "at_ms": 11405,
+          "at_ms": 1105,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2968,10 +3137,10 @@
             "ENTRY",
             "TAKE_PROFIT"
           ],
-          "weight": 942
+          "weight": 1014
         },
         {
-          "at_ms": 11405,
+          "at_ms": 1105,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
@@ -2980,10 +3149,10 @@
             "ENTRY",
             "TAKE_PROFIT"
           ],
-          "weight": 942
+          "weight": 1014
         },
         {
-          "at_ms": 16706,
+          "at_ms": 1406,
           "actor": "worker",
           "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
           "error": null,
@@ -2991,10 +3160,21 @@
           "legs": [
             "TAKE_PROFIT"
           ],
-          "weight": 1010
+          "weight": 1080
         },
         {
-          "at_ms": 16706,
+          "at_ms": 1656,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 6105,
           "actor": "supervisor",
           "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
           "error": null,
@@ -3002,34 +3182,268 @@
           "legs": [
             "TAKE_PROFIT"
           ],
-          "weight": 1010
+          "weight": 1124
         },
         {
-          "at_ms": 21956,
+          "at_ms": 6856,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1168
+        },
+        {
+          "at_ms": 11105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1080
+        },
+        {
+          "at_ms": 12056,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 16105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 17256,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1168
+        },
+        {
+          "at_ms": 21105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1080
+        },
+        {
+          "at_ms": 22456,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 26105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 27656,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1168
+        },
+        {
+          "at_ms": 31105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1080
+        },
+        {
+          "at_ms": 32856,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 36105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 38056,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1168
+        },
+        {
+          "at_ms": 41105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1080
+        },
+        {
+          "at_ms": 43256,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 46105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1124
+        },
+        {
+          "at_ms": 48456,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1168
+        },
+        {
+          "at_ms": 51105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [
+            "TAKE_PROFIT"
+          ],
+          "weight": 1036
+        },
+        {
+          "at_ms": 53706,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 987
+          "weight": 1101
         },
         {
-          "at_ms": 21956,
+          "at_ms": 56105,
           "actor": "supervisor",
           "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
           "error": null,
           "phase": "PARTIALLY_CLOSED",
           "legs": [],
-          "weight": 987
+          "weight": 1101
         },
         {
-          "at_ms": 27106,
+          "at_ms": 58856,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1143
+        },
+        {
+          "at_ms": 61105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1099
+        },
+        {
+          "at_ms": 64006,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1141
+        },
+        {
+          "at_ms": 66105,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "phase": "PARTIALLY_CLOSED",
+          "legs": [],
+          "weight": 1141
+        },
+        {
+          "at_ms": 69156,
           "actor": "worker",
           "status": "OBSERVED_NO_ACTION",
           "error": null,
           "phase": "CLOSED",
           "legs": [],
-          "weight": 1030
+          "weight": 916
         }
       ],
       "request_results": [
@@ -3050,5 +3464,871 @@
         }
       ]
     }
-  }
+  },
+  "concurrent_heavy_unfilled": {
+    "warm_weight": 616,
+    "entries": [
+      {
+        "side": "long_account",
+        "at_ms": 4500
+      }
+    ],
+    "closed_ms": null,
+    "phases": {
+      "long_account": "OUTCOME_UNKNOWN"
+    },
+    "pending_outcomes": [],
+    "observed_working_entries": {
+      "long_account": 1
+    },
+    "source_to_finish_reads": 107,
+    "source_to_finish_weight": 1735,
+    "samples": [
+      {
+        "at_ms": 0,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 616,
+        "phases": {}
+      },
+      {
+        "at_ms": 0,
+        "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+        "error": null,
+        "weight": 616,
+        "phases": {}
+      },
+      {
+        "at_ms": 4501,
+        "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+        "error": null,
+        "weight": 773,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 4801,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 837,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 5000,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 837,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 9801,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 837,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 10000,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 837,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 15001,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 811,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 15001,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 811,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 20001,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 811,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 20001,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 811,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 25201,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 785,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 25201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 785,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 30201,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 785,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 30201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 785,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 34200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 759,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 35201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 759,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 39200,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 759,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 40201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 759,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 44400,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 733,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 45201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 733,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 49400,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 733,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 50201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 733,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 54200,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 663,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 55201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 663,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 59200,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 663,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 60201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 663,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 64400,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 681,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 65201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 681,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 69400,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 681,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 70201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 681,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 73300,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 599,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 73550,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 560,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 73800,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 558,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 74050,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 75201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 79050,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 80201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 84101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 85201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 89101,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 90201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 94301,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 95201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 99301,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 100201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 104501,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 105201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 109501,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 110201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 114701,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 115201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 119701,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 120201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 124901,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 125201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 129901,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 130201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 135101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 135201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 140101,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 140201,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 620,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 145301,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 145301,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 150301,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 150301,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 155501,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 155501,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 160501,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 160501,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 165701,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 165701,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 170701,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 170701,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 175901,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 175901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 180901,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 180901,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 186101,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 186101,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 191101,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 191101,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 196301,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 196301,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 201301,
+        "status": "OBSERVED_IDLE_REUSED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 201301,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 206501,
+        "status": "OBSERVED_NO_ACTION",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      },
+      {
+        "at_ms": 206501,
+        "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+        "error": null,
+        "weight": 434,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        }
+      }
+    ],
+    "denials": [],
+    "synthetic_actions": 1,
+    "entry_decisions": {
+      "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+        "stage": "ENTRY_ADMISSION",
+        "scope": "account",
+        "account_role": "short_account",
+        "symbol": "SOL",
+        "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+        "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+        "at_ms": 1791289164101,
+        "retry_after_ms": 1791289174101,
+        "deadline": "2026-10-06T12:19:30+00:00"
+      }
+    },
+    "wire_actions": [
+      "long_account:ENTRY:ENTRY"
+    ],
+    "orders": {
+      "1": {
+        "account": "0x1111111111111111111111111111111111111111",
+        "symbol": "SOL",
+        "leg": "ENTRY",
+        "view": {
+          "oid": "1",
+          "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+          "wire_order": {
+            "a": 2,
+            "b": true,
+            "p": "93.544",
+            "s": "4.67",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+          },
+          "status": "OPEN",
+          "at_ms": 1791289084501,
+          "fills": []
+        }
+      }
+    },
+    "final_requests": [
+      {
+        "phase": "OBSERVED",
+        "observed_oid": "1"
+      }
+    ],
+    "final_context": {
+      "entry_blocked": {},
+      "account_entry_blocked": {},
+      "blocked_lanes": {}
+    }
+  },
+  "network_attempts_blocked": 0
 }

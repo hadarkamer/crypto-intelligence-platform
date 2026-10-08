@@ -192,6 +192,11 @@ class ConnectionService:
             and 0 <= self.runtime.venue.now() - self.last_cycle_at_ms < 10000)
 
     def _next_wait_seconds(self, interval_seconds):
+        # A recorded send already requires reconciliation. Do not insert the
+        # idle delay before checking its result and attaching the next exit.
+        # A pass without another send returns to the ordinary cadence.
+        if self.last_status == 'TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION':
+            return .05
         if self._next_entry_retry_ms is None:
             return interval_seconds
         delay = max(.05, (self._next_entry_retry_ms - self.runtime.venue.now()) / 1000)

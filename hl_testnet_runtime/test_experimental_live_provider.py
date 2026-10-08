@@ -334,8 +334,19 @@ class ProviderTests(unittest.TestCase):
             self.provider.dispatch_context(request)
 
     def test_collection_timestamp_is_not_refreshed_at_dispatch(self):
+        from .experimental_execution_dispatch import review, BoundaryError
         request=self.cancel_request();self.provider.collect(self.state)
-        self.exchange.t+=5001
+        observed=self.exchange.t
+        self.exchange.t+=6000
+        context=self.provider.dispatch_context(request)
+        self.assertEqual(context['safety']['at_ms'],observed)
+        # The ordinary inventory limit is fifteen seconds. A previously
+        # prepared request still has its independent five-second lifetime.
+        with self.assertRaisesRegex(BoundaryError,'DURABLE_ATTEMPT_EXPIRED'):
+            review(request,context,now_ms=self.exchange.t)
+        request.update(attempt_at_ms=self.exchange.t,prepared_at_ms=self.exchange.t,nonce=self.exchange.t)
+        self.assertTrue(review(request,self.provider.dispatch_context(request),now_ms=self.exchange.t)['reviewed'])
+        self.exchange.t=observed+15001
         with self.assertRaisesRegex(ProviderError,'FRESH_COLLECTOR'):
             self.provider.dispatch_context(request)
 
@@ -515,14 +526,53 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result['blocked_lanes'],{})
         terminal=[o for o in snapshot['orders'] if o['status']!='OPEN']
         self.assertTrue(terminal)
-        self.assertEqual(sum(c[0]=='orderStatus' for c in self.raw.calls),
-                         sum(o['status']=='OPEN' for o in snapshot['orders']))
+        self.assertEqual(sum(c[0]=='orderStatus' for c in self.raw.calls),0)
         self.assertNotIn('lookup',[c[0] for c in self.raw.calls])
         self.assertEqual(sum(c[0]=='userFillsByTime' for c in self.raw.calls),1)
         terminal[0]['wire_order']['s']='1'
         self.state['trades'][cid]['orders'][terminal[0]['oid']]=terminal[0]
         result=self.provider.collect(self.state)
         self.assertIn('PREVIOUSLY_OWNED_ORDER_TERMS_CHANGED',result['blocked_lanes'].values())
+
+    def test_open_inventory_reuses_durable_identity_without_cloid_and_rejects_changed_terms(self):
+        self.active(steps=4);original=self.raw.read
+        changed={}
+        def frontend(kind,*args,**kwargs):
+            result=original(kind,*args,**kwargs)
+            if kind=='frontendOpenOrders':
+                for row in result:
+                    row.pop('cloid',None)
+                    row.update(changed)
+            return result
+        with patch.object(self.raw,'read',side_effect=frontend):
+            result=self.provider.collect(self.state)
+            self.assertEqual(result['blocked_lanes'],{})
+            # The first raw collection still checks the filled entry once;
+            # both already observed open exits use inventory directly.
+            self.assertEqual([c[0] for c in self.raw.calls].count('orderStatus'),1)
+            for invalid in ({'limitPx':'999'},{'cloid':'0x'+'f'*32},
+                            {'timestamp':self.exchange.now()+1},{'reduceOnly':False}):
+                changed.clear();changed.update(invalid)
+                result=self.provider.collect(self.state)
+                self.assertTrue(result['blocked_lanes'],invalid)
+
+    def test_open_inventory_partial_fill_must_match_history_and_current_position(self):
+        self.active(steps=4);original=self.raw.read
+        take=self.exchange.oid('TAKE_PROFIT')
+        quantity=Decimal(self.exchange.orders[take]['view']['wire_order']['s'])/2
+        self.exchange.fill(take,str(quantity))
+        result=self.provider.collect(self.state)
+        self.assertEqual(result['blocked_lanes'],{})
+        self.assertEqual([c[0] for c in self.raw.calls].count('orderStatus'),1)
+        def mismatch(kind,*args,**kwargs):
+            value=original(kind,*args,**kwargs)
+            if kind=='frontendOpenOrders':
+                for row in value:
+                    if str(row['oid'])==take:row['sz']=row['origSz']
+            return value
+        with patch.object(self.raw,'read',side_effect=mismatch):
+            result=self.provider.collect(self.state)
+        self.assertIn('OPEN_ORDER_HISTORY_INCOMPLETE',result['blocked_lanes'].values())
 
     def legacy_active(self,*,pending=None):
         from .experimental_live_provider import _empty

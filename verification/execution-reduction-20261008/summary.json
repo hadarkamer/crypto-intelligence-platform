@@ -1,213 +1,83 @@
 {
-  "scope": "Deep cleanup of existing isolated Testnet execution branch; no new files or operation types; no live deployment",
-  "base_receiver_commit": "919ba37c3cff917e7d7c0c4c2ffc33a9d6ae8a20",
-  "base_producer_commit": "039d0ed5f2308e59dc8fdc6cd5f516a8a2390995",
-  "deep_cleanup_local_base": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
-  "receiver_feature_parent": "f1129b9151a2c1a663743369eae13d0e9cf29a20",
+  "scope": "Further isolated Testnet execution cleanup; no deployment, formulas, alerts, quota or source-window changes",
+  "local_base_commit": "dde8340731aa5b9259018322d958c0e984e57e0d",
+  "receiver_parent_commit": "4805dcaf4749b2d33d5e14039515004e3cdbc704",
+  "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
   "tests": {
-    "passed": 2782,
-    "skipped": 571,
+    "passed": 2774,
+    "skipped": 557,
     "failures": 0,
     "errors": 0,
-    "tests_run": 3353,
+    "tests_run": 3331,
     "network_attempts_blocked": 0
   },
   "postgresql": "NOT_VERIFIED_IN_THIS_RUN",
-  "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
-  "deep_cleanup": {
+  "cleanup": {
+    "stats": {
+      "production": {
+        "files_modified": 9,
+        "files_deleted": 0,
+        "added_lines": 123,
+        "removed_lines": 207,
+        "net_removed_lines": 84
+      },
+      "tests": {
+        "files_modified": 11,
+        "files_deleted": 1,
+        "added_lines": 268,
+        "removed_lines": 305,
+        "net_removed_lines": 37
+      }
+    },
     "deleted_files": [
-      "receiver/hl_testnet_runtime/card_app_copy.py",
-      "receiver/hl_testnet_runtime/exclusive_exit_protocol.py",
-      "receiver/hl_testnet_runtime/experimental_local_controller.py",
-      "receiver/hl_testnet_runtime/test_card_app_copy.py",
-      "receiver/hl_testnet_runtime/test_exclusive_exit_protocol.py",
-      "receiver/hl_testnet_runtime/test_exclusive_raw_flow.py",
-      "receiver/hl_testnet_runtime/test_experimental_local_controller.py"
+      "receiver/hl_testnet_runtime/test_guarded_integration.py"
     ],
-    "deleted_file_count": 7,
-    "deleted_production_files": 3,
-    "deleted_test_files": 4,
-    "production_function_definitions_removed": 50,
-    "production_function_definitions_added": 0,
-    "production_classes_removed": 3,
-    "removed_production_functions": {
-      "receiver/hl_testnet_runtime/card_app_copy.py": [
-        "_observed",
-        "lifecycle",
-        "received"
-      ],
-      "receiver/hl_testnet_runtime/exclusive_exit_protocol.py": [
-        "Rehearsal.__init__",
-        "Rehearsal.abort_unsent",
-        "Rehearsal.abort_unsent.update",
-        "Rehearsal.begin",
-        "Rehearsal.begin.update",
-        "Rehearsal.confirm",
-        "Rehearsal.confirm.update",
-        "Rehearsal.observe",
-        "Rehearsal.observe.update",
-        "Rehearsal.prepare",
-        "Rehearsal.prepare.update",
-        "Rehearsal.read_snapshot",
-        "_candidate",
-        "_contracts",
-        "_frozen_request",
-        "_lookup",
-        "_read",
-        "plan"
-      ],
-      "receiver/hl_testnet_runtime/experimental_local_controller.py": [
-        "LocalController.__init__",
-        "LocalController._change",
-        "LocalController._load",
-        "LocalController._source_view",
-        "LocalController._synchronize",
-        "LocalController._validate",
-        "LocalController.advance_stop",
-        "LocalController.advance_stop.transition",
-        "LocalController.attach_simulated_protection",
-        "LocalController.attach_simulated_protection.transition",
-        "LocalController.begin_entry",
-        "LocalController.begin_entry.transition",
-        "LocalController.begin_stop",
-        "LocalController.begin_stop.transition",
-        "LocalController.initialize",
-        "LocalController.load",
-        "LocalController.observe_stop",
-        "LocalController.observe_stop.transition",
-        "LocalController.prepare_entry",
-        "LocalController.prepare_entry.transition",
-        "LocalController.reserve_stop",
-        "LocalController.reserve_stop.transition",
-        "LocalController.stop_reply",
-        "LocalController.stop_reply.transition",
-        "readiness"
-      ],
-      "receiver/hl_testnet_runtime/filled_quantity_dispatch.py": [
-        "Controller._observation_guard"
-      ],
-      "receiver/hl_testnet_runtime/long_stream_runtime.py": [
-        "_short_account_readiness",
-        "_short_card_readiness",
-        "_short_pending_readiness"
-      ]
-    },
-    "obsolete_test_methods_removed": 79,
-    "focused_test_methods_added_in_existing_files": 4,
-    "production_files_modified": 6,
-    "test_files_modified": 4,
     "new_files": 0,
-    "production_line_diff": {
-      "added": 125,
-      "removed": 862,
-      "net_removed": 737
+    "production_functions_removed": 12,
+    "production_classes_removed": 1,
+    "production_functions_added": 0,
+    "removed_production_definitions": {
+      "receiver/hl_testnet_runtime/card_display_projection.py": {
+        "receipt_matches": "function"
+      },
+      "receiver/hl_testnet_runtime/experimental_allocations.py": {
+        "unsigned_reduction": "function"
+      },
+      "receiver/hl_testnet_runtime/guarded_execution.py": {
+        "submit_checked": "function"
+      },
+      "receiver/hl_testnet_runtime/parent_exit_handoff.py": {
+        "_evidence": "function",
+        "_assess": "function",
+        "ParentHandoffJournal": "class",
+        "ParentHandoffJournal.prepare_handoff": "function",
+        "ParentHandoffJournal.prepare_handoff.change": "function",
+        "ParentHandoffJournal.begin_handoff": "function",
+        "ParentHandoffJournal.begin_handoff.mutate": "function",
+        "ParentHandoffJournal.confirm_terminal": "function",
+        "ParentHandoffJournal.confirm_terminal.mutate": "function"
+      },
+      "receiver/hl_testnet_runtime/trade_cards.py": {
+        "journal_projection": "function"
+      }
     },
-    "lines_in_seven_deleted_files": 1572,
-    "formula_alert_price_risk_contract_files_changed": 0,
-    "producer_files_changed": 0,
-    "removal_basis": [
-      "Three disconnected prototype modules with no live, CLI, HTTP, startup or dynamic import callers",
-      "Four test files exclusively covering deleted prototypes",
-      "Three unused short-account diagnostics and one unused observation-lock property"
-    ]
+    "obsolete_test_methods_removed": 29,
+    "formula_or_alert_files_changed": 0,
+    "producer_files_changed": 0
   },
-  "work_reductions": [
-    "Apply unchanged local admission gates before candidate-only exchange reads",
-    "Move existing allowance check before candidate-only inventory and market reads",
-    "Skip market read after current reconciliation confirms fully protected fixed exits",
-    "Empty account periodic fallback changed from ten to sixty seconds; source/feed/retry forces fresh work",
-    "Skip admission configuration reload on already idle cycles",
-    "Skip ownership validation for observations too old to establish health",
-    "Reuse already computed state checksum; one fewer serialization/digest per mutation"
+  "reductions": [
+    "Reuse current complete open-order inventory for already observed unchanged order IDs; still reconcile fills and positions",
+    "Reuse successful client-order-ID lookup for the same order ID instead of a second lookup",
+    "Prepare only the first admissible entry capacity in original source order; rejected candidates do not starve later eligible sources",
+    "Skip candidate-only source reads for entries deferred to the next cycle; keep active-trade source maintenance",
+    "One feed/ownership/peer validation per signing boundary instead of repeating each twice",
+    "Remove the fixed idle wait immediately after recorded dispatch; next non-dispatch cycle returns to normal cadence",
+    "Prioritize missing or undersized stops before another trade take-profit",
+    "Reuse unchanged fully observed zero-fill MaxPain GTC state for existing ten-second coalescing; unknown outcomes, partial fills and feed/source changes forbid reuse",
+    "Use the same fifteen-second inventory freshness as the existing dispatch boundary; keep five-second attempt and emergency evidence limits",
+    "Include owned reconciliation and all participating inventories in the existing early allowance estimate; keep actual request-budget enforcement unchanged"
   ],
-  "measured_counts_before_this_cleanup": {
-    "empty_inventory": {
-      "reads": 4,
-      "weight": 44,
-      "by_kind": {
-        "frontendOpenOrders": 2,
-        "clearinghouseState": 2
-      }
-    },
-    "entry_collection": {
-      "reads": 8,
-      "weight": 222,
-      "by_kind": {
-        "frontendOpenOrders": 1,
-        "clearinghouseState": 1,
-        "metaAndAssetCtxs": 1,
-        "userAbstraction": 1,
-        "userRole": 2,
-        "activeAssetData": 1,
-        "userRateLimit": 1
-      }
-    },
-    "idle_30_seconds": {
-      "reads": 12,
-      "weight": 132,
-      "by_kind": {
-        "frontendOpenOrders": 6,
-        "clearinghouseState": 6
-      },
-      "states": [
-        "OBSERVED_IDLE_REUSED",
-        "OBSERVED_NO_ACTION",
-        "OBSERVED_IDLE_REUSED",
-        "OBSERVED_NO_ACTION",
-        "OBSERVED_IDLE_REUSED",
-        "OBSERVED_NO_ACTION"
-      ],
-      "synthetic_actions": 0
-    },
-    "budget_wait_30_seconds": {
-      "reads": 12,
-      "weight": 132,
-      "by_kind": {
-        "frontendOpenOrders": 6,
-        "clearinghouseState": 6
-      },
-      "states": [
-        "OBSERVED_IDLE_REUSED",
-        "OBSERVED_NO_ACTION",
-        "OBSERVED_IDLE_REUSED",
-        "OBSERVED_NO_ACTION",
-        "OBSERVED_IDLE_REUSED",
-        "OBSERVED_NO_ACTION"
-      ],
-      "synthetic_actions": 0
-    },
-    "stable_protected_collection": {
-      "reads": 6,
-      "weight": 67,
-      "by_kind": {
-        "frontendOpenOrders": 1,
-        "clearinghouseState": 1,
-        "metaAndAssetCtxs": 1,
-        "orderStatus": 2,
-        "userFillsByTime": 1
-      },
-      "entry_capacity_count": 0,
-      "entry_blocked": {}
-    },
-    "blocked_peer_collection": {
-      "reads": 11,
-      "weight": 247,
-      "by_kind": {
-        "frontendOpenOrders": 1,
-        "clearinghouseState": 1,
-        "metaAndAssetCtxs": 1,
-        "orderStatus": 2,
-        "userFillsByTime": 1,
-        "userAbstraction": 1,
-        "userRole": 2,
-        "activeAssetData": 1,
-        "userRateLimit": 1
-      },
-      "entry_capacity_count": 1,
-      "entry_blocked": {}
-    }
-  },
-  "measured_counts_after_this_cleanup": {
+  "measured_before": {
     "empty_inventory": {
       "reads": 4,
       "weight": 44,
@@ -284,55 +154,1433 @@
       }
     }
   },
-  "empty_60_second_measurement": {
-    "before_calls": 24,
-    "after_calls": 4,
-    "calls_removed": 20,
-    "note": "Excludes initial scan; two empty accounts; existing tick and supervisor schedule"
+  "measured_after": {
+    "empty_inventory": {
+      "reads": 4,
+      "weight": 44,
+      "by_kind": {
+        "frontendOpenOrders": 2,
+        "clearinghouseState": 2
+      }
+    },
+    "entry_collection": {
+      "reads": 8,
+      "weight": 222,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "metaAndAssetCtxs": 1,
+        "userAbstraction": 1,
+        "userRole": 2,
+        "activeAssetData": 1,
+        "userRateLimit": 1
+      }
+    },
+    "idle_30_seconds": {
+      "reads": 0,
+      "weight": 0,
+      "by_kind": {},
+      "states": [
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED"
+      ],
+      "synthetic_actions": 0
+    },
+    "budget_wait_30_seconds": {
+      "reads": 0,
+      "weight": 0,
+      "by_kind": {},
+      "states": [
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED",
+        "OBSERVED_IDLE_REUSED"
+      ],
+      "synthetic_actions": 0
+    },
+    "stable_protected_collection": {
+      "reads": 3,
+      "weight": 43,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "userFillsByTime": 1
+      },
+      "entry_capacity_count": 0,
+      "entry_blocked": {}
+    },
+    "blocked_peer_collection": {
+      "reads": 3,
+      "weight": 43,
+      "by_kind": {
+        "frontendOpenOrders": 1,
+        "clearinghouseState": 1,
+        "userFillsByTime": 1
+      },
+      "entry_capacity_count": 0,
+      "entry_blocked": {
+        "bf1845754975c7c948ef20eed09870943fdd9cb8700dbb4e40831a23493b2538": "SHARED_MARKET_INDEPENDENT_EXITS_NOT_ISOLATED"
+      }
+    }
   },
-  "measurement_scope": "Same offline real collectors and finite weighted quota; exchange/network/SQL are deterministic test doubles. Thirty-second idle/wait samples exclude initial inventory. Entries measured per collection.",
+  "paired_entry_collection": {
+    "before_reads": 15,
+    "after_reads": 10
+  },
+  "local_account_validation": {
+    "checks": [
+      "feed continuity",
+      "legacy ownership",
+      "peer protection"
+    ],
+    "before_per_entry_send": 4,
+    "after_per_entry_send": 2
+  },
+  "comparable_normal_lifecycle": {
+    "scenario": "warm616 immediate fills, two accounts, same eight exchange actions",
+    "before_rest_reads": 85,
+    "after_rest_reads": 74,
+    "before_charged_weight": 1250,
+    "after_charged_weight": 1210,
+    "before_closed_ms": 100701,
+    "after_closed_ms": 80804
+  },
   "lifecycle_results": {
     "concurrent": {
+      "warm_weight": 44,
       "entries": [
         {
           "side": "long_account",
-          "at_ms": 750
+          "at_ms": 500
         },
         {
           "side": "short_account",
-          "at_ms": 6401
+          "at_ms": 1151
         }
       ],
-      "closed_ms": 87105,
+      "closed_ms": 77853,
       "phases": {
         "long_account": "CLOSED",
         "short_account": "CLOSED"
+      },
+      "pending_outcomes": [],
+      "observed_working_entries": {
+        "long_account": 0,
+        "short_account": 0
+      },
+      "source_to_finish_reads": 108,
+      "source_to_finish_weight": 1566,
+      "samples": [
+        {
+          "at_ms": 501,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 289,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 501,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 289,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 1154,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 556,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN",
+            "short_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 1653,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 667,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 2104,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 776,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 2555,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 885,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 3006,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 994,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 3458,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1102,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 5501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1102,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 5801,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1150,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 10501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1150,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 11101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 15501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 16101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 20501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 21101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 25501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 26101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 30501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 31101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 35501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 36101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 40501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 41101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 45501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 46101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 50501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 51101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 55501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 56101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 60501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 61101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 65501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1154,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 66351,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 70501,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 621,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 71802,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 426,
+          "phases": {
+            "long_account": "PARTIALLY_CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 72253,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 424,
+          "phases": {
+            "long_account": "PARTIALLY_CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 72703,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 466,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 75501,
+          "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+          "error": null,
+          "weight": 418,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 77853,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 460,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "CLOSED"
+          }
+        }
+      ],
+      "denials": [
+        {
+          "at_ms": 1791289085751,
+          "priority": "protection",
+          "used_weight": 1148,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 63349
+        },
+        {
+          "at_ms": 1791289085801,
+          "priority": "protection",
+          "used_weight": 1150,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 63299
+        },
+        {
+          "at_ms": 1791289091051,
+          "priority": "protection",
+          "used_weight": 1196,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 58199
+        },
+        {
+          "at_ms": 1791289091101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 58149
+        },
+        {
+          "at_ms": 1791289096101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 47899
+        },
+        {
+          "at_ms": 1791289096101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 47899
+        },
+        {
+          "at_ms": 1791289101101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 42899
+        },
+        {
+          "at_ms": 1791289101101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 42899
+        },
+        {
+          "at_ms": 1791289106101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 37899
+        },
+        {
+          "at_ms": 1791289106101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 37899
+        },
+        {
+          "at_ms": 1791289111101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 32899
+        },
+        {
+          "at_ms": 1791289111101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 32899
+        },
+        {
+          "at_ms": 1791289116101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 27899
+        },
+        {
+          "at_ms": 1791289116101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 27899
+        },
+        {
+          "at_ms": 1791289121101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 22899
+        },
+        {
+          "at_ms": 1791289121101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 22899
+        },
+        {
+          "at_ms": 1791289126101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 17899
+        },
+        {
+          "at_ms": 1791289126101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 17899
+        },
+        {
+          "at_ms": 1791289131101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 12899
+        },
+        {
+          "at_ms": 1791289131101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 12899
+        },
+        {
+          "at_ms": 1791289136101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 7899
+        },
+        {
+          "at_ms": 1791289136101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 7899
+        },
+        {
+          "at_ms": 1791289141101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 2899
+        },
+        {
+          "at_ms": 1791289141101,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 2899
+        },
+        {
+          "at_ms": 1791289146351,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 2949
+        },
+        {
+          "at_ms": 1791289146351,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 2,
+          "ceiling": 1200,
+          "retry_after_ms": 2649
+        }
+      ],
+      "synthetic_actions": 8,
+      "entry_decisions": {
+        "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
+          "stage": "ENTRY_ADMISSION",
+          "scope": "account",
+          "account_role": "long_account",
+          "symbol": "SOL",
+          "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
+          "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
+          "at_ms": 1791289157853,
+          "retry_after_ms": null,
+          "deadline": "2026-10-06T12:19:30+00:00"
+        },
+        "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+          "stage": "ENTRY_ADMISSION",
+          "scope": "account",
+          "account_role": "short_account",
+          "symbol": "SOL",
+          "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+          "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+          "at_ms": 1791289146351,
+          "retry_after_ms": null,
+          "deadline": "2026-10-06T12:19:30+00:00"
+        }
       },
       "wire_actions": [
         "long_account:ENTRY:ENTRY",
         "short_account:ENTRY:ENTRY",
         "long_account:CREATE_EXIT:STOP",
+        "short_account:CREATE_EXIT:STOP",
         "long_account:CREATE_EXIT:TAKE_PROFIT",
-        "short_account:EMERGENCY_CLOSE:STOP",
-        "long_account:CANCEL:STOP"
+        "short_account:CREATE_EXIT:TAKE_PROFIT",
+        "long_account:CANCEL:STOP",
+        "short_account:CANCEL:STOP"
       ],
-      "synthetic_actions": 6
+      "orders": {
+        "1": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "ENTRY",
+          "view": {
+            "oid": "1",
+            "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "93.544",
+              "s": "4.67",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              },
+              "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289081153,
+            "fills": [
+              {
+                "fill_id": "fill1_0",
+                "quantity": "4.67",
+                "price": "93.544",
+                "at_ms": 1791289081153
+              }
+            ]
+          }
+        },
+        "2": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "ENTRY",
+          "view": {
+            "oid": "2",
+            "cloid": "0xe0977db3fa67b9cd59aed178d1a9e2d5",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "93.544",
+              "s": "5.6",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              },
+              "c": "0xe0977db3fa67b9cd59aed178d1a9e2d5"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289081154,
+            "fills": [
+              {
+                "fill_id": "fill2_0",
+                "quantity": "5.60",
+                "price": "93.544",
+                "at_ms": 1791289081154
+              }
+            ]
+          }
+        },
+        "3": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "STOP",
+          "view": {
+            "oid": "3",
+            "cloid": "0x50922237d0722036b6df461ce773f79b",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "91.405",
+              "s": "4.67",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": true,
+                  "triggerPx": "91.405",
+                  "tpsl": "sl"
+                }
+              },
+              "c": "0x50922237d0722036b6df461ce773f79b"
+            },
+            "status": "CANCELED",
+            "at_ms": 1791289151802,
+            "fills": []
+          }
+        },
+        "4": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "STOP",
+          "view": {
+            "oid": "4",
+            "cloid": "0xe74a64202d8566254aee9d615a57dc1b",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "95.327",
+              "s": "5.6",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": true,
+                  "triggerPx": "95.327",
+                  "tpsl": "sl"
+                }
+              },
+              "c": "0xe74a64202d8566254aee9d615a57dc1b"
+            },
+            "status": "CANCELED",
+            "at_ms": 1791289152253,
+            "fills": []
+          }
+        },
+        "5": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "TAKE_PROFIT",
+          "view": {
+            "oid": "5",
+            "cloid": "0x45dc3bbe2293d7b34fdc89ea4c147d9c",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "95.327",
+              "s": "4.67",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": false,
+                  "triggerPx": "95.327",
+                  "tpsl": "tp"
+                }
+              },
+              "c": "0x45dc3bbe2293d7b34fdc89ea4c147d9c"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289083457,
+            "fills": [
+              {
+                "fill_id": "fill5_0",
+                "quantity": "4.67",
+                "price": "95.327",
+                "at_ms": 1791289083457
+              }
+            ]
+          }
+        },
+        "6": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "TAKE_PROFIT",
+          "view": {
+            "oid": "6",
+            "cloid": "0xf78efd3f518e5e97748b98e2ea5bfd12",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "91.405",
+              "s": "5.6",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": false,
+                  "triggerPx": "91.405",
+                  "tpsl": "tp"
+                }
+              },
+              "c": "0xf78efd3f518e5e97748b98e2ea5bfd12"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289083458,
+            "fills": [
+              {
+                "fill_id": "fill6_0",
+                "quantity": "5.60",
+                "price": "91.405",
+                "at_ms": 1791289083458
+              }
+            ]
+          }
+        }
+      },
+      "final_requests": [
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "1"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "2"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "3"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "4"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "5"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "6"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "3"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "4"
+        }
+      ],
+      "final_context": {
+        "entry_blocked": {},
+        "account_entry_blocked": {},
+        "blocked_lanes": {}
+      }
     },
     "concurrent_transient_immediate": {
+      "warm_weight": 616,
       "entries": [
         {
           "side": "long_account",
-          "at_ms": 4550
+          "at_ms": 4500
         },
         {
           "side": "short_account",
-          "at_ms": 73650
+          "at_ms": 73500
         }
       ],
-      "closed_ms": 100701,
+      "closed_ms": 80804,
       "phases": {
         "long_account": "CLOSED",
         "short_account": "CLOSED"
+      },
+      "pending_outcomes": [],
+      "observed_working_entries": {
+        "long_account": 0,
+        "short_account": 0
+      },
+      "source_to_finish_reads": 74,
+      "source_to_finish_weight": 1210,
+      "samples": [
+        {
+          "at_ms": 0,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 616,
+          "phases": {}
+        },
+        {
+          "at_ms": 0,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 616,
+          "phases": {}
+        },
+        {
+          "at_ms": 4502,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 773,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 4802,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 839,
+          "phases": {
+            "long_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 5103,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 905,
+          "phases": {
+            "long_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 5103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 905,
+          "phases": {
+            "long_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 5404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 970,
+          "phases": {
+            "long_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 10103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 970,
+          "phases": {
+            "long_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 10354,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 1036,
+          "phases": {
+            "long_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 10654,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1101,
+          "phases": {
+            "long_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 15103,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 1013,
+          "phases": {
+            "long_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 15804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1056,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 20103,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 1056,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 20804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1056,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 25103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 968,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 25804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 968,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 30103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 968,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 30804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 968,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 35103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 880,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 35804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 880,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 40103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 880,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 40804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 880,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 45103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 792,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 45804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 792,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 50103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 792,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 50804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 792,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 54000,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 660,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 55103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 660,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 59000,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 660,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 60103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 660,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 64000,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 640,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 65103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 616,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 69000,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 616,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 70103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 616,
+          "phases": {
+            "long_account": "CLOSED"
+          }
+        },
+        {
+          "at_ms": 73502,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 594,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 73802,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 594,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 74103,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 594,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 74404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 594,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 75103,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 594,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 75354,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 660,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 75654,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 725,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 80103,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 594,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 80804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 637,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "CLOSED"
+          }
+        }
+      ],
+      "denials": [],
+      "synthetic_actions": 8,
+      "entry_decisions": {
+        "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
+          "stage": "ENTRY_ADMISSION",
+          "scope": "account",
+          "account_role": "long_account",
+          "symbol": "SOL",
+          "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
+          "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
+          "at_ms": 1791289160804,
+          "retry_after_ms": null,
+          "deadline": "2026-10-06T12:19:30+00:00"
+        }
       },
       "wire_actions": [
         "long_account:ENTRY:ENTRY",
@@ -344,30 +1592,1275 @@
         "short_account:CREATE_EXIT:TAKE_PROFIT",
         "short_account:CANCEL:STOP"
       ],
-      "synthetic_actions": 8
+      "orders": {
+        "1": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "ENTRY",
+          "view": {
+            "oid": "1",
+            "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "93.544",
+              "s": "4.67",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              },
+              "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289084502,
+            "fills": [
+              {
+                "fill_id": "fill1_0",
+                "quantity": "4.67",
+                "price": "93.544",
+                "at_ms": 1791289084502
+              }
+            ]
+          }
+        },
+        "2": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "STOP",
+          "view": {
+            "oid": "2",
+            "cloid": "0xc10c394798adf68f8f293d2b202583cf",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "91.405",
+              "s": "4.67",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": true,
+                  "triggerPx": "91.405",
+                  "tpsl": "sl"
+                }
+              },
+              "c": "0xc10c394798adf68f8f293d2b202583cf"
+            },
+            "status": "CANCELED",
+            "at_ms": 1791289090354,
+            "fills": []
+          }
+        },
+        "3": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "TAKE_PROFIT",
+          "view": {
+            "oid": "3",
+            "cloid": "0x36f6ffc2bb4db0da33e81f7e1bfbd462",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "95.327",
+              "s": "4.67",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": false,
+                  "triggerPx": "95.327",
+                  "tpsl": "tp"
+                }
+              },
+              "c": "0x36f6ffc2bb4db0da33e81f7e1bfbd462"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289085404,
+            "fills": [
+              {
+                "fill_id": "fill3_0",
+                "quantity": "4.67",
+                "price": "95.327",
+                "at_ms": 1791289085404
+              }
+            ]
+          }
+        },
+        "4": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "ENTRY",
+          "view": {
+            "oid": "4",
+            "cloid": "0x89fe6111ac9406a5578c07d5a9c39ed9",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "93.544",
+              "s": "5.6",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              },
+              "c": "0x89fe6111ac9406a5578c07d5a9c39ed9"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289153502,
+            "fills": [
+              {
+                "fill_id": "fill4_0",
+                "quantity": "5.60",
+                "price": "93.544",
+                "at_ms": 1791289153502
+              }
+            ]
+          }
+        },
+        "5": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "STOP",
+          "view": {
+            "oid": "5",
+            "cloid": "0x3ff3dd7abbdaf004b15ff58c48bd3a28",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "95.327",
+              "s": "5.6",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": true,
+                  "triggerPx": "95.327",
+                  "tpsl": "sl"
+                }
+              },
+              "c": "0x3ff3dd7abbdaf004b15ff58c48bd3a28"
+            },
+            "status": "CANCELED",
+            "at_ms": 1791289155354,
+            "fills": []
+          }
+        },
+        "6": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "TAKE_PROFIT",
+          "view": {
+            "oid": "6",
+            "cloid": "0x29007245d1c5bb9b622145bfbeac26d2",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "91.405",
+              "s": "5.6",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": false,
+                  "triggerPx": "91.405",
+                  "tpsl": "tp"
+                }
+              },
+              "c": "0x29007245d1c5bb9b622145bfbeac26d2"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289154404,
+            "fills": [
+              {
+                "fill_id": "fill6_0",
+                "quantity": "5.60",
+                "price": "91.405",
+                "at_ms": 1791289154404
+              }
+            ]
+          }
+        }
+      },
+      "final_requests": [
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "1"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "2"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "3"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "2"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "4"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "5"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "6"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "5"
+        }
+      ],
+      "final_context": {
+        "entry_blocked": {},
+        "account_entry_blocked": {},
+        "blocked_lanes": {}
+      }
     },
     "concurrent_steady_unfilled": {
+      "warm_weight": 308,
       "entries": [
         {
           "side": "long_account",
-          "at_ms": 750
+          "at_ms": 500
+        },
+        {
+          "side": "short_account",
+          "at_ms": 4550
         }
       ],
-      "closed_ms": null,
+      "closed_ms": 82005,
       "phases": {
-        "long_account": "OUTCOME_UNKNOWN"
+        "long_account": "CLOSED",
+        "short_account": "CLOSED"
+      },
+      "pending_outcomes": [],
+      "observed_working_entries": {
+        "long_account": 0,
+        "short_account": 0
+      },
+      "source_to_finish_reads": 128,
+      "source_to_finish_weight": 1788,
+      "samples": [
+        {
+          "at_ms": 501,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 553,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 501,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 553,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 801,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 617,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 4553,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 794,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN",
+            "short_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 5052,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 905,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 5503,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 1014,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 5503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1014,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 5904,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 1102,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 6304,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1170,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 10503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1170,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 11454,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1194,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 15503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1106,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 16804,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1174,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 20503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1174,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 21954,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1198,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 25503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1110,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 27304,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1178,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 30503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1178,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 32404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 35503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 37404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 40503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 42404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 45503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 47404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 50503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 52404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 55503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 57404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 60503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 62404,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 65503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 1156,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 67604,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 1200,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 70503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 891,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 73055,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 980,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 73507,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 844,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 75503,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 467,
+          "phases": {
+            "long_account": "OPEN",
+            "short_account": "OPEN"
+          }
+        },
+        {
+          "at_ms": 75954,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 578,
+          "phases": {
+            "long_account": "PARTIALLY_CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 76405,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 687,
+          "phases": {
+            "long_account": "PARTIALLY_CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 76855,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 795,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 80503,
+          "status": "SUPERVISOR_OBSERVATION_VERIFIED",
+          "error": null,
+          "weight": 771,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "PARTIALLY_CLOSED"
+          }
+        },
+        {
+          "at_ms": 82005,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 814,
+          "phases": {
+            "long_account": "CLOSED",
+            "short_account": "CLOSED"
+          }
+        }
+      ],
+      "denials": [
+        {
+          "at_ms": 1791289085853,
+          "priority": "protection",
+          "used_weight": 1081,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 8147
+        },
+        {
+          "at_ms": 1791289086204,
+          "priority": "protection",
+          "used_weight": 1148,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 7796
+        },
+        {
+          "at_ms": 1791289086254,
+          "priority": "protection",
+          "used_weight": 1150,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 7746
+        },
+        {
+          "at_ms": 1791289091404,
+          "priority": "protection",
+          "used_weight": 1192,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 2596
+        },
+        {
+          "at_ms": 1791289091454,
+          "priority": "protection",
+          "used_weight": 1194,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 12546
+        },
+        {
+          "at_ms": 1791289091454,
+          "priority": "protection",
+          "used_weight": 1194,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 2546
+        },
+        {
+          "at_ms": 1791289096704,
+          "priority": "protection",
+          "used_weight": 1152,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 7296
+        },
+        {
+          "at_ms": 1791289096754,
+          "priority": "protection",
+          "used_weight": 1154,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 7246
+        },
+        {
+          "at_ms": 1791289101904,
+          "priority": "protection",
+          "used_weight": 1196,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 2096
+        },
+        {
+          "at_ms": 1791289101954,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 42146
+        },
+        {
+          "at_ms": 1791289101954,
+          "priority": "protection",
+          "used_weight": 1198,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 2046
+        },
+        {
+          "at_ms": 1791289107204,
+          "priority": "protection",
+          "used_weight": 1156,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 41896
+        },
+        {
+          "at_ms": 1791289107254,
+          "priority": "protection",
+          "used_weight": 1158,
+          "requested_weight": 120,
+          "ceiling": 1200,
+          "retry_after_ms": 41846
+        },
+        {
+          "at_ms": 1791289112404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 31596
+        },
+        {
+          "at_ms": 1791289112404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 2,
+          "ceiling": 1200,
+          "retry_after_ms": 31596
+        },
+        {
+          "at_ms": 1791289112404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 31596
+        },
+        {
+          "at_ms": 1791289117404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 26596
+        },
+        {
+          "at_ms": 1791289117404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 26596
+        },
+        {
+          "at_ms": 1791289117404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 26596
+        },
+        {
+          "at_ms": 1791289122404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 21596
+        },
+        {
+          "at_ms": 1791289122404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 21596
+        },
+        {
+          "at_ms": 1791289122404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 21596
+        },
+        {
+          "at_ms": 1791289127404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 16596
+        },
+        {
+          "at_ms": 1791289127404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 16596
+        },
+        {
+          "at_ms": 1791289127404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 16596
+        },
+        {
+          "at_ms": 1791289132404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 11596
+        },
+        {
+          "at_ms": 1791289132404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 11596
+        },
+        {
+          "at_ms": 1791289132404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 11596
+        },
+        {
+          "at_ms": 1791289137404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 6596
+        },
+        {
+          "at_ms": 1791289137404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 6596
+        },
+        {
+          "at_ms": 1791289137404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 6596
+        },
+        {
+          "at_ms": 1791289142404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 1596
+        },
+        {
+          "at_ms": 1791289142404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 1596
+        },
+        {
+          "at_ms": 1791289142404,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 1596
+        },
+        {
+          "at_ms": 1791289147604,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 2,
+          "ceiling": 1200,
+          "retry_after_ms": 1396
+        },
+        {
+          "at_ms": 1791289147604,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 2,
+          "ceiling": 1200,
+          "retry_after_ms": 1396
+        },
+        {
+          "at_ms": 1791289147604,
+          "priority": "protection",
+          "used_weight": 1200,
+          "requested_weight": 20,
+          "ceiling": 1200,
+          "retry_after_ms": 1396
+        }
+      ],
+      "synthetic_actions": 8,
+      "entry_decisions": {
+        "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2": {
+          "stage": "ENTRY_ADMISSION",
+          "scope": "account",
+          "account_role": "long_account",
+          "symbol": "SOL",
+          "occurrence_id": "22a43a5078c5b04e621e0ba50f886f497c0a909931f966d3c2a8a5346b185da2",
+          "reason": "ACCOUNT_INVENTORY_NOT_COLLECTED",
+          "at_ms": 1791289162005,
+          "retry_after_ms": null,
+          "deadline": "2026-10-06T12:19:30+00:00"
+        },
+        "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+          "stage": "ENTRY_ADMISSION",
+          "scope": "account",
+          "account_role": "short_account",
+          "symbol": "SOL",
+          "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+          "reason": "ACCOUNT_OUTCOME_UNKNOWN",
+          "at_ms": 1791289147604,
+          "retry_after_ms": null,
+          "deadline": "2026-10-06T12:19:30+00:00"
+        }
       },
       "wire_actions": [
-        "long_account:ENTRY:ENTRY"
+        "long_account:ENTRY:ENTRY",
+        "short_account:ENTRY:ENTRY",
+        "long_account:CREATE_EXIT:STOP",
+        "short_account:CREATE_EXIT:STOP",
+        "long_account:CREATE_EXIT:TAKE_PROFIT",
+        "short_account:CREATE_EXIT:TAKE_PROFIT",
+        "long_account:CANCEL:STOP",
+        "short_account:CANCEL:STOP"
       ],
-      "synthetic_actions": 1
+      "orders": {
+        "1": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "ENTRY",
+          "view": {
+            "oid": "1",
+            "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "93.544",
+              "s": "4.67",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              },
+              "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289084552,
+            "fills": [
+              {
+                "fill_id": "fill1_0",
+                "quantity": "4.67",
+                "price": "93.544",
+                "at_ms": 1791289084552
+              }
+            ]
+          }
+        },
+        "2": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "ENTRY",
+          "view": {
+            "oid": "2",
+            "cloid": "0xe0977db3fa67b9cd59aed178d1a9e2d5",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "93.544",
+              "s": "5.6",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              },
+              "c": "0xe0977db3fa67b9cd59aed178d1a9e2d5"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289084553,
+            "fills": [
+              {
+                "fill_id": "fill2_0",
+                "quantity": "5.60",
+                "price": "93.544",
+                "at_ms": 1791289084553
+              }
+            ]
+          }
+        },
+        "3": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "STOP",
+          "view": {
+            "oid": "3",
+            "cloid": "0x50922237d0722036b6df461ce773f79b",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "91.405",
+              "s": "4.67",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": true,
+                  "triggerPx": "91.405",
+                  "tpsl": "sl"
+                }
+              },
+              "c": "0x50922237d0722036b6df461ce773f79b"
+            },
+            "status": "CANCELED",
+            "at_ms": 1791289155954,
+            "fills": []
+          }
+        },
+        "4": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "STOP",
+          "view": {
+            "oid": "4",
+            "cloid": "0xe74a64202d8566254aee9d615a57dc1b",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "95.327",
+              "s": "5.6",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": true,
+                  "triggerPx": "95.327",
+                  "tpsl": "sl"
+                }
+              },
+              "c": "0xe74a64202d8566254aee9d615a57dc1b"
+            },
+            "status": "CANCELED",
+            "at_ms": 1791289156405,
+            "fills": []
+          }
+        },
+        "5": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "TAKE_PROFIT",
+          "view": {
+            "oid": "5",
+            "cloid": "0x45dc3bbe2293d7b34fdc89ea4c147d9c",
+            "wire_order": {
+              "a": 2,
+              "b": false,
+              "p": "95.327",
+              "s": "4.67",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": false,
+                  "triggerPx": "95.327",
+                  "tpsl": "tp"
+                }
+              },
+              "c": "0x45dc3bbe2293d7b34fdc89ea4c147d9c"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289153506,
+            "fills": [
+              {
+                "fill_id": "fill5_0",
+                "quantity": "4.67",
+                "price": "95.327",
+                "at_ms": 1791289153506
+              }
+            ]
+          }
+        },
+        "6": {
+          "account": "0x2222222222222222222222222222222222222222",
+          "symbol": "SOL",
+          "leg": "TAKE_PROFIT",
+          "view": {
+            "oid": "6",
+            "cloid": "0xf78efd3f518e5e97748b98e2ea5bfd12",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "91.405",
+              "s": "5.6",
+              "r": true,
+              "t": {
+                "trigger": {
+                  "isMarket": false,
+                  "triggerPx": "91.405",
+                  "tpsl": "tp"
+                }
+              },
+              "c": "0xf78efd3f518e5e97748b98e2ea5bfd12"
+            },
+            "status": "FILLED",
+            "at_ms": 1791289153507,
+            "fills": [
+              {
+                "fill_id": "fill6_0",
+                "quantity": "5.60",
+                "price": "91.405",
+                "at_ms": 1791289153507
+              }
+            ]
+          }
+        }
+      },
+      "final_requests": [
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "1"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "2"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "3"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "4"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "5"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "6"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "3"
+        },
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "4"
+        }
+      ],
+      "final_context": {
+        "entry_blocked": {},
+        "account_entry_blocked": {},
+        "blocked_lanes": {}
+      }
     },
     "long": {
+      "warm_weight": 616,
+      "latency_ms": 0,
+      "side": "LONG",
+      "burst": false,
       "submitted_ms": 4001,
       "synthetic_actions": 1,
+      "denials": [],
+      "samples": [
+        {
+          "at_ms": 0,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 616
+        },
+        {
+          "at_ms": 0,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 616
+        },
+        {
+          "at_ms": 4001,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 751
+        }
+      ],
+      "source_expiry_unchanged": true,
+      "final_entry_decisions": {},
       "lifecycle": {
-        "protected_ms": 10003,
-        "closed_ms": 20005,
+        "protected_ms": 103,
+        "filled_exit_ms": 104,
+        "closed_ms": 10155,
         "wire_actions": [
           "ENTRY:ENTRY",
           "CREATE_EXIT:STOP",
@@ -376,16 +2869,171 @@
         ],
         "wire_exit_times_ms": {
           "STOP": 1,
-          "TAKE_PROFIT": 5002
-        }
+          "TAKE_PROFIT": 52
+        },
+        "samples": [
+          {
+            "at_ms": 2,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [],
+            "weight": 817
+          },
+          {
+            "at_ms": 2,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [],
+            "weight": 817
+          },
+          {
+            "at_ms": 53,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [
+              "STOP"
+            ],
+            "weight": 883
+          },
+          {
+            "at_ms": 103,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [
+              "STOP",
+              "TAKE_PROFIT"
+            ],
+            "weight": 948
+          },
+          {
+            "at_ms": 105,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "STOP"
+            ],
+            "weight": 1014
+          },
+          {
+            "at_ms": 105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "STOP"
+            ],
+            "weight": 1014
+          },
+          {
+            "at_ms": 155,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1079
+          },
+          {
+            "at_ms": 5105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1079
+          },
+          {
+            "at_ms": 5155,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1121
+          },
+          {
+            "at_ms": 10105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1033
+          },
+          {
+            "at_ms": 10155,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "CLOSED",
+            "legs": [],
+            "weight": 1076
+          }
+        ],
+        "request_results": [
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          }
+        ]
       }
     },
     "short": {
+      "warm_weight": 616,
+      "latency_ms": 150,
+      "side": "SHORT",
+      "burst": false,
       "submitted_ms": 5201,
       "synthetic_actions": 1,
+      "denials": [],
+      "samples": [
+        {
+          "at_ms": 0,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 616
+        },
+        {
+          "at_ms": 0,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 616
+        },
+        {
+          "at_ms": 5201,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 751
+        }
+      ],
+      "source_expiry_unchanged": true,
+      "final_entry_decisions": {},
       "lifecycle": {
-        "protected_ms": 12853,
-        "closed_ms": 24955,
+        "protected_ms": 2353,
+        "filled_exit_ms": 2354,
+        "closed_ms": 9355,
         "wire_actions": [
           "ENTRY:ENTRY",
           "CREATE_EXIT:STOP",
@@ -393,21 +3041,211 @@
           "CANCEL:STOP"
         ],
         "wire_exit_times_ms": {
-          "STOP": 901,
-          "TAKE_PROFIT": 6802
-        }
+          "STOP": 751,
+          "TAKE_PROFIT": 1552
+        },
+        "samples": [
+          {
+            "at_ms": 752,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [],
+            "weight": 817
+          },
+          {
+            "at_ms": 752,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [],
+            "weight": 817
+          },
+          {
+            "at_ms": 1553,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [
+              "STOP"
+            ],
+            "weight": 883
+          },
+          {
+            "at_ms": 2353,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [
+              "STOP",
+              "TAKE_PROFIT"
+            ],
+            "weight": 948
+          },
+          {
+            "at_ms": 3105,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "STOP"
+            ],
+            "weight": 1014
+          },
+          {
+            "at_ms": 3105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "STOP"
+            ],
+            "weight": 1014
+          },
+          {
+            "at_ms": 3905,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1079
+          },
+          {
+            "at_ms": 8105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1079
+          },
+          {
+            "at_ms": 9355,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "CLOSED",
+            "legs": [],
+            "weight": 1034
+          }
+        ],
+        "request_results": [
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          }
+        ]
       }
     },
     "burst": {
+      "warm_weight": 616,
+      "latency_ms": 0,
+      "side": "LONG",
+      "burst": true,
       "submitted_ms": 4001,
-      "synthetic_actions": 1
+      "synthetic_actions": 1,
+      "denials": [],
+      "samples": [
+        {
+          "at_ms": 0,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 616
+        },
+        {
+          "at_ms": 0,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 616
+        },
+        {
+          "at_ms": 4001,
+          "actor": "worker",
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 773
+        }
+      ],
+      "source_expiry_unchanged": true,
+      "final_entry_decisions": {
+        "6d1f766a0bc564f64869e39db0fe162d69a067a712a16a90e5d1655d5e4516c8": {
+          "stage": "ENTRY_ADMISSION",
+          "scope": "account",
+          "account_role": "long_account",
+          "symbol": "SOL",
+          "occurrence_id": "6d1f766a0bc564f64869e39db0fe162d69a067a712a16a90e5d1655d5e4516c8",
+          "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+          "at_ms": 1791289080000,
+          "retry_after_ms": 1791289084000,
+          "deadline": "2026-10-06T12:19:30+00:00"
+        },
+        "ac28d739aff18ca47737cecc0ee8a650d1728fe58c04fa633a62be8a385386c5": {
+          "stage": "ENTRY_ADMISSION",
+          "scope": "account",
+          "account_role": "short_account",
+          "symbol": "SOL",
+          "occurrence_id": "ac28d739aff18ca47737cecc0ee8a650d1728fe58c04fa633a62be8a385386c5",
+          "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+          "at_ms": 1791289080000,
+          "retry_after_ms": 1791289084000,
+          "deadline": "2026-10-06T12:19:30+00:00"
+        }
+      }
     },
     "unknown_partial_stop": {
+      "warm_weight": 616,
+      "latency_ms": 50,
+      "side": "LONG",
+      "burst": false,
       "submitted_ms": 4401,
       "synthetic_actions": 1,
+      "denials": [],
+      "samples": [
+        {
+          "at_ms": 0,
+          "actor": "worker",
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 616
+        },
+        {
+          "at_ms": 0,
+          "actor": "supervisor",
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 616
+        },
+        {
+          "at_ms": 4401,
+          "actor": "worker",
+          "status": "OUTCOME_UNKNOWN_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 751
+        }
+      ],
+      "source_expiry_unchanged": true,
+      "final_entry_decisions": {},
       "lifecycle": {
-        "protected_ms": 11053,
-        "closed_ms": 27106,
+        "protected_ms": 853,
+        "filled_exit_ms": 854,
+        "closed_ms": 69156,
         "wire_actions": [
           "ENTRY:ENTRY",
           "CREATE_EXIT:STOP",
@@ -416,109 +3254,1830 @@
           "CANCEL:TAKE_PROFIT"
         ],
         "wire_exit_times_ms": {
-          "STOP": 301,
-          "TAKE_PROFIT": 5652
+          "STOP": 251,
+          "TAKE_PROFIT": 552
+        },
+        "samples": [
+          {
+            "at_ms": 252,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [
+              "ENTRY"
+            ],
+            "weight": 817
+          },
+          {
+            "at_ms": 252,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [
+              "ENTRY"
+            ],
+            "weight": 817
+          },
+          {
+            "at_ms": 553,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [
+              "ENTRY",
+              "STOP"
+            ],
+            "weight": 883
+          },
+          {
+            "at_ms": 853,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "OPEN",
+            "legs": [
+              "ENTRY",
+              "STOP",
+              "TAKE_PROFIT"
+            ],
+            "weight": 948
+          },
+          {
+            "at_ms": 1105,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "ENTRY",
+              "TAKE_PROFIT"
+            ],
+            "weight": 1014
+          },
+          {
+            "at_ms": 1105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "ENTRY",
+              "TAKE_PROFIT"
+            ],
+            "weight": 1014
+          },
+          {
+            "at_ms": 1406,
+            "actor": "worker",
+            "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1080
+          },
+          {
+            "at_ms": 1656,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 6105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 6856,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1168
+          },
+          {
+            "at_ms": 11105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1080
+          },
+          {
+            "at_ms": 12056,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 16105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 17256,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1168
+          },
+          {
+            "at_ms": 21105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1080
+          },
+          {
+            "at_ms": 22456,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 26105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 27656,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1168
+          },
+          {
+            "at_ms": 31105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1080
+          },
+          {
+            "at_ms": 32856,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 36105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 38056,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1168
+          },
+          {
+            "at_ms": 41105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1080
+          },
+          {
+            "at_ms": 43256,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 46105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1124
+          },
+          {
+            "at_ms": 48456,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1168
+          },
+          {
+            "at_ms": 51105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [
+              "TAKE_PROFIT"
+            ],
+            "weight": 1036
+          },
+          {
+            "at_ms": 53706,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1101
+          },
+          {
+            "at_ms": 56105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1101
+          },
+          {
+            "at_ms": 58856,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1143
+          },
+          {
+            "at_ms": 61105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1099
+          },
+          {
+            "at_ms": 64006,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1141
+          },
+          {
+            "at_ms": 66105,
+            "actor": "supervisor",
+            "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+            "error": null,
+            "phase": "PARTIALLY_CLOSED",
+            "legs": [],
+            "weight": 1141
+          },
+          {
+            "at_ms": 69156,
+            "actor": "worker",
+            "status": "OBSERVED_NO_ACTION",
+            "error": null,
+            "phase": "CLOSED",
+            "legs": [],
+            "weight": 916
+          }
+        ],
+        "request_results": [
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          },
+          {
+            "phase": "OBSERVED"
+          }
+        ]
+      }
+    },
+    "concurrent_heavy_unfilled": {
+      "warm_weight": 616,
+      "entries": [
+        {
+          "side": "long_account",
+          "at_ms": 4500
         }
+      ],
+      "closed_ms": null,
+      "phases": {
+        "long_account": "OUTCOME_UNKNOWN"
+      },
+      "pending_outcomes": [],
+      "observed_working_entries": {
+        "long_account": 1
+      },
+      "source_to_finish_reads": 107,
+      "source_to_finish_weight": 1735,
+      "samples": [
+        {
+          "at_ms": 0,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 616,
+          "phases": {}
+        },
+        {
+          "at_ms": 0,
+          "status": "SUPERVISOR_RECONCILIATION_REQUIRED",
+          "error": null,
+          "weight": 616,
+          "phases": {}
+        },
+        {
+          "at_ms": 4501,
+          "status": "TESTNET_ATTEMPT_RECORDED_AWAITING_OBSERVATION",
+          "error": null,
+          "weight": 773,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 4801,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 837,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 5000,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 837,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 9801,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 837,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 10000,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 837,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 15001,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 811,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 15001,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 811,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 20001,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 811,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 20001,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 811,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 25201,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 785,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 25201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 785,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 30201,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 785,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 30201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 785,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 34200,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 759,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 35201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 759,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 39200,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 759,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 40201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 759,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 44400,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 733,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 45201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 733,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 49400,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 733,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 50201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 733,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 54200,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 663,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 55201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 663,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 59200,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 663,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 60201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 663,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 64400,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 681,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 65201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 681,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 69400,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 681,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 70201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 681,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 73300,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 599,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 73550,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 560,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 73800,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 558,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 74050,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 75201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 79050,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 80201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 84101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 85201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 89101,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 90201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 94301,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 95201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 99301,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 100201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 104501,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 105201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 109501,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 110201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 114701,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 115201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 119701,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 120201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 124901,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 125201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 129901,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 130201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 135101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 135201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 140101,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 140201,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 620,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 145301,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 145301,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 150301,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 150301,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 155501,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 155501,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 160501,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 160501,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 165701,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 165701,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 170701,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 170701,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 175901,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 175901,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 180901,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 180901,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 186101,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 186101,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 191101,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 191101,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 196301,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 196301,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 201301,
+          "status": "OBSERVED_IDLE_REUSED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 201301,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 206501,
+          "status": "OBSERVED_NO_ACTION",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        },
+        {
+          "at_ms": 206501,
+          "status": "SUPERVISOR_ACCOUNT_PARTIALLY_VERIFIED",
+          "error": null,
+          "weight": 434,
+          "phases": {
+            "long_account": "OUTCOME_UNKNOWN"
+          }
+        }
+      ],
+      "denials": [],
+      "synthetic_actions": 1,
+      "entry_decisions": {
+        "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0": {
+          "stage": "ENTRY_ADMISSION",
+          "scope": "account",
+          "account_role": "short_account",
+          "symbol": "SOL",
+          "occurrence_id": "ba619c2d982adb4d63b9126d4613e229fc4a9205b6f939a2fdac3ce6cc9a98e0",
+          "reason": "TESTNET_REQUEST_BUDGET_EXHAUSTED",
+          "at_ms": 1791289164101,
+          "retry_after_ms": 1791289174101,
+          "deadline": "2026-10-06T12:19:30+00:00"
+        }
+      },
+      "wire_actions": [
+        "long_account:ENTRY:ENTRY"
+      ],
+      "orders": {
+        "1": {
+          "account": "0x1111111111111111111111111111111111111111",
+          "symbol": "SOL",
+          "leg": "ENTRY",
+          "view": {
+            "oid": "1",
+            "cloid": "0x5e8985d50f588bc3c9008421c3c9b7af",
+            "wire_order": {
+              "a": 2,
+              "b": true,
+              "p": "93.544",
+              "s": "4.67",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              },
+              "c": "0x5e8985d50f588bc3c9008421c3c9b7af"
+            },
+            "status": "OPEN",
+            "at_ms": 1791289084501,
+            "fills": []
+          }
+        }
+      },
+      "final_requests": [
+        {
+          "phase": "OBSERVED",
+          "observed_oid": "1"
+        }
+      ],
+      "final_context": {
+        "entry_blocked": {},
+        "account_entry_blocked": {},
+        "blocked_lanes": {}
       }
     }
   },
   "limitations": [
-    "Offline deterministic exchange replay only; not proof of live Testnet latency or behavior",
-    "571 PostgreSQL-dependent checks skipped; no schema changes",
-    "Empty-account observations still expire for health/entry authorization after fifteen seconds; missed feed changes may wait up to sixty seconds for periodic detection",
-    "Cold simultaneous-account replay closed both positions but one used existing emergency close",
-    "Steady-load unfilled-entry scenario still left first entry OUTCOME_UNKNOWN and second source expired before entry",
-    "Historical 616-weight scenario with immediate fills now completed both accounts, second entry at 73.65 seconds; this does not establish all concurrency cases"
+    "Offline exchange/SQL test doubles; no live Testnet proof",
+    "557 PostgreSQL-dependent tests skipped; schema unchanged",
+    "Empty-account missed feed changes may still wait up to sixty seconds for periodic detection",
+    "Known unchanged zero-fill MaxPain GTC uses ten-second periodic fallback; price-only cancellation barrier detection can be up to five seconds later than previous five-second polling",
+    "Very heavy warm616 load with first fill deliberately withheld until second entry still expires second alert; first entry is OBSERVED and open, with no unknown request",
+    "Quota-limited terminal verification and leftover-order cancellation can still be delayed; partial-fill lost-response replay completed cleanup in 69.156 seconds after initial fill",
+    "Early allowance is a scheduling estimate; unexpected larger fill pages or concurrent external budget use can still defer entry; real quota remains authoritative"
   ],
   "snapshot_unchanged_after_tests": true,
   "workspace_unchanged_since_snapshot": true,
   "tested_candidate_hashes": {
     "producer": {
       "file_count": 352,
-      "git_head": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
+      "git_head": "dde8340731aa5b9259018322d958c0e984e57e0d",
       "sha256": "5696746d465227f766b4b55f5f40705c5fcf5193a58b0bacddb575f588835e88"
     },
     "receiver": {
-      "file_count": 529,
-      "git_head": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
-      "sha256": "1dcc0a6b7b7942dc967077e2477ff68a96b3fd4caf4b6430e5931f68e78b5836"
+      "file_count": 528,
+      "git_head": "dde8340731aa5b9259018322d958c0e984e57e0d",
+      "sha256": "a0ab0c4f9a9641f158e54a05965651786d4f85c73f423fd1c71e1e17203748b1"
     }
   },
   "tested_file_sha256": {
-    "producer/experimental_execution_transport.py": "4c9e7670d7eaf9405b9d5111299dae987fdacb54f3826d414193149c69da2902",
-    "receiver/hl_testnet_runtime/experimental_execution_archive.py": "576f5bf9e9601fbd7077052beaa9a33b13b8cb8b5d827275ac8a883f843df0f4",
-    "receiver/hl_testnet_runtime/experimental_execution_evidence.py": "4a52bc6a5de738dc8491ac5ba374c950a4d1ddf9b9afc1cdf7e70076f6d74ddd",
-    "receiver/hl_testnet_runtime/experimental_live_provider.py": "fdd9d9571ce538919e9909f3e72b434478f61ef43d88a1d9b3a5f79cd685ea60",
-    "receiver/hl_testnet_runtime/experimental_live_runtime.py": "9924705a4d17c047f5674e09c47cc3c9670e10fe6048f23bdda4347844333a16",
-    "receiver/hl_testnet_runtime/experimental_live_safety.py": "3ef26917a9d4cba27e7cccffc1cb49c6971014b470bc38f0382cfb0cb2ead8bf",
-    "receiver/hl_testnet_runtime/experimental_live_service.py": "e753b93c8fe6573ad651894b64c4b0457e179e73e14157be1e629cc0cd9d76d7",
-    "receiver/hl_testnet_runtime/experimental_live_state.py": "afe6ad110f03fc885e540f30184a898e0e2bcc7a2f4dd32c98a1dcabc3086ee1",
-    "receiver/hl_testnet_runtime/filled_quantity_dispatch.py": "59cdd4c3bd6ecf2b0d21a04d020edab7c415119e33c458c64d779200a1254f85",
-    "receiver/hl_testnet_runtime/long_stream_runtime.py": "a206436dca5497ecf9cd2103db3f1785696e9b731434ad8d9113ae2c00555d07",
-    "receiver/hl_testnet_runtime/test_execution_history_store.py": "78b56249fd3bf2111c186a352839a6b535fa7701d6ed01e50db9e6e504364b2f",
-    "receiver/hl_testnet_runtime/test_experimental_entry_read_reuse.py": "76cf42a1e82dbaf70733e25add765e7ae70c0289990c6f5f3c67f395db67cc49",
-    "receiver/hl_testnet_runtime/test_experimental_final_working_set.py": "500d733445893a6bbad55de5351dff54b754edff62c54fd534e2f43e164af693",
-    "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "f4062a40d3661fb9df1d4a012d80b4d1c4537cc0448ebeae3b19aa4bbb55935a",
-    "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "ade36b39eb382956bac75cbd8845d6157769471bd4b091cf0f2b2b71ee66d31e",
-    "receiver/hl_testnet_runtime/test_experimental_live_service.py": "3d587744c10189bb81392e99658219526c046160b8e982bb009fa8b6b28b55fb",
-    "receiver/hl_testnet_runtime/test_long_stream_runtime.py": "ed9d579332138854f348780c8c4bd839ddecc6e56a901a13d7e525a7fcf1c5d3",
-    "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "d528d1f555de80d0b5804aa96576f1e2e07befb54dac8925c3d364c1877d4409"
+    "receiver/hl_testnet_runtime/card_display_projection.py": "9d0377152f9bdf83c32b3fba61149c3f1f9ff3a2b6b039fa0d9ea983e6e041e0",
+    "receiver/hl_testnet_runtime/experimental_allocations.py": "2669dedebe204a7486ea27437261e24273972dbc766a75e0d9281cae80db351f",
+    "receiver/hl_testnet_runtime/experimental_live_provider.py": "911279a4499ac6533702398df4ce0977047ed145f2c136b50c8411ed374f57db",
+    "receiver/hl_testnet_runtime/experimental_live_runtime.py": "5d43e4db9dda60a2c221ff4082d6632511f7feee9eb635b10cd3e651baa20ca4",
+    "receiver/hl_testnet_runtime/experimental_live_safety.py": "61aa975c0044668ee64bb3460ef80532e19168d0d0351898083949cadf249fd8",
+    "receiver/hl_testnet_runtime/experimental_live_service.py": "fcb2a9b8683b689990c94ecacb37c01e6550935365322dd088daa2728b17f4de",
+    "receiver/hl_testnet_runtime/guarded_execution.py": "ff1051ffb567b3544f86b69db5be9a727d11a9649a0f21664bd32e374543f04a",
+    "receiver/hl_testnet_runtime/parent_exit_handoff.py": "9f32198af07b012b151a76caca8f97d33782d205da427b9eb1f31d3802058367",
+    "receiver/hl_testnet_runtime/test_card_display_projection.py": "95c19bfdc27e1a7b291869cb5a569da8afd23ec2e37d6e783784c068f2aed9e6",
+    "receiver/hl_testnet_runtime/test_experimental_allocations.py": "58f2612e2b1c85a95411c45ec94a5ae13275db4edb168ce01fe5ad8246fce2ff",
+    "receiver/hl_testnet_runtime/test_experimental_entry_read_reuse.py": "cc600a20bb13af3bdab97d2e4be61dcf65fb502baec38628a39af3f2ba34c65c",
+    "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "b7ac3583f6006882e979d944a55b62b60a146a54a85d739d3a44c656e17ded55",
+    "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "d0c0397b84bed7d7e34554906611203622f8409c0eb1d1990b6798ff6dfcfc09",
+    "receiver/hl_testnet_runtime/test_experimental_live_service.py": "d9b096fc16eb5249a08706f83e461387d922eeaaa42abdc2536d07c1d388ab15",
+    "receiver/hl_testnet_runtime/test_guarded_execution.py": "038ecc37cd1f2c0fd68e4185c3f155c7a8cd840ad3430b96b81e674909563498",
+    "receiver/hl_testnet_runtime/test_parent_exit_handoff.py": "c56cc6fcc475b0e114ba9281d0920c2915413ddcfa8d000c5da75ebee8685ac1",
+    "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "549506d3d49564cddd634991c8e38e0476ec679d9f0ab388628e2ef6d4359a1e",
+    "receiver/hl_testnet_runtime/test_trade_cards_phase1.py": "d8bbd46a1c5baab86898bea1f6973bad0ee7664002368f64f1c561f554b1b06e",
+    "receiver/hl_testnet_runtime/test_unavailable_asset_cards.py": "d047958bd0da0189d28f5c365cb07aac74ba6112fb8781f7eb692bfc969d8a38",
+    "receiver/hl_testnet_runtime/trade_cards.py": "bde5ac03e552ce0ad1e2b103b647f05482b063603eb060fc2f1a1ce042672c6f"
   },
   "deployed": false,
-  "deployment": "Live deployment requires approval of this tested change per repository AGENTS.md",
-  "first_reduction_historical": {
-    "scope": "Isolated simplification of Testnet execution; no deployment or live exchange access",
+  "deployment": "Requires specific post-test approval under repository AGENTS.md",
+  "previous_cleanup": {
+    "scope": "Deep cleanup of existing isolated Testnet execution branch; no new files or operation types; no live deployment",
     "base_receiver_commit": "919ba37c3cff917e7d7c0c4c2ffc33a9d6ae8a20",
     "base_producer_commit": "039d0ed5f2308e59dc8fdc6cd5f516a8a2390995",
+    "deep_cleanup_local_base": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
+    "receiver_feature_parent": "f1129b9151a2c1a663743369eae13d0e9cf29a20",
     "tests": {
-      "passed": 2825,
-      "skipped": 603,
+      "passed": 2782,
+      "skipped": 571,
       "failures": 0,
       "errors": 0,
+      "tests_run": 3353,
       "network_attempts_blocked": 0
     },
     "postgresql": "NOT_VERIFIED_IN_THIS_RUN",
     "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
-    "measured_reads": {
-      "idle_before": 8,
-      "idle_after": 4,
-      "pre_entry_before": 17,
-      "pre_entry_after": 8,
-      "pre_entry_weight_before": 330,
-      "pre_entry_weight_after": 222
+    "deep_cleanup": {
+      "deleted_files": [
+        "receiver/hl_testnet_runtime/card_app_copy.py",
+        "receiver/hl_testnet_runtime/exclusive_exit_protocol.py",
+        "receiver/hl_testnet_runtime/experimental_local_controller.py",
+        "receiver/hl_testnet_runtime/test_card_app_copy.py",
+        "receiver/hl_testnet_runtime/test_exclusive_exit_protocol.py",
+        "receiver/hl_testnet_runtime/test_exclusive_raw_flow.py",
+        "receiver/hl_testnet_runtime/test_experimental_local_controller.py"
+      ],
+      "deleted_file_count": 7,
+      "deleted_production_files": 3,
+      "deleted_test_files": 4,
+      "production_function_definitions_removed": 50,
+      "production_function_definitions_added": 0,
+      "production_classes_removed": 3,
+      "removed_production_functions": {
+        "receiver/hl_testnet_runtime/card_app_copy.py": [
+          "_observed",
+          "lifecycle",
+          "received"
+        ],
+        "receiver/hl_testnet_runtime/exclusive_exit_protocol.py": [
+          "Rehearsal.__init__",
+          "Rehearsal.abort_unsent",
+          "Rehearsal.abort_unsent.update",
+          "Rehearsal.begin",
+          "Rehearsal.begin.update",
+          "Rehearsal.confirm",
+          "Rehearsal.confirm.update",
+          "Rehearsal.observe",
+          "Rehearsal.observe.update",
+          "Rehearsal.prepare",
+          "Rehearsal.prepare.update",
+          "Rehearsal.read_snapshot",
+          "_candidate",
+          "_contracts",
+          "_frozen_request",
+          "_lookup",
+          "_read",
+          "plan"
+        ],
+        "receiver/hl_testnet_runtime/experimental_local_controller.py": [
+          "LocalController.__init__",
+          "LocalController._change",
+          "LocalController._load",
+          "LocalController._source_view",
+          "LocalController._synchronize",
+          "LocalController._validate",
+          "LocalController.advance_stop",
+          "LocalController.advance_stop.transition",
+          "LocalController.attach_simulated_protection",
+          "LocalController.attach_simulated_protection.transition",
+          "LocalController.begin_entry",
+          "LocalController.begin_entry.transition",
+          "LocalController.begin_stop",
+          "LocalController.begin_stop.transition",
+          "LocalController.initialize",
+          "LocalController.load",
+          "LocalController.observe_stop",
+          "LocalController.observe_stop.transition",
+          "LocalController.prepare_entry",
+          "LocalController.prepare_entry.transition",
+          "LocalController.reserve_stop",
+          "LocalController.reserve_stop.transition",
+          "LocalController.stop_reply",
+          "LocalController.stop_reply.transition",
+          "readiness"
+        ],
+        "receiver/hl_testnet_runtime/filled_quantity_dispatch.py": [
+          "Controller._observation_guard"
+        ],
+        "receiver/hl_testnet_runtime/long_stream_runtime.py": [
+          "_short_account_readiness",
+          "_short_card_readiness",
+          "_short_pending_readiness"
+        ]
+      },
+      "obsolete_test_methods_removed": 79,
+      "focused_test_methods_added_in_existing_files": 4,
+      "production_files_modified": 6,
+      "test_files_modified": 4,
+      "new_files": 0,
+      "production_line_diff": {
+        "added": 125,
+        "removed": 862,
+        "net_removed": 737
+      },
+      "lines_in_seven_deleted_files": 1572,
+      "formula_alert_price_risk_contract_files_changed": 0,
+      "producer_files_changed": 0,
+      "removal_basis": [
+        "Three disconnected prototype modules with no live, CLI, HTTP, startup or dynamic import callers",
+        "Four test files exclusively covering deleted prototypes",
+        "Three unused short-account diagnostics and one unused observation-lock property"
+      ]
     },
-    "changes": [
-      "One routine inventory and reconciliation pass",
-      "Collect participating accounts only while work exists",
-      "Reuse same-collection account mode and balance",
-      "Reuse known order identity and verified terminal facts",
-      "One shared collection owner; supervisor fallback",
-      "Skip partial entry preflight while insufficient budget; retain existing quota and 90-second source expiry",
-      "Reuse unchanged fully protected static observations for at most 10 seconds",
-      "Remove duplicate intake validation and unnecessary archive transactions"
+    "work_reductions": [
+      "Apply unchanged local admission gates before candidate-only exchange reads",
+      "Move existing allowance check before candidate-only inventory and market reads",
+      "Skip market read after current reconciliation confirms fully protected fixed exits",
+      "Empty account periodic fallback changed from ten to sixty seconds; source/feed/retry forces fresh work",
+      "Skip admission configuration reload on already idle cycles",
+      "Skip ownership validation for observations too old to establish health",
+      "Reuse already computed state checksum; one fewer serialization/digest per mutation"
     ],
+    "measured_counts_before_this_cleanup": {
+      "empty_inventory": {
+        "reads": 4,
+        "weight": 44,
+        "by_kind": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2
+        }
+      },
+      "entry_collection": {
+        "reads": 8,
+        "weight": 222,
+        "by_kind": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "metaAndAssetCtxs": 1,
+          "userAbstraction": 1,
+          "userRole": 2,
+          "activeAssetData": 1,
+          "userRateLimit": 1
+        }
+      },
+      "idle_30_seconds": {
+        "reads": 12,
+        "weight": 132,
+        "by_kind": {
+          "frontendOpenOrders": 6,
+          "clearinghouseState": 6
+        },
+        "states": [
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_NO_ACTION",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_NO_ACTION",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_NO_ACTION"
+        ],
+        "synthetic_actions": 0
+      },
+      "budget_wait_30_seconds": {
+        "reads": 12,
+        "weight": 132,
+        "by_kind": {
+          "frontendOpenOrders": 6,
+          "clearinghouseState": 6
+        },
+        "states": [
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_NO_ACTION",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_NO_ACTION",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_NO_ACTION"
+        ],
+        "synthetic_actions": 0
+      },
+      "stable_protected_collection": {
+        "reads": 6,
+        "weight": 67,
+        "by_kind": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "metaAndAssetCtxs": 1,
+          "orderStatus": 2,
+          "userFillsByTime": 1
+        },
+        "entry_capacity_count": 0,
+        "entry_blocked": {}
+      },
+      "blocked_peer_collection": {
+        "reads": 11,
+        "weight": 247,
+        "by_kind": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "metaAndAssetCtxs": 1,
+          "orderStatus": 2,
+          "userFillsByTime": 1,
+          "userAbstraction": 1,
+          "userRole": 2,
+          "activeAssetData": 1,
+          "userRateLimit": 1
+        },
+        "entry_capacity_count": 1,
+        "entry_blocked": {}
+      }
+    },
+    "measured_counts_after_this_cleanup": {
+      "empty_inventory": {
+        "reads": 4,
+        "weight": 44,
+        "by_kind": {
+          "frontendOpenOrders": 2,
+          "clearinghouseState": 2
+        }
+      },
+      "entry_collection": {
+        "reads": 8,
+        "weight": 222,
+        "by_kind": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "metaAndAssetCtxs": 1,
+          "userAbstraction": 1,
+          "userRole": 2,
+          "activeAssetData": 1,
+          "userRateLimit": 1
+        }
+      },
+      "idle_30_seconds": {
+        "reads": 0,
+        "weight": 0,
+        "by_kind": {},
+        "states": [
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED"
+        ],
+        "synthetic_actions": 0
+      },
+      "budget_wait_30_seconds": {
+        "reads": 0,
+        "weight": 0,
+        "by_kind": {},
+        "states": [
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED",
+          "OBSERVED_IDLE_REUSED"
+        ],
+        "synthetic_actions": 0
+      },
+      "stable_protected_collection": {
+        "reads": 5,
+        "weight": 47,
+        "by_kind": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "orderStatus": 2,
+          "userFillsByTime": 1
+        },
+        "entry_capacity_count": 0,
+        "entry_blocked": {}
+      },
+      "blocked_peer_collection": {
+        "reads": 5,
+        "weight": 47,
+        "by_kind": {
+          "frontendOpenOrders": 1,
+          "clearinghouseState": 1,
+          "orderStatus": 2,
+          "userFillsByTime": 1
+        },
+        "entry_capacity_count": 0,
+        "entry_blocked": {
+          "bf1845754975c7c948ef20eed09870943fdd9cb8700dbb4e40831a23493b2538": "SHARED_MARKET_INDEPENDENT_EXITS_NOT_ISOLATED"
+        }
+      }
+    },
+    "empty_60_second_measurement": {
+      "before_calls": 24,
+      "after_calls": 4,
+      "calls_removed": 20,
+      "note": "Excludes initial scan; two empty accounts; existing tick and supervisor schedule"
+    },
+    "measurement_scope": "Same offline real collectors and finite weighted quota; exchange/network/SQL are deterministic test doubles. Thirty-second idle/wait samples exclude initial inventory. Entries measured per collection.",
+    "lifecycle_results": {
+      "concurrent": {
+        "entries": [
+          {
+            "side": "long_account",
+            "at_ms": 750
+          },
+          {
+            "side": "short_account",
+            "at_ms": 6401
+          }
+        ],
+        "closed_ms": 87105,
+        "phases": {
+          "long_account": "CLOSED",
+          "short_account": "CLOSED"
+        },
+        "wire_actions": [
+          "long_account:ENTRY:ENTRY",
+          "short_account:ENTRY:ENTRY",
+          "long_account:CREATE_EXIT:STOP",
+          "long_account:CREATE_EXIT:TAKE_PROFIT",
+          "short_account:EMERGENCY_CLOSE:STOP",
+          "long_account:CANCEL:STOP"
+        ],
+        "synthetic_actions": 6
+      },
+      "concurrent_transient_immediate": {
+        "entries": [
+          {
+            "side": "long_account",
+            "at_ms": 4550
+          },
+          {
+            "side": "short_account",
+            "at_ms": 73650
+          }
+        ],
+        "closed_ms": 100701,
+        "phases": {
+          "long_account": "CLOSED",
+          "short_account": "CLOSED"
+        },
+        "wire_actions": [
+          "long_account:ENTRY:ENTRY",
+          "long_account:CREATE_EXIT:STOP",
+          "long_account:CREATE_EXIT:TAKE_PROFIT",
+          "long_account:CANCEL:STOP",
+          "short_account:ENTRY:ENTRY",
+          "short_account:CREATE_EXIT:STOP",
+          "short_account:CREATE_EXIT:TAKE_PROFIT",
+          "short_account:CANCEL:STOP"
+        ],
+        "synthetic_actions": 8
+      },
+      "concurrent_steady_unfilled": {
+        "entries": [
+          {
+            "side": "long_account",
+            "at_ms": 750
+          }
+        ],
+        "closed_ms": null,
+        "phases": {
+          "long_account": "OUTCOME_UNKNOWN"
+        },
+        "wire_actions": [
+          "long_account:ENTRY:ENTRY"
+        ],
+        "synthetic_actions": 1
+      },
+      "long": {
+        "submitted_ms": 4001,
+        "synthetic_actions": 1,
+        "lifecycle": {
+          "protected_ms": 10003,
+          "closed_ms": 20005,
+          "wire_actions": [
+            "ENTRY:ENTRY",
+            "CREATE_EXIT:STOP",
+            "CREATE_EXIT:TAKE_PROFIT",
+            "CANCEL:STOP"
+          ],
+          "wire_exit_times_ms": {
+            "STOP": 1,
+            "TAKE_PROFIT": 5002
+          }
+        }
+      },
+      "short": {
+        "submitted_ms": 5201,
+        "synthetic_actions": 1,
+        "lifecycle": {
+          "protected_ms": 12853,
+          "closed_ms": 24955,
+          "wire_actions": [
+            "ENTRY:ENTRY",
+            "CREATE_EXIT:STOP",
+            "CREATE_EXIT:TAKE_PROFIT",
+            "CANCEL:STOP"
+          ],
+          "wire_exit_times_ms": {
+            "STOP": 901,
+            "TAKE_PROFIT": 6802
+          }
+        }
+      },
+      "burst": {
+        "submitted_ms": 4001,
+        "synthetic_actions": 1
+      },
+      "unknown_partial_stop": {
+        "submitted_ms": 4401,
+        "synthetic_actions": 1,
+        "lifecycle": {
+          "protected_ms": 11053,
+          "closed_ms": 27106,
+          "wire_actions": [
+            "ENTRY:ENTRY",
+            "CREATE_EXIT:STOP",
+            "CREATE_EXIT:TAKE_PROFIT",
+            "CANCEL:ENTRY",
+            "CANCEL:TAKE_PROFIT"
+          ],
+          "wire_exit_times_ms": {
+            "STOP": 301,
+            "TAKE_PROFIT": 5652
+          }
+        }
+      }
+    },
     "limitations": [
-      "Synthetic exchange evidence does not establish live Testnet behavior",
-      "603 PostgreSQL-dependent checks skipped; no database schema changes",
-      "Under historical 616-weight load, a second simultaneous alert still expired before entry",
-      "Two-account cold replay closed both positions; one used existing emergency close"
+      "Offline deterministic exchange replay only; not proof of live Testnet latency or behavior",
+      "571 PostgreSQL-dependent checks skipped; no schema changes",
+      "Empty-account observations still expire for health/entry authorization after fifteen seconds; missed feed changes may wait up to sixty seconds for periodic detection",
+      "Cold simultaneous-account replay closed both positions but one used existing emergency close",
+      "Steady-load unfilled-entry scenario still left first entry OUTCOME_UNKNOWN and second source expired before entry",
+      "Historical 616-weight scenario with immediate fills now completed both accounts, second entry at 73.65 seconds; this does not establish all concurrency cases"
     ],
+    "snapshot_unchanged_after_tests": true,
+    "workspace_unchanged_since_snapshot": true,
+    "tested_candidate_hashes": {
+      "producer": {
+        "file_count": 352,
+        "git_head": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
+        "sha256": "5696746d465227f766b4b55f5f40705c5fcf5193a58b0bacddb575f588835e88"
+      },
+      "receiver": {
+        "file_count": 529,
+        "git_head": "41982eaff0044f8a2b8d98d03dc02d7893ce1230",
+        "sha256": "1dcc0a6b7b7942dc967077e2477ff68a96b3fd4caf4b6430e5931f68e78b5836"
+      }
+    },
     "tested_file_sha256": {
       "producer/experimental_execution_transport.py": "4c9e7670d7eaf9405b9d5111299dae987fdacb54f3826d414193149c69da2902",
       "receiver/hl_testnet_runtime/experimental_execution_archive.py": "576f5bf9e9601fbd7077052beaa9a33b13b8cb8b5d827275ac8a883f843df0f4",
       "receiver/hl_testnet_runtime/experimental_execution_evidence.py": "4a52bc6a5de738dc8491ac5ba374c950a4d1ddf9b9afc1cdf7e70076f6d74ddd",
-      "receiver/hl_testnet_runtime/experimental_live_provider.py": "3bd9dccc1e5aad18af5966a53ace46131057ff1b595c9c39df558d0cd03dd815",
+      "receiver/hl_testnet_runtime/experimental_live_provider.py": "fdd9d9571ce538919e9909f3e72b434478f61ef43d88a1d9b3a5f79cd685ea60",
       "receiver/hl_testnet_runtime/experimental_live_runtime.py": "9924705a4d17c047f5674e09c47cc3c9670e10fe6048f23bdda4347844333a16",
-      "receiver/hl_testnet_runtime/experimental_live_safety.py": "38f7ad7835fa010f0f54c340e17885c998e3b189f80b451eb62344f4c9dfdda1",
-      "receiver/hl_testnet_runtime/experimental_live_service.py": "8a7626de284975b31b3033601a5d87d45470a099a69ad04c9abe3d0d8eac3a6b",
+      "receiver/hl_testnet_runtime/experimental_live_safety.py": "3ef26917a9d4cba27e7cccffc1cb49c6971014b470bc38f0382cfb0cb2ead8bf",
+      "receiver/hl_testnet_runtime/experimental_live_service.py": "e753b93c8fe6573ad651894b64c4b0457e179e73e14157be1e629cc0cd9d76d7",
+      "receiver/hl_testnet_runtime/experimental_live_state.py": "afe6ad110f03fc885e540f30184a898e0e2bcc7a2f4dd32c98a1dcabc3086ee1",
+      "receiver/hl_testnet_runtime/filled_quantity_dispatch.py": "59cdd4c3bd6ecf2b0d21a04d020edab7c415119e33c458c64d779200a1254f85",
+      "receiver/hl_testnet_runtime/long_stream_runtime.py": "a206436dca5497ecf9cd2103db3f1785696e9b731434ad8d9113ae2c00555d07",
       "receiver/hl_testnet_runtime/test_execution_history_store.py": "78b56249fd3bf2111c186a352839a6b535fa7701d6ed01e50db9e6e504364b2f",
       "receiver/hl_testnet_runtime/test_experimental_entry_read_reuse.py": "76cf42a1e82dbaf70733e25add765e7ae70c0289990c6f5f3c67f395db67cc49",
       "receiver/hl_testnet_runtime/test_experimental_final_working_set.py": "500d733445893a6bbad55de5351dff54b754edff62c54fd534e2f43e164af693",
-      "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "3ab1f8f4b4051c8a7c391270d6a612ab4e0624af6d4914b77c018a888078ec6c",
-      "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "77aae0f695601e58cff9026110638c055674dea9e12b9adb6b064e8e0da7b7ed",
+      "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "f4062a40d3661fb9df1d4a012d80b4d1c4537cc0448ebeae3b19aa4bbb55935a",
+      "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "ade36b39eb382956bac75cbd8845d6157769471bd4b091cf0f2b2b71ee66d31e",
       "receiver/hl_testnet_runtime/test_experimental_live_service.py": "3d587744c10189bb81392e99658219526c046160b8e982bb009fa8b6b28b55fb",
-      "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "69421bdf41001e1c33c11e4d17090bfda3030c5bfa8797da0d87b294f0ec5dba"
+      "receiver/hl_testnet_runtime/test_long_stream_runtime.py": "ed9d579332138854f348780c8c4bd839ddecc6e56a901a13d7e525a7fcf1c5d3",
+      "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "d528d1f555de80d0b5804aa96576f1e2e07befb54dac8925c3d364c1877d4409"
     },
-    "deployment": "Requires explicit approval of this tested change per repository AGENTS.md"
+    "deployed": false,
+    "deployment": "Live deployment requires approval of this tested change per repository AGENTS.md",
+    "first_reduction_historical": {
+      "scope": "Isolated simplification of Testnet execution; no deployment or live exchange access",
+      "base_receiver_commit": "919ba37c3cff917e7d7c0c4c2ffc33a9d6ae8a20",
+      "base_producer_commit": "039d0ed5f2308e59dc8fdc6cd5f516a8a2390995",
+      "tests": {
+        "passed": 2825,
+        "skipped": 603,
+        "failures": 0,
+        "errors": 0,
+        "network_attempts_blocked": 0
+      },
+      "postgresql": "NOT_VERIFIED_IN_THIS_RUN",
+      "status": "PARTIAL_POSTGRESQL_NOT_VERIFIED",
+      "measured_reads": {
+        "idle_before": 8,
+        "idle_after": 4,
+        "pre_entry_before": 17,
+        "pre_entry_after": 8,
+        "pre_entry_weight_before": 330,
+        "pre_entry_weight_after": 222
+      },
+      "changes": [
+        "One routine inventory and reconciliation pass",
+        "Collect participating accounts only while work exists",
+        "Reuse same-collection account mode and balance",
+        "Reuse known order identity and verified terminal facts",
+        "One shared collection owner; supervisor fallback",
+        "Skip partial entry preflight while insufficient budget; retain existing quota and 90-second source expiry",
+        "Reuse unchanged fully protected static observations for at most 10 seconds",
+        "Remove duplicate intake validation and unnecessary archive transactions"
+      ],
+      "limitations": [
+        "Synthetic exchange evidence does not establish live Testnet behavior",
+        "603 PostgreSQL-dependent checks skipped; no database schema changes",
+        "Under historical 616-weight load, a second simultaneous alert still expired before entry",
+        "Two-account cold replay closed both positions; one used existing emergency close"
+      ],
+      "tested_file_sha256": {
+        "producer/experimental_execution_transport.py": "4c9e7670d7eaf9405b9d5111299dae987fdacb54f3826d414193149c69da2902",
+        "receiver/hl_testnet_runtime/experimental_execution_archive.py": "576f5bf9e9601fbd7077052beaa9a33b13b8cb8b5d827275ac8a883f843df0f4",
+        "receiver/hl_testnet_runtime/experimental_execution_evidence.py": "4a52bc6a5de738dc8491ac5ba374c950a4d1ddf9b9afc1cdf7e70076f6d74ddd",
+        "receiver/hl_testnet_runtime/experimental_live_provider.py": "3bd9dccc1e5aad18af5966a53ace46131057ff1b595c9c39df558d0cd03dd815",
+        "receiver/hl_testnet_runtime/experimental_live_runtime.py": "9924705a4d17c047f5674e09c47cc3c9670e10fe6048f23bdda4347844333a16",
+        "receiver/hl_testnet_runtime/experimental_live_safety.py": "38f7ad7835fa010f0f54c340e17885c998e3b189f80b451eb62344f4c9dfdda1",
+        "receiver/hl_testnet_runtime/experimental_live_service.py": "8a7626de284975b31b3033601a5d87d45470a099a69ad04c9abe3d0d8eac3a6b",
+        "receiver/hl_testnet_runtime/test_execution_history_store.py": "78b56249fd3bf2111c186a352839a6b535fa7701d6ed01e50db9e6e504364b2f",
+        "receiver/hl_testnet_runtime/test_experimental_entry_read_reuse.py": "76cf42a1e82dbaf70733e25add765e7ae70c0289990c6f5f3c67f395db67cc49",
+        "receiver/hl_testnet_runtime/test_experimental_final_working_set.py": "500d733445893a6bbad55de5351dff54b754edff62c54fd534e2f43e164af693",
+        "receiver/hl_testnet_runtime/test_experimental_live_provider.py": "3ab1f8f4b4051c8a7c391270d6a612ab4e0624af6d4914b77c018a888078ec6c",
+        "receiver/hl_testnet_runtime/test_experimental_live_safety.py": "77aae0f695601e58cff9026110638c055674dea9e12b9adb6b064e8e0da7b7ed",
+        "receiver/hl_testnet_runtime/test_experimental_live_service.py": "3d587744c10189bb81392e99658219526c046160b8e982bb009fa8b6b28b55fb",
+        "receiver/hl_testnet_runtime/test_simplified_execution_replay.py": "69421bdf41001e1c33c11e4d17090bfda3030c5bfa8797da0d87b294f0ec5dba"
+      },
+      "deployment": "Requires explicit approval of this tested change per repository AGENTS.md"
+    }
   }
 }

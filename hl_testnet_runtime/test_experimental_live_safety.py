@@ -1,5 +1,6 @@
 """Offline real feed tokens, durable checkpoints and independent supervision."""
 from copy import deepcopy
+from decimal import Decimal
 import json
 import threading
 from types import SimpleNamespace
@@ -322,6 +323,65 @@ class LiveSafetyTests(unittest.TestCase):
                 status='filled', statusTimestamp=self.fx.oracle.now())])))
         self.assertIsNone(self.supervisor.idle_receipt())
 
+    def test_known_unfilled_gtc_coalesces_until_ten_seconds_or_actionable_change(self):
+        self.ready_feed(); self.observed(); self.supervisor.pass_once()
+        self.supervisor._thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout: None)
+        self.fx.service.supervisor = self.supervisor
+        msg = maxpain_alert(approved_ms=T)
+        account = self.fx.release['routes']['long_account']
+        self.fx.oracle.mark[safety._lane(account, msg['symbol'])] = msg['entry']
+        self.fx.worker.receive([msg])
+        self.assertEqual(self.fx.worker.run_once(entries_enabled=True).get('operation'), 'ENTRY')
+        self.assertIsNone(self.supervisor.idle_receipt())  # Reply alone is not observation.
+        self.observed()
+        trade = self.fx.store.load()['trades'][msg['occurrence_id']]
+        self.assertEqual(trade['entry_fills'], {})
+        self.assertEqual(self.fx.store.request(trade['entry_request'])['phase'], 'OBSERVED')
+        reads = len(self.fx.raw.calls)
+        self.fx.oracle.t += 5000
+        self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_IDLE_REUSED')
+        self.assertEqual(len(self.fx.raw.calls), reads)
+
+        # Local retirement revokes reuse even while the unchanged feed is fresh.
+        self.fx.store.mutate(lambda state: state['sources'][msg['occurrence_id']].update(entry_permission='RETIRED'))
+        self.assertIsNone(self.supervisor.idle_receipt())
+        self.fx.store.mutate(lambda state: state['sources'][msg['occurrence_id']].update(entry_permission='WAITING'))
+        self.assertIsNotNone(self.supervisor.idle_receipt())
+        self.fx.oracle.t += 5000
+        self.assertEqual(self.fx.service.tick()['status'], 'OBSERVED_NO_ACTION')
+        self.assertGreater(len(self.fx.raw.calls), reads)
+
+        # A partial fill wakes collection immediately and resumes normal SL/TP
+        # work; neither the remaining GTC quantity nor its known OID permits reuse.
+        partial = (Decimal(trade['quantity']) / 2).quantize(Decimal(10) ** -trade['asset']['decimals'])
+        self.fx.oracle.fill(self.fx.oracle.oid('ENTRY'), str(partial))
+        token = self.feed.begin_reconciliation(account)
+        self.feed._receive(account, token.generation, json.dumps(dict(channel='orderUpdates',
+            data=[dict(order=dict(coin=msg['symbol'], oid=int(self.fx.oracle.oid('ENTRY'))),
+                status='open', statusTimestamp=self.fx.oracle.now())])))
+        self.assertIsNone(self.supervisor.idle_receipt())
+        reads = len(self.fx.raw.calls)
+        self.assertEqual(self.fx.service.tick().get('operation'), 'CREATE_EXIT')
+        self.assertGreater(len(self.fx.raw.calls), reads)
+        self.assertIsNone(self.supervisor.idle_receipt())
+        for _ in range(3):
+            self.observed()
+        self.assertTrue(self.capability._peers_protected(self.fx.store.load()))
+        self.assertIsNone(self.supervisor.idle_receipt())
+
+    def test_known_gtc_does_not_defer_another_ready_source(self):
+        self.ready_feed(); self.observed(); self.supervisor.pass_once()
+        self.supervisor._thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout: None)
+        msg = maxpain_alert(approved_ms=T)
+        account = self.fx.release['routes']['long_account']
+        self.fx.oracle.mark[safety._lane(account, msg['symbol'])] = msg['entry']
+        self.fx.worker.receive([msg])
+        self.fx.worker.run_once(entries_enabled=True)
+        self.observed()
+        self.assertIsNotNone(self.supervisor.idle_receipt())
+        self.fx.worker.receive([r2732_message(entry=2.3, decision_ms=T-60000)])
+        self.assertIsNone(self.supervisor.idle_receipt())
+
     def test_stale_primary_does_not_suppress_supervisor_fallback(self):
         self.ready_feed(); self.observed()
         primary = self.fx.service
@@ -341,11 +401,59 @@ class LiveSafetyTests(unittest.TestCase):
         account = self.fx.release['routes']['short_account']
         self.assertFalse(self.supervisor.health(account=account)['healthy'])
         self.fx.worker.receive([r2732_message(entry=2.3, decision_ms=T-60000)])
-        result = self.fx.worker.run_once(entries_enabled=True)
+        with patch.object(self.capability, '_continuous', wraps=self.capability._continuous) as continuity, \
+                patch.object(self.capability, '_legacy_clear', wraps=self.capability._legacy_clear) as ownership, \
+                patch.object(self.capability, '_peers_protected', wraps=self.capability._peers_protected) as peers:
+            result = self.fx.worker.run_once(entries_enabled=True)
+        # Each side of signing gets one current account verification; the same
+        # committed observation must not cause duplicate journal/safety work.
+        self.assertEqual([continuity.call_count, ownership.call_count, peers.call_count], [2, 2, 2])
         self.assertEqual(result.get('operation'), 'ENTRY', result)
         self.assertEqual(self.fx.provider._last['context']['inventory_accounts'], [account])
         self.assertTrue(self.supervisor.health(account=account)['healthy'])
         self.assertEqual(len(self.fx.http), 1)
+
+    def test_account_verification_never_reuses_changed_authority(self):
+        self.ready_feed(); self.observed()
+        self.supervisor._thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout: None)
+        account = self.fx.release['routes']['short_account']
+        request = dict(request_id='entry', phase='OUTCOME_UNKNOWN', domain='testnet',
+            proposal=dict(operation='ENTRY', account=account, role='short_account'))
+        self.fx.store.mutate(lambda state: state['requests'].update(entry=deepcopy(request)))
+        context = self.fx.provider._last['context']
+        args = dict(request=request, collected_at_ms=context['inventory_at_ms'],
+            ownership_revision=context['ownership_revision'])
+        check = self.capability.verify_checkpoint
+        self.assertTrue(check(state=self.fx.store.load(), **args)['emergency_healthy'])
+
+        # A changed legacy owner must be discovered on the next verification.
+        row = dict(account=account, symbol='XRP', bucket='b'*64, revision=1,
+            pending=None, emergency=None, bindings=[], evidence=None)
+        with patch.object(self.legacy, 'for_account',
+                side_effect=lambda owner: [deepcopy(row)] if owner == account else []):
+            result = check(state=self.fx.store.load(), **args)
+        self.assertFalse(result['entry_circuit_clear'])
+        self.assertFalse(result['emergency_healthy'])
+
+        state = self.fx.store.load()
+        state['requests']['peer'] = dict(phase='OUTCOME_UNKNOWN', proposal=dict(account=account))
+        result = check(state=state, **args)
+        self.assertFalse(result['entry_circuit_clear'])
+        self.assertFalse(result['emergency_healthy'])
+
+        # Even a feed change after the account proof but before health is read
+        # must close admission without requiring another exchange collection.
+        original = self.supervisor._record_observation
+        def disconnect(state, verified):
+            original(state, verified)
+            self.feed._disconnected(account, self.feed.begin_reconciliation(account).generation)
+        with patch.object(self.supervisor, '_record_observation', side_effect=disconnect):
+            result = check(state=self.fx.store.load(), **args)
+        self.assertFalse(result['emergency_healthy'])
+        self.fx.oracle.t += safety.FRESH_MS + 1
+        result = check(state=self.fx.store.load(), **args)
+        self.assertFalse(result['entry_circuit_clear'])
+        self.assertFalse(result['emergency_healthy'])
 
     def test_budget_wait_reuses_idle_receipt_only_before_retry_due(self):
         self.ready_feed(); self.observed()

@@ -304,7 +304,15 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
 
     def _maintain_live(self, state, context, now):
         from . import emergency_close
-        for trade in sorted(state['trades'].values(),key=lambda t:t['cid']):
+        # Cover every filled position before preparing another trade's TP.
+        # Stable card identity remains the tie-breaker within each priority.
+        for trade in sorted(state['trades'].values(),key=lambda t:(
+                not (_remaining(t)>0 and sum(
+                    (life.number(o['wire_order']['s'])-sum(
+                        (life.number(f['quantity']) for f in o['fills']),0)
+                     for oid,o in t['orders'].items()
+                     if o['status']=='OPEN' and t['order_legs'][oid]=='STOP'),0)<_remaining(t)),
+                t['cid'])):
             if trade['phase'] in FINAL: continue
             own={**state,'trades':{trade['cid']:trade}}
             view=self._deadline_view(state,trade,context,now) if _remaining(trade)>0 else None

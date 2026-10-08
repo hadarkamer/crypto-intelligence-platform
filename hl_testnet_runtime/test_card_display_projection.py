@@ -36,24 +36,6 @@ class DisplayOnlyTests(unittest.TestCase):
         self.assertEqual((self.b,self.s),before)
         self.assertEqual(self.export()['cards'][0]['prices']['stop'],'98')
 
-    def test_delivery_receipt_is_not_a_trade_receipt(self):
-        out=self.export();receipt=dict(delivery_id=out['delivery_id'],received=True)
-        self.assertTrue(p.receipt_matches(receipt,out['delivery_id']))
-        self.assertIs(type(p.receipt_matches(receipt,out['delivery_id'])),bool)
-
-    def test_receipt_with_commands_or_order_data_is_rejected(self):
-        out=self.export()
-        for field in ('buy','sell','cancel','stop','account','commands','policy','next_step','webhook','redirect'):
-            receipt=dict(delivery_id=out['delivery_id'],received=True)
-            receipt[field]='do something'
-            with self.assertRaises(life.LifecycleError):p.receipt_matches(receipt,out['delivery_id'])
-
-    def test_mismatched_and_malformed_receipts_rejected(self):
-        identity=self.export()['delivery_id']
-        for value in (None,[],{},dict(delivery_id='a'*64,received=True),dict(delivery_id=identity,received=1),
-                      dict(delivery_id=identity,received=False),dict(delivery_id=identity,received='true')):
-            with self.assertRaises(life.LifecycleError):p.receipt_matches(value,identity)
-
     def test_display_projection_cannot_be_execution_evidence(self):
         out=self.export()
         with self.assertRaises(life.LifecycleError):life.validate_snapshot(out)

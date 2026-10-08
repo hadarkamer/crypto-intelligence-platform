@@ -2,6 +2,7 @@
 from collections import Counter
 from copy import deepcopy
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -19,6 +20,8 @@ class EntryReadReuseTests(unittest.TestCase):
 
     def candidate(self, *, symbol='HYPE', side='LONG', cycle='first'):
         message = maxpain_alert(approved_ms=T)
+        message.update(source_at=contract.iso_ms(T-240000+len(self.state['sources'])*60000),
+            created_at=contract.iso_ms(T-230000+len(self.state['sources'])*60000))
         message.update(symbol=symbol, side=side,
             rule_id=next(k for k,v in contract.SPECS.items() if v[0] == symbol))
         if side == 'SHORT':
@@ -41,6 +44,10 @@ class EntryReadReuseTests(unittest.TestCase):
     def test_two_candidates_reuse_reads_without_changing_capacity_or_inventory(self):
         first = self.candidate()
         second = self.candidate(symbol='SOL', cycle='second')
+        third = self.candidate(cycle='third')
+        # Refused first admission still lets the next candidate use the same
+        # account facts; each plan remains independently checked.
+        self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'HYPE')]='99'
         original = self.provider._capacity
         def separate(*args, **kwargs):
             kwargs['entry_reads'] = {}
@@ -53,6 +60,7 @@ class EntryReadReuseTests(unittest.TestCase):
         counts = Counter(call[0] for call in self.raw.calls)
         self.assertEqual(after, before)
         self.assertEqual(set(after['capacity']), {first, second})
+        self.assertEqual(after['entry_blocked'],{third:'ENTRY_DEFERRED_TO_NEXT_CYCLE'})
         self.assertEqual(sum(baseline.values()), 13)
         self.assertEqual(sum(counts.values()), 9)
         self.assertEqual(counts['frontendOpenOrders'], 1)
@@ -65,20 +73,60 @@ class EntryReadReuseTests(unittest.TestCase):
     def test_same_asset_raw_capacity_reused_but_plans_and_returns_independent(self):
         first = self.candidate()
         second = self.candidate(cycle='second')
+        self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'HYPE')]='99'
         after = self.collect()
         self.assertEqual(len(self.raw.calls), 8)
         self.assertEqual(sum(c[0] == 'activeAssetData' for c in self.raw.calls), 1)
         after['capacity'][first]['active']['availableToTrade'][0] = '0'
         self.assertEqual(after['capacity'][second]['active']['availableToTrade'][0], '50000')
 
-    def test_distinct_accounts_do_not_share_capacity_identity_or_allowance(self):
-        self.candidate()
-        self.candidate(side='SHORT', cycle='second')
-        self.assertEqual(self.collect()['entry_blocked'], {})
+    def test_only_first_admissible_account_capacity_is_prepared(self):
+        first=self.candidate()
+        second=self.candidate(side='SHORT', cycle='second')
+        result=self.collect()
+        self.assertEqual(set(result['capacity']),{first})
+        self.assertEqual(result['entry_blocked'],{second:'ENTRY_DEFERRED_TO_NEXT_CYCLE'})
         counts = Counter(call[0] for call in self.raw.calls)
-        self.assertEqual(counts['userRole'], 4)
-        self.assertEqual(counts['userRateLimit'], 2)
-        self.assertEqual(counts['activeAssetData'], 2)
+        self.assertEqual(counts['userRole'], 2)
+        self.assertEqual(counts['userRateLimit'], 1)
+        self.assertEqual(counts['activeAssetData'], 1)
+        self.assertEqual(sum(counts.values()),10)
+        # Once that source is consumed, the other account receives its own
+        # fresh identity, balance and capacity reads in the following cycle.
+        self.state['sources'].pop(first);self.raw.calls.clear()
+        result=self.collect()
+        self.assertEqual(set(result['capacity']),{second})
+        self.assertEqual(result['entry_blocked'],{})
+        self.assertEqual(len(self.raw.calls),8)
+
+    def test_continuous_release_unapproved_source_cannot_defer_later_approved_alert(self):
+        from experimental_execution_fixtures import maxpain_message
+        from .experimental_live_release import CONTINUOUS_ENTRY
+        self.state['not_before_ms']=T-360000
+        legacy=maxpain_message(created_ms=T-300000)
+        cid=legacy['occurrence_id']
+        record,_=reduce_source(None,legacy,now=contract.iso_ms(T-300000),
+            not_before=contract.iso_ms(self.state['not_before_ms']),domain='testnet')
+        for stamp in [*range(T-240000,self.exchange.t,60000),self.exchange.t]:
+            heartbeat=maxpain_message(created_ms=T-300000,as_of_ms=stamp,kind='HEARTBEAT')
+            record,_=reduce_source(record,heartbeat,now=contract.iso_ms(stamp),
+                not_before=contract.iso_ms(self.state['not_before_ms']),domain='testnet')
+        self.state['sources'][cid]=record
+        approved=self.candidate(symbol='SOL')
+        account=self.state['routes']['long_account']
+        self.exchange.mark[runtime._lane(account,'HYPE')]='99'
+        paths=self.exchange.collect(self.state)['ranges'][cid]
+        self.provider.prices=SimpleNamespace(source_range=lambda *args:paths['source'],
+            mark_window=lambda *args:paths['testnet'])
+        release=dict(domain='testnet',release_id='a'*64,dispatch_enabled=True,
+            protection_enabled=True,entries_enabled=True,routes=self.state['routes'],
+            not_before_ms=self.state['not_before_ms'],entry_policy=CONTINUOUS_ENTRY,
+            entry_expires_at_ms=None)
+        self.provider.safety=SimpleNamespace(release_loader=lambda:release)
+        result=self.collect()
+        self.assertIn(cid,result['capacity'])  # It reached the unchanged policy gate.
+        self.assertIn(approved,result['capacity'])
+        self.assertNotIn(approved,result['entry_blocked'])
 
     def test_next_collection_rereads_even_unchanged_revision_and_sees_changed_data(self):
         first = self.candidate()
@@ -119,12 +167,13 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertIn(second, result['capacity'])
         self.assertEqual(len(attempts), 2)
         recovered = self.collect()
-        self.assertEqual(recovered['entry_blocked'], {})
-        self.assertEqual(len(recovered['capacity']), 2)
+        self.assertEqual(recovered['entry_blocked'], {second:'ENTRY_DEFERRED_TO_NEXT_CYCLE'})
+        self.assertEqual(set(recovered['capacity']), {first})
 
     def test_cached_capacity_preserves_earliest_read_time(self):
         first = self.candidate()
         second = self.candidate(cycle='second')
+        self.exchange.mark[runtime._lane(self.state['routes']['long_account'],'HYPE')]='99'
         observed = []
         def tick(kind):
             observed.append((kind, self.exchange.t))
@@ -138,12 +187,13 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertLess(first_at, self.exchange.t)
 
     def test_malformed_raw_response_does_not_poison_later_card_or_other_account(self):
-        first_long = self.candidate()
+        first_long = self.candidate(symbol='SOL')
         failed_short = self.candidate(side='SHORT', cycle='short-first')
-        second_long = self.candidate(cycle='long-second')
+        second_long = self.candidate(symbol='SOL',cycle='long-second')
         recovered_short = self.candidate(side='SHORT', cycle='short-second')
         short_account = self.state['routes']['short_account']
         long_account = self.state['routes']['long_account']
+        self.exchange.mark[runtime._lane(long_account,'SOL')]='99'
         original = self.raw.read
         short_reads = []
         def malformed_once(kind, *args, **kwargs):
@@ -175,7 +225,7 @@ class EntryReadReuseTests(unittest.TestCase):
         self.raw.mutate = None
         self.raw.calls.clear()
         result = self.collect()
-        self.assertEqual(len(result['capacity']), 2)
+        self.assertEqual(len(result['capacity']), 1)
         self.assertEqual(len(self.raw.calls), 8)
 
     def test_mode_balance_and_capacity_are_refreshed_in_the_next_collection(self):
@@ -202,7 +252,7 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertEqual(standard['capacity'][first]['unheld'], '50000')
         self.assertEqual(unified['capacity'][first]['unheld'], '40000')
         self.assertEqual(restored['capacity'][first]['unheld'], '50000')
-        self.assertTrue(all(not result['entry_blocked'] for result in (standard, unified, restored)))
+        self.assertTrue(all(set(result['capacity'])=={first} for result in (standard, unified, restored)))
         counts = Counter(call[0] for call in self.raw.calls)
         self.assertEqual(counts['activeAssetData'], 3)
         self.assertEqual(counts['userRole'], 6)

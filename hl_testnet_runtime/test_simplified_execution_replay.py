@@ -407,6 +407,7 @@ class ReductionReplay(unittest.TestCase):
             account=fx.release['routes']['long_account' if msg['side']=='LONG' else 'short_account']
             fx.oracle.mark[core._lane(account,msg['symbol'])]=msg['entry']
         fx.worker.receive(messages)
+        source_read_start=len(fx.raw.calls)
         worker_at=supervisor_at=base;entry_fills=set();exit_fills=set();samples=[];closed=None
         def fill(trade,oid,quantity):
             fx.oracle.fill(oid,quantity)
@@ -441,12 +442,36 @@ class ReductionReplay(unittest.TestCase):
             if len(trades)==2 and all(t['phase']=='CLOSED' for t in trades.values()):closed=fx.oracle.now()-base;break
         state=fx.store.load()
         entries=[r for r in fx.oracle.requests if r['proposal']['operation']=='ENTRY']
+        # A trade's legacy phase can remain OUTCOME_UNKNOWN while its accepted
+        # GTC entry is already OBSERVED and waiting for a fill. Report the
+        # durable request evidence separately instead of calling this a lost
+        # or unresolved exchange response.
+        pending_outcomes=[r['request_id'] for r in state['requests'].values()
+            if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')]
+        observed_working_entries={t['role']:sum(
+            o['status']=='OPEN' and t['order_legs'][oid]=='ENTRY'
+            and any(r['phase']=='OBSERVED' and r.get('observed_oid')==oid
+                and r['proposal']['card_id']==t['cid'] for r in state['requests'].values())
+            for oid,o in t['orders'].items()) for t in state['trades'].values()}
         return dict(warm_weight=warm_weight,entries=[dict(side=r['proposal']['role'],at_ms=r['attempt_at_ms']-base) for r in entries],
             closed_ms=closed,phases={t['role']:t['phase'] for t in state['trades'].values()},
+            pending_outcomes=pending_outcomes,observed_working_entries=observed_working_entries,
+            source_to_finish_reads=len(fx.raw.calls)-source_read_start,
+            source_to_finish_weight=sum(row['weight'] for row in ledger.tickets.values())-warm_weight,
             samples=samples,denials=ledger.denials,synthetic_actions=len(fx.http),entry_decisions=state.get('entry_decisions',{}),wire_actions=[r['proposal']['role']+':'+r['proposal']['operation']+':'+r['proposal']['leg'] for r in fx.oracle.requests],orders=fx.oracle.orders,final_requests=[{k:v for k,v in r.items() if k in ('phase','observed_oid','result','outcome')} for r in state['requests'].values()],final_context={k:v for k,v in fx.provider._last['context'].items() if k in ('entry_blocked','account_entry_blocked','blocked_lanes')})
 
     def test_two_accounts_finish_separate_trades_under_one_weighted_budget(self):
-        result=self.concurrent(warm_weight=44)
-        self.assertEqual(len(result['entries']),2,result)
-        self.assertTrue(all(r['at_ms']<90000 for r in result['entries']),result)
-        self.assertIsNotNone(result['closed_ms'],result)
+        for weight in (44,308):
+            with self.subTest(warm_weight=weight):
+                result=self.concurrent(warm_weight=weight)
+                self.assertEqual(len(result['entries']),2,result)
+                self.assertEqual({r['side'] for r in result['entries']},{'long_account','short_account'},result)
+                self.assertTrue(all(r['at_ms']<90000 for r in result['entries']),result)
+                self.assertIsNotNone(result['closed_ms'],result)
+                self.assertEqual(result['pending_outcomes'],[],result)
+                self.assertFalse(any(result['observed_working_entries'].values()),result)
+                actions=result['wire_actions']
+                self.assertFalse(any(':EMERGENCY_CLOSE:' in action for action in actions),result)
+                stops=[actions.index(role+':CREATE_EXIT:STOP') for role in ('long_account','short_account')]
+                takes=[actions.index(role+':CREATE_EXIT:TAKE_PROFIT') for role in ('long_account','short_account')]
+                self.assertLess(max(stops),min(takes),result)

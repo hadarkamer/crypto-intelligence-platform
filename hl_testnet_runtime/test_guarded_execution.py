@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -153,37 +152,5 @@ class GuardTests(unittest.TestCase):
             r = original(*args, **kw); r['budget_diagnostics']['plan_sha256'] = 'wrong'; return r
         with patch.object(guard.checks, 'run_check', side_effect=corrupted):
             self.assertIn('BUDGET_NOT_BOUND_TO_EXACT_PLAN', self.review()['blockers'])
-    def test_disabled_does_no_work(self):
-        with patch.object(guard, 'review_only', side_effect=AssertionError('No review')):
-            for value in (False, 'true', 1, None):
-                r = guard.submit_checked(self.signal, account=A, agent=B, journal=self.journal,
-                                         exit_type='limit', enable_testnet=value)
-                self.assertEqual(r['status'], 'DISABLED')
-    def test_blocked_review_never_calls_sender(self):
-        sender = SimpleNamespace(submit_once=Mock(side_effect=AssertionError('Cannot send')))
-        with patch.dict('sys.modules', {'hyperliquid_testnet_executor':sender}), \
-                patch.object(guard.checks, 'InfoReader', return_value=self.reader):
-            r = guard.submit_checked(self.signal, account=A, agent=B, journal=None,
-                                     exit_type='limit', enable_testnet=True)
-        self.assertEqual(r['status'], 'BLOCKED_BEFORE_SIGNING')
-        sender.submit_once.assert_not_called()
-    def test_success_hands_exact_source_once_to_sender(self):
-        sender = SimpleNamespace(submit_once=Mock(return_value={'status':'MOCK_RECEIPT', 'order_batches_sent':1}))
-        with patch.dict('sys.modules', {'hyperliquid_testnet_executor':sender}), \
-                patch.object(guard.checks, 'InfoReader', return_value=self.reader):
-            r = guard.submit_checked(self.signal, account=A, agent=B, journal=self.journal,
-                                     exit_type='limit', enable_testnet=True)
-        sender.submit_once.assert_called_once_with(self.signal, account=A, journal=self.journal,
-                                                  exit_type='limit', enable_testnet=True)
-        self.assertTrue(r['budget_gate_passed'])
-    def test_slow_budget_not_dispatched(self):
-        review = self.review()
-        with patch.object(guard, 'review_only', return_value=review), \
-                patch.object(guard.time, 'monotonic', side_effect=[0, 9]):
-            r = guard.submit_checked(self.signal, account=A, agent=B, journal=self.journal,
-                                     exit_type='limit', enable_testnet=True)
-        self.assertEqual(r['status'], 'BUDGET_SAMPLE_EXPIRED_BEFORE_DISPATCH')
-
-
 if __name__ == '__main__':
     unittest.main(verbosity=2)

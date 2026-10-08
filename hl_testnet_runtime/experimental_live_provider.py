@@ -240,8 +240,12 @@ class LiveEvidenceProvider:
             positions=dict(assetPositions=deepcopy(sorted(positions['assetPositions'],key=lambda x:x['position']['coin']))),
             account_state=deepcopy(positions),at_ms=at_ms)
 
-    def _experimental_bindings(self, state, account, symbol, *, observation_cache=None):
+    def _experimental_bindings(self, state, account, symbol, *, observation_cache=None, inventory=None):
         lookups={};ids={};seen=set()
+        changing={str(row.get('o',row.get('oid'))) for r in state['requests'].values()
+            if r['phase'] not in ('OBSERVED','ABORTED_UNSENT')
+            and r['proposal']['account']==account and r['proposal']['symbol']==symbol
+            for row in r['proposal']['action'].get('cancels',r['proposal']['action'].get('modifies',[]))}
         for request in state['requests'].values():
             p=request['proposal']
             if (p['account']!=account or p['symbol']!=symbol or p['action']['type']=='cancel'
@@ -258,8 +262,31 @@ class LiveEvidenceProvider:
                 if prior['status']!='OPEN' and certified:
                     raw=None  # Immutable terminal proof is checked by the collector.
                 else:
-                    reader=observation_cache.pass_reader(0) if observation_cache is not None else self.public
-                    raw=reader.read('orderStatus',account,oid=oid)
+                    opened=next((row for row in (inventory or {}).get('orders',[])
+                                 if str(row['oid'])==oid),None)
+                    trigger=order['t'].get('trigger')
+                    expected_type=('Limit' if trigger is None else
+                        'Stop Market' if trigger['tpsl']=='sl' else 'Take Profit Limit')
+                    if (prior['status']=='OPEN' and oid not in changing and opened is not None
+                            and opened.get('orderType')==expected_type
+                            and opened.get('isTrigger') is (trigger is not None)):
+                        # The OID/CLOID binding was already observed. Current
+                        # complete inventory proves it remains open; asking its
+                        # status again adds no fact. Adapt that evidence to the
+                        # existing collector, preserving its prior status clock.
+                        # frontendOpenOrders may omit CLOID. A supplied changed
+                        # CLOID is still rejected by the normal identity check.
+                        current=deepcopy(opened);current.setdefault('cloid',cloid)
+                        stamp=life.moment(current.get('timestamp'))
+                        if not request['attempt_at_ms']<=stamp<=inventory['at_ms']:
+                            raise ProviderError('ORDER_LOOKUP_ID_OR_TIME_MISMATCH')
+                        raw=dict(status='order',order=dict(status='open',
+                            statusTimestamp=prior['at_ms'],order=current))
+                    else:
+                        # Missing orders and activated triggers need their real
+                        # status; inventory alone cannot prove finality.
+                        reader=observation_cache.pass_reader(0) if observation_cache is not None else self.public
+                        raw=reader.read('orderStatus',account,oid=oid)
             else:
                 raw=self._lookup(account,cloid)
             if raw is not None:lookups[cloid]=raw
@@ -272,6 +299,11 @@ class LiveEvidenceProvider:
                 if oid is not None and oid!=observed:
                     raise ProviderError('PREVIOUSLY_OWNED_ORDER_ID_CHANGED')
                 oid=observed
+                if observation_cache is not None:
+                    # A successful CLOID lookup already returned the complete
+                    # status for this exact OID. Do not fetch it a second time.
+                    key=observation_cache._key('orderStatus',account,oid=oid)
+                    observation_cache.samples[0][key]=deepcopy(raw)
             if oid in seen:
                 raise ProviderError('EXCHANGE_ORDER_HAS_MULTIPLE_DURABLE_OWNERS')
             seen.add(oid)
@@ -286,7 +318,8 @@ class LiveEvidenceProvider:
 
     def _lane(self, state, account, symbol, legacy, inventory, *, observation_cache=None, observation_end_ms=None, historical=None):
         lane=runtime._lane(account,symbol)
-        exp,lookups=self._experimental_bindings(state,account,symbol,observation_cache=observation_cache)
+        exp,lookups=self._experimental_bindings(state,account,symbol,
+            observation_cache=observation_cache,inventory=inventory)
         old=next((s for s in legacy if s['symbol']==symbol),None)
         old_bindings=[] if old is None else old['bindings']
         bindings=old_bindings+exp
@@ -495,7 +528,8 @@ class LiveEvidenceProvider:
         lanes={(s['account'],s['symbol']) for rows in legacy_live.values() for s in rows
                if s['bindings'] or s.get('pending') is not None or s.get('emergency') is not None}
         lanes|={(t['account'],t['symbol']) for t in working['trades'].values()}
-        from .experimental_live_runtime import entry_retry_ready
+        available=getattr(self.budget,'capacity',None)
+        from .experimental_live_runtime import entry_retry_ready, TestnetExecutionRuntime
         deferred={cid:decision['retry_after_ms'] for cid,decision in state.get('entry_decisions',{}).items()
                   if decision.get('reason') in ('TESTNET_REQUEST_BUDGET_EXHAUSTED','TESTNET_REQUEST_BUDGET_BUSY',
                       'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED','TESTNET_OBSERVATION_BATCH_EXPIRED')
@@ -522,17 +556,36 @@ class LiveEvidenceProvider:
             if (msg['family'] in ('r2732','hype_row71205','sol_g65')
                     and any(t['source']['family']==msg['family'] for t in peers)):
                 continue
+            candidates.add(cid)
+        participating={account for account,_ in lanes}|{
+            state['routes']['long_account' if state['sources'][cid]['source']['side']=='LONG'
+                else 'short_account'] for cid in candidates}
+        for cid in list(candidates):
+            msg=state['sources'][cid]['source']
+            account=state['routes']['long_account' if msg['side']=='LONG' else 'short_account']
             # Move the existing single allowance check ahead of source-only
             # I/O. Include the inventory and market reads not yet performed;
             # each transport still acquires its ordinary unchanged permit.
-            available=getattr(self.budget,'capacity',None)
             if callable(available):
                 try:
-                    planned=('frontendOpenOrders','clearinghouseState','metaAndAssetCtxs',
+                    planned=['metaAndAssetCtxs',
                         'userAbstraction','userRole','userRole','activeAssetData',
-                        'userRateLimit','spotClearinghouseState')
+                        'userRateLimit','spotClearinghouseState']
+                    planned+=['frontendOpenOrders','clearinghouseState']*len(participating)
+                    # Existing lanes are collected before capacity. Estimate
+                    # their settled recent fill pages and possible status
+                    # reads. The transport still reserves the full 120 per
+                    # page; this local estimate grants no read permission.
+                    planned+=['orderStatus' for r in working['requests'].values()
+                        if r['phase']!='ABORTED_UNSENT' and r['proposal']['action']['type']!='cancel'
+                        and state['trades'][r['proposal']['card_id']]['orders'].get(
+                            r.get('observed_oid'),{}).get('status') not in ('FILLED','CANCELED','REJECTED')]
                     weight=request_weight('/exchange',dict(action=dict(type='order',orders=[{}])))
                     weight+=sum(request_weight('/info',dict(type=kind)) for kind in planned)
+                    for owned_account,owned_symbol in lanes:
+                        prior=working.get('collector_checkpoints',{}).get(runtime._lane(owned_account,owned_symbol),{})
+                        rows=sum(f['at_ms']>=prior.get('at_ms',now)-sync.OVERLAP_MS for f in prior.get('fills',[]))
+                        weight+=20+(rows+19)//20
                     capacity=available(requested_weight=weight,priority='background')
                     if not capacity['eligible']:
                         raise BudgetError('TESTNET_REQUEST_BUDGET_EXHAUSTED',
@@ -541,8 +594,8 @@ class LiveEvidenceProvider:
                     result['entry_blocked'][cid]=_error(exc)
                     remember_retry(exc,[account])
                     if account in account_retries:result['entry_retry_after_ms'][cid]=account_retries[account]
+                    candidates.discard(cid)
                     continue
-            candidates.add(cid)
         source_lanes={(state['routes']['long_account' if state['sources'][cid]['source']['side']=='LONG'
                                     else 'short_account'],state['sources'][cid]['source']['symbol'])
                       for cid in candidates}
@@ -696,8 +749,12 @@ class LiveEvidenceProvider:
                 result['blocked_lanes'][lane]=_error(exc)
         # Reuse only this collection; existing exposure is still collected
         # while a source-only entry waits for its recorded budget retry.
-        entry_reads={}
-        for cid,record in state['sources'].items():
+        entry_reads={};entry_selected=False
+        entry_planner=object.__new__(TestnetExecutionRuntime)
+        if callable(getattr(self.safety,'release_loader',None)):
+            entry_planner.release_loader=self.safety.release_loader
+        for cid in sorted(state['sources'],key=lambda k:(state['sources'][k]['source']['source_at'],k)):
+            record=state['sources'][cid]
             msg=contract.validate(record['source']);role='long_account' if msg['side']=='LONG' else 'short_account'
             account=state['routes'][role];lane=runtime._lane(account,msg['symbol'])
             trade=price_state['trades'].get(cid)
@@ -711,6 +768,9 @@ class LiveEvidenceProvider:
                 result['entry_blocked'][cid]='ENTRY_DEFERRED_FOR_OWNED_PROTECTION_AND_RECONCILIATION'
                 candidate=False
             candidate=candidate and cid in candidates
+            if candidate and entry_selected:
+                result['entry_blocked'][cid]='ENTRY_DEFERRED_TO_NEXT_CYCLE'
+                candidate=False
             # Keep formula stop updates and pending-order cancellation alive
             # during an entry halt. Entry ranges/capacity have no maintenance
             # authority and must never delay protection of an existing fill.
@@ -747,6 +807,11 @@ class LiveEvidenceProvider:
                 result['capacity'][cid],reports[cid]=self._capacity(msg,account,role,metadata,
                     buckets=buckets[account],inventory=inventories[account],market=market,
                     entry_reads=entry_reads)
+                # The worker sends at most one proposal per cycle. Reuse its
+                # unchanged pure admission to stop preparing capacities that
+                # cannot be used. A refused first candidate leaves the next
+                # candidate eligible; the projection never writes the journal.
+                entry_selected=entry_planner._admit(deepcopy(price_state),cid,result,self.now()) is not None
             except Exception as exc:
                 # This entire block is entry-only evidence. A failed source
                 # cache or background allowance must not abort owned exits.
@@ -803,7 +868,7 @@ class LiveEvidenceProvider:
         if owner is not None:
             owner.verify()
         cached=self._last
-        if cached is None or not 0<=self.now()-cached['context']['inventory_at_ms']<=5000:
+        if cached is None or not 0<=self.now()-cached['context']['inventory_at_ms']<=15000:
             raise ProviderError('FRESH_COLLECTOR_CHECKPOINT_REQUIRED_BEFORE_DISPATCH')
         state=self.experimental_store.load();p=request['proposal'];cid=p['card_id'];entry=p['operation']=='ENTRY'
         if state.get('domain')!='testnet' or state['requests'].get(request['request_id'])!=request:

@@ -409,6 +409,17 @@ class FullConnectionTests(unittest.TestCase):
                 self.service.tick()
         self.assertEqual(self.service._next_wait_seconds(5), 5)
 
+    def test_recorded_entry_reconciles_promptly_then_resumes_normal_wait(self):
+        from approved_alert_fixtures import maxpain_alert
+        msg=maxpain_alert(approved_ms=T)
+        self.seed(msg)
+        self.assertEqual(self.service.tick()['operation'],'ENTRY')
+        self.assertEqual(self.service._next_wait_seconds(5),.05)
+        self.assertEqual(self.service.tick()['status'],'OBSERVED_NO_ACTION')
+        self.assertEqual(self.service._next_wait_seconds(5),5)
+        self.assertEqual(len(self.http),1)
+        self.assertTrue(all(r['phase']=='OBSERVED' for r in self.store.load()['requests'].values()))
+
     def test_unresolved_entry_defers_other_candidate_source_before_initial_stop(self):
         self.oracle=SoftwareExchange(ARM+10000);self.build(CREATED-60000)
         msg=r2732_message(entry=2.3,decision_ms=ARM-60000);self.seed(msg)

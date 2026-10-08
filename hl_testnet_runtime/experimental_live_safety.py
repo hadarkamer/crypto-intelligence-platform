@@ -16,7 +16,7 @@ import uuid
 
 from . import card_lifecycle as life
 from . import experimental_live_release as releases
-from .experimental_execution_runtime import FINAL, _lane, _remaining
+from .experimental_execution_runtime import FINAL, _lane, _remaining, _working_entry_active
 from .experimental_live_state import TestnetExecutionState
 from .filled_dispatch_store import DispatchStore
 from .fill_wakeups import FillWakeups
@@ -258,15 +258,12 @@ class LiveSafetyProvider:
                 and release['protection_enabled'] is True and release['dispatch_enabled'] is True
                 and releases.entry_enabled(release, self.clock()))
             account = proposal['account']
-            result['feed_reconciled'] = self._continuous(receipt, account)
-            result['entry_circuit_clear'] = (self._legacy_clear(state, ownership_revision, account,
-                    account_ownership_revision=receipt['context'].get('legacy_account_revisions', {}).get(account))
-                and self._peers_protected(state, request_id=request['request_id'], account=account))
             if self.supervisor is not None:
-                # This exact committed observation is already current. Validate
-                # it locally instead of demanding another supervisor scan/pass
-                # merely because this account was previously idle and omitted.
+                # One verification covers feed continuity, legacy ownership and
+                # peer protection for this exact state. Health still rechecks
+                # the feed and supervisor liveness before granting authority.
                 verified = self.supervisor._verified_accounts(state, receipt, request_id=request['request_id'])
+                result['feed_reconciled'] = result['entry_circuit_clear'] = account in verified
                 self.supervisor._record_observation(state, verified)
                 health = self.supervisor.health(account=account)
                 result['emergency_healthy'] = health['healthy']
@@ -353,14 +350,30 @@ class IndependentProtectionSupervisor:
                 and 0 <= self.safety.clock() - receipt['context']['inventory_at_ms'] < EMPTY_RECHECK_MS)
         if not verified:
             return False
-        if any(t['phase'] not in FINAL and (t['phase'] != 'OPEN' or _remaining(t) <= 0
-                or t['source']['family'] in ('r2732', 'sol_g65')
-                or any(o['status'] == 'OPEN' and t['order_legs'][oid] == 'ENTRY'
-                    for oid, o in t['orders'].items()))
-               for t in state['trades'].values()):
-            # Even a flat/protected intermediate state still needs the next
-            # lifecycle commit (entry settlement, partial exit, final cleanup).
-            return False
+        for t in state['trades'].values():
+            if t['phase'] in FINAL:
+                continue
+            # A known, unchanged GTC order with no fills needs only the same
+            # ten-second poll as settled protection. Feed changes, retirement
+            # and every unresolved request still force immediate observation.
+            request = state['requests'].get(t.get('entry_request'), {})
+            if (t['source']['family'] == 'maxpain' and t['account'] in verified
+                    and t['phase'] == 'OUTCOME_UNKNOWN' and not t['entry_fills'] and not t['exit_fills']
+                    and not t.get('entry_retired_reason')
+                    and _working_entry_active(state['sources'][t['cid']], self.safety.clock())
+                    and request.get('phase') == 'OBSERVED' and len(t['orders']) == 1
+                    and all(o['status'] == 'OPEN' and not o['fills']
+                        and t['order_legs'][oid] == 'ENTRY' and request.get('observed_oid') == oid
+                        and o['wire_order']['t'] == {'limit': {'tif': 'Gtc'}}
+                        for oid, o in t['orders'].items())):
+                continue
+            if (t['phase'] != 'OPEN' or _remaining(t) <= 0
+                    or t['source']['family'] in ('r2732', 'sol_g65')
+                    or any(o['status'] == 'OPEN' and t['order_legs'][oid] == 'ENTRY'
+                        for oid, o in t['orders'].items())):
+                # Entry settlement, partial exits and final cleanup still
+                # require the next lifecycle pass without coalescing.
+                return False
         return 0 <= self.safety.clock() - receipt['context']['inventory_at_ms'] < COALESCE_MS
 
     def _feed_changed(self, receipt):
