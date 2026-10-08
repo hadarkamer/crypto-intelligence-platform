@@ -1,0 +1,69 @@
+{
+  "branch": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Action completed."
+      }
+    ],
+    "structuredContent": {
+      "content": "{\"ref\":\"refs/heads/codex/experimental-render-isolated-20261006\",\"node_id\":\"REF_kwDOTNUrmdoANnJlZnMvaGVhZHMvY29kZXgvZXhwZXJpbWVudGFsLXJlbmRlci1pc29sYXRlZC0yMDI2MTAwNg\",\"url\":\"https://api.github.com/repos/hadarkamer/crypto-intelligence-platform/git/refs/heads/codex/experimental-render-isolated-20261006\",\"object\":{\"sha\":\"7a7df5da970a5104f2bc29b042ffcbcf12e86346\",\"type\":\"commit\",\"url\":\"https://api.github.com/repos/hadarkamer/crypto-intelligence-platform/git/commits/7a7df5da970a5104f2bc29b042ffcbcf12e86346\"}}",
+      "title": "experimental-render-isolated-20261006",
+      "modified_date": null,
+      "url": "https://api.github.com/repos/hadarkamer/crypto-intelligence-platform/git/ref/heads/codex/experimental-render-isolated-20261006",
+      "display_url": "https://api.github.com/repos/hadarkamer/crypto-intelligence-platform/git/ref/heads/codex/experimental-render-isolated-20261006",
+      "display_title": "experimental-render-isolated-20261006",
+      "structuredContent": {
+        "title": "experimental-render-isolated-20261006",
+        "content": "{\"ref\":\"refs/heads/codex/experimental-render-isolated-20261006\",\"node_id\":\"REF_kwDOTNUrmdoANnJlZnMvaGVhZHMvY29kZXgvZXhwZXJpbWVudGFsLXJlbmRlci1pc29sYXRlZC0yMDI2MTAwNg\",\"url\":\"https://api.github.com/repos/hadarkamer/crypto-intelligence-platform/git/refs/heads/codex/experimental-render-isolated-20261006\",\"object\":{\"sha\":\"7a7df5da970a5104f2bc29b042ffcbcf12e86346\",\"type\":\"commit\",\"url\":\"https://api.github.com/repos/hadarkamer/crypto-intelligence-platform/git/commits/7a7df5da970a5104f2bc29b042ffcbcf12e86346\"}}",
+        "display_url": "https://api.github.com/repos/hadarkamer/crypto-intelligence-platform/git/ref/heads/codex/experimental-render-isolated-20261006"
+      }
+    },
+    "isError": false
+  },
+  "isolated": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"autoDeploy\":\"no\",\"autoDeployTrigger\":\"off\",\"branch\":\"codex/experimental-render-isolated-20261006\",\"createdAt\":\"2026-10-06T18:22:21.951527Z\",\"dashboardUrl\":\"https://dashboard.render.com/static/srv-db2jon7lot8c739eebrg\",\"id\":\"srv-db2jon7lot8c739eebrg\",\"name\":\"hl-experimental-isolated-check-20261006\",\"notifyOnFail\":\"default\",\"ownerId\":\"tea-d94cq7e7r5hc73dee88g\",\"repo\":\"https://github.com/hadarkamer/crypto-intelligence-platform\",\"rootDir\":\"\",\"serviceDetails\":{\"buildCommand\":\"cd receiver \\u0026\\u0026 pip install -r hl_testnet_runtime/requirements-render-isolated.txt \\u0026\\u0026 python -m hl_testnet_runtime.render_preflight.build_postgres \\u0026\\u0026 python -m hl_testnet_runtime.experimental_render_verify --bundle-root ..\",\"buildPlan\":\"starter\",\"ipAllowList\":[{\"cidrBlock\":\"0.0.0.0/0\",\"description\":\"everywhere\"}],\"previews\":{\"generation\":\"off\"},\"publishPath\":\"public\",\"pullRequestPreviewsEnabled\":\"no\",\"renderSubdomainPolicy\":\"enabled\",\"url\":\"https://hl-experimental-isolated-check-20261006.onrender.com\"},\"slug\":\"hl-experimental-isolated-check-20261006\",\"suspended\":\"not_suspended\",\"suspenders\":[],\"type\":\"static_site\",\"updatedAt\":\"2026-10-06T19:44:46.870873Z\"}"
+      }
+    ],
+    "isError": false
+  },
+  "receiver": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"autoDeploy\":\"no\",\"autoDeployTrigger\":\"off\",\"branch\":\"paper-trading-v1\",\"createdAt\":\"2026-09-15T19:38:23.201729Z\",\"dashboardUrl\":\"https://dashboard.render.com/web/srv-dakptbh594qs7395460g\",\"id\":\"srv-dakptbh594qs7395460g\",\"name\":\"hl-testnet-check-yoyo\",\"notifyOnFail\":\"default\",\"ownerId\":\"tea-d94cq7e7r5hc73dee88g\",\"repo\":\"https://github.com/hadarkamer/crypto-intelligence-platform\",\"rootDir\":\"\",\"serviceDetails\":{\"buildPlan\":\"starter\",\"cache\":{\"profile\":\"no-cache\"},\"env\":\"python\",\"envSpecificDetails\":{\"buildCommand\":\"pip install -r hl_testnet_runtime/requirements.txt \\u0026\\u0026 python -m unittest -q hl_testnet_runtime.test_runtime\",\"startCommand\":\"gunicorn --bind 0.0.0.0:$PORT --config hl_testnet_runtime/gunicorn_conf.py hl_testnet_runtime.app:application\"},\"healthCheckPath\":\"\",\"ipAllowList\":[{\"cidrBlock\":\"0.0.0.0/0\",\"description\":\"everywhere\"}],\"maintenanceMode\":{\"enabled\":false,\"uri\":\"\"},\"numInstances\":1,\"openPorts\":[{\"port\":10000,\"protocol\":\"TCP\"}],\"plan\":\"1c-2g\",\"previews\":{\"generation\":\"off\"},\"pullRequestPreviewsEnabled\":\"no\",\"region\":\"oregon\",\"renderSubdomainPolicy\":\"enabled\",\"runtime\":\"python\",\"sshAddress\":\"srv-dakptbh594qs7395460g@ssh.oregon.render.com\",\"url\":\"https://hl-testnet-check-yoyo.onrender.com\"},\"slug\":\"hl-testnet-check-yoyo\",\"suspended\":\"not_suspended\",\"suspenders\":[],\"type\":\"web_service\",\"updatedAt\":\"2026-10-07T20:02:40.308376Z\"}"
+      }
+    ],
+    "isError": false
+  },
+  "producer": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"autoDeploy\":\"yes\",\"autoDeployTrigger\":\"commit\",\"branch\":\"main\",\"createdAt\":\"2026-07-04T11:09:56.757533Z\",\"dashboardUrl\":\"https://dashboard.render.com/web/srv-d94ek17lk1mc73b4tb90\",\"id\":\"srv-d94ek17lk1mc73b4tb90\",\"name\":\"crypto-intelligence-platform-1\",\"notifyOnFail\":\"default\",\"ownerId\":\"tea-d94cq7e7r5hc73dee88g\",\"repo\":\"https://github.com/hadarkamer/crypto-intelligence-platform\",\"rootDir\":\"\",\"serviceDetails\":{\"buildPlan\":\"starter\",\"cache\":{\"profile\":\"no-cache\"},\"env\":\"python\",\"envSpecificDetails\":{\"buildCommand\":\"pip install -r requirements.txt \\u0026\\u0026 playwright install chromium\",\"startCommand\":\"python main.py\"},\"healthCheckPath\":\"\",\"ipAllowList\":[{\"cidrBlock\":\"0.0.0.0/0\",\"description\":\"everywhere\"}],\"maintenanceMode\":{\"enabled\":false,\"uri\":\"\"},\"numInstances\":1,\"openPorts\":[{\"port\":10000,\"protocol\":\"TCP\"}],\"plan\":\"standard\",\"previews\":{\"generation\":\"off\"},\"pullRequestPreviewsEnabled\":\"no\",\"region\":\"oregon\",\"renderSubdomainPolicy\":\"enabled\",\"runtime\":\"python\",\"sshAddress\":\"srv-d94ek17lk1mc73b4tb90@ssh.oregon.render.com\",\"url\":\"https://crypto-intelligence-platform-1.onrender.com\"},\"slug\":\"crypto-intelligence-platform-1\",\"suspended\":\"not_suspended\",\"suspenders\":[],\"type\":\"web_service\",\"updatedAt\":\"2026-10-08T08:23:48.435442Z\"}"
+      }
+    ],
+    "isError": false
+  },
+  "receiver_deploy": {
+    "content": [
+      {
+        "type": "text",
+        "text": "[{\"commit\":{\"createdAt\":\"2026-10-07T19:37:10Z\",\"id\":\"b3c066967ab3d27c93b7bbaaeb20a75cd5ab1be9\",\"message\":\"Prepare verified continuous Testnet receiver release\\n\\nPromote the exact receiver source blobs validated in isolated Render build dep-db38ltqjnfac7392fneg (3292 checks, zero skips/failures). Preserve existing repository files outside the verification bundle. Live branch and service remain unchanged pending explicit database initialization and ownership handover.\"},\"createdAt\":\"2026-10-07T20:01:38.271615Z\",\"finishedAt\":\"2026-10-07T20:02:40.306697Z\",\"id\":\"dep-db3aa8nlot8c73f4rvu0\",\"startedAt\":\"2026-10-07T20:01:38.240697Z\",\"status\":\"live\",\"trigger\":\"api\",\"updatedAt\":\"2026-10-07T20:03:14.746101Z\"}]\n\n cursor: Yj9phvC4UcRhOG5sb3Q4YzczZjRydnUw"
+      }
+    ],
+    "isError": false
+  },
+  "producer_deploy": {
+    "content": [
+      {
+        "type": "text",
+        "text": "[{\"commit\":{\"createdAt\":\"2026-10-08T08:22:15Z\",\"id\":\"11e4ea433bc09178c5c5758115645dabb040ee23\",\"message\":\"Add owner-requested DOGE half-adverse partial-75 experimental alert\\n\\nTrack 75% partial take and 24h holding deadline with original stop; one pending/open observation. Serialize target admission across both DOGE MaxPain alerts and block targets within 0.2%. Preserve existing formula fingerprints, source restoration and execution allowlists. New rule is notification-only, excluded from exchange forwarding. 55 offline regression and delivery checks passed.\"},\"createdAt\":\"2026-10-08T08:22:24.494209Z\",\"finishedAt\":\"2026-10-08T08:23:48.434347Z\",\"id\":\"dep-db3l5g6q1p3s73fbsn0g\",\"startedAt\":\"2026-10-08T08:22:24.468Z\",\"status\":\"live\",\"trigger\":\"new_commit\",\"updatedAt\":\"2026-10-08T08:24:16.52135Z\"}]\n\n cursor: MyZ8260fpxc1ZzZxMXAzczczZmJzbjBn"
+      }
+    ],
+    "isError": false
+  }
+}

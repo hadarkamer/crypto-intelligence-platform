@@ -1,0 +1,64 @@
+{
+  "hasMore": false,
+  "logs": [
+    {
+      "id": "2f8017a8-a8bb-45ea-9c65-e7d39047de3d",
+      "labels": [
+        {
+          "name": "resource",
+          "value": "srv-db2jon7lot8c739eebrg"
+        },
+        {
+          "name": "level",
+          "value": "info"
+        },
+        {
+          "name": "type",
+          "value": "app"
+        }
+      ],
+      "message": "PREFLIGHT_POSTGRES_BUILD: unmodified verified source 18.6",
+      "timestamp": "2026-10-08T08:34:57.504389413Z"
+    },
+    {
+      "id": "6eea123f-7728-4b7b-85c5-7d0589f9f944",
+      "labels": [
+        {
+          "name": "resource",
+          "value": "srv-db2jon7lot8c739eebrg"
+        },
+        {
+          "name": "level",
+          "value": "info"
+        },
+        {
+          "name": "type",
+          "value": "app"
+        }
+      ],
+      "message": "{\"build_only\":true,\"candidate_sha256\":{\"producer\":\"c84c413b94353af38cdba5fb67c294ea5baf10223ca386f240cab775fc7cdd63\",\"receiver\":\"e1e5071ca74438312c51e54981c902601fea9af9fef6402c5a01c35590de297b\"},\"manifest_sha256\":\"1545e9ccc4aa73c7e4d2728007a72892bf8b7601984c83237e3cf7ffc22f7f31\",\"parity\":{\"bars_per_comparison\":4,\"candidate_sha256\":\"f97df96e1d6dd30845a49904acd060d4c72de11f51e719b3ef2b3e6990235300\",\"comparisons\":4000,\"network_attempts_blocked\":0,\"producer_decision_functions_sha256\":\"b784c3c2374f0d069be180b563b9641f5b8d9bee34912e208e724464e1c7391a\",\"producer_file_sha256\":\"040538d896293a5b72125d73b2b5ffe0a26ce1343567b7ae97db2c1969acee72\"},\"postgresql_cleanup\":\"STOPPED\",\"publication_blocked\":true,\"real_exchange_requests_sent\":0,\"schema\":\"experimental_render_verification_v1\",\"stages\":{\"producer\":{\"errors\":0,\"failures\":0,\"network_attempts_blocked\":0,\"passed\":402,\"skipped\":0,\"tests_run\":402,\"unexpected_successes\":0},\"runtime\":{\"errors\":0,\"failures\":0,\"network_attempts_blocked\":0,\"passed\":3008,\"skipped\":0,\"tests_run\":3008,\"unexpected_successes\":0}},\"status\":\"PASSED\",\"verification\":{\"postgresql\":\"FRESH_LOOPBACK_POSTGRES18\",\"postgresql_cleanup\":\"STOPPED\",\"producer_postgresql\":\"FRESH_LOOPBACK_PRODUCER_DATABASE\",\"stages\":{\"producer\":{\"errors\":0,\"exit_code\":0,\"failure_details\":[],\"failures\":0,\"network_attempts_blocked\":0,\"passed\":402,\"postgresql_configured\":true,\"skipped\":0,\"tests_run\":402,\"unexpected_successes\":0},\"runtime\":{\"errors\":0,\"exit_code\":0,\"failure_details\":[],\"failures\":0,\"network_attempts_blocked\":0,\"passed\":3008,\"postgresql_configured\":true,\"skipped\":0,\"tests_run\":3008,\"unexpected_successes\":0}}}}",
+      "timestamp": "2026-10-08T08:37:46.281792287Z"
+    },
+    {
+      "id": "924daaca-75c3-429d-af15-4da30e4a7b8e",
+      "labels": [
+        {
+          "name": "resource",
+          "value": "srv-db2jon7lot8c739eebrg"
+        },
+        {
+          "name": "level",
+          "value": "info"
+        },
+        {
+          "name": "type",
+          "value": "app"
+        }
+      ],
+      "message": "\u001b[31m\u001b[1m==> Build failed 😞\u001b(B\u001b[m",
+      "timestamp": "2026-10-08T08:37:46.317693285Z"
+    }
+  ],
+  "nextEndTime": "2026-10-08T08:34:57.504389413Z",
+  "nextStartTime": "2026-10-08T08:34:57Z"
+}
