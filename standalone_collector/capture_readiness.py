@@ -19,7 +19,7 @@ LOGIN_GATE_SCRIPT=r'''() => {
     return true;
   };
   return [...document.querySelectorAll('[role="dialog"], .MuiModal-root')].some(e =>
-    visible(e) && /\blog\s*in\s+to\s+unlock\s+full\s+data\b/i.test(e.textContent||''));
+    visible(e) && /\blog\s*in\s+to\s+unlock\s+full\s+data\b/i.test(e.innerText||''));
 }'''
 STATE_SCRIPT=r'''() => {
   const visible = el => {
@@ -38,7 +38,7 @@ STATE_SCRIPT=r'''() => {
     account_link_present:!!document.querySelector('a[href="/account"]')};
   const state=(ready,reason)=>({ready,reason,label,...ui});
   if([...document.querySelectorAll('[role="dialog"], .MuiModal-root')].some(e =>
-      visible(e) && /\blog\s*in\s+to\s+unlock\s+full\s+data\b/i.test(e.textContent||'')))
+      visible(e) && /\blog\s*in\s+to\s+unlock\s+full\s+data\b/i.test(e.innerText||'')))
     return state(false,'login-required');
   const canvases=[...document.querySelectorAll('canvas')].filter(e=> {
     const r=e.getBoundingClientRect(); return visible(e) && r.width>=400 && r.height>=200;

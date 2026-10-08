@@ -192,5 +192,23 @@ class RenderDOMTests(unittest.TestCase):
         s=self.check('<div class="MuiModal-root" role="presentation"><div role="dialog">Log in to unlock full data</div></div>')
         self.assertEqual(s['reason'],'login-required')
 
+    def test_adjacent_dialog_children_do_not_hide_unlock_data_gate(self):
+        page=self.browser.new_page(viewport={'width':1000,'height':800})
+        try:
+            page.set_content('<button role="combobox">12 hour</button><a href="/login">Login</a>'
+                '<canvas width="800" height="500"></canvas>'
+                '<div class="MuiModal-root" style="position:absolute;inset:0">'
+                '<div role="dialog" style="position:absolute;top:200px;width:400px;height:100px">'
+                '<div>Log in to unlock full data</div><button>Login</button>'
+                '<button>Continue with Google</button></div></div>')
+            # Real CoinGlass children concatenate without a separator in
+            # textContent; the rendered heading has a newline in innerText.
+            text=page.locator('[role="dialog"]').text_content()
+            self.assertEqual(text,'Log in to unlock full dataLoginContinue with Google')
+            self.assertIn('data\n',page.locator('[role="dialog"]').inner_text())
+            self.assertTrue(page.evaluate(readiness.LOGIN_GATE_SCRIPT))
+            self.assertEqual(page.evaluate(readiness.STATE_SCRIPT)['reason'],'login-required')
+        finally:page.close()
+
 
 if __name__=='__main__':unittest.main()
