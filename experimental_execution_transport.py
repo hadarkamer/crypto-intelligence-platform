@@ -164,9 +164,12 @@ class Sender:
 
     def _merge(self, values):
         _require(isinstance(values, list) and len(values) <= MAX_BUFFER, 'TRANSPORT_SOURCE_OVERFLOW')
-        validated = [contract.validate(v) for v in values]
+        self._merge_validated([contract.validate(v) for v in values])
+
+    def _merge_validated(self, values):
+        """Merge the copied records already validated at the source boundary."""
         pending, acked = dict(self.pending), self.acked
-        for value in validated:
+        for value in values:
             identity = value['occurrence_id']
             previous = pending.get(identity) or acked.get(identity)
             if previous:
@@ -229,7 +232,7 @@ class Sender:
                     if identity in blocked:
                         continue
                     try:
-                        self._merge(group)
+                        self._merge_validated(group)
                         refreshed.add(identity)
                     except (ValueError, TypeError, KeyError, ArithmeticError):
                         blocked.add(identity)
