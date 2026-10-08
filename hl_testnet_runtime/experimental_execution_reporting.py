@@ -34,10 +34,12 @@ def project(state):
     if state.get('version') != VERSION or state.get('domain') != 'software':
         raise ReportError('VERIFIED_ISOLATED_STATE_REQUIRED')
     from .experimental_shared_market import assess
+    from .experimental_execution_cards import cards_from_state
     rows = _project_rows(state)
     return dict(domain='software', real_exchange_activity=False, snapshot_revision=state['revision'],
         history=dict(state.get('history', {})), shared_market=assess(state),
-        trades=rows, counts=dict(total=len(rows), closed=sum(r['status']=='CLOSED' for r in rows),
+        trades=rows, cards=cards_from_state(state, domain='software'),
+        counts=dict(total=len(rows), closed=sum(r['status']=='CLOSED' for r in rows),
             open=sum(Decimal(r['remaining_quantity'])>0 for r in rows),
             unresolved_attempts=sum(r['unresolved_attempts'] for r in rows)))
 
@@ -87,7 +89,8 @@ def project_history(page, *, domain):
     """Project one checksummed archive page, never all historical state."""
     if domain not in ('software', 'testnet'):
         raise ReportError('VERIFIED_HISTORY_DOMAIN_REQUIRED')
-    rows, occurrences = [], []
+    from .experimental_execution_cards import card_from_record
+    rows, occurrences, cards = [], [], []
     for record in page['records']:
         if record['domain'] != domain:
             raise ReportError('HISTORY_DOMAIN_MISMATCH')
@@ -97,5 +100,6 @@ def project_history(page, *, domain):
             continue
         rows.extend(_project_rows(dict(trades={cid:record['trade']},
             requests=record['requests'], events=record['events'])))
-    return dict(domain=domain, trades=rows, archived_occurrences=occurrences,
+        cards.append(card_from_record(record, domain=domain))
+    return dict(domain=domain, trades=rows, cards=cards, archived_occurrences=occurrences,
         archived_count=page['archived_count'], next_cursor=page['next_cursor'])

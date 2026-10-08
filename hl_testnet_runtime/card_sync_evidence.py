@@ -154,6 +154,83 @@ class PublicReader:
             connection.close()
 
 
+class ObservationReadCache:
+    """Collection-local reuse inside each independent verification pass.
+
+    Pass zero and pass one never share a transport response. Cache hits preserve
+    the collection's original end timestamp; failures are never cached. The
+    underlying reader still funds all missing reads through its unchanged budget.
+    """
+    def __init__(self, reader):
+        self.reader = reader
+        self.samples = ({}, {})
+
+    @staticmethod
+    def _key(kind, account, *, oid=None, start=None, end=None):
+        return (kind, account, str(oid) if oid is not None else None, start, end)
+
+    def pass_reader(self, number):
+        if number not in (0, 1):
+            raise SyncError('VERIFICATION_PASS_COUNT_INVALID')
+        owner = self
+        class PassReader:
+            def read(self, kind, account, *, oid=None, start=None, end=None):
+                key = owner._key(kind, account, oid=oid, start=start, end=end)
+                if key not in owner.samples[number]:
+                    owner.samples[number][key] = deepcopy(owner.reader.read(
+                        kind, account, oid=oid, start=start, end=end))
+                return deepcopy(owner.samples[number][key])
+            def reserve_history_split(self, account, start, middle, end):
+                children=[owner._key('userFillsByTime',account,start=a,end=b)
+                          for a,b in ((start,middle),(middle+1,end))]
+                if all(key in owner.samples[number] for key in children):
+                    return
+                method = getattr(owner.reader, 'reserve_history_split', None)
+                if callable(method):
+                    method(account, start, middle, end)
+        return PassReader()
+
+    def _complete_history(self, key, number):
+        """A cached split page is reusable only with its complete child tree.
+
+        Failed earlier lanes may have fetched a parent but not all children.
+        Evict each incomplete parent so the next funded plan declares and
+        actually claims that parent before requesting additional split credit.
+        """
+        samples=self.samples[number]
+        if key not in samples:return False
+        rows=samples[key]
+        if not isinstance(rows,list) or any(not isinstance(r,dict) for r in rows):
+            return True  # Validation still rejects the original malformed raw response.
+        times={r.get('time') for r in rows if type(r.get('time')) is int}
+        if len(rows)<2000 and len(times)<500:return True
+        kind,account,oid,start,end=key
+        if start==end:return True  # The normal truncation error remains mandatory.
+        middle=(start+end)//2
+        complete=[self._complete_history(self._key(kind,account,start=a,end=b),number)
+                  for a,b in ((start,middle),(middle+1,end))]
+        if not all(complete):
+            samples.pop(key,None)
+            return False
+        return True
+
+    def missing_plan(self, bodies):
+        # The collector schedules an identical request once per independent
+        # pass. Count each body's occurrences, never collapse the two passes.
+        seen = {}; missing = []
+        for body in bodies:
+            key = self._key(body['type'], body['user'], oid=body.get('oid'),
+                            start=body.get('startTime'), end=body.get('endTime'))
+            number = seen.get(key, 0)
+            seen[key] = number + 1
+            if number >= 2:
+                raise SyncError('OBSERVATION_PLAN_PASS_AMBIGUOUS')
+            if body['type']=='userFillsByTime':self._complete_history(key,number)
+            if key not in self.samples[number]:
+                missing.append(body)
+        return missing
+
+
 def history(reader, account, start, end, *, depth=0):
     rows = reader.read('userFillsByTime',account,start=start,end=end)
     if not isinstance(rows,list) or any(not isinstance(r,dict) for r in rows):
@@ -500,7 +577,8 @@ def _planned_observation_reads(bindings, previous, cursor, end, *, reuse_verifie
 
 
 def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.monotonic,
-            plain_take_profit_oids=(), reuse_verified_terminals=False, verification_passes=2):
+            plain_take_profit_oids=(), reuse_verified_terminals=False, verification_passes=2,
+            observation_cache=None, observation_end_ms=None):
     if type(verification_passes) is not int or verification_passes not in (1, 2):
         raise SyncError('VERIFICATION_PASS_COUNT_INVALID')
     if type(reuse_verified_terminals) is not bool:
@@ -517,17 +595,21 @@ def collect(evidence, reader, *, cursor_ms=None, clock=now_ms, elapsed=time.mono
         terminal_certificates(bindings,previous)
     cursor = previous['at_ms'] if cursor_ms is None else life.moment(cursor_ms)
     if cursor < previous['at_ms']: raise SyncError('CHECKPOINT_BEHIND_EVIDENCE')
-    end,started = clock(),elapsed()
+    end,started = clock() if observation_end_ms is None else life.moment(observation_end_ms),elapsed()
+    if end > clock(): raise SyncError('OBSERVATION_TIME_IN_FUTURE')
     if not 0 <= end-cursor <= MAX_CATCHUP_MS: raise SyncError('HISTORY_GAP_REQUIRES_REVIEW')
     plan=getattr(type(reader),'observation_batch',None)
-    context=(reader.observation_batch(_planned_observation_reads(bindings,previous,cursor,end,
-                reuse_verified_terminals=reuse_verified_terminals,
-                verification_passes=verification_passes))
-             if callable(plan) else nullcontext())
+    bodies=_planned_observation_reads(bindings,previous,cursor,end,
+        reuse_verified_terminals=reuse_verified_terminals,verification_passes=verification_passes)
+    if observation_cache is not None:
+        if type(observation_cache) is not ObservationReadCache or observation_cache.reader is not reader:
+            raise SyncError('EXACT_OBSERVATION_CACHE_OWNER_REQUIRED')
+        bodies=observation_cache.missing_plan(bodies)
+    context=(reader.observation_batch(bodies) if callable(plan) and bodies else nullcontext())
     with context:
         return _collect_funded(bindings,previous,reader,cursor,end,started,clock,elapsed,
             plain=plain,reuse_verified_terminals=reuse_verified_terminals,
-            verification_passes=verification_passes)
+            verification_passes=verification_passes,observation_cache=observation_cache)
 
 
 def retained_anchor(reader, account, fill):
@@ -618,17 +700,19 @@ def _collect_retained(evidence, reader, *, cursor_ms, anchor, clock=now_ms,
 
 
 def _collect_funded(bindings, previous, reader, cursor, end, started, clock, elapsed,
-                    *, plain, reuse_verified_terminals, inventory_guard=None, verification_passes=2):
+                    *, plain, reuse_verified_terminals, inventory_guard=None, verification_passes=2, observation_cache=None):
     account,symbol=life.validate_snapshot(previous)
+    pass_readers=([observation_cache.pass_reader(i) for i in (0,1)]
+                  if observation_cache is not None else [reader,reader])
     # Reconstruct a short missed interval before taking the current order and
     # position snapshot. Each bounded window is observed twice; nothing is
     # persisted until the final full lifecycle review succeeds.
     while end-cursor >= DAY_MS-OVERLAP_MS:
         stop = cursor+DAY_MS-2*OVERLAP_MS
         start = max(1,cursor-OVERLAP_MS)
-        first_fills = merge_fills(previous['fills'],history(reader,account,start,stop),
+        first_fills = merge_fills(previous['fills'],history(pass_readers[0],account,start,stop),
                                   account,symbol,start,stop)
-        second_fills = merge_fills(previous['fills'],history(reader,account,start,stop),
+        second_fills = merge_fills(previous['fills'],history(pass_readers[1],account,start,stop),
                                    account,symbol,start,stop)
         if first_fills != second_fills: raise SyncError('OBSERVATION_CHANGED_RETRY')
         previous['fills'] = first_fills
@@ -639,9 +723,9 @@ def _collect_funded(bindings, previous, reader, cursor, end, started, clock, ela
     # it never accepts a transport acknowledgement as an observed execution.
     # Each pass uses only certificates that existed before this collection.
     guard={} if inventory_guard is None else dict(inventory_guard=inventory_guard)
-    first = observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
+    first = observe(bindings,previous,pass_readers[0],start,end,plain_take_profit_oids=plain,
                     reuse_verified_terminals=reuse_verified_terminals,**guard)
-    second = (observe(bindings,previous,reader,start,end,plain_take_profit_oids=plain,
+    second = (observe(bindings,previous,pass_readers[1],start,end,plain_take_profit_oids=plain,
                      reuse_verified_terminals=reuse_verified_terminals,**guard)
               if verification_passes == 2 else first)
     if first != second: raise SyncError('OBSERVATION_CHANGED_RETRY')

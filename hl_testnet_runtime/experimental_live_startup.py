@@ -24,6 +24,14 @@ from .experimental_execution_dispatch import BoundaryError
 
 HANDOVER = releases.HANDOVER
 RECEIPT = 'experimental_startup_handover_v1'
+# These failures provide no contradictory ownership/fill facts. Every other
+# historical reconciliation error retains its fence until explicitly resolved.
+COLD_HISTORY_RETRY_ERRORS = frozenset(('HISTORY_GAP_REQUIRES_REVIEW',
+    'EXACT_TRADABLE_MARK_ASSET_REQUIRED','FRESH_TESTNET_MARK_CONTEXT_REQUIRED',
+    'VALID_TESTNET_MARK_PRICE_REQUIRED','TESTNET_REQUEST_BUDGET_EXHAUSTED',
+    'PUBLIC_READ_UNAVAILABLE','READ_BUDGET_EXCEEDED','ACCOUNT_COLLECTION_EXPIRED',
+    'OBSERVATION_TOO_SLOW','ACCOUNT_OBSERVATION_OR_JOURNAL_CHANGED_RETRY',
+    'OBSERVATION_CHANGED_RETRY'))
 _lock = threading.RLock()
 _coordinator = None
 
@@ -51,12 +59,9 @@ def legacy_environment(env):
     return result
 
 
-def legacy_fingerprint(store, routes):
-    """Read-only finality gate. Pending or ambiguous work retains its manager."""
+def _legacy_fingerprint_rows(rows):
+    """Immutable ownership facts; fresh inventory is a separate requirement."""
     from .long_stream_runtime import _immutable_flat_checkpoint
-    if store.entry_blocker() is not None:
-        raise BoundaryError('HANDOVER_LEGACY_EMERGENCY_UNRESOLVED')
-    rows = {a: store.for_account(a) for a in routes.values()}
     for account, values in rows.items():
         if len(values) > 256 or len({r['symbol'] for r in values}) != len(values):
             raise BoundaryError('HANDOVER_LEGACY_INVENTORY_INVALID')
@@ -65,12 +70,52 @@ def legacy_fingerprint(store, routes):
                     or row.get('emergency') is not None or 'history_gap_recovery' in row
                     or (row['bindings'] and not _immutable_flat_checkpoint(row))):
                 raise BoundaryError('HANDOVER_LEGACY_MANAGEMENT_RETAINED')
-    # Re-observing immutable terminal history can change revision/evidence
-    # clocks. The ownership receipt must survive that harmless maintenance.
     return life.digest({a: [dict(bucket=r['bucket'], bindings=r['bindings'],
                                 last_request=r.get('last_request'))
                            for r in values if r['bindings'] or r.get('last_request')]
                         for a, values in rows.items()})
+
+
+def legacy_fingerprint(store, routes):
+    """Read-only finality gate. Pending or ambiguous work retains its manager."""
+    if store.entry_blocker() is not None:
+        raise BoundaryError('HANDOVER_LEGACY_EMERGENCY_UNRESOLVED')
+    return _legacy_fingerprint_rows({a: store.for_account(a) for a in routes.values()})
+
+
+def handover_receipt_matches(state, fingerprint):
+    row = state.get(RECEIPT)
+    return bool(isinstance(row, dict) and row.get('schema') == RECEIPT
+        and isinstance(row.get('release_id'), str) and len(row['release_id']) == 64
+        and all(c in '0123456789abcdef' for c in row['release_id'])
+        and row.get('routes') == state['routes']
+        and row.get('not_before_ms') == state['not_before_ms']
+        and row.get('legacy_fingerprint') == fingerprint
+        and type(row.get('flat_verified_at_ms')) is int
+        and row['flat_verified_at_ms'] >= state['not_before_ms'])
+
+
+def retired_legacy_rows(state, rows):
+    """Return cold ownership only under the actual persisted handover proof.
+
+    Rows/evidence are not rewritten or timestamped. Callers must compare current
+    complete account inventory, including every cold terminal order identity.
+    An absent/changed receipt or nonfinal row cannot retire any legacy work.
+    """
+    if set(rows) != set(state['routes'].values()):
+        return {}
+    try:
+        for account, values in rows.items():
+            for value in values:
+                reason=state.get('blocked_lanes',{}).get(life.digest([account,value['symbol']]))
+                if reason and reason not in COLD_HISTORY_RETRY_ERRORS:
+                    return {}
+        fingerprint = _legacy_fingerprint_rows(rows)
+        if not handover_receipt_matches(state, fingerprint):
+            return {}
+    except (ValueError, KeyError, TypeError):
+        return {}
+    return deepcopy(rows)
 
 
 class LegacyOwner:
@@ -141,17 +186,7 @@ class HandoverCoordinator:
                                   self.service.runtime.store.load()['routes'])
 
     def _receipt_matches(self, state, fingerprint):
-        row = state.get(RECEIPT)
-        return bool(isinstance(row, dict) and row.get('schema') == RECEIPT
-                    # Historical ownership is independent from a later entry
-                    # release. Updating approval cannot abandon open exits.
-                    and isinstance(row.get('release_id'), str)
-                    and len(row['release_id']) == 64
-                    and all(c in '0123456789abcdef' for c in row['release_id'])
-                    and row.get('routes') == state['routes']
-                    and row.get('not_before_ms') == state['not_before_ms']
-                    and row.get('legacy_fingerprint') == fingerprint
-                    and type(row.get('flat_verified_at_ms')) is int)
+        return handover_receipt_matches(state, fingerprint)
 
     def _flat(self, fingerprint):
         """Shared-budget snapshots; no source-price or formula dependency."""
@@ -361,6 +396,9 @@ class HandoverCoordinator:
             new_entries_enabled=bool(enabled),
             predecessor_retirement_operator_attested=attested,
             process_ownership=owner_health,
+            last_cycle_error_code=getattr(self.service,'last_cycle_error_code',None),
+            last_cycle_at_ms=getattr(self.service,'last_cycle_at_ms',None),
+            last_entry_decisions=deepcopy(getattr(self.service,'last_entry_decisions',{})),
             cross_process_ownership_verified=False)
 
 

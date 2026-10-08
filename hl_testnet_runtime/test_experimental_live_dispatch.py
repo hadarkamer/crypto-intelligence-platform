@@ -372,6 +372,8 @@ class LiveDispatchTests(unittest.TestCase):
         snap = self.context['owner_snapshot']; first = snap['fills'][0]
         first['quantity'] = '600'
         snap['fills'].append({**first, 'fill_id': 'f2', 'quantity': '400', 'at_ms': self.t})
+        # The entry becomes terminal only after this later final tranche.
+        snap['terminal_orders'][0]['at_ms'] = self.t
         self.send()
         self.assertEqual(len(self.http), 1)
 
@@ -380,6 +382,7 @@ class LiveDispatchTests(unittest.TestCase):
         owner = self.context['owner']; snap = self.context['owner_snapshot']; first = snap['fills'][0]
         first['quantity'] = '600'
         snap['fills'].append({**first, 'fill_id': 'f2', 'quantity': '400', 'at_ms': self.t})
+        snap['terminal_orders'][0]['at_ms'] = self.t
         owner['orders']['STOP'] = ['2']
         snap['open_orders'] = [dict(account=owner['account'], symbol='XRP', oid='2',
             quantity='600', price='2.01', trigger_price='2.01', side='B',

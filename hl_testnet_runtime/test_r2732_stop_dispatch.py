@@ -392,7 +392,7 @@ class R2732StopDispatchTests(unittest.TestCase):
         stop_fill = fill(state['original_binding'], '100', leg='STOP', fid='closed-stop', at=NOW+2)
         stop_fill.update(oid='13', price='1.995')
         snapshot['fills'].append(stop_fill)
-        snapshot['terminal_orders'] += [{**terminal('13', '100'), 'state': 'FILLED'}, terminal('12')]
+        snapshot['terminal_orders'] += [{**terminal('13', '100', at=NOW+2), 'state': 'FILLED'}, terminal('12')]
         lookup['order']['status'] = 'filled'
         observed = stop.observe(state, snapshot, now_ms=NOW+2, lookup=lookup)
         view = stop.review(observed, now_ms=NOW+2)['cards'][0]

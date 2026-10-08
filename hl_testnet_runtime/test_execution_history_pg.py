@@ -148,6 +148,24 @@ class ExecutionHistoryPostgresTests(unittest.TestCase):
     def compact(self, store=None):
         return (store or self.store).compact_history(now_ms=self.oracle.now(), force=True)
 
+    def test_native_durable_card_survives_archive_reconnect_and_late_cancel(self):
+        value, _ = self.close_first()
+        cid = value['occurrence_id']
+        expected = self.worker.trade_card(cid)['card']
+        self.assertEqual(expected['domain'], 'testnet')
+        self.assertEqual(self.worker.report()['cards'], [expected])
+        self.compact(); self.reconnect()
+        self.assertEqual(self.worker.trade_card(cid)['card'], expected)
+        self.assertEqual(self.worker.trade_card(cid)['location'], 'archived')
+        self.assertEqual(self.worker.history_report()['cards'], [expected])
+        cancel = cancellation(value, self.oracle.now())
+        self.worker.receive([cancel]); self.reconnect()
+        result = self.worker.trade_card(cid)
+        self.assertEqual(result['card'], expected)
+        self.assertEqual(result['current_source']['cancellation'], cancel)
+        self.assertEqual(result['source_updates'][0]['source']['cancellation'], cancel)
+        self.assertNotIn(cid, self.store.load()['trades'])
+
     def test_closed_archive_reopen_same_symbol_final_dispatch_replay_and_domain(self):
         first, before = self.close_first()
         cid = first['occurrence_id']

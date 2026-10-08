@@ -132,7 +132,10 @@ class LiveDispatchPort:
     def _context(self, request, release):
         try:
             value = deepcopy(self.context_loader(deepcopy(request)))
-        except Exception:
+        except Exception as exc:
+            from .experimental_live_provider import ProviderError
+            if isinstance(exc, ProviderError) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,99}', str(exc)):
+                raise LiveDispatchError(str(exc)) from None
             raise LiveDispatchError('FINAL_TRUSTED_CONTEXT_UNAVAILABLE') from None
         # A collector must not substitute another environment or route for the
         # one from which the actual signer will be constructed.

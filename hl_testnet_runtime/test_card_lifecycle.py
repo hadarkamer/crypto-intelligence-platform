@@ -205,9 +205,38 @@ class LifecycleTests(unittest.TestCase):
         b=binding();s=snapshot(b,position='30',fills=[fill(b,qty='30')],terms=[terminal(b,leg,'0') for leg in m.LEGS]);v=run(b,s)['cards'][0]
         self.assertEqual(v['remaining_quantity'],'30');self.assertIn('TERMINAL_FILL_TOTAL_MISMATCH',v['issues']);self.assertIn('STOP_COVERAGE_MISSING',v['issues'])
 
-    def test_both_exit_legs_race_requires_review(self):
-        b=binding();s=closed(b);s['fills'][-1]['quantity']='50';s['fills'].append(fill(b,'STOP',qty='50'));s['terminal_orders']=[terminal(b,'ENTRY'),terminal(b,'TAKE_PROFIT','50'),terminal(b,'STOP','50')]
-        self.assertIn('BOTH_EXIT_LEGS_FILLED_REVIEW',run(b,s)['cards'][0]['issues'])
+    def test_conserved_both_exit_legs_are_verified_without_blanket_refusal(self):
+        for side in ('LONG','SHORT'):
+            b=binding(side=side);s=closed(b);s['fills'][-1]['quantity']='50';s['fills'].append(fill(b,'STOP',qty='50'));s['terminal_orders']=[terminal(b,'ENTRY'),terminal(b,'TAKE_PROFIT','50'),terminal(b,'STOP','50')]
+            view=run(b,s)['cards'][0]
+            self.assertEqual(view['issues'],[])
+            self.assertTrue(view['closure_verified'])
+
+    def test_later_entry_cannot_hide_exit_before_owned_quantity_existed(self):
+        b=binding();s=closed(b)
+        s['fills'][-1]['at_ms']=s['fills'][0]['at_ms']-1
+        view=run(b,s)['cards'][0]
+        self.assertIn('EXIT_EXCEEDS_CARD_QUANTITY',view['issues'])
+        self.assertFalse(view['closure_verified'])
+
+    def test_final_quantity_cannot_hide_intermediate_overexit(self):
+        b=binding();s=closed(b)
+        s['fills'][0]['quantity']='30'
+        s['fills'][-1]['quantity']='40';s['fills'][-1]['at_ms']=T-5000
+        s['fills'].append({**fill(b,qty='70',fid='later-entry'),'at_ms':T-2000})
+        s['fills'].append(fill(b,'STOP',qty='60'))
+        s['terminal_orders']=[terminal(b,'ENTRY'),terminal(b,'TAKE_PROFIT','40'),terminal(b,'STOP','60')]
+        view=run(b,s)['cards'][0]
+        self.assertEqual(view['remaining_quantity'],'0')
+        self.assertIn('EXIT_EXCEEDS_CARD_QUANTITY',view['issues'])
+        self.assertFalse(view['closure_verified'])
+
+    def test_fill_after_terminal_order_time_is_not_proven_finality(self):
+        b=binding();s=closed(b)
+        s['terminal_orders'][1]['at_ms']=s['fills'][-1]['at_ms']-1
+        view=run(b,s)['cards'][0]
+        self.assertIn('FILL_AFTER_ORDER_FINALITY',view['issues'])
+        self.assertFalse(view['closure_verified'])
 
     def test_missing_history_order_inventory_or_stale_report_not_final(self):
         b=binding()

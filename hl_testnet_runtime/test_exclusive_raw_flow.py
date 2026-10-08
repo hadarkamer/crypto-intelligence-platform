@@ -217,7 +217,8 @@ class ExclusiveRawFlowTests(NoExternal):
         self.assertEqual(rows[self.other]['remaining_quantity'],'100')
         self.assertEqual(self.s['bindings'][1],other_before)
         self.assertEqual(self.s['evidence']['snapshot']['position_quantity'],'100')
-        self.assertIn('BOTH_EXIT_LEGS_FILLED_REVIEW',rows[self.cid]['issues'])
+        self.assertNotIn('BOTH_EXIT_LEGS_FILLED_REVIEW',rows[self.cid]['issues'])
+        self.assertTrue(rows[self.cid]['closure_verified'])
     def test_short_round_trip_uses_buy_to_reduce_only_own_remaining(self):
         self.seed(source('SHORT'));tp=self.to_take();self.book.fill(tp,'30');self.refresh()
         choices=fixture.targets(self.s,False);self.step(choices);sl,_=self.step(choices)

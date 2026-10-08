@@ -245,7 +245,10 @@ class ExecutionHistoryLifecycleTests(unittest.TestCase):
         state = self.store.load()
         self.assertIn(first['occurrence_id'], state['trades'])
         self.assertEqual(state['history']['archived_count'], 0)
-        self.assertEqual(len(self.entries()), 2)
+        # Atomic rollback preserves history, while a verified active journal
+        # with capacity may continue independent new entries after protections.
+        self.assertEqual(len(self.entries()), 3)
+        self.assertEqual(self.entries()[-1]['proposal']['symbol'], 'SOL')
         self.assertEqual(self.worker.report()['history_maintenance_error'],
                          'HISTORY_MAINTENANCE_DEFERRED')
         for leg in ('STOP', 'TAKE_PROFIT'):
@@ -318,7 +321,7 @@ class TestnetDomainHistoryMaintenanceTests(unittest.TestCase):
             for _ in range(4):
                 fixture.cycle()
         self.assertEqual(sum(r['proposal']['operation'] == 'ENTRY'
-                             for r in fixture.venue.requests), 1)
+                             for r in fixture.venue.requests), 2)
         for leg in ('STOP', 'TAKE_PROFIT'):
             order = fixture.venue.orders[fixture.venue.oid(leg)]['view']
             self.assertEqual(order['status'], 'OPEN')

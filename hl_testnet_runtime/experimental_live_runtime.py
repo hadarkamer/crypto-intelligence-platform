@@ -20,6 +20,74 @@ import approved_alert_contract as contract
 VERSION = 'experimental-testnet-worker-v1'
 MODE = 'explicit_approved_testnet_worker_v1'
 
+# These are expected candidate refusals, not permission to swallow corrupt
+# state, missing fields, ownership conflicts or an arbitrary implementation bug.
+LOCAL_ENTRY_REFUSALS = frozenset((
+    'TESTNET_MARK_OUTSIDE_ORIGINAL_EXITS', 'ASSET_NOT_FOUND',
+    'ASSET_PRECISION_OR_LISTING_INVALID', 'ASSET_UNAVAILABLE',
+    'PRICES_COLLAPSED_AFTER_ROUNDING', 'PRICE_PRECISION_NO_ROUNDING',
+    'CURRENT_PRICE_OR_SIZE_PRECISION_REJECTED', 'OUTSIDE_LAB_SIZE_BOUNDS',
+    'QUANTITY_EXCEEDS_EXCHANGE_CAP', 'MARK_NOTIONAL_EXCEEDS_LAB_CAP',
+    'ESTIMATED_MARGIN_EXCEEDS_UNHELD_USDC', 'ESTIMATED_MARGIN_EXCEEDS_EXCHANGE_AVAILABLE',
+    'OUTSIDE_CONSERVATIVE_LAB_BUDGET', 'CURRENT_LEVERAGE_NOT_VERIFIED',
+    'FRESH_EXACT_ACCOUNT_CAPACITY_REQUIRED', 'EXACT_FRESH_TESTNET_MARK_SAMPLE_REQUIRED',
+    'PROSPECTIVE_ENTRY_ALREADY_CONSUMED', 'FORMULA_OVERLAP_NOT_ALLOWED',
+    'G65_PENDING_ENTRY_OR_CANCEL_ALREADY_CONSUMED', 'HYPE_ORIGINAL_ENTRY_WINDOW_CONSUMED',
+    'R2732_SOURCE_INITIAL_EXIT_ALREADY_REACHED', 'R2732_SOURCE_LOCK_ALREADY_REACHED',
+    'R2732_TESTNET_INITIAL_EXIT_ALREADY_REACHED', 'R2732_TESTNET_LOCK_ALREADY_REACHED',
+    'R2732_TESTNET_PRICE_OUTSIDE_ORIGINAL_EXITS', 'R2732_VALID_MINIMUM_ENTRY_SIZE_REQUIRED',
+))
+RETRYABLE_UNSENT = frozenset((
+    'TESTNET_REQUEST_BUDGET_PERMIT_EXPIRED', 'FINAL_EVIDENCE_EXPIRED',
+    'DURABLE_ATTEMPT_EXPIRED', 'FRESH_COLLECTOR_CHECKPOINT_REQUIRED_BEFORE_DISPATCH',
+    'EXPERIMENTAL_OWNERSHIP_CHANGED_RECONCILE_FIRST',
+    'LEGACY_OWNERSHIP_CHANGED_RECONCILE_FIRST', 'DISPATCH_CONTEXT_CHANGED_RECONCILE_FIRST',
+    'OBSERVED_SAFETY_CHECKPOINT_PENDING',
+))
+MAX_ENTRY_ATTEMPTS = 3
+ENTRY_RETRY_DELAY_MS = 1000
+
+
+def entry_retry_ready(state, cid, now):
+    """Positive durable never-sent proof; no timeouts or status-only retries."""
+    trade = state['trades'].get(cid)
+    if trade is None or trade['phase'] != 'RETRY_WAIT_UNSENT':
+        return False
+    if (trade['orders'] or trade['entry_fills'] or trade['exit_fills']
+            or not _source_active(state['sources'][cid], now)):
+        return False
+    attempts = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
+    if not 0 < len(attempts) < MAX_ENTRY_ATTEMPTS:
+        return False
+    if any(r['phase'] != 'ABORTED_UNSENT' or r.get('certified_unsent') is not True
+            or r.get('observed_oid') is not None or r.get('reply') is not None
+            or r['proposal']['operation'] != 'ENTRY'
+            or r.get('unsent_reason') not in RETRYABLE_UNSENT for r in attempts):
+        return False
+    retry = trade.get('entry_retry', {})
+    return (type(retry.get('after_ms')) is int and now >= retry['after_ms']
+        and retry.get('attempts') == len(attempts))
+
+
+def _entry_decision(state, cid, context, now, reason, *, scope=None, retry_after_ms=None):
+    source = state['sources'][cid]['source']
+    role = 'long_account' if source['side'] == 'LONG' else 'short_account'
+    account = state['routes'][role]
+    if scope is None:
+        scope = ('account' if account in context.get('account_entry_blocked', {})
+            else 'market' if _lane(account, source['symbol']) in context.get('blocked_lanes', {})
+            else 'occurrence')
+    state.setdefault('entry_blocked', {})[cid] = reason
+    decision = dict(stage='ENTRY_ADMISSION', scope=scope,
+        account_role=role, symbol=source['symbol'], occurrence_id=cid, reason=reason,
+        at_ms=now, retry_after_ms=retry_after_ms,
+        deadline=source.get('expires_at') or source.get('valid_until'))
+    previous = state.setdefault('entry_decisions', {}).get(cid)
+    fields = ('stage', 'scope', 'reason', 'retry_after_ms')
+    if previous is None or any(previous.get(key) != decision[key] for key in fields):
+        state['events'].append(dict(kind='ENTRY_DEFERRED', **deepcopy(decision)))
+    state['entry_decisions'][cid] = decision
+
 
 def readiness():
     return dict(version=VERSION, mode='testnet_explicit_release',
@@ -92,10 +160,60 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             or context.get('account_entry_blocked', {}).get(account)
             or context.get('blocked_lanes', {}).get(_lane(account, msg['symbol'])))
         if reason:
-            state.setdefault('entry_blocked', {})[cid] = reason
+            _entry_decision(state, cid, context, now, reason)
             return None
         state.setdefault('entry_blocked', {}).pop(cid, None)
-        return super()._admit(state, cid, context, now)
+        # Retry only an empty trade backed by exact never-sent certificates.
+        # Earlier attempts remain immutable and keep the CLOID serial unique.
+        candidate = deepcopy(state)
+        retry = entry_retry_ready(candidate, cid, now)
+        previous = candidate['trades'].pop(cid) if retry else None
+        try:
+            proposal = super()._admit(candidate, cid, context, now)
+        except ValueError as exc:
+            reason = str(exc)
+            if reason not in LOCAL_ENTRY_REFUSALS:
+                raise
+            _entry_decision(state, cid, context, now, reason)
+            return None
+        if previous is not None and proposal is None:
+            candidate['trades'][cid] = previous
+        if proposal is not None:
+            prior = candidate.setdefault('entry_decisions', {}).pop(cid, None)
+            if prior is not None:
+                candidate['events'].append(dict(at_ms=now, kind='ENTRY_ADMISSION_PASSED',
+                    occurrence_id=cid, previous_reason=prior['reason']))
+            if previous is not None:
+                candidate['trades'][cid]['first_entry_decision_at_ms'] = previous.get(
+                    'first_entry_decision_at_ms', previous.get('execution_audit', {}).get('entry_decision_at_ms'))
+        state.clear(); state.update(candidate)
+        if proposal is None and cid in state.get('entry_blocked', {}):
+            _entry_decision(state, cid, context, now, state['entry_blocked'][cid])
+        return proposal
+
+    def _abort_entry_unsent(self, state, request, now, reason):
+        """Called only before send or after an exact transport certificate."""
+        request.update(phase='ABORTED_UNSENT', unsent_reason=reason, certified_unsent=True)
+        cid = request['proposal']['card_id']
+        if request['proposal']['operation'] == 'ENTRY':
+            trade = state['trades'][cid]
+            if trade['orders'] or trade['entry_fills'] or trade['exit_fills']:
+                raise RuntimeError('UNSENT_ENTRY_CONFLICTS_WITH_OBSERVED_EXPOSURE')
+            attempts = [r for r in state['requests'].values() if r['proposal']['card_id'] == cid]
+            retry = (reason in RETRYABLE_UNSENT and len(attempts) < MAX_ENTRY_ATTEMPTS
+                and _source_active(state['sources'][cid], now)
+                and all(r['phase'] == 'ABORTED_UNSENT' and r.get('certified_unsent') is True
+                    and r.get('unsent_reason') in RETRYABLE_UNSENT for r in attempts))
+            trade['phase'] = 'RETRY_WAIT_UNSENT' if retry else 'CANCELED_WITHOUT_FILL'
+            if retry:
+                trade['entry_retry'] = dict(after_ms=now+ENTRY_RETRY_DELAY_MS,
+                    reason=reason, attempts=len(attempts))
+            else:
+                trade.pop('entry_retry', None)
+            _entry_decision(state, cid, {}, now, reason,
+                retry_after_ms=now+ENTRY_RETRY_DELAY_MS if retry else None)
+        state['events'].append(dict(at_ms=now, kind='DEFINITELY_NOT_SUBMITTED',
+            request_id=request['request_id'], occurrence_id=cid, reason=reason))
 
     @staticmethod
     def _rejection_key(proposal):
@@ -231,15 +349,23 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         # protection in another lane whose full ownership is proven.
         if context.get('basis_revision') != state['revision']:
             raise RuntimeError('CONCURRENT_OBSERVATION_RELOAD_REQUIRED')
-        if (context.get('inventory_complete') is not True
-                or context.get('inventory_accounts') != sorted(state['routes'].values())
+        accounts = context.get('inventory_accounts')
+        account_errors = context.get('inventory_account_errors', {})
+        if (context.get('inventory_complete') is not True or not isinstance(accounts, list)
+                or accounts != sorted(set(accounts)) or not set(accounts) <= set(state['routes'].values())
+                or not isinstance(account_errors, dict)
+                or set(accounts) | set(account_errors) != set(state['routes'].values())
+                or set(accounts) & set(account_errors)
                 or type(context.get('inventory_at_ms')) is not int
                 or not 0 <= now-context['inventory_at_ms'] <= 15000):
             raise RuntimeError('COMPLETE_FRESH_TWO_ACCOUNT_INVENTORY_REQUIRED')
         scoped = deepcopy(context)
+        scoped.setdefault('account_entry_blocked', {}).update(account_errors)
         blocked = scoped.setdefault('blocked_lanes', {})
         observed = set()
         for snapshot in context['snapshots']:
+            if snapshot.get('account') not in accounts:
+                raise RuntimeError('SNAPSHOT_OUTSIDE_VERIFIED_ACCOUNT_INVENTORY')
             lane = _lane(snapshot['account'], snapshot['symbol'])
             candidate = deepcopy(state)
             try:
@@ -253,6 +379,11 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             lane = _lane(trade['account'], trade['symbol'])
             if trade['phase'] not in FINAL and lane not in observed:
                 blocked[lane] = 'ACTIVE_MARKET_INVENTORY_UNPROVEN'
+            if trade['phase'] == 'RETRY_WAIT_UNSENT' and not _source_active(state['sources'][trade['cid']], now):
+                trade['phase'] = 'CANCELED_WITHOUT_FILL'
+                trade.pop('entry_retry', None)
+                state['events'].append(dict(at_ms=now, kind='CANCELED_WITHOUT_FILL',
+                    occurrence_id=trade['cid'], reason='ORIGINAL_SOURCE_NO_LONGER_ACTIVE'))
         state['blocked_lanes'] = deepcopy(blocked)
         self._rejections(state, scoped, now)
         for cid, condition in state.get('formula_states', {}).items():
@@ -270,9 +401,21 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         safe = {**state, 'trades': {cid:t for cid,t in state['trades'].items()
             if _lane(t['account'], t['symbol']) not in blocked}}
         proposal = self._maintain_live(safe, scoped, now)
-        unknown = any(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT') for r in state['requests'].values())
-        if proposal is None and entries_enabled and not unknown and not any(t.get('emergency_reason') for t in state['trades'].values() if t['phase'] not in FINAL):
+        unavailable = {r['proposal']['account'] for r in state['requests'].values()
+            if r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')}
+        emergency_accounts = {t['account'] for t in state['trades'].values()
+            if t['phase'] not in FINAL and t.get('emergency_reason')}
+        if proposal is None and entries_enabled:
             for cid in sorted(state['sources'], key=lambda k:(state['sources'][k]['source']['source_at'], k)):
+                source = state['sources'][cid]
+                if not _source_active(source, now):
+                    continue
+                role = 'long_account' if source['source']['side'] == 'LONG' else 'short_account'
+                account = state['routes'][role]
+                if account in unavailable or account in emergency_accounts:
+                    _entry_decision(state, cid, scoped, now,
+                        'ACCOUNT_OUTCOME_UNKNOWN' if account in unavailable else 'ACCOUNT_PROTECTION_PENDING', scope='account')
+                    continue
                 proposal = self._admit(state, cid, scoped, now)
                 if proposal is not None: break
         if 'collector_checkpoints' in context:
@@ -280,10 +423,9 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             state.setdefault('collector_checkpoints', {}).update(deepcopy(context['collector_checkpoints']))
         if 'ownership_revision' in context:
             state['ownership_revision'] = deepcopy(context['ownership_revision'])
-        state['account_inventory_checkpoint'] = dict(at_ms=context['inventory_at_ms'],
-            accounts=deepcopy(context['inventory_accounts']),
-            ownership_revision=context.get('ownership_revision'),
-            safety_checkpoint_id=context.get('safety_checkpoint_id'))
+        from .experimental_live_safety import _marker
+        marker_context = {**context, 'ownership_revision': context.get('ownership_revision')}
+        state['account_inventory_checkpoint'] = _marker(marker_context, context.get('safety_checkpoint_id'))
         return proposal
 
     def _reserve_live(self, state, proposal, now, nonce):
@@ -354,8 +496,11 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                     and (not observation_verified or not releases.entry_enabled(latest_release,self.venue.now())
                         or latest_release != release
                         or not _source_active(state['sources'][request['proposal']['card_id']], self.venue.now()))):
-                current['phase'] = 'ABORTED_UNSENT'
-                state['trades'][request['proposal']['card_id']]['phase'] = 'CANCELED_WITHOUT_FILL'
+                reason = ('OBSERVED_SAFETY_CHECKPOINT_PENDING' if not observation_verified
+                    and releases.entry_enabled(latest_release, self.venue.now()) and latest_release == release
+                    and _source_active(state['sources'][request['proposal']['card_id']], self.venue.now())
+                    else 'SOURCE_OR_RELEASE_CLOSED_BEFORE_TRANSPORT')
+                self._abort_entry_unsent(state, current, self.venue.now(), reason)
                 return False
             return True
         if not self.store.mutate(final_check):
@@ -368,12 +513,7 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
                 current = state['requests'][request['request_id']]
                 if not certificate.matches(current):
                     raise RuntimeError('EXACT_UNSENT_CERTIFICATE_REQUIRED')
-                current['phase'] = 'ABORTED_UNSENT'
-                current['unsent_reason'] = certificate.reason
-                if current['proposal']['operation'] == 'ENTRY':
-                    state['trades'][request['proposal']['card_id']]['phase'] = 'CANCELED_WITHOUT_FILL'
-                state['events'].append(dict(at_ms=self.venue.now(), kind='DEFINITELY_NOT_SUBMITTED',
-                    request_id=request['request_id'], occurrence_id=request['proposal']['card_id']))
+                self._abort_entry_unsent(state, current, self.venue.now(), certificate.reason)
             self.store.mutate(abort_unsent)
             return dict(status='DEFINITELY_NOT_SUBMITTED_REOBSERVE', **readiness())
         except Exception:
@@ -392,7 +532,12 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
         """Domain-correct operational status, never a software P/L projection."""
         state = self.store.load()
         from .experimental_shared_market import assess
+        from .experimental_execution_cards import cards_from_state
+        release = self._release(state, self.venue.now())
+        capabilities = readiness()
+        capabilities['live_dispatch_enabled'] = release.get('dispatch_enabled') is True
         return dict(domain='testnet', revision=state['revision'],
+            entries_enabled=releases.entry_enabled(release, self.venue.now()),
             sources=len(state['sources']), trades=len(state['trades']),
             history=deepcopy(state.get('history', {})),
             history_maintenance_error=getattr(self,'_history_maintenance_error',None),
@@ -400,4 +545,6 @@ class TestnetExecutionRuntime(IsolatedExecutionRuntime):
             unresolved_attempts=sum(r['phase'] not in ('OBSERVED', 'ABORTED_UNSENT')
                 for r in state['requests'].values()),
             entry_blocked=deepcopy(state.get('entry_blocked', {})),
-            blocked_lanes=deepcopy(state.get('blocked_lanes', {})), **readiness())
+            entry_decisions=deepcopy(state.get('entry_decisions', {})),
+            cards=cards_from_state(state, domain='testnet'),
+            blocked_lanes=deepcopy(state.get('blocked_lanes', {})), **capabilities)

@@ -170,8 +170,10 @@ class EntryReadReuseTests(unittest.TestCase):
                 if len(modes) == 4:
                     self.exchange.t += 15001
         self.raw.mutate = expire
-        with self.assertRaisesRegex(ProviderError, 'ACCOUNT_COLLECTION_EXPIRED'):
-            self.collect()
+        expired=self.collect()
+        self.assertEqual(expired['inventory_accounts'],[])
+        self.assertEqual(set(expired['account_entry_blocked'].values()),{'ACCOUNT_COLLECTION_EXPIRED'})
+        self.assertEqual(expired['snapshots'],[])
         self.raw.mutate = None
         self.raw.calls.clear()
         result = self.collect()
@@ -280,11 +282,12 @@ class EntryReadReuseTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(completed), 2)
 
-    def test_empty_consecutive_collections_keep_all_nine_reads_each(self):
+    def test_idle_collections_keep_two_inventory_passes_without_unused_market_read(self):
         self.provider.collect(self.state)
-        self.assertEqual(len(self.raw.calls), 9)
+        self.assertEqual(len(self.raw.calls), 8)
         self.provider.collect(self.state)
-        self.assertEqual(len(self.raw.calls), 18)
+        self.assertEqual(len(self.raw.calls), 16)
+        self.assertNotIn('metaAndAssetCtxs',[c[0] for c in self.raw.calls])
 
 
 if __name__ == '__main__':
